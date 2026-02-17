@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kanban Board - Current State</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #000000;
+      color: #FFFFFF;
+    }
+    .kanban-container {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    .kanban-header {
+      padding: 12px;
+      border-bottom: 1px solid #333333;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .section-title {
+      font-size: 14px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .new-task-btn {
+      background: #FF0000;
+      color: #000000;
+      padding: 6px 12px;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .columns-container {
+      flex: 1;
+      display: flex;
+      gap: 12px;
+      padding: 12px;
+      overflow-x: auto;
+    }
+    .column {
+      flex: 1;
+      min-width: 220px;
+      max-width: 300px;
+      background: #000000;
+      border: 1px solid rgba(51, 51, 51, 0.5);
+      border-radius: 8px;
+      border-top: 2px solid;
+      display: flex;
+      flex-direction: column;
+    }
+    .column.planning { border-top-color: #a371f7; }
+    .column.inbox { border-top-color: #FF0000; }
+    .column.assigned { border-top-color: #FFA500; }
+    .column.in-progress { border-top-color: #FF0000; }
+    .column.testing { border-top-color: #FF0000; }
+    .column.review { border-top-color: #a371f7; }
+    .column.done { border-top-color: #00FF00; }
+    .column-header {
+      padding: 8px;
+      border-bottom: 1px solid #333333;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .column-title {
+      font-size: 12px;
+      font-weight: 500;
+      text-transform: uppercase;
+      color: #999999;
+    }
+    .column-count {
+      font-size: 12px;
+      background: #262626;
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: #999999;
+    }
+    .column-tasks {
+      flex: 1;
+      padding: 8px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .task-card {
+      background: #1A1A1A;
+      border: 1px solid rgba(51, 51, 51, 0.5);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .task-drag-handle {
+      padding: 6px;
+      border-bottom: 1px solid rgba(51, 51, 51, 0.3);
+      display: flex;
+      justify-content: center;
+      opacity: 0;
+    }
+    .task-card:hover .task-drag-handle {
+      opacity: 1;
+    }
+    .drag-icon { color: rgba(153, 153, 153, 0.5); }
+    .task-content { padding: 16px; }
+    .task-title {
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 1.4;
+      margin-bottom: 12px;
+    }
+    .planning-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: rgba(163, 113, 247, 0.1);
+      border: 1px solid rgba(163, 113, 247, 0.2);
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+    .planning-dot {
+      width: 8px;
+      height: 8px;
+      background: #a371f7;
+      border-radius: 50%;
+    }
+    .planning-text {
+      font-size: 12px;
+      color: #a371f7;
+      font-weight: 500;
+    }
+    .assigned-agent {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      background: rgba(38, 38, 38, 0.5);
+      border-radius: 4px;
+      margin-bottom: 12px;
+    }
+    .agent-emoji { font-size: 16px; }
+    .agent-name-small {
+      font-size: 12px;
+      color: #999999;
+    }
+    .task-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 8px;
+      border-top: 1px solid rgba(51, 51, 51, 0.2);
+    }
+    .priority {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .priority-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+    .priority-dot.normal { background: #FF0000; }
+    .priority-dot.high { background: #FFA500; }
+    .priority-dot.low { background: rgba(153, 153, 153, 0.4); }
+    .priority-text {
+      font-size: 12px;
+      text-transform: capitalize;
+    }
+    .priority-text.normal { color: #FF0000; }
+    .priority-text.high { color: #FFA500; }
+    .priority-text.low { color: #999999; }
+    .timestamp {
+      font-size: 10px;
+      color: rgba(153, 153, 153, 0.6);
+    }
+  </style>
+</head>
+<body>
+  <div class="kanban-container">
+    <div class="kanban-header">
+      <div class="header-left">
+        <span>→</span>
+        <span class="section-title">Mission Queue</span>
+      </div>
+      <button class="new-task-btn">
+        <span>+</span>
+        New Task
+      </button>
+    </div>
+    
+    <div class="columns-container">
+      <div class="column planning">
+        <div class="column-header">
+          <span class="column-title">📋 Planning</span>
+          <span class="column-count">1</span>
+        </div>
+        <div class="column-tasks">
+          <div class="task-card">
+            <div class="task-drag-handle">
+              <span class="drag-icon">⋮⋮</span>
+            </div>
+            <div class="task-content">
+              <div class="task-title">Design new landing page for product launch</div>
+              <div class="planning-indicator">
+                <span class="planning-dot"></span>
+                <span class="planning-text">Continue planning</span>
+              </div>
+              <div class="task-footer">
+                <div class="priority">
+                  <span class="priority-dot normal"></span>
+                  <span class="priority-text normal">Normal</span>
+                </div>
+                <span class="timestamp">2 hours ago</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="column inbox">
+        <div class="column-header">
+          <span class="column-title">Inbox</span>
+          <span class="column-count">2</span>
+        </div>
+        <div class="column-tasks">
+          <div class="task-card">
+            <div class="task-drag-handle">
+              <span class="drag-icon">⋮⋮</span>
+            </div>
+            <div class="task-content">
+              <div class="task-title">Review and respond to client emails</div>
+              <div class="task-footer">
+                <div class="priority">
+                  <span class="priority-dot high"></span>
+                  <span class="priority-text high">High</span>
+                </div>
+                <span class="timestamp">30 min ago</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="column assigned">
+        <div class="column-header">
+          <span class="column-title">Assigned</span>
+          <span class="column-count">1</span>
+        </div>
+        <div class="column-tasks">
+          <div class="task-card">
+            <div class="task-drag-handle">
+              <span class="drag-icon">⋮⋮</span>
+            </div>
+            <div class="task-content">
+              <div class="task-title">Create social media content calendar</div>
+              <div class="assigned-agent">
+                <span class="agent-emoji">✍️</span>
+                <span class="agent-name-small">Content Writer</span>
+              </div>
+              <div class="task-footer">
+                <div class="priority">
+                  <span class="priority-dot normal"></span>
+                  <span class="priority-text normal">Normal</span>
+                </div>
+                <span class="timestamp">1 day ago</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="column in-progress">
+        <div class="column-header">
+          <span class="column-title">In Progress</span>
+          <span class="column-count">1</span>
+        </div>
+        <div class="column-tasks">
+          <div class="task-card">
+            <div class="task-drag-handle">
+              <span class="drag-icon">⋮⋮</span>
+            </div>
+            <div class="task-content">
+              <div class="task-title">Update company website copy</div>
+              <div class="assigned-agent">
+                <span class="agent-emoji">💻</span>
+                <span class="agent-name-small">Content Writer</span>
+              </div>
+              <div class="task-footer">
+                <div class="priority">
+                  <span class="priority-dot low"></span>
+                  <span class="priority-text low">Low</span>
+                </div>
+                <span class="timestamp">3 hours ago</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="column testing">
+        <div class="column-header">
+          <span class="column-title">Testing</span>
+          <span class="column-count">0</span>
+        </div>
+        <div class="column-tasks"></div>
+      </div>
+      
+      <div class="column review">
+        <div class="column-header">
+          <span class="column-title">Review</span>
+          <span class="column-count">0</span>
+        </div>
+        <div class="column-tasks"></div>
+      </div>
+      
+      <div class="column done">
+        <div class="column-header">
+          <span class="column-title">Done</span>
+          <span class="column-count">3</span>
+        </div>
+        <div class="column-tasks">
+          <div class="task-card">
+            <div class="task-drag-handle">
+              <span class="drag-icon">⋮⋮</span>
+            </div>
+            <div class="task-content">
+              <div class="task-title">Set up email automation workflow</div>
+              <div class="task-footer">
+                <div class="priority">
+                  <span class="priority-dot normal"></span>
+                  <span class="priority-text normal">Normal</span>
+                </div>
+                <span class="timestamp">2 days ago</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

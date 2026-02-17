@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Header Navigation - Current State</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #000000;
+      color: #FFFFFF;
+    }
+    .header {
+      height: 56px;
+      background: #1A1A1A;
+      border-bottom: 1px solid #333333;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+    }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .logo { height: 32px; }
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #999999;
+    }
+    .workspace-badge {
+      background: #262626;
+      padding: 4px 12px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .workspace-icon { font-size: 18px; }
+    .workspace-name { font-weight: 500; color: #FFFFFF; }
+    .header-center {
+      display: flex;
+      gap: 32px;
+    }
+    .stat {
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 24px;
+      font-weight: 700;
+      color: #FF0000;
+    }
+    .stat-label {
+      font-size: 10px;
+      color: #999999;
+      text-transform: uppercase;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .clock {
+      color: #999999;
+      font-size: 14px;
+    }
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .status-online {
+      background: rgba(0, 255, 0, 0.2);
+      border: 1px solid #00FF00;
+      color: #00FF00;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #00FF00;
+    }
+    .settings-btn {
+      background: transparent;
+      border: none;
+      color: #999999;
+      cursor: pointer;
+      padding: 8px;
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <img src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" alt="Logo" class="logo">
+      <div class="breadcrumb">
+        <span>←</span>
+        <span>/</span>
+        <div class="workspace-badge">
+          <span class="workspace-icon">🏠</span>
+          <span class="workspace-name">BlackCEO Operations</span>
+        </div>
+      </div>
+    </div>
+    
+    <div class="header-center">
+      <div class="stat">
+        <div class="stat-value">3</div>
+        <div class="stat-label">Agents Active</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">12</div>
+        <div class="stat-label">Tasks in Queue</div>
+      </div>
+    </div>
+    
+    <div class="header-right">
+      <span class="clock">14:32:07</span>
+      <div class="status-badge status-online">
+        <span class="status-dot"></span>
+        ONLINE
+      </div>
+      <button class="settings-btn">⚙️</button>
+    </div>
+  </header>
+</body>
+</html>

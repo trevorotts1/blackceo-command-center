@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Sidebar - Current State</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #000000;
+      color: #FFFFFF;
+    }
+    .sidebar {
+      width: 264px;
+      background: #1A1A1A;
+      border-right: 1px solid #333333;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .sidebar-header {
+      padding: 12px;
+      border-bottom: 1px solid #333333;
+    }
+    .header-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .collapse-btn {
+      background: transparent;
+      border: none;
+      color: #999999;
+      cursor: pointer;
+      padding: 4px;
+    }
+    .section-title {
+      font-size: 14px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .count-badge {
+      background: #262626;
+      color: #999999;
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .filter-tabs {
+      display: flex;
+      gap: 4px;
+    }
+    .filter-tab {
+      padding: 4px 12px;
+      font-size: 12px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      text-transform: uppercase;
+    }
+    .filter-tab.active {
+      background: #FF0000;
+      color: #000000;
+      font-weight: 500;
+    }
+    .filter-tab:not(.active) {
+      background: transparent;
+      color: #999999;
+    }
+    .sub-agents-banner {
+      margin: 12px;
+      padding: 8px 12px;
+      background: rgba(0, 255, 0, 0.1);
+      border: 1px solid rgba(0, 255, 0, 0.2);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+    .green-dot { color: #00FF00; }
+    .agent-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .agent-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .agent-row:hover {
+      background: #262626;
+    }
+    .agent-avatar {
+      font-size: 24px;
+      position: relative;
+    }
+    .online-indicator {
+      position: absolute;
+      bottom: -2px;
+      right: -2px;
+      width: 12px;
+      height: 12px;
+      background: #00FF00;
+      border-radius: 50%;
+      border: 2px solid #1A1A1A;
+    }
+    .agent-info { flex: 1; min-width: 0; }
+    .agent-name {
+      font-size: 14px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .agent-name.truncated {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .master-star { color: #FFA500; font-size: 12px; }
+    .agent-role {
+      font-size: 12px;
+      color: #999999;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .status-badge {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .status-standby {
+      background: #262626;
+      color: #999999;
+      border: 1px solid #333333;
+    }
+    .status-working {
+      background: rgba(0, 255, 0, 0.2);
+      color: #00FF00;
+      border: 1px solid rgba(0, 255, 0, 0.5);
+    }
+    .connect-btn {
+      margin: 0 8px 8px;
+      padding: 4px 8px;
+      font-size: 12px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .connect-btn.connected {
+      background: rgba(0, 255, 0, 0.2);
+      color: #00FF00;
+    }
+    .connect-btn.disconnected {
+      background: #000000;
+      color: #999999;
+    }
+    .sidebar-footer {
+      padding: 12px;
+      border-top: 1px solid #333333;
+    }
+    .add-agent-btn {
+      width: 100%;
+      padding: 8px;
+      background: #262626;
+      border: none;
+      border-radius: 4px;
+      color: #999999;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="header-row">
+        <button class="collapse-btn">←</button>
+        <span class="section-title">Agents</span>
+        <span class="count-badge">22</span>
+      </div>
+      <div class="sub-agents-banner">
+        <span class="green-dot">●</span>
+        <span>Active Sub-Agents:</span>
+        <strong style="color: #00FF00;">2</strong>
+      </div>
+      <div class="filter-tabs">
+        <button class="filter-tab active">All</button>
+        <button class="filter-tab">Working</button>
+        <button class="filter-tab">Standby</button>
+      </div>
+    </div>
+    
+    <div class="agent-list">
+      <div class="agent-row">
+        <div class="agent-avatar">
+          📋
+          <span class="online-indicator"></span>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name truncated">Master Or... <span class="master-star">★</span></div>
+          <div class="agent-role">Orchestration & Co...</div>
+        </div>
+        <span class="status-badge status-standby">Standby</span>
+      </div>
+      <div style="padding: 0 8px 8px;">
+        <button class="connect-btn connected">
+          ⚡ Command Center Connected
+        </button>
+      </div>
+      
+      <div class="agent-row">
+        <div class="agent-avatar">📚</div>
+        <div class="agent-info">
+          <div class="agent-name truncated">Communicati...</div>
+          <div class="agent-role">Email & Messaging...</div>
+        </div>
+        <span class="status-badge status-standby">Standby</span>
+      </div>
+      
+      <div class="agent-row">
+        <div class="agent-avatar">💻</div>
+        <div class="agent-info">
+          <div class="agent-name truncated">Content Wri...</div>
+          <div class="agent-role">Writing & Editing</div>
+        </div>
+        <span class="status-badge status-working">Working</span>
+      </div>
+      
+      <div class="agent-row">
+        <div class="agent-avatar">🔍</div>
+        <div class="agent-info">
+          <div class="agent-name truncated">Research An...</div>
+          <div class="agent-role">Research & Analysis</div>
+        </div>
+        <span class="status-badge status-standby">Standby</span>
+      </div>
+    </div>
+    
+    <div class="sidebar-footer">
+      <button class="add-agent-btn">
+        <span>+</span>
+        Add Agent
+      </button>
+    </div>
+  </aside>
+</body>
+</html>

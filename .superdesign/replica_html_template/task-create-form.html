@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task Create Form - Current State</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: rgba(0, 0, 0, 0.5);
+      color: #FFFFFF;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal {
+      background: #1A1A1A;
+      border: 1px solid #333333;
+      border-radius: 8px;
+      width: 100%;
+      max-width: 480px;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px;
+      border-bottom: 1px solid #333333;
+    }
+    .modal-title {
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .close-btn {
+      background: transparent;
+      border: none;
+      color: #999999;
+      cursor: pointer;
+      padding: 4px;
+      font-size: 20px;
+    }
+    .modal-content {
+      padding: 16px;
+    }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: #999999;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .form-input {
+      width: 100%;
+      background: #000000;
+      border: 1px solid #333333;
+      border-radius: 4px;
+      padding: 12px;
+      font-size: 14px;
+      color: #FFFFFF;
+      font-family: inherit;
+    }
+    .form-input:focus {
+      outline: none;
+      border-color: #FF0000;
+    }
+    .form-input::placeholder {
+      color: #52525B;
+    }
+    textarea.form-input {
+      min-height: 100px;
+      resize: vertical;
+    }
+    select.form-input {
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23999999' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+      background-position: right 12px center;
+      background-repeat: no-repeat;
+      background-size: 16px;
+      padding-right: 40px;
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 16px;
+      border-top: 1px solid #333333;
+    }
+    .btn {
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+    }
+    .btn-cancel {
+      background: transparent;
+      color: #999999;
+    }
+    .btn-create {
+      background: #FF0000;
+      color: #000000;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-create:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <div class="modal">
+    <div class="modal-header">
+      <h2 class="modal-title">Create New Task</h2>
+      <button class="close-btn">×</button>
+    </div>
+    
+    <div class="modal-content">
+      <div class="form-group">
+        <label class="form-label">Task Name</label>
+        <input type="text" class="form-input" placeholder="Enter task name...">
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Description</label>
+        <textarea class="form-input" placeholder="Describe the task..."></textarea>
+      </div>
+      
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Priority</label>
+          <select class="form-input">
+            <option value="low">Low</option>
+            <option value="normal" selected>Normal</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
+          </select>
+        </div>
+        
+        <div class="form-group">
+          <label class="form-label">Assign To</label>
+          <select class="form-input">
+            <option value="">-- Select Agent --</option>
+            <option value="1">📋 Master Orchestrator</option>
+            <option value="2">📚 Communication Agent</option>
+            <option value="3">💻 Content Writer</option>
+            <option value="4">🔍 Research Analyst</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    
+    <div class="modal-footer">
+      <button class="btn btn-cancel">Cancel</button>
+      <button class="btn btn-create">
+        <span>+</span>
+        Create Task
+      </button>
+    </div>
+  </div>
+</body>
+</html>

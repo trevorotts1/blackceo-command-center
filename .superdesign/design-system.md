@@ -1,249 +1,138 @@
-# BlackCEO Command Center - Design System
+# BlackCEO Command Center Design System
 
 ## Product Context
-BlackCEO Command Center is a premium AI agent orchestration dashboard for managing multiple AI agents, tasks, and workflows. It should look like it belongs alongside Linear, Vercel, and Raycast - not like a developer prototype.
+BlackCEO Command Center is a premium AI agent management dashboard for entrepreneurs and business owners. Users manage AI agents, create tasks, track progress across a Kanban board, and monitor real-time activity. This is a commercial product sold to clients who expect a polished, modern experience.
 
-## Target Aesthetic
-- **Premium SaaS dashboard** with depth and sophistication
-- **Dark mode done right** - layered elevation, subtle gradients, never pure #000000
-- **Professional** - no emojis in avatars, clean typography hierarchy
-- **Modern** - smooth transitions, subtle animations, hover states on everything clickable
+The visual target: Think Linear meets Vercel meets Raycast. Premium, modern, professional. NOT a developer tool. NOT a prototype. This should look like it costs $500/month.
 
----
+## Brand Identity
+- Product Name: BlackCEO Command Center
+- Logo URL (for Super Design HTML renders): https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png
+- Logo path in codebase (for React components): /logo-blackceo.png
+- When Super Design generates design HTML, use the full URL above so the logo renders in the preview canvas
+- When implementing into the React codebase, reference /logo-blackceo.png (the local file downloaded in Phase 1)
+- Brand Colors: Black (dark, not pure), Red (accent, used sparingly), White (text)
+- Brand feel: Authoritative, modern, clean, premium, sophisticated
+- NO emojis anywhere in the UI. Agent avatars use gradient letter circles.
 
-## CRITICAL RULES (NEVER VIOLATE)
+## Elevation System (CRITICAL: This Creates Depth)
+Modern dark UIs do NOT use flat pure black. They use layered elevation:
 
-### 1. NO PURE BLACK BACKGROUNDS
-- NEVER use #000000 as a background
-- Use elevation system instead (see below)
-- Even the darkest background should have subtle depth
+- Level 0 (App Background): #09090B
+- Level 1 (Surfaces/Panels): #111113
+- Level 2 (Cards/Rows): #18181B
+- Level 3 (Elevated/Hover): #27272A
+- Level 4 (Highest/Tooltips): #3F3F46
 
-### 2. NO EMOJIS IN UI
-- Replace ALL emoji avatars with styled letter circles
-- Agent "Master Orchestrator" becomes "MO" in a styled circle
-- Use colored gradients or solid backgrounds for avatar circles
+Each level is slightly lighter than the level below it. This creates visual depth where "closer" elements appear lighter, just like in the physical world.
 
-### 3. NO MONOSPACE FOR HEADINGS/LABELS
-- Monospace (JetBrains Mono) is ONLY for:
-  - Timestamps
-  - Counts/numbers
-  - Technical data
-  - Code snippets
-- Use Inter or system sans-serif for:
-  - Headings
-  - Labels
-  - Body text
-  - Navigation
+## Color Palette
 
-### 4. EVERY CLICKABLE ELEMENT NEEDS HOVER STATE
-- Buttons, cards, links, icons - ALL need visible hover transitions
-- Use subtle background changes, color shifts, or elevation changes
+### Text Colors (High contrast for readability)
+- --text-primary: #FAFAFA (headings, important labels)
+- --text-secondary: #E4E4E7 (card titles, names)
+- --text-body: #A1A1AA (descriptions, body text)
+- --text-muted: #71717A (timestamps, metadata, placeholders)
+- --text-dim: #52525B (disabled text, subtle hints)
 
----
+### Accent Colors
+- --accent-red: #DC2626 (primary CTA buttons, active states, brand highlights)
+- --accent-red-hover: #B91C1C (button hover state)
+- --accent-red-glow: rgba(220, 38, 38, 0.12) (subtle glow behind active elements)
+- --accent-red-subtle: rgba(220, 38, 38, 0.08) (very faint tint for backgrounds)
 
-## Color System
+### Status Colors (Desaturated for dark mode. NOT fully saturated.)
+- --status-online: #22C55E (connected, active, success)
+- --status-working: #F59E0B (in progress, amber)
+- --status-standby: #71717A (standby, inactive)
+- --status-error: #EF4444 (errors, failures)
+- --status-blocked: #F97316 (blocked, waiting)
 
-### Elevation Backgrounds (NOT pure black)
-| Level | Color | Use Case |
-|-------|-------|----------|
-| Base | #0A0A0B | Page background, lowest layer |
-| Elevated-1 | #111113 | Cards, sidebars |
-| Elevated-2 | #18181B | Hover states, nested containers |
-| Elevated-3 | #1F1F23 | Active states, dropdowns |
-| Elevated-4 | #27272A | Tooltips, popovers |
+### Kanban Column Accent Colors (Used as 2px top borders + 3% background tint)
+- PLANNING: #71717A
+- INBOX: #3B82F6
+- ASSIGNED: #8B5CF6
+- IN PROGRESS: #F59E0B
+- TESTING: #06B6D4
+- REVIEW: #EC4899
+- DONE: #22C55E
+- BLOCKED: #EF4444
+- CANCELLED: #6B7280
 
-### Borders
-| Type | Color | Use Case |
-|------|-------|----------|
-| Subtle | #27272A | Card borders, dividers |
-| Default | #3F3F46 | Input borders, focused elements |
-| Strong | #52525B | Emphasized borders |
-
-### Text
-| Type | Color | Use Case |
-|------|-------|----------|
-| Primary | #FAFAFA | Headings, important text |
-| Secondary | #A1A1AA | Body text, labels |
-| Muted | #71717A | Placeholders, hints |
-| Disabled | #52525B | Disabled states |
-
-### Brand Colors
-| Name | Color | Use Case |
-|------|-------|----------|
-| Accent | #EF4444 | Primary actions, brand moments |
-| Accent Hover | #DC2626 | Hover state for accent |
-| Success | #22C55E | Online status, completed tasks |
-| Warning | #F59E0B | Warnings, high priority |
-| Info | #3B82F6 | Information, links |
-| Purple | #A855F7 | Planning status, review |
-
----
+### Border Colors
+- --border-subtle: rgba(255, 255, 255, 0.06) (default card borders)
+- --border-medium: rgba(255, 255, 255, 0.10) (hover borders)
+- --border-strong: rgba(255, 255, 255, 0.15) (focus/active borders)
 
 ## Typography
+- Primary font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif
+- Monospace font: 'JetBrains Mono', 'Fira Code', monospace
 
-### Font Stack
-- **Headings & Labels:** Inter, system-ui, -apple-system, sans-serif
-- **Monospace (data only):** JetBrains Mono, Fira Code, monospace
+### Type Scale
+- Page Title: 24px, weight 600, tracking -0.02em, color --text-primary
+- Section Title: 16px, weight 600, color --text-primary
+- Section Label: 11px, weight 600, ALL CAPS, letter-spacing 0.05em, color --text-muted
+- Card Title: 14px, weight 500, color --text-secondary
+- Body Text: 13px, weight 400, color --text-body
+- Small Text: 12px, weight 400, color --text-muted
+- Monospace Data: 12-13px, JetBrains Mono, weight 400-500, for timestamps, counts, clock
 
-### Scale
-| Name | Size | Weight | Use Case |
-|------|------|--------|----------|
-| Display | 32px | 600 | Page titles |
-| H1 | 24px | 600 | Section headers |
-| H2 | 20px | 600 | Card titles |
-| H3 | 16px | 500 | Subsection headers |
-| Body | 14px | 400 | Default text |
-| Small | 12px | 400 | Labels, captions |
-| Tiny | 10px | 400 | Timestamps, counts |
+CRITICAL: NEVER use monospace fonts for headings, labels, or navigation text. Monospace is ONLY for numerical data (timestamps, counts, agent counts, the clock).
 
-### Monospace (DATA ONLY)
-| Name | Size | Use Case |
-|------|------|----------|
-| Mono-sm | 12px | Timestamps, counts |
-| Mono-base | 14px | Technical data |
+## Spacing and Shape
+- Border radius: 8px (cards, buttons), 12px (modals, larger panels), 9999px (pills, badges)
+- Card padding: 16-20px
+- Section gap: 24px
+- Card gap: 8px
+- Sidebar width: 280px
+- Header height: 56px
+- Sidebar agent row height: 56px minimum
 
----
+## Glassmorphism (for modals and elevated overlays)
+- Background: rgba(24, 24, 27, 0.85)
+- Backdrop filter: blur(20px)
+- Border: 1px solid rgba(255, 255, 255, 0.06)
+- Shadow: 0 8px 32px rgba(0, 0, 0, 0.5)
 
-## Spacing Scale
-| Name | Value |
-|------|-------|
-| 0 | 0px |
-| 1 | 4px |
-| 2 | 8px |
-| 3 | 12px |
-| 4 | 16px |
-| 5 | 20px |
-| 6 | 24px |
-| 8 | 32px |
-| 10 | 40px |
-| 12 | 48px |
-| 16 | 64px |
+## Interactive States (EVERY clickable element needs these)
+- Hover transition: all 150ms ease
+- Card hover: border brightens to --border-medium, translateY(-1px), box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3)
+- Button hover (primary): background shifts from --accent-red to --accent-red-hover
+- Button hover (secondary): background fills to Level 3 (#27272A)
+- Row hover: background fills to Level 3
+- Focus: outline 2px solid --accent-red with 2px offset, or border color change
+- New feed entries: animate opacity 0 to 1 over 300ms with translateY(8px) to translateY(0)
+- Modal open: opacity 0 to 1, scale(0.97) to scale(1) over 200ms
 
----
+## Agent Avatar System
+Replace ALL emoji avatars with gradient letter circles:
 
-## Border Radius
-| Name | Value | Use Case |
-|------|-------|----------|
-| sm | 4px | Small elements, badges |
-| md | 6px | Buttons, inputs |
-| lg | 8px | Cards |
-| xl | 12px | Modals, large cards |
-| full | 9999px | Avatars, pills |
+- Size: 36px circle (border-radius: 50%)
+- Letter: First letter of agent name, white #FAFAFA, 14px, weight 600, centered
+- Tier 1 (Strategic/Opus agents): linear-gradient(135deg, #DC2626, #991B1B) (red)
+- Tier 2 (Execution/Kimi agents): linear-gradient(135deg, #2563EB, #1E40AF) (blue)
+- Tier 3 (Research/Perplexity agents): linear-gradient(135deg, #7C3AED, #5B21B6) (purple)
+- 2px ring matching status color (online: green, standby: gray, working: amber)
 
----
+## Status Badge Design
+- Pill shape (9999px radius)
+- Size: auto width, 22px height, 8px horizontal padding
+- Font: 10px, weight 600, ALL CAPS
+- ONLINE: #22C55E background at 15% opacity, #22C55E text
+- STANDBY: #71717A background at 15% opacity, #A1A1AA text
+- WORKING: #F59E0B background at 15% opacity, #F59E0B text
+- ERROR: #EF4444 background at 15% opacity, #EF4444 text
 
-## Shadows
-| Name | Value | Use Case |
-|------|-------|----------|
-| sm | 0 1px 2px rgba(0,0,0,0.5) | Subtle elevation |
-| md | 0 4px 6px rgba(0,0,0,0.4) | Cards, dropdowns |
-| lg | 0 10px 15px rgba(0,0,0,0.3) | Modals, popovers |
-| glow | 0 0 20px rgba(var,0.3) | Status indicators |
+## Button Design
+- Primary (CTA): #DC2626 background, white text, 8px radius, weight 600, 12px 20px padding. Hover: #B91C1C.
+- Secondary: transparent background, 1px solid rgba(255,255,255,0.10) border, --text-body color. Hover: #27272A fill.
+- Ghost: transparent, no border, --text-muted color. Hover: --text-secondary color + #27272A background.
+- All buttons: transition all 150ms ease, cursor pointer
 
----
+## Subtle Background Gradient
+Add barely-perceptible gradient interest to main backgrounds:
 
-## Avatar System (NO EMOJIS)
+- Workspace selection: radial-gradient at center, rgba(220, 38, 38, 0.03) fading to transparent. Like a distant red spotlight.
+- Dashboard: linear-gradient(135deg, #09090B, #0C0A0F). A near-imperceptible shift from pure dark to a faint cool undertone.
 
-### Letter Avatars
-- Extract initials from agent name
-- Use gradient or solid color backgrounds
-- White or light text on dark backgrounds
-
-### Avatar Colors (by agent type)
-| Type | Background |
-|------|------------|
-| Master | linear-gradient(135deg, #F59E0B 0%, #EF4444 100%) |
-| Standard | linear-gradient(135deg, #3B82F6 0%, #6366F1 100%) |
-| Specialist | linear-gradient(135deg, #22C55E 0%, #10B981 100%) |
-
-### Avatar Sizes
-| Size | Dimensions |
-|------|------------|
-| sm | 24px |
-| md | 32px |
-| lg | 40px |
-| xl | 48px |
-
----
-
-## Component Patterns
-
-### Cards
-- Background: Elevated-1 (#111113)
-- Border: 1px solid Subtle (#27272A)
-- Border Radius: lg (8px)
-- Hover: Border becomes Default (#3F3F46), subtle shadow
-- Padding: 16px (md) or 24px (lg)
-
-### Buttons
-#### Primary
-- Background: Accent (#EF4444)
-- Text: White
-- Hover: Accent Hover (#DC2626)
-- Border Radius: md (6px)
-
-#### Secondary
-- Background: Elevated-2 (#18181B)
-- Border: 1px solid Subtle (#27272A)
-- Text: Secondary (#A1A1AA)
-- Hover: Background Elevated-3, Text Primary
-
-#### Ghost
-- Background: transparent
-- Text: Secondary (#A1A1AA)
-- Hover: Background Elevated-2, Text Primary
-
-### Inputs
-- Background: Elevated-1 (#111113)
-- Border: 1px solid Subtle (#27272A)
-- Text: Primary (#FAFAFA)
-- Placeholder: Muted (#71717A)
-- Focus: Border Accent (#EF4444)
-- Border Radius: md (6px)
-
-### Status Badges
-| Status | Background | Text |
-|--------|------------|------|
-| Online/Working | #22C55E/15 | #22C55E |
-| Standby | #3F3F46/50 | #A1A1AA |
-| Offline | #EF4444/15 | #EF4444 |
-
-### Tabs
-- Inactive: Text Secondary, no background
-- Active: Text Primary, bottom border Accent
-- Hover: Text Primary, background Elevated-2
-
----
-
-## Animations & Transitions
-
-### Timing
-- **Fast:** 150ms (hover states, small elements)
-- **Normal:** 200ms (most transitions)
-- **Slow:** 300ms (modals, large elements)
-
-### Easing
-- **Default:** ease-out
-- **Bounce:** cubic-bezier(0.34, 1.56, 0.64, 1)
-
-### Common Animations
-- **Fade In:** opacity 0→1, translateY(-4px)→0
-- **Pulse:** opacity 1→0.6→1 (for status indicators)
-- **Slide:** translateX(-100%)→0 (for sidebars)
-
----
-
-## Logo
-**URL:** `https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png`
-
-Always use this exact URL. Never replace with placeholder or text.
-
----
-
-## Design Constraints (MANDATORY)
-1. Use ONLY the fonts, colors, spacing, and component styles defined in this design system
-2. Do not introduce any fonts, colors, or visual styles not in this design system
-3. Every clickable element must have a visible hover state
-4. Never use pure #000000 as a background
-5. Never use emojis in the UI - use letter avatars instead
-6. Monospace font is ONLY for timestamps, counts, and technical data
+These should be so subtle that if someone asked "is there a gradient?" they would have to look closely. The point is to prevent the flat, dead feeling of a solid color, not to create a visible gradient.

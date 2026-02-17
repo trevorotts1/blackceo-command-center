@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workspace Selection - Current State</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #000000;
+      color: #FFFFFF;
+      min-height: 100vh;
+    }
+    .header {
+      background: #1A1A1A;
+      border-bottom: 1px solid #333333;
+      padding: 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .logo { height: 40px; }
+    .btn-primary {
+      background: #FF0000;
+      color: #000000;
+      padding: 8px 16px;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .main { max-width: 1280px; margin: 0 auto; padding: 32px 24px; }
+    .page-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .page-subtitle {
+      color: #999999;
+      margin-bottom: 32px;
+    }
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+    .workspace-card {
+      background: #1A1A1A;
+      border: 1px solid #333333;
+      border-radius: 12px;
+      padding: 24px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .workspace-card:hover {
+      border-color: rgba(255, 0, 0, 0.5);
+    }
+    .workspace-card.selected {
+      border: 2px solid #FF0000;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 16px;
+    }
+    .workspace-info { display: flex; align-items: center; gap: 12px; }
+    .workspace-icon { font-size: 32px; }
+    .workspace-name { font-size: 18px; font-weight: 600; }
+    .workspace-slug { font-size: 14px; color: #999999; }
+    .workspace-stats {
+      display: flex;
+      gap: 16px;
+      color: #999999;
+      font-size: 14px;
+      margin-top: 16px;
+    }
+    .stat { display: flex; align-items: center; gap: 4px; }
+    .add-workspace-card {
+      border: 2px dashed #333333;
+      background: transparent;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 200px;
+      gap: 12px;
+    }
+    .add-icon {
+      width: 48px;
+      height: 48px;
+      background: #262626;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #999999;
+      font-size: 24px;
+    }
+    .add-text { color: #999999; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <img src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" alt="Logo" class="logo">
+    <button class="btn-primary">
+      <span>+</span>
+      New Workspace
+    </button>
+  </header>
+  
+  <main class="main">
+    <h2 class="page-title">All Workspaces</h2>
+    <p class="page-subtitle">Select a workspace to view its mission queue and agents</p>
+    
+    <div class="workspace-grid">
+      <div class="workspace-card selected">
+        <div class="card-header">
+          <div class="workspace-info">
+            <span class="workspace-icon">🏠</span>
+            <div>
+              <div class="workspace-name">BlackCEO Operations</div>
+              <div class="workspace-slug">/default</div>
+            </div>
+          </div>
+          <span style="color: #999999;">→</span>
+        </div>
+        <div class="workspace-stats">
+          <span class="stat">✓ 5 tasks</span>
+          <span class="stat">👥 22 agents</span>
+        </div>
+      </div>
+      
+      <div class="workspace-card add-workspace-card">
+        <div class="add-icon">+</div>
+        <span class="add-text">Add Workspace</span>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
