@@ -193,7 +193,11 @@ export default function WorkspacePage() {
     return (
       <div className="min-h-screen bg-mc-bg flex items-center justify-center">
         <div className="text-center">
-          <div className="text-4xl mb-4 animate-pulse">🦞</div>
+          <img 
+            src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
+            alt="Loading" 
+            className="h-12 w-auto mb-4 animate-pulse"
+          />
           <p className="text-mc-text-secondary">Loading {slug}...</p>
         </div>
       </div>

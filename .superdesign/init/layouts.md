@@ -1,3 +1,50 @@
+# Layouts - BlackCEO Command Center
+
+## Root Layout
+**File:** `src/app/layout.tsx`
+
+```tsx
+import type { Metadata } from 'next';
+import './globals.css';
+import { JetBrains_Mono } from 'next/font/google';
+import DemoBanner from '@/components/DemoBanner';
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-jetbrains-mono',
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+});
+
+export const metadata: Metadata = {
+  title: 'BlackCEO Command Center',
+  description: 'AI Agent Orchestration Dashboard',
+  icons: {
+    icon: '/favicon.svg',
+  },
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en" className={jetbrainsMono.variable}>
+      <body className={`${jetbrainsMono.className} bg-mc-bg text-mc-text min-h-screen`}>
+        <DemoBanner />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+## Header Component
+**File:** `src/components/Header.tsx`
+**Description:** Top navigation bar with logo, workspace indicator, stats, time, and online status.
+
+```tsx
 'use client';
 
 import { useState, useEffect } from 'react';
@@ -23,7 +70,6 @@ export function Header({ workspace }: HeaderProps) {
     return () => clearInterval(timer);
   }, []);
 
-  // Load active sub-agent count
   useEffect(() => {
     const loadSubAgentCount = async () => {
       try {
@@ -38,8 +84,6 @@ export function Header({ workspace }: HeaderProps) {
     };
 
     loadSubAgentCount();
-
-    // Poll every 30 seconds (reduced from 10s to reduce load)
     const interval = setInterval(loadSubAgentCount, 30000);
     return () => clearInterval(interval);
   }, []);
@@ -60,7 +104,6 @@ export function Header({ workspace }: HeaderProps) {
           />
         </div>
 
-        {/* Workspace indicator or back to dashboard */}
         {workspace ? (
           <div className="flex items-center gap-2">
             <Link
@@ -87,7 +130,7 @@ export function Header({ workspace }: HeaderProps) {
         )}
       </div>
 
-      {/* Center: Stats - only show in workspace view */}
+      {/* Center: Stats */}
       {workspace && (
         <div className="flex items-center gap-8">
           <div className="text-center">
@@ -131,3 +174,42 @@ export function Header({ workspace }: HeaderProps) {
     </header>
   );
 }
+```
+
+## Demo Banner
+**File:** `src/components/DemoBanner.tsx`
+**Description:** Top banner shown in demo mode.
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+
+export default function DemoBanner() {
+  const [isDemo, setIsDemo] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/demo')
+      .then(r => r.json())
+      .then(data => setIsDemo(data.demo))
+      .catch(() => {});
+  }, []);
+
+  if (!isDemo) return null;
+
+  return (
+    <div className="bg-gradient-to-r from-blue-600 via-purple-600 to-blue-600 text-white text-center py-2 px-4 text-sm font-medium z-50 relative">
+      <span className="mr-2">DEMO</span>
+      <span>Live Demo - AI agents are working in real-time. This is a read-only simulation.</span>
+      <a
+        href="https://github.com/crshdn/mission-control"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="ml-3 underline hover:text-blue-200 transition-colors"
+      >
+        Get BlackCEO Command Center
+      </a>
+    </div>
+  );
+}
+```

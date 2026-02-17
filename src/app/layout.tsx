@@ -11,7 +11,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Mission Control',
+  title: 'BlackCEO Command Center',
   description: 'AI Agent Orchestration Dashboard',
   icons: {
     icon: '/favicon.svg',

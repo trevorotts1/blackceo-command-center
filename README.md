@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="mission-control.png" alt="Mission Control" width="600" />
-</p>
-
-<h1 align="center">🦞 Mission Control</h1>
+<h1 align="center">BLACKCEO COMMAND CENTER</h1>
 
 <p align="center">
   <strong>AI Agent Orchestration Dashboard</strong><br>
@@ -53,7 +49,7 @@
 │                       YOUR MACHINE                           │
 │                                                              │
 │  ┌─────────────────┐          ┌──────────────────────────┐  │
-│  │ Mission Control  │◄────────►│    OpenClaw Gateway      │  │
+│  │ Command Center   │◄────────►│    OpenClaw Gateway      │  │
 │  │   (Next.js)      │   WS     │  (AI Agent Runtime)      │  │
 │  │   Port 4000      │          │  Port 18789              │  │
 │  └────────┬─────────┘          └───────────┬──────────────┘  │

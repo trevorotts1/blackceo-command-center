@@ -1,6 +1,6 @@
 /**
  * Settings Page
- * Configure Mission Control paths, URLs, and preferences
+ * Configure BlackCEO Command Center paths, URLs, and preferences
  */
 
 'use client';
@@ -70,7 +70,7 @@ export default function SettingsPage() {
             <button
               onClick={() => router.push('/')}
               className="p-2 hover:bg-mc-bg-tertiary rounded text-mc-text-secondary"
-              title="Back to Mission Control"
+              title="Back to Command Center"
             >
               ← Back
             </button>
@@ -121,7 +121,7 @@ export default function SettingsPage() {
             <h2 className="text-xl font-semibold text-mc-text">Workspace Paths</h2>
           </div>
           <p className="text-sm text-mc-text-secondary mb-4">
-            Configure where Mission Control stores projects and deliverables.
+            Configure where BlackCEO Command Center stores projects and deliverables.
           </p>
 
           <div className="space-y-4">
@@ -137,7 +137,7 @@ export default function SettingsPage() {
                 className="w-full px-4 py-2 bg-mc-bg border border-mc-border rounded text-mc-text focus:border-mc-accent focus:outline-none"
               />
               <p className="text-xs text-mc-text-secondary mt-1">
-                Base directory for all Mission Control files. Use ~ for home directory.
+                Base directory for all BlackCEO Command Center files. Use ~ for home directory.
               </p>
             </div>
 
@@ -182,13 +182,13 @@ export default function SettingsPage() {
             <h2 className="text-xl font-semibold text-mc-text">API Configuration</h2>
           </div>
           <p className="text-sm text-mc-text-secondary mb-4">
-            Configure Mission Control API URL for agent orchestration.
+            Configure BlackCEO Command Center API URL for agent orchestration.
           </p>
 
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-mc-text mb-2">
-                Mission Control URL
+                Command Center URL
               </label>
               <input
                 type="text"
@@ -198,7 +198,7 @@ export default function SettingsPage() {
                 className="w-full px-4 py-2 bg-mc-bg border border-mc-border rounded text-mc-text focus:border-mc-accent focus:outline-none"
               />
               <p className="text-xs text-mc-text-secondary mt-1">
-                URL where Mission Control is running. Auto-detected by default. Change for remote access.
+                URL where BlackCEO Command Center is running. Auto-detected by default. Change for remote access.
               </p>
             </div>
           </div>

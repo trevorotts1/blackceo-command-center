@@ -100,7 +100,7 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
       <div className="p-3 border-b border-mc-border flex items-center justify-between">
         <div className="flex items-center gap-2">
           <ChevronRight className="w-4 h-4 text-mc-text-secondary" />
-          <span className="text-sm font-medium uppercase tracking-wider">Mission Queue</span>
+          <span className="text-sm font-medium uppercase tracking-wider">Task Board</span>
         </div>
         <button
           onClick={() => setShowCreateModal(true)}

@@ -32,7 +32,11 @@ export function WorkspaceDashboard() {
     return (
       <div className="min-h-screen bg-mc-bg flex items-center justify-center">
         <div className="text-center">
-          <div className="text-4xl mb-4 animate-pulse">🦞</div>
+          <img 
+            src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
+            alt="Loading" 
+            className="h-12 w-auto mb-4 animate-pulse"
+          />
           <p className="text-mc-text-secondary">Loading workspaces...</p>
         </div>
       </div>
@@ -46,8 +50,11 @@ export function WorkspaceDashboard() {
         <div className="max-w-7xl mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <span className="text-2xl">🦞</span>
-              <h1 className="text-xl font-bold">Mission Control</h1>
+              <img 
+                src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
+                alt="BlackCEO Command Center" 
+                className="h-10 w-auto"
+              />
             </div>
             <button
               onClick={() => setShowCreateModal(true)}
@@ -65,7 +72,7 @@ export function WorkspaceDashboard() {
         <div className="mb-8">
           <h2 className="text-2xl font-bold mb-2">All Workspaces</h2>
           <p className="text-mc-text-secondary">
-            Select a workspace to view its mission queue and agents
+            Select a workspace to begin
           </p>
         </div>
 
@@ -156,7 +163,6 @@ function WorkspaceCard({ workspace, onDelete }: { workspace: WorkspaceStats; onD
               <h3 className="font-semibold text-lg group-hover:text-mc-accent transition-colors">
                 {workspace.name}
               </h3>
-              <p className="text-sm text-mc-text-secondary">/{workspace.slug}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">

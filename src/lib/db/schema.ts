@@ -1,5 +1,5 @@
 /**
- * Database Schema for Mission Control
+ * Database Schema for BlackCEO Command Center
  * 
  * This defines the current desired schema state.
  * For existing databases, migrations handle schema updates.

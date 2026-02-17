@@ -1,4 +1,4 @@
-// Core types for Mission Control
+// Core types for BlackCEO Command Center
 
 export type AgentStatus = 'standby' | 'working' | 'offline';
 

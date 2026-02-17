@@ -39,7 +39,7 @@ export interface RegisterSubAgentParams {
 
 /**
  * Log an activity to a task's activity feed
- * This makes activities visible in the Mission Control UI
+ * This makes activities visible in the Command Center UI
  */
 export async function logActivity(params: LogActivityParams): Promise<void> {
   try {
@@ -94,7 +94,7 @@ export async function logDeliverable(params: LogDeliverableParams): Promise<void
 }
 
 /**
- * Register a sub-agent session in Mission Control
+ * Register a sub-agent session in Command Center
  * This makes the session visible in the Sessions tab and updates agent counters
  */
 export async function registerSubAgentSession(params: RegisterSubAgentParams): Promise<void> {

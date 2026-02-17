@@ -284,12 +284,12 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
                     ) : openclawSession ? (
                       <>
                         <Zap className="w-3 h-3" />
-                        <span>OpenClaw Connected</span>
+                        <span>Command Center Connected</span>
                       </>
                     ) : (
                       <>
                         <ZapOff className="w-3 h-3" />
-                        <span>Connect to OpenClaw</span>
+                        <span>Connect to Command Center</span>
                       </>
                     )}
                   </button>

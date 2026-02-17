@@ -3,9 +3,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, closeDb } from './index';
 
-const ORCHESTRATOR_SOUL_MD = `# Mission Control Orchestrator
+const ORCHESTRATOR_SOUL_MD = `# BlackCEO Command Center Orchestrator
 
-You are the master orchestrator of Mission Control. You lead a team of AI agents working together to complete tasks.
+You are the master orchestrator of BlackCEO Command Center. You lead a team of AI agents working together to complete tasks.
 
 ## Core Identity
 
@@ -42,7 +42,7 @@ const ORCHESTRATOR_USER_MD = `# User Context
 
 ## The Human
 
-The human running Mission Control is the ultimate authority. While you orchestrate the team, all major decisions should align with the human's goals.
+The human running BlackCEO Command Center is the ultimate authority. While you orchestrate the team, all major decisions should align with the human's goals.
 
 ## Communication with Human
 
@@ -61,7 +61,7 @@ The human running Mission Control is the ultimate authority. While you orchestra
 
 const ORCHESTRATOR_AGENTS_MD = `# Team Roster
 
-As the orchestrator, you manage and coordinate with all agents in Mission Control.
+As the orchestrator, you manage and coordinate with all agents in BlackCEO Command Center.
 
 ## How to Work with Agents
 
@@ -98,7 +98,7 @@ async function seed() {
   const businessId = 'default';
   db.prepare(
     `INSERT OR IGNORE INTO businesses (id, name, description, created_at) VALUES (?, ?, ?, ?)`
-  ).run(businessId, 'Mission Control HQ', 'Default workspace for all operations', now);
+  ).run(businessId, 'BlackCEO Operations', 'Default workspace for all operations', now);
 
   // Create master orchestrator agent
   const orchestratorId = uuidv4();
@@ -177,7 +177,7 @@ async function seed() {
   const events = [
     { type: 'system', message: 'Database seeded with initial data' },
     { type: 'agent_joined', agentId: orchestratorId, message: 'Orchestrator joined the team' },
-    { type: 'system', message: 'Mission Control is online' },
+    { type: 'system', message: 'BlackCEO Command Center is online' },
   ];
 
   for (const event of events) {
@@ -195,7 +195,7 @@ async function seed() {
     uuidv4(),
     teamConvoId,
     orchestratorId,
-    "Welcome to Mission Control, team! 🦞 I'm your orchestrator. Let's get to work.",
+    "Welcome to BlackCEO Command Center, team! I'm your orchestrator. Let's get to work.",
     'text',
     now
   );

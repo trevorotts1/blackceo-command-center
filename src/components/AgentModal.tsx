@@ -269,7 +269,7 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
                   </select>
                 )}
                 <p className="text-xs text-mc-text-secondary mt-1">
-                  AI model used by this agent. Leave empty to use OpenClaw default.
+                  AI model used by this agent. Leave empty to use default.
                 </p>
               </div>
             </div>
