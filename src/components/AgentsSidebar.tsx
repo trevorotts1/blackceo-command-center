@@ -115,16 +115,16 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
 
   return (
     <aside
-      className={`bg-mc-bg-secondary border-r border-mc-border flex flex-col transition-all duration-300 ease-in-out ${
+      className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
         isMinimized ? 'w-12' : 'w-64'
       }`}
     >
       {/* Header */}
-      <div className="p-3 border-b border-mc-border">
+      <div className="p-3 border-b border-gray-100">
         <div className="flex items-center">
           <button
             onClick={toggleMinimize}
-            className="p-1 rounded hover:bg-mc-bg-tertiary text-mc-text-secondary hover:text-mc-text transition-colors"
+            className="p-1 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
             aria-label={isMinimized ? 'Expand agents' : 'Minimize agents'}
           >
             {isMinimized ? (
@@ -135,8 +135,8 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
           </button>
           {!isMinimized && (
             <>
-              <span className="text-sm font-medium uppercase tracking-wider">Agents</span>
-              <span className="bg-mc-bg-tertiary text-mc-text-secondary text-xs px-2 py-0.5 rounded ml-2">
+              <span className="text-sm font-semibold text-gray-900 ml-1">Agents</span>
+              <span className="bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full ml-2 font-medium">
                 {agents.length}
               </span>
             </>
@@ -147,28 +147,28 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
           <>
             {/* Active Sub-Agents Counter */}
             {activeSubAgents > 0 && (
-              <div className="mb-3 mt-3 px-3 py-2 bg-green-500/10 border border-green-500/20 rounded-lg">
+              <div className="mb-3 mt-3 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg">
                 <div className="flex items-center gap-2 text-sm">
-                  <span className="text-green-400">●</span>
-                  <span className="text-mc-text">Active Sub-Agents:</span>
-                  <span className="font-bold text-green-400">{activeSubAgents}</span>
+                  <span className="text-emerald-500">●</span>
+                  <span className="text-gray-700">Active Sub-Agents:</span>
+                  <span className="font-semibold text-emerald-600">{activeSubAgents}</span>
                 </div>
               </div>
             )}
 
             {/* Filter Tabs */}
-            <div className="flex gap-1">
+            <div className="flex gap-1 mt-3">
               {(['all', 'working', 'standby'] as FilterTab[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setFilter(tab)}
-                  className={`px-3 py-1 text-xs rounded uppercase ${
+                  className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
                     filter === tab
-                      ? 'bg-mc-accent text-mc-bg font-medium'
-                      : 'text-mc-text-secondary hover:bg-mc-bg-tertiary'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
                   }`}
                 >
-                  {tab}
+                  {tab.toUpperCase()}
                 </button>
               ))}
             </div>
@@ -195,21 +195,21 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
                 >
                   <span className="text-2xl">{agent.avatar_emoji}</span>
                   {openclawSession && (
-                    <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-mc-bg-secondary" />
+                    <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white" />
                   )}
                   {!!agent.is_master && (
-                    <span className="absolute -top-1 -right-1 text-xs text-mc-accent-yellow">★</span>
+                    <span className="absolute -top-1 -right-1 text-xs text-amber-500">★</span>
                   )}
                   {/* Status indicator */}
                   <span
                     className={`absolute -bottom-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full ${
-                      agent.status === 'working' ? 'bg-mc-accent-green' :
-                      agent.status === 'standby' ? 'bg-mc-text-secondary' :
-                      'bg-gray-500'
+                      agent.status === 'working' ? 'bg-emerald-500' :
+                      agent.status === 'standby' ? 'bg-gray-400' :
+                      'bg-gray-300'
                     }`}
                   />
                   {/* Tooltip */}
-                  <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 px-2 py-1 bg-mc-bg text-mc-text text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50 border border-mc-border">
+                  <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 px-2 py-1 bg-gray-900 text-white text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50 shadow-lg">
                     {agent.name}
                   </div>
                 </button>
@@ -222,8 +222,8 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
           return (
             <div
               key={agent.id}
-              className={`w-full rounded hover:bg-mc-bg-tertiary transition-colors ${
-                selectedAgent?.id === agent.id ? 'bg-mc-bg-tertiary' : ''
+              className={`w-full rounded-lg transition-colors ${
+                selectedAgent?.id === agent.id ? 'bg-indigo-50 border border-indigo-200' : 'hover:bg-gray-50'
               }`}
             >
               <button
@@ -231,32 +231,32 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
                   setSelectedAgent(agent);
                   setEditingAgent(agent);
                 }}
-                className="w-full flex items-center gap-3 p-2 text-left"
+                className="w-full flex items-center gap-3 p-2.5 text-left"
               >
                 {/* Avatar */}
                 <div className="text-2xl relative">
                   {agent.avatar_emoji}
                   {openclawSession && (
-                    <span className="absolute -bottom-1 -right-1 w-3 h-3 bg-green-500 rounded-full border-2 border-mc-bg-secondary" />
+                    <span className="absolute -bottom-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white" />
                   )}
                 </div>
 
                 {/* Info */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm truncate">{agent.name}</span>
+                    <span className="font-medium text-sm text-gray-900 truncate">{agent.name}</span>
                     {!!agent.is_master && (
-                      <span className="text-xs text-mc-accent-yellow">★</span>
+                      <span className="text-xs text-amber-500">★</span>
                     )}
                   </div>
-                  <div className="text-xs text-mc-text-secondary truncate">
+                  <div className="text-xs text-gray-500 truncate">
                     {agent.role}
                   </div>
                 </div>
 
                 {/* Status */}
                 <span
-                  className={`text-xs px-2 py-0.5 rounded uppercase ${getStatusBadge(
+                  className={`text-xs px-2 py-0.5 rounded-full font-medium uppercase ${getStatusBadge(
                     agent.status
                   )}`}
                 >
@@ -266,14 +266,14 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
 
               {/* OpenClaw Connect Button - show for master agents */}
               {!!agent.is_master && (
-                <div className="px-2 pb-2">
+                <div className="px-2.5 pb-2.5">
                   <button
                     onClick={(e) => handleConnectToOpenClaw(agent, e)}
                     disabled={isConnecting}
-                    className={`w-full flex items-center justify-center gap-2 px-2 py-1 rounded text-xs transition-colors ${
+                    className={`w-full flex items-center justify-center gap-2 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${
                       openclawSession
-                        ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-                        : 'bg-mc-bg text-mc-text-secondary hover:bg-mc-bg-tertiary hover:text-mc-text'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
+                        : 'bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100 hover:text-gray-900'
                     }`}
                   >
                     {isConnecting ? (
@@ -284,7 +284,7 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
                     ) : openclawSession ? (
                       <>
                         <Zap className="w-3 h-3" />
-                        <span>Command Center Connected</span>
+                        <span>BlackCEO Command Center Connected</span>
                       </>
                     ) : (
                       <>
@@ -302,10 +302,10 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
 
       {/* Add Agent Button */}
       {!isMinimized && (
-        <div className="p-3 border-t border-mc-border">
+        <div className="p-3 border-t border-gray-100">
           <button
             onClick={() => setShowCreateModal(true)}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-mc-bg-tertiary hover:bg-mc-border rounded text-sm text-mc-text-secondary hover:text-mc-text transition-colors"
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg text-sm text-gray-600 hover:text-gray-900 font-medium transition-colors"
           >
             <Plus className="w-4 h-4" />
             Add Agent

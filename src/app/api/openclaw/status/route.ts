@@ -12,7 +12,7 @@ export async function GET() {
       } catch (err) {
         return NextResponse.json({
           connected: false,
-          error: 'Failed to connect to OpenClaw Gateway',
+          error: 'Failed to connect to the backend gateway',
           gateway_url: process.env.OPENCLAW_GATEWAY_URL || 'ws://127.0.0.1:18789',
         });
       }

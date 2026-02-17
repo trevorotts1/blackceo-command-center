@@ -68,16 +68,16 @@ export function LiveFeed() {
 
   return (
     <aside
-      className={`bg-mc-bg-secondary border-l border-mc-border flex flex-col transition-all duration-300 ease-in-out ${
+      className={`bg-white border-l border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
         isMinimized ? 'w-12' : 'w-80'
       }`}
     >
       {/* Header */}
-      <div className="p-3 border-b border-mc-border">
+      <div className="p-3 border-b border-gray-100">
         <div className="flex items-center">
           <button
             onClick={toggleMinimize}
-            className="p-1 rounded hover:bg-mc-bg-tertiary text-mc-text-secondary hover:text-mc-text transition-colors"
+            className="p-1 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
             aria-label={isMinimized ? 'Expand feed' : 'Minimize feed'}
           >
             {isMinimized ? (
@@ -87,7 +87,7 @@ export function LiveFeed() {
             )}
           </button>
           {!isMinimized && (
-            <span className="text-sm font-medium uppercase tracking-wider">Live Feed</span>
+            <span className="text-sm font-semibold text-gray-900 ml-1">Live Feed</span>
           )}
         </div>
 
@@ -98,13 +98,13 @@ export function LiveFeed() {
               <button
                 key={tab}
                 onClick={() => setFilter(tab)}
-                className={`px-3 py-1 text-xs rounded uppercase ${
+                className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
                   filter === tab
-                    ? 'bg-mc-accent text-mc-bg font-medium'
-                    : 'text-mc-text-secondary hover:bg-mc-bg-tertiary'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
                 }`}
               >
-                {tab}
+                {tab.toUpperCase()}
               </button>
             ))}
           </div>
@@ -115,7 +115,7 @@ export function LiveFeed() {
       {!isMinimized && (
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {filteredEvents.length === 0 ? (
-            <div className="text-center py-8 text-mc-text-secondary text-sm">
+            <div className="text-center py-8 text-gray-400 text-sm">
               No events yet
             </div>
           ) : (
@@ -130,47 +130,46 @@ export function LiveFeed() {
 }
 
 function EventItem({ event }: { event: Event }) {
-  const getEventIcon = (type: string) => {
+  const getEventDot = (type: string) => {
     switch (type) {
       case 'task_created':
-        return '📋';
+        return 'bg-blue-500';
       case 'task_assigned':
-        return '👤';
+        return 'bg-purple-500';
       case 'task_status_changed':
-        return '🔄';
+        return 'bg-amber-500';
       case 'task_completed':
-        return '✅';
+        return 'bg-emerald-500';
       case 'message_sent':
-        return '💬';
+        return 'bg-indigo-500';
       case 'agent_joined':
-        return '🎉';
+        return 'bg-cyan-500';
       case 'agent_status_changed':
-        return '🔔';
+        return 'bg-orange-500';
       case 'system':
-        return '⚙️';
+        return 'bg-gray-500';
       default:
-        return '📌';
+        return 'bg-gray-400';
     }
   };
 
-  const isTaskEvent = ['task_created', 'task_assigned', 'task_completed'].includes(event.type);
   const isHighlight = event.type === 'task_created' || event.type === 'task_completed';
 
   return (
     <div
-      className={`p-2 rounded border-l-2 animate-slide-in ${
+      className={`p-2.5 rounded-lg animate-slide-in transition-colors ${
         isHighlight
-          ? 'bg-mc-bg-tertiary border-mc-accent-pink'
-          : 'bg-transparent border-transparent hover:bg-mc-bg-tertiary'
+          ? 'bg-indigo-50 border border-indigo-100'
+          : 'hover:bg-gray-50'
       }`}
     >
-      <div className="flex items-start gap-2">
-        <span className="text-sm">{getEventIcon(event.type)}</span>
+      <div className="flex items-start gap-2.5">
+        <span className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${getEventDot(event.type)}`} />
         <div className="flex-1 min-w-0">
-          <p className={`text-sm ${isTaskEvent ? 'text-mc-accent-pink' : 'text-mc-text'}`}>
+          <p className="text-sm text-gray-700 leading-snug">
             {event.message}
           </p>
-          <div className="flex items-center gap-1 mt-1 text-xs text-mc-text-secondary">
+          <div className="flex items-center gap-1 mt-1 text-xs text-gray-400">
             <Clock className="w-3 h-3" />
             {formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}
           </div>

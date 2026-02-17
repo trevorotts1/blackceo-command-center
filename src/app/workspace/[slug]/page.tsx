@@ -170,16 +170,16 @@ export default function WorkspacePage() {
 
   if (notFound) {
     return (
-      <div className="min-h-screen bg-mc-bg flex items-center justify-center">
+      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
           <div className="text-6xl mb-4">🔍</div>
-          <h1 className="text-2xl font-bold mb-2">Workspace Not Found</h1>
-          <p className="text-mc-text-secondary mb-6">
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">Workspace Not Found</h1>
+          <p className="text-gray-500 mb-6">
             The workspace &ldquo;{slug}&rdquo; doesn&apos;t exist.
           </p>
           <Link
             href="/"
-            className="inline-flex items-center gap-2 px-6 py-3 bg-mc-accent text-mc-bg rounded-lg font-medium hover:bg-mc-accent/90"
+            className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 transition-colors"
           >
             <ChevronLeft className="w-4 h-4" />
             Back to Dashboard
@@ -191,21 +191,21 @@ export default function WorkspacePage() {
 
   if (isLoading || !workspace) {
     return (
-      <div className="min-h-screen bg-mc-bg flex items-center justify-center">
+      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
           <img 
             src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
             alt="Loading" 
             className="h-12 w-auto mb-4 animate-pulse"
           />
-          <p className="text-mc-text-secondary">Loading {slug}...</p>
+          <p className="text-gray-500">Loading {slug}...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen flex flex-col bg-mc-bg overflow-hidden">
+    <div className="h-screen flex flex-col bg-[#F8F9FB] overflow-hidden">
       <Header workspace={workspace} />
 
       <div className="flex-1 flex overflow-hidden">

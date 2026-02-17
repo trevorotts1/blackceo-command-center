@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
         await client.connect();
       } catch {
         return NextResponse.json(
-          { error: 'Failed to connect to OpenClaw Gateway' },
+          { error: 'Failed to connect to the backend gateway' },
           { status: 503 }
         );
       }
@@ -76,7 +76,7 @@ export async function POST(request: Request) {
         await client.connect();
       } catch {
         return NextResponse.json(
-          { error: 'Failed to connect to OpenClaw Gateway' },
+          { error: 'Failed to connect to the backend gateway' },
           { status: 503 }
         );
       }

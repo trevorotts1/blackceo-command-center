@@ -154,15 +154,15 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-mc-bg-secondary border border-mc-border rounded-lg w-full max-w-2xl max-h-[90vh] flex flex-col">
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-mc-border flex-shrink-0">
-          <h2 className="text-lg font-semibold">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200 flex-shrink-0">
+          <h2 className="text-lg font-semibold text-gray-900">
             {task ? task.title : 'Create New Task'}
           </h2>
           <button
             onClick={onClose}
-            className="p-1 hover:bg-mc-bg-tertiary rounded"
+            className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -170,15 +170,15 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
 
         {/* Tabs - only show for existing tasks */}
         {task && (
-          <div className="flex border-b border-mc-border flex-shrink-0">
+          <div className="flex border-b border-gray-200 flex-shrink-0 bg-gray-50">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
                   activeTab === tab.id
-                    ? 'text-mc-accent border-b-2 border-mc-accent'
-                    : 'text-mc-text-secondary hover:text-mc-text'
+                    ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white'
+                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
                 }`}
               >
                 {tab.icon}
@@ -189,51 +189,51 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
         )}
 
         {/* Content Area */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-y-auto p-4 bg-white">
           {/* Overview Tab */}
           {activeTab === 'overview' && (
             <form onSubmit={handleSubmit} className="space-y-4">
           {/* Title */}
           <div>
-            <label className="block text-sm font-medium mb-1">Title</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
             <input
               type="text"
               value={form.title}
               onChange={(e) => setForm({ ...form, title: e.target.value })}
               required
-              className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               placeholder="What needs to be done?"
             />
           </div>
 
           {/* Description */}
           <div>
-            <label className="block text-sm font-medium mb-1">Description</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
             <textarea
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
               rows={3}
-              className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent resize-none"
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
               placeholder="Add details..."
             />
           </div>
 
           {/* Planning Mode Toggle - only for new tasks */}
           {!task && (
-            <div className="p-3 bg-mc-bg rounded-lg border border-mc-border">
+            <div className="p-3 bg-indigo-50 rounded-lg border border-indigo-200">
               <label className="flex items-start gap-3 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={usePlanningMode}
                   onChange={(e) => setUsePlanningMode(e.target.checked)}
-                  className="w-4 h-4 mt-0.5 rounded border-mc-border"
+                  className="w-4 h-4 mt-0.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                 />
                 <div>
-                  <span className="font-medium text-sm flex items-center gap-2">
-                    <ClipboardList className="w-4 h-4 text-mc-accent" />
+                  <span className="font-medium text-sm text-gray-900 flex items-center gap-2">
+                    <ClipboardList className="w-4 h-4 text-indigo-600" />
                     Enable Planning Mode
                   </span>
-                  <p className="text-xs text-mc-text-secondary mt-1">
+                  <p className="text-xs text-gray-600 mt-1">
                     Best for complex projects that need detailed requirements. 
                     You&apos;ll answer a few questions to define scope, goals, and constraints 
                     before work begins. Skip this for quick, straightforward tasks.
@@ -246,11 +246,11 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
           <div className="grid grid-cols-2 gap-4">
             {/* Status */}
             <div>
-              <label className="block text-sm font-medium mb-1">Status</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
               <select
                 value={form.status}
                 onChange={(e) => setForm({ ...form, status: e.target.value as TaskStatus })}
-                className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
+                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               >
                 {statuses.map((s) => (
                   <option key={s} value={s}>
@@ -262,11 +262,11 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
 
             {/* Priority */}
             <div>
-              <label className="block text-sm font-medium mb-1">Priority</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
               <select
                 value={form.priority}
                 onChange={(e) => setForm({ ...form, priority: e.target.value as TaskPriority })}
-                className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
+                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               >
                 {priorities.map((p) => (
                   <option key={p} value={p}>
@@ -279,7 +279,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
 
           {/* Assigned Agent */}
           <div>
-            <label className="block text-sm font-medium mb-1">Assign to</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Assign to</label>
             <select
               value={form.assigned_agent_id}
               onChange={(e) => {
@@ -289,7 +289,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
                   setForm({ ...form, assigned_agent_id: e.target.value });
                 }
               }}
-              className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
             >
               <option value="">Unassigned</option>
               {agents.map((agent) => (
@@ -297,20 +297,20 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
                   {agent.avatar_emoji} {agent.name} - {agent.role}
                 </option>
               ))}
-              <option value="__add_new__" className="text-mc-accent">
-                ➕ Add new agent...
+              <option value="__add_new__" className="text-indigo-600">
+                + Add new agent...
               </option>
             </select>
           </div>
 
           {/* Due Date */}
           <div>
-            <label className="block text-sm font-medium mb-1">Due Date</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Due Date</label>
             <input
               type="datetime-local"
               value={form.due_date}
               onChange={(e) => setForm({ ...form, due_date: e.target.value })}
-              className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
             />
           </div>
             </form>
@@ -342,14 +342,14 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
 
         {/* Footer - only show on overview tab */}
         {activeTab === 'overview' && (
-          <div className="flex items-center justify-between p-4 border-t border-mc-border flex-shrink-0">
+          <div className="flex items-center justify-between p-4 border-t border-gray-200 flex-shrink-0 bg-gray-50">
             <div className="flex gap-2">
               {task && (
                 <>
                   <button
                     type="button"
                     onClick={handleDelete}
-                    className="flex items-center gap-2 px-3 py-2 text-mc-accent-red hover:bg-mc-accent-red/10 rounded text-sm"
+                    className="flex items-center gap-2 px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg text-sm font-medium transition-colors"
                   >
                     <Trash2 className="w-4 h-4" />
                     Delete
@@ -361,14 +361,14 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 text-sm text-mc-text-secondary hover:text-mc-text"
+                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={isSubmitting}
-                className="flex items-center gap-2 px-4 py-2 bg-mc-accent text-mc-bg rounded text-sm font-medium hover:bg-mc-accent/90 disabled:opacity-50"
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
               >
                 <Save className="w-4 h-4" />
                 {isSubmitting ? 'Saving...' : 'Save'}

@@ -114,14 +114,14 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
-        <div className="text-mc-text-secondary">Loading deliverables...</div>
+        <div className="text-gray-500">Loading deliverables...</div>
       </div>
     );
   }
 
   if (deliverables.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-8 text-mc-text-secondary">
+      <div className="flex flex-col items-center justify-center py-8 text-gray-500">
         <div className="text-4xl mb-2">📦</div>
         <p>No deliverables yet</p>
       </div>
@@ -133,10 +133,10 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
       {deliverables.map((deliverable) => (
         <div
           key={deliverable.id}
-          className="flex gap-3 p-3 bg-mc-bg rounded-lg border border-mc-border hover:border-mc-accent transition-colors"
+          className="flex gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200 hover:border-indigo-300 transition-colors"
         >
           {/* Icon */}
-          <div className="flex-shrink-0 text-mc-accent">
+          <div className="flex-shrink-0 text-indigo-600">
             {getDeliverableIcon(deliverable.deliverable_type)}
           </div>
 
@@ -149,20 +149,20 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
                   href={deliverable.path}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="font-medium text-mc-accent hover:text-mc-accent/80 hover:underline flex items-center gap-1.5"
+                  className="font-medium text-indigo-600 hover:text-indigo-700 hover:underline flex items-center gap-1.5"
                 >
                   {deliverable.title}
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               ) : (
-                <h4 className="font-medium text-mc-text">{deliverable.title}</h4>
+                <h4 className="font-medium text-gray-900">{deliverable.title}</h4>
               )}
               <div className="flex items-center gap-1">
                 {/* Preview button for HTML files */}
                 {deliverable.deliverable_type === 'file' && deliverable.path?.endsWith('.html') && (
                   <button
                     onClick={() => handlePreview(deliverable)}
-                    className="flex-shrink-0 p-1.5 hover:bg-mc-bg-tertiary rounded text-mc-accent-cyan"
+                    className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-cyan-600 transition-colors"
                     title="Preview in browser"
                   >
                     <Eye className="w-4 h-4" />
@@ -172,7 +172,7 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
                 {deliverable.path && (
                   <button
                     onClick={() => handleOpen(deliverable)}
-                    className="flex-shrink-0 p-1.5 hover:bg-mc-bg-tertiary rounded text-mc-accent"
+                    className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-indigo-600 transition-colors"
                     title={deliverable.deliverable_type === 'url' ? 'Open URL' : 'Reveal in Finder'}
                   >
                     <ExternalLink className="w-4 h-4" />
@@ -183,7 +183,7 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
 
             {/* Description */}
             {deliverable.description && (
-              <p className="text-sm text-mc-text-secondary mt-1">
+              <p className="text-sm text-gray-600 mt-1">
                 {deliverable.description}
               </p>
             )}
@@ -195,19 +195,19 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
                   href={deliverable.path}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="mt-2 p-2 bg-mc-bg-tertiary rounded text-xs text-mc-accent hover:text-mc-accent/80 font-mono break-all block hover:bg-mc-bg-tertiary/80"
+                  className="mt-2 p-2 bg-gray-100 rounded text-xs text-indigo-600 hover:text-indigo-700 font-mono break-all block hover:bg-gray-200 transition-colors"
                 >
                   {deliverable.path}
                 </a>
               ) : (
-                <div className="mt-2 p-2 bg-mc-bg-tertiary rounded text-xs text-mc-text-secondary font-mono break-all">
+                <div className="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-600 font-mono break-all">
                   {deliverable.path}
                 </div>
               )
             )}
 
             {/* Metadata */}
-            <div className="flex items-center gap-4 mt-2 text-xs text-mc-text-secondary">
+            <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
               <span className="capitalize">{deliverable.deliverable_type}</span>
               <span>•</span>
               <span>{formatTimestamp(deliverable.created_at)}</span>
