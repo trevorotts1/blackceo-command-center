@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reference: Modern Light Kanban Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #F8F9FB;
+      color: #1A1D26;
+      min-height: 100vh;
+    }
+    
+    .layout {
+      display: flex;
+      min-height: 100vh;
+    }
+    
+    /* LEFT SIDEBAR - Purple/Blue Gradient */
+    .sidebar {
+      width: 260px;
+      background: linear-gradient(180deg, #4F46E5 0%, #7C3AED 100%);
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      color: white;
+    }
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 8px;
+      margin-bottom: 32px;
+    }
+    .logo-icon {
+      width: 40px;
+      height: 40px;
+      background: white;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      color: #4F46E5;
+      font-size: 18px;
+    }
+    .logo-text {
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .search-box {
+      background: rgba(255,255,255,0.15);
+      border: none;
+      border-radius: 12px;
+      padding: 12px 16px;
+      color: white;
+      font-size: 14px;
+      margin-bottom: 24px;
+      width: 100%;
+    }
+    .search-box::placeholder { color: rgba(255,255,255,0.6); }
+    .nav-section { margin-bottom: 8px; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      color: rgba(255,255,255,0.8);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+    .nav-item:hover, .nav-item.active {
+      background: rgba(255,255,255,0.15);
+      color: white;
+    }
+    .nav-item .icon { width: 20px; opacity: 0.8; }
+    .nav-badge {
+      margin-left: auto;
+      background: rgba(255,255,255,0.2);
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .sidebar-footer {
+      margin-top: auto;
+      padding-top: 24px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+    }
+    .upgrade-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255,255,255,0.1);
+      padding: 12px 16px;
+      border-radius: 12px;
+      color: white;
+      font-weight: 600;
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+    .user-profile {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px;
+    }
+    .user-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #F59E0B, #EF4444);
+    }
+    .user-info { font-size: 13px; }
+    .user-name { font-weight: 600; }
+    .user-role { opacity: 0.7; font-size: 12px; }
+    
+    /* MAIN CONTENT */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    
+    /* HEADER */
+    .header {
+      background: white;
+      padding: 20px 32px;
+      border-bottom: 1px solid #E5E7EB;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header-title {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1A1D26;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .header-btn {
+      padding: 10px 20px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-outline {
+      background: white;
+      border: 1px solid #E5E7EB;
+      color: #6B7280;
+    }
+    .btn-primary {
+      background: #4F46E5;
+      color: white;
+    }
+    
+    /* FILTER TABS */
+    .filters {
+      background: white;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #E5E7EB;
+    }
+    .filter-tabs {
+      display: flex;
+      gap: 8px;
+    }
+    .filter-tab {
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #6B7280;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+    }
+    .filter-tab.active {
+      background: #F3F4F6;
+      color: #1A1D26;
+    }
+    .filter-tab .count {
+      background: #E5E7EB;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      margin-left: 6px;
+    }
+    .sort-dropdown {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: #6B7280;
+    }
+    
+    /* KANBAN BOARD */
+    .kanban {
+      flex: 1;
+      display: flex;
+      gap: 24px;
+      padding: 24px 32px;
+      overflow-x: auto;
+    }
+    
+    /* KANBAN COLUMN */
+    .column {
+      min-width: 320px;
+      max-width: 320px;
+      display: flex;
+      flex-direction: column;
+    }
+    .column-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .column-pill {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 20px;
+      border-radius: 25px;
+      font-size: 14px;
+      font-weight: 600;
+      color: white;
+    }
+    .column-pill.in-progress { background: linear-gradient(135deg, #10B981, #059669); }
+    .column-pill.reviewed { background: linear-gradient(135deg, #F59E0B, #D97706); }
+    .column-pill.completed { background: linear-gradient(135deg, #10B981, #047857); }
+    .column-pill.inbox { background: linear-gradient(135deg, #3B82F6, #2563EB); }
+    .column-pill.assigned { background: linear-gradient(135deg, #8B5CF6, #7C3AED); }
+    .column-pill .count {
+      background: rgba(255,255,255,0.3);
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+    }
+    .column-add {
+      width: 32px;
+      height: 32px;
+      background: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 20px;
+      color: #9CA3AF;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    /* TASK CARDS */
+    .cards {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1), 0 8px 24px rgba(0,0,0,0.08);
+    }
+    .card-priority {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+    .priority-important { background: #FEE2E2; color: #DC2626; }
+    .priority-high { background: #FFEDD5; color: #EA580C; }
+    .priority-normal { background: #DBEAFE; color: #2563EB; }
+    .priority-low { background: #E5E7EB; color: #6B7280; }
+    .priority-meh { background: #FEF3C7; color: #D97706; }
+    
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #1A1D26;
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+    .card-description {
+      font-size: 13px;
+      color: #6B7280;
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
+    .card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .avatar-stack {
+      display: flex;
+    }
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 2px solid white;
+      margin-left: -8px;
+      background: linear-gradient(135deg, #F59E0B, #EF4444);
+    }
+    .avatar:first-child { margin-left: 0; }
+    .avatar.blue { background: linear-gradient(135deg, #3B82F6, #6366F1); }
+    .avatar.green { background: linear-gradient(135deg, #10B981, #059669); }
+    .avatar.purple { background: linear-gradient(135deg, #8B5CF6, #7C3AED); }
+    .avatar-more {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 2px solid white;
+      margin-left: -8px;
+      background: #E5E7EB;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6B7280;
+    }
+    .card-metrics {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: #9CA3AF;
+    }
+    .metric {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-icon">B</div>
+        <span class="logo-text">BlackCEO</span>
+      </div>
+      
+      <input type="text" class="search-box" placeholder="🔍 Search">
+      
+      <nav class="nav-section">
+        <a href="#" class="nav-item">
+          <span class="icon">🏠</span>
+          Home
+          <span class="nav-badge">10</span>
+        </a>
+        <a href="#" class="nav-item active">
+          <span class="icon">📋</span>
+          Tasks
+        </a>
+        <a href="#" class="nav-item">
+          <span class="icon">🤖</span>
+          Agents
+          <span class="nav-badge">22</span>
+        </a>
+        <a href="#" class="nav-item">
+          <span class="icon">📊</span>
+          Analytics
+        </a>
+        <a href="#" class="nav-item">
+          <span class="icon">⚙️</span>
+          Settings
+        </a>
+      </nav>
+      
+      <div class="sidebar-footer">
+        <div class="upgrade-btn">
+          Go Pro
+          <span>⭐</span>
+        </div>
+        <div class="user-profile">
+          <div class="user-avatar"></div>
+          <div class="user-info">
+            <div class="user-name">Trevor Otts</div>
+            <div class="user-role">Admin</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+    
+    <!-- MAIN CONTENT -->
+    <main class="main">
+      <!-- HEADER -->
+      <header class="header">
+        <h1 class="header-title">Task Board 📋</h1>
+        <div class="header-actions">
+          <button class="header-btn btn-outline">🔍</button>
+          <button class="header-btn btn-primary">Share</button>
+          <button class="header-btn btn-outline">📤</button>
+          <button class="header-btn btn-primary">+ New Task</button>
+        </div>
+      </header>
+      
+      <!-- FILTERS -->
+      <div class="filters">
+        <div class="filter-tabs">
+          <button class="filter-tab">By Status</button>
+          <button class="filter-tab active">By Total Tasks <span class="count">12</span></button>
+          <button class="filter-tab">Tasks Due</button>
+          <button class="filter-tab">By Agent</button>
+          <button class="filter-tab">Completed</button>
+        </div>
+        <div class="sort-dropdown">
+          Sort By <strong>Newest</strong> ▼
+        </div>
+      </div>
+      
+      <!-- KANBAN BOARD -->
+      <div class="kanban">
+        <!-- IN PROGRESS COLUMN -->
+        <div class="column">
+          <div class="column-header">
+            <div class="column-pill in-progress">
+              <span class="count">25</span>
+              In Progress
+            </div>
+            <button class="column-add">+</button>
+          </div>
+          <div class="cards">
+            <div class="card">
+              <span class="card-priority priority-important">Important</span>
+              <h3 class="card-title">UI/UX Design in the age of AI</h3>
+              <p class="card-description">Lorem ipsum dolor sit amet, libre unst consectetur adipiscing elit.</p>
+              <div class="card-footer">
+                <div class="avatar-stack">
+                  <div class="avatar"></div>
+                  <div class="avatar blue"></div>
+                </div>
+                <div class="card-metrics">
+                  <span class="metric">💬 11</span>
+                  <span class="metric">👁 187</span>
+                </div>
+              </div>
+            </div>
+            <div class="card">
+              <span class="card-priority priority-meh">Meh</span>
+              <h3 class="card-title">Responsive Website Design for 23 more clients</h3>
+              <p class="card-description">Lorem ipsum dolor sit amet, libre unst consectetur adipiscing elit.</p>
+              <div class="card-footer">
+                <div class="avatar-stack">
+                  <div class="avatar green"></div>
+                  <div class="avatar purple"></div>
+                  <div class="avatar"></div>
+                  <div class="avatar-more">+3</div>
+                </div>
+                <div class="card-metrics">
+                  <span class="metric">💬 32</span>
+                  <span class="metric">👁 115</span>
+                </div>
+              </div>
+            </div>
+            <div class="card">
+              <span class="card-priority priority-low">OK</span>
+              <h3 class="card-title">Blog Copywriting (Low priority)</h3>
+              <p class="card-description">Lorem ipsum dolor sit amet, libre unst consectetur adipiscing elit.</p>
+              <div class="card-footer">
+                <div class="avatar-stack">
+                  <div class="avatar blue"></div>
+                  <div class="avatar"></div>
+                </div>
+                <div class="card-metrics">
+                  <span class="metric">💬 987</span>
+                  <span class="metric">👁 21.8k</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- REVIEWED COLUMN -->
+        <div class="column">
+          <div class="column-header">
+            <div class="column-pill reviewed">
+              <span class="count">8</span>
+              Reviewed
+            </div>
+            <button class="column-add">+</button>
+          </div>
+          <div class="cards">
+            <div class="card">
+              <span class="card-priority priority-important">Important</span>
+              <h3 class="card-title">User flow confirmation for finance app</h3>
+              <p class="card-description">Lorem ipsum dolor sit amet, libre unst consectetur adipiscing elit.</p>
+              <div class="card-footer">
+                <div class="avatar-stack">
+                  <div class="avatar"></div>
+                </div>
+                <div class="card-metrics">
+                  <span class="metric">💬 8</span>
+                  <span class="metric">👁 112</span>
+                </div>
+              </div>
+            </div>
+            <div class="card">
+              <span class="card-priority priority-important">Important</span>
+              <h3 class="card-title">Healthcare app wireframe flow</h3>
+              <p class="card-description">Lorem ipsum dolor sit amet, libre unst consectetur adipiscing elit.</p>
+              <div class="card-footer">
+                <div class="avatar-stack">
+                  <div class="avatar green"></div>
+                  <div class="avatar purple"></div>
+                  <div class="avatar-more">+3</div>
+                </div>
+                <div class="card-metrics">
+                  <span class="metric">💬 221</span>
+                  <span class="metric">👁 87.2k</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- COMPLETED COLUMN -->
+        <div class="column">
+          <div class="column-header">
+            <div class="column-pill completed">
+              <span class="count">2</span>
+              Completed
+            </div>
+            <button class="column-add">+</button>
+          </div>
+          <div class="cards">
+            <div class="card">
+              <span class="card-priority priority-high">High Priority</span>
+              <h3 class="card-title">UI/UX Design in the age of AI</h3>
+              <p class="card-description">Lorem ipsum dolor sit amet, libre unst consectetur adipiscing elit.</p>
+              <div class="card-footer">
+                <div class="avatar-stack">
+                  <div class="avatar"></div>
+                  <div class="avatar blue"></div>
+                </div>
+                <div class="card-metrics">
+                  <span class="metric">💬 108k</span>
+                  <span class="metric">👁 997</span>
+                </div>
+              </div>
+            </div>
+            <div class="card">
+              <span class="card-priority priority-low">Low Priority</span>
+              <h3 class="card-title">UI/UX Design in the age of AI</h3>
+              <p class="card-description">Lorem ipsum dolor sit amet, libre unst consectetur adipiscing elit.</p>
+              <div class="card-footer">
+                <div class="avatar-stack">
+                  <div class="avatar purple"></div>
+                  <div class="avatar green"></div>
+                </div>
+                <div class="card-metrics">
+                  <span class="metric">💬 17</span>
+                  <span class="metric">👁 0</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
