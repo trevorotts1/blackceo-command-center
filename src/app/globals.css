@@ -19,18 +19,16 @@
   --bcc-primary-hover: #4338CA;
   
   /* Column colors */
-  --bcc-inbox: #3B82F6;
+  --bcc-backlog: #6B7280;
   --bcc-progress: #10B981;
   --bcc-review: #F59E0B;
-  --bcc-assigned: #8B5CF6;
+  --bcc-blocked: #DC2626;
   --bcc-done: #059669;
-  --bcc-planning: #6366F1;
-  --bcc-testing: #06B6D4;
-  
+
   /* Priority colors */
-  --bcc-important: #DC2626;
+  --bcc-critical: #DC2626;
   --bcc-high: #EA580C;
-  --bcc-normal: #2563EB;
+  --bcc-medium: #2563EB;
   --bcc-low: #6B7280;
 }
 
@@ -86,8 +84,8 @@ body {
 }
 
 /* Column pill gradients */
-.column-pill-inbox {
-  background: linear-gradient(135deg, #3B82F6, #2563EB);
+.column-pill-backlog {
+  background: linear-gradient(135deg, #6B7280, #4B5563);
 }
 
 .column-pill-progress {
@@ -98,24 +96,16 @@ body {
   background: linear-gradient(135deg, #F59E0B, #D97706);
 }
 
-.column-pill-assigned {
-  background: linear-gradient(135deg, #8B5CF6, #7C3AED);
+.column-pill-blocked {
+  background: linear-gradient(135deg, #DC2626, #B91C1C);
 }
 
 .column-pill-done {
   background: linear-gradient(135deg, #059669, #047857);
 }
 
-.column-pill-planning {
-  background: linear-gradient(135deg, #6366F1, #4F46E5);
-}
-
-.column-pill-testing {
-  background: linear-gradient(135deg, #06B6D4, #0891B2);
-}
-
 /* Priority badge styles */
-.priority-important {
+.priority-critical {
   background: #FEE2E2;
   color: #DC2626;
 }
@@ -125,7 +115,7 @@ body {
   color: #EA580C;
 }
 
-.priority-normal {
+.priority-medium {
   background: #DBEAFE;
   color: #2563EB;
 }
@@ -133,11 +123,6 @@ body {
 .priority-low {
   background: #F3F4F6;
   color: #6B7280;
-}
-
-.priority-urgent {
-  background: #FEE2E2;
-  color: #DC2626;
 }
 
 /* Avatar gradients */

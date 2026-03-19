@@ -16,7 +16,7 @@ const EMOJI_OPTIONS = ['🤖', '🦞', '💻', '🔍', '✍️', '🎨', '📊',
 
 export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: AgentModalProps) {
   const { addAgent, updateAgent, agents } = useMissionControl();
-  const [activeTab, setActiveTab] = useState<'info' | 'soul' | 'user' | 'agents'>('info');
+  const [activeTab, setActiveTab] = useState<'info' | 'soul' | 'user' | 'agents' | 'tools' | 'memory'>('info');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string>('');
@@ -32,6 +32,8 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
     soul_md: agent?.soul_md || '',
     user_md: agent?.user_md || '',
     agents_md: agent?.agents_md || '',
+    tools_md: agent?.tools_md || '',
+    memory_md: agent?.memory_md || '',
     model: agent?.model || '',
   });
 
@@ -118,6 +120,8 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
     { id: 'soul', label: 'SOUL.md' },
     { id: 'user', label: 'USER.md' },
     { id: 'agents', label: 'AGENTS.md' },
+    { id: 'tools', label: 'TOOLS.md' },
+    { id: 'memory', label: 'MEMORY.md' },
   ] as const;
 
   return (
@@ -316,6 +320,36 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
                 rows={15}
                 className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
                 placeholder="# Team Roster&#10;&#10;Information about other agents this agent works with..."
+              />
+            </div>
+          )}
+
+          {activeTab === 'tools' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                TOOLS.md - Tools & Capabilities
+              </label>
+              <textarea
+                value={form.tools_md}
+                onChange={(e) => setForm({ ...form, tools_md: e.target.value })}
+                rows={15}
+                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                placeholder="# Tools & Capabilities&#10;&#10;Define what tools this agent has access to, API keys, integrations..."
+              />
+            </div>
+          )}
+
+          {activeTab === 'memory' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                MEMORY.md - Long-Term Memory
+              </label>
+              <textarea
+                value={form.memory_md}
+                onChange={(e) => setForm({ ...form, memory_md: e.target.value })}
+                rows={15}
+                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                placeholder="# Long-Term Memory&#10;&#10;Curated memories, decisions, lessons learned..."
               />
             </div>
           )}

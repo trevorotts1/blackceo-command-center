@@ -24,8 +24,8 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [usePlanningMode, setUsePlanningMode] = useState(false);
-  // Auto-switch to planning tab if task is in planning status
-  const [activeTab, setActiveTab] = useState<TabType>(task?.status === 'planning' ? 'planning' : 'overview');
+  // Auto-switch to planning tab if task has planning session
+  const [activeTab, setActiveTab] = useState<TabType>(task?.planning_session_key ? 'planning' : 'overview');
 
   // Stable callback for when spec is locked - use window.location.reload() to refresh data
   const handleSpecLocked = useCallback(() => {
@@ -35,8 +35,8 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
   const [form, setForm] = useState({
     title: task?.title || '',
     description: task?.description || '',
-    priority: task?.priority || 'normal' as TaskPriority,
-    status: task?.status || 'inbox' as TaskStatus,
+    priority: task?.priority || 'medium' as TaskPriority,
+    status: task?.status || 'backlog' as TaskStatus,
     assigned_agent_id: task?.assigned_agent_id || '',
     due_date: task?.due_date || '',
   });
@@ -51,8 +51,8 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
 
       const payload = {
         ...form,
-        // If planning mode is enabled for new tasks, override status to 'planning'
-        status: (!task && usePlanningMode) ? 'planning' : form.status,
+        // Planning mode doesn't change status - it just creates a planning session
+        // New tasks always start in 'backlog'
         assigned_agent_id: form.assigned_agent_id || null,
         due_date: form.due_date || null,
         workspace_id: workspaceId || task?.workspace_id || 'default',
@@ -103,7 +103,6 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
               .then((res) => {
                 if (res.ok) {
                   // Update our local task reference and switch to planning tab
-                  updateTask({ ...savedTask, status: 'planning' });
                   setActiveTab('planning');
                 } else {
                   return res.json().then((data) => {
@@ -141,8 +140,8 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
     }
   };
 
-  const statuses: TaskStatus[] = ['planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'done'];
-  const priorities: TaskPriority[] = ['low', 'normal', 'high', 'urgent'];
+  const statuses: TaskStatus[] = ['backlog', 'in_progress', 'review', 'blocked', 'done'];
+  const priorities: TaskPriority[] = ['low', 'medium', 'high', 'critical'];
 
   const tabs = [
     { id: 'overview' as TabType, label: 'Overview', icon: null },

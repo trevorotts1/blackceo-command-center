@@ -2,9 +2,9 @@
 
 export type AgentStatus = 'standby' | 'working' | 'offline';
 
-export type TaskStatus = 'planning' | 'inbox' | 'assigned' | 'in_progress' | 'testing' | 'review' | 'done';
+export type TaskStatus = 'backlog' | 'in_progress' | 'review' | 'blocked' | 'done';
 
-export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
+export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
 
 export type MessageType = 'text' | 'system' | 'task_update' | 'file';
 
@@ -32,6 +32,8 @@ export interface Agent {
   soul_md?: string;
   user_md?: string;
   agents_md?: string;
+  tools_md?: string;
+  memory_md?: string;
   model?: string;
   created_at: string;
   updated_at: string;
@@ -50,6 +52,19 @@ export interface Task {
   due_date?: string;
   created_at: string;
   updated_at: string;
+  // New metadata fields
+  dependencies: string[];
+  parallel_candidates: string[];
+  block_reason?: string;
+  sprint?: string;
+  department?: string;
+  // Planning fields
+  planning_session_key?: string;
+  planning_messages?: string;
+  planning_complete?: number;
+  planning_spec?: string;
+  planning_agents?: string;
+  planning_dispatch_error?: string;
   // Joined fields
   assigned_agent?: Agent;
   created_by_agent?: Agent;
@@ -105,6 +120,16 @@ export interface Workspace {
   slug: string;
   description?: string;
   icon: string;
+  user_md?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentMemoryLog {
+  id: string;
+  agent_id: string;
+  log_date: string;
+  content: string;
   created_at: string;
   updated_at: string;
 }
@@ -115,12 +140,10 @@ export interface WorkspaceStats {
   slug: string;
   icon: string;
   taskCounts: {
-    planning: number;
-    inbox: number;
-    assigned: number;
+    backlog: number;
     in_progress: number;
-    testing: number;
     review: number;
+    blocked: number;
     done: number;
     total: number;
   };
@@ -227,6 +250,8 @@ export interface CreateAgentRequest {
   soul_md?: string;
   user_md?: string;
   agents_md?: string;
+  tools_md?: string;
+  memory_md?: string;
   model?: string;
 }
 
@@ -242,6 +267,11 @@ export interface CreateTaskRequest {
   created_by_agent_id?: string;
   business_id?: string;
   due_date?: string;
+  dependencies?: string[];
+  parallel_candidates?: string[];
+  block_reason?: string;
+  sprint?: string;
+  department?: string;
 }
 
 export interface UpdateTaskRequest extends Partial<CreateTaskRequest> {

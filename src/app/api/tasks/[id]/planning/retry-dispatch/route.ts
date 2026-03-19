@@ -62,8 +62,8 @@ export async function POST(
       if (result.success) {
         // Update task status on success
         run(`
-          UPDATE tasks 
-          SET status = 'inbox',
+          UPDATE tasks
+          SET status = 'backlog',
               planning_dispatch_error = NULL,
               updated_at = datetime('now')
           WHERE id = ?

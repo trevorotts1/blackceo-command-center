@@ -133,9 +133,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // Build task message for agent
     const priorityEmoji = {
       low: '🔵',
-      normal: '⚪',
+      medium: '⚪',
       high: '🟡',
-      urgent: '🔴'
+      critical: '🔴'
     }[task.priority] || '⚪';
 
     // Get project path for deliverables

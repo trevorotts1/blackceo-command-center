@@ -166,7 +166,7 @@ Respond with ONLY valid JSON in this format:
 
     getDb().prepare(`
       UPDATE tasks
-      SET planning_session_key = ?, planning_messages = ?, status = 'planning'
+      SET planning_session_key = ?, planning_messages = ?, status = 'backlog'
       WHERE id = ?
     `).run(sessionKey, JSON.stringify(messages), taskId);
 
@@ -214,7 +214,7 @@ export async function DELETE(
           planning_complete = 0,
           planning_spec = NULL,
           planning_agents = NULL,
-          status = 'inbox',
+          status = 'backlog',
           updated_at = datetime('now')
       WHERE id = ?
     `, [taskId]);

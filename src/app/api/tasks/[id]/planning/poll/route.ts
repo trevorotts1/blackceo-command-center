@@ -153,7 +153,7 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
         UPDATE tasks
         SET planning_complete = 1,
             assigned_agent_id = ?,
-            status = 'inbox',
+            status = 'backlog',
             planning_dispatch_error = NULL,
             updated_at = datetime('now')
         WHERE id = ?
@@ -164,7 +164,7 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
       db.prepare(`
         UPDATE tasks
         SET planning_complete = 1,
-            status = 'inbox',
+            status = 'backlog',
             planning_dispatch_error = NULL,
             updated_at = datetime('now')
         WHERE id = ?

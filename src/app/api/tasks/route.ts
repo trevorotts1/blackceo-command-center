@@ -95,8 +95,8 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
 
     const workspaceId = validatedData.workspace_id || 'default';
-    const status = validatedData.status || 'inbox';
-    
+    const status = validatedData.status || 'backlog';
+
     run(
       `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, due_date, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -105,7 +105,7 @@ export async function POST(request: NextRequest) {
         validatedData.title,
         validatedData.description || null,
         status,
-        validatedData.priority || 'normal',
+        validatedData.priority || 'medium',
         validatedData.assigned_agent_id || null,
         validatedData.created_by_agent_id || null,
         workspaceId,

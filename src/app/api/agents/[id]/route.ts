@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run } from '@/lib/db';
+import { writeAgentFile, deleteAgentFolder } from '@/lib/agent-files';
 import type { Agent, UpdateAgentRequest } from '@/lib/types';
 
 // GET /api/agents/[id] - Get a single agent
@@ -84,6 +85,14 @@ export async function PATCH(
       updates.push('agents_md = ?');
       values.push(body.agents_md);
     }
+    if (body.tools_md !== undefined) {
+      updates.push('tools_md = ?');
+      values.push(body.tools_md);
+    }
+    if (body.memory_md !== undefined) {
+      updates.push('memory_md = ?');
+      values.push(body.memory_md);
+    }
     if (body.model !== undefined) {
       updates.push('model = ?');
       values.push(body.model);
@@ -98,6 +107,14 @@ export async function PATCH(
     values.push(id);
 
     run(`UPDATE agents SET ${updates.join(', ')} WHERE id = ?`, values);
+
+    // Sync .md files to disk
+    const mdFields = ['soul_md', 'agents_md', 'tools_md', 'memory_md'] as const;
+    for (const field of mdFields) {
+      if (body[field] !== undefined) {
+        writeAgentFile(existing.name, field, body[field] || '');
+      }
+    }
 
     const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
     return NextResponse.json(agent);
@@ -131,6 +148,9 @@ export async function DELETE(
 
     // Now delete the agent
     run('DELETE FROM agents WHERE id = ?', [id]);
+
+    // Remove agent folder from disk
+    deleteAgentFolder(existing.name);
 
     return NextResponse.json({ success: true });
   } catch (error) {

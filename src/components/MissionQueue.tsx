@@ -13,13 +13,11 @@ interface MissionQueueProps {
 }
 
 const COLUMNS: { id: TaskStatus; label: string; gradient: string }[] = [
-  { id: 'planning', label: 'Planning', gradient: 'column-pill-planning' },
-  { id: 'inbox', label: 'Inbox', gradient: 'column-pill-inbox' },
-  { id: 'assigned', label: 'Assigned', gradient: 'column-pill-assigned' },
+  { id: 'backlog', label: 'Backlog / To-Do', gradient: 'column-pill-backlog' },
   { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress' },
-  { id: 'testing', label: 'Testing', gradient: 'column-pill-testing' },
-  { id: 'review', label: 'Review', gradient: 'column-pill-review' },
-  { id: 'done', label: 'Completed', gradient: 'column-pill-done' },
+  { id: 'review', label: 'Review / QC', gradient: 'column-pill-review' },
+  { id: 'blocked', label: 'Blocked', gradient: 'column-pill-blocked' },
+  { id: 'done', label: 'Done', gradient: 'column-pill-done' },
 ];
 
 export function MissionQueue({ workspaceId }: MissionQueueProps) {
@@ -219,16 +217,16 @@ interface TaskCardProps {
 
 function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskCardProps) {
   const priorityStyles: Record<string, string> = {
-    urgent: 'priority-important',
+    critical: 'priority-critical',
     high: 'priority-high',
-    normal: 'priority-normal',
+    medium: 'priority-medium',
     low: 'priority-low',
   };
 
   const priorityLabels: Record<string, string> = {
-    urgent: 'Important',
+    critical: 'Critical',
     high: 'High',
-    normal: 'Normal',
+    medium: 'Medium',
     low: 'Low',
   };
 
@@ -255,8 +253,8 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
     >
       {/* Priority Badge */}
       <div className="flex mb-3">
-        <span className={`px-3 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${priorityStyles[task.priority]}`}>
-          {priorityLabels[task.priority]}
+        <span className={`px-3 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${priorityStyles[task.priority] || 'priority-medium'}`}>
+          {priorityLabels[task.priority] || task.priority}
         </span>
       </div>
 

@@ -1,140 +1,183 @@
-# HANDOFF.md - BlackCEO Command Center
+# BlackCEO Command Center - Critical Project Reference
 
-**Last Updated:** 2026-02-17 11:20 AM EST
-**Status:** LIGHT THEME IMPLEMENTATION COMPLETE
-
----
-
-## What This Project Is
-
-**BlackCEO Command Center** is Trevor's white-labeled AI agent orchestration dashboard. It manages 22 AI agents that run his business operations.
-
-**Location:** ~/projects/mission-control
-**Port:** 3000 (PM2 process: mission-control)
+**Last Updated:** 2026-02-18 7:10 PM EST
+**Purpose:** Permanent reference so any future session can pick this up cold.
 
 ---
 
-## Current State: Light Theme Complete
+## What It Is
 
-### What Was Done Today (Feb 17)
+BlackCEO Command Center is Trevor's AI agent orchestration dashboard. A Next.js web app that manages 23 AI agents running his business operations. White-labeled under the BlackCEO brand.
 
-We pivoted from using Superdesign to directly implementing a clean light theme. Trevor reviewed the app and requested all components match the Task Board's modern aesthetic.
-
-### Components Updated to Light Theme
-
-All components now use consistent white/gray/indigo color scheme:
-
-| Component | File | Status |
-|-----------|------|--------|
-| Workspace Dashboard | `src/components/WorkspaceDashboard.tsx` | ✅ Complete |
-| Header | `src/components/Header.tsx` | ✅ Complete |
-| Agent Sidebar | `src/components/AgentsSidebar.tsx` | ✅ Complete |
-| Live Feed | `src/components/LiveFeed.tsx` | ✅ Complete |
-| Task Modal | `src/components/TaskModal.tsx` | ✅ Complete |
-| Agent Modal | `src/components/AgentModal.tsx` | ✅ Complete |
-| Planning Tab | `src/components/PlanningTab.tsx` | ✅ Complete |
-| Activity Log | `src/components/ActivityLog.tsx` | ✅ Complete |
-| Deliverables List | `src/components/DeliverablesList.tsx` | ✅ Complete |
-| Sessions List | `src/components/SessionsList.tsx` | ✅ Complete |
-| Settings Page | `src/app/settings/page.tsx` | ✅ Complete |
-| Workspace Page | `src/app/workspace/[slug]/page.tsx` | ✅ Complete |
-| SSE Debug Panel | `src/components/SSEDebugPanel.tsx` | ✅ Complete |
-| CSS/Globals | `src/app/globals.css` | ✅ Complete |
-
-### Design System (Implemented)
-
-**Colors:**
-- Background: #F8F9FB (light gray)
-- Cards/Panels: #FFFFFF (white)
-- Borders: #E5E7EB (gray-200)
-- Text Primary: #1A1D26 (gray-900)
-- Text Secondary: #6B7280 (gray-500)
-- Accent: #4F46E5 (indigo-600)
-- Success: #10B981 (emerald-500)
-
-**Typography:**
-- Font: Inter
-- Headings: font-semibold text-gray-900
-- Labels: font-medium text-gray-700
-- Body: text-gray-600
-
-**Interactive:**
-- Buttons: bg-indigo-600 hover:bg-indigo-700
-- Cards: hover:border-indigo-300 hover:shadow-lg
-- Inputs: focus:ring-2 focus:ring-indigo-500
+- **Location:** ~/projects/mission-control
+- **Tech:** Next.js 15 + React + TypeScript + Tailwind CSS + SQLite (better-sqlite3) + Zustand
+- **Port:** 3000 (PM2 process: "mission-control")
+- **DB:** ~/projects/mission-control/mission-control.db (SQLite)
 
 ---
 
-## What Still Needs Attention
+## Access URLs
 
-1. **MissionQueue.tsx** - The main Kanban board component may still have some styling to verify
-2. **Any remaining mc-* Tailwind classes** - Should be replaced with standard Tailwind (gray-*, indigo-*, etc.)
-
-To check for remaining dark theme classes:
-```bash
-grep -r "bg-mc-\|text-mc-\|border-mc-" ~/projects/mission-control/src --include="*.tsx"
-```
+- Local: http://localhost:3000
+- Network: http://192.168.1.206:3000
+- Tailscale: http://100.112.71.57:3000
 
 ---
 
-## Server Info
+## Commands
 
-- **PM2 Process:** mission-control
-- **Port:** 3000
-- **URLs:**
-  - Local: http://localhost:3000
-  - Network: http://192.168.1.206:3000
-  - Tailscale: http://100.112.71.57:3000
-
-**Commands:**
 ```bash
 cd ~/projects/mission-control
-npm run build          # Build the app
-npx pm2 restart mission-control  # Restart after build
+npm run dev              # Dev server (port 4000)
+npm run build            # Production build
+npx pm2 restart mission-control  # Restart prod
 npx pm2 logs mission-control     # View logs
+npm run db:seed          # Re-seed DB
+npm run db:backup        # Backup SQLite
+npm run db:reset         # Nuke + re-seed
 ```
 
 ---
 
-## Database
+## Tech Stack
 
-- **File:** ~/projects/mission-control/mission-control.db (SQLite)
-- **22 agents** configured
-- **Workspace:** "BlackCEO Operations" (slug: default)
+**Dependencies:** Next.js, React, better-sqlite3, @hello-pangea/dnd (drag-drop Kanban), zustand (state), lucide-react (icons), date-fns, zod, uuid, playwright
+**Dev:** TypeScript, Tailwind, PostCSS, ESLint
 
 ---
 
-## Logo URLs
+## App Structure
 
-- **Local:** `/logo-blackceo.png` (in public folder)
-- **GHL:** `https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png`
+### Pages
+- `/` - Main dashboard
+- `/workspace/[slug]` - Workspace view
+- `/settings` - Settings page
+
+### API Routes (src/app/api/)
+- `agents/` - CRUD for agents
+- `tasks/` - CRUD for tasks
+- `events/` - SSE event stream
+- `workspaces/` - Workspace management
+- `files/` - File handling
+- `openclaw/` - OpenClaw integration
+- `webhooks/` - Webhook endpoints
+- `demo/` - Demo data
+
+### Components (src/components/)
+- **WorkspaceDashboard.tsx** - Main layout
+- **Header.tsx** - Top nav with BlackCEO branding
+- **AgentsSidebar.tsx** - Left panel listing all agents
+- **MissionQueue.tsx** - Kanban board (drag-drop task columns)
+- **LiveFeed.tsx** - Real-time event feed (SSE)
+- **TaskModal.tsx** - Task detail/edit modal
+- **AgentModal.tsx** - Agent detail modal
+- **PlanningTab.tsx** - Task planning interface with Q&A
+- **ActivityLog.tsx** - Task activity history
+- **DeliverablesList.tsx** - Task deliverables
+- **SessionsList.tsx** - OpenClaw sessions list
+- **SSEDebugPanel.tsx** - Debug panel for SSE events
+
+### Lib (src/lib/)
+- **db/** - SQLite schema, migrations, seed data
+- **openclaw/** - Client + device identity for OpenClaw integration
+- **store.ts** - Zustand global state
+- **types.ts** - TypeScript types
+- **events.ts** - SSE event system
+- **orchestration.ts** - Agent orchestration logic
+- **auto-dispatch.ts** - Auto task dispatch
+- **planning-utils.ts** - Planning Q&A utilities
+- **config.ts** - App config
+- **validation.ts** - Zod schemas
+
+---
+
+## Database Schema
+
+**Tables:**
+- `workspaces` - Multi-workspace support (default: "BlackCEO Operations")
+- `agents` - 23 agents with name, role, status, soul_md, model config
+- `tasks` - Kanban tasks with statuses: pending_dispatch, planning, inbox, assigned, in_progress, testing, review, done
+- `planning_questions` - Q&A for task planning (multiple choice, text, yes/no)
+- `planning_specs` - Locked planning specs per task
+- `conversations` - Agent-to-agent and task conversations
+- `conversation_participants` - M:M for conversations
+- `messages` - Chat messages
+- `events` - Activity event log (SSE source)
+- `businesses` - Multi-business support
+- `openclaw_sessions` - Tracks OpenClaw agent sessions
+- `task_activities` - Task activity log
+- `task_deliverables` - Files/outputs attached to tasks
+
+---
+
+## 23 Agents
+
+1. **Master Orchestrator** - Plans, delegates, reviews. Quality gate. Never produces deliverables.
+2. **Operations Admin** - Airtable, Sheets, calendar, email, SOPs, project tracking
+3. **Content Writer** - Blog, email, SMS, newsletters. Creates content (does NOT send)
+4. **Communications Agent** - Email/SMS delivery. Takes content from Content Writer and sends it.
+5. **Convert and Flow Agent** - GHL backend: CRM, pipelines, automations, contacts, sub-accounts
+6. **Website Developer** - Conversion-optimized pages. Sub-agents on Kimi 2.5 write code.
+7. **Funnel Builder** - Funnel architecture, conversion strategy, offer sequencing
+8. **App Builder** - DB schema, API, components, state. Sub-agents write code.
+9. **Graphics Agent** - Image generation (KIE.AI, Nano Banana Pro, OpenAI)
+10. **Video Agent** - Video creation (KIE.AI video, FFMPEG, FAL.AI)
+11. **Voice AI Agent** - Call scripts, The Code methodology (128 techniques, 12 personas)
+12. **Social Media Agent** - All platforms unified. Content calendar.
+13. **Research Agent** - Web research, competitor intel, fact-checking
+14. **Scraper Agent** - Web scraping, data extraction
+15. **N8N Workflow Builder** - N8N workflow JSON. Sub-agents assemble JSON.
+16. **Course Agent** - Curriculum for BlackCEO School of AI (entrepreneurs 55+)
+17. **Book Writer** - Non-fiction with full narrative arc
+18. **Anthology Writer** - 8-stage chapter creation for guided anthology
+19. **Support Agent** - Monitors support@blackceo.com and Slack
+20. **Billing Agent** - Stripe products, subscriptions, invoicing
+21. **QA/Testing Agent** - Test strategies. Sub-agents execute tests.
+22. **Zoom Agent** - Download recordings, transcribe, segment, clip, upload
+23. **Podcast Agent** - Podcast production, Podbean, episode scheduling
+
+---
+
+## Design System (Light Theme - Implemented)
+
+**Colors:**
+- Background: #F8F9FB | Cards: #FFFFFF | Borders: #E5E7EB
+- Text: #1A1D26 (primary), #6B7280 (secondary)
+- Accent: #4F46E5 (indigo-600) | Success: #10B981
+
+**Font:** Inter
+**Buttons:** bg-indigo-600 hover:bg-indigo-700
+**Cards:** hover:border-indigo-300 hover:shadow-lg
+
+---
+
+## Logo
+
+- Local: `/public/logo-blackceo.png`
+- GHL: `https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png`
 
 ---
 
 ## What NOT to Change
 
-Per Trevor's instructions:
-- Project folder name (keep ~/projects/mission-control)
-- PM2 process name (keep "mission-control")
+- Project folder name (~/projects/mission-control)
+- PM2 process name ("mission-control")
 - Database file name
 - API endpoint paths
-- WebSocket connection details
-- Agent configurations (22 agents in DB)
+- Agent configurations (23 agents in DB)
+
+---
+
+## Known Issues / Next Steps
+
+1. **MissionQueue.tsx** - May still have old mc-* Tailwind classes to verify
+2. **Phases 8-17** - Blocked awaiting guidance on `openclaw agent add` command
+3. **Tab 24** - Needs a name from Trevor
+4. Superdesign was tested but designs looked identical - pivoted to direct implementation
 
 ---
 
 ## Superdesign (Paused)
 
-We created a Superdesign project but Trevor noted the generated designs looked identical. We pivoted to direct implementation instead.
-
-- **Project ID:** `159f7357-87e0-4e38-ab37-43b8512b5f8a`
-- **Files:** `.superdesign/` folder contains design-system.md and replica templates (for reference only)
-
----
-
-## Next Steps If Continuing
-
-1. Verify MissionQueue.tsx matches the light theme
-2. Test all modals and forms for visual consistency
-3. Check any remaining dark theme classes and update
-4. Trevor may want additional polish or specific component tweaks
+Project ID: `159f7357-87e0-4e38-ab37-43b8512b5f8a`
+Files in `.superdesign/` folder (reference only, not actively used)

@@ -105,12 +105,9 @@ const migrations: Migration[] = [
       // Create index
       db.exec(`CREATE INDEX IF NOT EXISTS idx_planning_questions_task ON planning_questions(task_id, sort_order)`);
       
-      // Update tasks status check constraint to include 'planning'
-      // SQLite doesn't support ALTER CONSTRAINT, so we check if it's needed
-      const taskSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
-      if (taskSchema && !taskSchema.sql.includes("'planning'")) {
-        console.log('[Migration 003] Note: tasks table needs planning status - will be handled by schema recreation on fresh dbs');
-      }
+      // Note: Task status values have been updated to new 5-column Kanban format
+      // 'backlog', 'in_progress', 'review', 'blocked', 'done'
+      // Migration for existing databases is handled in migration 008
     }
   },
   {
@@ -180,6 +177,48 @@ const migrations: Migration[] = [
         db.exec(`ALTER TABLE tasks ADD COLUMN planning_dispatch_error TEXT`);
         console.log('[Migration 006] Added planning_dispatch_error to tasks');
       }
+    }
+  },
+  {
+    id: '007',
+    name: 'add_agent_tools_memory_and_daily_logs',
+    up: (db) => {
+      console.log('[Migration 007] Adding tools_md, memory_md to agents; user_md to workspaces; agent_memory_logs table...');
+
+      // Add tools_md to agents
+      const agentsInfo = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+      if (!agentsInfo.some(col => col.name === 'tools_md')) {
+        db.exec(`ALTER TABLE agents ADD COLUMN tools_md TEXT`);
+        console.log('[Migration 007] Added tools_md to agents');
+      }
+
+      // Add memory_md to agents
+      if (!agentsInfo.some(col => col.name === 'memory_md')) {
+        db.exec(`ALTER TABLE agents ADD COLUMN memory_md TEXT`);
+        console.log('[Migration 007] Added memory_md to agents');
+      }
+
+      // Add user_md to workspaces (shared across all agents in workspace)
+      const workspacesInfo = db.prepare("PRAGMA table_info(workspaces)").all() as { name: string }[];
+      if (!workspacesInfo.some(col => col.name === 'user_md')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN user_md TEXT`);
+        console.log('[Migration 007] Added user_md to workspaces');
+      }
+
+      // Create agent_memory_logs table for daily logs per agent
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_memory_logs (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          log_date TEXT NOT NULL,
+          content TEXT NOT NULL DEFAULT '',
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(agent_id, log_date)
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_memory_logs_agent ON agent_memory_logs(agent_id, log_date DESC)`);
+      console.log('[Migration 007] Created agent_memory_logs table');
     }
   }
 ];

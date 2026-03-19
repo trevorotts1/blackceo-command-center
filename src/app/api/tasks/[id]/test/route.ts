@@ -67,9 +67,9 @@ const SCREENSHOTS_DIR = ((process.env.PROJECTS_PATH || '~/projects').replace(/^~
  * Run automated browser tests on all deliverables for a task
  *
  * Enhanced workflow:
- * - Runs on tasks in 'testing' status (moved there after agent completion)
- * - PASS -> moves to 'review' for human approval
- * - FAIL -> moves to 'assigned' for agent to fix
+ * - Runs on tasks in 'review' status (moved there after agent completion)
+ * - PASS -> stays in 'review' for human approval
+ * - FAIL -> moves to 'in_progress' for agent to fix
  */
 export async function POST(
   request: NextRequest,
@@ -166,7 +166,7 @@ export async function POST(
     let newStatus: string | undefined;
 
     if (passed) {
-      // Tests passed -> move to review for human approval
+      // Tests passed -> stays in review for human approval
       run(
         'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
         ['review', now, taskId]
@@ -180,17 +180,17 @@ export async function POST(
           uuidv4(),
           taskId,
           'status_changed',
-          'Task moved to REVIEW - automated tests passed, awaiting human approval',
+          'Task verified in REVIEW - automated tests passed, awaiting human approval',
           now
         ]
       );
     } else {
-      // Tests failed -> move back to assigned for agent to fix
+      // Tests failed -> move back to in_progress for agent to fix
       run(
         'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-        ['assigned', now, taskId]
+        ['in_progress', now, taskId]
       );
-      newStatus = 'assigned';
+      newStatus = 'in_progress';
 
       run(
         `INSERT INTO task_activities (id, task_id, activity_type, message, created_at)
@@ -199,7 +199,7 @@ export async function POST(
           uuidv4(),
           taskId,
           'status_changed',
-          'Task moved back to ASSIGNED due to failed automated tests - agent needs to fix issues',
+          'Task moved back to IN PROGRESS due to failed automated tests - agent needs to fix issues',
           now
         ]
       );
@@ -519,9 +519,9 @@ export async function GET(
       'HTTP status code validation (for URL deliverables)'
     ],
     workflow: {
-      expectedStatus: 'testing',
-      onPass: 'Moves to review for human approval',
-      onFail: 'Moves to assigned for agent to fix issues'
+      expectedStatus: 'review',
+      onPass: 'Stays in review for human approval',
+      onFail: 'Moves to in_progress for agent to fix issues'
     },
     usage: {
       method: 'POST',

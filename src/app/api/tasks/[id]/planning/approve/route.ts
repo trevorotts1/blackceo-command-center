@@ -112,10 +112,10 @@ export async function POST(
       VALUES (?, ?, ?, datetime('now'))
     `).run(specId, taskId, specMarkdown);
 
-    // Update task description with spec and move to inbox
+    // Update task description with spec and move to backlog
     getDb().prepare(`
-      UPDATE tasks 
-      SET description = ?, status = 'inbox', updated_at = datetime('now')
+      UPDATE tasks
+      SET description = ?, status = 'backlog', updated_at = datetime('now')
       WHERE id = ?
     `).run(specMarkdown, taskId);
 

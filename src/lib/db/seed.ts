@@ -157,15 +157,15 @@ async function seed() {
   // Create some example tasks
   const tasks = [
     { title: 'Set up development environment', status: 'done', priority: 'high' },
-    { title: 'Create project documentation', status: 'in_progress', priority: 'normal' },
-    { title: 'Research competitor features', status: 'assigned', priority: 'normal' },
-    { title: 'Design new dashboard layout', status: 'inbox', priority: 'low' },
+    { title: 'Create project documentation', status: 'in_progress', priority: 'medium' },
+    { title: 'Research competitor features', status: 'in_progress', priority: 'medium' },
+    { title: 'Design new dashboard layout', status: 'backlog', priority: 'low' },
   ];
 
   for (let i = 0; i < tasks.length; i++) {
     const taskId = uuidv4();
     const task = tasks[i];
-    const assignedTo = task.status !== 'inbox' ? agentIds[i % agentIds.length] : null;
+    const assignedTo = task.status !== 'backlog' ? agentIds[i % agentIds.length] : null;
 
     db.prepare(
       `INSERT INTO tasks (id, title, status, priority, assigned_agent_id, created_by_agent_id, business_id, created_at, updated_at)

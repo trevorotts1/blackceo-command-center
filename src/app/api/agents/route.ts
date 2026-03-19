@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
+import { createAgentFolder } from '@/lib/agent-files';
 import type { Agent, CreateAgentRequest } from '@/lib/types';
 
 // GET /api/agents - List all agents
@@ -38,8 +39,8 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
 
     run(
-      `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, soul_md, user_md, agents_md, model, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, soul_md, user_md, agents_md, tools_md, memory_md, model, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         body.name,
@@ -51,6 +52,8 @@ export async function POST(request: NextRequest) {
         body.soul_md || null,
         body.user_md || null,
         body.agents_md || null,
+        body.tools_md || null,
+        body.memory_md || null,
         body.model || null,
         now,
         now,
@@ -63,6 +66,9 @@ export async function POST(request: NextRequest) {
        VALUES (?, ?, ?, ?, ?)`,
       [uuidv4(), 'agent_joined', id, `${body.name} joined the team`, now]
     );
+
+    // Create agent folder with template files
+    createAgentFolder(body.name, body.role, body.model || 'default');
 
     const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
     return NextResponse.json(agent, { status: 201 });

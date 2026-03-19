@@ -2,16 +2,14 @@ import { z } from 'zod';
 
 // Task status and priority enums from types
 const TaskStatus = z.enum([
-  'planning',
-  'inbox',
-  'assigned',
+  'backlog',
   'in_progress',
-  'testing',
   'review',
+  'blocked',
   'done'
 ]);
 
-const TaskPriority = z.enum(['low', 'normal', 'high', 'urgent']);
+const TaskPriority = z.enum(['low', 'medium', 'high', 'critical']);
 
 const ActivityType = z.enum([
   'spawned',
