@@ -152,6 +152,35 @@ export async function POST(request: NextRequest) {
         payload: task,
       });
     }
+
+    // Trigger webhook for auto-routing asynchronously (don't block response)
+    if (task) {
+      (async () => {
+        try {
+          const webhookUrl = `${request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/webhooks/task-created`;
+          const webhookResponse = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              taskId: task.id,
+              title: task.title,
+              description: task.description,
+              department: task.department,
+              priority: task.priority,
+              workspaceId: task.workspace_id,
+            }),
+          });
+          if (!webhookResponse.ok) {
+            console.error('[POST /api/tasks] Webhook notification failed:', await webhookResponse.text());
+          } else {
+            console.log('[POST /api/tasks] Webhook notification sent for task:', task.id);
+          }
+        } catch (webhookError) {
+          // Log error but don't fail the task creation
+          console.error('[POST /api/tasks] Failed to trigger webhook:', webhookError);
+        }
+      })();
+    }
     
     return NextResponse.json(task, { status: 201 });
   } catch (error) {

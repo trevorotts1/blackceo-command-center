@@ -216,11 +216,12 @@ interface TaskCardProps {
 }
 
 function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskCardProps) {
-  const priorityStyles: Record<string, string> = {
-    critical: 'priority-critical',
-    high: 'priority-high',
-    medium: 'priority-medium',
-    low: 'priority-low',
+  // Priority pill styles (for new pill tags)
+  const priorityPillStyles: Record<string, string> = {
+    critical: 'bg-red-100 text-red-700',
+    high: 'bg-amber-100 text-amber-700',
+    medium: 'bg-gray-100 text-gray-600',
+    low: 'bg-blue-50 text-blue-500',
   };
 
   const priorityLabels: Record<string, string> = {
@@ -228,6 +229,21 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
     high: 'High',
     medium: 'Medium',
     low: 'Low',
+  };
+
+  // Department emoji mapping
+  const departmentEmojis: Record<string, string> = {
+    marketing: '📢',
+    sales: '💰',
+    engineering: '⚙️',
+    product: '📦',
+    design: '🎨',
+    operations: '⚡',
+    finance: '💵',
+    hr: '👥',
+    legal: '⚖️',
+    support: '🎧',
+    executive: '👑',
   };
 
   // Get avatar gradient based on agent or task id
@@ -251,17 +267,55 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         isDragging ? 'opacity-50 scale-95' : ''
       } ${isCompleted ? 'opacity-75' : ''}`}
     >
-      {/* Priority Badge */}
-      <div className="flex mb-3">
-        <span className={`px-3 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${priorityStyles[task.priority] || 'priority-medium'}`}>
+      {/* Title */}
+      <h3 className={`text-[15px] font-semibold text-gray-900 mb-3 leading-snug ${isCompleted ? 'line-through text-gray-400' : ''}`}>
+        {task.title}
+      </h3>
+
+      {/* Pill Tags Row */}
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {/* Department Pill */}
+        {task.department && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {task.department}
+          </span>
+        )}
+
+        {/* Agent Pill */}
+        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+          task.assigned_agent 
+            ? 'bg-teal-100 text-teal-700' 
+            : 'bg-gray-100 text-gray-500'
+        }`}>
+          {task.assigned_agent ? (task.assigned_agent as { name: string }).name : 'Unassigned'}
+        </span>
+
+        {/* Priority Pill */}
+        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+          priorityPillStyles[task.priority] || 'bg-gray-100 text-gray-600'
+        }`}>
           {priorityLabels[task.priority] || task.priority}
         </span>
       </div>
 
-      {/* Title */}
-      <h3 className={`text-[15px] font-semibold text-gray-900 mb-2 leading-snug ${isCompleted ? 'line-through text-gray-400' : ''}`}>
-        {task.title}
-      </h3>
+      {/* Sprint and Due Date */}
+      {(task.sprint || task.due_date) && (
+        <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-gray-400">
+          {task.sprint && (
+            <span className="flex items-center gap-1">
+              <span>🏃</span> {task.sprint}
+            </span>
+          )}
+          {task.sprint && task.due_date && (
+            <span className="text-gray-300">|</span>
+          )}
+          {task.due_date && (
+            <span className="flex items-center gap-1">
+              <span>📅</span> {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Description */}
       {task.description && (
