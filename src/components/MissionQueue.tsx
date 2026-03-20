@@ -240,19 +240,89 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
     },
   };
 
-  // Department emoji and color mapping
+  // Department emoji and color mapping - All 17 BlackCEO Command Center departments
   const departmentConfig: Record<string, { emoji: string; color: string }> = {
-    marketing: { emoji: '📢', color: 'bg-pink-100 text-pink-700 border-pink-200' },
-    sales: { emoji: '💰', color: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
-    engineering: { emoji: '⚙️', color: 'bg-slate-100 text-slate-700 border-slate-200' },
-    product: { emoji: '📦', color: 'bg-violet-100 text-violet-700 border-violet-200' },
-    design: { emoji: '🎨', color: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200' },
-    operations: { emoji: '⚡', color: 'bg-amber-100 text-amber-700 border-amber-200' },
-    finance: { emoji: '💵', color: 'bg-green-100 text-green-700 border-green-200' },
-    hr: { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
-    legal: { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
-    support: { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
+    // 1. CEO / COM - Master/Fallback department
+    'ceo-com': { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
+    'ceo / com': { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
+    ceo: { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
+    com: { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
     executive: { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
+
+    // 2. Marketing
+    marketing: { emoji: '📢', color: 'bg-pink-100 text-pink-700 border-pink-200' },
+
+    // 3. Sales
+    sales: { emoji: '💰', color: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
+
+    // 4. Billing
+    billing: { emoji: '💳', color: 'bg-green-100 text-green-700 border-green-200' },
+
+    // 5. Customer Support
+    'customer-support': { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
+    'customer support': { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
+    support: { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
+
+    // 6. Operations
+    operations: { emoji: '⚡', color: 'bg-amber-100 text-amber-700 border-amber-200' },
+    ops: { emoji: '⚡', color: 'bg-amber-100 text-amber-700 border-amber-200' },
+
+    // 7. Creative
+    creative: { emoji: '💡', color: 'bg-violet-100 text-violet-700 border-violet-200' },
+
+    // 8. HR / People
+    'hr-people': { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
+    'hr / people': { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
+    hr: { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
+    people: { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
+
+    // 9. Legal / Compliance
+    'legal-compliance': { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+    'legal / compliance': { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+    legal: { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+    compliance: { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+
+    // 10. IT / Tech
+    'it-tech': { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
+    'it / tech': { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
+    it: { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
+    tech: { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
+    technology: { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
+
+    // 11. Web Development
+    'web-development': { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
+    'web development': { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
+    web: { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
+    website: { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
+
+    // 12. App Development
+    'app-development': { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
+    'app development': { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
+    app: { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
+    mobile: { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
+
+    // 13. Graphics
+    graphics: { emoji: '🎨', color: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200' },
+    design: { emoji: '🎨', color: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200' },
+
+    // 14. Video Production
+    'video-production': { emoji: '🎬', color: 'bg-rose-100 text-rose-700 border-rose-200' },
+    'video production': { emoji: '🎬', color: 'bg-rose-100 text-rose-700 border-rose-200' },
+    video: { emoji: '🎬', color: 'bg-rose-100 text-rose-700 border-rose-200' },
+
+    // 15. Audio Production
+    'audio-production': { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
+    'audio production': { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
+    audio: { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
+    podcast: { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
+
+    // 16. Research
+    research: { emoji: '🔬', color: 'bg-lime-100 text-lime-700 border-lime-200' },
+
+    // 17. Communications
+    communications: { emoji: '📡', color: 'bg-orange-100 text-orange-700 border-orange-200' },
+    comms: { emoji: '📡', color: 'bg-orange-100 text-orange-700 border-orange-200' },
+    pr: { emoji: '📡', color: 'bg-orange-100 text-orange-700 border-orange-200' },
   };
 
   // Get avatar gradient based on agent name

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Settings, ChevronLeft, LayoutGrid } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
+import { LogoConfig } from '@/lib/logo';
 import { format } from 'date-fns';
 import type { Workspace } from '@/lib/types';
 
@@ -53,9 +54,9 @@ export function Header({ workspace }: HeaderProps) {
       {/* Left: Logo & Title */}
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
-          <img 
-            src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
-            alt="BlackCEO Command Center" 
+          <img
+            src={LogoConfig.url}
+            alt={LogoConfig.alt}
             className="h-8 w-auto"
           />
         </div>

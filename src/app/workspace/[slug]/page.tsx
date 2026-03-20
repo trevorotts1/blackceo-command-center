@@ -10,6 +10,7 @@ import { MissionQueue } from '@/components/MissionQueue';
 import { LiveFeed } from '@/components/LiveFeed';
 import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useMissionControl } from '@/lib/store';
+import { LogoConfig } from '@/lib/logo';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import type { Task, Workspace } from '@/lib/types';
@@ -193,9 +194,9 @@ export default function WorkspacePage() {
     return (
       <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
-          <img 
-            src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
-            alt="Loading" 
+          <img
+            src={LogoConfig.url}
+            alt="Loading"
             className="h-12 w-auto mb-4 animate-pulse"
           />
           <p className="text-gray-500">Loading {slug}...</p>

@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Plus, ArrowRight, Folder, Users, CheckSquare, Trash2, AlertTriangle, Sparkles, Zap } from 'lucide-react';
 import Link from 'next/link';
+import { LogoConfig } from '@/lib/logo';
 import type { WorkspaceStats } from '@/lib/types';
 
 export function WorkspaceDashboard() {
@@ -37,9 +38,9 @@ export function WorkspaceDashboard() {
     return (
       <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
-          <img 
-            src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
-            alt="Loading" 
+          <img
+            src={LogoConfig.url}
+            alt="Loading"
             className="h-12 w-auto mb-4 animate-pulse"
           />
           <p className="text-gray-500">Loading workspaces...</p>
@@ -56,9 +57,9 @@ export function WorkspaceDashboard() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="relative">
-                <img 
-                  src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
-                  alt="BlackCEO Command Center" 
+                <img
+                  src={LogoConfig.url}
+                  alt={LogoConfig.alt}
                   className="h-10 w-auto"
                 />
                 <span className="absolute -top-1 -right-3 flex h-2 w-2">

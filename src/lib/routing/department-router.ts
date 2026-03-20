@@ -227,7 +227,7 @@ export function comDispatch(
     }
   }
 
-  // Step 3: Fallback to least-loaded master agent
+  // Step 3: Fallback to least-loaded master agent (CEO / COM)
   const masters = agents
     .filter((a) => a.is_master && a.status !== 'offline')
     .sort((a, b) => a.active_tasks - b.active_tasks);
@@ -236,9 +236,9 @@ export function comDispatch(
     return {
       agentId: masters[0].id,
       agentName: masters[0].name,
-      department: 'General',
+      department: 'CEO / COM',
       score: 0,
-      reason: `No department match — routed to least-loaded master agent (load: ${masters[0].active_tasks} tasks)`,
+      reason: `No department match — routed to CEO / COM master agent (load: ${masters[0].active_tasks} tasks)`,
     };
   }
 
