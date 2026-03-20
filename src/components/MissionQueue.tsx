@@ -216,38 +216,47 @@ interface TaskCardProps {
 }
 
 function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskCardProps) {
-  // Priority pill styles (for new pill tags)
-  const priorityPillStyles: Record<string, string> = {
-    critical: 'bg-red-100 text-red-700',
-    high: 'bg-amber-100 text-amber-700',
-    medium: 'bg-gray-100 text-gray-600',
-    low: 'bg-blue-50 text-blue-500',
+  // Enhanced priority pill styles with icons
+  const priorityConfig: Record<string, { style: string; icon: string; label: string }> = {
+    critical: { 
+      style: 'bg-gradient-to-r from-red-500 to-rose-500 text-white shadow-red-200', 
+      icon: '🔴',
+      label: 'Critical'
+    },
+    high: { 
+      style: 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-amber-200', 
+      icon: '🟠',
+      label: 'High'
+    },
+    medium: { 
+      style: 'bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-blue-200', 
+      icon: '🔵',
+      label: 'Medium'
+    },
+    low: { 
+      style: 'bg-gray-100 text-gray-600 border border-gray-200', 
+      icon: '⚪',
+      label: 'Low'
+    },
   };
 
-  const priorityLabels: Record<string, string> = {
-    critical: 'Critical',
-    high: 'High',
-    medium: 'Medium',
-    low: 'Low',
+  // Department emoji and color mapping
+  const departmentConfig: Record<string, { emoji: string; color: string }> = {
+    marketing: { emoji: '📢', color: 'bg-pink-100 text-pink-700 border-pink-200' },
+    sales: { emoji: '💰', color: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
+    engineering: { emoji: '⚙️', color: 'bg-slate-100 text-slate-700 border-slate-200' },
+    product: { emoji: '📦', color: 'bg-violet-100 text-violet-700 border-violet-200' },
+    design: { emoji: '🎨', color: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200' },
+    operations: { emoji: '⚡', color: 'bg-amber-100 text-amber-700 border-amber-200' },
+    finance: { emoji: '💵', color: 'bg-green-100 text-green-700 border-green-200' },
+    hr: { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
+    legal: { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+    support: { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
+    executive: { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
   };
 
-  // Department emoji mapping
-  const departmentEmojis: Record<string, string> = {
-    marketing: '📢',
-    sales: '💰',
-    engineering: '⚙️',
-    product: '📦',
-    design: '🎨',
-    operations: '⚡',
-    finance: '💵',
-    hr: '👥',
-    legal: '⚖️',
-    support: '🎧',
-    executive: '👑',
-  };
-
-  // Get avatar gradient based on agent or task id
-  const getAvatarGradient = (index: number) => {
+  // Get avatar gradient based on agent name
+  const getAvatarGradient = (name: string) => {
     const gradients = [
       'avatar-gradient-1',
       'avatar-gradient-2',
@@ -255,65 +264,82 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
       'avatar-gradient-4',
       'avatar-gradient-5',
     ];
-    return gradients[index % gradients.length];
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) {
+      hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    return gradients[Math.abs(hash) % gradients.length];
   };
+
+  const priority = priorityConfig[task.priority] || priorityConfig.medium;
+  const deptKey = task.department?.toLowerCase() || '';
+  const dept = departmentConfig[deptKey] || { emoji: '🏢', color: 'bg-gray-100 text-gray-600 border-gray-200' };
+  
+  // Safe agent name access for demo reliability
+  const agentName = task.assigned_agent ? (task.assigned_agent as { name: string }).name : null;
+  const agentInitial = agentName ? agentName.charAt(0).toUpperCase() : '?';
 
   return (
     <div
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onClick}
-      className={`bg-white rounded-2xl p-5 card-shadow card-hover cursor-pointer border border-gray-50 ${
+      className={`bg-white rounded-2xl p-5 card-shadow card-hover cursor-pointer border border-gray-100 ${
         isDragging ? 'opacity-50 scale-95' : ''
-      } ${isCompleted ? 'opacity-75' : ''}`}
+      } ${isCompleted ? 'opacity-70' : ''}`}
     >
+      {/* Top row: Priority pill */}
+      <div className="flex items-center justify-between mb-3">
+        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide shadow-sm ${priority.style}`}>
+          <span>{priority.icon}</span>
+          {priority.label}
+        </span>
+        
+        {/* Due date indicator */}
+        {task.due_date && (
+          <span className="text-[11px] text-gray-400 font-medium">
+            {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+          </span>
+        )}
+      </div>
+
       {/* Title */}
       <h3 className={`text-[15px] font-semibold text-gray-900 mb-3 leading-snug ${isCompleted ? 'line-through text-gray-400' : ''}`}>
         {task.title}
       </h3>
 
-      {/* Pill Tags Row */}
-      <div className="flex flex-wrap gap-1.5 mb-3">
+      {/* Pill Tags Row - Department and Agent */}
+      <div className="flex flex-wrap gap-2 mb-4">
         {/* Department Pill */}
         {task.department && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {task.department}
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${dept.color}`}>
+            <span>{dept.emoji}</span>
+            <span className="capitalize">{task.department}</span>
           </span>
         )}
 
         {/* Agent Pill */}
-        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-          task.assigned_agent 
-            ? 'bg-teal-100 text-teal-700' 
-            : 'bg-gray-100 text-gray-500'
-        }`}>
-          {task.assigned_agent ? (task.assigned_agent as { name: string }).name : 'Unassigned'}
-        </span>
-
-        {/* Priority Pill */}
-        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-          priorityPillStyles[task.priority] || 'bg-gray-100 text-gray-600'
-        }`}>
-          {priorityLabels[task.priority] || task.priority}
-        </span>
+        {agentName ? (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200">
+            <span className="w-4 h-4 rounded-full bg-teal-500 text-white text-[8px] flex items-center justify-center font-bold">
+              {agentInitial}
+            </span>
+            <span className="max-w-[80px] truncate">{agentName}</span>
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-50 text-gray-400 border border-gray-200">
+            <span className="w-4 h-4 rounded-full bg-gray-300 text-white text-[8px] flex items-center justify-center font-bold">?</span>
+            Unassigned
+          </span>
+        )}
       </div>
 
-      {/* Sprint and Due Date */}
-      {(task.sprint || task.due_date) && (
-        <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-gray-400">
-          {task.sprint && (
-            <span className="flex items-center gap-1">
-              <span>🏃</span> {task.sprint}
-            </span>
-          )}
-          {task.sprint && task.due_date && (
-            <span className="text-gray-300">|</span>
-          )}
-          {task.due_date && (
-            <span className="flex items-center gap-1">
-              <span>📅</span> {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-            </span>
-          )}
+      {/* Sprint badge */}
+      {task.sprint && (
+        <div className="mb-3">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-purple-50 text-purple-600 border border-purple-100">
+            <span>🏃</span> {task.sprint}
+          </span>
         </div>
       )}
 
@@ -326,26 +352,26 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
 
       {/* Footer */}
       <div className="flex items-center justify-between pt-4 border-t border-gray-50">
-        {/* Avatar Stack */}
-        <div className="flex -space-x-2">
-          {task.assigned_agent ? (
-            <>
-              <div className={`w-8 h-8 rounded-full border-2 border-white ${getAvatarGradient(0)} flex items-center justify-center text-white text-xs font-bold`}>
-                {(task.assigned_agent as { name: string }).name.charAt(0).toUpperCase()}
-              </div>
-            </>
+        {/* Avatar */}
+        <div className="flex items-center gap-2">
+          {agentName ? (
+            <div className={`w-7 h-7 rounded-full ${getAvatarGradient(agentName)} flex items-center justify-center text-white text-xs font-bold shadow-sm`}>
+              {agentInitial}
+            </div>
           ) : (
-            <div className={`w-8 h-8 rounded-full border-2 border-white ${getAvatarGradient(1)}`} />
+            <div className="w-7 h-7 rounded-full bg-gray-100 border-2 border-dashed border-gray-300 flex items-center justify-center">
+              <span className="text-gray-300 text-xs">?</span>
+            </div>
           )}
         </div>
 
         {/* Metrics */}
         <div className="flex items-center gap-3 text-gray-400 text-xs font-medium">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 hover:text-gray-600 transition-colors">
             <MessageSquare className="w-3.5 h-3.5" />
-            <span>{Math.floor(Math.random() * 50)}</span>
+            <span>{Math.floor(Math.random() * 20)}</span>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 hover:text-gray-600 transition-colors" title={new Date(task.created_at).toLocaleString()}>
             <Eye className="w-3.5 h-3.5" />
             <span>{formatDistanceToNow(new Date(task.created_at), { addSuffix: false })}</span>
           </div>

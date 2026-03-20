@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-03-20
+
+### Added
+
+- **Auto-Routing Webhook** — Intelligent request routing system that automatically directs tasks to appropriate departments based on content analysis.
+- **17-Department Support** — Expanded department router supporting up to 17 distinct departments with configurable routing rules.
+- **Dashboard UI Updates** — Enhanced mission control dashboard with improved visual hierarchy and department management interface.
+- **Schema & Migration Updates** — Database schema updates for department configuration and routing metadata.
+- **Validation & Types** — Enhanced Zod schemas and TypeScript types for department routing and webhook payloads.
+- **Standup Heartbeat Scripts** — Added `scripts/standup-heartbeat.sh` for automated daily standup coordination and status tracking.
+
+### Changed
+
+- **Department Configuration** — Moved department definitions to centralized config with environment-based overrides.
+- **Webhook Processing** — Improved webhook handler with better error recovery and retry logic.
+
+---
+
 ## [1.1.0] - 2026-02-16
 
 ### 🔒 Security
