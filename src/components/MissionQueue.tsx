@@ -340,6 +340,13 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
           {task.assigned_agent ? (task.assigned_agent as { name: string }).name : 'Unassigned'}
         </span>
 
+        {/* Persona Pill */}
+        {(task as any).persona && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+            🧠 {(task as any).persona}
+          </span>
+        )}
+
         {/* Priority Pill */}
         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
           priorityPillStyles[task.priority] || 'bg-gray-100 text-gray-600'
