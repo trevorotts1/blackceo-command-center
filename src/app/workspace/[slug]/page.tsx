@@ -11,6 +11,7 @@ import { LiveFeed } from '@/components/LiveFeed';
 import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
+import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import type { Task, Workspace } from '@/lib/types';
@@ -30,6 +31,7 @@ export default function WorkspacePage() {
 
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const logoUrl = useLogoUrl();
 
   // Connect to SSE for real-time updates
   useSSE();
@@ -195,7 +197,7 @@ export default function WorkspacePage() {
       <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
           <img
-            src={LogoConfig.url}
+            src={logoUrl}
             alt="Loading"
             className="h-12 w-auto mb-4 animate-pulse"
           />

@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Plus, GripVertical, MessageSquare, Eye } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
+import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import type { Task, TaskStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
@@ -20,15 +21,39 @@ const COLUMNS: { id: TaskStatus; label: string; gradient: string }[] = [
   { id: 'done', label: 'Done', gradient: 'column-pill-done' },
 ];
 
+const departmentNames: Record<string, string> = {
+  'ceo-com': 'CEO / COM',
+  'marketing': 'Marketing',
+  'sales': 'Sales',
+  'billing': 'Billing',
+  'customer-support': 'Customer Support',
+  'operations': 'Operations',
+  'creative': 'Creative',
+  'hr-people': 'HR / People',
+  'legal-compliance': 'Legal / Compliance',
+  'it-tech': 'IT / Tech',
+  'web-development': 'Web Development',
+  'app-development': 'App Development',
+  'graphics': 'Graphics',
+  'video-production': 'Video Production',
+  'audio-production': 'Audio Production',
+  'research': 'Research',
+  'communications': 'Communications',
+};
+
 export function MissionQueue({ workspaceId }: MissionQueueProps) {
-  const { tasks, updateTaskStatus, addEvent } = useMissionControl();
+  const { tasks, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
 
-  const getTasksByStatus = (status: TaskStatus) =>
-    tasks.filter((task) => task.status === status);
+  const getTasksByStatus = (status: TaskStatus) => {
+    const filteredByDept = selectedDepartment
+      ? tasks.filter((task) => task.department === selectedDepartment)
+      : tasks;
+    return filteredByDept.filter((task) => task.status === status);
+  };
 
   const handleDragStart = (e: React.DragEvent, task: Task) => {
     setDraggedTask(task);
@@ -152,6 +177,31 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
         </div>
       </div>
 
+      {/* Department Filter Banner */}
+      <div className={`px-8 py-2 flex items-center justify-between shrink-0 transition-all ${
+        selectedDepartment 
+          ? 'bg-indigo-50 border-b border-indigo-100' 
+          : 'bg-gray-50 border-b border-gray-100'
+      }`}>
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{selectedDepartment ? '📋' : '📊'}</span>
+          <span className={`text-sm font-semibold ${
+            selectedDepartment ? 'text-indigo-900' : 'text-gray-600'
+          }`}>
+            Viewing: {selectedDepartment ? departmentNames[selectedDepartment] || selectedDepartment : 'All Departments'}
+          </span>
+        </div>
+        {selectedDepartment && (
+          <button
+            onClick={() => setSelectedDepartment(null)}
+            className="flex items-center gap-1 px-3 py-1 rounded-full bg-white text-indigo-700 text-xs font-medium hover:bg-indigo-100 transition-all border border-indigo-200 shadow-sm"
+          >
+            <X className="w-3 h-3" />
+            Clear Filter
+          </button>
+        )}
+      </div>
+
       {/* Kanban Columns */}
       <div className="flex-1 overflow-x-auto p-8">
         <div className="flex gap-6 h-full min-w-max pb-4">
@@ -216,117 +266,38 @@ interface TaskCardProps {
 }
 
 function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskCardProps) {
-  // Enhanced priority pill styles with icons
-  const priorityConfig: Record<string, { style: string; icon: string; label: string }> = {
-    critical: { 
-      style: 'bg-gradient-to-r from-red-500 to-rose-500 text-white shadow-red-200', 
-      icon: '🔴',
-      label: 'Critical'
-    },
-    high: { 
-      style: 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-amber-200', 
-      icon: '🟠',
-      label: 'High'
-    },
-    medium: { 
-      style: 'bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-blue-200', 
-      icon: '🔵',
-      label: 'Medium'
-    },
-    low: { 
-      style: 'bg-gray-100 text-gray-600 border border-gray-200', 
-      icon: '⚪',
-      label: 'Low'
-    },
+  // Priority pill styles (for new pill tags)
+  const priorityPillStyles: Record<string, string> = {
+    critical: 'bg-red-100 text-red-700',
+    high: 'bg-amber-100 text-amber-700',
+    medium: 'bg-gray-100 text-gray-600',
+    low: 'bg-blue-50 text-blue-500',
   };
 
-  // Department emoji and color mapping - All 17 BlackCEO Command Center departments
-  const departmentConfig: Record<string, { emoji: string; color: string }> = {
-    // 1. CEO / COM - Master/Fallback department
-    'ceo-com': { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
-    'ceo / com': { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
-    ceo: { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
-    com: { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
-    executive: { emoji: '👑', color: 'bg-amber-100 text-amber-800 border-amber-300' },
-
-    // 2. Marketing
-    marketing: { emoji: '📢', color: 'bg-pink-100 text-pink-700 border-pink-200' },
-
-    // 3. Sales
-    sales: { emoji: '💰', color: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
-
-    // 4. Billing
-    billing: { emoji: '💳', color: 'bg-green-100 text-green-700 border-green-200' },
-
-    // 5. Customer Support
-    'customer-support': { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
-    'customer support': { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
-    support: { emoji: '🎧', color: 'bg-teal-100 text-teal-700 border-teal-200' },
-
-    // 6. Operations
-    operations: { emoji: '⚡', color: 'bg-amber-100 text-amber-700 border-amber-200' },
-    ops: { emoji: '⚡', color: 'bg-amber-100 text-amber-700 border-amber-200' },
-
-    // 7. Creative
-    creative: { emoji: '💡', color: 'bg-violet-100 text-violet-700 border-violet-200' },
-
-    // 8. HR / People
-    'hr-people': { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
-    'hr / people': { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
-    hr: { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
-    people: { emoji: '👥', color: 'bg-cyan-100 text-cyan-700 border-cyan-200' },
-
-    // 9. Legal / Compliance
-    'legal-compliance': { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
-    'legal / compliance': { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
-    legal: { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
-    compliance: { emoji: '⚖️', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
-
-    // 10. IT / Tech
-    'it-tech': { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
-    'it / tech': { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
-    it: { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
-    tech: { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
-    technology: { emoji: '💻', color: 'bg-slate-100 text-slate-700 border-slate-200' },
-
-    // 11. Web Development
-    'web-development': { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
-    'web development': { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
-    web: { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
-    website: { emoji: '🌐', color: 'bg-blue-100 text-blue-700 border-blue-200' },
-
-    // 12. App Development
-    'app-development': { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
-    'app development': { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
-    app: { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
-    mobile: { emoji: '📱', color: 'bg-purple-100 text-purple-700 border-purple-200' },
-
-    // 13. Graphics
-    graphics: { emoji: '🎨', color: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200' },
-    design: { emoji: '🎨', color: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200' },
-
-    // 14. Video Production
-    'video-production': { emoji: '🎬', color: 'bg-rose-100 text-rose-700 border-rose-200' },
-    'video production': { emoji: '🎬', color: 'bg-rose-100 text-rose-700 border-rose-200' },
-    video: { emoji: '🎬', color: 'bg-rose-100 text-rose-700 border-rose-200' },
-
-    // 15. Audio Production
-    'audio-production': { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
-    'audio production': { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
-    audio: { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
-    podcast: { emoji: '🎵', color: 'bg-sky-100 text-sky-700 border-sky-200' },
-
-    // 16. Research
-    research: { emoji: '🔬', color: 'bg-lime-100 text-lime-700 border-lime-200' },
-
-    // 17. Communications
-    communications: { emoji: '📡', color: 'bg-orange-100 text-orange-700 border-orange-200' },
-    comms: { emoji: '📡', color: 'bg-orange-100 text-orange-700 border-orange-200' },
-    pr: { emoji: '📡', color: 'bg-orange-100 text-orange-700 border-orange-200' },
+  const priorityLabels: Record<string, string> = {
+    critical: 'Critical',
+    high: 'High',
+    medium: 'Medium',
+    low: 'Low',
   };
 
-  // Get avatar gradient based on agent name
-  const getAvatarGradient = (name: string) => {
+  // Department emoji mapping
+  const departmentEmojis: Record<string, string> = {
+    marketing: '📢',
+    sales: '💰',
+    engineering: '⚙️',
+    product: '📦',
+    design: '🎨',
+    operations: '⚡',
+    finance: '💵',
+    hr: '👥',
+    legal: '⚖️',
+    support: '🎧',
+    executive: '👑',
+  };
+
+  // Get avatar gradient based on agent or task id
+  const getAvatarGradient = (index: number) => {
     const gradients = [
       'avatar-gradient-1',
       'avatar-gradient-2',
@@ -334,82 +305,65 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
       'avatar-gradient-4',
       'avatar-gradient-5',
     ];
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) {
-      hash = name.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    return gradients[Math.abs(hash) % gradients.length];
+    return gradients[index % gradients.length];
   };
-
-  const priority = priorityConfig[task.priority] || priorityConfig.medium;
-  const deptKey = task.department?.toLowerCase() || '';
-  const dept = departmentConfig[deptKey] || { emoji: '🏢', color: 'bg-gray-100 text-gray-600 border-gray-200' };
-  
-  // Safe agent name access for demo reliability
-  const agentName = task.assigned_agent ? (task.assigned_agent as { name: string }).name : null;
-  const agentInitial = agentName ? agentName.charAt(0).toUpperCase() : '?';
 
   return (
     <div
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onClick}
-      className={`bg-white rounded-2xl p-5 card-shadow card-hover cursor-pointer border border-gray-100 ${
+      className={`bg-white rounded-2xl p-5 card-shadow card-hover cursor-pointer border border-gray-50 ${
         isDragging ? 'opacity-50 scale-95' : ''
-      } ${isCompleted ? 'opacity-70' : ''}`}
+      } ${isCompleted ? 'opacity-75' : ''}`}
     >
-      {/* Top row: Priority pill */}
-      <div className="flex items-center justify-between mb-3">
-        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide shadow-sm ${priority.style}`}>
-          <span>{priority.icon}</span>
-          {priority.label}
-        </span>
-        
-        {/* Due date indicator */}
-        {task.due_date && (
-          <span className="text-[11px] text-gray-400 font-medium">
-            {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-          </span>
-        )}
-      </div>
-
       {/* Title */}
       <h3 className={`text-[15px] font-semibold text-gray-900 mb-3 leading-snug ${isCompleted ? 'line-through text-gray-400' : ''}`}>
         {task.title}
       </h3>
 
-      {/* Pill Tags Row - Department and Agent */}
-      <div className="flex flex-wrap gap-2 mb-4">
+      {/* Pill Tags Row */}
+      <div className="flex flex-wrap gap-1.5 mb-3">
         {/* Department Pill */}
         {task.department && (
-          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${dept.color}`}>
-            <span>{dept.emoji}</span>
-            <span className="capitalize">{task.department}</span>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {task.department}
           </span>
         )}
 
         {/* Agent Pill */}
-        {agentName ? (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200">
-            <span className="w-4 h-4 rounded-full bg-teal-500 text-white text-[8px] flex items-center justify-center font-bold">
-              {agentInitial}
-            </span>
-            <span className="max-w-[80px] truncate">{agentName}</span>
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-50 text-gray-400 border border-gray-200">
-            <span className="w-4 h-4 rounded-full bg-gray-300 text-white text-[8px] flex items-center justify-center font-bold">?</span>
-            Unassigned
-          </span>
-        )}
+        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+          task.assigned_agent 
+            ? 'bg-teal-100 text-teal-700' 
+            : 'bg-gray-100 text-gray-500'
+        }`}>
+          {task.assigned_agent ? (task.assigned_agent as { name: string }).name : 'Unassigned'}
+        </span>
+
+        {/* Priority Pill */}
+        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+          priorityPillStyles[task.priority] || 'bg-gray-100 text-gray-600'
+        }`}>
+          {priorityLabels[task.priority] || task.priority}
+        </span>
       </div>
 
-      {/* Sprint badge */}
-      {task.sprint && (
-        <div className="mb-3">
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-purple-50 text-purple-600 border border-purple-100">
-            <span>🏃</span> {task.sprint}
-          </span>
+      {/* Sprint and Due Date */}
+      {(task.sprint || task.due_date) && (
+        <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-gray-400">
+          {task.sprint && (
+            <span className="flex items-center gap-1">
+              <span>🏃</span> {task.sprint}
+            </span>
+          )}
+          {task.sprint && task.due_date && (
+            <span className="text-gray-300">|</span>
+          )}
+          {task.due_date && (
+            <span className="flex items-center gap-1">
+              <span>📅</span> {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            </span>
+          )}
         </div>
       )}
 
@@ -422,26 +376,26 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
 
       {/* Footer */}
       <div className="flex items-center justify-between pt-4 border-t border-gray-50">
-        {/* Avatar */}
-        <div className="flex items-center gap-2">
-          {agentName ? (
-            <div className={`w-7 h-7 rounded-full ${getAvatarGradient(agentName)} flex items-center justify-center text-white text-xs font-bold shadow-sm`}>
-              {agentInitial}
-            </div>
+        {/* Avatar Stack */}
+        <div className="flex -space-x-2">
+          {task.assigned_agent ? (
+            <>
+              <div className={`w-8 h-8 rounded-full border-2 border-white ${getAvatarGradient(0)} flex items-center justify-center text-white text-xs font-bold`}>
+                {(task.assigned_agent as { name: string }).name.charAt(0).toUpperCase()}
+              </div>
+            </>
           ) : (
-            <div className="w-7 h-7 rounded-full bg-gray-100 border-2 border-dashed border-gray-300 flex items-center justify-center">
-              <span className="text-gray-300 text-xs">?</span>
-            </div>
+            <div className={`w-8 h-8 rounded-full border-2 border-white ${getAvatarGradient(1)}`} />
           )}
         </div>
 
         {/* Metrics */}
         <div className="flex items-center gap-3 text-gray-400 text-xs font-medium">
-          <div className="flex items-center gap-1 hover:text-gray-600 transition-colors">
+          <div className="flex items-center gap-1">
             <MessageSquare className="w-3.5 h-3.5" />
-            <span>{Math.floor(Math.random() * 20)}</span>
+            <span>{Math.floor(Math.random() * 50)}</span>
           </div>
-          <div className="flex items-center gap-1 hover:text-gray-600 transition-colors" title={new Date(task.created_at).toLocaleString()}>
+          <div className="flex items-center gap-1">
             <Eye className="w-3.5 h-3.5" />
             <span>{formatDistanceToNow(new Date(task.created_at), { addSuffix: false })}</span>
           </div>

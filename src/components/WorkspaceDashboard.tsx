@@ -4,12 +4,14 @@ import { useState, useEffect } from 'react';
 import { Plus, ArrowRight, Folder, Users, CheckSquare, Trash2, AlertTriangle, Sparkles, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { LogoConfig } from '@/lib/logo';
+import { useLogoUrl } from '@/hooks/useLogoUrl';
 import type { WorkspaceStats } from '@/lib/types';
 
 export function WorkspaceDashboard() {
   const [workspaces, setWorkspaces] = useState<WorkspaceStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const logoUrl = useLogoUrl();
 
   useEffect(() => {
     loadWorkspaces();
@@ -39,7 +41,7 @@ export function WorkspaceDashboard() {
       <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
           <img
-            src={LogoConfig.url}
+            src={logoUrl}
             alt="Loading"
             className="h-12 w-auto mb-4 animate-pulse"
           />
@@ -58,7 +60,7 @@ export function WorkspaceDashboard() {
             <div className="flex items-center gap-3">
               <div className="relative">
                 <img
-                  src={LogoConfig.url}
+                  src={logoUrl}
                   alt={LogoConfig.alt}
                   className="h-10 w-auto"
                 />

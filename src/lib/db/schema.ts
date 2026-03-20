@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_by_agent_id TEXT REFERENCES agents(id),
   workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
   business_id TEXT DEFAULT 'default',
+  department TEXT,
   due_date TEXT,
   planning_session_key TEXT,
   planning_messages TEXT,

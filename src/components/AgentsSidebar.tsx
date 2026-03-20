@@ -41,7 +41,7 @@ interface AgentsSidebarProps {
 }
 
 export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
-  const { agentOpenClawSessions } = useMissionControl();
+  const { agentOpenClawSessions, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const [filter, setFilter] = useState<FilterTab>('all');
   const [connectingAgentId, setConnectingAgentId] = useState<string | null>(null);
   const [activeSubAgents, setActiveSubAgents] = useState(0);
@@ -149,11 +149,53 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
 
       {/* Department List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        {/* All Departments Option */}
+        {!isMinimized && (
+          <button
+            onClick={() => setSelectedDepartment(null)}
+            className={`w-full rounded-lg transition-colors text-left ${
+              selectedDepartment === null
+                ? 'bg-indigo-50 border border-indigo-200 ring-1 ring-indigo-200'
+                : 'hover:bg-gray-50'
+            }`}
+          >
+            <div className="flex items-center gap-3 p-2.5">
+              <div className="text-2xl">🏢</div>
+              <div className="flex-1 min-w-0">
+                <div className={`font-medium text-sm truncate ${
+                  selectedDepartment === null ? 'text-indigo-900' : 'text-gray-900'
+                }`}>
+                  All Departments
+                </div>
+                <div className={`text-xs truncate ${
+                  selectedDepartment === null ? 'text-indigo-600' : 'text-gray-500'
+                }`}>
+                  View all tasks
+                </div>
+              </div>
+              {selectedDepartment === null && (
+                <span className="w-2 h-2 rounded-full bg-indigo-500" />
+              )}
+            </div>
+          </button>
+        )}
+
+        {/* Divider */}
+        {!isMinimized && <div className="border-t border-gray-100 my-2" />}
+
         {filteredDepartments.map((dept) => {
+          const isSelected = selectedDepartment === dept.id;
+
           if (isMinimized) {
             // Minimized view - just emoji
             return (
-              <div key={dept.id} className="flex justify-center py-2">
+              <button
+                key={dept.id}
+                onClick={() => setSelectedDepartment(dept.id)}
+                className={`flex justify-center py-2 w-full ${
+                  isSelected ? 'bg-indigo-50 rounded-lg' : ''
+                }`}
+              >
                 <div
                   className="relative group"
                   title={`${dept.name} - ${dept.headTitle}`}
@@ -162,7 +204,7 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
                   {/* Status indicator */}
                   <span
                     className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
-                      dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
+                      isSelected ? 'bg-indigo-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
                     }`}
                   />
                   {/* Tooltip */}
@@ -170,47 +212,60 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
                     {dept.name}
                   </div>
                 </div>
-              </div>
+              </button>
             );
           }
 
           // Expanded view - full department card
           return (
-            <div
+            <button
               key={dept.id}
-              className="w-full rounded-lg hover:bg-gray-50 transition-colors"
+              onClick={() => setSelectedDepartment(dept.id)}
+              className={`w-full rounded-lg transition-colors text-left ${
+                isSelected
+                  ? 'bg-indigo-50 border border-indigo-200 ring-1 ring-indigo-200'
+                  : 'hover:bg-gray-50'
+              }`}
             >
-              <div className="w-full flex items-center gap-3 p-2.5 text-left">
+              <div className="flex items-center gap-3 p-2.5">
                 {/* Emoji */}
                 <div className="text-2xl relative">
                   {dept.emoji}
                   <span
                     className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
-                      dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
+                      isSelected ? 'bg-indigo-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
                     }`}
                   />
                 </div>
 
                 {/* Info */}
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-sm text-gray-900 truncate">
+                  <div className={`font-medium text-sm truncate ${
+                    isSelected ? 'text-indigo-900' : 'text-gray-900'
+                  }`}>
                     {dept.name}
                   </div>
-                  <div className="text-xs text-gray-500 truncate">
+                  <div className={`text-xs truncate ${
+                    isSelected ? 'text-indigo-600' : 'text-gray-500'
+                  }`}>
                     {dept.headTitle}
                   </div>
                 </div>
 
-                {/* Status */}
-                <span
-                  className={`text-xs px-2 py-0.5 rounded-full font-medium uppercase ${getStatusBadge(
-                    dept.status
-                  )}`}
-                >
-                  {dept.status}
-                </span>
+                {/* Status or Selected indicator */}
+                {isSelected ? (
+                  <span className="w-2 h-2 rounded-full bg-indigo-500" />
+                ) : (
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-full font-medium uppercase ${getStatusBadge(
+                      dept.status
+                    )}`}
+                  >
+                    {dept.status}
+                  </span>
+                )}
               </div>
-            </div>
+            </button>
           );
         })}
       </div>

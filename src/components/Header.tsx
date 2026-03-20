@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { Settings, ChevronLeft, LayoutGrid } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
+import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { format } from 'date-fns';
 import type { Workspace } from '@/lib/types';
 
@@ -18,6 +19,7 @@ export function Header({ workspace }: HeaderProps) {
   const { agents, tasks, isOnline } = useMissionControl();
   const [currentTime, setCurrentTime] = useState(new Date());
   const [activeSubAgents, setActiveSubAgents] = useState(0);
+  const logoUrl = useLogoUrl();
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -55,7 +57,7 @@ export function Header({ workspace }: HeaderProps) {
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
           <img
-            src={LogoConfig.url}
+            src={logoUrl}
             alt={LogoConfig.alt}
             className="h-8 w-auto"
           />

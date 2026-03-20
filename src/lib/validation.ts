@@ -65,3 +65,69 @@ export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 export type UpdateTaskInput = z.infer<typeof UpdateTaskSchema>;
 export type CreateActivityInput = z.infer<typeof CreateActivitySchema>;
 export type CreateDeliverableInput = z.infer<typeof CreateDeliverableSchema>;
+
+// ---------------------------------------------------------------------------
+// Logo URL validation
+// ---------------------------------------------------------------------------
+
+const VALID_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.svg', '.webp'];
+
+const BLOCKED_HOSTS = [
+  'drive.google.com',
+  'docs.google.com',
+  'dropbox.com',
+  'dl.dropboxusercontent.com',
+];
+
+/**
+ * Validates that a URL is a direct, publicly-accessible image link.
+ * Returns { valid: true } on success or { valid: false, error: string } on failure.
+ */
+export function validateLogoUrl(url: string): { valid: boolean; error?: string } {
+  // Basic URL format check
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return {
+      valid: false,
+      error: 'That does not look like a valid URL. Please provide a full URL starting with https://',
+    };
+  }
+
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return {
+      valid: false,
+      error: 'Please use a URL that starts with https://',
+    };
+  }
+
+  // Block Google Drive and Dropbox
+  const host = parsed.hostname.toLowerCase();
+  if (BLOCKED_HOSTS.some((blocked) => host === blocked || host.endsWith('.' + blocked))) {
+    if (host.includes('google.com')) {
+      return {
+        valid: false,
+        error:
+          'Google Drive links will not work. Please use a direct image link ending in .png, .jpg, or .svg. Try uploading your image to imgur.com or your own website and sharing that link instead.',
+      };
+    }
+    return {
+      valid: false,
+      error:
+        'Dropbox links will not work. Please use a direct image link ending in .png, .jpg, or .svg. Try uploading your image to imgur.com or your own website and sharing that link instead.',
+    };
+  }
+
+  // Check for a valid image extension in the pathname
+  const pathname = parsed.pathname.toLowerCase();
+  const hasValidExtension = VALID_IMAGE_EXTENSIONS.some((ext) => pathname.endsWith(ext));
+  if (!hasValidExtension) {
+    return {
+      valid: false,
+      error: `The URL must point directly to an image file. Please make sure the link ends in .png, .jpg, .jpeg, .svg, or .webp. (Your link ends with "${pathname.split('/').pop() || pathname}")`,
+    };
+  }
+
+  return { valid: true };
+}
