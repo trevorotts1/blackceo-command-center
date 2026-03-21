@@ -68,19 +68,11 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
 
-  const getTasksByStatus = (statusId: string) => {
+  const getTasksByStatus = (status: TaskStatus) => {
     const filteredByDept = selectedDepartment
       ? tasks.filter((task) => task.department === selectedDepartment)
       : tasks;
-    return filteredByDept.filter((task) => {
-      if (statusId === 'backlog') {
-        return ['backlog', 'inbox', 'planning', 'assigned', 'pending_dispatch'].includes(task.status);
-      }
-      if (statusId === 'review') {
-        return ['review', 'testing'].includes(task.status);
-      }
-      return task.status === statusId;
-    });
+    return filteredByDept.filter((task) => task.status === status);
   };
 
   const handleDragStart = (e: React.DragEvent, task: Task) => {
@@ -151,15 +143,15 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-bcc-bg">
       {/* Header */}
-      <header className="bg-white h-auto lg:h-20 px-4 lg:px-8 py-3 lg:py-0 flex flex-col lg:flex-row items-start lg:items-center justify-between border-b border-gray-100 shrink-0 gap-3 lg:gap-0">
-        <div className="flex items-center gap-3 w-full lg:w-auto">
-          <h1 className="text-xl lg:text-2xl font-bold text-gray-900 tracking-tight">Task Board</h1>
+      <header className="bg-white h-20 px-8 flex items-center justify-between border-b border-gray-100 shrink-0">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Task Board</h1>
           {selectedDepartment && (
             <>
-              <span className="hidden sm:block text-gray-300 mx-1">|</span>
-              <div className="flex items-center gap-2 bg-indigo-50 text-indigo-700 px-2 lg:px-3 py-1 lg:py-1.5 rounded-lg border border-indigo-100 ml-auto lg:ml-0">
-                <span className="text-base lg:text-lg leading-none">{departmentEmojis[selectedDepartment] || '📋'}</span>
-                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[selectedDepartment] || selectedDepartment}</span>
+              <span className="text-gray-300 mx-1">|</span>
+              <div className="flex items-center gap-2 bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg border border-indigo-100">
+                <span className="text-lg leading-none">{departmentEmojis[selectedDepartment] || '📋'}</span>
+                <span className="font-semibold">{departmentNames[selectedDepartment] || selectedDepartment}</span>
                 <button 
                   onClick={() => setSelectedDepartment(null)}
                   className="ml-1 p-0.5 rounded-md hover:bg-indigo-100 text-indigo-400 hover:text-indigo-900 transition-colors"
@@ -171,50 +163,48 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
             </>
           )}
         </div>
-        <div className="flex items-center gap-2 lg:gap-3 w-full lg:w-auto justify-end">
-          <button className="p-2 lg:p-2.5 rounded-xl border border-gray-100 hover:bg-gray-50 text-gray-500 transition-all">
-            <svg className="w-4 lg:w-5 h-4 lg:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="flex items-center gap-3">
+          <button className="p-2.5 rounded-xl border border-gray-100 hover:bg-gray-50 text-gray-500 transition-all">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
           </button>
-          <button className="hidden sm:block px-4 lg:px-5 py-2 lg:py-2.5 rounded-xl bg-indigo-50 text-indigo-700 font-semibold text-sm hover:bg-indigo-100 transition-all">
+          <button className="px-5 py-2.5 rounded-xl bg-indigo-50 text-indigo-700 font-semibold text-sm hover:bg-indigo-100 transition-all">
             Share Board
           </button>
           <button
             onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-1.5 lg:gap-2 px-3 lg:px-5 py-2 lg:py-2.5 rounded-xl bg-bcc-primary text-white font-semibold text-sm hover:bg-bcc-primary-hover transition-all shadow-md shadow-indigo-200"
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-bcc-primary text-white font-semibold text-sm hover:bg-bcc-primary-hover transition-all shadow-md shadow-indigo-200"
           >
             <Plus className="w-4 h-4" />
-            <span className="hidden sm:inline">New Task</span>
-            <span className="sm:hidden">New</span>
+            New Task
           </button>
         </div>
       </header>
 
       {/* Filter Tabs */}
-      <div className="bg-white px-4 lg:px-8 py-3 lg:py-3.5 border-b border-gray-100 flex flex-col sm:flex-row items-start sm:items-center justify-between shrink-0 gap-3 sm:gap-0">
-        <div className="flex items-center gap-1 lg:gap-2 overflow-x-auto w-full sm:w-auto pb-2 sm:pb-0 -mx-4 sm:mx-0 px-4 sm:px-0">
+      <div className="bg-white px-8 py-3.5 border-b border-gray-100 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-2">
           {filters.map((filter) => (
             <button
               key={filter.id}
               onClick={() => setActiveFilter(filter.id)}
-              className={`px-3 lg:px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 lg:gap-2 whitespace-nowrap ${
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
                 activeFilter === filter.id
                   ? 'text-gray-900 bg-gray-100 font-semibold'
                   : 'text-gray-500 hover:bg-gray-50'
               }`}
             >
-              <span className="hidden sm:inline">{filter.label}</span>
-              <span className="sm:hidden">{filter.label.replace('By ', '').replace('Tasks ', '')}</span>
+              {filter.label}
               {filter.count !== undefined && (
-                <span className="px-1.5 lg:px-2 py-0.5 rounded-full bg-gray-200 text-[10px] lg:text-[11px] font-bold text-gray-600">
+                <span className="px-2 py-0.5 rounded-full bg-gray-200 text-[11px] font-bold text-gray-600">
                   {filter.count}
                 </span>
               )}
             </button>
           ))}
         </div>
-        <div className="hidden sm:flex items-center gap-2 text-sm text-gray-500 font-medium">
+        <div className="flex items-center gap-2 text-sm text-gray-500 font-medium">
           <span className="opacity-60">Sort By:</span>
           <button className="flex items-center gap-1.5 text-gray-900 font-semibold">
             Newest
@@ -226,24 +216,24 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
       </div>
 
       {/* Kanban Columns */}
-      <div className="flex-1 overflow-x-auto overflow-y-auto lg:overflow-y-hidden p-4 lg:p-8">
-        <div className="flex flex-col lg:flex-row gap-6 h-full min-w-0 lg:min-w-max pb-4">
+      <div className="flex-1 overflow-x-auto p-8">
+        <div className="flex gap-6 h-full min-w-max pb-4">
           {COLUMNS.map((column) => {
             const columnTasks = getTasksByStatus(column.id);
             return (
               <div
                 key={column.id}
-                className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                className="w-80 flex flex-col gap-6"
                 onDragOver={handleDragOver}
                 onDrop={(e) => handleDrop(e, column.id)}
               >
                 {/* Column Header */}
                 <div className="flex items-center justify-between shrink-0">
-                  <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
+                  <div className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
                     <span className="text-[11px] font-bold bg-white/20 px-2 py-0.5 rounded-full">
                       {columnTasks.length}
                     </span>
-                    <span className="text-xs lg:text-sm font-bold">{column.label}</span>
+                    <span className="text-sm font-bold">{column.label}</span>
                   </div>
                   <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
                     <Plus className="w-4 h-4" />
@@ -251,7 +241,7 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
                 </div>
 
                 {/* Tasks */}
-                <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
+                <div className="flex flex-col gap-4 overflow-y-auto pr-2">
                   {columnTasks.map((task) => (
                     <TaskCard
                       key={task.id}
@@ -289,33 +279,6 @@ interface TaskCardProps {
 }
 
 function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskCardProps) {
-  // Status pill styles
-  const statusPillStyles: Record<string, string> = {
-    backlog: 'bg-gray-100 text-gray-600',
-    inbox: 'bg-gray-100 text-gray-600',
-    planning: 'bg-gray-100 text-gray-600',
-    assigned: 'bg-gray-100 text-gray-600',
-    pending_dispatch: 'bg-gray-100 text-gray-600',
-    in_progress: 'bg-blue-100 text-blue-700',
-    review: 'bg-amber-100 text-amber-700',
-    testing: 'bg-amber-100 text-amber-700',
-    blocked: 'bg-red-100 text-red-700',
-    done: 'bg-emerald-100 text-emerald-700',
-  };
-
-  const statusLabels: Record<string, string> = {
-    backlog: 'Backlog',
-    inbox: 'Inbox',
-    planning: 'Planning',
-    assigned: 'Assigned',
-    pending_dispatch: 'Pending',
-    in_progress: 'In Progress',
-    review: 'Review',
-    testing: 'Testing',
-    blocked: 'Blocked',
-    done: 'Done',
-  };
-
   // Priority pill styles (for new pill tags)
   const priorityPillStyles: Record<string, string> = {
     critical: 'bg-red-100 text-red-700',
@@ -349,7 +312,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onClick}
-      className={`bg-white rounded-xl lg:rounded-2xl p-4 lg:p-5 card-shadow card-hover cursor-pointer border border-gray-50 w-full ${
+      className={`bg-white rounded-2xl p-5 card-shadow card-hover cursor-pointer border border-gray-50 ${
         isDragging ? 'opacity-50 scale-95' : ''
       } ${isCompleted ? 'opacity-75' : ''}`}
     >
@@ -367,11 +330,20 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
 
       {/* Pill Tags Row */}
       <div className="flex flex-wrap gap-1.5 mb-3">
-        {/* Status Pill */}
+        {/* Department Pill */}
+        {task.department && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {task.department}
+          </span>
+        )}
+
+        {/* Agent Pill */}
         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-          statusPillStyles[task.status] || 'bg-gray-100 text-gray-600'
+          task.assigned_agent 
+            ? 'bg-teal-100 text-teal-700' 
+            : 'bg-gray-100 text-gray-500'
         }`}>
-          {statusLabels[task.status] || task.status}
+          {task.assigned_agent ? (task.assigned_agent as { name: string }).name : 'Unassigned'}
         </span>
 
         {/* Persona Pill */}
@@ -387,27 +359,6 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         }`}>
           {priorityLabels[task.priority] || task.priority}
         </span>
-
-        {/* Department Pill */}
-        {task.department && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {departmentNames[task.department.toLowerCase()] || task.department}
-          </span>
-        )}
-
-        {/* Agent Pill */}
-        {task.assigned_agent && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700">
-            {(task.assigned_agent as { name: string }).name}
-          </span>
-        )}
-
-        {/* Persona Pill */}
-        {(task as any).persona && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-            🧠 {(task as any).persona}
-          </span>
-        )}
       </div>
 
       {/* Sprint and Due Date */}
