@@ -3,20 +3,25 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Settings, ChevronLeft, LayoutGrid } from 'lucide-react';
+import { Settings, ChevronLeft, LayoutGrid, Menu, X, BarChart3 } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
+import { LogoConfig } from '@/lib/logo';
+import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { format } from 'date-fns';
 import type { Workspace } from '@/lib/types';
 
 interface HeaderProps {
   workspace?: Workspace;
+  onMenuClick?: () => void;
+  sidebarOpen?: boolean;
 }
 
-export function Header({ workspace }: HeaderProps) {
+export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const router = useRouter();
   const { agents, tasks, isOnline } = useMissionControl();
   const [currentTime, setCurrentTime] = useState(new Date());
   const [activeSubAgents, setActiveSubAgents] = useState(0);
+  const logoUrl = useLogoUrl();
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -53,9 +58,9 @@ export function Header({ workspace }: HeaderProps) {
       {/* Left: Logo & Title */}
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
-          <img 
-            src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
-            alt="BlackCEO Command Center" 
+          <img
+            src={logoUrl}
+            alt={LogoConfig.alt}
             className="h-8 w-auto"
           />
         </div>
@@ -65,10 +70,10 @@ export function Header({ workspace }: HeaderProps) {
           <div className="flex items-center gap-2">
             <Link
               href="/"
-              className="flex items-center gap-1 text-gray-400 hover:text-indigo-600 transition-colors"
+              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
-              <LayoutGrid className="w-4 h-4" />
+              <span>All Companies</span>
             </Link>
             <span className="text-gray-300">/</span>
             <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg">
@@ -120,6 +125,14 @@ export function Header({ workspace }: HeaderProps) {
           />
           {isOnline ? 'ONLINE' : 'OFFLINE'}
         </div>
+        <button
+          onClick={() => router.push('/ceo-board')}
+          className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium rounded-lg hover:shadow-md transition-all duration-200"
+          title="CEO Performance Board"
+        >
+          <BarChart3 className="w-4 h-4" />
+          <span className="hidden sm:inline">Performance Board</span>
+        </button>
         <button
           onClick={() => router.push('/settings')}
           className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors"

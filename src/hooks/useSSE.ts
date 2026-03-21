@@ -114,18 +114,32 @@ export function useSSE() {
 
       eventSource.onerror = (error) => {
         debug.sse('Connection error', error);
-        setIsOnline(false);
         isConnecting = false;
 
         // Close the connection
         eventSource.close();
         eventSourceRef.current = null;
 
-        // Attempt reconnection after 5 seconds
+        // Health check via fetch before showing offline (SSE can fail through Cloudflare even when API works)
+        fetch('/api/workspaces', { method: 'GET', cache: 'no-store' })
+          .then((res) => {
+            if (res.ok) {
+              debug.sse('SSE failed but API is healthy - staying online');
+              setIsOnline(true);
+            } else {
+              setIsOnline(false);
+            }
+          })
+          .catch(() => {
+            debug.sse('Both SSE and health check failed - going offline');
+            setIsOnline(false);
+          });
+
+        // Attempt reconnection after 10 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
           debug.sse('Attempting to reconnect...');
           connect();
-        }, 5000);
+        }, 10000);
       };
     };
 

@@ -23,6 +23,7 @@ interface MissionControlState {
   isOnline: boolean;
   isLoading: boolean;
   selectedBusiness: string;
+  selectedDepartment: string | null;
 
   // Actions
   setAgents: (agents: Agent[]) => void;
@@ -38,6 +39,7 @@ interface MissionControlState {
   setIsOnline: (online: boolean) => void;
   setIsLoading: (loading: boolean) => void;
   setSelectedBusiness: (business: string) => void;
+  setSelectedDepartment: (department: string | null) => void;
 
   // Task mutations
   updateTaskStatus: (taskId: string, status: TaskStatus) => void;
@@ -66,9 +68,10 @@ export const useMissionControl = create<MissionControlState>((set) => ({
   openclawMessages: [],
   selectedAgent: null,
   selectedTask: null,
-  isOnline: false,
+  isOnline: true,
   isLoading: true,
   selectedBusiness: 'all',
+  selectedDepartment: null,
 
   // Setters
   setAgents: (agents) => set({ agents }),
@@ -95,6 +98,7 @@ export const useMissionControl = create<MissionControlState>((set) => ({
   },
   setIsLoading: (loading) => set({ isLoading: loading }),
   setSelectedBusiness: (business) => set({ selectedBusiness: business }),
+  setSelectedDepartment: (department) => set({ selectedDepartment: department }),
 
   // Task mutations
   updateTaskStatus: (taskId, status) => {

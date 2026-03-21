@@ -7,9 +7,11 @@ import { ChevronLeft } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { AgentsSidebar } from '@/components/AgentsSidebar';
 import { MissionQueue } from '@/components/MissionQueue';
+import { CEODashboard } from '@/components/CEODashboard';
+import { useMissionControl } from '@/lib/store';
 import { LiveFeed } from '@/components/LiveFeed';
 import { SSEDebugPanel } from '@/components/SSEDebugPanel';
-import { useMissionControl } from '@/lib/store';
+import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import type { Task, Workspace } from '@/lib/types';
@@ -25,10 +27,13 @@ export default function WorkspacePage() {
     setIsOnline,
     setIsLoading,
     isLoading,
+    selectedDepartment,
   } = useMissionControl();
 
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const logoUrl = useLogoUrl();
 
   // Connect to SSE for real-time updates
   useSSE();
@@ -65,12 +70,18 @@ export default function WorkspacePage() {
 
     async function loadData() {
       try {
-        debug.api('Loading workspace data...', { workspaceId });
-        
+        debug.api('Loading workspace data...', { workspaceId, selectedDepartment });
+
         // Fetch workspace-scoped data
+        // If "All Departments" (selectedDepartment=null): fetch ALL tasks
+        // If specific department selected: filter by that department
+        const tasksUrl = selectedDepartment === null
+          ? '/api/tasks'
+          : `/api/tasks?department=${selectedDepartment}`;
+
         const [agentsRes, tasksRes, eventsRes] = await Promise.all([
           fetch(`/api/agents?workspace_id=${workspaceId}`),
-          fetch(`/api/tasks?workspace_id=${workspaceId}`),
+          fetch(tasksUrl),
           fetch('/api/events'),
         ]);
 
@@ -88,26 +99,22 @@ export default function WorkspacePage() {
       }
     }
 
-    // Check OpenClaw connection separately (non-blocking)
-    async function checkOpenClaw() {
+    // Check dashboard API health (data availability, not gateway connection)
+    async function checkHealth() {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-        const openclawRes = await fetch('/api/openclaw/status', { signal: controller.signal });
+        const res = await fetch('/api/workspaces', { signal: controller.signal, cache: 'no-store' });
         clearTimeout(timeoutId);
-
-        if (openclawRes.ok) {
-          const status = await openclawRes.json();
-          setIsOnline(status.connected);
-        }
+        setIsOnline(res.ok);
       } catch {
         setIsOnline(false);
       }
     }
 
     loadData();
-    checkOpenClaw();
+    checkHealth();
 
     // SSE is the primary real-time mechanism - these are fallback polls with longer intervals
     // to reduce server load while providing redundancy
@@ -127,7 +134,11 @@ export default function WorkspacePage() {
     // Poll tasks as SSE fallback every 60 seconds (increased from 10s)
     const taskPoll = setInterval(async () => {
       try {
-        const res = await fetch(`/api/tasks?workspace_id=${workspaceId}`);
+        // Use same logic as initial load: All Departments = no filter, specific dept = filter by dept
+        const pollUrl = selectedDepartment === null
+          ? '/api/tasks'
+          : `/api/tasks?department=${selectedDepartment}`;
+        const res = await fetch(pollUrl);
         if (res.ok) {
           const newTasks: Task[] = await res.json();
           const currentTasks = useMissionControl.getState().tasks;
@@ -148,14 +159,11 @@ export default function WorkspacePage() {
       }
     }, 60000); // Increased from 10000 to 60000
 
-    // Check OpenClaw connection every 30 seconds (kept as-is for monitoring)
+    // Check dashboard health every 30 seconds (data availability, not gateway)
     const connectionCheck = setInterval(async () => {
       try {
-        const res = await fetch('/api/openclaw/status');
-        if (res.ok) {
-          const status = await res.json();
-          setIsOnline(status.connected);
-        }
+        const res = await fetch('/api/workspaces', { cache: 'no-store' });
+        setIsOnline(res.ok);
       } catch {
         setIsOnline(false);
       }
@@ -166,7 +174,7 @@ export default function WorkspacePage() {
       clearInterval(connectionCheck);
       clearInterval(taskPoll);
     };
-  }, [workspace, setAgents, setTasks, setEvents, setIsOnline, setIsLoading]);
+  }, [workspace, selectedDepartment, setAgents, setTasks, setEvents, setIsOnline, setIsLoading]);
 
   if (notFound) {
     return (
@@ -193,9 +201,9 @@ export default function WorkspacePage() {
     return (
       <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
-          <img 
-            src="https://storage.googleapis.com/msgsndr/Mct54Bwi1KlNouGXQcDX/media/bbda8c9f-425b-45cd-a081-797689289593.png" 
-            alt="Loading" 
+          <img
+            src={logoUrl}
+            alt="Loading"
             className="h-12 w-auto mb-4 animate-pulse"
           />
           <p className="text-gray-500">Loading {slug}...</p>
@@ -204,16 +212,24 @@ export default function WorkspacePage() {
     );
   }
 
-  return (
-    <div className="h-screen flex flex-col bg-[#F8F9FB] overflow-hidden">
-      <Header workspace={workspace} />
+  const isCEOWorkspace = workspace.slug === 'ceo' || workspace.slug === 'default';
+  // Show task board when a department is selected, even on CEO workspace
+  const showTaskBoard = true;
 
-      <div className="flex-1 flex overflow-hidden">
+  return (
+    <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
+      <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
+
+      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar */}
-        <AgentsSidebar workspaceId={workspace.id} />
+        <AgentsSidebar workspaceId={workspace.id} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
         {/* Main Content Area */}
-        <MissionQueue workspaceId={workspace.id} />
+        {showTaskBoard ? (
+          <MissionQueue workspaceId={workspace.id} />
+        ) : (
+          <CEODashboard workspace={workspace} />
+        )}
 
         {/* Live Feed */}
         <LiveFeed />
