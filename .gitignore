@@ -51,3 +51,6 @@ next-env.d.ts
 *.backup
 *.bak
 *.db.backup
+
+# Build backups
+.next-backup/
