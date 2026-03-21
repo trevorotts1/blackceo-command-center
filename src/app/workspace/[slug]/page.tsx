@@ -31,6 +31,7 @@ export default function WorkspacePage() {
 
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const logoUrl = useLogoUrl();
 
   // Connect to SSE for real-time updates
@@ -208,12 +209,12 @@ export default function WorkspacePage() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-[#F8F9FB] overflow-hidden">
-      <Header workspace={workspace} />
+    <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
+      <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar */}
-        <AgentsSidebar workspaceId={workspace.id} />
+        <AgentsSidebar workspaceId={workspace.id} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
         {/* Main Content Area */}
         <MissionQueue workspaceId={workspace.id} />

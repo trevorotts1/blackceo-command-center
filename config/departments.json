@@ -1,0 +1,19 @@
+[
+  { "id": "ceo", "emoji": "👔", "name": "CEO / COM", "headTitle": "Chief Executive Officer" },
+  { "id": "marketing", "emoji": "📢", "name": "Marketing", "headTitle": "Chief Marketing Officer" },
+  { "id": "sales", "emoji": "💰", "name": "Sales", "headTitle": "Chief Sales Officer" },
+  { "id": "billing", "emoji": "💳", "name": "Billing / Finance", "headTitle": "Chief Financial Officer" },
+  { "id": "support", "emoji": "🎧", "name": "Customer Support", "headTitle": "Chief Customer Officer" },
+  { "id": "operations", "emoji": "⚙️", "name": "Operations", "headTitle": "Chief Operating Officer" },
+  { "id": "creative", "emoji": "✍️", "name": "Creative", "headTitle": "Chief Creative Officer" },
+  { "id": "hr", "emoji": "👥", "name": "HR / People", "headTitle": "Chief People Officer" },
+  { "id": "legal", "emoji": "⚖️", "name": "Legal / Compliance", "headTitle": "General Counsel" },
+  { "id": "it", "emoji": "🖥️", "name": "IT / Tech", "headTitle": "Chief Technology Officer" },
+  { "id": "webdev", "emoji": "🌐", "name": "Web Development", "headTitle": "Chief Web Officer" },
+  { "id": "appdev", "emoji": "📱", "name": "App Development", "headTitle": "Chief App Officer" },
+  { "id": "graphics", "emoji": "🎨", "name": "Graphics", "headTitle": "Chief Graphics Officer" },
+  { "id": "video", "emoji": "🎬", "name": "Video", "headTitle": "Chief Video Officer" },
+  { "id": "audio", "emoji": "🎙️", "name": "Audio", "headTitle": "Chief Audio Officer" },
+  { "id": "research", "emoji": "🔬", "name": "Research", "headTitle": "Chief Research Officer" },
+  { "id": "comms", "emoji": "📣", "name": "Communications", "headTitle": "Chief Communications Officer" }
+]

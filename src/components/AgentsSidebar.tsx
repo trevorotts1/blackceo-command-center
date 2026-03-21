@@ -38,9 +38,11 @@ const DEPARTMENTS: Department[] = [
 
 interface AgentsSidebarProps {
   workspaceId?: string;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
-export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
+export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSidebarProps) {
   const { agentOpenClawSessions, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const [filter, setFilter] = useState<FilterTab>('all');
   const [connectingAgentId, setConnectingAgentId] = useState<string | null>(null);
@@ -49,6 +51,31 @@ export function AgentsSidebar({ workspaceId }: AgentsSidebarProps) {
   const [departments, setDepartments] = useState<Department[]>(DEPARTMENTS);
 
   const toggleMinimize = () => setIsMinimized(!isMinimized);
+
+  // Load department names from config (allows renaming via /api/departments)
+  useEffect(() => {
+    const loadDepartments = async () => {
+      try {
+        const res = await fetch('/api/departments');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.departments)) {
+            // Merge API names/emojis/headTitles over the default list (preserves status field)
+            setDepartments((prev) =>
+              prev.map((dept) => {
+                const override = data.departments.find((d: { id: string }) => d.id === dept.id);
+                return override ? { ...dept, ...override } : dept;
+              })
+            );
+          }
+        }
+      } catch {
+        // Fall back silently to hardcoded defaults
+      }
+    };
+
+    loadDepartments();
+  }, []);
 
   // Load active sub-agent count
   useEffect(() => {

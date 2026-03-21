@@ -1,22 +1,23 @@
 /**
  * Logo Configuration
- * 
- * Provides a configurable logo URL via environment variable.
- * Clients can set their own logo by setting NEXT_PUBLIC_LOGO_URL.
+ *
+ * Priority order (resolved at runtime by useLogoUrl hook):
+ * 1. logo-config.json in public/ (set via the /api/logo endpoint)
+ * 2. NEXT_PUBLIC_LOGO_URL environment variable
+ * 3. Generic "BLACKCEO COMMAND CENTER" text placeholder (no image)
  */
 
-// Generic fallback logo (simple building icon as SVG data URI)
-const FALLBACK_LOGO = `data:image/svg+xml,${encodeURIComponent(`
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M3 21h18"/>
-  <path d="M5 21V7l8-4 8 4v14"/>
-  <path d="M9 21v-6h6v6"/>
+// Generic fallback logo (text-based SVG, no image required)
+export const FALLBACK_LOGO = `data:image/svg+xml,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 60" fill="none">
+  <text x="0" y="44" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#1e293b" letter-spacing="1">BLACKCEO COMMAND CENTER</text>
 </svg>
 `)}`;
 
 /**
- * Get the configured logo URL.
- * Uses NEXT_PUBLIC_LOGO_URL env var if set, otherwise returns a generic fallback.
+ * Get the baseline logo URL (env var or fallback).
+ * This is client-safe and does NOT read from the filesystem.
+ * Use the useLogoUrl() hook in components for the full priority chain.
  */
 export function getLogoUrl(): string {
   return process.env.NEXT_PUBLIC_LOGO_URL || FALLBACK_LOGO;
@@ -25,6 +26,9 @@ export function getLogoUrl(): string {
 /**
  * Logo configuration for the application.
  * Include alt text and default dimensions.
+ *
+ * Note: .url reflects the env var / fallback.
+ * In components, prefer useLogoUrl() to also pick up logo-config.json.
  */
 export const LogoConfig = {
   url: getLogoUrl(),

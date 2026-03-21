@@ -21,6 +21,26 @@ const COLUMNS: { id: TaskStatus; label: string; gradient: string }[] = [
   { id: 'done', label: 'Done', gradient: 'column-pill-done' },
 ];
 
+const departmentEmojis: Record<string, string> = {
+  'ceo-com': '👔', 'ceo': '👔',
+  'marketing': '📢',
+  'sales': '💰',
+  'billing': '💳',
+  'customer-support': '🎧', 'support': '🎧',
+  'operations': '⚙️',
+  'creative': '✍️',
+  'hr-people': '👥', 'hr': '👥',
+  'legal-compliance': '⚖️', 'legal': '⚖️',
+  'it-tech': '🖥️', 'it': '🖥️',
+  'web-development': '🌐', 'webdev': '🌐',
+  'app-development': '📱', 'appdev': '📱',
+  'graphics': '🎨',
+  'video-production': '🎬', 'video': '🎬',
+  'audio-production': '🎙️', 'audio': '🎙️',
+  'research': '🔬',
+  'communications': '📣', 'comms': '📣',
+};
+
 const departmentNames: Record<string, string> = {
   'ceo-com': 'CEO / COM',
   'marketing': 'Marketing',
@@ -48,11 +68,19 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
 
-  const getTasksByStatus = (status: TaskStatus) => {
+  const getTasksByStatus = (statusId: string) => {
     const filteredByDept = selectedDepartment
       ? tasks.filter((task) => task.department === selectedDepartment)
       : tasks;
-    return filteredByDept.filter((task) => task.status === status);
+    return filteredByDept.filter((task) => {
+      if (statusId === 'backlog') {
+        return ['backlog', 'inbox', 'planning', 'assigned', 'pending_dispatch'].includes(task.status);
+      }
+      if (statusId === 'review') {
+        return ['review', 'testing'].includes(task.status);
+      }
+      return task.status === statusId;
+    });
   };
 
   const handleDragStart = (e: React.DragEvent, task: Task) => {
@@ -123,50 +151,70 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-bcc-bg">
       {/* Header */}
-      <header className="bg-white h-20 px-8 flex items-center justify-between border-b border-gray-100 shrink-0">
-        <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Task Board</h1>
-        <div className="flex items-center gap-3">
-          <button className="p-2.5 rounded-xl border border-gray-100 hover:bg-gray-50 text-gray-500 transition-all">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <header className="bg-white h-auto lg:h-20 px-4 lg:px-8 py-3 lg:py-0 flex flex-col lg:flex-row items-start lg:items-center justify-between border-b border-gray-100 shrink-0 gap-3 lg:gap-0">
+        <div className="flex items-center gap-3 w-full lg:w-auto">
+          <h1 className="text-xl lg:text-2xl font-bold text-gray-900 tracking-tight">Task Board</h1>
+          {selectedDepartment && (
+            <>
+              <span className="hidden sm:block text-gray-300 mx-1">|</span>
+              <div className="flex items-center gap-2 bg-indigo-50 text-indigo-700 px-2 lg:px-3 py-1 lg:py-1.5 rounded-lg border border-indigo-100 ml-auto lg:ml-0">
+                <span className="text-base lg:text-lg leading-none">{departmentEmojis[selectedDepartment] || '📋'}</span>
+                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[selectedDepartment] || selectedDepartment}</span>
+                <button 
+                  onClick={() => setSelectedDepartment(null)}
+                  className="ml-1 p-0.5 rounded-md hover:bg-indigo-100 text-indigo-400 hover:text-indigo-900 transition-colors"
+                  title="Clear filter"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2 lg:gap-3 w-full lg:w-auto justify-end">
+          <button className="p-2 lg:p-2.5 rounded-xl border border-gray-100 hover:bg-gray-50 text-gray-500 transition-all">
+            <svg className="w-4 lg:w-5 h-4 lg:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
           </button>
-          <button className="px-5 py-2.5 rounded-xl bg-indigo-50 text-indigo-700 font-semibold text-sm hover:bg-indigo-100 transition-all">
+          <button className="hidden sm:block px-4 lg:px-5 py-2 lg:py-2.5 rounded-xl bg-indigo-50 text-indigo-700 font-semibold text-sm hover:bg-indigo-100 transition-all">
             Share Board
           </button>
           <button
             onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-bcc-primary text-white font-semibold text-sm hover:bg-bcc-primary-hover transition-all shadow-md shadow-indigo-200"
+            className="flex items-center gap-1.5 lg:gap-2 px-3 lg:px-5 py-2 lg:py-2.5 rounded-xl bg-bcc-primary text-white font-semibold text-sm hover:bg-bcc-primary-hover transition-all shadow-md shadow-indigo-200"
           >
             <Plus className="w-4 h-4" />
-            New Task
+            <span className="hidden sm:inline">New Task</span>
+            <span className="sm:hidden">New</span>
           </button>
         </div>
       </header>
 
       {/* Filter Tabs */}
-      <div className="bg-white px-8 py-3.5 border-b border-gray-100 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2">
+      <div className="bg-white px-4 lg:px-8 py-3 lg:py-3.5 border-b border-gray-100 flex flex-col sm:flex-row items-start sm:items-center justify-between shrink-0 gap-3 sm:gap-0">
+        <div className="flex items-center gap-1 lg:gap-2 overflow-x-auto w-full sm:w-auto pb-2 sm:pb-0 -mx-4 sm:mx-0 px-4 sm:px-0">
           {filters.map((filter) => (
             <button
               key={filter.id}
               onClick={() => setActiveFilter(filter.id)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+              className={`px-3 lg:px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 lg:gap-2 whitespace-nowrap ${
                 activeFilter === filter.id
                   ? 'text-gray-900 bg-gray-100 font-semibold'
                   : 'text-gray-500 hover:bg-gray-50'
               }`}
             >
-              {filter.label}
+              <span className="hidden sm:inline">{filter.label}</span>
+              <span className="sm:hidden">{filter.label.replace('By ', '').replace('Tasks ', '')}</span>
               {filter.count !== undefined && (
-                <span className="px-2 py-0.5 rounded-full bg-gray-200 text-[11px] font-bold text-gray-600">
+                <span className="px-1.5 lg:px-2 py-0.5 rounded-full bg-gray-200 text-[10px] lg:text-[11px] font-bold text-gray-600">
                   {filter.count}
                 </span>
               )}
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2 text-sm text-gray-500 font-medium">
+        <div className="hidden sm:flex items-center gap-2 text-sm text-gray-500 font-medium">
           <span className="opacity-60">Sort By:</span>
           <button className="flex items-center gap-1.5 text-gray-900 font-semibold">
             Newest
@@ -177,50 +225,25 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
         </div>
       </div>
 
-      {/* Department Filter Banner */}
-      <div className={`px-8 py-2 flex items-center justify-between shrink-0 transition-all ${
-        selectedDepartment 
-          ? 'bg-indigo-50 border-b border-indigo-100' 
-          : 'bg-gray-50 border-b border-gray-100'
-      }`}>
-        <div className="flex items-center gap-2">
-          <span className="text-lg">{selectedDepartment ? '📋' : '📊'}</span>
-          <span className={`text-sm font-semibold ${
-            selectedDepartment ? 'text-indigo-900' : 'text-gray-600'
-          }`}>
-            Viewing: {selectedDepartment ? departmentNames[selectedDepartment] || selectedDepartment : 'All Departments'}
-          </span>
-        </div>
-        {selectedDepartment && (
-          <button
-            onClick={() => setSelectedDepartment(null)}
-            className="flex items-center gap-1 px-3 py-1 rounded-full bg-white text-indigo-700 text-xs font-medium hover:bg-indigo-100 transition-all border border-indigo-200 shadow-sm"
-          >
-            <X className="w-3 h-3" />
-            Clear Filter
-          </button>
-        )}
-      </div>
-
       {/* Kanban Columns */}
-      <div className="flex-1 overflow-x-auto p-8">
-        <div className="flex gap-6 h-full min-w-max pb-4">
+      <div className="flex-1 overflow-x-auto overflow-y-auto lg:overflow-y-hidden p-4 lg:p-8">
+        <div className="flex flex-col lg:flex-row gap-6 h-full min-w-0 lg:min-w-max pb-4">
           {COLUMNS.map((column) => {
             const columnTasks = getTasksByStatus(column.id);
             return (
               <div
                 key={column.id}
-                className="w-80 flex flex-col gap-6"
+                className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
                 onDragOver={handleDragOver}
                 onDrop={(e) => handleDrop(e, column.id)}
               >
                 {/* Column Header */}
                 <div className="flex items-center justify-between shrink-0">
-                  <div className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
+                  <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
                     <span className="text-[11px] font-bold bg-white/20 px-2 py-0.5 rounded-full">
                       {columnTasks.length}
                     </span>
-                    <span className="text-sm font-bold">{column.label}</span>
+                    <span className="text-xs lg:text-sm font-bold">{column.label}</span>
                   </div>
                   <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
                     <Plus className="w-4 h-4" />
@@ -228,7 +251,7 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
                 </div>
 
                 {/* Tasks */}
-                <div className="flex flex-col gap-4 overflow-y-auto pr-2">
+                <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
                   {columnTasks.map((task) => (
                     <TaskCard
                       key={task.id}
@@ -282,20 +305,6 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
   };
 
   // Department emoji mapping
-  const departmentEmojis: Record<string, string> = {
-    marketing: '📢',
-    sales: '💰',
-    engineering: '⚙️',
-    product: '📦',
-    design: '🎨',
-    operations: '⚡',
-    finance: '💵',
-    hr: '👥',
-    legal: '⚖️',
-    support: '🎧',
-    executive: '👑',
-  };
-
   // Get avatar gradient based on agent or task id
   const getAvatarGradient = (index: number) => {
     const gradients = [
@@ -313,14 +322,21 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onClick}
-      className={`bg-white rounded-2xl p-5 card-shadow card-hover cursor-pointer border border-gray-50 ${
+      className={`bg-white rounded-xl lg:rounded-2xl p-4 lg:p-5 card-shadow card-hover cursor-pointer border border-gray-50 w-full ${
         isDragging ? 'opacity-50 scale-95' : ''
       } ${isCompleted ? 'opacity-75' : ''}`}
     >
       {/* Title */}
-      <h3 className={`text-[15px] font-semibold text-gray-900 mb-3 leading-snug ${isCompleted ? 'line-through text-gray-400' : ''}`}>
+      <h3 className={`text-[15px] font-semibold text-gray-900 mb-1 leading-snug ${isCompleted ? 'line-through text-gray-400' : ''}`}>
         {task.title}
       </h3>
+
+      {/* Description */}
+      {task.description && (
+        <p className="text-xs text-gray-500 mb-3 leading-relaxed">
+          {task.description}
+        </p>
+      )}
 
       {/* Pill Tags Row */}
       <div className="flex flex-wrap gap-1.5 mb-3">
