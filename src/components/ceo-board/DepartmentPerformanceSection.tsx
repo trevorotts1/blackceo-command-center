@@ -8,6 +8,8 @@ import { DepartmentPerformance } from './DepartmentCard';
 import { Building2, TrendingUp } from 'lucide-react';
 import type { WorkspaceStats, Task } from '@/lib/types';
 
+const EXCLUDED_WORKSPACE_IDS = ['default'];
+
 interface DepartmentPerformanceSectionProps {
   className?: string;
 }
@@ -126,8 +128,13 @@ export function DepartmentPerformanceSection({ className }: DepartmentPerformanc
         const workspaces: WorkspaceStats[] = await workspacesRes.json();
         const tasks: Task[] = await tasksRes.json();
         
+        // Filter out excluded workspaces (e.g., BlackCEO Operations)
+        const filteredWorkspaces = workspaces.filter(
+          (w) => !EXCLUDED_WORKSPACE_IDS.includes(w.id)
+        );
+        
         // Calculate department performance from real data
-        const performanceData = calculateDepartmentPerformance(workspaces, tasks);
+        const performanceData = calculateDepartmentPerformance(filteredWorkspaces, tasks);
         setDepartments(performanceData);
       } catch (err) {
         console.error('Failed to load department data:', err);

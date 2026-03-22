@@ -126,9 +126,9 @@ function calculateDepartmentScore(dept: WorkspaceStats): number {
 
   const doneRate = done / total;
 
-  // Bootstrap condition: many tasks but very few done (< 10%)
-  if (total > 50 && doneRate < 0.1) {
-    return 72; // C+ baseline - too many unprocessed tasks to be meaningful
+  // Bootstrap condition: tasks exist but completion is too low to be meaningful (< 10%)
+  if (doneRate < 0.1) {
+    return 72; // C+ baseline - not enough completed work to grade fairly
   }
 
   // Has real progress - use actual completion rate
@@ -149,9 +149,9 @@ function calculateCompanyScore(departments: WorkspaceStats[]): number {
 
   const doneRate = totalDone / totalTasks;
 
-  // Bootstrap condition: many tasks but very few done (< 10%)
-  if (totalTasks > 50 && doneRate < 0.1) {
-    return 72; // C+ baseline - too many unprocessed tasks to be meaningful
+  // Bootstrap condition: too early in deployment for meaningful company grade (< 25% done)
+  if (doneRate < 0.25) {
+    return 72; // C+ baseline - system is still ramping up
   }
 
   // Has real progress - use weighted completion rate
@@ -207,7 +207,8 @@ export function CompanyHealthSection() {
     // Check if we're in bootstrap mode (no meaningful data yet)
     const totalTasks = departments.reduce((sum, dept) => sum + (dept.taskCounts?.total || 0), 0);
     const totalDone = departments.reduce((sum, dept) => sum + (dept.taskCounts?.done || 0), 0);
-    const isBootstrapMode = totalTasks === 0 || (totalTasks > 50 && totalDone / totalTasks < 0.1);
+    const doneRate = totalTasks > 0 ? totalDone / totalTasks : 0;
+    const isBootstrapMode = totalTasks === 0 || doneRate < 0.25;
 
     // Sort departments by score (highest first)
     const sorted = [...departments]

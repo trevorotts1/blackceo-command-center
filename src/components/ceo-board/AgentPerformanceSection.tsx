@@ -19,7 +19,7 @@ const demoAgents: Agent[] = [
     id: '1',
     name: 'Facebook Specialist',
     department: 'Marketing',
-    model: 'Kimi 2.5',
+    model: 'Kimi K2.5',
     actionsCompleted: 47,
     idlePercent: 12,
     qualityScore: 91,
@@ -29,7 +29,7 @@ const demoAgents: Agent[] = [
     id: '2',
     name: 'Email Specialist',
     department: 'Marketing',
-    model: 'Sonnet 4.6',
+    model: 'Sonnet',
     actionsCompleted: 31,
     idlePercent: 8,
     qualityScore: 88,
@@ -39,7 +39,7 @@ const demoAgents: Agent[] = [
     id: '3',
     name: 'Sales Closer',
     department: 'Sales',
-    model: 'GPT 5.4',
+    model: 'GPT-5.4',
     actionsCompleted: 23,
     idlePercent: 22,
     qualityScore: 79,
@@ -49,7 +49,7 @@ const demoAgents: Agent[] = [
     id: '4',
     name: 'Content Creator',
     department: 'Creative',
-    model: 'Kimi 2.5',
+    model: 'Kimi K2.5',
     actionsCompleted: 58,
     idlePercent: 5,
     qualityScore: 94,
@@ -59,7 +59,7 @@ const demoAgents: Agent[] = [
     id: '5',
     name: 'Support Agent',
     department: 'Support',
-    model: 'Kimi 2.5',
+    model: 'Kimi K2.5',
     actionsCompleted: 112,
     idlePercent: 3,
     qualityScore: 96,
@@ -69,7 +69,7 @@ const demoAgents: Agent[] = [
     id: '6',
     name: 'Operations Manager',
     department: 'Operations',
-    model: 'Sonnet 4.6',
+    model: 'Sonnet',
     actionsCompleted: 19,
     idlePercent: 31,
     qualityScore: 72,
@@ -95,6 +95,20 @@ function getQualityTextColor(score: number): string {
   if (score >= 80) return 'text-emerald-600';
   if (score >= 60) return 'text-amber-600';
   return 'text-red-600';
+}
+
+/** Map full model IDs to short display labels */
+function getModelLabel(model: string | null | undefined): string {
+  if (!model) return 'No Model';
+  const m = model.toLowerCase();
+  if (m.includes('kimi') || m.includes('moonshot')) return 'Kimi K2.5';
+  if (m.includes('gpt') || m.includes('openai') || m.includes('codex')) return 'GPT-5.4';
+  if (m.includes('sonnet')) return 'Sonnet';
+  if (m.includes('opus')) return 'Opus';
+  if (m.includes('minimax')) return 'MiniMax';
+  if (m.includes('perplexity')) return 'Perplexity';
+  if (m.includes('gemini')) return 'Gemini';
+  return model;
 }
 
 export function AgentPerformanceSection() {
@@ -149,8 +163,9 @@ export function AgentPerformanceSection() {
 
             {/* Model Pill */}
             <div className="mb-3">
-              <span className="inline-flex items-center px-2 py-1 rounded-md bg-gray-800 text-gray-100 text-xs font-mono">
-                {agent.model}
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-50 border border-gray-200 text-[11px] font-medium text-gray-600">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                {getModelLabel(agent.model)}
               </span>
             </div>
 

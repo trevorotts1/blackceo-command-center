@@ -119,10 +119,8 @@ export async function GET(request: NextRequest) {
 
     let sql = `
       SELECT
-        r.*,
-        d.name as department_name
+        r.*
       FROM recommendations r
-      LEFT JOIN departments d ON r.department_id = d.id
       WHERE 1=1
     `;
     const params: unknown[] = [];
