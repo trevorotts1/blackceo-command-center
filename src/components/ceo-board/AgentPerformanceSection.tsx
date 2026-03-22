@@ -165,23 +165,39 @@ export function AgentPerformanceSection() {
                   />
                 </div>
 
-                {/* Department Pill */}
-                <div className="flex items-center gap-2 mb-2">
+                {/* Department Pill + Specialist Type */}
+                <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <span
                     className={`px-2 py-0.5 rounded-full text-xs font-medium border ${deptColorClass}`}
                   >
                     {deptLabel}
                   </span>
+                  {(agent as any).specialist_type && (
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${
+                      (agent as any).specialist_type === 'permanent'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                        : 'bg-gray-50 border-gray-200 text-gray-600'
+                    }`}>
+                      {(agent as any).specialist_type === 'permanent' ? 'Full-time' : 'On-call'}
+                    </span>
+                  )}
                 </div>
 
-                {/* Model Pill */}
-                <span
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-medium ${pillStyle}`}
-                  style={{ fontSize: '12px' }}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                  {modelLabel}
-                </span>
+                {/* Model Pill + Persona */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-medium ${pillStyle}`}
+                    style={{ fontSize: '12px' }}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
+                    {modelLabel}
+                  </span>
+                  {(agent as any).persona && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-violet-200 bg-violet-50 text-violet-700 text-[11px] font-medium">
+                      🧠 {(agent as any).persona}
+                    </span>
+                  )}
+                </div>
               </motion.div>
             );
           })}

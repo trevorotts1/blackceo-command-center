@@ -13,6 +13,8 @@ interface DAChallenge {
   created_at: string;
   response_deadline: string | null;
   resolved_at: string | null;
+  /** Which persona the DA is operating under for this challenge */
+  persona?: string;
 }
 
 const departmentColors: Record<string, string> = {
@@ -201,6 +203,16 @@ export function DevilsAdvocateFeed() {
                   {statusConfig[challenge.status].label}
                 </span>
               </div>
+
+              {/* Persona Operating Under */}
+              {challenge.persona && (
+                <div className="flex items-center gap-1.5 mb-2">
+                  <span className="text-xs">🧠</span>
+                  <span className="text-xs font-medium text-violet-600">
+                    Acting as {challenge.persona}
+                  </span>
+                </div>
+              )}
 
               {/* Challenge Text */}
               <p className="text-sm text-gray-700 leading-relaxed mb-3">

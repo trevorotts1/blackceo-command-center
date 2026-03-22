@@ -20,6 +20,8 @@ export interface DepartmentPerformance {
   agentCount: number;
   lastActivity: string;
   blockers?: string[];
+  /** Active persona guiding the latest task in this department */
+  activePersona?: string;
 }
 
 interface DepartmentCardProps {
@@ -169,6 +171,16 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
         </div>
         <ProgressBar progress={department.progress} status={department.status} />
       </div>
+
+      {/* Active Persona */}
+      {department.activePersona && (
+        <div className="mb-3 flex items-center gap-1.5 px-2 py-1.5 bg-violet-50 border border-violet-100 rounded-lg">
+          <span className="text-xs">🧠</span>
+          <span className="text-xs font-medium text-violet-700 truncate">
+            {department.activePersona}
+          </span>
+        </div>
+      )}
 
       {/* Footer: Agent Count + Last Activity */}
       <div className="flex items-center justify-between pt-3 border-t border-gray-100">

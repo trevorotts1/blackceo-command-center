@@ -35,6 +35,10 @@ export interface Agent {
   tools_md?: string;
   memory_md?: string;
   model?: string;
+  /** Active persona for this agent's current/latest task */
+  persona?: string;
+  /** "permanent" = full-time team member, "on-call" = spawned when needed */
+  specialist_type?: 'permanent' | 'on-call';
   created_at: string;
   updated_at: string;
 }
