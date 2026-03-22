@@ -370,13 +370,15 @@ function RecommendationCard({
   );
 }
 
-function generateDemoAgents(deptId: string): AgentData[] {
-  const personas = ['Alex Hormozi', 'Gary Vaynerchuk', 'Seth Godin', 'Simon Sinek', 'Brené Brown', 'Ray Dalio', 'Donald Miller', 'Russell Brunson', 'Chris Voss', 'Daniel Pink'];
+const FALLBACK_PERSONAS = ['Alex Hormozi', 'Gary Vaynerchuk', 'Seth Godin', 'Simon Sinek', 'Brené Brown', 'Ray Dalio', 'Donald Miller', 'Russell Brunson', 'Chris Voss', 'Daniel Pink'];
+
+function generateDemoAgents(deptId: string, livePersonas?: string[]): AgentData[] {
+  const personas = livePersonas && livePersonas.length > 0 ? livePersonas : FALLBACK_PERSONAS;
   const models = ['Kimi 2.5', 'Sonnet 4.6', 'GPT 5.4', 'Opus 4.6'];
   return Array.from({ length: 3 }, (_, i) => ({
     id: `${deptId}-agent-${i}`,
     name: `${deptId.charAt(0).toUpperCase() + deptId.slice(1)} Specialist ${i + 1}`,
-    persona: personas[Math.floor(Math.random() * personas.length)],
+    persona: personas[i % personas.length],
     model: models[Math.floor(Math.random() * models.length)],
     actionsCompleted: Math.floor(Math.random() * 100) + 50,
     idlePercent: Math.floor(Math.random() * 20) + 5,
@@ -498,7 +500,21 @@ export default function DepartmentSubBoardPage() {
         setKpis([]);
       }
 
-      setAgents(generateDemoAgents(deptId));
+      // Try to load real personas from governing-personas.md
+      let livePersonas: string[] | undefined;
+      try {
+        const personaRes = await fetch(`/api/departments/${deptId}/personas`);
+        if (personaRes.ok) {
+          const personaData = await personaRes.json();
+          if (personaData.personas && personaData.personas.length > 0) {
+            livePersonas = personaData.personas;
+          }
+        }
+      } catch {
+        // Fall back to demo personas silently
+      }
+
+      setAgents(generateDemoAgents(deptId, livePersonas));
       setRecommendations(generateDemoRecommendations(deptId));
       setIsLoading(false);
     };
