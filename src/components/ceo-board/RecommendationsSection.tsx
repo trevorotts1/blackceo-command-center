@@ -1,52 +1,49 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Lightbulb } from 'lucide-react';
-import { RecommendationCard } from './RecommendationCard';
-
-interface Recommendation {
-  id: string;
-  priority: 'High' | 'Medium' | 'Low';
-  department: 'Marketing' | 'Operations' | 'Sales' | 'Finance' | 'HR' | 'Product';
-  description: string;
-  impact: string;
-}
-
-const RECOMMENDATIONS_DATA: Recommendation[] = [
-  {
-    id: '1',
-    priority: 'High',
-    department: 'Marketing',
-    description: 'Marketing needs 3 new SOPs to standardize campaign workflows and reduce onboarding time for new agents.',
-    impact: '+15% efficiency',
-  },
-  {
-    id: '2',
-    priority: 'Medium',
-    department: 'Sales',
-    description: 'Sales team requires 2 additional AI agents to handle increased lead volume from Q2 campaigns.',
-    impact: '+22% lead response rate',
-  },
-  {
-    id: '3',
-    priority: 'Medium',
-    department: 'Operations',
-    description: 'Operations should implement automated task routing to reduce manual assignment overhead.',
-    impact: '-30% admin time',
-  },
-  {
-    id: '4',
-    priority: 'Low',
-    department: 'Finance',
-    description: 'Finance can optimize reporting workflows by consolidating weekly reports into a single dashboard.',
-    impact: '+8% reporting speed',
-  },
-];
+import { RecommendationEngineCard } from './RecommendationEngineCard';
+import type { Recommendation } from '@/lib/types';
 
 export function RecommendationsSection() {
-  const handleViewDetails = (id: string) => {
-    // This can be expanded to open a modal or navigate to details
-    console.log('View details for recommendation:', id);
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [stats, setStats] = useState({
+    total: 47,
+    approved: 31,
+    improved: 18,
+    effectiveness: 58,
+  });
+
+  useEffect(() => {
+    fetchRecommendations();
+  }, []);
+
+  const fetchRecommendations = async () => {
+    try {
+      setIsLoading(true);
+      const res = await fetch('/api/recommendations?status=pending&limit=5');
+      if (!res.ok) throw new Error('Failed to fetch recommendations');
+      const data = await res.json();
+      setRecommendations(data);
+    } catch (error) {
+      console.error('Error fetching recommendations:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleStatusChange = (id: string, newStatus: string) => {
+    // Remove dismissed cards from the list immediately for better UX
+    if (newStatus === 'dismissed') {
+      setRecommendations((prev) => prev.filter((rec) => rec.id !== id));
+    } else {
+      // For approved/saved, update the status in the list
+      setRecommendations((prev) =>
+        prev.map((rec) => (rec.id === id ? { ...rec, status: newStatus as Recommendation['status'] } : rec))
+      );
+    }
   };
 
   return (
@@ -56,7 +53,7 @@ export function RecommendationsSection() {
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
-        className="mb-8"
+        className="mb-6"
       >
         <div className="flex items-center gap-3 mb-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-amber-50">
@@ -71,45 +68,81 @@ export function RecommendationsSection() {
         </p>
       </motion.div>
 
-      {/* Recommendations Grid */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {RECOMMENDATIONS_DATA.map((recommendation, index) => (
-          <RecommendationCard
-            key={recommendation.id}
-            priority={recommendation.priority}
-            department={recommendation.department}
-            description={recommendation.description}
-            impact={recommendation.impact}
-            onViewDetails={() => handleViewDetails(recommendation.id)}
-            index={index}
-          />
-        ))}
-      </div>
-
-      {/* View All Link */}
+      {/* Effectiveness Stats Bar */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        transition={{ delay: 0.6, duration: 0.4 }}
-        className="mt-6 text-center"
+        transition={{ delay: 0.2, duration: 0.4 }}
+        className="mb-6 pb-6 border-b border-gray-100"
       >
-        <button className="inline-flex items-center gap-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 transition-colors">
-          View all recommendations
-          <svg
-            className="h-4 w-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M9 5l7 7-7 7"
-            />
-          </svg>
-        </button>
+        <p className="text-xs text-gray-500">
+          {stats.total} recommendations made · {stats.approved} approved · {stats.improved} improved · {stats.effectiveness}% effectiveness
+        </p>
       </motion.div>
+
+      {/* Recommendations List */}
+      {isLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500" />
+        </div>
+      ) : recommendations.length === 0 ? (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.3, duration: 0.4 }}
+          className="text-center py-12"
+        >
+          <p className="text-sm text-gray-500">
+            No pending recommendations. Check back after agents complete more tasks.
+          </p>
+        </motion.div>
+      ) : (
+        <div className="space-y-4">
+          {recommendations.map((rec, index) => (
+            <motion.div
+              key={rec.id}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: index * 0.1, duration: 0.3 }}
+            >
+              <RecommendationEngineCard
+                id={rec.id}
+                category={rec.category}
+                title={rec.title}
+                description={rec.description}
+                supportingData={
+                  typeof rec.supporting_data === 'string'
+                    ? rec.supporting_data
+                    : rec.supporting_data
+                    ? JSON.stringify(rec.supporting_data, null, 2)
+                    : undefined
+                }
+                confidence={rec.confidence}
+                status={rec.status}
+                departmentId={rec.department_id}
+                onStatusChange={handleStatusChange}
+              />
+            </motion.div>
+          ))}
+        </div>
+      )}
+
+      {/* View All Link */}
+      {!isLoading && recommendations.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.6, duration: 0.4 }}
+          className="mt-6 text-center"
+        >
+          <button className="inline-flex items-center gap-2 text-sm font-medium text-[#6366F1] hover:text-indigo-700 transition-colors">
+            View all recommendations
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+        </motion.div>
+      )}
     </section>
   );
 }

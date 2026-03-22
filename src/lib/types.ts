@@ -323,11 +323,13 @@ export type SSEEventType =
   | 'activity_logged'
   | 'deliverable_added'
   | 'agent_spawned'
-  | 'agent_completed';
+  | 'agent_completed'
+  | 'recommendation_created'
+  | 'recommendation_updated';
 
 export interface SSEEvent {
   type: SSEEventType;
-  payload: Task | TaskActivity | TaskDeliverable | {
+  payload: Task | TaskActivity | TaskDeliverable | Recommendation | {
     taskId: string;
     sessionId: string;
     agentName?: string;
@@ -336,4 +338,17 @@ export interface SSEEvent {
   } | {
     id: string;  // For task_deleted events
   };
+}
+
+export interface Recommendation {
+  id: string;
+  department_id: string;
+  category: 'do-more' | 'stop' | 'watch' | 'try';
+  title: string;
+  description: string;
+  supporting_data?: string;
+  confidence: number;
+  status: 'pending' | 'approved' | 'dismissed' | 'saved';
+  created_at: string;
+  resolved_at?: string;
 }

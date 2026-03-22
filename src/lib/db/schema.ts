@@ -184,6 +184,40 @@ CREATE TABLE IF NOT EXISTS agent_memory_logs (
   UNIQUE(agent_id, log_date)
 );
 
+-- Recommendations table (Proactive Intelligence)
+CREATE TABLE IF NOT EXISTS recommendations (
+  id TEXT PRIMARY KEY,
+  department_id TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('do-more', 'stop', 'watch', 'try')),
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  supporting_data TEXT,
+  confidence REAL DEFAULT 0.7,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'dismissed', 'saved')),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Index for recommendations
+CREATE INDEX IF NOT EXISTS idx_recommendations_status ON recommendations(status);
+CREATE INDEX IF NOT EXISTS idx_recommendations_category ON recommendations(category);
+CREATE INDEX IF NOT EXISTS idx_recommendations_department ON recommendations(department_id);
+
+-- DA Challenges table (Devil's Advocate Feed)
+CREATE TABLE IF NOT EXISTS da_challenges (
+  id TEXT PRIMARY KEY,
+  department_id TEXT NOT NULL,
+  challenge_text TEXT NOT NULL,
+  response_text TEXT,
+  status TEXT DEFAULT 'open' CHECK (status IN ('open', 'responded', 'escalated')),
+  created_at TEXT DEFAULT (datetime('now')),
+  response_deadline TEXT,
+  resolved_at TEXT
+);
+
+-- Index for DA challenges
+CREATE INDEX IF NOT EXISTS idx_da_challenges_status ON da_challenges(status);
+CREATE INDEX IF NOT EXISTS idx_da_challenges_department ON da_challenges(department_id);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id);

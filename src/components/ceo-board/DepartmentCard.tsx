@@ -25,6 +25,7 @@ export interface DepartmentPerformance {
 interface DepartmentCardProps {
   department: DepartmentPerformance;
   index: number;
+  onClick?: () => void;
 }
 
 const statusConfig = {
@@ -91,7 +92,7 @@ function ProgressBar({ progress, status }: { progress: number; status: Departmen
   );
 }
 
-export function DepartmentCard({ department, index }: DepartmentCardProps) {
+export function DepartmentCard({ department, index, onClick }: DepartmentCardProps) {
   const status = statusConfig[department.status];
   const hasBlockers = department.blockers && department.blockers.length > 0;
 
@@ -108,12 +109,13 @@ export function DepartmentCard({ department, index }: DepartmentCardProps) {
         y: -4,
         transition: { duration: 0.2 },
       }}
-      className="group relative bg-white rounded-2xl border border-gray-200 p-5 shadow-sm hover:shadow-lg hover:shadow-gray-200/50 hover:border-indigo-200 transition-all duration-300"
+      onClick={onClick}
+      className={`group relative bg-white rounded-2xl border border-gray-200 p-4 shadow-sm hover:shadow-lg hover:shadow-gray-200/50 hover:border-indigo-200 transition-all duration-300 ${onClick ? 'cursor-pointer' : ''}`}
     >
       {/* Header: Icon + Name + Status */}
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-gray-50 to-gray-100 text-2xl shadow-sm">
+          <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-gray-50 to-gray-100 text-lg shadow-sm">
             {department.icon}
           </div>
           <div>
@@ -152,23 +154,9 @@ export function DepartmentCard({ department, index }: DepartmentCardProps) {
         )}
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-3 gap-3 mb-4">
-        <StatBox
-          label="In Progress"
-          value={department.stats.inProgress}
-          color="indigo"
-        />
-        <StatBox
-          label="Done"
-          value={department.stats.done}
-          color="emerald"
-        />
-        <StatBox
-          label="Backlog"
-          value={department.stats.backlog}
-          color="gray"
-        />
+      {/* Stats Row */}
+      <div className="mb-4 text-xs text-gray-400">
+        <span className="font-medium text-indigo-400">{department.stats.inProgress}</span> active · <span className="font-medium text-emerald-400">{department.stats.done}</span> done · <span className="font-medium text-gray-400">{department.stats.backlog}</span> backlog
       </div>
 
       {/* Progress Bar */}
@@ -198,30 +186,5 @@ export function DepartmentCard({ department, index }: DepartmentCardProps) {
         </div>
       </div>
     </motion.div>
-  );
-}
-
-interface StatBoxProps {
-  label: string;
-  value: number;
-  color: 'indigo' | 'emerald' | 'gray';
-}
-
-function StatBox({ label, value, color }: StatBoxProps) {
-  const colorClasses = {
-    indigo: 'bg-indigo-50 text-indigo-700 border-indigo-100',
-    emerald: 'bg-emerald-50 text-emerald-700 border-emerald-100',
-    gray: 'bg-gray-50 text-gray-600 border-gray-100',
-  };
-
-  return (
-    <div
-      className={`text-center py-2.5 px-2 rounded-xl border ${colorClasses[color]} transition-transform duration-200 group-hover:scale-[1.02]`}
-    >
-      <p className="text-lg font-bold leading-none">{value}</p>
-      <p className="text-[10px] font-medium uppercase tracking-wide mt-1 opacity-80">
-        {label}
-      </p>
-    </div>
   );
 }

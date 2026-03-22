@@ -10,6 +10,8 @@ import { DepartmentPerformanceSection } from '@/components/ceo-board/DepartmentP
 import { AnalyticsSection } from '@/components/ceo-board/AnalyticsSection';
 import { BenchmarkingSection } from '@/components/ceo-board/BenchmarkingSection';
 import { RecommendationsSection } from '@/components/ceo-board/RecommendationsSection';
+import { DevilsAdvocateFeed } from '@/components/ceo-board/DevilsAdvocateFeed';
+import { AgentPerformanceSection } from '@/components/ceo-board/AgentPerformanceSection';
 
 // Page-level animation variants
 const pageVariants = {
@@ -104,6 +106,11 @@ export default function CEOPerformanceBoardPage() {
             <CompanyHealthSection />
           </motion.section>
 
+          {/* Agent Performance Section */}
+          <motion.section variants={sectionVariants}>
+            <AgentPerformanceSection />
+          </motion.section>
+
           {/* Two-Column Layout: Departments + Analytics */}
           <motion.section
             variants={sectionVariants}
@@ -123,6 +130,11 @@ export default function CEOPerformanceBoardPage() {
           {/* Benchmarking Section */}
           <motion.section variants={sectionVariants}>
             <BenchmarkingSection />
+          </motion.section>
+
+          {/* Devil's Advocate Feed */}
+          <motion.section variants={sectionVariants}>
+            <DevilsAdvocateFeed />
           </motion.section>
 
           {/* Recommendations Section */}

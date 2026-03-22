@@ -140,9 +140,14 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
     setDraggedTask(null);
   };
 
+  // Filter tasks by selected department for accurate counts
+  const filteredTasks = selectedDepartment
+    ? tasks.filter((task) => task.department === selectedDepartment)
+    : tasks;
+
   const filters = [
     { id: 'status', label: 'By Status' },
-    { id: 'total', label: 'By Total Tasks', count: tasks.length },
+    { id: 'total', label: 'By Total Tasks', count: filteredTasks.length },
     { id: 'due', label: 'Tasks Due' },
     { id: 'agent', label: 'By Agent' },
     { id: 'completed', label: 'Completed' },

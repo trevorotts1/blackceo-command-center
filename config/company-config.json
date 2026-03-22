@@ -1,0 +1,25 @@
+{
+  "companyName": "BlackCEO Operations",
+  "industry": "Business Coaching / Education",
+  "commandCenterName": "BlackCEO Command Center",
+  "createdAt": "2026-03-21T00:00:00Z",
+  "connectedSystems": {
+    "payment": "stripe",
+    "crm": "convertandflow",
+    "email": "none",
+    "social": "none"
+  },
+  "companyKPIs": [
+    { "id": "new-leads", "name": "New Leads This Week", "target": 50, "unit": "count", "source": "manual", "benchmarkIndustryAvg": 40 },
+    { "id": "new-clients", "name": "New Paying Clients", "target": 10, "unit": "count", "source": "manual", "benchmarkIndustryAvg": 8 },
+    { "id": "monthly-revenue", "name": "Monthly Revenue", "target": 50000, "unit": "currency", "source": "stripe", "benchmarkIndustryAvg": 35000 },
+    { "id": "conversion-rate", "name": "Lead Conversion Rate", "target": 20, "unit": "percent", "source": "manual", "benchmarkIndustryAvg": 15 }
+  ],
+  "gradingWeights": {
+    "kpiAchievement": 0.4,
+    "agentPerformance": 0.3,
+    "daCompliance": 0.15,
+    "recommendationFollowThrough": 0.15
+  },
+  "departments": ["ceo", "marketing", "sales", "billing", "support", "operations", "creative", "hr", "legal", "it", "webdev", "appdev", "graphics", "video", "audio", "research", "comms"]
+}
