@@ -1,7 +1,10 @@
 'use client';
 
-import { motion } from 'framer-motion';
+import { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Edit3, Check } from 'lucide-react';
 import { scoreToGrade, gradeToColor, gradeToLabel, type Grade } from '@/lib/grading';
+import { KPIEntryPanel } from '@/components/ceo-board/KPIEntryPanel';
 
 // Demo department data
 const demoDepartments = [
