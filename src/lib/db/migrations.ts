@@ -220,6 +220,78 @@ const migrations: Migration[] = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_memory_logs_agent ON agent_memory_logs(agent_id, log_date DESC)`);
       console.log('[Migration 007] Created agent_memory_logs table');
     }
+  },
+  {
+    id: '010',
+    name: 'add_execution_queue',
+    up: (db) => {
+      console.log('[Migration 010] Adding execution_queue table...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS execution_queue (
+          id TEXT PRIMARY KEY,
+          task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+          recommendation_id TEXT REFERENCES recommendations(id) ON DELETE SET NULL,
+          task_name TEXT NOT NULL,
+          department TEXT,
+          queued_at TEXT DEFAULT (datetime('now')),
+          scheduled_window TEXT DEFAULT 'evening' CHECK (scheduled_window IN ('evening', 'overnight', 'morning')),
+          status TEXT DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+          started_at TEXT,
+          completed_at TEXT,
+          result_notes TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_execution_queue_status ON execution_queue(status)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_execution_queue_queued ON execution_queue(queued_at DESC)`);
+      console.log('[Migration 010] Created execution_queue table');
+    }
+  },
+  {
+    id: '009',
+    name: 'add_effectiveness_tracking',
+    up: (db) => {
+      console.log('[Migration 009] Adding effectiveness tracking...');
+
+      // Add columns to recommendations if missing
+      const recCols = db.prepare("PRAGMA table_info(recommendations)").all() as { name: string }[];
+      const colNames = new Set(recCols.map(c => c.name));
+
+      if (!colNames.has('approved_at')) {
+        db.exec(`ALTER TABLE recommendations ADD COLUMN approved_at TEXT`);
+      }
+      if (!colNames.has('effectiveness_score')) {
+        db.exec(`ALTER TABLE recommendations ADD COLUMN effectiveness_score INTEGER`);
+      }
+      if (!colNames.has('measured_at')) {
+        db.exec(`ALTER TABLE recommendations ADD COLUMN measured_at TEXT`);
+      }
+      if (!colNames.has('outcome_notes')) {
+        db.exec(`ALTER TABLE recommendations ADD COLUMN outcome_notes TEXT`);
+      }
+
+      // Create recommendation_outcomes table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS recommendation_outcomes (
+          id TEXT PRIMARY KEY,
+          recommendation_id TEXT NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+          measured_at TEXT DEFAULT (datetime('now')),
+          before_score INTEGER NOT NULL,
+          after_score INTEGER NOT NULL,
+          improvement_pct REAL NOT NULL,
+          notes TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_outcomes_rec ON recommendation_outcomes(recommendation_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_outcomes_measured ON recommendation_outcomes(measured_at DESC)`);
+
+      console.log('[Migration 009] Effectiveness tracking columns and outcomes table created');
+    }
   }
 ];
 

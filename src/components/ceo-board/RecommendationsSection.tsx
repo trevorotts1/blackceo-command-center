@@ -6,18 +6,26 @@ import { Lightbulb } from 'lucide-react';
 import { RecommendationEngineCard } from './RecommendationEngineCard';
 import type { Recommendation } from '@/lib/types';
 
+interface EffectivenessStats {
+  totalApproved: number;
+  tracked: number;
+  avgImprovement: number;
+  topDepartment: string;
+}
+
 export function RecommendationsSection() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [stats, setStats] = useState({
-    total: 47,
-    approved: 31,
-    improved: 18,
-    effectiveness: 58,
+  const [effectiveness, setEffectiveness] = useState<EffectivenessStats>({
+    totalApproved: 0,
+    tracked: 0,
+    avgImprovement: 0,
+    topDepartment: 'N/A',
   });
 
   useEffect(() => {
     fetchRecommendations();
+    fetchEffectiveness();
   }, []);
 
   const fetchRecommendations = async () => {
@@ -31,6 +39,22 @@ export function RecommendationsSection() {
       console.error('Error fetching recommendations:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const fetchEffectiveness = async () => {
+    try {
+      const res = await fetch('/api/recommendations/effectiveness');
+      if (!res.ok) return;
+      const data = await res.json();
+      setEffectiveness({
+        totalApproved: data.totalApproved ?? 0,
+        tracked: data.tracked ?? 0,
+        avgImprovement: data.avgImprovement ?? 0,
+        topDepartment: data.topDepartment ?? 'N/A',
+      });
+    } catch (error) {
+      console.error('Error fetching effectiveness:', error);
     }
   };
 
@@ -68,16 +92,26 @@ export function RecommendationsSection() {
         </p>
       </motion.div>
 
-      {/* Effectiveness Stats Bar */}
+      {/* Effectiveness Stat Card */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ delay: 0.2, duration: 0.4 }}
         className="mb-6 pb-6 border-b border-gray-100"
       >
-        <p className="text-xs text-gray-500">
-          {stats.total} recommendations made · {stats.approved} approved · {stats.improved} improved · {stats.effectiveness}% effectiveness
-        </p>
+        <div className="flex items-center gap-6 text-xs text-gray-500">
+          <div>
+            <span className="font-semibold text-gray-700">{effectiveness.tracked}</span> recommendations tracked
+          </div>
+          <div className="w-px h-4 bg-gray-200" />
+          <div>
+            <span className="font-semibold text-gray-700">{effectiveness.avgImprovement}%</span> average improvement
+          </div>
+          <div className="w-px h-4 bg-gray-200" />
+          <div>
+            Top dept: <span className="font-semibold text-gray-700 capitalize">{effectiveness.topDepartment}</span>
+          </div>
+        </div>
       </motion.div>
 
       {/* Recommendations List */}

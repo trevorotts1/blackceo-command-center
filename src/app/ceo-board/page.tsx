@@ -10,8 +10,10 @@ import { DepartmentPerformanceSection } from '@/components/ceo-board/DepartmentP
 import { AnalyticsSection } from '@/components/ceo-board/AnalyticsSection';
 import { BenchmarkingSection } from '@/components/ceo-board/BenchmarkingSection';
 import { RecommendationsSection } from '@/components/ceo-board/RecommendationsSection';
+import { ManualKPISection } from '@/components/ceo-board/ManualKPISection';
 import { DevilsAdvocateFeed } from '@/components/ceo-board/DevilsAdvocateFeed';
 import { AgentPerformanceSection } from '@/components/ceo-board/AgentPerformanceSection';
+import { ExecutionQueueSection } from '@/components/ceo-board/ExecutionQueueSection';
 
 // Page-level animation variants
 const pageVariants = {
@@ -140,6 +142,16 @@ export default function CEOPerformanceBoardPage() {
           {/* Recommendations Section */}
           <motion.section variants={sectionVariants}>
             <RecommendationsSection />
+          </motion.section>
+
+          {/* Execution Queue Section */}
+          <motion.section variants={sectionVariants}>
+            <ExecutionQueueSection />
+          </motion.section>
+
+          {/* Manual KPI Entry Section */}
+          <motion.section variants={sectionVariants}>
+            <ManualKPISection />
           </motion.section>
 
           {/* Footer Spacer */}

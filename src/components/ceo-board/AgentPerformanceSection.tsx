@@ -1,101 +1,9 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Bot, Activity, CheckCircle, Clock } from 'lucide-react';
-
-interface Agent {
-  id: string;
-  name: string;
-  department: string;
-  model: string;
-  actionsCompleted: number;
-  idlePercent: number;
-  qualityScore: number;
-  status: 'active' | 'idle';
-}
-
-const demoAgents: Agent[] = [
-  {
-    id: '1',
-    name: 'Facebook Specialist',
-    department: 'Marketing',
-    model: 'Kimi K2.5',
-    actionsCompleted: 47,
-    idlePercent: 12,
-    qualityScore: 91,
-    status: 'active',
-  },
-  {
-    id: '2',
-    name: 'Email Specialist',
-    department: 'Marketing',
-    model: 'Sonnet',
-    actionsCompleted: 31,
-    idlePercent: 8,
-    qualityScore: 88,
-    status: 'active',
-  },
-  {
-    id: '3',
-    name: 'Sales Closer',
-    department: 'Sales',
-    model: 'GPT-5.4',
-    actionsCompleted: 23,
-    idlePercent: 22,
-    qualityScore: 79,
-    status: 'idle',
-  },
-  {
-    id: '4',
-    name: 'Content Creator',
-    department: 'Creative',
-    model: 'Kimi K2.5',
-    actionsCompleted: 58,
-    idlePercent: 5,
-    qualityScore: 94,
-    status: 'active',
-  },
-  {
-    id: '5',
-    name: 'Support Agent',
-    department: 'Support',
-    model: 'Kimi K2.5',
-    actionsCompleted: 112,
-    idlePercent: 3,
-    qualityScore: 96,
-    status: 'active',
-  },
-  {
-    id: '6',
-    name: 'Operations Manager',
-    department: 'Operations',
-    model: 'Sonnet',
-    actionsCompleted: 19,
-    idlePercent: 31,
-    qualityScore: 72,
-    status: 'idle',
-  },
-];
-
-const departmentColors: Record<string, string> = {
-  'Marketing': 'bg-purple-100 text-purple-700 border-purple-200',
-  'Sales': 'bg-blue-100 text-blue-700 border-blue-200',
-  'Creative': 'bg-pink-100 text-pink-700 border-pink-200',
-  'Support': 'bg-teal-100 text-teal-700 border-teal-200',
-  'Operations': 'bg-orange-100 text-orange-700 border-orange-200',
-};
-
-function getQualityColor(score: number): string {
-  if (score >= 80) return 'bg-emerald-500';
-  if (score >= 60) return 'bg-amber-500';
-  return 'bg-red-500';
-}
-
-function getQualityTextColor(score: number): string {
-  if (score >= 80) return 'text-emerald-600';
-  if (score >= 60) return 'text-amber-600';
-  return 'text-red-600';
-}
+import type { Agent } from '@/lib/types';
 
 /** Map full model IDs to short display labels */
 function getModelLabel(model: string | null | undefined): string {
@@ -103,15 +11,101 @@ function getModelLabel(model: string | null | undefined): string {
   const m = model.toLowerCase();
   if (m.includes('kimi') || m.includes('moonshot')) return 'Kimi K2.5';
   if (m.includes('gpt') || m.includes('openai') || m.includes('codex')) return 'GPT-5.4';
-  if (m.includes('sonnet')) return 'Sonnet';
-  if (m.includes('opus')) return 'Opus';
+  if (m.includes('sonnet')) return 'Sonnet 4.6';
+  if (m.includes('opus')) return 'Opus 4.6';
   if (m.includes('minimax')) return 'MiniMax';
   if (m.includes('perplexity')) return 'Perplexity';
   if (m.includes('gemini')) return 'Gemini';
   return model;
 }
 
+/** Pill color styles based on model */
+function getModelPillStyle(model: string | null | undefined): string {
+  if (!model) return 'bg-gray-50 border-gray-200 text-gray-500';
+  const m = model.toLowerCase();
+  if (m.includes('kimi') || m.includes('moonshot')) return 'bg-indigo-50 border-indigo-200 text-indigo-700';
+  if (m.includes('gpt') || m.includes('openai') || m.includes('codex')) return 'bg-green-50 border-green-200 text-green-700';
+  if (m.includes('sonnet') || m.includes('opus')) return 'bg-blue-50 border-blue-200 text-blue-700';
+  if (m.includes('minimax')) return 'bg-violet-50 border-violet-200 text-violet-700';
+  return 'bg-gray-50 border-gray-200 text-gray-500';
+}
+
+/** Dot color for the model indicator */
+function getModelDotColor(model: string | null | undefined): string {
+  if (!model) return 'bg-gray-300';
+  const m = model.toLowerCase();
+  if (m.includes('kimi') || m.includes('moonshot')) return 'bg-indigo-400';
+  if (m.includes('gpt') || m.includes('openai') || m.includes('codex')) return 'bg-green-400';
+  if (m.includes('sonnet') || m.includes('opus')) return 'bg-blue-400';
+  if (m.includes('minimax')) return 'bg-violet-400';
+  return 'bg-gray-300';
+}
+
+const departmentColors: Record<string, string> = {
+  marketing: 'bg-purple-100 text-purple-700 border-purple-200',
+  sales: 'bg-blue-100 text-blue-700 border-blue-200',
+  creative: 'bg-pink-100 text-pink-700 border-pink-200',
+  support: 'bg-teal-100 text-teal-700 border-teal-200',
+  operations: 'bg-orange-100 text-orange-700 border-orange-200',
+  billing: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+  hr: 'bg-rose-100 text-rose-700 border-rose-200',
+  legal: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+  it: 'bg-slate-100 text-slate-700 border-slate-200',
+  webdev: 'bg-lime-100 text-lime-700 border-lime-200',
+  appdev: 'bg-amber-100 text-amber-700 border-amber-200',
+  graphics: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200',
+  video: 'bg-red-100 text-red-700 border-red-200',
+  audio: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  research: 'bg-sky-100 text-sky-700 border-sky-200',
+  comms: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+  ceo: 'bg-gray-100 text-gray-700 border-gray-200',
+};
+
+const DEPT_LABELS: Record<string, string> = {
+  marketing: 'Marketing',
+  sales: 'Sales',
+  creative: 'Creative',
+  support: 'Support',
+  operations: 'Operations',
+  billing: 'Billing',
+  hr: 'HR',
+  legal: 'Legal',
+  it: 'IT',
+  webdev: 'Web Dev',
+  appdev: 'App Dev',
+  graphics: 'Graphics',
+  video: 'Video',
+  audio: 'Audio',
+  research: 'Research',
+  comms: 'Comms',
+  ceo: 'CEO',
+};
+
 export function AgentPerformanceSection() {
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadAgents() {
+      try {
+        const res = await fetch('/api/agents');
+        if (res.ok) {
+          const data: Agent[] = await res.json();
+          // Show non-QC, non-standup agents first; limit to 12 for display
+          const filtered = data
+            .filter((a) => !a.id.startsWith('qc-') && !a.id.startsWith('standup-'))
+            .slice(0, 12);
+          setAgents(filtered.length > 0 ? filtered : data.slice(0, 12));
+        }
+      } catch (err) {
+        console.error('Failed to load agents:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadAgents();
+  }, []);
+
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
       {/* Header */}
@@ -120,102 +114,79 @@ export function AgentPerformanceSection() {
           <Bot className="h-5 w-5 text-white" />
         </div>
         <div>
-          <h2 className="text-lg font-bold text-gray-900">Agent Performance</h2>
-          <p className="text-sm text-gray-500">Real-time AI workforce metrics</p>
+          <h2 className="text-lg font-bold text-gray-900">Agent Roster</h2>
+          <p className="text-sm text-gray-500">AI workforce with model assignments</p>
         </div>
       </div>
 
-      {/* Agent Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {demoAgents.map((agent, index) => (
-          <motion.div
-            key={agent.id}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: index * 0.05 }}
-            className="p-4 rounded-xl border border-gray-200 bg-white hover:border-indigo-300 hover:shadow-md transition-all"
-          >
-            {/* Top Row: Name, Department, Status */}
-            <div className="flex items-start justify-between mb-3">
-              <div className="flex-1 min-w-0">
-                <h3 className="text-sm font-semibold text-gray-900 truncate">
-                  {agent.name}
-                </h3>
-                <div className="flex items-center gap-2 mt-1">
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-xs font-medium border ${
-                      departmentColors[agent.department] ||
-                      'bg-gray-100 text-gray-700 border-gray-200'
+      {loading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="p-4 rounded-xl border border-gray-100 bg-gray-50 animate-pulse h-32" />
+          ))}
+        </div>
+      ) : (
+        /* Agent Grid */
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {agents.map((agent, index) => {
+            const dept = agent.workspace_id || 'default';
+            const deptLabel = DEPT_LABELS[dept] || dept;
+            const deptColorClass = departmentColors[dept] || 'bg-gray-100 text-gray-700 border-gray-200';
+            const modelLabel = getModelLabel(agent.model);
+            const pillStyle = getModelPillStyle(agent.model);
+            const dotColor = getModelDotColor(agent.model);
+            const isActive = (agent.status as string) === 'working' || (agent.status as string) === 'active';
+
+            return (
+              <motion.div
+                key={agent.id}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.04 }}
+                className="p-4 rounded-xl border border-gray-200 bg-white hover:border-indigo-300 hover:shadow-md transition-all"
+              >
+                {/* Top Row: Emoji + Name + Status */}
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <span className="text-xl">{agent.avatar_emoji || '🤖'}</span>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-sm font-semibold text-gray-900 truncate">
+                        {agent.name}
+                      </h3>
+                      <p className="text-xs text-gray-400 truncate">{agent.role}</p>
+                    </div>
+                  </div>
+                  {/* Status Dot */}
+                  <div
+                    className={`flex-shrink-0 h-2.5 w-2.5 rounded-full mt-1 ${
+                      isActive ? 'bg-emerald-500' : 'bg-gray-300'
                     }`}
+                    title={agent.status}
+                  />
+                </div>
+
+                {/* Department Pill */}
+                <div className="flex items-center gap-2 mb-2">
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-xs font-medium border ${deptColorClass}`}
                   >
-                    {agent.department}
+                    {deptLabel}
                   </span>
                 </div>
-              </div>
-              {/* Status Dot */}
-              <div
-                className={`flex h-2.5 w-2.5 rounded-full ${
-                  agent.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
-                }`}
-                title={agent.status === 'active' ? 'Active' : 'Idle'}
-              />
-            </div>
 
-            {/* Model Pill */}
-            <div className="mb-3">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-50 border border-gray-200 text-[11px] font-medium text-gray-600">
-                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-                {getModelLabel(agent.model)}
-              </span>
-            </div>
-
-            {/* Stats Row */}
-            <div className="grid grid-cols-3 gap-2 mb-3">
-              <div className="text-center p-2 rounded-lg bg-gray-50">
-                <div className="flex items-center justify-center gap-1 mb-1">
-                  <CheckCircle className="h-3 w-3 text-gray-400" />
-                </div>
-                <p className="text-lg font-bold text-gray-900">{agent.actionsCompleted}</p>
-                <p className="text-[10px] text-gray-500 uppercase tracking-wide">Actions</p>
-              </div>
-              <div className="text-center p-2 rounded-lg bg-gray-50">
-                <div className="flex items-center justify-center gap-1 mb-1">
-                  <Clock className="h-3 w-3 text-gray-400" />
-                </div>
-                <p className="text-lg font-bold text-gray-900">{agent.idlePercent}%</p>
-                <p className="text-[10px] text-gray-500 uppercase tracking-wide">Idle</p>
-              </div>
-              <div className="text-center p-2 rounded-lg bg-gray-50">
-                <div className="flex items-center justify-center gap-1 mb-1">
-                  <Activity className="h-3 w-3 text-gray-400" />
-                </div>
-                <p className={`text-lg font-bold ${getQualityTextColor(agent.qualityScore)}`}>
-                  {agent.qualityScore}%
-                </p>
-                <p className="text-[10px] text-gray-500 uppercase tracking-wide">Quality</p>
-              </div>
-            </div>
-
-            {/* Quality Progress Bar */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-gray-500">Quality Score</span>
-                <span className={`font-medium ${getQualityTextColor(agent.qualityScore)}`}>
-                  {agent.qualityScore >= 80 ? 'Excellent' : agent.qualityScore >= 60 ? 'Good' : 'Needs Attention'}
+                {/* Model Pill */}
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-medium ${pillStyle}`}
+                  style={{ fontSize: '12px' }}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
+                  {modelLabel}
                 </span>
-              </div>
-              <div className="h-1.5 w-full rounded-full bg-gray-100 overflow-hidden">
-                <motion.div
-                  initial={{ width: 0 }}
-                  animate={{ width: `${agent.qualityScore}%` }}
-                  transition={{ duration: 0.8, delay: index * 0.1 }}
-                  className={`h-full rounded-full ${getQualityColor(agent.qualityScore)}`}
-                />
-              </div>
-            </div>
-          </motion.div>
-        ))}
-      </div>
+              </motion.div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

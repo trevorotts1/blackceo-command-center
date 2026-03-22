@@ -14,10 +14,10 @@ export async function POST(
 
     // Update recommendation status
     run(
-      `UPDATE recommendations 
-       SET status = 'approved', resolved_at = ?
+      `UPDATE recommendations
+       SET status = 'approved', resolved_at = ?, approved_at = ?
        WHERE id = ?`,
-      [now, id]
+      [now, now, id]
     );
 
     // Fetch updated recommendation

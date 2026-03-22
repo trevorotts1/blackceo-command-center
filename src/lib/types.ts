@@ -1,6 +1,6 @@
 // Core types for BlackCEO Command Center
 
-export type AgentStatus = 'standby' | 'working' | 'offline';
+export type AgentStatus = 'standby' | 'working' | 'offline' | 'active';
 
 export type TaskStatus = 'backlog' | 'inbox' | 'planning' | 'in_progress' | 'assigned' | 'review' | 'testing' | 'blocked' | 'pending_dispatch' | 'done';
 
@@ -325,11 +325,13 @@ export type SSEEventType =
   | 'agent_spawned'
   | 'agent_completed'
   | 'recommendation_created'
-  | 'recommendation_updated';
+  | 'recommendation_updated'
+  | 'execution_queue_updated'
+  | 'recommendation_outcome_recorded';
 
 export interface SSEEvent {
   type: SSEEventType;
-  payload: Task | TaskActivity | TaskDeliverable | Recommendation | {
+  payload: Task | TaskActivity | TaskDeliverable | Recommendation | ExecutionQueueItem | {
     taskId: string;
     sessionId: string;
     agentName?: string;
@@ -337,6 +339,9 @@ export interface SSEEvent {
     deleted?: boolean;
   } | {
     id: string;  // For task_deleted events
+  } | {
+    recommendation_id: string;
+    outcome: unknown;
   };
 }
 
@@ -351,4 +356,39 @@ export interface Recommendation {
   status: 'pending' | 'approved' | 'dismissed' | 'saved';
   created_at: string;
   resolved_at?: string;
+}
+
+// Execution Queue types (Out-of-Hours)
+export type ExecutionWindow = 'evening' | 'overnight' | 'morning';
+export type ExecutionQueueStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+export interface ExecutionQueueItem {
+  id: string;
+  task_id?: string;
+  recommendation_id?: string;
+  task_name: string;
+  department?: string;
+  queued_at: string;
+  scheduled_window: ExecutionWindow;
+  status: ExecutionQueueStatus;
+  started_at?: string;
+  completed_at?: string;
+  result_notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateExecutionQueueRequest {
+  task_name: string;
+  task_id?: string;
+  recommendation_id?: string;
+  department?: string;
+  scheduled_window?: ExecutionWindow;
+}
+
+export interface UpdateExecutionQueueRequest {
+  status?: ExecutionQueueStatus;
+  result_notes?: string;
+  started_at?: string;
+  completed_at?: string;
 }

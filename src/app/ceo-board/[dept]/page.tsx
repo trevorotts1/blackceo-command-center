@@ -19,7 +19,7 @@ import {
   ChevronUp,
   Zap,
 } from 'lucide-react';
-import { LineChart, Line, ResponsiveContainer } from 'recharts';
+import { Sparkline } from '@/components/ceo-board/Sparkline';
 
 // Types
 interface DepartmentData {
@@ -32,15 +32,22 @@ interface DepartmentData {
   insight: string;
 }
 
+interface KPIHistoryPoint {
+  snapshot_date: string;
+  value: number;
+}
+
 interface KPIData {
   id: string;
+  kpiId: string;
   name: string;
   value: number;
   target: number;
   unit: 'currency' | 'percent' | 'count';
   trend: 'up' | 'down' | 'flat';
   changePercent: number;
-  sparkline: { value: number }[];
+  sparkline: number[];
+  benchmark?: number;
 }
 
 interface AgentData {
@@ -62,238 +69,26 @@ interface Recommendation {
   supportingData: string;
 }
 
-// Demo data
+// Department metadata (grades/insights stay static for now)
 const DEPARTMENTS: Record<string, DepartmentData> = {
-  marketing: {
-    id: 'marketing',
-    name: 'Marketing',
-    emoji: '📢',
-    headTitle: 'Chief Marketing Officer',
-    grade: 'B',
-    gradeScore: 82,
-    insight: 'Email open rates hit 34%, highest in 60 days. Ad spend efficiency improved 12%. One area to watch: social media engagement dropped 8%.',
-  },
-  sales: {
-    id: 'sales',
-    name: 'Sales',
-    emoji: '💰',
-    headTitle: 'Chief Sales Officer',
-    grade: 'A',
-    gradeScore: 91,
-    insight: 'Conversion rates are 23% above industry benchmark. Lead response time improved to under 5 minutes. Pipeline velocity up 18% this week.',
-  },
-  billing: {
-    id: 'billing',
-    name: 'Billing / Finance',
-    emoji: '💳',
-    headTitle: 'Chief Financial Officer',
-    grade: 'C',
-    gradeScore: 68,
-    insight: 'Invoice processing is on track, but payment collection lagged 3 days this week. Consider automated follow-up sequences.',
-  },
-  support: {
-    id: 'support',
-    name: 'Customer Support',
-    emoji: '🎧',
-    headTitle: 'Chief Customer Officer',
-    grade: 'A',
-    gradeScore: 89,
-    insight: 'Ticket resolution time down 25%. Customer satisfaction scores at 94%. First response time averaging under 2 minutes.',
-  },
-  operations: {
-    id: 'operations',
-    name: 'Operations',
-    emoji: '⚙️',
-    headTitle: 'Chief Operating Officer',
-    grade: 'B',
-    gradeScore: 78,
-    insight: 'Process automation increased 15%. Two workflows need attention: vendor onboarding and inventory alerts.',
-  },
-  creative: {
-    id: 'creative',
-    name: 'Creative',
-    emoji: '✍️',
-    headTitle: 'Chief Creative Officer',
-    grade: 'B',
-    gradeScore: 84,
-    insight: 'Content output increased 20% with same agent count. Quality scores steady at 92%. Brand consistency improved.',
-  },
-  hr: {
-    id: 'hr',
-    name: 'HR / People',
-    emoji: '👥',
-    headTitle: 'Chief People Officer',
-    grade: 'C',
-    gradeScore: 65,
-    insight: 'Recruitment pipeline healthy but onboarding completion rate dropped. Review new hire experience this week.',
-  },
-  legal: {
-    id: 'legal',
-    name: 'Legal / Compliance',
-    emoji: '⚖️',
-    headTitle: 'General Counsel',
-    grade: 'A',
-    gradeScore: 94,
-    insight: 'All compliance checks passed. Contract review turnaround time best in 90 days. Zero escalations this week.',
-  },
-  it: {
-    id: 'it',
-    name: 'IT / Tech',
-    emoji: '🖥️',
-    headTitle: 'Chief Technology Officer',
-    grade: 'B',
-    gradeScore: 80,
-    insight: 'System uptime 99.9%. Security scan completed with zero critical issues. Two minor patches pending deployment.',
-  },
-  webdev: {
-    id: 'webdev',
-    name: 'Web Development',
-    emoji: '🌐',
-    headTitle: 'Chief Web Officer',
-    grade: 'A',
-    gradeScore: 88,
-    insight: 'Deployment frequency up 30%. Zero failed builds this week. Page load times improved 12% through optimization.',
-  },
-  appdev: {
-    id: 'appdev',
-    name: 'App Development',
-    emoji: '📱',
-    headTitle: 'Chief App Officer',
-    grade: 'B',
-    gradeScore: 76,
-    insight: 'Feature delivery on schedule. Bug fix velocity increased. Testing coverage improved to 87%.',
-  },
-  graphics: {
-    id: 'graphics',
-    name: 'Graphics',
-    emoji: '🎨',
-    headTitle: 'Chief Graphics Officer',
-    grade: 'A',
-    gradeScore: 90,
-    insight: 'Design output exceeded targets by 15%. Brand guideline adherence at 98%. Client approval rate up 8%.',
-  },
-  video: {
-    id: 'video',
-    name: 'Video',
-    emoji: '🎬',
-    headTitle: 'Chief Video Officer',
-    grade: 'B',
-    gradeScore: 79,
-    insight: 'Video production volume steady. Average render time down 20%. Two projects awaiting client feedback.',
-  },
-  audio: {
-    id: 'audio',
-    name: 'Audio',
-    emoji: '🎙️',
-    headTitle: 'Chief Audio Officer',
-    grade: 'C',
-    gradeScore: 71,
-    insight: 'Podcast editing on schedule. Voiceover quality scores high. Consider upgrading microphone for one agent.',
-  },
-  research: {
-    id: 'research',
-    name: 'Research',
-    emoji: '🔬',
-    headTitle: 'Chief Research Officer',
-    grade: 'B',
-    gradeScore: 83,
-    insight: 'Market analysis reports delivered ahead of schedule. Competitor tracking comprehensive. Two insights led to strategy shifts.',
-  },
-  comms: {
-    id: 'comms',
-    name: 'Communications',
-    emoji: '📣',
-    headTitle: 'Chief Communications Officer',
-    grade: 'B',
-    gradeScore: 81,
-    insight: 'Internal communications response rate at 78%. Town hall prep on track. Media mentions increased 25% this week.',
-  },
-  ceo: {
-    id: 'ceo',
-    name: 'CEO / COM',
-    emoji: '👔',
-    headTitle: 'Chief Executive Officer',
-    grade: 'A',
-    gradeScore: 92,
-    insight: 'Strategic planning on track. Board presentation ready 2 days early. Cross-department coordination improved 15%.',
-  },
+  marketing: { id: 'marketing', name: 'Marketing', emoji: '📢', headTitle: 'Chief Marketing Officer', grade: 'B', gradeScore: 82, insight: 'Email open rates hit 34%, highest in 60 days. Ad spend efficiency improved 12%.' },
+  sales: { id: 'sales', name: 'Sales', emoji: '💰', headTitle: 'Chief Sales Officer', grade: 'A', gradeScore: 91, insight: 'Conversion rates are 23% above industry benchmark. Lead response time improved.' },
+  billing: { id: 'billing', name: 'Billing / Finance', emoji: '💳', headTitle: 'Chief Financial Officer', grade: 'C', gradeScore: 68, insight: 'Invoice processing is on track, but payment collection lagged 3 days this week.' },
+  support: { id: 'support', name: 'Customer Support', emoji: '🎧', headTitle: 'Chief Customer Officer', grade: 'A', gradeScore: 89, insight: 'Ticket resolution time down 25%. Customer satisfaction scores at 94%.' },
+  operations: { id: 'operations', name: 'Operations', emoji: '⚙️', headTitle: 'Chief Operating Officer', grade: 'B', gradeScore: 78, insight: 'Process automation increased 15%. Two workflows need attention.' },
+  creative: { id: 'creative', name: 'Creative', emoji: '✍️', headTitle: 'Chief Creative Officer', grade: 'B', gradeScore: 84, insight: 'Content output increased 20% with same agent count. Quality scores steady at 92%.' },
+  hr: { id: 'hr', name: 'HR / People', emoji: '👥', headTitle: 'Chief People Officer', grade: 'C', gradeScore: 65, insight: 'Recruitment pipeline healthy but onboarding completion rate dropped.' },
+  legal: { id: 'legal', name: 'Legal / Compliance', emoji: '⚖️', headTitle: 'General Counsel', grade: 'A', gradeScore: 94, insight: 'All compliance checks passed. Contract review turnaround time best in 90 days.' },
+  it: { id: 'it', name: 'IT / Tech', emoji: '🖥️', headTitle: 'Chief Technology Officer', grade: 'B', gradeScore: 80, insight: 'System uptime 99.9%. Security scan completed with zero critical issues.' },
+  webdev: { id: 'webdev', name: 'Web Development', emoji: '🌐', headTitle: 'Chief Web Officer', grade: 'A', gradeScore: 88, insight: 'Deployment frequency up 30%. Zero failed builds this week.' },
+  appdev: { id: 'appdev', name: 'App Development', emoji: '📱', headTitle: 'Chief App Officer', grade: 'B', gradeScore: 76, insight: 'Feature delivery on schedule. Bug fix velocity increased. Testing coverage improved.' },
+  graphics: { id: 'graphics', name: 'Graphics', emoji: '🎨', headTitle: 'Chief Graphics Officer', grade: 'A', gradeScore: 90, insight: 'Design output exceeded targets by 15%. Brand guideline adherence at 98%.' },
+  video: { id: 'video', name: 'Video', emoji: '🎬', headTitle: 'Chief Video Officer', grade: 'B', gradeScore: 79, insight: 'Video production volume steady. Average render time down 20%.' },
+  audio: { id: 'audio', name: 'Audio', emoji: '🎙️', headTitle: 'Chief Audio Officer', grade: 'C', gradeScore: 71, insight: 'Podcast editing on schedule. Voiceover quality scores high.' },
+  research: { id: 'research', name: 'Research', emoji: '🔬', headTitle: 'Chief Research Officer', grade: 'B', gradeScore: 83, insight: 'Market analysis reports delivered ahead of schedule. Competitor tracking comprehensive.' },
+  comms: { id: 'comms', name: 'Communications', emoji: '📣', headTitle: 'Chief Communications Officer', grade: 'B', gradeScore: 81, insight: 'Internal communications response rate at 78%. Media mentions increased 25%.' },
+  ceo: { id: 'ceo', name: 'CEO / COM', emoji: '👔', headTitle: 'Chief Executive Officer', grade: 'A', gradeScore: 92, insight: 'Strategic planning on track. Cross-department coordination improved 15%.' },
 };
-
-function generateDemoKPIs(deptId: string): KPIData[] {
-  const deptKPIs: Record<string, KPIData[]> = {
-    marketing: [
-      { id: 'mkt-1', name: 'Cost Per Lead', value: 22.5, target: 25, unit: 'currency', trend: 'down', changePercent: -10, sparkline: Array.from({ length: 7 }, () => ({ value: 25 + Math.random() * 5 })) },
-      { id: 'mkt-2', name: 'Conversion Rate', value: 24, target: 20, unit: 'percent', trend: 'up', changePercent: 20, sparkline: Array.from({ length: 7 }, () => ({ value: 18 + Math.random() * 8 })) },
-      { id: 'mkt-3', name: 'Email Open Rate', value: 34, target: 30, unit: 'percent', trend: 'up', changePercent: 13, sparkline: Array.from({ length: 7 }, () => ({ value: 28 + Math.random() * 10 })) },
-      { id: 'mkt-4', name: 'Social Reach', value: 45200, target: 40000, unit: 'count', trend: 'up', changePercent: 13, sparkline: Array.from({ length: 7 }, () => ({ value: 35000 + Math.random() * 15000 })) },
-    ],
-    sales: [
-      { id: 'sales-1', name: 'Lead Response Time', value: 4.5, target: 5, unit: 'count', trend: 'down', changePercent: -25, sparkline: Array.from({ length: 7 }, () => ({ value: 6 + Math.random() * 4 })) },
-      { id: 'sales-2', name: 'Conversion Rate', value: 23, target: 20, unit: 'percent', trend: 'up', changePercent: 15, sparkline: Array.from({ length: 7 }, () => ({ value: 18 + Math.random() * 8 })) },
-      { id: 'sales-3', name: 'Deals Closed', value: 12, target: 10, unit: 'count', trend: 'up', changePercent: 20, sparkline: Array.from({ length: 7 }, () => ({ value: 6 + Math.random() * 8 })) },
-      { id: 'sales-4', name: 'Pipeline Value', value: 285000, target: 250000, unit: 'currency', trend: 'up', changePercent: 14, sparkline: Array.from({ length: 7 }, () => ({ value: 200000 + Math.random() * 100000 })) },
-    ],
-    support: [
-      { id: 'support-1', name: 'Avg Resolution Time', value: 18, target: 24, unit: 'count', trend: 'down', changePercent: -25, sparkline: Array.from({ length: 7 }, () => ({ value: 24 + Math.random() * 12 })) },
-      { id: 'support-2', name: 'First Response Time', value: 1.8, target: 5, unit: 'count', trend: 'down', changePercent: -64, sparkline: Array.from({ length: 7 }, () => ({ value: 4 + Math.random() * 3 })) },
-      { id: 'support-3', name: 'CSAT Score', value: 94, target: 90, unit: 'percent', trend: 'up', changePercent: 4, sparkline: Array.from({ length: 7 }, () => ({ value: 85 + Math.random() * 12 })) },
-      { id: 'support-4', name: 'Tickets Resolved', value: 187, target: 150, unit: 'count', trend: 'up', changePercent: 25, sparkline: Array.from({ length: 7 }, () => ({ value: 120 + Math.random() * 80 })) },
-    ],
-  };
-
-  const defaultKPIs: KPIData[] = [
-    { id: 'default-1', name: 'Tasks Completed', value: 45, target: 40, unit: 'count', trend: 'up', changePercent: 12, sparkline: Array.from({ length: 7 }, () => ({ value: 30 + Math.random() * 20 })) },
-    { id: 'default-2', name: 'Efficiency Score', value: 87, target: 85, unit: 'percent', trend: 'up', changePercent: 2, sparkline: Array.from({ length: 7 }, () => ({ value: 75 + Math.random() * 15 })) },
-    { id: 'default-3', name: 'Quality Rating', value: 4.6, target: 4.5, unit: 'count', trend: 'up', changePercent: 2, sparkline: Array.from({ length: 7 }, () => ({ value: 4 + Math.random() * 1 })) },
-    { id: 'default-4', name: 'On-Time Delivery', value: 92, target: 90, unit: 'percent', trend: 'up', changePercent: 2, sparkline: Array.from({ length: 7 }, () => ({ value: 80 + Math.random() * 15 })) },
-  ];
-
-  return deptKPIs[deptId] || defaultKPIs;
-}
-
-function generateDemoAgents(deptId: string): AgentData[] {
-  const personas = ['Alex Hormozi', 'Gary Vee', 'Seth Godin', 'Simon Sinek', 'Brené Brown', 'Ray Dalio'];
-  const models = ['Kimi 2.5', 'Sonnet 4.6', 'GPT 5.4', 'Opus 4.6'];
-
-  return Array.from({ length: 3 }, (_, i) => ({
-    id: `${deptId}-agent-${i}`,
-    name: `${deptId.charAt(0).toUpperCase() + deptId.slice(1)} Specialist ${i + 1}`,
-    persona: personas[Math.floor(Math.random() * personas.length)],
-    model: models[Math.floor(Math.random() * models.length)],
-    actionsCompleted: Math.floor(Math.random() * 100) + 50,
-    idlePercent: Math.floor(Math.random() * 20) + 5,
-    qualityScore: Math.floor(Math.random() * 15) + 85,
-  }));
-}
-
-function generateDemoRecommendations(deptId: string): Recommendation[] {
-  return [
-    {
-      id: `${deptId}-rec-1`,
-      title: 'Increase email frequency by 20%',
-      description: 'Current open rates are above industry average. Testing shows your audience can handle more touchpoints without fatigue.',
-      category: 'try',
-      confidence: 0.82,
-      supportingData: 'Open rate: 34% (industry avg: 25%). Unsubscribe rate: 0.3% (industry avg: 0.5%). Engagement has increased 12% over past 14 days.',
-    },
-    {
-      id: `${deptId}-rec-2`,
-      title: 'Pause underperforming ad creative',
-      description: 'Three ad variants are consuming 40% of budget but generating only 8% of conversions.',
-      category: 'stop',
-      confidence: 0.91,
-      supportingData: 'Ad spend analysis: Variant A ($1,200 spent, 2 conversions), Variant B ($980 spent, 1 conversion), Variant C ($890 spent, 3 conversions). Compare to top performer: $400 spent, 18 conversions.',
-    },
-    {
-      id: `${deptId}-rec-3`,
-      title: 'Double down on LinkedIn content',
-      description: 'LinkedIn posts are generating 3x more qualified leads than other platforms at half the cost.',
-      category: 'do-more',
-      confidence: 0.88,
-      supportingData: 'LinkedIn: 45 leads @ $12 CPL. Instagram: 23 leads @ $38 CPL. Twitter: 12 leads @ $52 CPL. LinkedIn leads also showing 40% higher conversion to sales calls.',
-    },
-  ];
-}
 
 function formatValue(value: number, unit: string): string {
   if (unit === 'currency') return `$${value.toLocaleString()}`;
@@ -332,11 +127,29 @@ function getCategoryLabel(category: string): string {
   }
 }
 
-// Sub-components
+// Compute trend from sparkline data
+function computeTrend(data: number[]): { trend: 'up' | 'down' | 'flat'; changePercent: number } {
+  if (data.length < 2) return { trend: 'flat', changePercent: 0 };
+  const first = data[0];
+  const last = data[data.length - 1];
+  if (first === 0) return { trend: 'flat', changePercent: 0 };
+  const pct = Math.round(((last - first) / first) * 100);
+  return {
+    trend: pct > 2 ? 'up' : pct < -2 ? 'down' : 'flat',
+    changePercent: pct,
+  };
+}
+
+// KPI Card with SVG sparkline + benchmark label
 function KPICard({ kpi }: { kpi: KPIData }) {
   const TrendIcon = kpi.trend === 'up' ? TrendingUp : kpi.trend === 'down' ? TrendingDown : Minus;
   const trendColor = kpi.trend === 'up' ? 'text-emerald-600' : kpi.trend === 'down' ? 'text-rose-600' : 'text-gray-500';
   const trendBg = kpi.trend === 'up' ? 'bg-emerald-50' : kpi.trend === 'down' ? 'bg-rose-50' : 'bg-gray-100';
+
+  // Benchmark comparison
+  const benchmarkLabel = kpi.benchmark !== undefined
+    ? kpi.value >= kpi.benchmark ? 'above' : 'below'
+    : null;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow duration-200">
@@ -353,23 +166,15 @@ function KPICard({ kpi }: { kpi: KPIData }) {
         </div>
       </div>
       <div className="h-12">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={kpi.sparkline}>
-            <Line
-              type="monotone"
-              dataKey="value"
-              stroke={kpi.trend === 'up' ? '#10B981' : kpi.trend === 'down' ? '#EF4444' : '#6366F1'}
-              strokeWidth={2}
-              dot={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
+        <Sparkline data={kpi.sparkline} width={200} height={48} />
       </div>
       <div className="mt-3 flex items-center justify-between text-xs">
         <span className="text-gray-400">Target: {formatValue(kpi.target, kpi.unit)}</span>
-        <span className={kpi.value >= kpi.target ? 'text-emerald-600 font-medium' : 'text-amber-600 font-medium'}>
-          {kpi.value >= kpi.target ? 'On Target' : 'Below Target'}
-        </span>
+        {benchmarkLabel && (
+          <span className={`font-medium ${benchmarkLabel === 'above' ? 'text-emerald-600' : 'text-amber-600'}`}>
+            {benchmarkLabel === 'above' ? '↑' : '↓'} vs industry avg ({formatValue(kpi.benchmark!, kpi.unit)})
+          </span>
+        )}
       </div>
     </div>
   );
@@ -564,6 +369,49 @@ function RecommendationCard({
   );
 }
 
+function generateDemoAgents(deptId: string): AgentData[] {
+  const personas = ['Alex Hormozi', 'Gary Vee', 'Seth Godin', 'Simon Sinek', 'Brené Brown', 'Ray Dalio'];
+  const models = ['Kimi 2.5', 'Sonnet 4.6', 'GPT 5.4', 'Opus 4.6'];
+  return Array.from({ length: 3 }, (_, i) => ({
+    id: `${deptId}-agent-${i}`,
+    name: `${deptId.charAt(0).toUpperCase() + deptId.slice(1)} Specialist ${i + 1}`,
+    persona: personas[Math.floor(Math.random() * personas.length)],
+    model: models[Math.floor(Math.random() * models.length)],
+    actionsCompleted: Math.floor(Math.random() * 100) + 50,
+    idlePercent: Math.floor(Math.random() * 20) + 5,
+    qualityScore: Math.floor(Math.random() * 15) + 85,
+  }));
+}
+
+function generateDemoRecommendations(deptId: string): Recommendation[] {
+  return [
+    {
+      id: `${deptId}-rec-1`,
+      title: 'Increase email frequency by 20%',
+      description: 'Current open rates are above industry average. Testing shows your audience can handle more touchpoints without fatigue.',
+      category: 'try',
+      confidence: 0.82,
+      supportingData: 'Open rate: 34% (industry avg: 25%). Unsubscribe rate: 0.3% (industry avg: 0.5%).',
+    },
+    {
+      id: `${deptId}-rec-2`,
+      title: 'Pause underperforming ad creative',
+      description: 'Three ad variants are consuming 40% of budget but generating only 8% of conversions.',
+      category: 'stop',
+      confidence: 0.91,
+      supportingData: 'Ad spend analysis: Top performer: $400 spent, 18 conversions vs underperformers at 1-3 conversions each.',
+    },
+    {
+      id: `${deptId}-rec-3`,
+      title: 'Double down on top channel',
+      description: 'Your best channel is generating 3x more qualified leads than others at half the cost.',
+      category: 'do-more',
+      confidence: 0.88,
+      supportingData: 'Top channel: 45 leads @ $12 CPL. Next best: 23 leads @ $38 CPL.',
+    },
+  ];
+}
+
 // Main Page Component
 export default function DepartmentSubBoardPage() {
   const router = useRouter();
@@ -577,17 +425,84 @@ export default function DepartmentSubBoardPage() {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    setIsLoading(true);
-    setTimeout(() => {
+    const loadDepartmentData = async () => {
+      setIsLoading(true);
+
       const dept = DEPARTMENTS[deptId];
-      if (dept) {
-        setDepartment(dept);
-        setKpis(generateDemoKPIs(deptId));
-        setAgents(generateDemoAgents(deptId));
-        setRecommendations(generateDemoRecommendations(deptId));
+      if (!dept) {
+        setIsLoading(false);
+        return;
       }
+
+      setDepartment(dept);
+
+      try {
+        // Fetch 30 days of KPI history for this department
+        const historyRes = await fetch(`/api/kpi-history?department_id=${deptId}&days=30`);
+        const historyData = await historyRes.json();
+
+        // Fetch benchmarks for this department
+        const benchRes = await fetch(`/api/benchmarks?department=${deptId}`);
+        const benchData = await benchRes.json();
+
+        // Build a map: kpi_id -> { points: KPIHistoryPoint[], latest: value }
+        const kpiMap: Record<string, KPIHistoryPoint[]> = {};
+        if (historyData.data) {
+          for (const row of historyData.data) {
+            if (!kpiMap[row.kpi_id]) kpiMap[row.kpi_id] = [];
+            kpiMap[row.kpi_id].push({ snapshot_date: row.snapshot_date, value: row.value });
+          }
+        }
+
+        // Build benchmark map: kpi_name -> benchmark value
+        const benchMap: Record<string, number> = {};
+        if (benchData.benchmarks) {
+          for (const b of benchData.benchmarks) {
+            benchMap[b.kpi_name] = b.benchmark;
+          }
+        }
+
+        // Convert to KPIData[]
+        const kpiList: KPIData[] = Object.entries(kpiMap).map(([kpiId, points]) => {
+          const values = points.map(p => p.value);
+          const latest = values[values.length - 1];
+          const first = values[0];
+          const { trend, changePercent } = computeTrend(values);
+
+          // Find matching benchmark by name
+          const kpiName = points.length > 0 ? (historyData.data.find((d: { kpi_id: string; kpi_name: string }) => d.kpi_id === kpiId)?.kpi_name || kpiId) : kpiId;
+          const benchmark = benchMap[kpiName];
+
+          // Get target and unit from first data row
+          const dataRow = historyData.data?.find((d: { kpi_id: string }) => d.kpi_id === kpiId);
+
+          return {
+            id: `${deptId}-${kpiId}`,
+            kpiId,
+            name: kpiName,
+            value: Math.round(latest * 100) / 100,
+            target: dataRow?.target || 0,
+            unit: dataRow?.unit || 'count',
+            trend,
+            changePercent,
+            sparkline: values.slice(-30),
+            benchmark,
+          };
+        });
+
+        setKpis(kpiList);
+      } catch (err) {
+        console.error('Failed to load KPI data:', err);
+        // Fall back to empty - UI will still render
+        setKpis([]);
+      }
+
+      setAgents(generateDemoAgents(deptId));
+      setRecommendations(generateDemoRecommendations(deptId));
       setIsLoading(false);
-    }, 500);
+    };
+
+    loadDepartmentData();
   }, [deptId]);
 
   const gradeColors = getGradeColor(department?.grade || 'B');
@@ -686,12 +601,19 @@ export default function DepartmentSubBoardPage() {
                 <Target className="h-5 w-5" />
               </div>
               <h2 className="text-xl font-bold text-gray-900">Department KPIs</h2>
+              <span className="text-xs text-gray-400 ml-2">30-day trend</span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {kpis.map((kpi) => (
-                <KPICard key={kpi.id} kpi={kpi} />
-              ))}
-            </div>
+            {kpis.length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                {kpis.map((kpi) => (
+                  <KPICard key={kpi.id} kpi={kpi} />
+                ))}
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
+                <p className="text-gray-500">No KPI data available yet for this department.</p>
+              </div>
+            )}
           </motion.section>
           <motion.section
             initial={{ opacity: 0, y: 20 }}

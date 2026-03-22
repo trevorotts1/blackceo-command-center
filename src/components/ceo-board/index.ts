@@ -18,6 +18,8 @@ export { BenchmarkingSection } from './BenchmarkingSection';
 export { ComparisonBar } from './ComparisonBar';
 export { RecommendationsSection } from './RecommendationsSection';
 export { RecommendationCard } from './RecommendationCard';
+export { ManualKPISection } from './ManualKPISection';
+export { ExecutionQueueSection } from './ExecutionQueueSection';
 
 // Health Section (re-export from health/)
 export * from './health';

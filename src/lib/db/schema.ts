@@ -194,6 +194,10 @@ CREATE TABLE IF NOT EXISTS recommendations (
   supporting_data TEXT,
   confidence REAL DEFAULT 0.7,
   status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'dismissed', 'saved')),
+  approved_at TEXT,
+  effectiveness_score INTEGER,
+  measured_at TEXT,
+  outcome_notes TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -201,6 +205,21 @@ CREATE TABLE IF NOT EXISTS recommendations (
 CREATE INDEX IF NOT EXISTS idx_recommendations_status ON recommendations(status);
 CREATE INDEX IF NOT EXISTS idx_recommendations_category ON recommendations(category);
 CREATE INDEX IF NOT EXISTS idx_recommendations_department ON recommendations(department_id);
+
+-- Recommendation outcomes table (Effectiveness Tracking)
+CREATE TABLE IF NOT EXISTS recommendation_outcomes (
+  id TEXT PRIMARY KEY,
+  recommendation_id TEXT NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+  measured_at TEXT DEFAULT (datetime('now')),
+  before_score INTEGER NOT NULL,
+  after_score INTEGER NOT NULL,
+  improvement_pct REAL NOT NULL,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_outcomes_rec ON recommendation_outcomes(recommendation_id);
+CREATE INDEX IF NOT EXISTS idx_outcomes_measured ON recommendation_outcomes(measured_at DESC);
 
 -- DA Challenges table (Devil's Advocate Feed)
 CREATE TABLE IF NOT EXISTS da_challenges (
@@ -213,6 +232,27 @@ CREATE TABLE IF NOT EXISTS da_challenges (
   response_deadline TEXT,
   resolved_at TEXT
 );
+
+-- Execution Queue table (Out-of-Hours Task Queue)
+CREATE TABLE IF NOT EXISTS execution_queue (
+  id TEXT PRIMARY KEY,
+  task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+  recommendation_id TEXT REFERENCES recommendations(id) ON DELETE SET NULL,
+  task_name TEXT NOT NULL,
+  department TEXT,
+  queued_at TEXT DEFAULT (datetime('now')),
+  scheduled_window TEXT DEFAULT 'evening' CHECK (scheduled_window IN ('evening', 'overnight', 'morning')),
+  status TEXT DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+  started_at TEXT,
+  completed_at TEXT,
+  result_notes TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Index for execution queue
+CREATE INDEX IF NOT EXISTS idx_execution_queue_status ON execution_queue(status);
+CREATE INDEX IF NOT EXISTS idx_execution_queue_queued ON execution_queue(queued_at DESC);
 
 -- Index for DA challenges
 CREATE INDEX IF NOT EXISTS idx_da_challenges_status ON da_challenges(status);
