@@ -10,6 +10,21 @@
  */
 
 export const schema = `
+-- Companies table (Multi-company support)
+CREATE TABLE IF NOT EXISTS companies (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  industry TEXT,
+  logo_url TEXT,
+  config TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Index for companies
+CREATE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug);
+
 -- Workspaces table
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
@@ -17,10 +32,14 @@ CREATE TABLE IF NOT EXISTS workspaces (
   slug TEXT NOT NULL UNIQUE,
   description TEXT,
   icon TEXT DEFAULT '📁',
+  company_id TEXT DEFAULT 'default' REFERENCES companies(id),
   user_md TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Index for workspaces by company
+CREATE INDEX IF NOT EXISTS idx_workspaces_company ON workspaces(company_id);
 
 -- Agents table
 CREATE TABLE IF NOT EXISTS agents (
@@ -257,6 +276,22 @@ CREATE INDEX IF NOT EXISTS idx_execution_queue_queued ON execution_queue(queued_
 -- Index for DA challenges
 CREATE INDEX IF NOT EXISTS idx_da_challenges_status ON da_challenges(status);
 CREATE INDEX IF NOT EXISTS idx_da_challenges_department ON da_challenges(department_id);
+
+-- Department Memory table
+CREATE TABLE IF NOT EXISTS dept_memory (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL DEFAULT 'default',
+  memory_type TEXT NOT NULL CHECK (memory_type IN ('decision', 'context', 'lesson', 'goal', 'constraint')),
+  content TEXT NOT NULL,
+  created_by TEXT DEFAULT 'system',
+  importance INTEGER DEFAULT 3 CHECK (importance BETWEEN 1 AND 5),
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dept_memory_workspace ON dept_memory(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_dept_memory_type ON dept_memory(memory_type);
+CREATE INDEX IF NOT EXISTS idx_dept_memory_importance ON dept_memory(importance DESC);
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);

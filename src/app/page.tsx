@@ -3,48 +3,27 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Building2, Users, Bot, ArrowRight, Activity, BarChart3 } from 'lucide-react';
+import { Building2, Users, ArrowRight, Activity, BarChart3 } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { format } from 'date-fns';
 
 interface Company {
   id: string;
   name: string;
-  description: string;
-  departments: number;
-  agents: number;
-  status: 'active' | 'inactive';
+  slug: string;
+  industry: string | null;
+  workspace_count: number;
+  status: 'active';
   gradient: string;
 }
 
-const companies: Company[] = [
-  {
-    id: 'blackceo',
-    name: 'BlackCEO Operations',
-    description: 'Primary company operations and management hub',
-    departments: 17,
-    agents: 24,
-    status: 'active',
-    gradient: 'from-indigo-500 via-purple-500 to-pink-500',
-  },
-  {
-    id: 'acme-dental',
-    name: 'Acme Dental',
-    description: 'Client dental practice management workspace',
-    departments: 17,
-    agents: 12,
-    status: 'active',
-    gradient: 'from-emerald-400 via-teal-500 to-cyan-500',
-  },
-  {
-    id: 'zhw-demo',
-    name: 'Zero Human Workforce Demo',
-    description: 'Autonomous AI workforce demonstration environment',
-    departments: 17,
-    agents: 48,
-    status: 'active',
-    gradient: 'from-amber-400 via-orange-500 to-red-500',
-  },
+const gradients = [
+  'from-indigo-500 via-purple-500 to-pink-500',
+  'from-emerald-400 via-teal-500 to-cyan-500',
+  'from-amber-400 via-orange-500 to-red-500',
+  'from-sky-400 via-blue-500 to-indigo-500',
+  'from-rose-400 via-pink-500 to-fuchsia-500',
+  'from-lime-400 via-green-500 to-emerald-500',
 ];
 
 const containerVariants = {
@@ -81,10 +60,37 @@ export default function CompanySelectorPage() {
   const logoUrl = useLogoUrl();
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isOnline, setIsOnline] = useState(true);
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Fetch companies from API
+  useEffect(() => {
+    async function fetchCompanies() {
+      try {
+        const res = await fetch('/api/companies', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          setCompanies(
+            data.map((c: Company & { workspace_count: number }, i: number) => ({
+              ...c,
+              status: 'active' as const,
+              gradient: gradients[i % gradients.length],
+              workspace_count: c.workspace_count ?? 0,
+            }))
+          );
+        }
+      } catch (err) {
+        console.error('Failed to fetch companies:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchCompanies();
   }, []);
 
   // Check dashboard API health (not gateway - CEO cares about data availability)
@@ -107,7 +113,7 @@ export default function CompanySelectorPage() {
   }, []);
 
   const handleCompanySelect = (companyId: string) => {
-    router.push('/workspace/default');
+    router.push(`/workspace/${companyId}`);
   };
 
   return (
@@ -224,23 +230,16 @@ export default function CompanySelectorPage() {
 
                     {/* Description */}
                     <p className="text-white/80 text-sm mb-6 line-clamp-2">
-                      {company.description}
+                      {company.industry || 'Company workspace'}
                     </p>
 
                     {/* Stats Row */}
                     <div className="flex items-center gap-4 mt-auto">
-                      {/* Departments Badge */}
+                      {/* Workspaces Badge */}
                       <div className="flex items-center gap-2 px-3 py-2 bg-white/15 backdrop-blur-sm rounded-xl">
                         <Users className="w-4 h-4 text-white/80" />
-                        <span className="text-white font-semibold text-sm">{company.departments}</span>
-                        <span className="text-white/60 text-xs">depts</span>
-                      </div>
-
-                      {/* Agents Badge */}
-                      <div className="flex items-center gap-2 px-3 py-2 bg-white/15 backdrop-blur-sm rounded-xl">
-                        <Bot className="w-4 h-4 text-white/80" />
-                        <span className="text-white font-semibold text-sm">{company.agents}</span>
-                        <span className="text-white/60 text-xs">agents</span>
+                        <span className="text-white font-semibold text-sm">{company.workspace_count}</span>
+                        <span className="text-white/60 text-xs">workspaces</span>
                       </div>
                     </div>
 

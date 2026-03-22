@@ -20,6 +20,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { Sparkline } from '@/components/ceo-board/Sparkline';
+import DepartmentMemorySection from '@/components/ceo-board/DepartmentMemorySection';
 
 // Types
 interface DepartmentData {
@@ -614,6 +615,13 @@ export default function DepartmentSubBoardPage() {
                 <p className="text-gray-500">No KPI data available yet for this department.</p>
               </div>
             )}
+          </motion.section>
+          <motion.section
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15 }}
+          >
+            <DepartmentMemorySection workspaceId={deptId} />
           </motion.section>
           <motion.section
             initial={{ opacity: 0, y: 20 }}

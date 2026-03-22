@@ -2,6 +2,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, closeDb } from './index';
+import { seedDeptMemory } from './seed-dept-memory';
 
 const ORCHESTRATOR_SOUL_MD = `# BlackCEO Command Center Orchestrator
 
@@ -199,6 +200,9 @@ async function seed() {
     'text',
     now
   );
+
+  // Seed department memories
+  seedDeptMemory();
 
   console.log('✅ Database seeded successfully!');
   console.log(`   - Created Orchestrator (master agent): ${orchestratorId}`);

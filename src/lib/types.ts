@@ -114,12 +114,24 @@ export interface Business {
   created_at: string;
 }
 
+export interface Company {
+  id: string;
+  name: string;
+  slug: string;
+  industry?: string;
+  logo_url?: string;
+  config: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Workspace {
   id: string;
   name: string;
   slug: string;
   description?: string;
   icon: string;
+  company_id?: string;
   user_md?: string;
   created_at: string;
   updated_at: string;
@@ -238,6 +250,33 @@ export interface PlanningState {
     percentage: number;
   };
   isLocked: boolean;
+}
+
+// Department Memory types
+export type MemoryType = 'decision' | 'context' | 'lesson' | 'goal' | 'constraint';
+
+export interface DeptMemory {
+  id: string;
+  workspace_id: string;
+  memory_type: MemoryType;
+  content: string;
+  created_by: string;
+  importance: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDeptMemoryRequest {
+  workspace_id: string;
+  memory_type: MemoryType;
+  content: string;
+  created_by?: string;
+  importance?: number;
+}
+
+export interface UpdateDeptMemoryRequest {
+  content?: string;
+  importance?: number;
 }
 
 // API request/response types

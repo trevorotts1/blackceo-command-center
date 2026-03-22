@@ -292,6 +292,107 @@ const migrations: Migration[] = [
 
       console.log('[Migration 009] Effectiveness tracking columns and outcomes table created');
     }
+  },
+  {
+    id: '011',
+    name: 'add_dept_memory',
+    up: (db) => {
+      console.log('[Migration 011] Adding dept_memory table...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dept_memory (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          memory_type TEXT NOT NULL CHECK (memory_type IN ('decision', 'context', 'lesson', 'goal', 'constraint')),
+          content TEXT NOT NULL,
+          created_by TEXT DEFAULT 'system',
+          importance INTEGER DEFAULT 3 CHECK (importance BETWEEN 1 AND 5),
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_dept_memory_workspace ON dept_memory(workspace_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_dept_memory_type ON dept_memory(memory_type)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_dept_memory_importance ON dept_memory(importance DESC)`);
+      console.log('[Migration 011] Created dept_memory table');
+    }
+  },
+  {
+    id: '012',
+    name: 'add_companies_table',
+    up: (db) => {
+      console.log('[Migration 012] Adding companies table and company_id to workspaces...');
+
+      // Create companies table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS companies (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL UNIQUE,
+          industry TEXT,
+          logo_url TEXT,
+          config TEXT DEFAULT '{}',
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug)`);
+
+      // Seed default company
+      db.prepare(
+        `INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)`
+      ).run('default', 'BlackCEO Operations', 'blackceo', 'Business Operations', '{}');
+
+      // Add company_id to workspaces if not exists
+      const workspacesInfo = db.prepare("PRAGMA table_info(workspaces)").all() as { name: string }[];
+      if (!workspacesInfo.some(col => col.name === 'company_id')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN company_id TEXT DEFAULT 'default'`);
+        console.log('[Migration 012] Added company_id to workspaces');
+      }
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_workspaces_company ON workspaces(company_id)`);
+
+      // Seed Acme Dental company
+      db.prepare(
+        `INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)`
+      ).run('acme-dental', 'Acme Dental', 'acme-dental', 'Healthcare / Dental', '{}');
+
+      // Seed Zero Human Workforce Demo company
+      db.prepare(
+        `INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)`
+      ).run('zhw-demo', 'Zero Human Workforce Demo', 'zhw-demo', 'AI / Automation Demo', '{}');
+
+      // Create workspaces for Acme Dental
+      const acmeWorkspaces = [
+        { id: 'acme-front-desk', name: 'Front Desk', slug: 'acme-front-desk', desc: 'Patient intake and scheduling', icon: '🏥' },
+        { id: 'acme-billing', name: 'Billing', slug: 'acme-billing', desc: 'Insurance and payment processing', icon: '💳' },
+        { id: 'acme-marketing', name: 'Marketing', slug: 'acme-marketing', desc: 'Patient acquisition and outreach', icon: '📢' },
+        { id: 'acme-operations', name: 'Operations', slug: 'acme-operations', desc: 'Clinic operations and logistics', icon: '⚙️' },
+        { id: 'acme-hr', name: 'HR', slug: 'acme-hr', desc: 'Staff and human resources', icon: '👥' },
+      ];
+      for (const ws of acmeWorkspaces) {
+        db.prepare(
+          `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id) VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(ws.id, ws.name, ws.slug, ws.desc, ws.icon, 'acme-dental');
+      }
+
+      // Create workspaces for ZHW Demo
+      const zhwWorkspaces = [
+        { id: 'zhw-sales', name: 'Sales', slug: 'zhw-sales', desc: 'AI-powered sales pipeline', icon: '💰' },
+        { id: 'zhw-marketing', name: 'Marketing', slug: 'zhw-marketing', desc: 'Autonomous marketing engine', icon: '📢' },
+        { id: 'zhw-support', name: 'Support', slug: 'zhw-support', desc: 'AI customer support', icon: '🛟' },
+        { id: 'zhw-operations', name: 'Operations', slug: 'zhw-operations', desc: 'Fully automated operations', icon: '⚙️' },
+        { id: 'zhw-product', name: 'Product', slug: 'zhw-product', desc: 'AI product development', icon: '🚀' },
+      ];
+      for (const ws of zhwWorkspaces) {
+        db.prepare(
+          `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id) VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(ws.id, ws.name, ws.slug, ws.desc, ws.icon, 'zhw-demo');
+      }
+
+      console.log('[Migration 012] Companies and workspaces seeded');
+    }
   }
 ];
 
