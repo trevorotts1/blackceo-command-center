@@ -1,27 +1,79 @@
 # Changelog
 
+## v2.2.0 - March 22, 2026
+
+### Added - Persona UI Integration
+- DepartmentCard: activePersona field with violet persona indicator pill
+- AgentPerformanceSection: persona pill on agent cards showing active persona per task
+- AgentPerformanceSection: specialist type label (Full-time / On-call) per agent
+- DevilsAdvocateFeed: persona field on challenges with "Acting as [persona]" display
+- Agent type interface: persona and specialist_type fields added
+
+### Added - API Endpoints
+- GET /api/departments/[id]/personas: reads governing-personas.md from department workspace
+- GET /api/org-chart: reads ORG-CHART.md from CEO workspace
+- GET /api/persona-matrix: reads persona-matrix.md from CEO workspace
+- Department sub-board fetches live personas before falling back to demo data
+
+### Changed - Dynamic Departments
+- Removed ALL hardcoded "17 departments" references from codebase
+- CEODashboard: TOTAL_DEPARTMENTS_TARGET replaced with departments.length
+- DepartmentPerformanceSection: "all 17 departments" changed to "all departments"
+- departments.config.ts and seed-dept-memory.ts comments updated
+- Demo persona list expanded to 10 accurate book author names
+
+### Infrastructure
+- Added version file (v2.2.0)
+
+## v2.1.0 - March 22, 2026
+
+### Added
+- Version file added to repository
+
+## v1.4.0 - March 21, 2026
+
+### Added
+- Multi-company schema support
+- Per-department memory architecture
+- KPI entry form
+- Recommendation effectiveness tracking (90-day score)
+- Execution queue (5pm-9am out-of-hours processing)
+- Historical benchmarks with inline SVG sparklines (30-day trends)
+- Model pills on agent cards
+
+## v1.3.0 - March 21, 2026
+
+### Added
+- CompanyHealthHeader (letter grade + plain English explanation + dept badges)
+- DepartmentCard (stat row, progress bar, status dot)
+- DepartmentSubBoard page (/ceo-board/[dept])
+- Navigation (back buttons, clickable dept cards)
+- RecommendationEngineCard (Approve/Dismiss/Save for Later/Why buttons)
+- RecommendationsSection (API, effectiveness stats, empty state)
+- Approve-to-backlog Kanban integration
+- Recommendations API (GET, POST approve/dismiss/save, SQLite seeding)
+- AgentPerformanceSection (192 lines)
+- DevilsAdvocateFeed (248 lines)
+- DepartmentPerformanceSection (291 lines)
+- ExecutionQueueSection
+- BenchmarkingSection
+- KPIEntryPanel
+- ManualKPISection
+- Sparkline component
+- grading.ts utility
+
 ## v1.2.0 - March 21, 2026
 
 ### Fixed
-- All Departments view now shows all tasks instead of empty Kanban
+- All Departments view shows all tasks instead of empty Kanban
 - Routing: clicking All Departments no longer shows CEO Dashboard
-- CEO Performance Board now shows real metrics instead of zeros
-- CEODashboard component added to version control (was untracked)
+- CEO Performance Board shows real metrics instead of zeros
 
 ### Added
-- Task pills: Status, Priority, Department, Agent, Persona (purple with 🧠)
-- Persona values populated for all 111 tasks across 17 departments
+- Task pills: Status, Priority, Department, Agent, Persona
+- Persona values populated for all 111 tasks across departments
 - Back to Dashboard button on Performance Board
 - All Companies button on dashboard header
-- Navigation between company selector, dashboard, and performance board
-
-### Departments & Personas
-- Marketing → Seth G. | Sales → Hormozi A. | Creative → Twyla T.
-- CEO → Robbins T. | Billing → Ramit S. | Operations → Sinek S.
-- Support → Clear J. | Video → Goggins D. | Legal → Nassim T.
-- Webdev → Einstein A. | Comms → Carnegie D. | Appdev → Ferriss T.
-- Audio → Pink D. | HR → Sharma R. | IT → Keller H.
-- Research → Ries E. | Graphics → Twyla T.
 
 ## v1.1.0 - March 20, 2026
 - Department-based sidebar filtering
