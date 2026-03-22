@@ -371,7 +371,7 @@ function RecommendationCard({
 }
 
 function generateDemoAgents(deptId: string): AgentData[] {
-  const personas = ['Alex Hormozi', 'Gary Vee', 'Seth Godin', 'Simon Sinek', 'Brené Brown', 'Ray Dalio'];
+  const personas = ['Alex Hormozi', 'Gary Vaynerchuk', 'Seth Godin', 'Simon Sinek', 'Brené Brown', 'Ray Dalio', 'Donald Miller', 'Russell Brunson', 'Chris Voss', 'Daniel Pink'];
   const models = ['Kimi 2.5', 'Sonnet 4.6', 'GPT 5.4', 'Opus 4.6'];
   return Array.from({ length: 3 }, (_, i) => ({
     id: `${deptId}-agent-${i}`,

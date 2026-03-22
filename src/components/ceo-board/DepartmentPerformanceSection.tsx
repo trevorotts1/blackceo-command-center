@@ -193,7 +193,7 @@ export function DepartmentPerformanceSection({ className }: DepartmentPerformanc
               Department Performance
             </h2>
             <p className="mt-1 text-sm text-gray-500">
-              Real-time visibility into all 17 departments
+              Real-time visibility into all departments
             </p>
           </div>
         </div>

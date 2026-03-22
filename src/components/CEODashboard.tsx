@@ -9,7 +9,7 @@ interface CEODashboardProps {
   workspace: Workspace;
 }
 
-const TOTAL_DEPARTMENTS_TARGET = 17;
+// Dynamic: use actual department count as target (no hardcoded number)
 
 export function CEODashboard({ workspace }: CEODashboardProps) {
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
@@ -59,10 +59,11 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
     const totalAgents = departments.reduce((sum, dept) => sum + (dept.agentCount || 0), 0);
     const doneRate = totalTasks > 0 ? totalDone / totalTasks : 0;
 
+    const totalDepartments = departments.length || 1; // dynamic, never hardcoded
     const healthScoreRaw =
-      (departmentsWithTasks / TOTAL_DEPARTMENTS_TARGET) * 40 +
+      (departmentsWithTasks / totalDepartments) * 40 +
       doneRate * 40 +
-      (totalAgents / TOTAL_DEPARTMENTS_TARGET) * 20;
+      (totalAgents / totalDepartments) * 20;
 
     const healthScore = Math.max(0, Math.min(100, Math.round(healthScoreRaw)));
 
@@ -129,7 +130,7 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
                 <MetricTile
                   icon={<Target className="h-4 w-4 text-indigo-600" />}
                   label="Active Departments"
-                  value={`${metrics.departmentsWithTasks}/${TOTAL_DEPARTMENTS_TARGET}`}
+                  value={`${metrics.departmentsWithTasks}/${departments.length}`}
                 />
                 <MetricTile
                   icon={<AlertCircle className="h-4 w-4 text-emerald-600" />}
@@ -139,7 +140,7 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
                 <MetricTile
                   icon={<Users className="h-4 w-4 text-violet-600" />}
                   label="Agent Coverage"
-                  value={`${metrics.totalAgents}/${TOTAL_DEPARTMENTS_TARGET}`}
+                  value={`${metrics.totalAgents}/${departments.length}`}
                 />
               </div>
             </div>

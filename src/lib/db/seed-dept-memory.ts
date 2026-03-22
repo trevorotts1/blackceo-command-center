@@ -1,5 +1,5 @@
 // Department Memory Seed Script
-// Seeds 17 departments with 3-5 starter memories each
+// Seeds departments with 3-5 starter memories each
 
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, closeDb } from './index';

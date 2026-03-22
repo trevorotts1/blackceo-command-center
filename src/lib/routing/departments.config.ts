@@ -36,7 +36,7 @@ export interface DepartmentConfig {
 }
 
 /**
- * Default 17 departments — BlackCEO Command Center standard department structure.
+ * Default departments — BlackCEO Command Center standard department structure.
  * CEO/COM is the master/fallback department with highest priority.
  * Exported so callers can use it as a typed constant without loading from disk.
  */
