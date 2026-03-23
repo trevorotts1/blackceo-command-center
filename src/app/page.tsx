@@ -121,7 +121,7 @@ export default function CompanySelectorPage() {
   }, []);
 
   const handleCompanySelect = (companyId: string) => {
-    router.push('/ceo-board');
+    router.push('/workspace');
   };
 
   return (
@@ -191,7 +191,7 @@ export default function CompanySelectorPage() {
               Welcome to {companyName}
             </h2>
             <p className="text-gray-500 text-lg max-w-xl mx-auto">
-              Enter the CEO board to view all departments and performance metrics
+              Select a department to open its Kanban board, or view the CEO Performance Board for analytics
             </p>
           </motion.div>
 
@@ -257,7 +257,7 @@ export default function CompanySelectorPage() {
                       initial={{ opacity: 0.7, x: 0 }}
                       whileHover={{ opacity: 1, x: 4 }}
                     >
-                      <span className="text-sm">Enter CEO Board</span>
+                      <span className="text-sm">View Departments</span>
                       <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
                     </motion.div>
                   </div>
