@@ -157,7 +157,7 @@ export async function POST(request: NextRequest) {
     if (task) {
       (async () => {
         try {
-          const webhookUrl = `${request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/webhooks/task-created`;
+          const webhookUrl = `${request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:4000'}/api/webhooks/task-created`;
           const webhookResponse = await fetch(webhookUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

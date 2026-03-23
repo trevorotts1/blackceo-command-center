@@ -26,10 +26,10 @@ const DEFAULT_CONFIG: MissionControlConfig = {
   workspaceBasePath: '~/Documents/Shared',
   projectsPath: '~/Documents/Shared/projects',
   missionControlUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000',
-  defaultProjectName: 'mission-control',
+  defaultProjectName: 'command-center',
 };
 
-const CONFIG_KEY = 'mission-control-config';
+const CONFIG_KEY = 'command-center-config';
 
 /**
  * Get current configuration
@@ -162,3 +162,4 @@ export function getProjectPath(projectName: string, subpath?: string): string {
   const base = `${projectsPath}/${projectName}`;
   return subpath ? `${base}/${subpath}` : base;
 }
+

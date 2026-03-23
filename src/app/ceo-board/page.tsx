@@ -64,7 +64,7 @@ export default function CEOPerformanceBoardPage() {
           {/* Left - Back Button & Title */}
           <div className="flex items-center gap-4">
             <button
-              onClick={() => router.push('/workspace/default')}
+              onClick={() => router.push('/')}
               className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 text-sm font-medium"
             >
               <ChevronLeft className="h-4 w-4" />

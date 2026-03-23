@@ -61,6 +61,7 @@ export default function CompanySelectorPage() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isOnline, setIsOnline] = useState(true);
   const [companies, setCompanies] = useState<Company[]>([]);
+  const [companyName, setCompanyName] = useState('Command Center');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -72,6 +73,13 @@ export default function CompanySelectorPage() {
   useEffect(() => {
     async function fetchCompanies() {
       try {
+        // Fetch company name
+        const companyRes = await fetch('/api/company', { cache: 'no-store' });
+        if (companyRes.ok) {
+          const companyData = await companyRes.json();
+          if (companyData.name) setCompanyName(companyData.name);
+        }
+
         const res = await fetch('/api/companies', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
@@ -113,7 +121,7 @@ export default function CompanySelectorPage() {
   }, []);
 
   const handleCompanySelect = (companyId: string) => {
-    router.push(`/workspace/${companyId}`);
+    router.push('/ceo-board');
   };
 
   return (
@@ -180,10 +188,10 @@ export default function CompanySelectorPage() {
           {/* Title Section */}
           <motion.div className="text-center mb-12" variants={cardVariants}>
             <h2 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
-              Select a Company
+              Welcome to {companyName}
             </h2>
             <p className="text-gray-500 text-lg max-w-xl mx-auto">
-              Choose your organization to access the mission control dashboard
+              Enter the CEO board to view all departments and performance metrics
             </p>
           </motion.div>
 
@@ -249,7 +257,7 @@ export default function CompanySelectorPage() {
                       initial={{ opacity: 0.7, x: 0 }}
                       whileHover={{ opacity: 1, x: 4 }}
                     >
-                      <span className="text-sm">Enter Dashboard</span>
+                      <span className="text-sm">Enter CEO Board</span>
                       <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
                     </motion.div>
                   </div>

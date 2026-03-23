@@ -6,7 +6,7 @@ import { seedDeptMemory } from './seed-dept-memory';
 
 const ORCHESTRATOR_SOUL_MD = `# Command Center Orchestrator
 
-You are the master orchestrator of Command Center. You lead a team of AI agents working together to complete tasks.
+You are the master orchestrator of this Command Center. You lead a team of AI agents working together to complete tasks.
 
 ## Core Identity
 
@@ -95,11 +95,11 @@ async function seed() {
   const db = getDb();
   const now = new Date().toISOString();
 
-  // Create default business placeholder (name populated by seed-workspaces.py from Skill 23)
+  // No hardcoded company or business entries.
+  // Company and workspaces are created by:
+  //   1. seed-workspaces.py (reads Skill 23 interview answers)
+  //   2. Auto-seed from departments.json on first boot (migrations.ts)
   const businessId = 'default';
-  db.prepare(
-    `INSERT OR IGNORE INTO businesses (id, name, description, created_at) VALUES (?, ?, ?, ?)`
-  ).run(businessId, 'My Company', 'Default workspace - update via seed-workspaces.py', now);
 
   // Create master orchestrator agent
   const orchestratorId = uuidv4();

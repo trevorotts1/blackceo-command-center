@@ -23,7 +23,7 @@ import urllib.error
 # Configuration
 # ---------------------------------------------------------------------------
 
-BASE_URL = os.environ.get("MC_URL", "http://localhost:3000")
+BASE_URL = os.environ.get("MC_URL", "http://localhost:4000")
 WORKSPACE_ID = os.environ.get("MC_WORKSPACE", "default")
 
 # Label prefix → Mission Control agent name

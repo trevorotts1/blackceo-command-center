@@ -128,7 +128,7 @@ export function DepartmentPerformanceSection({ className }: DepartmentPerformanc
         const workspaces: WorkspaceStats[] = await workspacesRes.json();
         const tasks: Task[] = await tasksRes.json();
         
-        // Filter out excluded workspaces (e.g., BlackCEO Operations)
+        // Filter out excluded workspaces (e.g., legacy 'default')
         const filteredWorkspaces = workspaces.filter(
           (w) => !EXCLUDED_WORKSPACE_IDS.includes(w.id)
         );

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# disk-monitor.sh - BlackCEO Automation System
+# disk-monitor.sh - Command Center Automation System
 # Purpose: Check free disk space and alert if below threshold
 # Location: ~/projects/mission-control/scripts/disk-monitor.sh
 #

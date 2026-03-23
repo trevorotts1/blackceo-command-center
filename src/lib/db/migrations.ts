@@ -8,6 +8,9 @@
  */
 
 import Database from 'better-sqlite3';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 interface Migration {
   id: string;
@@ -45,12 +48,9 @@ const migrations: Migration[] = [
         );
       `);
       
-      // Insert default workspace if not exists
-      db.exec(`
-        INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon) 
-        VALUES ('default', 'Default Workspace', 'default', 'Default workspace', '🏠');
-      `);
-      
+      // No default workspace seeded. Workspaces are created by seed-workspaces.py
+      // or auto-seed from departments.json.
+
       // Add workspace_id to tasks if not exists
       const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
       if (!tasksInfo.some(col => col.name === 'workspace_id')) {
@@ -413,25 +413,45 @@ export function getMigrationStatus(db: Database.Database): { applied: string[]; 
   return { applied, pending };
 }
 
-// Auto-seed workspaces from config/departments.json on first boot
-function autoSeedFromDepartmentsJson(db: any) {
+// Auto-seed company + workspaces from config/departments.json on first boot
+function autoSeedFromDepartmentsJson(db: Database.Database) {
   try {
-    const fs = require('fs');
-    const path = require('path');
-    
     // Check if workspaces table is empty
-    const count = db.prepare('SELECT COUNT(*) as c FROM workspaces').get();
+    const count = db.prepare('SELECT COUNT(*) as c FROM workspaces').get() as { c: number } | undefined;
     if (count && count.c > 0) return; // Already has data
-    
+
     // Look for departments.json
-    const configPath = path.join(process.cwd(), 'config', 'departments.json');
-    if (!fs.existsSync(configPath)) return;
+    const configPaths = [
+      path.join(process.cwd(), 'config', 'departments.json'),
+      path.join(os.homedir(), 'projects', 'mission-control', 'config', 'departments.json'),
+      path.join('/opt', 'mission-control', 'config', 'departments.json'),
+    ];
     
+    let configPath: string | null = null;
+    for (const p of configPaths) {
+      if (fs.existsSync(p)) {
+        configPath = p;
+        break;
+      }
+    }
+    
+    if (!configPath) return;
+
     const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     if (!Array.isArray(depts) || depts.length === 0) return;
-    
+
     console.log('[Auto-seed] Found departments.json with', depts.length, 'departments');
-    
+
+    // Get company name from env, interview answers, or use placeholder
+    const companyName = findCompanyName();
+    const companySlug = companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'my-company';
+
+    // Create company entry first
+    db.prepare(
+      'INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)'
+    ).run(companySlug, companyName, companySlug, '', '{}');
+    console.log('[Auto-seed] Created company:', companyName);
+
     for (const dept of depts) {
       db.prepare(
         'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id) VALUES (?, ?, ?, ?, ?, ?)'
@@ -441,13 +461,51 @@ function autoSeedFromDepartmentsJson(db: any) {
         dept.id,
         dept.name + ' department workspace',
         dept.emoji || '📁',
-        'default'
+        companySlug
       );
       console.log('[Auto-seed] Created workspace:', dept.id, dept.name);
     }
-    
-    console.log('[Auto-seed] Done. Seeded', depts.length, 'workspaces');
+
+    console.log('[Auto-seed] Done. Seeded company +', depts.length, 'workspaces');
   } catch (err) {
     console.log('[Auto-seed] Skipped:', (err as Error).message);
   }
+}
+
+// Find company name from env var, interview answers file, or default
+function findCompanyName(): string {
+  // 1. Check COMPANY_NAME env var first
+  const envName = process.env.COMPANY_NAME?.trim();
+  if (envName) return envName;
+
+  // 2. Try to find from Skill 23 interview answers
+  const answerFiles = [
+    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'workforce-interview-answers.md'),
+    path.join(os.homedir(), '.openclaw', 'workspace', 'company-discovery', 'workforce-interview-answers.md'),
+  ];
+
+  for (const f of answerFiles) {
+    if (fs.existsSync(f)) {
+      try {
+        const content = fs.readFileSync(f, 'utf8');
+        // Look for patterns like "Company Name: XYZ" or "## Company Name\nXYZ"
+        const patterns = [
+          /(?:company|business)\s*name\s*[:\-]\s*(.+?)(?:\n|$)/i,
+          /#+\s*(?:company|business)\s*name\s*\n+(.+?)(?:\n|$)/i,
+        ];
+        for (const pattern of patterns) {
+          const match = content.match(pattern);
+          if (match && match[1]) {
+            const name = match[1].trim();
+            if (name) return name;
+          }
+        }
+      } catch {
+        // Continue to next file
+      }
+    }
+  }
+
+  // 3. Default fallback
+  return 'My Company';
 }

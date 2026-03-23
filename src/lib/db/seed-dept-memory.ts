@@ -172,7 +172,7 @@ const DEPT_SEEDS: DeptSeed[] = [
     memories: [
       { memory_type: 'goal', content: 'Goal: Achieve $10M ARR milestone by end of FY2026', importance: 5 },
       { memory_type: 'constraint', content: 'Constraint: All strategic pivots require board-level approval and 30-day impact analysis', importance: 5 },
-      { memory_type: 'context', content: 'Context: Company focus is empowering Black entrepreneurs through AI-powered business tools', importance: 5 },
+      { memory_type: 'context', content: 'Context: Company focus is empowering entrepreneurs through AI-powered business tools', importance: 5 },
       { memory_type: 'lesson', content: 'Lesson: Weekly cross-department sync reduced project delays by 28% since implementation', importance: 4 },
     ],
   },

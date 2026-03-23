@@ -165,7 +165,7 @@ export default function SettingsPage() {
                 type="text"
                 value={config.defaultProjectName}
                 onChange={(e) => handleChange('defaultProjectName', e.target.value)}
-                placeholder="mission-control"
+                placeholder="command-center"
                 className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500 focus:border-transparent focus:outline-none"
               />
               <p className="text-xs text-gray-500 mt-1">

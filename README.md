@@ -1,10 +1,10 @@
-# BlackCEO Command Center
+# Command Center
 
-Premium AI Agent Management Dashboard - A private, customized build.
+AI Agent Management Dashboard - A universal template for any organization.
 
 ## Overview
 
-BlackCEO Command Center is a sophisticated web application for managing and orchestrating AI agents. It provides a visual dashboard for task management, agent coordination, and real-time monitoring of agent activities.
+Command Center is a sophisticated web application for managing and orchestrating AI agents. It provides a visual dashboard for task management, agent coordination, and real-time monitoring of agent activities.
 
 ## Tech Stack
 
@@ -16,20 +16,32 @@ BlackCEO Command Center is a sophisticated web application for managing and orch
 
 ## Features
 
-- **Agent Management:** 22 agents across 3 tiers (Strategic, Execution, Research)
+- **Agent Management:** Multi-agent coordination across departments
 - **Task Board:** Kanban-style task management with drag-and-drop
 - **Live Feed:** Real-time activity monitoring
 - **Planning Phase:** Collaborative task specification with AI agents
-- **Workspace Support:** Multi-workspace organization
+- **Workspace Support:** Multi-workspace organization by department
+- **Multi-Company:** Support for multiple companies/organizations
 
 ## Setup
 
-See client installation documentation for deployment instructions.
+```bash
+# Set your company name
+export COMPANY_NAME="Your Company Name"
 
-## Contact
+# Install dependencies
+npm install
 
-trevor@blackceo.com
+# Build and start
+npm run build
+pm2 start ecosystem.config.cjs
+```
 
----
+## Configuration
 
-*This is a private repository. Do not share or distribute.*
+- **Company name:** Set via `COMPANY_NAME` env var or populated from database
+- **Departments:** Configure in `config/departments.json`
+- **Port:** 4000 (default)
+- **Logo:** Place at `public/logo.png` or set `NEXT_PUBLIC_LOGO_URL`
+
+See deployment documentation for full setup instructions.

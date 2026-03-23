@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# weekly-cleanup.sh - BlackCEO Automation System
+# weekly-cleanup.sh - Command Center Automation System
 # Purpose: Auto-delete stale antfarm workflow embedding indexes older than 7 days
 # Location: ~/projects/mission-control/scripts/weekly-cleanup.sh
 #
