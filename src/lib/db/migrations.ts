@@ -353,45 +353,11 @@ const migrations: Migration[] = [
 
       db.exec(`CREATE INDEX IF NOT EXISTS idx_workspaces_company ON workspaces(company_id)`);
 
-      // Seed Acme Dental company
-      db.prepare(
-        `INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)`
-      ).run('acme-dental', 'Acme Dental', 'acme-dental', 'Healthcare / Dental', '{}');
-
-      // Seed Zero Human Workforce Demo company
-      db.prepare(
-        `INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)`
-      ).run('zhw-demo', 'Zero Human Workforce Demo', 'zhw-demo', 'AI / Automation Demo', '{}');
-
-      // Create workspaces for Acme Dental
-      const acmeWorkspaces = [
-        { id: 'acme-front-desk', name: 'Front Desk', slug: 'acme-front-desk', desc: 'Patient intake and scheduling', icon: '🏥' },
-        { id: 'acme-billing', name: 'Billing', slug: 'acme-billing', desc: 'Insurance and payment processing', icon: '💳' },
-        { id: 'acme-marketing', name: 'Marketing', slug: 'acme-marketing', desc: 'Patient acquisition and outreach', icon: '📢' },
-        { id: 'acme-operations', name: 'Operations', slug: 'acme-operations', desc: 'Clinic operations and logistics', icon: '⚙️' },
-        { id: 'acme-hr', name: 'HR', slug: 'acme-hr', desc: 'Staff and human resources', icon: '👥' },
-      ];
-      for (const ws of acmeWorkspaces) {
-        db.prepare(
-          `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id) VALUES (?, ?, ?, ?, ?, ?)`
-        ).run(ws.id, ws.name, ws.slug, ws.desc, ws.icon, 'acme-dental');
-      }
-
-      // Create workspaces for ZHW Demo
-      const zhwWorkspaces = [
-        { id: 'zhw-sales', name: 'Sales', slug: 'zhw-sales', desc: 'AI-powered sales pipeline', icon: '💰' },
-        { id: 'zhw-marketing', name: 'Marketing', slug: 'zhw-marketing', desc: 'Autonomous marketing engine', icon: '📢' },
-        { id: 'zhw-support', name: 'Support', slug: 'zhw-support', desc: 'AI customer support', icon: '🛟' },
-        { id: 'zhw-operations', name: 'Operations', slug: 'zhw-operations', desc: 'Fully automated operations', icon: '⚙️' },
-        { id: 'zhw-product', name: 'Product', slug: 'zhw-product', desc: 'AI product development', icon: '🚀' },
-      ];
-      for (const ws of zhwWorkspaces) {
-        db.prepare(
-          `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id) VALUES (?, ?, ?, ?, ?, ?)`
-        ).run(ws.id, ws.name, ws.slug, ws.desc, ws.icon, 'zhw-demo');
-      }
-
-      console.log('[Migration 012] Companies and workspaces seeded');
+      // No seed data. Companies and workspaces are created dynamically
+      // from the client's Skill 23 (AI Workforce Blueprint) interview answers.
+      // The seed-workspaces.py script reads config/departments.json which
+      // Skill 23 generates based on the client's chosen departments.
+      console.log('[Migration 012] Schema ready. Workspaces populated by Skill 23 + seed script.');
     }
   }
 ];
