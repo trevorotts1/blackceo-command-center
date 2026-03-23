@@ -69,11 +69,11 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
         {workspace ? (
           <div className="flex items-center gap-2">
             <Link
-              href="/"
+              href="/workspace"
               className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
-              <span>All Companies</span>
+              <span>All Departments</span>
             </Link>
             <span className="text-gray-300">/</span>
             <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg">

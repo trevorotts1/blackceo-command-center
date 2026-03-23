@@ -3,13 +3,24 @@
 import { useEffect, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2 } from 'lucide-react';
+import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home } from 'lucide-react';
 
 interface Workspace {
   id: string;
   name: string;
   description: string;
 }
+
+const gradients = [
+  'from-indigo-500 to-purple-600',
+  'from-emerald-500 to-teal-600',
+  'from-rose-500 to-pink-600',
+  'from-amber-500 to-orange-600',
+  'from-sky-500 to-blue-600',
+  'from-violet-500 to-fuchsia-600',
+  'from-lime-500 to-green-600',
+  'from-red-500 to-rose-600',
+];
 
 function WorkspaceSelectorInner() {
   const router = useRouter();
@@ -31,7 +42,7 @@ function WorkspaceSelectorInner() {
 
         let allWorkspaces: Workspace[] = Array.isArray(wsData) ? wsData : wsData.workspaces || [];
 
-        // Filter demo workspaces and default/ceo utility workspaces
+        // Filter out demo workspaces and utility workspaces
         allWorkspaces = allWorkspaces.filter((w) => {
           const slug = (w as any).slug || w.id;
           return !slug.startsWith('acme-') &&
@@ -57,17 +68,6 @@ function WorkspaceSelectorInner() {
     }
     fetchData();
   }, [companyFilter]);
-
-  const gradients = [
-    'from-indigo-500 to-purple-600',
-    'from-emerald-500 to-teal-600',
-    'from-rose-500 to-pink-600',
-    'from-amber-500 to-orange-600',
-    'from-sky-500 to-blue-600',
-    'from-violet-500 to-fuchsia-600',
-    'from-lime-500 to-green-600',
-    'from-red-500 to-rose-600',
-  ];
 
   if (loading) {
     return (
@@ -95,23 +95,25 @@ function WorkspaceSelectorInner() {
           <h1 className="text-gray-900 font-semibold text-lg">Departments</h1>
         </div>
 
+        {/* Nav buttons */}
         <div className="flex items-center gap-3">
-          <motion.button
-            onClick={() => router.push('/ceo-board')}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-xl font-medium text-sm hover:bg-gray-50 transition-all"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            <BarChart3 className="w-4 h-4" />
-            CEO Performance Board
-          </motion.button>
           <motion.button
             onClick={() => router.push('/')}
             className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-xl font-medium text-sm hover:bg-gray-50 transition-all"
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
           >
+            <Home className="w-4 h-4" />
             Home
+          </motion.button>
+          <motion.button
+            onClick={() => router.push('/ceo-board')}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-medium text-sm shadow-sm hover:shadow-md transition-all"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <BarChart3 className="w-4 h-4" />
+            CEO Performance Board
           </motion.button>
         </div>
       </header>
@@ -184,7 +186,6 @@ function WorkspaceSelectorInner() {
             </div>
           )}
 
-          {/* Footer */}
           <div className="mt-12 text-center">
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
               <Activity className="w-4 h-4 text-indigo-500" />
