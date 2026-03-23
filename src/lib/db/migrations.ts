@@ -507,5 +507,5 @@ function findCompanyName(): string {
   }
 
   // 3. Default fallback
-  return 'My Company';
+  return 'Command Center';
 }
