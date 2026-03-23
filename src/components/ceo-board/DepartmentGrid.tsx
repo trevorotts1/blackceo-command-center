@@ -22,7 +22,7 @@ export function DepartmentGrid({ departments, filter, isLoading }: DepartmentGri
   }, [departments, filter]);
 
   const handleDepartmentClick = (deptId: string) => {
-    router.push(`/ceo-board/${deptId}`);
+    router.push(`/workspace/${deptId}`);
   };
 
   if (isLoading) {
