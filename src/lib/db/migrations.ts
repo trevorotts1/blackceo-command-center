@@ -399,6 +399,9 @@ export function runMigrations(db: Database.Database): void {
       throw error;
     }
   }
+
+  // Auto-seed from departments.json if workspaces table is empty
+  autoSeedFromDepartmentsJson(db);
 }
 
 /**
@@ -408,4 +411,43 @@ export function getMigrationStatus(db: Database.Database): { applied: string[]; 
   const applied = (db.prepare('SELECT id FROM _migrations ORDER BY id').all() as { id: string }[]).map(m => m.id);
   const pending = migrations.filter(m => !applied.includes(m.id)).map(m => m.id);
   return { applied, pending };
+}
+
+// Auto-seed workspaces from config/departments.json on first boot
+function autoSeedFromDepartmentsJson(db: any) {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    
+    // Check if workspaces table is empty
+    const count = db.prepare('SELECT COUNT(*) as c FROM workspaces').get();
+    if (count && count.c > 0) return; // Already has data
+    
+    // Look for departments.json
+    const configPath = path.join(process.cwd(), 'config', 'departments.json');
+    if (!fs.existsSync(configPath)) return;
+    
+    const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!Array.isArray(depts) || depts.length === 0) return;
+    
+    console.log('[Auto-seed] Found departments.json with', depts.length, 'departments');
+    
+    for (const dept of depts) {
+      db.prepare(
+        'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(
+        dept.id,
+        dept.name,
+        dept.id,
+        dept.name + ' department workspace',
+        dept.emoji || '📁',
+        'default'
+      );
+      console.log('[Auto-seed] Created workspace:', dept.id, dept.name);
+    }
+    
+    console.log('[Auto-seed] Done. Seeded', depts.length, 'workspaces');
+  } catch (err) {
+    console.log('[Auto-seed] Skipped:', (err as Error).message);
+  }
 }

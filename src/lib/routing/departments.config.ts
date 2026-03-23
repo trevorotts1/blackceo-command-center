@@ -1,7 +1,7 @@
 /**
  * Department Configuration
  *
- * This file defines the default department definitions for the BlackCEO Command Center.
+ * This file defines the default department definitions for the Command Center.
  * Workspaces can override or extend these definitions by setting DEPARTMENTS_CONFIG_PATH
  * to a JSON file, or by populating the workspace_departments table.
  *
@@ -36,7 +36,7 @@ export interface DepartmentConfig {
 }
 
 /**
- * Default departments — BlackCEO Command Center standard department structure.
+ * Default departments — Command Center standard department structure.
  * CEO/COM is the master/fallback department with highest priority.
  * Exported so callers can use it as a typed constant without loading from disk.
  */

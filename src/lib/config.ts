@@ -1,7 +1,7 @@
 /**
  * Configuration Management
  * 
- * Handles user-configurable settings for BlackCEO Command Center.
+ * Handles user-configurable settings for Command Center.
  * Settings are stored in localStorage for client-side access.
  * 
  * NEVER commit hardcoded IPs, paths, or sensitive data!

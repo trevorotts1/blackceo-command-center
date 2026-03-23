@@ -123,13 +123,13 @@ export default function CompanySelectorPage() {
         {/* Left: Logo & Title */}
         <div className="flex items-center gap-4">
           {logoUrl ? (
-            <img src={logoUrl} alt="BlackCEO" className="h-9 w-auto" />
+            <img src={logoUrl} alt="Command Center" className="h-9 w-auto" />
           ) : (
             <div className="flex items-center gap-2">
               <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
                 <Building2 className="w-5 h-5 text-white" />
               </div>
-              <span className="text-gray-900 font-bold text-xl tracking-tight">BlackCEO</span>
+              <span className="text-gray-900 font-bold text-xl tracking-tight">{companyName}</span>
             </div>
           )}
           <div className="h-6 w-px bg-gray-200 mx-2" />

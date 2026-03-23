@@ -1,4 +1,4 @@
-// Core types for BlackCEO Command Center
+// Core types for Command Center
 
 export type AgentStatus = 'standby' | 'working' | 'offline' | 'active';
 

@@ -4,9 +4,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb, closeDb } from './index';
 import { seedDeptMemory } from './seed-dept-memory';
 
-const ORCHESTRATOR_SOUL_MD = `# BlackCEO Command Center Orchestrator
+const ORCHESTRATOR_SOUL_MD = `# Command Center Orchestrator
 
-You are the master orchestrator of BlackCEO Command Center. You lead a team of AI agents working together to complete tasks.
+You are the master orchestrator of Command Center. You lead a team of AI agents working together to complete tasks.
 
 ## Core Identity
 
@@ -43,7 +43,7 @@ const ORCHESTRATOR_USER_MD = `# User Context
 
 ## The Human
 
-The human running BlackCEO Command Center is the ultimate authority. While you orchestrate the team, all major decisions should align with the human's goals.
+The human running Command Center is the ultimate authority. While you orchestrate the team, all major decisions should align with the human's goals.
 
 ## Communication with Human
 
@@ -62,7 +62,7 @@ The human running BlackCEO Command Center is the ultimate authority. While you o
 
 const ORCHESTRATOR_AGENTS_MD = `# Team Roster
 
-As the orchestrator, you manage and coordinate with all agents in BlackCEO Command Center.
+As the orchestrator, you manage and coordinate with all agents in Command Center.
 
 ## How to Work with Agents
 
@@ -178,7 +178,7 @@ async function seed() {
   const events = [
     { type: 'system', message: 'Database seeded with initial data' },
     { type: 'agent_joined', agentId: orchestratorId, message: 'Orchestrator joined the team' },
-    { type: 'system', message: 'BlackCEO Command Center is online' },
+    { type: 'system', message: 'Command Center is online' },
   ];
 
   for (const event of events) {
@@ -196,7 +196,7 @@ async function seed() {
     uuidv4(),
     teamConvoId,
     orchestratorId,
-    "Welcome to BlackCEO Command Center, team! I'm your orchestrator. Let's get to work.",
+    "Welcome to Command Center, team! I'm your orchestrator. Let's get to work.",
     'text',
     now
   );

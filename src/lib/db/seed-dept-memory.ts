@@ -16,7 +16,7 @@ const DEPT_SEEDS: DeptSeed[] = [
     name: 'Marketing',
     memories: [
       { memory_type: 'goal', content: 'Goal: Reduce cost per lead (CPL) to $20 by Q2 2026', importance: 5 },
-      { memory_type: 'constraint', content: 'Constraint: All campaigns must use BlackCEO brand colors (navy, gold, white)', importance: 4 },
+      { memory_type: 'constraint', content: 'Constraint: All campaigns must use company brand colors', importance: 4 },
       { memory_type: 'context', content: 'Context: Primary audience is Black entrepreneurs aged 30-55 across US metro areas', importance: 4 },
       { memory_type: 'lesson', content: 'Lesson: Email sequences with personalization outperform generic blasts by 3x on open rates', importance: 3 },
     ],
@@ -141,7 +141,7 @@ const DEPT_SEEDS: DeptSeed[] = [
     id: 'audio',
     name: 'Audio',
     memories: [
-      { memory_type: 'goal', content: 'Goal: Launch weekly BlackCEO podcast with 5,000 downloads per episode by Q4 2026', importance: 5 },
+      { memory_type: 'goal', content: 'Goal: Launch weekly company podcast with 5,000 downloads per episode by Q4 2026', importance: 5 },
       { memory_type: 'constraint', content: 'Constraint: All audio content must be mastered to -16 LUFS for consistent loudness', importance: 4 },
       { memory_type: 'context', content: 'Context: Recording setup uses Rode PodMic, Focusrite Scarlett, Riverside for remote', importance: 3 },
       { memory_type: 'lesson', content: 'Lesson: Episodes under 35 minutes have 60% higher completion rates', importance: 3 },

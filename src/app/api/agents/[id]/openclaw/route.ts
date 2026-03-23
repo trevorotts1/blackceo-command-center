@@ -100,7 +100,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     run(
       `INSERT INTO events (id, type, agent_id, message, created_at)
        VALUES (?, ?, ?, ?, ?)`,
-      [uuidv4(), 'agent_status_changed', id, `${agent.name} connected to BlackCEO Command Center`, now]
+      [uuidv4(), 'agent_status_changed', id, `${agent.name} connected to Command Center`, now]
     );
 
     const session = queryOne<OpenClawSession>(
@@ -151,7 +151,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     run(
       `INSERT INTO events (id, type, agent_id, message, created_at)
        VALUES (?, ?, ?, ?, ?)`,
-      [uuidv4(), 'agent_status_changed', id, `${agent.name} disconnected from BlackCEO Command Center`, now]
+      [uuidv4(), 'agent_status_changed', id, `${agent.name} disconnected from Command Center`, now]
     );
 
     return NextResponse.json({ linked: false, success: true });

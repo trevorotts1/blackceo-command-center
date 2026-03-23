@@ -18,7 +18,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'BlackCEO Command Center',
+  title: process.env.COMPANY_NAME ? `${process.env.COMPANY_NAME} Command Center` : 'Command Center',
   description: 'AI Agent Orchestration Dashboard',
   icons: {
     icon: '/favicon.svg',

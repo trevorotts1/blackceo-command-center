@@ -1,6 +1,6 @@
 /**
  * Settings Page
- * Configure BlackCEO Command Center paths, URLs, and preferences
+ * Configure Command Center paths, URLs, and preferences
  */
 
 'use client';
@@ -121,7 +121,7 @@ export default function SettingsPage() {
             <h2 className="text-xl font-semibold text-gray-900">Workspace Paths</h2>
           </div>
           <p className="text-sm text-gray-500 mb-4">
-            Configure where BlackCEO Command Center stores projects and deliverables.
+            Configure where Command Center stores projects and deliverables.
           </p>
 
           <div className="space-y-4">
@@ -137,7 +137,7 @@ export default function SettingsPage() {
                 className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500 focus:border-transparent focus:outline-none"
               />
               <p className="text-xs text-gray-500 mt-1">
-                Base directory for all BlackCEO Command Center files. Use ~ for home directory.
+                Base directory for all Command Center files. Use ~ for home directory.
               </p>
             </div>
 
@@ -182,7 +182,7 @@ export default function SettingsPage() {
             <h2 className="text-xl font-semibold text-gray-900">API Configuration</h2>
           </div>
           <p className="text-sm text-gray-500 mb-4">
-            Configure BlackCEO Command Center API URL for agent orchestration.
+            Configure Command Center API URL for agent orchestration.
           </p>
 
           <div className="space-y-4">
@@ -198,7 +198,7 @@ export default function SettingsPage() {
                 className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500 focus:border-transparent focus:outline-none"
               />
               <p className="text-xs text-gray-500 mt-1">
-                URL where BlackCEO Command Center is running. Auto-detected by default. Change for remote access.
+                URL where Command Center is running. Auto-detected by default. Change for remote access.
               </p>
             </div>
           </div>
