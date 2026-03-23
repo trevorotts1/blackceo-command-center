@@ -193,8 +193,7 @@ export function CompanyHealthSection() {
         const filteredDepartments = data.filter(
           (item) => {
             const slug = item.slug || item.id;
-            return slug !== 'ceo' && 
-                   slug !== 'default' && 
+            return slug !== 'default' && 
                    !slug.startsWith('acme-') && 
                    !slug.startsWith('zhw-');
           }

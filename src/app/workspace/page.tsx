@@ -47,8 +47,7 @@ function WorkspaceSelectorInner() {
           const slug = (w as any).slug || w.id;
           return !slug.startsWith('acme-') &&
                  !slug.startsWith('zhw-') &&
-                 slug !== 'default' &&
-                 slug !== 'ceo';
+                 slug !== 'default';
         });
 
         // If a company filter is passed, show only that company's workspaces
