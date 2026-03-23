@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Bot, Activity, CheckCircle, Clock } from 'lucide-react';
 import type { Agent } from '@/lib/types';
@@ -82,6 +83,7 @@ const DEPT_LABELS: Record<string, string> = {
 };
 
 export function AgentPerformanceSection() {
+  const router = useRouter();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -143,7 +145,8 @@ export function AgentPerformanceSection() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: index * 0.04 }}
-                className="p-4 rounded-xl border border-gray-200 bg-white hover:border-indigo-300 hover:shadow-md transition-all"
+                onClick={() => router.push(`/workspace/${dept}`)}
+                className="p-4 rounded-xl border border-gray-200 bg-white hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer"
               >
                 {/* Top Row: Emoji + Name + Status */}
                 <div className="flex items-start justify-between mb-2">

@@ -188,9 +188,16 @@ export function CompanyHealthSection() {
 
         const data: WorkspaceStats[] = await res.json();
         
-        // Filter out 'ceo' and 'default' workspaces - only show named departments
+        // Filter to only show workspaces belonging to the default company (Trevor's board)
+        // Exclude ceo, default, and any seeded demo workspaces (acme-*, zhw-*)
         const filteredDepartments = data.filter(
-          (item) => item.slug !== 'ceo' && item.slug !== 'default'
+          (item) => {
+            const slug = item.slug || item.id;
+            return slug !== 'ceo' && 
+                   slug !== 'default' && 
+                   !slug.startsWith('acme-') && 
+                   !slug.startsWith('zhw-');
+          }
         );
 
         setDepartments(filteredDepartments);

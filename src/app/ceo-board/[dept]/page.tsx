@@ -431,7 +431,34 @@ export default function DepartmentSubBoardPage() {
     const loadDepartmentData = async () => {
       setIsLoading(true);
 
-      const dept = DEPARTMENTS[deptId];
+      let dept = DEPARTMENTS[deptId];
+      
+      // If not in hardcoded map, fetch from workspaces API dynamically
+      if (!dept) {
+        try {
+          const wsRes = await fetch('/api/workspaces');
+          if (wsRes.ok) {
+            const workspaces = await wsRes.json();
+            const ws = workspaces.find((w: { id: string; slug?: string; name: string; icon?: string; description?: string }) => 
+              w.id === deptId || w.slug === deptId
+            );
+            if (ws) {
+              dept = {
+                id: ws.id,
+                name: ws.name,
+                emoji: ws.icon || '🏢',
+                headTitle: `Head of ${ws.name}`,
+                grade: 'B',
+                gradeScore: 75,
+                insight: ws.description || `${ws.name} department is active and operational.`,
+              };
+            }
+          }
+        } catch (e) {
+          console.error('Failed to fetch workspace for dept page:', e);
+        }
+      }
+
       if (!dept) {
         setIsLoading(false);
         return;
