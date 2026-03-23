@@ -95,11 +95,11 @@ async function seed() {
   const db = getDb();
   const now = new Date().toISOString();
 
-  // Create default business
+  // Create default business placeholder (name populated by seed-workspaces.py from Skill 23)
   const businessId = 'default';
   db.prepare(
     `INSERT OR IGNORE INTO businesses (id, name, description, created_at) VALUES (?, ?, ?, ?)`
-  ).run(businessId, 'BlackCEO Operations', 'Default workspace for all operations', now);
+  ).run(businessId, 'My Company', 'Default workspace - update via seed-workspaces.py', now);
 
   // Create master orchestrator agent
   const orchestratorId = uuidv4();

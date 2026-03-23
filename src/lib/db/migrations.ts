@@ -339,10 +339,8 @@ const migrations: Migration[] = [
       `);
       db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug)`);
 
-      // Seed default company
-      db.prepare(
-        `INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)`
-      ).run('default', 'BlackCEO Operations', 'blackceo', 'Business Operations', '{}');
+      // No default company seeded. Client's company is created by seed-workspaces.py
+      // from Skill 23 interview answers.
 
       // Add company_id to workspaces if not exists
       const workspacesInfo = db.prepare("PRAGMA table_info(workspaces)").all() as { name: string }[];
