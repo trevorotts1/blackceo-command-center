@@ -120,8 +120,32 @@ export default function CompanySelectorPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleCompanySelect = (companyId: string) => {
-    router.push('/workspace');
+  const handleCompanySelect = async (companyId: string) => {
+    try {
+      const res = await fetch('/api/workspaces', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        const workspaces = Array.isArray(data) ? data : data.workspaces || [];
+        // Find workspaces for this company
+        const companyWorkspaces = workspaces.filter(
+          (w: { company_id?: string }) => w.company_id === companyId
+        );
+        if (companyWorkspaces.length === 1) {
+          // One workspace - go directly to Kanban board
+          router.push(`/workspace/${companyWorkspaces[0].id}`);
+        } else if (companyWorkspaces.length > 1) {
+          // Multiple workspaces - show selector
+          router.push('/workspace');
+        } else {
+          // Fallback: try company ID as workspace slug
+          router.push(`/workspace/${companyId}`);
+        }
+      } else {
+        router.push(`/workspace/${companyId}`);
+      }
+    } catch {
+      router.push(`/workspace/${companyId}`);
+    }
   };
 
   return (
@@ -191,7 +215,7 @@ export default function CompanySelectorPage() {
               Welcome to {companyName}
             </h2>
             <p className="text-gray-500 text-lg max-w-xl mx-auto">
-              Select a department to open its Kanban board, or view the CEO Performance Board for analytics
+              Click a company to enter its dashboard. View the CEO Performance Board from the header.
             </p>
           </motion.div>
 
@@ -257,7 +281,7 @@ export default function CompanySelectorPage() {
                       initial={{ opacity: 0.7, x: 0 }}
                       whileHover={{ opacity: 1, x: 4 }}
                     >
-                      <span className="text-sm">View Departments</span>
+                      <span className="text-sm">Enter Dashboard</span>
                       <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
                     </motion.div>
                   </div>
