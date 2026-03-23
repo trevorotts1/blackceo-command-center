@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { scoreToGrade, gradeToColor, gradeToLabel, type Grade } from '@/lib/grading';
 import type { WorkspaceStats } from '@/lib/types';
@@ -50,18 +51,21 @@ const DEPARTMENT_EMOJIS: Record<string, string> = {
 };
 
 interface DepartmentBadgeProps {
+  id: string;
   name: string;
   score: number;
   emoji: string;
+  onClick: () => void;
 }
 
-function DepartmentBadge({ name, score, emoji }: DepartmentBadgeProps) {
+function DepartmentBadge({ name, score, emoji, onClick }: DepartmentBadgeProps) {
   const grade = scoreToGrade(score);
   const color = gradeToColor(grade);
 
   return (
-    <div
-      className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full shadow-sm whitespace-nowrap"
+    <button
+      onClick={onClick}
+      className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full shadow-sm whitespace-nowrap hover:bg-gray-50 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer"
     >
       <span className="text-lg">{emoji}</span>
       <span className="text-sm font-medium text-gray-700">{name}</span>
@@ -74,7 +78,7 @@ function DepartmentBadge({ name, score, emoji }: DepartmentBadgeProps) {
       >
         {grade}
       </span>
-    </div>
+    </button>
   );
 }
 
@@ -168,6 +172,7 @@ function calculateCompanyScore(departments: WorkspaceStats[]): number {
 }
 
 export function CompanyHealthSection() {
+  const router = useRouter();
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -296,9 +301,11 @@ export function CompanyHealthSection() {
               {sortedDepartments.map((dept) => (
                 <DepartmentBadge
                   key={dept.id}
+                  id={dept.id}
                   name={dept.name}
                   score={dept.score}
                   emoji={dept.emoji}
+                  onClick={() => router.push(`/ceo-board/${dept.id}`)}
                 />
               ))}
             </div>

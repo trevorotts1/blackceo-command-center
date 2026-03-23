@@ -2,11 +2,11 @@ module.exports = {
   apps: [{
     name: 'mission-control',
     script: '/opt/homebrew/bin/npx',
-    args: 'next start -p 4000',
+    args: 'next start -p 3000 -H 0.0.0.0',
     cwd: process.cwd(),
     env: {
       NODE_ENV: 'production',
-      PORT: '4000'
+      PORT: '3000'
     },
     // PM2 settings
     instances: 1,
