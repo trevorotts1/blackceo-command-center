@@ -126,18 +126,22 @@ export default function CompanySelectorPage() {
       if (res.ok) {
         const data = await res.json();
         const workspaces = Array.isArray(data) ? data : data.workspaces || [];
-        // Find workspaces for this company
+        // If a workspace exists with the same ID as the company, go there directly (Trevor's setup)
+        const directMatch = workspaces.find((w: { id: string }) => w.id === companyId);
+        if (directMatch) {
+          router.push(`/workspace/${companyId}`);
+          return;
+        }
+        // Otherwise find workspaces for this company
         const companyWorkspaces = workspaces.filter(
           (w: { company_id?: string }) => w.company_id === companyId
         );
         if (companyWorkspaces.length === 1) {
-          // One workspace - go directly to Kanban board
           router.push(`/workspace/${companyWorkspaces[0].id}`);
         } else if (companyWorkspaces.length > 1) {
-          // Multiple workspaces - show selector
-          router.push('/workspace');
+          // Multiple workspaces - show selector (client setup with 17 departments)
+          router.push(`/workspace?company=${companyId}`);
         } else {
-          // Fallback: try company ID as workspace slug
           router.push(`/workspace/${companyId}`);
         }
       } else {

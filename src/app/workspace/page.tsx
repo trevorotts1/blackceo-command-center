@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2 } from 'lucide-react';
 
@@ -11,8 +11,10 @@ interface Workspace {
   description: string;
 }
 
-export default function WorkspaceSelector() {
+function WorkspaceSelectorInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const companyFilter = searchParams.get('company');
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [companyName, setCompanyName] = useState('');
   const [loading, setLoading] = useState(true);
@@ -27,7 +29,25 @@ export default function WorkspaceSelector() {
         const wsData = await wsRes.json();
         const companyData = await companyRes.json();
 
-        setWorkspaces(Array.isArray(wsData) ? wsData : wsData.workspaces || []);
+        let allWorkspaces: Workspace[] = Array.isArray(wsData) ? wsData : wsData.workspaces || [];
+
+        // Filter demo workspaces and default/ceo utility workspaces
+        allWorkspaces = allWorkspaces.filter((w) => {
+          const slug = (w as any).slug || w.id;
+          return !slug.startsWith('acme-') &&
+                 !slug.startsWith('zhw-') &&
+                 slug !== 'default' &&
+                 slug !== 'ceo';
+        });
+
+        // If a company filter is passed, show only that company's workspaces
+        if (companyFilter) {
+          allWorkspaces = allWorkspaces.filter(
+            (w) => (w as any).company_id === companyFilter
+          );
+        }
+
+        setWorkspaces(allWorkspaces);
         setCompanyName(companyData.name || companyData.company?.name || 'Command Center');
       } catch (err) {
         console.error('Failed to fetch workspaces:', err);
@@ -36,7 +56,7 @@ export default function WorkspaceSelector() {
       }
     }
     fetchData();
-  }, []);
+  }, [companyFilter]);
 
   const gradients = [
     'from-indigo-500 to-purple-600',
@@ -176,5 +196,17 @@ export default function WorkspaceSelector() {
         </motion.div>
       </main>
     </div>
+  );
+}
+
+export default function WorkspaceSelector() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+      </div>
+    }>
+      <WorkspaceSelectorInner />
+    </Suspense>
   );
 }
