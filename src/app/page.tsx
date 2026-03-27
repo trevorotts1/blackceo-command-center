@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -106,6 +106,15 @@ export default function HomePage() {
       route: '/ceo-board',
       cta: 'View Performance',
     },
+    {
+      title: 'Intelligence Settings',
+      description: 'AI Configuration',
+      detail: 'Manage which AI models and personas power each department and role. Fine-tune your workforce intelligence.',
+      icon: <Brain className="w-7 h-7 text-white" />,
+      gradient: 'from-violet-500 via-purple-500 to-fuchsia-500',
+      route: '/settings/intelligence',
+      cta: 'Configure AI',
+    },
   ];
 
   return (
@@ -162,7 +171,7 @@ export default function HomePage() {
 
           {/* Three Entry Cards */}
           <motion.div
-            className="grid grid-cols-1 md:grid-cols-3 gap-6"
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"
             variants={containerVariants}
           >
             {cards.map((card) => (

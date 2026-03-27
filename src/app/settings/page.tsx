@@ -7,7 +7,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Settings, Save, RotateCcw, Home, FolderOpen, Link as LinkIcon } from 'lucide-react';
+import { Settings, Save, RotateCcw, Home, FolderOpen, Link as LinkIcon, Brain, ArrowRight } from 'lucide-react';
 import { getConfig, updateConfig, resetConfig, type MissionControlConfig } from '@/lib/config';
 
 export default function SettingsPage() {
@@ -222,6 +222,25 @@ export default function SettingsPage() {
           <p className="text-xs text-indigo-500 mt-3">
             Environment variables take precedence over UI settings for server-side operations.
           </p>
+        </section>
+
+        {/* Intelligence Settings Link */}
+        <section
+          onClick={() => router.push('/settings/intelligence')}
+          className="mb-8 p-6 bg-white border border-gray-200 rounded-xl shadow-sm cursor-pointer hover:border-indigo-300 hover:shadow-md transition-all group"
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-violet-500 to-fuchsia-500 rounded-xl flex items-center justify-center">
+                <Brain className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Intelligence Settings</h2>
+                <p className="text-sm text-gray-500">Manage which AI models and personas power each department and role</p>
+              </div>
+            </div>
+            <ArrowRight className="w-5 h-5 text-gray-400 group-hover:text-indigo-600 group-hover:translate-x-1 transition-all" />
+          </div>
         </section>
       </div>
     </div>

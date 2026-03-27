@@ -306,4 +306,19 @@ CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
 CREATE INDEX IF NOT EXISTS idx_openclaw_sessions_task ON openclaw_sessions(task_id);
 CREATE INDEX IF NOT EXISTS idx_planning_questions_task ON planning_questions(task_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_agent_memory_logs_agent ON agent_memory_logs(agent_id, log_date DESC);
+
+-- Agent Settings table (Intelligence Settings - model/persona per department/role)
+CREATE TABLE IF NOT EXISTS agent_settings (
+  id TEXT PRIMARY KEY,
+  department_id TEXT NOT NULL,
+  role_id TEXT,
+  setting_type TEXT NOT NULL CHECK (setting_type IN ('model', 'persona')),
+  value TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_settings_dept ON agent_settings(department_id);
+CREATE INDEX IF NOT EXISTS idx_agent_settings_role ON agent_settings(role_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_settings_unique ON agent_settings(department_id, role_id, setting_type);
 `;

@@ -357,6 +357,37 @@ const migrations: Migration[] = [
       // Skill 23 generates based on the client's chosen departments.
       console.log('[Migration 012] Schema ready. Workspaces populated by Skill 23 + seed script.');
     }
+  },
+  {
+    id: '013',
+    name: 'add_agent_settings',
+    up: (db) => {
+      console.log('[Migration 013] Adding agent_settings table...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_settings (
+          id TEXT PRIMARY KEY,
+          department_id TEXT NOT NULL,
+          role_id TEXT,
+          setting_type TEXT NOT NULL CHECK (setting_type IN ('model', 'persona')),
+          value TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_settings_dept ON agent_settings(department_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_settings_role ON agent_settings(role_id)`);
+
+      // Create unique index (check if exists first to be safe)
+      try {
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_settings_unique ON agent_settings(department_id, role_id, setting_type)`);
+      } catch {
+        // Index may already exist
+      }
+
+      console.log('[Migration 013] Created agent_settings table');
+    }
   }
 ];
 
