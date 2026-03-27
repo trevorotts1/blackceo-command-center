@@ -1,15 +1,19 @@
 'use client';
 
-import { useEffect, useState, Suspense } from 'react';
+import { useEffect, useState, Suspense, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home } from 'lucide-react';
+import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home, GripVertical } from 'lucide-react';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
+import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 
 interface Workspace {
   id: string;
   name: string;
   description: string;
+  slug?: string;
+  icon?: string;
+  sort_order?: number;
 }
 
 const gradients = [
@@ -31,6 +35,7 @@ function WorkspaceSelectorInner() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [companyName, setCompanyName] = useState('');
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     async function fetchData() {
@@ -70,6 +75,34 @@ function WorkspaceSelectorInner() {
     fetchData();
   }, [companyFilter]);
 
+  const onDragEnd = useCallback(async (result: DropResult) => {
+    if (!result.destination) return;
+    const from = result.source.index;
+    const to = result.destination.index;
+    if (from === to) return;
+
+    // Reorder locally
+    const reordered = Array.from(workspaces);
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+    setWorkspaces(reordered);
+
+    // Persist to DB
+    setSaving(true);
+    try {
+      const order = reordered.map((w) => w.id);
+      await fetch('/api/workspaces', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order }),
+      });
+    } catch (err) {
+      console.error('Failed to persist workspace order:', err);
+    } finally {
+      setSaving(false);
+    }
+  }, [workspaces]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
@@ -99,6 +132,9 @@ function WorkspaceSelectorInner() {
           </div>
           <div className="h-6 w-px bg-gray-200 mx-2" />
           <h1 className="text-gray-900 font-semibold text-lg">Departments</h1>
+          {saving && (
+            <span className="text-xs text-indigo-500 font-medium animate-pulse ml-2">Saving order...</span>
+          )}
         </div>
 
         {/* Nav buttons */}
@@ -136,7 +172,7 @@ function WorkspaceSelectorInner() {
               Select a Department
             </h2>
             <p className="text-gray-500 text-lg max-w-xl mx-auto">
-              Click any department to open its Kanban board with tasks, live feed, and agents
+              Click any department to open its Kanban board. Drag to reorder.
             </p>
           </div>
 
@@ -146,53 +182,88 @@ function WorkspaceSelectorInner() {
               <p className="text-gray-400 text-sm mt-2">Run Skill 23 (AI Workforce Blueprint) to set up your departments.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {workspaces.map((workspace, index) => (
-                <motion.button
-                  key={workspace.id}
-                  onClick={() => router.push(`/workspace/${workspace.id}`)}
-                  className="group relative w-full text-left"
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.05 }}
-                  whileHover={{ scale: 1.03 }}
-                  whileTap={{ scale: 0.98 }}
-                >
+            <DragDropContext onDragEnd={onDragEnd}>
+              <Droppable droppableId="workspaces-grid">
+                {(provided) => (
                   <div
-                    className={`relative overflow-hidden rounded-3xl ${cardBackground ? '' : `bg-gradient-to-br ${gradients[index % gradients.length]}`} p-6 sm:p-8 min-h-[180px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
-                    style={cardBackground || undefined}
+                    ref={provided.innerRef}
+                    {...provided.droppableProps}
+                    className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
                   >
-                    <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
-                    <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
+                    {workspaces.map((workspace, index) => (
+                      <Draggable
+                        key={workspace.id}
+                        draggableId={workspace.id}
+                        index={index}
+                      >
+                        {(dragProvided, snapshot) => (
+                          <div
+                            ref={dragProvided.innerRef}
+                            {...dragProvided.draggableProps}
+                            style={{
+                              ...dragProvided.draggableProps.style,
+                            }}
+                          >
+                            <motion.button
+                              onClick={() => router.push(`/workspace/${workspace.id}`)}
+                              className={`group relative w-full text-left ${snapshot.isDragging ? 'z-50' : ''}`}
+                              initial={{ opacity: 0, y: 20 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ delay: index * 0.05 }}
+                              whileHover={{ scale: snapshot.isDragging ? 1.0 : 1.03 }}
+                              whileTap={{ scale: 0.98 }}
+                            >
+                              <div
+                                className={`relative overflow-hidden rounded-3xl ${cardBackground ? '' : `bg-gradient-to-br ${gradients[index % gradients.length]}`} p-6 sm:p-8 min-h-[180px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300 ${snapshot.isDragging ? 'ring-2 ring-indigo-400 shadow-2xl shadow-indigo-200/50' : ''}`}
+                                style={cardBackground || undefined}
+                              >
+                                {/* Drag handle */}
+                                <div
+                                  {...dragProvided.dragHandleProps}
+                                  className="absolute top-3 right-3 z-20 p-1.5 rounded-lg bg-white/20 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing"
+                                  title="Drag to reorder"
+                                >
+                                  <GripVertical className="w-4 h-4 text-white/80" />
+                                </div>
 
-                    <div className="relative z-10 flex flex-col h-full">
-                      <div className="flex items-center justify-between mb-4">
-                        <div className="flex items-center gap-2 px-3 py-1.5 bg-white/20 backdrop-blur-sm rounded-full">
-                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                          <span className="text-white/90 text-xs font-medium uppercase tracking-wider">Active</span>
-                        </div>
-                        <Users className="w-6 h-6 text-white/60" />
-                      </div>
+                                <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
+                                <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
 
-                      <h3 className="text-white font-bold text-2xl mb-2 leading-tight">
-                        {workspace.name}
-                      </h3>
+                                <div className="relative z-10 flex flex-col h-full">
+                                  <div className="flex items-center justify-between mb-4">
+                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-white/20 backdrop-blur-sm rounded-full">
+                                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                      <span className="text-white/90 text-xs font-medium uppercase tracking-wider">Active</span>
+                                    </div>
+                                    <Users className="w-6 h-6 text-white/60" />
+                                  </div>
 
-                      {workspace.description && (
-                        <p className="text-white/80 text-sm line-clamp-2 mt-auto">
-                          {workspace.description}
-                        </p>
-                      )}
+                                  <h3 className="text-white font-bold text-2xl mb-2 leading-tight">
+                                    {workspace.name}
+                                  </h3>
 
-                      <div className="mt-4 flex items-center gap-2 text-white font-medium">
-                        <span className="text-sm">Open Kanban Board</span>
-                        <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
-                      </div>
-                    </div>
+                                  {workspace.description && (
+                                    <p className="text-white/80 text-sm line-clamp-2 mt-auto">
+                                      {workspace.description}
+                                    </p>
+                                  )}
+
+                                  <div className="mt-4 flex items-center gap-2 text-white font-medium">
+                                    <span className="text-sm">Open Kanban Board</span>
+                                    <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
+                                  </div>
+                                </div>
+                              </div>
+                            </motion.button>
+                          </div>
+                        )}
+                      </Draggable>
+                    ))}
+                    {provided.placeholder}
                   </div>
-                </motion.button>
-              ))}
-            </div>
+                )}
+              </Droppable>
+            </DragDropContext>
           )}
 
           <div className="mt-12 text-center">

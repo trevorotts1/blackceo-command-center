@@ -49,7 +49,7 @@ export async function PATCH(
     // Build update query dynamically
     const updates: string[] = [];
     const values: unknown[] = [];
-    
+
     if (name !== undefined) {
       updates.push('name = ?');
       values.push(name);
@@ -62,7 +62,11 @@ export async function PATCH(
       updates.push('icon = ?');
       values.push(icon);
     }
-    
+    if (body.sort_order !== undefined) {
+      updates.push('sort_order = ?');
+      values.push(body.sort_order);
+    }
+
     if (updates.length === 0) {
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
     }

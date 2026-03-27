@@ -388,6 +388,44 @@ const migrations: Migration[] = [
 
       console.log('[Migration 013] Created agent_settings table');
     }
+  },
+  {
+    id: '014',
+    name: 'add_workspace_sort_order',
+    up: (db) => {
+      console.log('[Migration 014] Adding sort_order to workspaces...');
+
+      const workspacesInfo = db.prepare("PRAGMA table_info(workspaces)").all() as { name: string }[];
+      if (!workspacesInfo.some(col => col.name === 'sort_order')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN sort_order INTEGER DEFAULT 1000`);
+        console.log('[Migration 014] Added sort_order column');
+
+        // Set sensible default order:
+        // CEO = 1, Master Orchestration = 2, BlackCEO Operations = 3
+        // Everything else alphabetically starting at 10 (gap for future inserts)
+        const workspaces = db.prepare('SELECT id, name, slug FROM workspaces ORDER BY name').all() as { id: string; name: string; slug: string }[];
+
+        let sortOrder = 10;
+        for (const ws of workspaces) {
+          const lower = ws.name.toLowerCase();
+          const slugLower = ws.slug.toLowerCase();
+          if (lower === 'ceo' || slugLower === 'ceo') {
+            db.prepare('UPDATE workspaces SET sort_order = 1 WHERE id = ?').run(ws.id);
+          } else if (lower.includes('master orchestration') || slugLower.includes('master-orchestration')) {
+            db.prepare('UPDATE workspaces SET sort_order = 2 WHERE id = ?').run(ws.id);
+          } else if (lower.includes('blackceo operations') || slugLower.includes('blackceo-operations') || lower.includes('operations')) {
+            db.prepare('UPDATE workspaces SET sort_order = 3 WHERE id = ?').run(ws.id);
+          } else {
+            db.prepare('UPDATE workspaces SET sort_order = ? WHERE id = ?').run(sortOrder, ws.id);
+            sortOrder += 10;
+          }
+        }
+
+        console.log(`[Migration 014] Set default sort_order for ${workspaces.length} workspaces`);
+      } else {
+        console.log('[Migration 014] sort_order column already exists, skipping');
+      }
+    }
   }
 ];
 

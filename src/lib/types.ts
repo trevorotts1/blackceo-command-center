@@ -137,6 +137,7 @@ export interface Workspace {
   icon: string;
   company_id?: string;
   user_md?: string;
+  sort_order?: number;
   created_at: string;
   updated_at: string;
 }
@@ -155,6 +156,7 @@ export interface WorkspaceStats {
   name: string;
   slug: string;
   icon: string;
+  sort_order?: number;
   taskCounts: {
     backlog: number;
     in_progress: number;

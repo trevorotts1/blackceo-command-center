@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   icon TEXT DEFAULT '📁',
   company_id TEXT DEFAULT 'default' REFERENCES companies(id),
   user_md TEXT,
+  sort_order INTEGER DEFAULT 1000,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
