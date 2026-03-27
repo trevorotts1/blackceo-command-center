@@ -47,6 +47,7 @@ interface Agent {
   role: string;
   workspace_id: string;
   avatar_emoji: string;
+  is_master: number;
 }
 
 /**
@@ -73,7 +74,7 @@ export async function GET() {
 
     // Fetch all agents grouped by workspace
     const agents = db.prepare(
-      'SELECT id, name, role, workspace_id, avatar_emoji FROM agents ORDER BY name'
+      'SELECT id, name, role, workspace_id, avatar_emoji, is_master FROM agents ORDER BY name'
     ).all() as Agent[];
 
     // Fetch all existing settings
@@ -102,6 +103,11 @@ export async function GET() {
         const roleModel = modelSettings.get(roleKey);
         const rolePersona = personaSettings.get(roleKey);
 
+        // Determine agent type for UI labeling
+        const agentType: 'persistent' | 'specialist' = agent.is_master ? 'persistent' : 'specialist';
+        // specialist_type is not yet in DB schema; default non-master agents to 'on-call'
+        const specialistType: 'permanent' | 'on-call' | null = agent.is_master ? null : 'on-call';
+
         return {
           id: agent.id,
           name: agent.role,
@@ -111,6 +117,8 @@ export async function GET() {
           modelInherited: !roleModel,
           persona: rolePersona || deptPersona,
           personaInherited: !rolePersona,
+          agentType,
+          specialistType,
         };
       });
 
