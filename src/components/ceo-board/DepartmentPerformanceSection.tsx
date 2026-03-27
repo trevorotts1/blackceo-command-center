@@ -14,31 +14,6 @@ interface DepartmentPerformanceSectionProps {
   className?: string;
 }
 
-// Map workspace slug to department icon
-const DEPARTMENT_ICONS: Record<string, string> = {
-  marketing: '📢',
-  sales: '💰',
-  finance: '💳',
-  support: '🎧',
-  operations: '⚙️',
-  creative: '✍️',
-  hr: '👥',
-  legal: '⚖️',
-  it: '🖥️',
-  webdev: '🌐',
-  'web-development': '🌐',
-  appdev: '📱',
-  'app-development': '📱',
-  graphics: '🎨',
-  video: '🎬',
-  audio: '🎙️',
-  research: '🔬',
-  comms: '📣',
-  communications: '📣',
-  ceo: '👔',
-  default: '👔',
-};
-
 // Map database task status to department stats
 function calculateDepartmentPerformance(
   workspaceStats: WorkspaceStats[],
@@ -84,7 +59,7 @@ function calculateDepartmentPerformance(
     return {
       id: workspace.id,
       name: workspace.name,
-      icon: DEPARTMENT_ICONS[workspace.slug] || DEPARTMENT_ICONS[workspace.name.toLowerCase()] || '📁',
+      icon: workspace.icon || '📁',
       status,
       progress,
       stats: {

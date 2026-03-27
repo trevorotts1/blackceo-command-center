@@ -286,11 +286,13 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
  *
  * Resolution order:
  *   1. DEPARTMENTS_CONFIG_PATH env var (external JSON file)
- *   2. DEFAULT_DEPARTMENTS constant (built-in fallback)
+ *   2. Database workspaces table (filters DEFAULT_DEPARTMENTS to only existing workspaces)
+ *   3. DEFAULT_DEPARTMENTS constant (built-in fallback if DB is empty)
  *
  * Errors in the external file log a warning and fall back to defaults.
  */
 export function loadDepartments(): DepartmentConfig[] {
+  let allDepartments: DepartmentConfig[] = DEFAULT_DEPARTMENTS;
   const configPath = process.env.DEPARTMENTS_CONFIG_PATH;
 
   if (configPath) {
@@ -310,7 +312,7 @@ export function loadDepartments(): DepartmentConfig[] {
       }
 
       console.log(`[DepartmentConfig] Loaded ${parsed.length} departments from ${resolved}`);
-      return parsed;
+      allDepartments = parsed;
     } catch (err) {
       console.warn(
         `[DepartmentConfig] Failed to load from DEPARTMENTS_CONFIG_PATH="${configPath}": ${(err as Error).message}. Falling back to defaults.`,
@@ -318,5 +320,25 @@ export function loadDepartments(): DepartmentConfig[] {
     }
   }
 
-  return DEFAULT_DEPARTMENTS;
+  // Filter to only departments that exist as workspaces in the database
+  try {
+    // Dynamic import to avoid circular dependency at module load time
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getDb } = require('../db');
+    const db = getDb();
+    const workspaces = db.prepare('SELECT slug FROM workspaces').all() as { slug: string }[];
+    const workspaceSlugs = new Set(workspaces.map((w) => w.slug));
+
+    if (workspaceSlugs.size > 0) {
+      const filtered = allDepartments.filter((dept) => workspaceSlugs.has(dept.id));
+      if (filtered.length > 0) {
+        console.log(`[DepartmentConfig] Filtered to ${filtered.length} departments matching workspaces in DB`);
+        return filtered;
+      }
+    }
+  } catch (err) {
+    console.warn(`[DepartmentConfig] Could not query workspaces from DB: ${(err as Error).message}. Using all defaults.`);
+  }
+
+  return allDepartments;
 }

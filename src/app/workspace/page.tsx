@@ -81,8 +81,9 @@ function WorkspaceSelectorInner() {
     );
   }
 
-  const brandStyle = brand.primaryColor && brand.secondaryColor
-    ? { background: `linear-gradient(135deg, ${brand.primaryColor}, ${brand.secondaryColor})` }
+  const hasBrand = brand.primaryColor && brand.secondaryColor;
+  const cardBackground = hasBrand
+    ? { background: `linear-gradient(135deg, ${brand.primaryLight}, ${brand.secondaryLight})` }
     : null;
 
   return (
@@ -158,8 +159,8 @@ function WorkspaceSelectorInner() {
                   whileTap={{ scale: 0.98 }}
                 >
                   <div
-                    className={`relative overflow-hidden rounded-3xl ${brandStyle ? '' : `bg-gradient-to-br ${gradients[index % gradients.length]}`} p-6 sm:p-8 min-h-[180px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
-                    style={brandStyle || undefined}
+                    className={`relative overflow-hidden rounded-3xl ${cardBackground ? '' : `bg-gradient-to-br ${gradients[index % gradients.length]}`} p-6 sm:p-8 min-h-[180px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
+                    style={cardBackground || undefined}
                   >
                     <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
                     <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />

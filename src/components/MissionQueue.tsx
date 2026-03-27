@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Plus, GripVertical, MessageSquare, Eye } from 'lucide-react';
+import { Plus, GripVertical, MessageSquare, Eye, AlertTriangle } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
@@ -437,8 +437,16 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
                 {(task.assigned_agent as { name: string }).name.charAt(0).toUpperCase()}
               </div>
             </>
-          ) : (
+          ) : ['backlog', 'inbox', 'planning'].includes(task.status) ? (
             <div className="w-8 h-8 rounded-full border-2 border-white bg-gray-200 flex items-center justify-center text-gray-400 text-xs font-bold">?</div>
+          ) : (
+            <div
+              className="w-8 h-8 rounded-full border-2 border-white bg-orange-100 flex items-center justify-center text-orange-600"
+              title="This task is in a working state but has no assigned agent"
+              aria-label="Unassigned task warning"
+            >
+              <AlertTriangle className="w-4 h-4" />
+            </div>
           )}
         </div>
 

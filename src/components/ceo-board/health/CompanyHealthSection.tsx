@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { scoreToGrade, gradeToColor, gradeToLabel, type Grade } from '@/lib/grading';
 import type { WorkspaceStats } from '@/lib/types';
 
@@ -303,28 +304,57 @@ export function CompanyHealthSection() {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider text-center mb-3">
               Department Grades
             </p>
-            <div
-              className="dept-scroll flex gap-3 overflow-x-auto pb-2 justify-start lg:justify-center px-1"
-              style={{
-                scrollbarWidth: 'thin',
-                scrollbarColor: '#CBD5E1 transparent',
-              }}
-            >
-              <style>{`
-                .dept-scroll::-webkit-scrollbar { height: 6px; }
-                .dept-scroll::-webkit-scrollbar-track { background: transparent; }
-                .dept-scroll::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
-              `}</style>
-              {sortedDepartments.map((dept) => (
-                <DepartmentBadge
-                  key={dept.id}
-                  id={dept.id}
-                  name={dept.name}
-                  score={dept.score}
-                  emoji={dept.emoji}
-                  onClick={() => router.push(`/ceo-board/${dept.id}`)}
-                />
-              ))}
+            <div className="relative flex items-center w-full">
+              {/* Left Arrow */}
+              <button
+                onClick={() => {
+                  const el = document.getElementById('dept-scroll-container');
+                  if (el) el.scrollBy({ left: -200, behavior: 'smooth' });
+                }}
+                className="shrink-0 w-8 h-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center hover:bg-gray-50 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer z-10 mr-2"
+                aria-label="Scroll left"
+              >
+                <ChevronLeft className="w-4 h-4 text-gray-500" />
+              </button>
+
+              {/* Scrollable Container */}
+              <div
+                id="dept-scroll-container"
+                className="dept-scroll flex gap-3 overflow-x-auto py-1 justify-start lg:justify-center px-1 flex-1"
+                style={{
+                  scrollbarWidth: 'auto',
+                  scrollbarColor: '#94A3B8 #E2E8F0',
+                }}
+              >
+                <style>{`
+                  .dept-scroll::-webkit-scrollbar { height: 10px; }
+                  .dept-scroll::-webkit-scrollbar-track { background: #E2E8F0; border-radius: 5px; }
+                  .dept-scroll::-webkit-scrollbar-thumb { background: #94A3B8; border-radius: 5px; }
+                  .dept-scroll::-webkit-scrollbar-thumb:hover { background: #64748B; }
+                `}</style>
+                {sortedDepartments.map((dept) => (
+                  <DepartmentBadge
+                    key={dept.id}
+                    id={dept.id}
+                    name={dept.name}
+                    score={dept.score}
+                    emoji={dept.emoji}
+                    onClick={() => router.push(`/ceo-board/${dept.id}`)}
+                  />
+                ))}
+              </div>
+
+              {/* Right Arrow */}
+              <button
+                onClick={() => {
+                  const el = document.getElementById('dept-scroll-container');
+                  if (el) el.scrollBy({ left: 200, behavior: 'smooth' });
+                }}
+                className="shrink-0 w-8 h-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center hover:bg-gray-50 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer z-10 ml-2"
+                aria-label="Scroll right"
+              >
+                <ChevronRight className="w-4 h-4 text-gray-500" />
+              </button>
             </div>
           </motion.div>
         )}

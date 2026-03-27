@@ -39,7 +39,11 @@ export default function HomePage() {
   const [isOnline, setIsOnline] = useState(true);
   const [companyName, setCompanyName] = useState('BlackCEO');
 
-  const brandStyle = brand.primaryColor && brand.secondaryColor
+  const hasBrand = brand.primaryColor && brand.secondaryColor;
+  const cardBackground = hasBrand
+    ? { background: `linear-gradient(135deg, ${brand.primaryLight}, ${brand.secondaryLight})` }
+    : null;
+  const headerGradient = hasBrand
     ? { background: `linear-gradient(135deg, ${brand.primaryColor}, ${brand.secondaryColor})` }
     : null;
 
@@ -184,8 +188,8 @@ export default function HomePage() {
                 whileTap={{ scale: 0.98 }}
               >
                 <div
-                  className={`relative overflow-hidden rounded-3xl ${brandStyle ? '' : `bg-gradient-to-br ${card.gradient}`} p-7 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
-                  style={brandStyle || undefined}
+                  className={`relative overflow-hidden rounded-3xl ${cardBackground ? '' : `bg-gradient-to-br ${card.gradient}`} p-7 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
+                  style={cardBackground || undefined}
                 >
                   {/* Decorative */}
                   <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />

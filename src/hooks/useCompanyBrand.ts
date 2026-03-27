@@ -1,21 +1,28 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { BrandPalette, generatePalette } from '@/lib/colors';
 
-export interface CompanyBrand {
-  primaryColor: string | null;
-  secondaryColor: string | null;
-}
+export type CompanyBrand = BrandPalette;
 
 /**
  * useCompanyBrand
  *
  * Fetches the company record and extracts brand colors.
- * Returns { primaryColor, secondaryColor } — both null if not configured.
- * Brand colors can live at top-level fields or inside config.brand.primaryColor / config.brand.secondaryColor.
+ * Generates a full palette (light/dark/accent variants) from primary + secondary.
+ * All palette fields are null when brand colors are not configured.
  */
 export function useCompanyBrand(): CompanyBrand {
-  const [brand, setBrand] = useState<CompanyBrand>({ primaryColor: null, secondaryColor: null });
+  const [brand, setBrand] = useState<CompanyBrand>({
+    primaryColor: null,
+    secondaryColor: null,
+    primaryLight: null,
+    primaryDark: null,
+    secondaryLight: null,
+    secondaryDark: null,
+    accent: null,
+    accentLight: null,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -27,10 +34,11 @@ export function useCompanyBrand(): CompanyBrand {
             data.primaryColor ?? data.primary_color ?? data.config?.brand?.primaryColor ?? null;
           const secondaryColor =
             data.secondaryColor ?? data.secondary_color ?? data.config?.brand?.secondaryColor ?? null;
-          setBrand({
-            primaryColor: primaryColor || null,
-            secondaryColor: secondaryColor || null,
-          });
+
+          const palette = generatePalette(primaryColor, secondaryColor);
+          if (palette) {
+            setBrand(palette);
+          }
         }
       })
       .catch(() => {});

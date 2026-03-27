@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Plus, ChevronRight, ChevronLeft, Zap, ZapOff, Loader2, BarChart3, Sparkles } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
-import type { OpenClawSession } from '@/lib/types';
 
 type FilterTab = 'all' | 'active' | 'idle';
 type DepartmentStatus = 'active' | 'idle';
@@ -15,26 +14,6 @@ interface Department {
   headTitle: string;
   status: DepartmentStatus;
 }
-
-const DEPARTMENTS: Department[] = [
-    { id: 'ceo', emoji: '👔', name: 'CEO / COM', headTitle: 'Chief Executive Officer', status: 'active' },
-  { id: 'marketing', emoji: '📢', name: 'Marketing', headTitle: 'Chief Marketing Officer', status: 'active' },
-  { id: 'sales', emoji: '💰', name: 'Sales', headTitle: 'Chief Sales Officer', status: 'active' },
-  { id: 'billing', emoji: '💳', name: 'Billing / Finance', headTitle: 'Chief Financial Officer', status: 'active' },
-  { id: 'support', emoji: '🎧', name: 'Customer Support', headTitle: 'Chief Customer Officer', status: 'active' },
-  { id: 'operations', emoji: '⚙️', name: 'Operations', headTitle: 'Chief Operating Officer', status: 'active' },
-  { id: 'creative', emoji: '✍️', name: 'Creative', headTitle: 'Chief Creative Officer', status: 'active' },
-  { id: 'hr', emoji: '👥', name: 'HR / People', headTitle: 'Chief People Officer', status: 'active' },
-  { id: 'legal', emoji: '⚖️', name: 'Legal / Compliance', headTitle: 'General Counsel', status: 'active' },
-  { id: 'it', emoji: '🖥️', name: 'IT / Tech', headTitle: 'Chief Technology Officer', status: 'active' },
-  { id: 'webdev', emoji: '🌐', name: 'Web Development', headTitle: 'Chief Web Officer', status: 'active' },
-  { id: 'appdev', emoji: '📱', name: 'App Development', headTitle: 'Chief App Officer', status: 'active' },
-  { id: 'graphics', emoji: '🎨', name: 'Graphics', headTitle: 'Chief Graphics Officer', status: 'active' },
-  { id: 'video', emoji: '🎬', name: 'Video', headTitle: 'Chief Video Officer', status: 'active' },
-  { id: 'audio', emoji: '🎙️', name: 'Audio', headTitle: 'Chief Audio Officer', status: 'active' },
-  { id: 'research', emoji: '🔬', name: 'Research', headTitle: 'Chief Research Officer', status: 'active' },
-  { id: 'comms', emoji: '📣', name: 'Communications', headTitle: 'Chief Communications Officer', status: 'active' },
-];
 
 interface AgentsSidebarProps {
   workspaceId?: string;
@@ -48,29 +27,31 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
   const [connectingAgentId, setConnectingAgentId] = useState<string | null>(null);
   const [activeSubAgents, setActiveSubAgents] = useState(0);
   const [isMinimized, setIsMinimized] = useState(false);
-  const [departments, setDepartments] = useState<Department[]>(DEPARTMENTS);
+  const [departments, setDepartments] = useState<Department[]>([]);
 
   const toggleMinimize = () => setIsMinimized(!isMinimized);
 
-  // Load department names from config (allows renaming via /api/departments)
+  // Load departments dynamically from the workspaces database
   useEffect(() => {
     const loadDepartments = async () => {
       try {
-        const res = await fetch('/api/departments');
+        const res = await fetch('/api/workspaces');
         if (res.ok) {
-          const data = await res.json();
-          if (data.success && Array.isArray(data.departments)) {
-            // Merge API names/emojis/headTitles over the default list (preserves status field)
-            setDepartments((prev) =>
-              prev.map((dept) => {
-                const override = data.departments.find((d: { id: string }) => d.id === dept.id);
-                return override ? { ...dept, ...override } : dept;
-              })
+          const workspaces = await res.json();
+          if (Array.isArray(workspaces)) {
+            setDepartments(
+              workspaces.map((ws: { id: string; name: string; icon?: string; slug: string }) => ({
+                id: ws.slug || ws.id,
+                emoji: ws.icon || '📁',
+                name: ws.name,
+                headTitle: ws.name,
+                status: 'active' as DepartmentStatus,
+              }))
             );
           }
         }
       } catch {
-        // Fall back silently to hardcoded defaults
+        // Fall back silently to empty list
       }
     };
 

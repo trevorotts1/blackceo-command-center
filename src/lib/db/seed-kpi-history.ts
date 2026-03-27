@@ -114,12 +114,26 @@ function generateDateStr(daysAgo: number): string {
   return d.toISOString().split('T')[0];
 }
 
-export function seedKPIHistory(workspaceId: string = 'default') {
+export function seedKPIHistory(workspaceId?: string) {
   const db = getDb();
   const rand = seededRandom(42);
   const TOTAL_DAYS = 60;
 
-  console.log(`[seed-kpi] Seeding ${TOTAL_DAYS} days of KPI history for workspace: ${workspaceId}`);
+  // Load department IDs that actually exist in the workspaces table
+  const workspaces = db.prepare('SELECT slug FROM workspaces').all() as { slug: string }[];
+  const existingSlugs = new Set(workspaces.map((w) => w.slug));
+
+  // Filter benchmarks to only include departments that exist as workspaces
+  let benchmarksToSeed = BENCHMARKS.filter((bmk) => existingSlugs.has(bmk.deptId));
+
+  // If no workspaces exist yet, seed all benchmarks (bootstrap case)
+  if (existingSlugs.size === 0) {
+    console.log('[seed-kpi] No workspaces found in DB — seeding all benchmarks for bootstrap');
+    benchmarksToSeed = BENCHMARKS;
+  }
+
+  const deptCount = new Set(benchmarksToSeed.map((b) => b.deptId)).size;
+  console.log(`[seed-kpi] Seeding ${TOTAL_DAYS} days of KPI history for ${deptCount} departments`);
 
   // Check existing data
   const existing = db.prepare(
@@ -137,7 +151,7 @@ export function seedKPIHistory(workspaceId: string = 'default') {
   `);
 
   const insertMany = db.transaction(() => {
-    for (const bmk of BENCHMARKS) {
+    for (const bmk of benchmarksToSeed) {
       for (let day = TOTAL_DAYS - 1; day >= 0; day--) {
         const value = generateHistoricalValue(bmk.benchmark, TOTAL_DAYS - 1 - day, TOTAL_DAYS, rand);
         const dateStr = generateDateStr(day);
@@ -156,7 +170,7 @@ export function seedKPIHistory(workspaceId: string = 'default') {
     }
 
     // Also insert benchmark rows (one per KPI, dated today, tagged)
-    for (const bmk of BENCHMARKS) {
+    for (const bmk of benchmarksToSeed) {
       insert.run(
         uuidv4(),
         bmk.deptId,
@@ -174,7 +188,7 @@ export function seedKPIHistory(workspaceId: string = 'default') {
 
   const total = db.prepare('SELECT COUNT(*) as cnt FROM kpi_snapshots').get() as { cnt: number };
   console.log(`[seed-kpi] Done. Total snapshots: ${total.cnt}`);
-  console.log(`[seed-kpi] Departments: ${BENCHMARKS.map(b => b.deptId).filter((v, i, a) => a.indexOf(v) === i).length}`);
+  console.log(`[seed-kpi] Departments seeded: ${deptCount}`);
   console.log(`[seed-kpi] KPIs per dept: varies`);
 
   return total.cnt;
