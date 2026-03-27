@@ -93,11 +93,38 @@ export function AgentPerformanceSection() {
         const res = await fetch('/api/agents');
         if (res.ok) {
           const data: Agent[] = await res.json();
-          // Show non-QC, non-standup agents first; limit to 12 for display
+
           const filtered = data
+            // Remove QC and standup agents
             .filter((a) => !a.id.startsWith('qc-') && !a.id.startsWith('standup-'))
-            .slice(0, 12);
-          setAgents(filtered.length > 0 ? filtered : data.slice(0, 12));
+            // A. Filter out agents with no model assigned
+            .filter((a) => a.model && a.model.trim() !== '' && a.model.toLowerCase() !== 'no model')
+            // B. Filter out agents tagged to "default" department (system agents)
+            .filter((a) => {
+              const dept = (a.workspace_id || 'default').toLowerCase();
+              return dept !== 'default';
+            })
+            // D. Remove "Orchestrator" with no model (extra safety)
+            .filter((a) => {
+              const name = a.name.toLowerCase();
+              if (name === 'orchestrator' && (!a.model || a.model.trim() === '')) return false;
+              return true;
+            });
+
+          // C. If both "CEO" and "Master Orchestrator" exist, keep only the CEO
+          const hasCEO = filtered.some((a) => a.name.toLowerCase() === 'ceo');
+          const deduped = hasCEO
+            ? filtered.filter((a) => a.name.toLowerCase() !== 'master orchestrator')
+            : filtered;
+
+          // F. Sort agents by department name alphabetically
+          const sorted = deduped.sort((a, b) => {
+            const deptA = DEPT_LABELS[(a.workspace_id || '').toLowerCase()] || a.workspace_id || 'zzz';
+            const deptB = DEPT_LABELS[(b.workspace_id || '').toLowerCase()] || b.workspace_id || 'zzz';
+            return deptA.localeCompare(deptB);
+          });
+
+          setAgents(sorted);
         }
       } catch (err) {
         console.error('Failed to load agents:', err);
@@ -157,6 +184,9 @@ export function AgentPerformanceSection() {
                         {agent.name}
                       </h3>
                       <p className="text-xs text-gray-400 truncate">{agent.role}</p>
+                      {agent.description && (
+                        <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{agent.description}</p>
+                      )}
                     </div>
                   </div>
                   {/* Status Dot */}
@@ -171,7 +201,12 @@ export function AgentPerformanceSection() {
                 {/* Department Pill + Specialist Type */}
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <span
-                    className={`px-2 py-0.5 rounded-full text-xs font-medium border ${deptColorClass}`}
+                    className={`px-2 py-0.5 rounded-full text-xs font-medium border cursor-pointer hover:opacity-80 ${deptColorClass}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      router.push(`/workspace/${dept}`);
+                    }}
+                    title={`Go to ${deptLabel} workspace`}
                   >
                     {deptLabel}
                   </span>
