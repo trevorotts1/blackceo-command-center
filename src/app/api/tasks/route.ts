@@ -13,6 +13,7 @@ export async function GET(request: NextRequest) {
     const businessId = searchParams.get('business_id');
     const workspaceId = searchParams.get('workspace_id');
     const assignedAgentId = searchParams.get('assigned_agent_id');
+    const department = searchParams.get('department');
 
     let sql = `
       SELECT
@@ -49,6 +50,10 @@ export async function GET(request: NextRequest) {
     if (assignedAgentId) {
       sql += ' AND t.assigned_agent_id = ?';
       params.push(assignedAgentId);
+    }
+    if (department) {
+      sql += ' AND t.department = ?';
+      params.push(department);
     }
 
     sql += ' ORDER BY t.created_at DESC';

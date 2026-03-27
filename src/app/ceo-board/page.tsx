@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { LayoutDashboard, Calendar, ChevronLeft } from 'lucide-react';
+import { LayoutDashboard, Calendar, ChevronLeft, ArrowRight } from 'lucide-react';
 
 // CEO Board Components
 import { CompanyHealthSection } from '@/components/ceo-board/health';
@@ -12,7 +12,6 @@ import { BenchmarkingSection } from '@/components/ceo-board/BenchmarkingSection'
 import { RecommendationsSection } from '@/components/ceo-board/RecommendationsSection';
 import { ManualKPISection } from '@/components/ceo-board/ManualKPISection';
 import { DevilsAdvocateFeed } from '@/components/ceo-board/DevilsAdvocateFeed';
-import { AgentPerformanceSection } from '@/components/ceo-board/AgentPerformanceSection';
 import { ExecutionQueueSection } from '@/components/ceo-board/ExecutionQueueSection';
 
 // Page-level animation variants
@@ -108,11 +107,6 @@ export default function CEOPerformanceBoardPage() {
             <CompanyHealthSection />
           </motion.section>
 
-          {/* Agent Performance Section */}
-          <motion.section variants={sectionVariants}>
-            <AgentPerformanceSection />
-          </motion.section>
-
           {/* Two-Column Layout: Departments + Analytics */}
           <motion.section
             variants={sectionVariants}
@@ -127,6 +121,25 @@ export default function CEOPerformanceBoardPage() {
             <div className="xl:col-span-1">
               <AnalyticsSection />
             </div>
+          </motion.section>
+
+          {/* View Department Performance Card */}
+          <motion.section variants={sectionVariants}>
+            <button
+              onClick={() => router.push('/workspace')}
+              className="w-full bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex items-center justify-between hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer group"
+            >
+              <div className="flex items-center gap-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 shadow-sm">
+                  <LayoutDashboard className="h-6 w-6 text-white" />
+                </div>
+                <div className="text-left">
+                  <h3 className="text-lg font-bold text-gray-900">View Department Performance</h3>
+                  <p className="text-sm text-gray-500">Click to see detailed performance grades, KPIs, and recommendations for each department</p>
+                </div>
+              </div>
+              <ArrowRight className="h-6 w-6 text-gray-400 group-hover:text-indigo-600 group-hover:translate-x-1 transition-all flex-shrink-0" />
+            </button>
           </motion.section>
 
           {/* Benchmarking Section */}

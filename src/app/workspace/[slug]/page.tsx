@@ -26,6 +26,7 @@ export default function WorkspacePage() {
     setEvents,
     setIsOnline,
     setIsLoading,
+    setSelectedDepartment,
     isLoading,
     selectedDepartment,
   } = useMissionControl();
@@ -61,6 +62,22 @@ export default function WorkspacePage() {
 
     loadWorkspace();
   }, [slug, setIsLoading]);
+
+  // Auto-set selectedDepartment when a specific department workspace loads
+  // This ensures the MissionQueue filters tasks to just that department
+  useEffect(() => {
+    if (!workspace) return;
+    if (workspace.slug === 'default' || workspace.slug === 'ceo') {
+      // CEO / All Departments view: show everything
+      setSelectedDepartment(null);
+    } else {
+      // Specific department: use workspace slug to match task.department values
+      // task.department stores the slug (e.g., "marketing"), not the display name
+      setSelectedDepartment(workspace.slug);
+    }
+    // Run only when workspace changes, not when selectedDepartment changes (avoid loops)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace, setSelectedDepartment]);
 
   // Load workspace-specific data
   useEffect(() => {

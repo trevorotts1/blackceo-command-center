@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
+import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
 
 const cardVariants = {
@@ -33,9 +34,14 @@ interface EntryCard {
 export default function HomePage() {
   const router = useRouter();
   const logoUrl = useLogoUrl();
+  const brand = useCompanyBrand();
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isOnline, setIsOnline] = useState(true);
   const [companyName, setCompanyName] = useState('BlackCEO');
+
+  const brandStyle = brand.primaryColor && brand.secondaryColor
+    ? { background: `linear-gradient(135deg, ${brand.primaryColor}, ${brand.secondaryColor})` }
+    : null;
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -168,7 +174,10 @@ export default function HomePage() {
                 whileHover={{ scale: 1.03, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } }}
                 whileTap={{ scale: 0.98 }}
               >
-                <div className={`relative overflow-hidden rounded-3xl bg-gradient-to-br ${card.gradient} p-7 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}>
+                <div
+                  className={`relative overflow-hidden rounded-3xl ${brandStyle ? '' : `bg-gradient-to-br ${card.gradient}`} p-7 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
+                  style={brandStyle || undefined}
+                >
                   {/* Decorative */}
                   <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
                   <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />

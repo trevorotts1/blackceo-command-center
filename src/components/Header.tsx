@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Settings, ChevronLeft, LayoutGrid, Menu, X, BarChart3 } from 'lucide-react';
+import { Settings, ChevronLeft, LayoutGrid, Menu, X, BarChart3, Home } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -68,6 +68,14 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
         {/* Workspace indicator or back to dashboard */}
         {workspace ? (
           <div className="flex items-center gap-2">
+            <Link
+              href="/"
+              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
+            >
+              <Home className="w-4 h-4" />
+              <span>Home</span>
+            </Link>
+            <span className="text-gray-300">/</span>
             <Link
               href="/workspace"
               className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"

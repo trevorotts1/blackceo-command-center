@@ -303,7 +303,18 @@ export function CompanyHealthSection() {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider text-center mb-3">
               Department Grades
             </p>
-            <div className="flex gap-3 overflow-x-auto pb-2 justify-start lg:justify-center px-1 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
+            <div
+              className="dept-scroll flex gap-3 overflow-x-auto pb-2 justify-start lg:justify-center px-1"
+              style={{
+                scrollbarWidth: 'thin',
+                scrollbarColor: '#CBD5E1 transparent',
+              }}
+            >
+              <style>{`
+                .dept-scroll::-webkit-scrollbar { height: 6px; }
+                .dept-scroll::-webkit-scrollbar-track { background: transparent; }
+                .dept-scroll::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+              `}</style>
               {sortedDepartments.map((dept) => (
                 <DepartmentBadge
                   key={dept.id}

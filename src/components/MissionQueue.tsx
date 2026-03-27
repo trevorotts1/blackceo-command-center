@@ -310,9 +310,9 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
 
   const statusLabels: Record<string, string> = {
     backlog: 'Backlog',
-    inbox: 'Inbox',
+    inbox: 'New',
     planning: 'Planning',
-    assigned: 'Assigned',
+    assigned: 'Queued',
     pending_dispatch: 'Pending',
     in_progress: 'In Progress',
     review: 'Review',
@@ -406,13 +406,6 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
             {(task.assigned_agent as { name: string }).name}
           </span>
         )}
-
-        {/* Persona Pill */}
-        {(task as any).persona && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-            🧠 {(task as any).persona}
-          </span>
-        )}
       </div>
 
       {/* Sprint and Due Date */}
@@ -452,7 +445,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
               </div>
             </>
           ) : (
-            <div className={`w-8 h-8 rounded-full border-2 border-white ${getAvatarGradient(1)}`} />
+            <div className="w-8 h-8 rounded-full border-2 border-white bg-gray-200 flex items-center justify-center text-gray-400 text-xs font-bold">?</div>
           )}
         </div>
 

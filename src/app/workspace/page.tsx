@@ -4,6 +4,7 @@ import { useEffect, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home } from 'lucide-react';
+import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 
 interface Workspace {
   id: string;
@@ -25,6 +26,7 @@ const gradients = [
 function WorkspaceSelectorInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const brand = useCompanyBrand();
   const companyFilter = searchParams.get('company');
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [companyName, setCompanyName] = useState('');
@@ -78,6 +80,10 @@ function WorkspaceSelectorInner() {
       </div>
     );
   }
+
+  const brandStyle = brand.primaryColor && brand.secondaryColor
+    ? { background: `linear-gradient(135deg, ${brand.primaryColor}, ${brand.secondaryColor})` }
+    : null;
 
   return (
     <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
@@ -151,7 +157,10 @@ function WorkspaceSelectorInner() {
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.98 }}
                 >
-                  <div className={`relative overflow-hidden rounded-3xl bg-gradient-to-br ${gradients[index % gradients.length]} p-6 sm:p-8 min-h-[180px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}>
+                  <div
+                    className={`relative overflow-hidden rounded-3xl ${brandStyle ? '' : `bg-gradient-to-br ${gradients[index % gradients.length]}`} p-6 sm:p-8 min-h-[180px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
+                    style={brandStyle || undefined}
+                  >
                     <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
                     <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
 

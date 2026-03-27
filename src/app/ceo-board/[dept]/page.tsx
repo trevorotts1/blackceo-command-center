@@ -5,6 +5,7 @@ import { useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ChevronLeft,
+  Home,
   Target,
   Users,
   Sparkles,
@@ -70,26 +71,7 @@ interface Recommendation {
   supportingData: string;
 }
 
-// Department metadata (grades/insights stay static for now)
-const DEPARTMENTS: Record<string, DepartmentData> = {
-  marketing: { id: 'marketing', name: 'Marketing', emoji: '📢', headTitle: 'Chief Marketing Officer', grade: 'B', gradeScore: 82, insight: 'Email open rates hit 34%, highest in 60 days. Ad spend efficiency improved 12%.' },
-  sales: { id: 'sales', name: 'Sales', emoji: '💰', headTitle: 'Chief Sales Officer', grade: 'A', gradeScore: 91, insight: 'Conversion rates are 23% above industry benchmark. Lead response time improved.' },
-  billing: { id: 'billing', name: 'Billing / Finance', emoji: '💳', headTitle: 'Chief Financial Officer', grade: 'C', gradeScore: 68, insight: 'Invoice processing is on track, but payment collection lagged 3 days this week.' },
-  support: { id: 'support', name: 'Customer Support', emoji: '🎧', headTitle: 'Chief Customer Officer', grade: 'A', gradeScore: 89, insight: 'Ticket resolution time down 25%. Customer satisfaction scores at 94%.' },
-  operations: { id: 'operations', name: 'Operations', emoji: '⚙️', headTitle: 'Chief Operating Officer', grade: 'B', gradeScore: 78, insight: 'Process automation increased 15%. Two workflows need attention.' },
-  creative: { id: 'creative', name: 'Creative', emoji: '✍️', headTitle: 'Chief Creative Officer', grade: 'B', gradeScore: 84, insight: 'Content output increased 20% with same agent count. Quality scores steady at 92%.' },
-  hr: { id: 'hr', name: 'HR / People', emoji: '👥', headTitle: 'Chief People Officer', grade: 'C', gradeScore: 65, insight: 'Recruitment pipeline healthy but onboarding completion rate dropped.' },
-  legal: { id: 'legal', name: 'Legal / Compliance', emoji: '⚖️', headTitle: 'General Counsel', grade: 'A', gradeScore: 94, insight: 'All compliance checks passed. Contract review turnaround time best in 90 days.' },
-  it: { id: 'it', name: 'IT / Tech', emoji: '🖥️', headTitle: 'Chief Technology Officer', grade: 'B', gradeScore: 80, insight: 'System uptime 99.9%. Security scan completed with zero critical issues.' },
-  webdev: { id: 'webdev', name: 'Web Development', emoji: '🌐', headTitle: 'Chief Web Officer', grade: 'A', gradeScore: 88, insight: 'Deployment frequency up 30%. Zero failed builds this week.' },
-  appdev: { id: 'appdev', name: 'App Development', emoji: '📱', headTitle: 'Chief App Officer', grade: 'B', gradeScore: 76, insight: 'Feature delivery on schedule. Bug fix velocity increased. Testing coverage improved.' },
-  graphics: { id: 'graphics', name: 'Graphics', emoji: '🎨', headTitle: 'Chief Graphics Officer', grade: 'A', gradeScore: 90, insight: 'Design output exceeded targets by 15%. Brand guideline adherence at 98%.' },
-  video: { id: 'video', name: 'Video', emoji: '🎬', headTitle: 'Chief Video Officer', grade: 'B', gradeScore: 79, insight: 'Video production volume steady. Average render time down 20%.' },
-  audio: { id: 'audio', name: 'Audio', emoji: '🎙️', headTitle: 'Chief Audio Officer', grade: 'C', gradeScore: 71, insight: 'Podcast editing on schedule. Voiceover quality scores high.' },
-  research: { id: 'research', name: 'Research', emoji: '🔬', headTitle: 'Chief Research Officer', grade: 'B', gradeScore: 83, insight: 'Market analysis reports delivered ahead of schedule. Competitor tracking comprehensive.' },
-  comms: { id: 'comms', name: 'Communications', emoji: '📣', headTitle: 'Chief Communications Officer', grade: 'B', gradeScore: 81, insight: 'Internal communications response rate at 78%. Media mentions increased 25%.' },
-  ceo: { id: 'ceo', name: 'CEO / COM', emoji: '👔', headTitle: 'Chief Executive Officer', grade: 'A', gradeScore: 92, insight: 'Strategic planning on track. Cross-department coordination improved 15%.' },
-};
+// Department data is fetched dynamically from /api/workspaces (no hardcoded departments)
 
 function formatValue(value: number, unit: string): string {
   if (unit === 'currency') return `$${value.toLocaleString()}`;
@@ -431,32 +413,30 @@ export default function DepartmentSubBoardPage() {
     const loadDepartmentData = async () => {
       setIsLoading(true);
 
-      let dept = DEPARTMENTS[deptId];
-      
-      // If not in hardcoded map, fetch from workspaces API dynamically
-      if (!dept) {
-        try {
-          const wsRes = await fetch('/api/workspaces');
-          if (wsRes.ok) {
-            const workspaces = await wsRes.json();
-            const ws = workspaces.find((w: { id: string; slug?: string; name: string; icon?: string; description?: string }) => 
-              w.id === deptId || w.slug === deptId
-            );
-            if (ws) {
-              dept = {
-                id: ws.id,
-                name: ws.name,
-                emoji: ws.icon || '🏢',
-                headTitle: `Head of ${ws.name}`,
-                grade: 'B',
-                gradeScore: 75,
-                insight: ws.description || `${ws.name} department is active and operational.`,
-              };
-            }
+      let dept: DepartmentData | undefined;
+
+      // Fetch department data dynamically from the workspaces API
+      try {
+        const wsRes = await fetch('/api/workspaces');
+        if (wsRes.ok) {
+          const workspaces = await wsRes.json();
+          const ws = workspaces.find((w: { id: string; slug?: string; name: string; icon?: string; description?: string }) =>
+            w.id === deptId || w.slug === deptId
+          );
+          if (ws) {
+            dept = {
+              id: ws.id,
+              name: ws.name,
+              emoji: ws.icon || '🏢',
+              headTitle: `Head of ${ws.name}`,
+              grade: 'B',
+              gradeScore: 75,
+              insight: ws.description || `${ws.name} department is active and operational.`,
+            };
           }
-        } catch (e) {
-          console.error('Failed to fetch workspace for dept page:', e);
         }
+      } catch (e) {
+        console.error('Failed to fetch workspace for dept page:', e);
       }
 
       if (!dept) {
@@ -583,6 +563,7 @@ export default function DepartmentSubBoardPage() {
     <div className="min-h-screen bg-[#F8F9FB]">
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200 px-4 sm:px-6 lg:px-8">
         <div className="h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2">
           <button
             onClick={() => router.push('/ceo-board')}
             className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 text-sm font-medium transition-colors"
@@ -590,6 +571,14 @@ export default function DepartmentSubBoardPage() {
             <ChevronLeft className="h-4 w-4" />
             Back to Company Overview
           </button>
+          <button
+            onClick={() => router.push('/')}
+            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 text-sm font-medium transition-colors"
+          >
+            <Home className="h-4 w-4" />
+            Home
+          </button>
+          </div>
           <div className="flex items-center gap-2">
             <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
             <span className="text-xs font-medium text-emerald-600">Live</span>
