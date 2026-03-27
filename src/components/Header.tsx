@@ -12,31 +12,21 @@ import type { Workspace } from '@/lib/types';
 
 // --- AI Settings model & persona options ---
 const MODEL_OPTIONS = [
-  { value: 'openrouter/free', label: 'Free - Default' },
+  { value: 'openrouter/free', label: 'Free Models Router' },
   { value: 'moonshot/kimi-k2.5', label: 'Kimi K2.5' },
   { value: 'openrouter/xiaomi/mimo-v2-pro', label: 'MiMo V2 Pro' },
-  { value: 'anthropic/claude-sonnet-4-6', label: 'Sonnet' },
+  { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet' },
   { value: 'openai-codex/gpt-5.4', label: 'GPT 5.4' },
-  { value: 'google/gemini-3-flash-preview', label: 'Gemini Flash' },
+  { value: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash' },
 ];
 
 const PERSONA_OPTIONS = [
-  'Auto-assign',
-  'Coach',
-  'Copywriter',
-  'Critic',
-  'Data Analyst',
-  'Designer',
-  'DevOps',
-  'Growth Hacker',
-  'Lawyer',
-  'Marketer',
-  'Product Manager',
-  'Researcher',
-  'Sales',
-  'Strategist',
-  'Support',
-  'Writer',
+  { value: 'auto', label: 'Auto-assign' },
+  { value: 'clear-atomic-habits', label: 'James Clear' },
+  { value: 'godin-this-is-marketing', label: 'Seth Godin' },
+  { value: 'hormozi-100m-offers', label: 'Alex Hormozi' },
+  { value: 'miller-building-storybrand-2', label: 'Donald Miller' },
+  { value: 'voss-never-split-difference', label: 'Chris Voss' },
 ];
 
 interface HeaderProps {
@@ -55,7 +45,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   // --- AI Settings panel state ---
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
   const [aiModel, setAiModel] = useState('openrouter/free');
-  const [aiPersona, setAiPersona] = useState('Auto-assign');
+  const [aiPersona, setAiPersona] = useState('auto');
   const [aiSaving, setAiSaving] = useState(false);
   const [aiSaved, setAiSaved] = useState(false);
   const [aiLoaded, setAiLoaded] = useState(false);
@@ -67,13 +57,18 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
     if (!aiPanelOpen || !workspace || aiLoaded) return;
     const loadSettings = async () => {
       try {
-        const res = await fetch(
-          `/api/settings/intelligence?department=${workspace.slug}`
-        );
+        const res = await fetch('/api/settings/intelligence', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
-          if (data.model) setAiModel(data.model);
-          if (data.persona) setAiPersona(data.persona);
+          // API returns { departments: [...], models: [...], personas: [...], defaults: {...} }
+          // Find the matching department by slug
+          const dept = data.departments?.find(
+            (d: { slug: string; model: string; persona: string }) => d.slug === workspace.slug
+          );
+          if (dept) {
+            setAiModel(dept.model || data.defaults?.model || 'openrouter/free');
+            setAiPersona(dept.persona || data.defaults?.persona || 'auto');
+          }
         }
       } catch (err) {
         console.error('Failed to load AI settings:', err);
@@ -106,20 +101,34 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
     setAiSaving(true);
     setAiSaved(false);
     try {
-      await fetch('/api/settings/intelligence', {
+      // API expects: { assignments: [{ department_id, role_id?, setting_type, value }] }
+      const res = await fetch('/api/settings/intelligence', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          department: workspace.slug,
-          model: aiModel,
-          persona: aiPersona,
+          assignments: [
+            {
+              department_id: workspace.id,
+              role_id: null,
+              setting_type: 'model',
+              value: aiModel,
+            },
+            {
+              department_id: workspace.id,
+              role_id: null,
+              setting_type: 'persona',
+              value: aiPersona,
+            },
+          ],
         }),
       });
-      setAiSaved(true);
-      setTimeout(() => {
-        setAiSaved(false);
-        setAiPanelOpen(false);
-      }, 1200);
+      if (res.ok) {
+        setAiSaved(true);
+        setTimeout(() => {
+          setAiSaved(false);
+          setAiPanelOpen(false);
+        }, 1200);
+      }
     } catch (err) {
       console.error('Failed to save AI settings:', err);
     } finally {
@@ -308,8 +317,8 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
                       className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 pr-8 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 transition-colors"
                     >
                       {PERSONA_OPTIONS.map((p) => (
-                        <option key={p} value={p}>
-                          {p}
+                        <option key={p.value} value={p.value}>
+                          {p.label}
                         </option>
                       ))}
                     </select>

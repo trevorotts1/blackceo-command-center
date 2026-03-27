@@ -363,13 +363,6 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         {task.title}
       </h3>
 
-      {/* Description */}
-      {task.description && (
-        <p className="text-xs text-gray-500 mb-3 leading-relaxed">
-          {task.description}
-        </p>
-      )}
-
       {/* Pill Tags Row */}
       <div className="flex flex-wrap gap-1.5 mb-3">
         {/* Status Pill */}
