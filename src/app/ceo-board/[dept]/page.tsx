@@ -563,21 +563,33 @@ export default function DepartmentSubBoardPage() {
     <div className="min-h-screen bg-[#F8F9FB]">
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200 px-4 sm:px-6 lg:px-8">
         <div className="h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-          <button
-            onClick={() => router.push('/ceo-board')}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 text-sm font-medium transition-colors"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            Back to Company Overview
-          </button>
-          <button
-            onClick={() => router.push('/')}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 text-sm font-medium transition-colors"
-          >
-            <Home className="h-4 w-4" />
-            Home
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => router.push('/')}
+              className="flex items-center gap-1.5 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
+            >
+              <Home className="h-4 w-4" />
+              Home
+            </button>
+            <span className="text-gray-300">/</span>
+            <button
+              onClick={() => router.push('/ceo-board')}
+              className="flex items-center gap-1.5 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
+            >
+              Performance Board
+            </button>
+            <span className="text-gray-300">/</span>
+            <button
+              onClick={() => router.push('/workspace')}
+              className="flex items-center gap-1.5 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
+            >
+              Kanban
+            </button>
+            <span className="text-gray-300">/</span>
+            <span className="px-3 py-2 text-gray-900 font-semibold text-sm flex items-center gap-1.5">
+              <ChevronLeft className="h-3.5 w-3.5 text-gray-400" />
+              {department?.name || deptId}
+            </span>
           </div>
           <div className="flex items-center gap-2">
             <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
