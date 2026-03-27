@@ -1,5 +1,54 @@
 # Changelog
 
+## v2.4.0 - March 27, 2026
+
+### Added - Intelligence Settings
+- New Settings > Intelligence page (`/settings/intelligence`) for per-department model and persona configuration
+- AI Settings quick panel in Header for fast model/persona switching per workspace
+- `agent_settings` database table with migration 013 (department + role + setting_type + value)
+- `/api/settings/intelligence` API endpoint for reading and writing agent settings
+- Model options: Free Models Router, Kimi K2.5, MiMo V2 Pro, Claude Sonnet, GPT 5.4, Gemini 3 Flash
+- Persona options: Auto-assign, James Clear, Seth Godin, Alex Hormozi, Donald Miller, Chris Voss
+
+### Added - Complementary Brand Palette
+- `src/lib/colors.ts`: HSL color utility library (hexToHsl, hslToHex, generatePalette)
+- Generates light/dark/accent variants from company primary and secondary colors
+- `useCompanyBrand` hook fetches company record and builds full brand palette dynamically
+- All palette fields null-safe when brand colors are not yet configured
+
+### Fixed - Dynamic Department Resolution
+- `departments.config.ts` now filters departments against workspaces in the database instead of always returning all 17 defaults
+- AgentsSidebar loads departments from `/api/workspaces` instead of hardcoded array
+- Removed 18-entry hardcoded DEPARTMENTS constant from AgentsSidebar
+- Resolution order: env var config > database workspaces > built-in fallback
+
+### Fixed - Donut Chart Restore
+- Rebuilt UtilizationPieChart as pure inline SVG (removed recharts dependency for this component)
+- Animated donut with gradient stroke, center label, and legend row per department
+- Responsive sizing with configurable width/height props
+
+### Fixed - Scrollbar and Layout
+- Header CSS updated with wider scrollbar styling and arrow indicators
+- Custom scrollbar track/thumb/thumb-hover for AI settings panel overflow
+
+### Fixed - Avatar and Agent Logic
+- AgentsSidebar deduplicates agent entries and filters out system/default agents
+- CEO role deduplication in agent roster display
+- Agent description and department navigation links added
+
+### Changed - CEO Board Layout
+- Agent Performance section moved below the two-column department/analytics grid
+- "View Department Performance" navigation card added with arrow CTA
+- Removed standalone AgentPerformanceSection from CEO board main view
+
+### Changed - Port Configuration
+- dev and start scripts use `${PORT:-4000}` env var instead of hardcoded 4000
+- Allows client machines to run on port 4000 while Trevor's machine uses 3000
+
+### Infrastructure
+- `agent_settings` table with unique constraint on (department_id, role_id, setting_type)
+- Migration 013 adds indexes on department_id and role_id columns
+
 ## v2.3.0 - March 23, 2026
 
 ### Fixed - Dynamic Department Seeding

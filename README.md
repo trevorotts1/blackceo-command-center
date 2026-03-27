@@ -22,6 +22,10 @@ Command Center is a sophisticated web application for managing and orchestrating
 - **Planning Phase:** Collaborative task specification with AI agents
 - **Workspace Support:** Multi-workspace organization by department
 - **Multi-Company:** Support for multiple companies/organizations
+- **Intelligence Settings:** Per-department model and persona configuration with quick-access header panel
+- **Dynamic Departments:** Departments loaded from database workspaces, not hardcoded lists
+- **Brand Palette:** Automatic complementary color generation from company primary/secondary colors
+- **CEO Performance Board:** Company health grading, department analytics, recommendations, benchmarks
 
 ## Setup
 
@@ -40,8 +44,10 @@ pm2 start ecosystem.config.cjs
 ## Configuration
 
 - **Company name:** Set via `COMPANY_NAME` env var or populated from database
-- **Departments:** Configure in `config/departments.json`
-- **Port:** 4000 (default)
+- **Departments:** Loaded dynamically from database workspaces; configure via `config/departments.json` or Skill 23 seed
+- **Port:** `${PORT:-4000}` (env var, defaults to 4000 for clients, 3000 for Trevor's machine)
 - **Logo:** Place at `public/logo.png` or set `NEXT_PUBLIC_LOGO_URL`
+- **Brand colors:** Set primary/secondary hex colors on the company record; palette auto-generates
+- **Intelligence:** Settings > Intelligence for per-department AI model and persona assignment
 
 See deployment documentation for full setup instructions.
