@@ -144,7 +144,7 @@ function SemiGauge({
           textAnchor="middle"
           fill="#2D5A27"
           style={{
-            fontSize: '48px',
+            fontSize: '56px',
             fontWeight: 900,
             fontFamily: 'ui-monospace, monospace',
           }}
@@ -156,7 +156,7 @@ function SemiGauge({
           y={cy + 14}
           textAnchor="middle"
           fill="#6B7280"
-          style={{ fontSize: '14px' }}
+          style={{ fontSize: '16px', fontWeight: 500 }}
         >
           Completion Rate
         </text>
@@ -165,7 +165,7 @@ function SemiGauge({
           y={cy + 32}
           textAnchor="middle"
           fill="#9CA3AF"
-          style={{ fontSize: '12px' }}
+          style={{ fontSize: '14px' }}
         >
           This month
         </text>

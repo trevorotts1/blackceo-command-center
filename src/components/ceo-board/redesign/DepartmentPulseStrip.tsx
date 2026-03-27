@@ -174,16 +174,16 @@ export function DepartmentPulseStrip() {
           </div>
 
           {/* Center: dept name only, no grade label */}
-          <span className="text-sm font-semibold text-[#1A1A1A] whitespace-nowrap">
+          <span className="text-base font-semibold text-gray-900 whitespace-nowrap">
             {dept.name}
           </span>
 
           {/* Right: grade circle + trend arrow */}
           <div className="flex flex-col items-center gap-0.5">
             <div
-              className={`flex h-10 w-10 items-center justify-center rounded-full ${GRADE_BG[dept.grade]}`}
+              className={`flex h-12 w-12 items-center justify-center rounded-full ${GRADE_BG[dept.grade]}`}
             >
-              <span className="text-lg font-black text-white">
+              <span className="text-xl font-black text-white">
                 {dept.grade}
               </span>
             </div>

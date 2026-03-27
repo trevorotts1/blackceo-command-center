@@ -352,7 +352,15 @@ function RecommendationCard({
   );
 }
 
-const FALLBACK_PERSONAS = ['Alex Hormozi', 'Gary Vaynerchuk', 'Seth Godin', 'Simon Sinek', 'Brené Brown', 'Ray Dalio', 'Donald Miller', 'Russell Brunson', 'Chris Voss', 'Daniel Pink'];
+const FALLBACK_PERSONAS = [
+  'Alex Hormozi', 'Chris Voss', 'Neil Rackham', 'Daniel Pink', 'Phil Jones', 'Brendan Kane', 'Daniel Priestley',
+  'Donald Miller', 'Seth Godin', 'Robert Bly', 'Joanna Wiebe', 'Robert Cialdini', 'Shelle Rose Charvet',
+  'Simon Sinek', 'Jim Collins', 'Jay Samit', 'Vishen Lakhiani', 'Tim Grover',
+  'James Clear', 'Tiago Forte', 'Brian Moran', 'Charles Duhigg',
+  'Mike Michalowicz',
+  'Mel Robbins', 'Robin Sharma', 'David Goggins', 'TD Jakes', 'Janet Attwood', 'Grenny Patterson',
+  'Nedra Tawwab', 'Brené Brown', 'Michelle Obama'
+];
 
 function generateDemoAgents(deptId: string, livePersonas?: string[]): AgentData[] {
   const personas = livePersonas && livePersonas.length > 0 ? livePersonas : FALLBACK_PERSONAS;

@@ -76,15 +76,15 @@ export function RecommendationsRow() {
             </div>
 
             {/* Title */}
-            <h3 className="text-base font-bold text-[#1A1A1A] mt-3">
+            <h3 className="text-lg font-bold text-gray-900 mt-3">
               {rec.title}
             </h3>
 
             {/* Body */}
-            <p className="text-sm text-[#666666] mt-1 line-clamp-2">{rec.body}</p>
+            <p className="text-base text-gray-600 mt-1 line-clamp-2">{rec.body}</p>
 
             {/* Action Link */}
-            <button className="flex items-center gap-1 mt-3 text-xs font-medium text-emerald-600 hover:text-emerald-700 transition-colors">
+            <button className="flex items-center gap-1 mt-3 text-sm font-medium text-emerald-600 hover:text-emerald-700 transition-colors">
               Take action
               <ArrowRight className="h-3 w-3" />
             </button>

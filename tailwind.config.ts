@@ -8,7 +8,45 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      fontSize: {
+        'display': ['72px', { lineHeight: '0.95', fontWeight: '900' }],
+        'kpi-value': ['56px', { lineHeight: '1.1', fontWeight: '900' }],
+        'page-title': ['32px', { lineHeight: '1.2', fontWeight: '800' }],
+        'section': ['24px', { lineHeight: '1.3', fontWeight: '700' }],
+        'card-title': ['20px', { lineHeight: '1.4', fontWeight: '700' }],
+        'sub-heading': ['18px', { lineHeight: '1.4', fontWeight: '600' }],
+        'body-lg': ['18px', { lineHeight: '1.5', fontWeight: '400' }],
+        'body': ['16px', { lineHeight: '1.6', fontWeight: '400' }],
+        'label': ['14px', { lineHeight: '1.5', fontWeight: '500' }],
+        'caption': ['14px', { lineHeight: '1.5', fontWeight: '400' }],
+        'badge': ['13px', { lineHeight: '1.4', fontWeight: '500' }],
+      },
       colors: {
+        // Brand Green Scale
+        brand: {
+          50: '#E8F5E9',
+          100: '#C8E6C9',
+          200: '#A5D6A7',
+          300: '#81C784',
+          400: '#66BB6A',
+          500: '#4CAF50',
+          600: '#43A047',
+          700: '#388E3C',
+          800: '#2E7D32',
+          900: '#1B5E20',
+          950: '#0D3B13',
+        },
+        // Semantic Colors
+        semantic: {
+          success: '#10B981',
+          successLight: '#D1FAE5',
+          warning: '#F59E0B',
+          warningLight: '#FEF3C7',
+          danger: '#EF4444',
+          dangerLight: '#FEE2E2',
+          info: '#3B82F6',
+          infoLight: '#DBEAFE',
+        },
         // Light Theme - BlackCEO Command Center
         'bcc-bg': '#F8F9FB',
         'bcc-white': '#FFFFFF',

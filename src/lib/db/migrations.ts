@@ -438,9 +438,14 @@ const migrations: Migration[] = [
         db.exec(`ALTER TABLE agents ADD COLUMN specialist_type TEXT DEFAULT 'on-call' CHECK (specialist_type IN ('permanent', 'on-call'))`);
         console.log('[Migration 015] Added specialist_type column');
 
-        // Backfill: master agents are permanent, all others are on-call
+        // Backfill: master agents and department heads (non-default workspace) are permanent.
+        // Only dynamically spawned sub-agents should be on-call.
         const result = db.prepare(`
-          UPDATE agents SET specialist_type = CASE WHEN is_master = 1 THEN 'permanent' ELSE 'on-call' END
+          UPDATE agents SET specialist_type = CASE
+            WHEN is_master = 1 THEN 'permanent'
+            WHEN workspace_id IS NOT NULL AND workspace_id != '' AND workspace_id != 'default' THEN 'permanent'
+            ELSE 'on-call'
+          END
         `).run();
         console.log(`[Migration 015] Backfilled specialist_type for ${result.changes} agents`);
       } else {

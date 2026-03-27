@@ -211,7 +211,7 @@ export function NeedsAttentionSection() {
           animate={{ opacity: 1 }}
         >
           <CheckCircle className="h-5 w-5 text-emerald-500 flex-shrink-0" />
-          <span className="text-sm font-medium text-gray-700">
+          <span className="text-base font-medium text-gray-700">
             All departments are healthy
           </span>
         </motion.div>
@@ -247,13 +247,13 @@ export function NeedsAttentionSection() {
 
               {/* Content */}
               <div className="flex-1 min-w-0">
-                <span className="text-sm font-medium text-[#1A1A1A]">
+                <span className="text-base font-medium text-gray-900">
                   {item.issue}
                 </span>
               </div>
 
               {/* Time badge */}
-              <span className="text-xs text-gray-400 flex-shrink-0">
+              <span className="text-sm text-gray-500 flex-shrink-0">
                 {item.timeContext}
               </span>
 

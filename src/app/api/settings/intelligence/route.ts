@@ -16,11 +16,51 @@ const AVAILABLE_MODELS = [
 
 const AVAILABLE_PERSONAS = [
   { id: 'auto', label: 'Auto-assign (recommended)' },
-  { id: 'clear-atomic-habits', label: 'James Clear' },
-  { id: 'godin-this-is-marketing', label: 'Seth Godin' },
+  // Sales & Revenue
   { id: 'hormozi-100m-offers', label: 'Alex Hormozi' },
-  { id: 'miller-building-storybrand-2', label: 'Donald Miller' },
   { id: 'voss-never-split-difference', label: 'Chris Voss' },
+  { id: 'rackham-spin-selling', label: 'Neil Rackham' },
+  { id: 'pink-to-sell-is-human', label: 'Daniel Pink' },
+  { id: 'jones-exactly-what-to-say', label: 'Phil Jones' },
+  { id: 'kane-hook-point', label: 'Brendan Kane' },
+  { id: 'priestley-oversubscribed', label: 'Daniel Priestley' },
+  // Marketing & Content
+  { id: 'miller-building-storybrand-2', label: 'Donald Miller' },
+  { id: 'godin-this-is-marketing', label: 'Seth Godin' },
+  { id: 'bly-copywriters-handbook', label: 'Robert Bly' },
+  { id: 'wiebe-copy-hackers', label: 'Joanna Wiebe' },
+  { id: 'cialdini-influence', label: 'Robert Cialdini' },
+  { id: 'charvet-words-change-minds', label: 'Shelle Rose Charvet' },
+  // Leadership & Strategy
+  { id: 'sinek-start-with-why', label: 'Simon Sinek' },
+  { id: 'sinek-find-your-why', label: 'Simon Sinek' },
+  { id: 'collins-good-to-great', label: 'Jim Collins' },
+  { id: 'samit-disrupt-yourself', label: 'Jay Samit' },
+  { id: 'lakhiani-extraordinary-mind', label: 'Vishen Lakhiani' },
+  { id: 'grover-relentless', label: 'Tim Grover' },
+  // Productivity & Systems
+  { id: 'clear-atomic-habits', label: 'James Clear' },
+  { id: 'forte-building-second-brain', label: 'Tiago Forte' },
+  { id: 'forte-para-method', label: 'Tiago Forte' },
+  { id: 'moran-12-week-year', label: 'Brian Moran' },
+  { id: 'duhigg-power-of-habit', label: 'Charles Duhigg' },
+  { id: 'pink-when', label: 'Daniel Pink' },
+  // Finance & Business Health
+  { id: 'michalowicz-profit-first', label: 'Mike Michalowicz' },
+  // Coaching & Human Development
+  { id: 'robbins-five-second-rule', label: 'Mel Robbins' },
+  { id: 'robbins-let-them-theory', label: 'Mel Robbins' },
+  { id: 'sharma-5am-club', label: 'Robin Sharma' },
+  { id: 'goggins-cant-hurt-me', label: 'David Goggins' },
+  { id: 'jakes-instinct', label: 'TD Jakes' },
+  { id: 'pink-drive', label: 'Daniel Pink' },
+  { id: 'attwood-passion-test', label: 'Janet Attwood' },
+  { id: 'grenny-crucial-conversations', label: 'Grenny Patterson' },
+  // Emotional Intelligence & Relationships
+  { id: 'tawwab-set-boundaries-find-peace', label: 'Nedra Tawwab' },
+  { id: 'brown-atlas-of-heart', label: 'Brené Brown' },
+  { id: 'obama-becoming', label: 'Michelle Obama' },
+  { id: 'obama-light-we-carry', label: 'Michelle Obama' },
 ];
 
 interface AgentSetting {
@@ -170,17 +210,42 @@ export async function GET() {
       const { existsSync, readFileSync } = await import('fs');
       const { homedir } = await import('os');
       const { join } = await import('path');
-      const matrixPath = join(homedir(), 'clawd', 'persona-matrix.md');
-      if (existsSync(matrixPath)) {
-        const raw = readFileSync(matrixPath, 'utf-8');
-        // Parse persona slugs from markdown headers or list items
-        const slugPattern = /(?:^|\n)(?:[-*]\s+|\#+\s+)([\w-]+)\s*[\(:\-]/g;
-        let match;
-        while ((match = slugPattern.exec(raw)) !== null) {
-          const slug = match[1];
-          if (slug && slug !== 'auto' && !enrichedPersonas.find(p => p.id === slug)) {
-            enrichedPersonas.push({ id: slug, label: slug.replace(/-/g, ' ') });
+      const matrixPaths = [
+        join(homedir(), 'clawd', 'persona-matrix.md'),
+        join(homedir(), 'clawd', 'persona-matrix', 'persona-matrix.md'),
+        join(homedir(), '.openclaw', 'persona-matrix.md'),
+      ];
+      for (const matrixPath of matrixPaths) {
+        if (existsSync(matrixPath)) {
+          const raw = readFileSync(matrixPath, 'utf-8');
+          // Parse persona slugs from various markdown formats:
+          // 1. Backtick slugs: `hormozi-100m-offers`
+          const backtickPattern = /`([a-z][a-z0-9]+(?:-[a-z0-9]+)+)`/g;
+          let match;
+          while ((match = backtickPattern.exec(raw)) !== null) {
+            const slug = match[1];
+            if (slug && slug !== 'auto' && !enrichedPersonas.find(p => p.id === slug)) {
+              enrichedPersonas.push({ id: slug, label: slug.replace(/-/g, ' ') });
+            }
           }
+          // 2. List items with bold names: - **Name** → `slug`
+          // 3. Headers: ## slug-name
+          const headerPattern = /(?:^|\n)#{1,4}\s+([a-z][a-z0-9]+(?:-[a-z0-9]+)+)/g;
+          while ((match = headerPattern.exec(raw)) !== null) {
+            const slug = match[1];
+            if (slug && slug !== 'auto' && !enrichedPersonas.find(p => p.id === slug)) {
+              enrichedPersonas.push({ id: slug, label: slug.replace(/-/g, ' ') });
+            }
+          }
+          // 4. Dash-prefixed slugs: - slug-name
+          const dashPattern = /(?:^|\n)\s*-\s+([a-z][a-z0-9]+(?:-[a-z0-9]+)+)(?:\s|$)/g;
+          while ((match = dashPattern.exec(raw)) !== null) {
+            const slug = match[1];
+            if (slug && slug !== 'auto' && !enrichedPersonas.find(p => p.id === slug)) {
+              enrichedPersonas.push({ id: slug, label: slug.replace(/-/g, ' ') });
+            }
+          }
+          if (enrichedPersonas.length > AVAILABLE_PERSONAS.length) break; // Found extras, stop
         }
       }
     } catch {

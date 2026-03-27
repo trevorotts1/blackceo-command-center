@@ -154,7 +154,13 @@ export function DevilsAdvocateFeed() {
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+    <div className="rounded-2xl shadow-sm border-0 p-6"
+      style={{
+        backgroundColor: 'rgba(255,255,255,0.88)',
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
+      }}
+    >
       {/* Header */}
       <div className="flex items-center gap-3 mb-6">
         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 shadow-sm">
@@ -162,7 +168,7 @@ export function DevilsAdvocateFeed() {
         </div>
         <div>
           <h2 className="text-lg font-bold text-gray-900">⚔️ Devil&apos;s Advocate</h2>
-          <p className="text-sm text-gray-500">AI challenges that keep departments honest</p>
+          <p className="text-base text-gray-500">AI challenges that keep departments honest</p>
         </div>
       </div>
 
@@ -242,8 +248,8 @@ export function DevilsAdvocateFeed() {
               {/* Response Box */}
               {hasResponse && (
                 <div className="p-3 rounded-lg bg-gray-50 border border-gray-200 mb-3">
-                  <p className="text-xs text-gray-500 font-medium mb-1">Department Response:</p>
-                  <p className="text-sm text-gray-700">{challenge.response_text}</p>
+                  <p className="text-badge text-gray-500 font-medium mb-1">Department Response:</p>
+                  <p className="text-base text-gray-700">{challenge.response_text}</p>
                 </div>
               )}
 

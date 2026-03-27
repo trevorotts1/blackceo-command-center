@@ -48,6 +48,18 @@ body {
 body {
   background-color: var(--bcc-bg);
   color: var(--bcc-text);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+/* Override text-xs to badge/caption floor */
+.text-xs {
+  font-size: 0.8125rem !important; /* 13px - only for badges */
+}
+
+/* Exception: keep real tiny for timestamps in dense lists */
+.timestamp-only {
+  font-size: 0.75rem; /* 12px - never use outside timestamps */
 }
 
 /* Custom scrollbar - Light theme */

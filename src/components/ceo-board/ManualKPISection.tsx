@@ -192,7 +192,7 @@ export function ManualKPISection() {
 
               return (
                 <div key={field.id} className="space-y-2">
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                  <label className="flex items-center gap-2 text-base font-medium text-gray-700">
                     <Icon className="w-4 h-4 text-gray-400" />
                     {field.label}
                   </label>

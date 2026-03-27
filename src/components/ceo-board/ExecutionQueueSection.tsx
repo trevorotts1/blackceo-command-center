@@ -147,7 +147,7 @@ export function ExecutionQueueSection() {
             </h2>
           </div>
         </div>
-        <p className="text-sm text-gray-500 ml-[52px]">
+        <p className="text-base text-gray-500 ml-[52px]">
           Approved tasks scheduled for overnight execution.
         </p>
       </motion.div>

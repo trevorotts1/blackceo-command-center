@@ -211,12 +211,17 @@ export function AgentPerformanceSection() {
                     {deptLabel}
                   </span>
                   {(agent as any).specialist_type && (
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${
+                    <span className={`px-2 py-0.5 rounded-full text-badge font-medium border ${
                       (agent as any).specialist_type === 'permanent'
                         ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                        : 'bg-gray-50 border-gray-200 text-gray-600'
+                        : 'bg-slate-50 border-slate-200 text-slate-600'
                     }`}>
                       {(agent as any).specialist_type === 'permanent' ? 'Full-time' : 'On-call'}
+                    </span>
+                  )}
+                  {agent.role && /chief|head|director|general|coordinator|lead/i.test(agent.role) && (
+                    <span className="px-2 py-0.5 rounded-full text-badge font-medium border bg-amber-50 border-amber-200 text-amber-700">
+                      Dept Head
                     </span>
                   )}
                 </div>

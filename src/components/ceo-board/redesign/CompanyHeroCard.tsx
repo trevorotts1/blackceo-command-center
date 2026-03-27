@@ -150,16 +150,16 @@ export function CompanyHeroCard() {
         {/* Bottom Stat Pills */}
         <div className="flex gap-3 mt-6">
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
-            <span className="text-white text-sm font-medium">{totalTasks}</span>
-            <span className="text-white/70 text-xs">Total Tasks</span>
+            <span className="text-white text-base font-semibold">{totalTasks}</span>
+            <span className="text-white/70 text-sm">Total Tasks</span>
           </div>
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
-            <span className="text-white text-sm font-medium">{activeAgents}</span>
-            <span className="text-white/70 text-xs">Active Agents</span>
+            <span className="text-white text-base font-semibold">{activeAgents}</span>
+            <span className="text-white/70 text-sm">Active Agents</span>
           </div>
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
-            <span className="text-white text-sm font-medium">{completionRate}%</span>
-            <span className="text-white/70 text-xs">Completion Rate</span>
+            <span className="text-white text-base font-semibold">{completionRate}%</span>
+            <span className="text-white/70 text-sm">Completion Rate</span>
           </div>
         </div>
       </div>

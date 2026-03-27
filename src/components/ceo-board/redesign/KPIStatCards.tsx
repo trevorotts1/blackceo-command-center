@@ -61,10 +61,10 @@ function TrendBadge({
 
   return (
     <span
-      className={`inline-flex items-center justify-center w-4 h-4 rounded-sm ${bg}`}
+      className={`inline-flex items-center justify-center w-7 h-7 rounded-md ${bg}`}
     >
       <Icon
-        className={`h-2.5 w-2.5 ${
+        className={`h-4 w-4 ${
           dark
             ? 'text-white/80'
             : trend === 'up'
@@ -214,7 +214,7 @@ export function KPIStatCards() {
 
           {/* Number */}
           <span
-            className={`text-[48px] font-black leading-none mt-1 ${
+            className={`text-kpi-value leading-none mt-1 ${
               card.dark ? 'text-white' : 'text-gray-900'
             }`}
             style={{ fontFamily: 'ui-monospace, monospace' }}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Settings, ChevronDown } from 'lucide-react';
@@ -13,14 +13,15 @@ import { DepartmentPulseStrip } from '@/components/ceo-board/redesign/Department
 import { PerformanceGaugeChart } from '@/components/ceo-board/redesign/PerformanceGaugeChart';
 import { NeedsAttentionSection } from '@/components/ceo-board/redesign/NeedsAttentionSection';
 import { RecommendationsRow } from '@/components/ceo-board/redesign/RecommendationsRow';
+import { SectionContainer } from '@/components/ceo-board/redesign/SectionContainer';
 
 // Existing bottom sections (kept as-is)
 import { DevilsAdvocateFeed } from '@/components/ceo-board/DevilsAdvocateFeed';
 import { ExecutionQueueSection } from '@/components/ceo-board/ExecutionQueueSection';
 import { ManualKPISection } from '@/components/ceo-board/ManualKPISection';
 
-// Nav tabs
-const NAV_TABS = ['Dashboard', 'Departments', 'Agents', 'Analytics', 'Settings'];
+// Nav tabs - only functional ones
+const NAV_TABS = ['Dashboard', 'Departments', 'Agents'];
 
 // Page-level animation variants
 const pageVariants = {
@@ -49,6 +50,56 @@ const sectionVariants = {
 export default function CEOPerformanceBoardPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState('Dashboard');
+  const [monthlyStats, setMonthlyStats] = useState({ tasksDone: 0, agentsActive: 0, tasksPerWeek: 0 });
+  const [activeAgentCount, setActiveAgentCount] = useState(0);
+  const [deptCount, setDeptCount] = useState(0);
+  const [attentionCount, setAttentionCount] = useState(0);
+
+  useEffect(() => {
+    async function loadMonthlyStats() {
+      try {
+        const [wsRes, agentsRes] = await Promise.all([
+          fetch('/api/workspaces?stats=true'),
+          fetch('/api/agents'),
+        ]);
+
+        let departments: any[] = [];
+        let agents: any[] = [];
+
+        if (wsRes.ok) {
+          departments = (await wsRes.json()).filter((d: any) => {
+            const slug = d.slug || d.id;
+            return slug !== 'default' && !slug.startsWith('acme-') && !slug.startsWith('zhw-');
+          });
+        }
+        if (agentsRes.ok) agents = await agentsRes.json();
+
+        const tasksDone = departments.reduce((s: number, d: any) => s + (d.taskCounts?.done || 0), 0);
+        const agentsActive = agents.filter((a: any) => a.status === 'active' || a.status === 'working').length;
+        const tasksPerWeek = tasksDone > 0 ? Math.max(1, Math.round(tasksDone / 4)) : 0;
+
+        setMonthlyStats({ tasksDone, agentsActive, tasksPerWeek });
+        setActiveAgentCount(agentsActive);
+        setDeptCount(departments.length);
+
+        // Count items needing attention
+        let needsAttention = 0;
+        for (const d of departments) {
+          const total = d.taskCounts?.total || 0;
+          const done = d.taskCounts?.done || 0;
+          const blocked = d.taskCounts?.blocked || 0;
+          const inProgress = d.taskCounts?.in_progress || 0;
+          if (total === 0) continue;
+          const score = Math.round(((done + inProgress * 0.5) / total) * 100);
+          if (score < 60 || blocked > 0) needsAttention++;
+        }
+        setAttentionCount(needsAttention);
+      } catch {
+        // handled
+      }
+    }
+    loadMonthlyStats();
+  }, []);
 
   const currentDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
@@ -113,29 +164,20 @@ export default function CEOPerformanceBoardPage() {
 
         {/* RIGHT - Date + separator + LIVE + settings + avatar */}
         <div className="flex items-center gap-4">
-          {/* Date */}
-          <span className="text-sm text-gray-500 hidden sm:block">
+          <span className="text-base text-gray-500 hidden sm:block">
             {currentDate}
           </span>
-
-          {/* Separator */}
           <div className="h-5 w-px bg-gray-300 hidden sm:block" />
-
-          {/* LIVE indicator */}
           <div className="flex items-center gap-1.5">
             <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-xs font-medium text-emerald-600">Live</span>
+            <span className="text-sm font-medium text-emerald-600">Live</span>
           </div>
-
-          {/* Settings gear */}
           <button className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-gray-200/60 transition-colors">
             <Settings className="h-5 w-5 text-gray-500" />
           </button>
-
-          {/* User avatar */}
           <div className="flex items-center gap-1">
             <div className="h-9 w-9 rounded-full bg-emerald-600 flex items-center justify-center">
-              <span className="text-white text-xs font-semibold">TO</span>
+              <span className="text-white text-sm font-semibold">TO</span>
             </div>
             <ChevronDown className="h-3 w-3 text-gray-400" />
           </div>
@@ -143,8 +185,8 @@ export default function CEOPerformanceBoardPage() {
       </motion.header>
 
       {/* Main Content */}
-      <main className="relative z-10 p-6 lg:p-8">
-        <div className="max-w-[1600px] mx-auto space-y-6">
+      <main className="relative z-10 p-8">
+        <div className="max-w-[1600px] mx-auto space-y-12">
           {/* 1. Company Health Hero */}
           <motion.section variants={sectionVariants}>
             <CompanyHeroCard />
@@ -155,22 +197,24 @@ export default function CEOPerformanceBoardPage() {
             <KPIStatCards />
           </motion.section>
 
-          {/* 2b. Gold Accent Card - Monthly Activity */}
+          {/* 2b. Monthly Activity Card */}
           <motion.section variants={sectionVariants}>
-            <div className="bg-[#F5D45A] rounded-2xl shadow-sm p-6">
-              <h3 className="text-lg font-bold text-[#1A1A1A] mb-4">Monthly Activity</h3>
+            <div className="bg-amber-50 rounded-2xl shadow-sm p-8 border-l-4 border-l-amber-400">
+              <h3 className="text-xl font-bold text-gray-900 mb-6">Monthly Activity</h3>
               <div className="flex items-center justify-between">
-                <div className="text-center">
-                  <span className="text-[48px] font-black text-[#1A1A1A] leading-none" style={{ fontFamily: 'ui-monospace, monospace' }}>16</span>
-                  <p className="text-sm text-[#555555] mt-1">Tasks Done</p>
+                <div className="text-center flex-1">
+                  <span className="text-kpi-value text-gray-900">{monthlyStats.tasksDone}</span>
+                  <p className="text-base text-gray-600 mt-1">Tasks Done</p>
                 </div>
-                <div className="text-center">
-                  <span className="text-[48px] font-black text-[#1A1A1A] leading-none" style={{ fontFamily: 'ui-monospace, monospace' }}>0</span>
-                  <p className="text-sm text-[#555555] mt-1">Agents Active</p>
+                <div className="w-px h-16 bg-amber-200" />
+                <div className="text-center flex-1">
+                  <span className="text-kpi-value text-gray-900">{monthlyStats.agentsActive}</span>
+                  <p className="text-base text-gray-600 mt-1">Agents Active</p>
                 </div>
-                <div className="text-center">
-                  <span className="text-[48px] font-black text-[#1A1A1A] leading-none" style={{ fontFamily: 'ui-monospace, monospace' }}>4</span>
-                  <p className="text-sm text-[#555555] mt-1">Tasks/Week</p>
+                <div className="w-px h-16 bg-amber-200" />
+                <div className="text-center flex-1">
+                  <span className="text-kpi-value text-gray-900">{monthlyStats.tasksPerWeek}</span>
+                  <p className="text-base text-gray-600 mt-1">Tasks/Week</p>
                 </div>
               </div>
             </div>
@@ -178,21 +222,23 @@ export default function CEOPerformanceBoardPage() {
 
           {/* 3. Active Agents Strip */}
           <motion.section variants={sectionVariants}>
-            <h2 className="text-xl font-bold text-[#1A1A1A] mb-4">Active Agents</h2>
-            <ActiveAgentsStrip />
+            <SectionContainer title="Active Agents" accentColor="bg-emerald-500" context={`${activeAgentCount} active`}>
+              <ActiveAgentsStrip />
+            </SectionContainer>
           </motion.section>
 
-          {/* 4. Department Pulse Strip - COMPACT, NOT full grid */}
+          {/* 4. Department Pulse Strip */}
           <motion.section variants={sectionVariants}>
-            <h2 className="text-xl font-bold text-[#1A1A1A] mb-4">
-              Department Pulse
-            </h2>
-            <DepartmentPulseStrip />
+            <SectionContainer title="Department Pulse" accentColor="bg-brand-500" context={`${deptCount} departments`}>
+              <DepartmentPulseStrip />
+            </SectionContainer>
           </motion.section>
 
           {/* 5. Performance Gauge + Chart */}
           <motion.section variants={sectionVariants}>
-            <PerformanceGaugeChart />
+            <SectionContainer title="Performance" accentColor="bg-blue-500">
+              <PerformanceGaugeChart />
+            </SectionContainer>
           </motion.section>
 
           {/* 6. Needs Attention */}
@@ -205,17 +251,17 @@ export default function CEOPerformanceBoardPage() {
             <RecommendationsRow />
           </motion.section>
 
-          {/* 8. Devil's Advocate Feed (existing, kept as-is) */}
+          {/* 8. Devil's Advocate Feed */}
           <motion.section variants={sectionVariants}>
             <DevilsAdvocateFeed />
           </motion.section>
 
-          {/* 9. Execution Queue (existing, kept as-is) */}
+          {/* 9. Execution Queue */}
           <motion.section variants={sectionVariants}>
             <ExecutionQueueSection />
           </motion.section>
 
-          {/* 10. Manual KPI Entry (existing, kept as-is) */}
+          {/* 10. Manual KPI Entry */}
           <motion.section variants={sectionVariants}>
             <ManualKPISection />
           </motion.section>

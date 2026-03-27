@@ -37,6 +37,10 @@ export async function POST(request: NextRequest) {
 
     const id = uuidv4();
     const now = new Date().toISOString();
+    const workspaceId = (body as { workspace_id?: string }).workspace_id || 'default';
+    // Master agents and department heads (assigned to a workspace) are permanent.
+    // Only agents without a workspace assignment are on-call (likely spawned sub-agents).
+    const specialistType = body.is_master || workspaceId !== 'default' ? 'permanent' : 'on-call';
 
     run(
       `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, soul_md, user_md, agents_md, tools_md, memory_md, model, specialist_type, created_at, updated_at)
@@ -48,14 +52,14 @@ export async function POST(request: NextRequest) {
         body.description || null,
         body.avatar_emoji || '🤖',
         body.is_master ? 1 : 0,
-        (body as { workspace_id?: string }).workspace_id || 'default',
+        workspaceId,
         body.soul_md || null,
         body.user_md || null,
         body.agents_md || null,
         body.tools_md || null,
         body.memory_md || null,
         body.model || null,
-        body.is_master ? 'permanent' : 'on-call',
+        specialistType,
         now,
         now,
       ]
