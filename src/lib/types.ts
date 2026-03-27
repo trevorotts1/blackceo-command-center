@@ -298,6 +298,7 @@ export interface CreateAgentRequest {
   tools_md?: string;
   memory_md?: string;
   model?: string;
+  specialist_type?: 'permanent' | 'on-call';
 }
 
 export interface UpdateAgentRequest extends Partial<CreateAgentRequest> {

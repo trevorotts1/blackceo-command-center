@@ -45,14 +45,15 @@ export async function POST(
         // Create temporary sub-agent record
         agentId = crypto.randomUUID();
         db.prepare(`
-          INSERT INTO agents (id, name, role, description, status)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO agents (id, name, role, description, status, specialist_type)
+          VALUES (?, ?, ?, ?, ?, ?)
         `).run(
           agentId,
           agent_name,
           'Sub-Agent',
           'Automatically created sub-agent',
-          'working'
+          'working',
+          'on-call'
         );
       }
     }

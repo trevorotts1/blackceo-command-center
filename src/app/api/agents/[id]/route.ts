@@ -97,6 +97,10 @@ export async function PATCH(
       updates.push('model = ?');
       values.push(body.model);
     }
+    if ((body as { specialist_type?: string }).specialist_type !== undefined) {
+      updates.push('specialist_type = ?');
+      values.push((body as { specialist_type: string }).specialist_type);
+    }
 
     if (updates.length === 0) {
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 });

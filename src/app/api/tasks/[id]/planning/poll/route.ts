@@ -45,8 +45,8 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
     // Create the agents in the workspace and track first agent for auto-assign
     if (parsed.agents && parsed.agents.length > 0) {
       const insertAgent = db.prepare(`
-        INSERT INTO agents (id, workspace_id, name, role, description, avatar_emoji, status, soul_md, created_at, updated_at)
-        VALUES (?, (SELECT workspace_id FROM tasks WHERE id = ?), ?, ?, ?, ?, 'standby', ?, datetime('now'), datetime('now'))
+        INSERT INTO agents (id, workspace_id, name, role, description, avatar_emoji, status, soul_md, specialist_type, created_at, updated_at)
+        VALUES (?, (SELECT workspace_id FROM tasks WHERE id = ?), ?, ?, ?, ?, 'standby', ?, 'on-call', datetime('now'), datetime('now'))
       `);
 
       for (const agent of parsed.agents) {

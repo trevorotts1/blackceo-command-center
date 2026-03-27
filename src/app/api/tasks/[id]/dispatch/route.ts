@@ -4,6 +4,7 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
+import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
 interface RouteParams {
@@ -130,6 +131,15 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       );
     }
 
+    // --- INTELLIGENCE SETTINGS RESOLUTION ---
+    // Resolve which model and persona this dispatch should use.
+    // Resolution order: role override > department default > hardcoded default.
+    const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
+    const specialistType = resolveSpecialistType(agent);
+
+    console.log(`[Dispatch] Task ${task.id} → Agent "${agent.name}" | model=${settings.model} (${settings.modelSource}) | persona=${settings.persona} (${settings.personaSource}) | specialist=${specialistType}`);
+    // --- END INTELLIGENCE RESOLUTION ---
+
     // Build task message for agent
     const priorityEmoji = {
       low: '🔵',
@@ -151,6 +161,9 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 **Priority:** ${task.priority.toUpperCase()}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
+**Agent Model:** ${settings.model}
+**Agent Persona:** ${settings.persona === 'auto' ? 'auto-select (orchestrator decides)' : settings.persona}
+**Specialist Type:** ${specialistType}
 
 **OUTPUT DIRECTORY:** ${taskProjectDir}
 Create this directory and save all deliverables there.
@@ -169,6 +182,7 @@ When complete, reply with:
 If you need help or clarification, ask the orchestrator.`;
 
     // Send message to agent's session using chat.send
+    // Include resolved model so OpenClaw gateway can route to the correct model
     try {
       // Use sessionKey for routing to the agent's session
       // Format: agent:main:{openclaw_session_id}
@@ -176,7 +190,11 @@ If you need help or clarification, ask the orchestrator.`;
       await client.call('chat.send', {
         sessionKey,
         message: taskMessage,
-        idempotencyKey: `dispatch-${task.id}-${Date.now()}`
+        idempotencyKey: `dispatch-${task.id}-${Date.now()}`,
+        // Pass resolved model to gateway — if gateway supports model override
+        // per-message, it will use this. Otherwise it's logged for traceability.
+        model: settings.model,
+        persona: settings.persona,
       });
 
       // Update task status to in_progress

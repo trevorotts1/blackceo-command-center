@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS agents (
   tools_md TEXT,
   memory_md TEXT,
   model TEXT,
+  specialist_type TEXT DEFAULT 'on-call' CHECK (specialist_type IN ('permanent', 'on-call')),
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

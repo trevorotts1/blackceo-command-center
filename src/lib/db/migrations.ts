@@ -426,6 +426,27 @@ const migrations: Migration[] = [
         console.log('[Migration 014] sort_order column already exists, skipping');
       }
     }
+  },
+  {
+    id: '015',
+    name: 'add_specialist_type_to_agents',
+    up: (db) => {
+      console.log('[Migration 015] Adding specialist_type column to agents...');
+
+      const agentsInfo = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+      if (!agentsInfo.some(col => col.name === 'specialist_type')) {
+        db.exec(`ALTER TABLE agents ADD COLUMN specialist_type TEXT DEFAULT 'on-call' CHECK (specialist_type IN ('permanent', 'on-call'))`);
+        console.log('[Migration 015] Added specialist_type column');
+
+        // Backfill: master agents are permanent, all others are on-call
+        const result = db.prepare(`
+          UPDATE agents SET specialist_type = CASE WHEN is_master = 1 THEN 'permanent' ELSE 'on-call' END
+        `).run();
+        console.log(`[Migration 015] Backfilled specialist_type for ${result.changes} agents`);
+      } else {
+        console.log('[Migration 015] specialist_type column already exists, skipping');
+      }
+    }
   }
 ];
 

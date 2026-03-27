@@ -104,8 +104,8 @@ async function seed() {
   // Create master orchestrator agent
   const orchestratorId = uuidv4();
   db.prepare(
-    `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, soul_md, user_md, agents_md, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, specialist_type, soul_md, user_md, agents_md, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     orchestratorId,
     'Orchestrator',
@@ -114,6 +114,7 @@ async function seed() {
     '🦞',
     'standby',
     1,
+    'permanent',
     ORCHESTRATOR_SOUL_MD,
     ORCHESTRATOR_USER_MD,
     ORCHESTRATOR_AGENTS_MD,
@@ -135,9 +136,9 @@ async function seed() {
     const agentId = uuidv4();
     agentIds.push(agentId);
     db.prepare(
-      `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(agentId, agent.name, agent.role, agent.desc, agent.emoji, 'standby', 0, now, now);
+      `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, specialist_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(agentId, agent.name, agent.role, agent.desc, agent.emoji, 'standby', 0, 'on-call', now, now);
   }
 
   // Create a team conversation
