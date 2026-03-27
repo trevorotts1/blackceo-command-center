@@ -205,7 +205,7 @@ function WorkspaceSelectorInner() {
                             }}
                           >
                             <motion.button
-                              onClick={() => router.push(`/workspace/${workspace.id}`)}
+                              onClick={() => router.push(`/workspace/${workspace.slug || workspace.id}`)}
                               className={`group relative w-full text-left ${snapshot.isDragging ? 'z-50' : ''}`}
                               initial={{ opacity: 0, y: 20 }}
                               animate={{ opacity: 1, y: 0 }}

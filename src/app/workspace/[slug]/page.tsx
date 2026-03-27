@@ -63,38 +63,39 @@ export default function WorkspacePage() {
     loadWorkspace();
   }, [slug, setIsLoading]);
 
-  // Auto-set selectedDepartment when a specific department workspace loads
-  // This ensures the MissionQueue filters tasks to just that department
+  // Lock the global department filter to the route.
+  // Department routes must always stay scoped to that single department.
   useEffect(() => {
     if (!workspace) return;
-    if (workspace.slug === 'default' || workspace.slug === 'ceo') {
-      // CEO / All Departments view: show everything
-      setSelectedDepartment(null);
-    } else {
-      // Specific department: use workspace slug to match task.department values
-      // task.department stores the slug (e.g., "marketing"), not the display name
-      setSelectedDepartment(workspace.slug);
+
+    const routeDepartment = workspace.slug === 'default' || workspace.slug === 'ceo'
+      ? null
+      : workspace.slug;
+
+    if (selectedDepartment !== routeDepartment) {
+      setSelectedDepartment(routeDepartment);
     }
-    // Run only when workspace changes, not when selectedDepartment changes (avoid loops)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspace, setSelectedDepartment]);
+  }, [workspace, selectedDepartment, setSelectedDepartment]);
 
   // Load workspace-specific data
   useEffect(() => {
     if (!workspace) return;
     
     const workspaceId = workspace.id;
+    const routeDepartment = workspace.slug === 'default' || workspace.slug === 'ceo'
+      ? null
+      : workspace.slug;
 
     async function loadData() {
       try {
-        debug.api('Loading workspace data...', { workspaceId, selectedDepartment });
+        debug.api('Loading workspace data...', { workspaceId, routeDepartment, selectedDepartment });
 
-        // Fetch workspace-scoped data
-        // If "All Departments" (selectedDepartment=null): fetch ALL tasks
-        // If specific department selected: filter by that department
-        const tasksUrl = selectedDepartment === null
+        // Always derive the task filter from the route itself.
+        // This prevents a race where a stale/null global selection briefly fetches all tasks
+        // and overwrites the single-department board after navigation.
+        const tasksUrl = routeDepartment === null
           ? '/api/tasks'
-          : `/api/tasks?department=${selectedDepartment}`;
+          : `/api/tasks?department=${routeDepartment}`;
 
         const [agentsRes, tasksRes, eventsRes] = await Promise.all([
           fetch(`/api/agents?workspace_id=${workspaceId}`),
@@ -151,10 +152,10 @@ export default function WorkspacePage() {
     // Poll tasks as SSE fallback every 60 seconds (increased from 10s)
     const taskPoll = setInterval(async () => {
       try {
-        // Use same logic as initial load: All Departments = no filter, specific dept = filter by dept
-        const pollUrl = selectedDepartment === null
+        // Use the route-derived filter here too so department pages never drift back to all tasks.
+        const pollUrl = routeDepartment === null
           ? '/api/tasks'
-          : `/api/tasks?department=${selectedDepartment}`;
+          : `/api/tasks?department=${routeDepartment}`;
         const res = await fetch(pollUrl);
         if (res.ok) {
           const newTasks: Task[] = await res.json();
