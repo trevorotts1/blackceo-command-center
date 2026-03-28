@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Building2, Users, BarChart3, ArrowRight, Loader2, Home, GripVertical, ListTodo } from 'lucide-react';
+import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home, GripVertical, ListTodo } from 'lucide-react';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 
