@@ -174,18 +174,18 @@ export default function HomePage() {
 
           {/* Entry Cards */}
           <motion.div
-            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 items-stretch"
             variants={containerVariants}
           >
             {cards.map((card) => (
               <motion.div
                 key={card.route}
-                className="group relative w-full"
+                className="group relative w-full h-full"
                 variants={cardVariants}
                 whileHover={{ scale: 1.03, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } }}
                 whileTap={{ scale: 0.98 }}
               >
-                <Link href={card.route} className="block text-left">
+                <Link href={card.route} className="block text-left h-full">
                   <div
                     className={`relative overflow-hidden rounded-2xl ${cardBackground ? '' : `bg-gradient-to-br ${card.gradient}`} p-8 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
                     style={cardBackground || undefined}
