@@ -4,8 +4,8 @@ import { useEffect, useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import type { WorkspaceStats } from '@/lib/types';
 
-/* SVG Semi-Circular Gauge with 3 segments */
-function SemiGauge({
+/* Horizontal Progress Bars replacing SemiGauge */
+function HorizontalBars({
   completed,
   inProgress,
   pending,
@@ -16,196 +16,116 @@ function SemiGauge({
   pending: number;
   loading: boolean;
 }) {
-  const [animCompleted, setAnimCompleted] = useState(0);
-  const [animInProgress, setAnimInProgress] = useState(0);
-
   const total = completed + inProgress + pending;
-  const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
-  const inProgressRate = total > 0 ? Math.round((inProgress / total) * 100) : 0;
+  const hasData = total > 0;
+  const completionRate = hasData ? Math.round((completed / total) * 100) : 0;
+  const inProgressRate = hasData ? Math.round((inProgress / total) * 100) : 0;
+  const pendingRate = hasData ? Math.round((pending / total) * 100) : 0;
+
+  const [animPct, setAnimPct] = useState(0);
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || !hasData) return;
     const start = performance.now();
-    const duration = 1200;
+    const duration = 1000;
     const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
 
     function animate(now: number) {
       const elapsed = now - start;
       const progress = Math.min(elapsed / duration, 1);
-      const eased = easeOut(progress);
-      setAnimCompleted(Math.round(eased * completionRate));
-      setAnimInProgress(Math.round(eased * inProgressRate));
+      setAnimPct(easeOut(progress));
       if (progress < 1) requestAnimationFrame(animate);
     }
     requestAnimationFrame(animate);
-  }, [completionRate, inProgressRate, loading]);
-
-  const cx = 140;
-  const cy = 125;
-  const r = 95;
-  const strokeW = 32;
-  const totalDeg = 180;
-
-  function describeArc(startDeg: number, sweepDeg: number): string {
-    if (sweepDeg <= 0) return '';
-    const clampedSweep = Math.min(sweepDeg, totalDeg);
-    const startAngle = Math.PI;
-    const sx = cx + r * Math.cos(startAngle - (startDeg * Math.PI) / totalDeg);
-    const sy = cy - r * Math.sin(startAngle - (startDeg * Math.PI) / totalDeg);
-    const ex = cx + r * Math.cos(startAngle - ((startDeg + clampedSweep) * Math.PI) / totalDeg);
-    const ey = cy - r * Math.sin(startAngle - ((startDeg + clampedSweep) * Math.PI) / totalDeg);
-    const largeArc = clampedSweep > 180 ? 1 : 0;
-    return `M ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 0 ${ex} ${ey}`;
-  }
-
-  const bgPath = describeArc(0, 180);
-  const completedPath = describeArc(0, (animCompleted / 100) * totalDeg);
-  const inProgressStart = (animCompleted / 100) * totalDeg;
-  const inProgressPath = describeArc(inProgressStart, (animInProgress / 100) * totalDeg);
-  const pendingStart = ((animCompleted + animInProgress) / 100) * totalDeg;
-  const pendingSweep = Math.max(0, totalDeg - pendingStart);
-  const pendingPath = describeArc(pendingStart, pendingSweep);
+  }, [hasData, loading]);
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center">
-        <div className="w-[280px] h-[150px] bg-gray-200 rounded-full animate-pulse" />
+      <div className="flex flex-col items-center justify-center w-full">
+        <div className="w-24 h-14 bg-gray-200 rounded-lg animate-pulse mb-4" />
+        <div className="w-full space-y-3">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-8 bg-gray-200 rounded-lg animate-pulse" />
+          ))}
+        </div>
       </div>
     );
   }
 
-  return (
-    <div className="flex flex-col items-center justify-center">
-      <svg
-        width="280"
-        height="155"
-        viewBox="0 0 280 155"
-        style={{ overflow: 'visible' }}
-      >
-        <defs>
-          <pattern
-            id="hatchGauge"
-            patternUnits="userSpaceOnUse"
-            width="8"
-            height="8"
-            patternTransform="rotate(45)"
-          >
-            <rect width="8" height="8" fill="#E5E7EB" />
-            <line x1="0" y1="0" x2="0" y2="8" stroke="#AAAAAA" strokeWidth="2" />
-          </pattern>
-        </defs>
-
-        {/* Background arc */}
-        <path
-          d={bgPath}
-          fill="none"
-          stroke="#E5E7EB"
-          strokeWidth={strokeW}
-          strokeLinecap="round"
-        />
-
-        {/* Completed segment */}
-        {completedPath && (
-          <path
-            d={completedPath}
-            fill="none"
-            stroke="#2D5A27"
-            strokeWidth={strokeW}
-            strokeLinecap="round"
-          />
-        )}
-
-        {/* In progress segment */}
-        {inProgressPath && (animInProgress / 100) * totalDeg > 0.5 && (
-          <path
-            d={inProgressPath}
-            fill="none"
-            stroke="#388E3C"
-            strokeWidth={strokeW}
-            strokeLinecap="round"
-          />
-        )}
-
-        {/* Pending segment */}
-        {pendingPath && pendingSweep > 0.5 && (
-          <path
-            d={pendingPath}
-            fill="none"
-            stroke="url(#hatchGauge)"
-            strokeWidth={strokeW}
-            strokeLinecap="round"
-          />
-        )}
-
-        {/* Center text */}
-        <text
-          x={cx}
-          y={cy - 12}
-          textAnchor="middle"
-          fill="#2D5A27"
-          style={{
-            fontSize: '56px',
-            fontWeight: 900,
-            fontFamily: 'ui-monospace, monospace',
-          }}
+  if (!hasData) {
+    return (
+      <div className="flex flex-col items-center justify-center w-full gap-4 py-4">
+        <p
+          style={{ fontSize: '56px', fontWeight: 900, fontFamily: 'ui-monospace, monospace' }}
+          className="text-gray-300"
         >
-          {animCompleted}%
-        </text>
-        <text
-          x={cx}
-          y={cy + 14}
-          textAnchor="middle"
-          fill="#6B7280"
-          style={{ fontSize: '16px', fontWeight: 500 }}
-        >
-          Completion Rate
-        </text>
-        <text
-          x={cx}
-          y={cy + 32}
-          textAnchor="middle"
-          fill="#9CA3AF"
-          style={{ fontSize: '14px' }}
-        >
-          This month
-        </text>
-      </svg>
-
-      {/* Legend */}
-      <div className="flex items-center gap-5 mt-2">
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-[#2D5A27]" />
-          <span className="text-sm text-gray-600">Completed</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-[#388E3C]" />
-          <span className="text-sm text-gray-600">In Progress</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <svg width="12" height="12" viewBox="0 0 12 12">
-            <defs>
-              <pattern
-                id="hatchLegend"
-                patternUnits="userSpaceOnUse"
-                width="4"
-                height="4"
-                patternTransform="rotate(45)"
-              >
-                <rect width="4" height="4" fill="#E5E7EB" />
-                <line
-                  x1="0"
-                  y1="0"
-                  x2="0"
-                  y2="4"
-                  stroke="#AAAAAA"
-                  strokeWidth="1.5"
+          0%
+        </p>
+        <p className="text-sm text-gray-400">No data yet</p>
+        <div className="w-full space-y-3 mt-2">
+          {[
+            { label: 'Completed', count: 0, color: '#2D5A27' },
+            { label: 'In Progress', count: 0, color: '#D97706' },
+            { label: 'Pending', count: 0, color: '#9CA3AF' },
+          ].map((row) => (
+            <div key={row.label} className="flex items-center gap-3 w-full">
+              <span className="text-sm text-gray-500 w-24 shrink-0">{row.label}</span>
+              <div className="flex-1 h-6 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full"
+                  style={{ width: '0%', backgroundColor: row.color }}
                 />
-              </pattern>
-            </defs>
-            <circle cx="6" cy="6" r="6" fill="url(#hatchLegend)" />
-          </svg>
-          <span className="text-sm text-gray-600">Pending</span>
+              </div>
+              <span className="text-sm text-gray-400 w-12 text-right tabular-nums">0</span>
+              <span className="text-sm text-gray-400 w-10 text-right tabular-nums">0%</span>
+            </div>
+          ))}
         </div>
+      </div>
+    );
+  }
+
+  const bars = [
+    { label: 'Completed', count: completed, pct: completionRate, color: '#2D5A27' },
+    { label: 'In Progress', count: inProgress, pct: inProgressRate, color: '#D97706' },
+    { label: 'Pending', count: pending, pct: pendingRate, color: '#9CA3AF' },
+  ];
+
+  return (
+    <div className="flex flex-col items-center justify-center w-full gap-3 py-2">
+      {/* Large KPI percentage */}
+      <p
+        style={{ fontSize: '56px', fontWeight: 900, fontFamily: 'ui-monospace, monospace' }}
+        className="text-[#2D5A27]"
+      >
+        {Math.round(completionRate * animPct)}%
+      </p>
+      <p className="text-sm text-gray-500 -mt-2 mb-2">Completion Rate</p>
+
+      {/* Stacked horizontal bars */}
+      <div className="w-full space-y-3">
+        {bars.map((row) => {
+          const barWidth = hasData ? Math.max(row.pct * animPct, row.count > 0 ? 4 : 0) : 0;
+          return (
+            <div key={row.label} className="flex items-center gap-3 w-full">
+              <span className="text-sm text-gray-600 w-24 shrink-0 font-medium">{row.label}</span>
+              <div className="flex-1 h-7 bg-gray-100 rounded-full overflow-hidden">
+                <motion.div
+                  className="h-full rounded-full"
+                  style={{ backgroundColor: row.color, width: `${barWidth}%` }}
+                  initial={{ width: 0 }}
+                  transition={{ duration: 0.8, ease: 'easeOut' }}
+                />
+              </div>
+              <span className="text-sm text-gray-600 w-12 text-right tabular-nums font-medium">
+                {row.count}
+              </span>
+              <span className="text-sm text-gray-400 w-10 text-right tabular-nums">
+                {row.pct}%
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -384,7 +304,7 @@ export function PerformanceGaugeChart() {
       0
     );
     if (done === 0 && ip === 0 && blocked === 0 && review === 0 && backlog === 0) {
-      return { completed: 68, inProgress: 20, pending: 12 };
+      return { completed: 0, inProgress: 0, pending: 0 };
     }
     return {
       completed: done,
@@ -404,7 +324,7 @@ export function PerformanceGaugeChart() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-      {/* Left: Gauge (40%) */}
+      {/* Left: Horizontal Bars (40%) */}
       <motion.div
         className="lg:col-span-2 rounded-2xl shadow-sm border-0 p-6 flex items-center justify-center"
         style={{
@@ -416,7 +336,7 @@ export function PerformanceGaugeChart() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6 }}
       >
-        <SemiGauge
+        <HorizontalBars
           completed={completed}
           inProgress={inProgress}
           pending={pending}
