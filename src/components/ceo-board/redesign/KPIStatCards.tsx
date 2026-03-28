@@ -230,7 +230,7 @@ export function KPIStatCards() {
                 <span className="inline-flex items-center justify-center w-4 h-4 rounded-sm bg-gray-50">
                   <Minus className="h-2.5 w-2.5 text-gray-400" />
                 </span>
-                <span className="text-xs text-gray-400">No active agents</span>
+                <span className="text-xs text-gray-600">No active agents</span>
               </>
             ) : (
               <>
@@ -238,7 +238,7 @@ export function KPIStatCards() {
                 <span
                   className={`text-xs ${
                     card.dark
-                      ? 'text-white/60'
+                      ? 'text-white/80'
                       : card.trend === 'up'
                         ? 'text-emerald-600'
                         : card.trend === 'down'

@@ -135,7 +135,7 @@ export default function SettingsPage() {
             <button
               onClick={handleSave}
               disabled={isSaving}
-              className="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 flex items-center gap-2 disabled:opacity-50 font-medium transition-colors"
+              className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 flex items-center gap-2 disabled:opacity-50 font-medium transition-colors"
             >
               <Save className="w-4 h-4" />
               {isSaving ? 'Saving...' : 'Save Changes'}
@@ -170,7 +170,7 @@ export default function SettingsPage() {
         {/* Intelligence Settings Link - Prominent at top */}
         <section
           onClick={() => router.push('/settings/intelligence')}
-          className="rounded-2xl shadow-sm bg-white/90 backdrop-blur-md cursor-pointer hover:shadow-md transition-all group"
+          className="bg-white/80 backdrop-blur-sm rounded-2xl border border-gray-200 shadow-sm cursor-pointer hover:shadow-md transition-all group"
         >
           <div className="p-6">
             <div className="flex items-center justify-between">
@@ -189,7 +189,7 @@ export default function SettingsPage() {
         </section>
 
         {/* Department Paths */}
-        <section className="rounded-2xl shadow-sm bg-white/90 backdrop-blur-md overflow-hidden">
+        <section className="bg-white/80 backdrop-blur-sm rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 flex items-center gap-3">
             <div className="w-1 h-6 rounded-full bg-brand-500 flex-shrink-0" />
             <div className="flex items-center gap-2">
@@ -255,7 +255,7 @@ export default function SettingsPage() {
         </section>
 
         {/* API Configuration */}
-        <section className="rounded-2xl shadow-sm bg-white/90 backdrop-blur-md overflow-hidden">
+        <section className="bg-white/80 backdrop-blur-sm rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 flex items-center gap-3">
             <div className="w-1 h-6 rounded-full bg-blue-500 flex-shrink-0" />
             <div className="flex items-center gap-2">
@@ -287,7 +287,7 @@ export default function SettingsPage() {
         </section>
 
         {/* Environment Variables - Collapsible Advanced section */}
-        <section className="rounded-2xl shadow-sm bg-white/90 backdrop-blur-md overflow-hidden">
+        <section className="bg-white/80 backdrop-blur-sm rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           <button
             onClick={() => setShowEnvVars(!showEnvVars)}
             className="w-full px-6 py-4 flex items-center justify-between text-left hover:bg-gray-50 transition-colors"
@@ -337,7 +337,7 @@ export default function SettingsPage() {
           <button
             onClick={handleSave}
             disabled={isSaving}
-            className="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 flex items-center gap-2 disabled:opacity-50 font-medium transition-colors"
+            className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 flex items-center gap-2 disabled:opacity-50 font-medium transition-colors"
           >
             <Save className="w-4 h-4" />
             {isSaving ? 'Saving...' : 'Save Changes'}

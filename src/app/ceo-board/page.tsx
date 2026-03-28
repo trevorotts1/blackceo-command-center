@@ -191,7 +191,7 @@ export default function CEOPerformanceBoardPage() {
 
       {/* Main Content */}
       <main className="relative z-10 p-8">
-        <div className="max-w-[1600px] mx-auto space-y-12">
+        <div className="max-w-[1600px] mx-auto space-y-6">
           {/* Breadcrumb */}
           <Breadcrumb
             items={[

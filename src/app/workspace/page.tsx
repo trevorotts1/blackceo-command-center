@@ -51,9 +51,10 @@ function WorkspaceSelectorInner() {
 
         let allWorkspaces: Workspace[] = Array.isArray(wsData) ? wsData : wsData.workspaces || [];
 
-        // Filter out demo workspaces and utility workspaces
+        // Filter out demo workspaces, utility workspaces, and empty/blank entries
         allWorkspaces = allWorkspaces.filter((w) => {
           const slug = (w as any).slug || w.id;
+          if (!w.name || w.name.trim() === '') return false;
           return !slug.startsWith('acme-') &&
                  !slug.startsWith('zhw-') &&
                  slug !== 'default';
@@ -133,7 +134,7 @@ function WorkspaceSelectorInner() {
             <span className="text-gray-900 font-bold text-xl tracking-tight">{companyName}</span>
           </div>
           <div className="h-6 w-px bg-gray-200 mx-2" />
-          <h1 className="text-gray-900 font-semibold text-lg">Departments</h1>
+          <h1 className="text-gray-900 font-semibold text-lg">Workspaces</h1>
           {saving && (
             <span className="text-xs text-indigo-500 font-medium animate-pulse ml-2">Saving order...</span>
           )}
@@ -235,23 +236,23 @@ function WorkspaceSelectorInner() {
                                   <div className="flex items-center justify-between mb-4">
                                     <div className="flex items-center gap-2 px-3 py-1.5 bg-white/20 backdrop-blur-sm rounded-full">
                                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                                      <span className="text-white/90 text-xs font-medium uppercase tracking-wider">Active</span>
+                                      <span className="text-white text-xs font-medium uppercase tracking-wider">Active</span>
                                     </div>
-                                    <Users className="w-6 h-6 text-white/60" />
+                                    <Users className="w-6 h-6 text-white" />
                                   </div>
 
                                   <h3 className="text-white font-bold text-2xl mb-2 leading-tight">
-                                    {workspace.name}
+                                    {workspace.icon ? `${workspace.icon} ` : ''}{workspace.name}
                                   </h3>
 
                                   {workspace.description && (
-                                    <p className="text-white/80 text-sm line-clamp-2 mt-auto">
+                                    <p className="text-white text-sm line-clamp-2 mt-auto">
                                       {workspace.description}
                                     </p>
                                   )}
 
                                   {(workspace.taskCounts || workspace.agentCount !== undefined) && (
-                                    <div className="flex items-center gap-4 mt-2 text-white/70 text-sm">
+                                    <div className="flex items-center gap-4 mt-2 text-white text-sm">
                                       {workspace.taskCounts && (
                                         <span className="flex items-center gap-1"><ListTodo className="w-3.5 h-3.5" /> {workspace.taskCounts.total} tasks</span>
                                       )}

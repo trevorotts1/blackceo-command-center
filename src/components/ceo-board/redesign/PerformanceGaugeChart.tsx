@@ -61,7 +61,7 @@ function HorizontalBars({
         >
           0%
         </p>
-        <p className="text-sm text-gray-400">No data yet</p>
+        <p className="text-sm text-gray-500">No data yet</p>
         <div className="w-full space-y-3 mt-2">
           {[
             { label: 'Completed', count: 0, color: '#2D5A27' },
@@ -69,15 +69,15 @@ function HorizontalBars({
             { label: 'Pending', count: 0, color: '#9CA3AF' },
           ].map((row) => (
             <div key={row.label} className="flex items-center gap-3 w-full">
-              <span className="text-sm text-gray-500 w-24 shrink-0">{row.label}</span>
+              <span className="text-sm text-gray-600 w-24 shrink-0">{row.label}</span>
               <div className="flex-1 h-6 bg-gray-100 rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full"
                   style={{ width: '0%', backgroundColor: row.color }}
                 />
               </div>
-              <span className="text-sm text-gray-400 w-12 text-right tabular-nums">0</span>
-              <span className="text-sm text-gray-400 w-10 text-right tabular-nums">0%</span>
+              <span className="text-sm text-gray-500 w-12 text-right tabular-nums">0</span>
+              <span className="text-sm text-gray-500 w-10 text-right tabular-nums">0%</span>
             </div>
           ))}
         </div>

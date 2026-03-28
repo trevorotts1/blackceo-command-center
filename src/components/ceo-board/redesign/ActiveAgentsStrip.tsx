@@ -113,15 +113,15 @@ export function ActiveAgentsStrip() {
 
   if (loading) {
     return (
-      <div className="space-y-0 divide-y divide-gray-100">
+      <div className="flex gap-3 overflow-x-auto p-6">
         {[1, 2, 3].map((i) => (
-          <div key={i} className="flex items-center gap-4 px-4 py-3">
-            <div className="h-12 w-12 rounded-full bg-gray-200 animate-pulse" />
+          <div key={i} className="flex items-center gap-3 px-4 py-3 rounded-xl bg-gray-50/60 flex-shrink-0" style={{ minWidth: '260px' }}>
+            <div className="h-10 w-10 rounded-full bg-gray-200 animate-pulse" />
             <div className="flex-1 space-y-2">
-              <div className="h-4 w-32 bg-gray-200 rounded animate-pulse" />
-              <div className="h-3 w-48 bg-gray-100 rounded animate-pulse" />
+              <div className="h-4 w-24 bg-gray-200 rounded animate-pulse" />
+              <div className="h-3 w-32 bg-gray-100 rounded animate-pulse" />
             </div>
-            <div className="h-6 w-20 bg-gray-200 rounded-full animate-pulse" />
+            <div className="h-6 w-16 bg-gray-200 rounded-full animate-pulse" />
           </div>
         ))}
       </div>
@@ -136,11 +136,9 @@ export function ActiveAgentsStrip() {
     );
   }
 
-  const displayAgents = agents.slice(0, 4);
-
   return (
     <motion.div
-      className="rounded-2xl shadow-sm border-0 p-6 space-y-0"
+      className="rounded-2xl shadow-sm border-0 p-6"
       style={{
         backgroundColor: 'rgba(255,255,255,0.88)',
         backdropFilter: 'blur(8px)',
@@ -150,49 +148,52 @@ export function ActiveAgentsStrip() {
       initial="hidden"
       animate="visible"
     >
-      {displayAgents.map((agent, index) => {
-        const sc = statusConfig[agent.taskStatus || 'Pending'];
-        return (
-          <motion.div
-            key={agent.id}
-            variants={itemVariants}
-            className="flex items-center gap-4 py-4"
-          >
-            {/* Avatar circle */}
-            <div
-              className="flex h-12 w-12 items-center justify-center rounded-full flex-shrink-0"
-              style={{ backgroundColor: getAgentColor(index) }}
+      <div className="flex gap-3 overflow-x-auto pb-2" style={{ scrollbarWidth: 'thin' }}>
+        {agents.map((agent, index) => {
+          const sc = statusConfig[agent.taskStatus || 'Pending'];
+          return (
+            <motion.div
+              key={agent.id}
+              variants={itemVariants}
+              className="flex items-center gap-3 py-3 px-4 rounded-xl bg-gray-50/60 flex-shrink-0"
+              style={{ minWidth: '260px' }}
             >
-              <span
-                className="text-white font-semibold"
-                style={{ fontSize: '16px' }}
+              {/* Avatar circle */}
+              <div
+                className="flex h-10 w-10 items-center justify-center rounded-full flex-shrink-0"
+                style={{ backgroundColor: getAgentColor(index) }}
               >
-                {getInitials(agent.name)}
-              </span>
-            </div>
-
-            {/* Name + task line */}
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-semibold text-[#1A1A1A]">
-                {agent.name}
-              </div>
-              <div className="text-[13px]">
-                <span className="text-gray-500">Working on </span>
-                <span className="font-semibold text-[#1A1A1A]">
-                  {agent.currentTask}
+                <span
+                  className="text-white font-semibold"
+                  style={{ fontSize: '14px' }}
+                >
+                  {getInitials(agent.name)}
                 </span>
               </div>
-            </div>
 
-            {/* Status badge */}
-            <span
-              className={`text-[11px] font-medium px-3 py-1 rounded-full ${sc.bg} text-gray-800 flex-shrink-0`}
-            >
-              {sc.label}
-            </span>
-          </motion.div>
-        );
-      })}
+              {/* Name + task line */}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold text-[#1A1A1A] truncate">
+                  {agent.name}
+                </div>
+                <div className="text-[12px] truncate">
+                  <span className="text-gray-500">Working on </span>
+                  <span className="font-semibold text-[#1A1A1A]">
+                    {agent.currentTask}
+                  </span>
+                </div>
+              </div>
+
+              {/* Status badge */}
+              <span
+                className={`text-[11px] font-medium px-2 py-1 rounded-full ${sc.bg} text-gray-800 flex-shrink-0`}
+              >
+                {sc.label}
+              </span>
+            </motion.div>
+          );
+        })}
+      </div>
     </motion.div>
   );
 }

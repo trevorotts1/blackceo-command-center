@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { DepartmentCard, DepartmentPerformance } from './DepartmentCard';
 import { FilterTab } from './FilterTabs';
@@ -14,16 +14,10 @@ interface DepartmentGridProps {
 }
 
 export function DepartmentGrid({ departments, filter, isLoading }: DepartmentGridProps) {
-  const router = useRouter();
-
   const filteredDepartments = useMemo(() => {
     if (filter === 'all') return departments;
     return departments.filter((dept) => dept.status === filter);
   }, [departments, filter]);
-
-  const handleDepartmentClick = (deptId: string) => {
-    router.push(`/ceo-board/${deptId}`);
-  };
 
   if (isLoading) {
     return (
@@ -56,12 +50,12 @@ export function DepartmentGrid({ departments, filter, isLoading }: DepartmentGri
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
       {filteredDepartments.map((department, index) => (
-        <DepartmentCard
-          key={department.id}
-          department={department}
-          index={index}
-          onClick={() => handleDepartmentClick(department.id)}
-        />
+        <Link key={department.id} href={`/ceo-board/${department.id}`} className="block">
+          <DepartmentCard
+            department={department}
+            index={index}
+          />
+        </Link>
       ))}
     </div>
   );

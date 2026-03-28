@@ -72,8 +72,19 @@ export function RecommendationsRow() {
 
   if (recommendations.length === 0) {
     return (
-      <div className="text-center py-8 text-gray-400 text-sm">
-        No recommendations yet
+      <div
+        className="rounded-2xl shadow-sm border-0 p-8 text-center"
+        style={{
+          backgroundColor: 'rgba(255,255,255,0.88)',
+          backdropFilter: 'blur(8px)',
+          WebkitBackdropFilter: 'blur(8px)',
+        }}
+      >
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-gray-200 to-gray-300 mx-auto mb-3">
+          <Zap className="h-5 w-5 text-gray-500" />
+        </div>
+        <p className="text-base font-medium text-gray-600">No recommendations yet</p>
+        <p className="text-sm text-gray-400 mt-1">Recommendations will appear as your agents analyze performance data</p>
       </div>
     );
   }
