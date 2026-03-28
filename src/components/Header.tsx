@@ -20,14 +20,7 @@ const MODEL_OPTIONS = [
   { value: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash' },
 ];
 
-const PERSONA_OPTIONS = [
-  { value: 'auto', label: 'Auto-assign' },
-  { value: 'clear-atomic-habits', label: 'James Clear' },
-  { value: 'godin-this-is-marketing', label: 'Seth Godin' },
-  { value: 'hormozi-100m-offers', label: 'Alex Hormozi' },
-  { value: 'miller-building-storybrand-2', label: 'Donald Miller' },
-  { value: 'voss-never-split-difference', label: 'Chris Voss' },
-];
+// Persona options are loaded dynamically from the API
 
 interface HeaderProps {
   workspace?: Workspace;
@@ -49,6 +42,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const [aiSaving, setAiSaving] = useState(false);
   const [aiSaved, setAiSaved] = useState(false);
   const [aiLoaded, setAiLoaded] = useState(false);
+  const [personaOptions, setPersonaOptions] = useState<{value: string; label: string}[]>([{ value: 'auto', label: 'Auto-assign' }]);
   const aiPanelRef = useRef<HTMLDivElement>(null);
   const aiButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -68,6 +62,10 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
           if (dept) {
             setAiModel(dept.model || data.defaults?.model || 'openrouter/free');
             setAiPersona(dept.persona || data.defaults?.persona || 'auto');
+          }
+          // Load dynamic persona list from API
+          if (data.personas) {
+            setPersonaOptions(data.personas.map((p: {id: string; label: string}) => ({ value: p.id, label: p.label })));
           }
         }
       } catch (err) {
@@ -308,7 +306,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
                       onChange={(e) => setAiPersona(e.target.value)}
                       className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 pr-8 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition-colors"
                     >
-                      {PERSONA_OPTIONS.map((p) => (
+                      {personaOptions.map((p) => (
                         <option key={p.value} value={p.value}>
                           {p.label}
                         </option>
