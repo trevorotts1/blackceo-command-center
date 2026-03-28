@@ -19,7 +19,7 @@ const config: Config = {
         'body': ['16px', { lineHeight: '1.6', fontWeight: '400' }],
         'label': ['14px', { lineHeight: '1.5', fontWeight: '500' }],
         'caption': ['14px', { lineHeight: '1.5', fontWeight: '400' }],
-        'badge': ['13px', { lineHeight: '1.4', fontWeight: '500' }],
+        'badge': ['14px', { lineHeight: '1.4', fontWeight: '500' }],
       },
       colors: {
         // Brand Green Scale

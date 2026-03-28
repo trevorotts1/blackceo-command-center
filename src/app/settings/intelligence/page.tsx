@@ -427,7 +427,7 @@ export default function IntelligenceSettingsPage() {
           >
             <option value="" disabled>Select a model...</option>
             {data.models.map(m => (
-              <option key={m.id} value={m.id}>{m.label} — {getModelDescription(m.id).split('—')[1]?.trim() || m.id}</option>
+              <option key={m.id} value={m.id}>{getModelDescription(m.id)}</option>
             ))}
           </select>
 
@@ -534,7 +534,7 @@ export default function IntelligenceSettingsPage() {
                             className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
                           >
                             {data.models.map(m => (
-                              <option key={m.id} value={m.id}>{m.label} — {getModelDescription(m.id).split('—')[1]?.trim() || ''}</option>
+                              <option key={m.id} value={m.id}>{getModelDescription(m.id)}</option>
                             ))}
                           </select>
                         </div>
@@ -612,7 +612,7 @@ export default function IntelligenceSettingsPage() {
                                         className="flex-1 px-2 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
                                       >
                                         {data.models.map(m => (
-                                          <option key={m.id} value={m.id}>{m.label} — {getModelDescription(m.id).split('—')[1]?.trim() || ''}</option>
+                                          <option key={m.id} value={m.id}>{getModelDescription(m.id)}</option>
                                         ))}
                                       </select>
                                       {!modelInherited && (

@@ -5,6 +5,62 @@ import { getDb } from '@/lib/db';
 const DEFAULT_MODEL = 'openrouter/free';
 const DEFAULT_PERSONA = 'auto';
 
+/* ── Persona details: book titles and categories ── */
+const PERSONA_DETAILS: Record<string, { author: string; book: string; category: string }> = {
+  // Sales & Revenue
+  'hormozi-100m-offers':          { author: 'Alex Hormozi',      book: '$100M Offers',                    category: 'Sales & Revenue' },
+  'voss-never-split-difference':  { author: 'Chris Voss',        book: 'Never Split the Difference',      category: 'Sales & Revenue' },
+  'rackham-spin-selling':         { author: 'Neil Rackham',      book: 'SPIN Selling',                    category: 'Sales & Revenue' },
+  'pink-to-sell-is-human':        { author: 'Daniel Pink',       book: 'To Sell Is Human',                category: 'Sales & Revenue' },
+  'jones-exactly-what-to-say':    { author: 'Phil Jones',        book: 'Exactly What to Say',             category: 'Sales & Revenue' },
+  'kane-hook-point':              { author: 'Brendan Kane',      book: 'Hook Point',                      category: 'Sales & Revenue' },
+  'priestley-oversubscribed':     { author: 'Daniel Priestley',  book: 'Oversubscribed',                  category: 'Sales & Revenue' },
+  // Marketing & Content
+  'miller-building-storybrand-2': { author: 'Donald Miller',     book: 'Building a StoryBrand',           category: 'Marketing & Content' },
+  'godin-this-is-marketing':      { author: 'Seth Godin',        book: 'This Is Marketing',              category: 'Marketing & Content' },
+  'bly-copywriters-handbook':     { author: 'Robert Bly',        book: "The Copywriter's Handbook",       category: 'Marketing & Content' },
+  'wiebe-copy-hackers':           { author: 'Joanna Wiebe',      book: 'Copy Hackers',                    category: 'Marketing & Content' },
+  'cialdini-influence':           { author: 'Robert Cialdini',   book: 'Influence',                       category: 'Marketing & Content' },
+  'charvet-words-change-minds':   { author: 'Shelle Rose Charvet', book: 'Words That Change Minds',       category: 'Marketing & Content' },
+  // Leadership & Strategy
+  'sinek-start-with-why':         { author: 'Simon Sinek',       book: 'Start With Why',                  category: 'Leadership & Strategy' },
+  'sinek-find-your-why':          { author: 'Simon Sinek',       book: 'Find Your Why',                   category: 'Leadership & Strategy' },
+  'collins-good-to-great':        { author: 'Jim Collins',       book: 'Good to Great',                   category: 'Leadership & Strategy' },
+  'samit-disrupt-yourself':       { author: 'Jay Samit',         book: 'Disrupt Yourself',                category: 'Leadership & Strategy' },
+  'lakhiani-extraordinary-mind':  { author: 'Vishen Lakhiani',   book: 'The Code of the Extraordinary Mind', category: 'Leadership & Strategy' },
+  'grover-relentless':            { author: 'Tim Grover',        book: 'Relentless',                      category: 'Leadership & Strategy' },
+  // Productivity & Systems
+  'clear-atomic-habits':          { author: 'James Clear',       book: 'Atomic Habits',                   category: 'Productivity & Systems' },
+  'forte-building-second-brain':  { author: 'Tiago Forte',       book: 'Building a Second Brain',         category: 'Productivity & Systems' },
+  'forte-para-method':            { author: 'Tiago Forte',       book: 'The PARA Method',                 category: 'Productivity & Systems' },
+  'moran-12-week-year':           { author: 'Brian Moran',       book: 'The 12 Week Year',                category: 'Productivity & Systems' },
+  'duhigg-power-of-habit':        { author: 'Charles Duhigg',    book: 'The Power of Habit',              category: 'Productivity & Systems' },
+  'pink-when':                    { author: 'Daniel Pink',       book: 'When',                            category: 'Productivity & Systems' },
+  // Finance & Business Health
+  'michalowicz-profit-first':     { author: 'Mike Michalowicz',  book: 'Profit First',                    category: 'Finance & Business Health' },
+  // Coaching & Human Development
+  'robbins-five-second-rule':     { author: 'Mel Robbins',       book: 'The 5 Second Rule',               category: 'Coaching & Development' },
+  'robbins-let-them-theory':      { author: 'Mel Robbins',       book: 'The Let Them Theory',             category: 'Coaching & Development' },
+  'sharma-5am-club':              { author: 'Robin Sharma',      book: 'The 5 AM Club',                   category: 'Coaching & Development' },
+  'goggins-cant-hurt-me':         { author: 'David Goggins',     book: "Can't Hurt Me",                   category: 'Coaching & Development' },
+  'jakes-instinct':               { author: 'T.D. Jakes',        book: 'Instinct',                        category: 'Coaching & Development' },
+  'pink-drive':                   { author: 'Daniel Pink',       book: 'Drive',                           category: 'Coaching & Development' },
+  'attwood-passion-test':         { author: 'Janet Attwood',     book: 'The Passion Test',                category: 'Coaching & Development' },
+  'grenny-crucial-conversations': { author: 'Joseph Grenny',     book: 'Crucial Conversations',           category: 'Coaching & Development' },
+  // Emotional Intelligence & Relationships
+  'tawwab-set-boundaries-find-peace': { author: 'Nedra Glover Tawwab', book: 'Set Boundaries, Find Peace', category: 'Emotional Intelligence' },
+  'brown-atlas-of-heart':         { author: 'Brene Brown',       book: 'Atlas of the Heart',              category: 'Emotional Intelligence' },
+  'obama-becoming':               { author: 'Michelle Obama',    book: 'Becoming',                        category: 'Emotional Intelligence' },
+  'obama-light-we-carry':         { author: 'Michelle Obama',    book: 'The Light We Carry',              category: 'Emotional Intelligence' },
+};
+
+function formatPersonaLabel(id: string): string {
+  if (id === 'auto') return 'Auto-assign (recommended)';
+  const details = PERSONA_DETAILS[id];
+  if (!details) return id.replace(/-/g, ' ');
+  return `${details.author} — "${details.book}" (${details.category})`;
+}
+
 const AVAILABLE_MODELS = [
   { id: 'openrouter/free', label: 'Free Models Router' },
   { id: 'moonshot/kimi-k2.5', label: 'Kimi K2.5' },
@@ -15,52 +71,52 @@ const AVAILABLE_MODELS = [
 ];
 
 const AVAILABLE_PERSONAS = [
-  { id: 'auto', label: 'Auto-assign (recommended)' },
+  { id: 'auto', label: formatPersonaLabel('auto') },
   // Sales & Revenue
-  { id: 'hormozi-100m-offers', label: 'Alex Hormozi' },
-  { id: 'voss-never-split-difference', label: 'Chris Voss' },
-  { id: 'rackham-spin-selling', label: 'Neil Rackham' },
-  { id: 'pink-to-sell-is-human', label: 'Daniel Pink' },
-  { id: 'jones-exactly-what-to-say', label: 'Phil Jones' },
-  { id: 'kane-hook-point', label: 'Brendan Kane' },
-  { id: 'priestley-oversubscribed', label: 'Daniel Priestley' },
+  { id: 'hormozi-100m-offers', label: formatPersonaLabel('hormozi-100m-offers') },
+  { id: 'voss-never-split-difference', label: formatPersonaLabel('voss-never-split-difference') },
+  { id: 'rackham-spin-selling', label: formatPersonaLabel('rackham-spin-selling') },
+  { id: 'pink-to-sell-is-human', label: formatPersonaLabel('pink-to-sell-is-human') },
+  { id: 'jones-exactly-what-to-say', label: formatPersonaLabel('jones-exactly-what-to-say') },
+  { id: 'kane-hook-point', label: formatPersonaLabel('kane-hook-point') },
+  { id: 'priestley-oversubscribed', label: formatPersonaLabel('priestley-oversubscribed') },
   // Marketing & Content
-  { id: 'miller-building-storybrand-2', label: 'Donald Miller' },
-  { id: 'godin-this-is-marketing', label: 'Seth Godin' },
-  { id: 'bly-copywriters-handbook', label: 'Robert Bly' },
-  { id: 'wiebe-copy-hackers', label: 'Joanna Wiebe' },
-  { id: 'cialdini-influence', label: 'Robert Cialdini' },
-  { id: 'charvet-words-change-minds', label: 'Shelle Rose Charvet' },
+  { id: 'miller-building-storybrand-2', label: formatPersonaLabel('miller-building-storybrand-2') },
+  { id: 'godin-this-is-marketing', label: formatPersonaLabel('godin-this-is-marketing') },
+  { id: 'bly-copywriters-handbook', label: formatPersonaLabel('bly-copywriters-handbook') },
+  { id: 'wiebe-copy-hackers', label: formatPersonaLabel('wiebe-copy-hackers') },
+  { id: 'cialdini-influence', label: formatPersonaLabel('cialdini-influence') },
+  { id: 'charvet-words-change-minds', label: formatPersonaLabel('charvet-words-change-minds') },
   // Leadership & Strategy
-  { id: 'sinek-start-with-why', label: 'Simon Sinek' },
-  { id: 'sinek-find-your-why', label: 'Simon Sinek' },
-  { id: 'collins-good-to-great', label: 'Jim Collins' },
-  { id: 'samit-disrupt-yourself', label: 'Jay Samit' },
-  { id: 'lakhiani-extraordinary-mind', label: 'Vishen Lakhiani' },
-  { id: 'grover-relentless', label: 'Tim Grover' },
+  { id: 'sinek-start-with-why', label: formatPersonaLabel('sinek-start-with-why') },
+  { id: 'sinek-find-your-why', label: formatPersonaLabel('sinek-find-your-why') },
+  { id: 'collins-good-to-great', label: formatPersonaLabel('collins-good-to-great') },
+  { id: 'samit-disrupt-yourself', label: formatPersonaLabel('samit-disrupt-yourself') },
+  { id: 'lakhiani-extraordinary-mind', label: formatPersonaLabel('lakhiani-extraordinary-mind') },
+  { id: 'grover-relentless', label: formatPersonaLabel('grover-relentless') },
   // Productivity & Systems
-  { id: 'clear-atomic-habits', label: 'James Clear' },
-  { id: 'forte-building-second-brain', label: 'Tiago Forte' },
-  { id: 'forte-para-method', label: 'Tiago Forte' },
-  { id: 'moran-12-week-year', label: 'Brian Moran' },
-  { id: 'duhigg-power-of-habit', label: 'Charles Duhigg' },
-  { id: 'pink-when', label: 'Daniel Pink' },
+  { id: 'clear-atomic-habits', label: formatPersonaLabel('clear-atomic-habits') },
+  { id: 'forte-building-second-brain', label: formatPersonaLabel('forte-building-second-brain') },
+  { id: 'forte-para-method', label: formatPersonaLabel('forte-para-method') },
+  { id: 'moran-12-week-year', label: formatPersonaLabel('moran-12-week-year') },
+  { id: 'duhigg-power-of-habit', label: formatPersonaLabel('duhigg-power-of-habit') },
+  { id: 'pink-when', label: formatPersonaLabel('pink-when') },
   // Finance & Business Health
-  { id: 'michalowicz-profit-first', label: 'Mike Michalowicz' },
+  { id: 'michalowicz-profit-first', label: formatPersonaLabel('michalowicz-profit-first') },
   // Coaching & Human Development
-  { id: 'robbins-five-second-rule', label: 'Mel Robbins' },
-  { id: 'robbins-let-them-theory', label: 'Mel Robbins' },
-  { id: 'sharma-5am-club', label: 'Robin Sharma' },
-  { id: 'goggins-cant-hurt-me', label: 'David Goggins' },
-  { id: 'jakes-instinct', label: 'TD Jakes' },
-  { id: 'pink-drive', label: 'Daniel Pink' },
-  { id: 'attwood-passion-test', label: 'Janet Attwood' },
-  { id: 'grenny-crucial-conversations', label: 'Grenny Patterson' },
+  { id: 'robbins-five-second-rule', label: formatPersonaLabel('robbins-five-second-rule') },
+  { id: 'robbins-let-them-theory', label: formatPersonaLabel('robbins-let-them-theory') },
+  { id: 'sharma-5am-club', label: formatPersonaLabel('sharma-5am-club') },
+  { id: 'goggins-cant-hurt-me', label: formatPersonaLabel('goggins-cant-hurt-me') },
+  { id: 'jakes-instinct', label: formatPersonaLabel('jakes-instinct') },
+  { id: 'pink-drive', label: formatPersonaLabel('pink-drive') },
+  { id: 'attwood-passion-test', label: formatPersonaLabel('attwood-passion-test') },
+  { id: 'grenny-crucial-conversations', label: formatPersonaLabel('grenny-crucial-conversations') },
   // Emotional Intelligence & Relationships
-  { id: 'tawwab-set-boundaries-find-peace', label: 'Nedra Tawwab' },
-  { id: 'brown-atlas-of-heart', label: 'Brené Brown' },
-  { id: 'obama-becoming', label: 'Michelle Obama' },
-  { id: 'obama-light-we-carry', label: 'Michelle Obama' },
+  { id: 'tawwab-set-boundaries-find-peace', label: formatPersonaLabel('tawwab-set-boundaries-find-peace') },
+  { id: 'brown-atlas-of-heart', label: formatPersonaLabel('brown-atlas-of-heart') },
+  { id: 'obama-becoming', label: formatPersonaLabel('obama-becoming') },
+  { id: 'obama-light-we-carry', label: formatPersonaLabel('obama-light-we-carry') },
 ];
 
 interface AgentSetting {
@@ -225,7 +281,7 @@ export async function GET() {
           while ((match = backtickPattern.exec(raw)) !== null) {
             const slug = match[1];
             if (slug && slug !== 'auto' && !enrichedPersonas.find(p => p.id === slug)) {
-              enrichedPersonas.push({ id: slug, label: slug.replace(/-/g, ' ') });
+              enrichedPersonas.push({ id: slug, label: formatPersonaLabel(slug) });
             }
           }
           // 2. List items with bold names: - **Name** → `slug`
@@ -234,7 +290,7 @@ export async function GET() {
           while ((match = headerPattern.exec(raw)) !== null) {
             const slug = match[1];
             if (slug && slug !== 'auto' && !enrichedPersonas.find(p => p.id === slug)) {
-              enrichedPersonas.push({ id: slug, label: slug.replace(/-/g, ' ') });
+              enrichedPersonas.push({ id: slug, label: formatPersonaLabel(slug) });
             }
           }
           // 4. Dash-prefixed slugs: - slug-name
@@ -242,7 +298,7 @@ export async function GET() {
           while ((match = dashPattern.exec(raw)) !== null) {
             const slug = match[1];
             if (slug && slug !== 'auto' && !enrichedPersonas.find(p => p.id === slug)) {
-              enrichedPersonas.push({ id: slug, label: slug.replace(/-/g, ' ') });
+              enrichedPersonas.push({ id: slug, label: formatPersonaLabel(slug) });
             }
           }
           if (enrichedPersonas.length > AVAILABLE_PERSONAS.length) break; // Found extras, stop
