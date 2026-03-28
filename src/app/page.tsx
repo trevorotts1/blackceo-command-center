@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -32,7 +32,6 @@ interface EntryCard {
 }
 
 export default function HomePage() {
-  const router = useRouter();
   const logoUrl = useLogoUrl();
   const brand = useCompanyBrand();
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -70,7 +69,7 @@ export default function HomePage() {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch('/api/workspaces', { signal: controller.signal, cache: 'no-store' });
+        const res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
         clearTimeout(timeoutId);
         setIsOnline(res.ok);
       } catch {
@@ -93,9 +92,9 @@ export default function HomePage() {
       cta: 'Open Kanban Board',
     },
     {
-      title: `${companyName} Workspaces`,
+      title: `${companyName} Departments`,
       description: 'Department View',
-      detail: 'Browse all 17 departments as individual workspaces. Click any department to open its dedicated Kanban board, agents, and live feed.',
+      detail: 'Browse all departments. Click any department to open its dedicated Kanban board, agents, and live feed.',
       icon: <LayoutGrid className="w-7 h-7 text-white" />,
       gradient: 'from-emerald-400 via-teal-500 to-cyan-500',
       route: '/workspace',
@@ -141,7 +140,7 @@ export default function HomePage() {
         </div>
 
         <div className="flex items-center gap-4">
-          <span className="text-gray-500 text-sm font-mono">
+          <span className="text-gray-500 text-base font-mono">
             {format(currentTime, 'MMM d, HH:mm:ss')}
           </span>
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
@@ -173,49 +172,50 @@ export default function HomePage() {
             </p>
           </motion.div>
 
-          {/* Three Entry Cards */}
+          {/* Entry Cards */}
           <motion.div
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"
             variants={containerVariants}
           >
             {cards.map((card) => (
-              <motion.button
+              <motion.div
                 key={card.route}
-                onClick={() => router.push(card.route)}
-                className="group relative w-full text-left"
+                className="group relative w-full"
                 variants={cardVariants}
                 whileHover={{ scale: 1.03, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } }}
                 whileTap={{ scale: 0.98 }}
               >
-                <div
-                  className={`relative overflow-hidden rounded-3xl ${cardBackground ? '' : `bg-gradient-to-br ${card.gradient}`} p-7 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
-                  style={cardBackground || undefined}
-                >
-                  {/* Decorative */}
-                  <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
-                  <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
+                <Link href={card.route} className="block text-left">
+                  <div
+                    className={`relative overflow-hidden rounded-2xl ${cardBackground ? '' : `bg-gradient-to-br ${card.gradient}`} p-8 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
+                    style={cardBackground || undefined}
+                  >
+                    {/* Decorative */}
+                    <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
+                    <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
 
-                  <div className="relative z-10 flex flex-col h-full">
-                    {/* Icon */}
-                    <div className="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-5">
-                      {card.icon}
-                    </div>
+                    <div className="relative z-10 flex flex-col h-full">
+                      {/* Icon */}
+                      <div className="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-5">
+                        {card.icon}
+                      </div>
 
-                    {/* Title + subtitle */}
-                    <p className="text-white/70 text-xs font-semibold uppercase tracking-wider mb-1">{card.description}</p>
-                    <h3 className="text-white font-bold text-xl mb-4 leading-tight">{card.title}</h3>
+                      {/* Title + subtitle */}
+                      <h3 className="text-white font-bold text-xl mb-1 leading-tight">{card.title}</h3>
+                      <p className="text-white/70 text-sm font-semibold uppercase tracking-wider mb-4">{card.description}</p>
 
-                    {/* Detail */}
-                    <p className="text-white/75 text-sm leading-relaxed flex-1">{card.detail}</p>
+                      {/* Detail */}
+                      <p className="text-white/75 text-sm leading-relaxed flex-1">{card.detail}</p>
 
-                    {/* CTA */}
-                    <div className="mt-6 flex items-center gap-2 text-white font-semibold text-sm">
-                      <span>{card.cta}</span>
-                      <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
+                      {/* CTA */}
+                      <div className="mt-6 flex items-center gap-2 text-white font-semibold text-sm">
+                        <span>{card.cta}</span>
+                        <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
+                      </div>
                     </div>
                   </div>
-                </div>
-              </motion.button>
+                </Link>
+              </motion.div>
             ))}
           </motion.div>
 
@@ -223,7 +223,7 @@ export default function HomePage() {
           <motion.div className="mt-12 text-center" variants={cardVariants}>
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
               <Activity className="w-4 h-4 text-indigo-500" />
-              <span>All systems operational</span>
+              <span>{isOnline ? 'All systems operational' : 'System check failed'}</span>
             </div>
           </motion.div>
         </motion.div>

@@ -51,7 +51,7 @@ function AnimatedCounter({ value, duration = 1.5 }: { value: number; duration?: 
 function MetricTile({ icon, label, value, displayValue, subtitle, color, bgColor, delay }: MetricTileProps) {
   return (
     <motion.div
-      className="relative bg-white rounded-xl p-4 border border-gray-100 shadow-sm cursor-pointer group overflow-hidden"
+      className="relative bg-white rounded-xl p-4 border border-gray-100 shadow-sm group overflow-hidden"
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{

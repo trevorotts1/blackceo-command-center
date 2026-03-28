@@ -14,6 +14,7 @@ import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
+import { Breadcrumb } from '@/components/Breadcrumb';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -199,13 +200,13 @@ export default function WorkspacePage() {
       <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
         <div className="text-center">
           <div className="text-6xl mb-4">🔍</div>
-          <h1 className="text-2xl font-bold text-gray-900 mb-2">Workspace Not Found</h1>
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">Department Not Found</h1>
           <p className="text-gray-500 mb-6">
-            The workspace &ldquo;{slug}&rdquo; doesn&apos;t exist.
+            The department &ldquo;{slug}&rdquo; doesn&apos;t exist.
           </p>
           <Link
             href="/"
-            className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 transition-colors"
+            className="inline-flex items-center gap-2 px-6 py-3 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition-colors"
           >
             <ChevronLeft className="w-4 h-4" />
             Back to Dashboard
@@ -217,14 +218,64 @@ export default function WorkspacePage() {
 
   if (isLoading || !workspace) {
     return (
-      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
-        <div className="text-center">
-          <img
-            src={logoUrl}
-            alt="Loading"
-            className="h-12 w-auto mb-4 animate-pulse"
-          />
-          <p className="text-gray-500">Loading {slug}...</p>
+      <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
+        {/* Header skeleton */}
+        <div className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4 shrink-0">
+          <div className="flex items-center gap-4">
+            <div className="h-8 w-8 bg-gray-200 rounded animate-pulse" />
+            <div className="h-6 w-32 bg-gray-200 rounded animate-pulse" />
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-20 bg-gray-200 rounded-lg animate-pulse" />
+            <div className="h-8 w-20 bg-gray-200 rounded-lg animate-pulse" />
+          </div>
+        </div>
+        <div className="flex-1 flex">
+          {/* Sidebar skeleton */}
+          <div className="w-72 bg-white border-r border-gray-200 p-4 space-y-3 shrink-0">
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="flex items-center gap-3 p-2.5">
+                <div className="h-10 w-10 bg-gray-200 rounded-lg animate-pulse" />
+                <div className="flex-1 space-y-1.5">
+                  <div className="h-4 w-24 bg-gray-200 rounded animate-pulse" />
+                  <div className="h-3 w-16 bg-gray-100 rounded animate-pulse" />
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* Board skeleton */}
+          <div className="flex-1 p-8">
+            <div className="flex gap-6 h-full">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="w-72 flex flex-col gap-4">
+                  <div className="h-10 w-full bg-gray-200 rounded-full animate-pulse" />
+                  {[1, 2].map((j) => (
+                    <div key={j} className="bg-white rounded-2xl p-5 border border-gray-50 space-y-3">
+                      <div className="h-4 w-3/4 bg-gray-200 rounded animate-pulse" />
+                      <div className="h-3 w-1/2 bg-gray-100 rounded animate-pulse" />
+                      <div className="h-3 w-full bg-gray-100 rounded animate-pulse" />
+                      <div className="flex items-center gap-2 pt-3 border-t border-gray-50">
+                        <div className="h-8 w-8 bg-gray-200 rounded-full animate-pulse" />
+                        <div className="h-3 w-16 bg-gray-100 rounded animate-pulse ml-auto" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Feed skeleton */}
+          <div className="w-80 bg-white border-l border-gray-200 p-4 space-y-3">
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="flex items-start gap-2.5 p-2.5">
+                <div className="h-2 w-2 bg-gray-200 rounded-full mt-1.5 shrink-0" />
+                <div className="flex-1 space-y-1.5">
+                  <div className="h-3 w-full bg-gray-200 rounded animate-pulse" />
+                  <div className="h-2 w-16 bg-gray-100 rounded animate-pulse" />
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -237,6 +288,17 @@ export default function WorkspacePage() {
   return (
     <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
       <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
+
+      {/* Breadcrumb */}
+      <div className="px-4 sm:px-6 lg:px-8 bg-[#F8F9FB] border-b border-gray-200">
+        <Breadcrumb
+          items={[
+            { label: 'Home', href: '/' },
+            { label: 'Departments', href: '/workspace' },
+            { label: workspace.name },
+          ]}
+        />
+      </div>
 
       <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar */}

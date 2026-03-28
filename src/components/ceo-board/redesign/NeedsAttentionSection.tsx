@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { ChevronRight, CheckCircle } from 'lucide-react';
 import { scoreToGrade, type Grade } from '@/lib/grading';
@@ -84,6 +85,7 @@ const itemVariants = {
 };
 
 export function NeedsAttentionSection() {
+  const router = useRouter();
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -226,6 +228,7 @@ export function NeedsAttentionSection() {
             <motion.div
               key={item.id}
               variants={itemVariants}
+              onClick={() => router.push(`/ceo-board/${item.slug}`)}
               className="flex items-center gap-4 p-4 bg-white rounded-xl cursor-pointer hover:shadow-md transition-shadow"
               style={{
                 boxShadow: '0 2px 12px rgba(0,0,0,0.08)',

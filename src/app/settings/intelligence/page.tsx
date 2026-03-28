@@ -4,12 +4,15 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Brain, Cpu, ChevronDown, ChevronRight, RotateCcw, Sparkles,
-  Save, Check, Loader2, ArrowLeft, Wand2, Info, Users, Bot, UserCheck
+  Save, Check, Loader2, ArrowLeft, Wand2, Info, Users, Bot, UserCheck,
+  ChevronsUpDown, ChevronsDownUp
 } from 'lucide-react';
+import { Breadcrumb } from '@/components/Breadcrumb';
 
 interface ModelOption {
   id: string;
   label: string;
+  description?: string;
 }
 
 interface PersonaOption {
@@ -47,11 +50,29 @@ interface IntelligenceData {
   defaults: { model: string; persona: string };
 }
 
+/* ── Model label + description map ── */
+const MODEL_DESCRIPTIONS: Record<string, string> = {
+  'openrouter/xiaomi/mimo-v2-pro': 'MiMo V2 Pro — 1M context, best for code and orchestration',
+  'openrouter/xiaomi/mimo-v2-omni': 'MiMo V2 Omni — 262K context, handles images, video, and audio',
+  'anthropic/claude-opus-4-6': 'Claude Opus 4.6 — 1M context, deepest reasoning and analysis',
+  'anthropic/claude-sonnet-4-6': 'Claude Sonnet 4.6 — 1M context, fast and versatile',
+  'openai-codex/gpt-5.4': 'GPT-5.4 — 1M context, strong general-purpose model',
+  'openrouter/minimax/minimax-m2.7': 'MiniMax M2.7 — 204K context, 131K output, long-form writing',
+  'moonshot/kimi-k2.5': 'Kimi K2.5 — 262K context, built-in reasoning',
+  'google/gemini-3-flash-preview': 'Gemini 3 Flash — fast and cheap, good for bulk tasks',
+  'google/gemini-3.1-pro-preview': 'Gemini 3.1 Pro — smartest Gemini, best for complex analysis',
+  'openrouter/perplexity/sonar-pro-search': 'Perplexity Sonar Pro — deep web research with citations',
+};
+
+function getModelDescription(modelId: string): string {
+  return MODEL_DESCRIPTIONS[modelId] || modelId;
+}
+
 /* ── Agent Type Badge ── */
 function AgentTypeBadge({ role }: { role: Role }) {
   if (role.agentType === 'persistent') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700 border border-indigo-200">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-badge font-semibold bg-brand-50 text-brand-700 border border-brand-200">
         <Bot className="w-3 h-3" />
         Persistent
       </span>
@@ -59,14 +80,14 @@ function AgentTypeBadge({ role }: { role: Role }) {
   }
   if (role.specialistType === 'permanent') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-badge font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200">
         <UserCheck className="w-3 h-3" />
         Full-time Specialist
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-badge font-semibold bg-amber-100 text-amber-700 border border-amber-200">
       <Users className="w-3 h-3" />
       On-call Specialist
     </span>
@@ -86,7 +107,7 @@ function InfoTip({ children }: { children: React.ReactNode }) {
         <Info className="w-4 h-4" />
       </button>
       {show && (
-        <div className="absolute z-50 left-6 top-0 w-72 p-3 bg-gray-900 text-white text-xs leading-relaxed rounded-lg shadow-xl">
+        <div className="absolute z-50 left-6 top-0 w-72 p-3 bg-gray-900 text-white text-badge leading-relaxed rounded-lg shadow-xl">
           {children}
           <div className="absolute -left-1.5 top-1.5 w-3 h-3 bg-gray-900 rotate-45 rounded-sm" />
         </div>
@@ -132,6 +153,17 @@ export default function IntelligenceSettingsPage() {
       return next;
     });
   };
+
+  const expandAll = () => {
+    if (!data) return;
+    setExpandedDepts(new Set(data.departments.map(d => d.id)));
+  };
+
+  const collapseAll = () => {
+    setExpandedDepts(new Set());
+  };
+
+  const allExpanded = data ? data.departments.every(d => expandedDepts.has(d.id)) : false;
 
   const getEffectiveModel = (dept: Department, role?: Role): string => {
     if (role) {
@@ -185,6 +217,11 @@ export default function IntelligenceSettingsPage() {
 
   const handleApplyModelToAll = (modelId: string) => {
     if (!data) return;
+    const modelLabel = data.models.find(m => m.id === modelId)?.label || modelId;
+    const confirmed = window.confirm(
+      `Apply "${modelLabel}" to ALL ${data.departments.length} departments?\n\nThis will override every department's current model setting. You can still review changes before saving.`
+    );
+    if (!confirmed) return;
     const updates: Record<string, { model?: string; persona?: string }> = {};
     for (const dept of data.departments) {
       updates[`${dept.id}:dept:model`] = { model: modelId };
@@ -295,13 +332,13 @@ export default function IntelligenceSettingsPage() {
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => router.push('/')}
+              onClick={() => router.push('/settings')}
               className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 transition-colors"
-              title="Back to Command Center"
+              title="Back to Settings"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
-            <Brain className="w-6 h-6 text-indigo-600" />
+            <Brain className="w-6 h-6 text-brand-600" />
             <h1 className="text-2xl font-bold text-gray-900">Intelligence Settings</h1>
           </div>
 
@@ -310,7 +347,7 @@ export default function IntelligenceSettingsPage() {
             disabled={!hasChanges || saving}
             className={`px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-colors ${
               hasChanges
-                ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                ? 'bg-brand-600 text-white hover:bg-brand-700'
                 : 'bg-gray-100 text-gray-400 cursor-not-allowed'
             }`}
           >
@@ -328,6 +365,14 @@ export default function IntelligenceSettingsPage() {
 
       {/* Content */}
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
+        <Breadcrumb
+          items={[
+            { label: 'Home', href: '/' },
+            { label: 'Settings', href: '/settings' },
+            { label: 'Intelligence' },
+          ]}
+        />
+
         {/* Success/Error */}
         {saved && !hasChanges && (
           <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-700 text-sm font-medium">
@@ -341,26 +386,26 @@ export default function IntelligenceSettingsPage() {
         )}
 
         {/* ── How This Works ── */}
-        <section className="bg-indigo-50/60 border border-indigo-100 rounded-xl px-5 py-4">
+        <section className="bg-brand-50/60 border border-brand-100 rounded-xl px-5 py-4">
           <div className="flex items-start gap-3">
-            <Info className="w-5 h-5 text-indigo-500 flex-shrink-0 mt-0.5" />
-            <div className="text-sm text-indigo-800 leading-relaxed space-y-1.5">
+            <Info className="w-5 h-5 text-brand-500 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-brand-800 leading-relaxed space-y-1.5">
               <p className="font-semibold">How Intelligence Settings Work</p>
-              <ul className="space-y-1 text-indigo-700">
+              <ul className="space-y-1 text-brand-700">
                 <li className="flex items-start gap-2">
-                  <span className="text-indigo-400 mt-1">1.</span>
+                  <span className="text-brand-400 mt-1">1.</span>
                   <span><strong>Department defaults</strong> set the model and persona for the whole department. These apply to all agents unless overridden.</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <span className="text-indigo-400 mt-1">2.</span>
+                  <span className="text-brand-400 mt-1">2.</span>
                   <span><strong>Role overrides</strong> let you lock a specific agent to a different model or persona than the department default.</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <span className="text-indigo-400 mt-1">3.</span>
+                  <span className="text-brand-400 mt-1">3.</span>
                   <span><strong>Auto-assign persona</strong> uses 5-layer alignment (company mission, goals, department objectives, task context, and agent role) to pick the best persona automatically.</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <span className="text-indigo-400 mt-1">4.</span>
+                  <span className="text-brand-400 mt-1">4.</span>
                   <span><strong>Model enforcement:</strong> When a task is dispatched to a persistent agent, the model selected here is used. On-call specialists use the model set in their OpenClaw config. This setting is stored and available to the routing layer.</span>
                 </li>
               </ul>
@@ -368,9 +413,9 @@ export default function IntelligenceSettingsPage() {
           </div>
         </section>
 
-        {/* Apply to All */}
-        <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-4 flex items-center gap-3">
-          <Wand2 className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+        {/* Apply to All + Expand/Collapse All */}
+        <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-4 flex items-center gap-3 flex-wrap">
+          <Wand2 className="w-4 h-4 text-brand-600 flex-shrink-0" />
           <span className="text-sm font-medium text-gray-700 whitespace-nowrap">Set all departments to:</span>
           <select
             onChange={(e) => {
@@ -378,13 +423,32 @@ export default function IntelligenceSettingsPage() {
               e.target.value = '';
             }}
             defaultValue=""
-            className="px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500 focus:border-transparent focus:outline-none"
+            className="px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
           >
             <option value="" disabled>Select a model...</option>
             {data.models.map(m => (
-              <option key={m.id} value={m.id}>{m.label} ({m.id})</option>
+              <option key={m.id} value={m.id}>{m.label} — {getModelDescription(m.id).split('—')[1]?.trim() || m.id}</option>
             ))}
           </select>
+
+          <div className="ml-auto">
+            <button
+              onClick={allExpanded ? collapseAll : expandAll}
+              className="px-3 py-1.5 text-sm font-medium text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded-lg transition-colors flex items-center gap-1.5"
+            >
+              {allExpanded ? (
+                <>
+                  <ChevronsDownUp className="w-4 h-4" />
+                  Collapse All
+                </>
+              ) : (
+                <>
+                  <ChevronsUpDown className="w-4 h-4" />
+                  Expand All
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* ── Unified Department Cards ── */}
@@ -408,12 +472,12 @@ export default function IntelligenceSettingsPage() {
                   {/* Chevron with hint */}
                   <div className="flex-shrink-0 flex items-center gap-1.5">
                     {isExpanded ? (
-                      <ChevronDown className="w-5 h-5 text-indigo-500" />
+                      <ChevronDown className="w-5 h-5 text-brand-500" />
                     ) : (
-                      <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+                      <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-brand-500 transition-colors" />
                     )}
                     {!isExpanded && (
-                      <span className="text-[11px] text-gray-400 group-hover:text-indigo-500 transition-colors hidden sm:inline">
+                      <span className="text-badge text-gray-400 group-hover:text-brand-500 transition-colors hidden sm:inline">
                         Click to expand
                       </span>
                     )}
@@ -424,21 +488,21 @@ export default function IntelligenceSettingsPage() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-gray-900 text-lg">{dept.name}</span>
-                      <span className="text-xs text-gray-400 font-mono">/{dept.slug}</span>
+                      <span className="text-badge text-gray-400 font-mono">/{dept.slug}</span>
                     </div>
                     {/* Summary chips when collapsed */}
                     {!isExpanded && (
                       <div className="flex items-center gap-2 mt-1.5">
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-gray-100 text-gray-600">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-badge font-medium bg-gray-100 text-gray-600">
                           <Cpu className="w-3 h-3" />
-                          {effectiveModel}
+                          {getModelDescription(effectiveModel)}
                         </span>
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-gray-100 text-gray-600">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-badge font-medium bg-gray-100 text-gray-600">
                           {effectivePersona === 'auto' && <Sparkles className="w-3 h-3 text-amber-400" />}
                           {personaLabel}
                         </span>
                         {dept.roles.length > 0 && (
-                          <span className="text-[11px] text-gray-400">
+                          <span className="text-badge text-gray-400">
                             {dept.roles.length} agent{dept.roles.length !== 1 ? 's' : ''}
                           </span>
                         )}
@@ -453,7 +517,7 @@ export default function IntelligenceSettingsPage() {
                     {/* ── Department Defaults ── */}
                     <div className="px-6 py-4 bg-gray-50/60">
                       <div className="flex items-center gap-2 mb-3">
-                        <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Department Defaults</span>
+                        <span className="text-badge font-bold text-gray-500 uppercase tracking-wider">Department Defaults</span>
                         <InfoTip>
                           These settings apply to every agent in {dept.name} unless an agent has its own override below.
                         </InfoTip>
@@ -461,22 +525,22 @@ export default function IntelligenceSettingsPage() {
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         {/* Dept Model */}
                         <div>
-                          <label className="block text-xs font-medium text-gray-500 mb-1.5">
+                          <label className="block text-label font-medium text-gray-500 mb-1.5">
                             Default Model
                           </label>
                           <select
                             value={effectiveModel}
                             onChange={(e) => setModel(`${dept.id}:dept:model`, e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500 focus:border-transparent focus:outline-none"
+                            className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
                           >
                             {data.models.map(m => (
-                              <option key={m.id} value={m.id}>{m.label}</option>
+                              <option key={m.id} value={m.id}>{m.label} — {getModelDescription(m.id).split('—')[1]?.trim() || ''}</option>
                             ))}
                           </select>
                         </div>
                         {/* Dept Persona */}
                         <div>
-                          <label className="block text-xs font-medium text-gray-500 mb-1.5">
+                          <label className="block text-label font-medium text-gray-500 mb-1.5">
                             Default Persona
                           </label>
                           <select
@@ -497,7 +561,7 @@ export default function IntelligenceSettingsPage() {
                     {/* ── Agent Roles ── */}
                     <div className="px-6 py-3">
                       <div className="flex items-center gap-2 mb-3">
-                        <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Agent Overrides</span>
+                        <span className="text-badge font-bold text-gray-500 uppercase tracking-wider">Agent Overrides</span>
                         <InfoTip>
                           Override the department default for a specific agent. Changes here only affect that agent. Click the reset arrow to go back to the department default.
                         </InfoTip>
@@ -518,19 +582,19 @@ export default function IntelligenceSettingsPage() {
                             return (
                               <div
                                 key={role.id}
-                                className="border border-gray-100 rounded-xl px-4 py-3 bg-white"
+                                className="border border-gray-100 rounded-xl px-4 py-3 bg-gray-50/80"
                               >
                                 {/* Agent Name + Type Badge */}
                                 <div className="flex items-center gap-3 mb-3">
                                   <span className="text-xl">{role.emoji}</span>
                                   <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2 flex-wrap">
-                                      <span className="text-sm font-semibold text-gray-900">
+                                      <span className="text-base font-semibold text-gray-900">
                                         {role.agentName}
                                       </span>
                                       <AgentTypeBadge role={role} />
                                     </div>
-                                    <div className="text-xs text-gray-500 mt-0.5">{role.name}</div>
+                                    <div className="text-sm text-gray-500 mt-0.5">{role.name}</div>
                                   </div>
                                 </div>
 
@@ -538,23 +602,23 @@ export default function IntelligenceSettingsPage() {
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                   {/* Model Override */}
                                   <div>
-                                    <label className="block text-[11px] font-medium text-gray-400 mb-1">
-                                      Model {modelInherited && <span className="text-gray-300">(inherited)</span>}
+                                    <label className="block text-badge font-medium text-gray-500 mb-1">
+                                      Model {modelInherited && <span className="text-gray-400">(inherited)</span>}
                                     </label>
                                     <div className="flex items-center gap-1.5">
                                       <select
                                         value={model}
                                         onChange={(e) => setModel(`${dept.id}:${role.id}:model`, e.target.value)}
-                                        className="flex-1 px-2 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500 focus:border-transparent focus:outline-none"
+                                        className="flex-1 px-2 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
                                       >
                                         {data.models.map(m => (
-                                          <option key={m.id} value={m.id}>{m.label}</option>
+                                          <option key={m.id} value={m.id}>{m.label} — {getModelDescription(m.id).split('—')[1]?.trim() || ''}</option>
                                         ))}
                                       </select>
                                       {!modelInherited && (
                                         <button
                                           onClick={() => handleResetRoleModel(dept.id, role.id)}
-                                          className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors flex-shrink-0"
+                                          className="p-1.5 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition-colors flex-shrink-0"
                                           title="Reset to department default"
                                         >
                                           <RotateCcw className="w-3.5 h-3.5" />
@@ -565,8 +629,8 @@ export default function IntelligenceSettingsPage() {
 
                                   {/* Persona Override */}
                                   <div>
-                                    <label className="block text-[11px] font-medium text-gray-400 mb-1">
-                                      Persona {personaInherited && <span className="text-gray-300">(inherited)</span>}
+                                    <label className="block text-badge font-medium text-gray-500 mb-1">
+                                      Persona {personaInherited && <span className="text-gray-400">(inherited)</span>}
                                     </label>
                                     <div className="flex items-center gap-1.5">
                                       <select
@@ -607,28 +671,28 @@ export default function IntelligenceSettingsPage() {
 
         {/* ── Legend ── */}
         <section className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-4">
-          <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Agent Type Legend</p>
+          <p className="text-badge font-bold text-gray-500 uppercase tracking-wider mb-3">Agent Type Legend</p>
           <div className="flex flex-wrap gap-4">
             <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700 border border-indigo-200">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-badge font-semibold bg-brand-50 text-brand-700 border border-brand-200">
                 <Bot className="w-3 h-3" />
                 Persistent
               </span>
-              <span className="text-xs text-gray-500">Always running, handles department workflows</span>
+              <span className="text-sm text-gray-500">Always running, handles department workflows</span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-badge font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200">
                 <UserCheck className="w-3 h-3" />
                 Full-time Specialist
               </span>
-              <span className="text-xs text-gray-500">Dedicated team member, always available</span>
+              <span className="text-sm text-gray-500">Dedicated team member, always available</span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-badge font-semibold bg-amber-100 text-amber-700 border border-amber-200">
                 <Users className="w-3 h-3" />
                 On-call Specialist
               </span>
-              <span className="text-xs text-gray-500">Spawned when a task needs their skill</span>
+              <span className="text-sm text-gray-500">Spawned when a task needs their skill</span>
             </div>
           </div>
         </section>

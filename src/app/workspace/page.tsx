@@ -3,9 +3,10 @@
 import { useEffect, useState, Suspense, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home, GripVertical } from 'lucide-react';
+import { Building2, Users, BarChart3, ArrowRight, Loader2, Home, GripVertical, ListTodo } from 'lucide-react';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
+import { Breadcrumb } from '@/components/Breadcrumb';
 
 interface Workspace {
   id: string;
@@ -14,18 +15,16 @@ interface Workspace {
   slug?: string;
   icon?: string;
   sort_order?: number;
+  taskCounts?: {
+    backlog: number;
+    in_progress: number;
+    review: number;
+    blocked: number;
+    done: number;
+    total: number;
+  };
+  agentCount?: number;
 }
-
-const gradients = [
-  'from-indigo-500 to-purple-600',
-  'from-emerald-500 to-teal-600',
-  'from-rose-500 to-pink-600',
-  'from-amber-500 to-orange-600',
-  'from-sky-500 to-blue-600',
-  'from-violet-500 to-fuchsia-600',
-  'from-lime-500 to-green-600',
-  'from-red-500 to-rose-600',
-];
 
 function WorkspaceSelectorInner() {
   const router = useRouter();
@@ -36,12 +35,30 @@ function WorkspaceSelectorInner() {
   const [companyName, setCompanyName] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+
+  useEffect(() => {
+    async function checkHealth() {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
+        clearTimeout(timeoutId);
+        setIsOnline(res.ok);
+      } catch {
+        setIsOnline(false);
+      }
+    }
+    checkHealth();
+    const interval = setInterval(checkHealth, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     async function fetchData() {
       try {
         const [wsRes, companyRes] = await Promise.all([
-          fetch('/api/workspaces', { cache: 'no-store' }),
+          fetch('/api/workspaces?stats=true', { cache: 'no-store' }),
           fetch('/api/company', { cache: 'no-store' }),
         ]);
         const wsData = await wsRes.json();
@@ -67,7 +84,7 @@ function WorkspaceSelectorInner() {
         setWorkspaces(allWorkspaces);
         setCompanyName(companyData.name || companyData.company?.name || 'Command Center');
       } catch (err) {
-        console.error('Failed to fetch workspaces:', err);
+        console.error('Failed to fetch departments:', err);
       } finally {
         setLoading(false);
       }
@@ -97,7 +114,7 @@ function WorkspaceSelectorInner() {
         body: JSON.stringify({ order }),
       });
     } catch (err) {
-      console.error('Failed to persist workspace order:', err);
+      console.error('Failed to persist department order:', err);
     } finally {
       setSaving(false);
     }
@@ -115,9 +132,6 @@ function WorkspaceSelectorInner() {
   }
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
-  const cardBackground = hasBrand
-    ? { background: `linear-gradient(135deg, ${brand.primaryLight}, ${brand.secondaryLight})` }
-    : null;
 
   return (
     <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
@@ -133,7 +147,7 @@ function WorkspaceSelectorInner() {
           <div className="h-6 w-px bg-gray-200 mx-2" />
           <h1 className="text-gray-900 font-semibold text-lg">Departments</h1>
           {saving && (
-            <span className="text-xs text-indigo-500 font-medium animate-pulse ml-2">Saving order...</span>
+            <span className="text-sm text-indigo-500 font-medium animate-pulse ml-2">Saving order...</span>
           )}
         </div>
 
@@ -167,19 +181,26 @@ function WorkspaceSelectorInner() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
+          <Breadcrumb
+            items={[
+              { label: 'Home', href: '/' },
+              { label: 'Departments' },
+            ]}
+          />
+
           <div className="text-center mb-12">
-            <h2 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
+            <h2 className="text-page-title text-gray-900 mb-4">
               Select a Department
             </h2>
-            <p className="text-gray-500 text-lg max-w-xl mx-auto">
-              Click any department to open its Kanban board. Drag to reorder.
+            <p className="text-gray-500 text-base max-w-xl mx-auto">
+              Click any department to open its board. Drag to reorder.
             </p>
           </div>
 
           {workspaces.length === 0 ? (
             <div className="text-center py-20">
               <p className="text-gray-500 text-lg">No departments found.</p>
-              <p className="text-gray-400 text-sm mt-2">Run Skill 23 (AI Workforce Blueprint) to set up your departments.</p>
+              <p className="text-gray-400 text-sm mt-2">Create your first department to get started.</p>
             </div>
           ) : (
             <DragDropContext onDragEnd={onDragEnd}>
@@ -210,46 +231,59 @@ function WorkspaceSelectorInner() {
                               initial={{ opacity: 0, y: 20 }}
                               animate={{ opacity: 1, y: 0 }}
                               transition={{ delay: index * 0.05 }}
-                              whileHover={{ scale: snapshot.isDragging ? 1.0 : 1.03 }}
+                              whileHover={{ scale: snapshot.isDragging ? 1.0 : 1.02 }}
                               whileTap={{ scale: 0.98 }}
                             >
                               <div
-                                className={`relative overflow-hidden rounded-3xl ${cardBackground ? '' : `bg-gradient-to-br ${gradients[index % gradients.length]}`} p-6 sm:p-8 min-h-[180px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300 ${snapshot.isDragging ? 'ring-2 ring-indigo-400 shadow-2xl shadow-indigo-200/50' : ''}`}
-                                style={cardBackground || undefined}
+                                className={`relative overflow-hidden rounded-2xl bg-white/90 backdrop-blur-md shadow-sm p-6 sm:p-8 min-h-[180px] flex flex-col transition-shadow duration-300 group-hover:shadow-md ${snapshot.isDragging ? 'ring-2 ring-indigo-400 shadow-md' : ''}`}
                               >
                                 {/* Drag handle */}
                                 <div
                                   {...dragProvided.dragHandleProps}
-                                  className="absolute top-3 right-3 z-20 p-1.5 rounded-lg bg-white/20 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing"
+                                  className="absolute top-3 right-3 z-20 p-1.5 rounded-lg bg-gray-100/80 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing"
                                   title="Drag to reorder"
                                 >
-                                  <GripVertical className="w-4 h-4 text-white/80" />
+                                  <GripVertical className="w-4 h-4 text-gray-400" />
                                 </div>
-
-                                <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
-                                <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
 
                                 <div className="relative z-10 flex flex-col h-full">
                                   <div className="flex items-center justify-between mb-4">
-                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-white/20 backdrop-blur-sm rounded-full">
-                                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                                      <span className="text-white/90 text-xs font-medium uppercase tracking-wider">Active</span>
+                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 rounded-full">
+                                      <span className="text-gray-500 text-sm font-medium">{workspace.name}</span>
                                     </div>
-                                    <Users className="w-6 h-6 text-white/60" />
+                                    <Users className="w-6 h-6 text-gray-300" />
                                   </div>
 
-                                  <h3 className="text-white font-bold text-2xl mb-2 leading-tight">
+                                  <h3 className="text-gray-900 font-bold text-2xl mb-2 leading-tight">
                                     {workspace.name}
                                   </h3>
 
                                   {workspace.description && (
-                                    <p className="text-white/80 text-sm line-clamp-2 mt-auto">
+                                    <p className="text-gray-500 text-sm line-clamp-2 mt-auto">
                                       {workspace.description}
                                     </p>
                                   )}
 
-                                  <div className="mt-4 flex items-center gap-2 text-white font-medium">
-                                    <span className="text-sm">Open Kanban Board</span>
+                                  {/* Metadata row */}
+                                  {(workspace.taskCounts || workspace.agentCount !== undefined) && (
+                                    <div className="flex items-center gap-4 mt-3">
+                                      {workspace.taskCounts && (
+                                        <div className="flex items-center gap-1.5 text-sm text-gray-500">
+                                          <ListTodo className="w-4 h-4 text-gray-400" />
+                                          <span>{workspace.taskCounts.total} tasks</span>
+                                        </div>
+                                      )}
+                                      {workspace.agentCount !== undefined && workspace.agentCount > 0 && (
+                                        <div className="flex items-center gap-1.5 text-sm text-gray-500">
+                                          <Users className="w-4 h-4 text-gray-400" />
+                                          <span>{workspace.agentCount} {workspace.agentCount === 1 ? 'agent' : 'agents'}</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  <div className="mt-4 flex items-center gap-2 text-brand-600 font-medium">
+                                    <span className="text-sm">Open Department</span>
                                     <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
                                   </div>
                                 </div>
@@ -268,10 +302,7 @@ function WorkspaceSelectorInner() {
 
           <div className="mt-12 text-center">
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
-              <Activity className="w-4 h-4 text-indigo-500" />
-              <span>{workspaces.length} departments</span>
-              <span className="w-1 h-1 bg-gray-300 rounded-full" />
-              <span>All systems operational</span>
+              <span>{workspaces.length} {workspaces.length === 1 ? 'department' : 'departments'}</span>
             </div>
           </div>
         </motion.div>

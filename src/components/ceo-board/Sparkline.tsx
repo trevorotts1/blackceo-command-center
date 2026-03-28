@@ -1,5 +1,7 @@
 'use client';
 
+import { useId } from 'react';
+
 /**
  * Inline SVG sparkline - no chart library needed.
  * Renders a smooth trend line from an array of numbers.
@@ -24,6 +26,9 @@ export function Sparkline({
   showArea = true,
   className = '',
 }: SparklineProps) {
+  const uniqueId = useId();
+  const gradId = `sparkline-grad-${uniqueId}`;
+
   if (!data || data.length < 2) {
     return (
       <svg width={width} height={height} className={className}>
@@ -63,8 +68,7 @@ export function Sparkline({
     ? `${linePath} L ${points[points.length - 1].x} ${height} L ${points[0].x} ${height} Z`
     : '';
 
-  // Gradient ID for unique SVG
-  const gradId = `sparkline-grad-${Math.random().toString(36).slice(2, 8)}`;
+  // Gradient ID for unique SVG (deterministic via useId)
 
   return (
     <svg width={width} height={height} className={className} viewBox={`0 0 ${width} ${height}`}>

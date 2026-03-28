@@ -160,14 +160,14 @@ export function DepartmentPerformanceSection({ className }: DepartmentPerformanc
       {/* Header */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 mb-8">
         <div className="flex items-start gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-50 text-brand-600">
             <Building2 className="h-6 w-6" />
           </div>
           <div>
-            <h2 className="text-2xl font-bold text-gray-900">
+            <h2 className="text-section text-gray-900">
               Department Performance
             </h2>
-            <p className="mt-1 text-sm text-gray-500">
+            <p className="mt-1 text-base text-gray-500">
               Real-time visibility into all departments
             </p>
           </div>
@@ -187,7 +187,7 @@ export function DepartmentPerformanceSection({ className }: DepartmentPerformanc
               label="Active Depts"
               value={metrics.activeDepts.toString()}
               subValue={`/ ${departments.length}`}
-              color="indigo"
+              color="brand"
             />
             <div className="h-8 w-px bg-gray-200" />
             <MetricItem
@@ -234,7 +234,7 @@ interface MetricItemProps {
   subValue?: string;
   icon?: React.ReactNode;
   trend?: 'positive' | 'negative' | 'neutral';
-  color?: 'indigo' | 'emerald' | 'red';
+  color?: 'indigo' | 'emerald' | 'red' | 'brand';
 }
 
 function MetricItem({ label, value, subValue, icon, trend, color }: MetricItemProps) {
@@ -242,11 +242,12 @@ function MetricItem({ label, value, subValue, icon, trend, color }: MetricItemPr
     indigo: 'text-indigo-600',
     emerald: 'text-emerald-600',
     red: 'text-red-600',
+    brand: 'text-brand-600',
   };
 
   return (
     <div className="flex flex-col">
-      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+      <span className="text-label font-medium text-gray-500 uppercase tracking-wide">
         {label}
       </span>
       <div className="flex items-center gap-1.5 mt-1">
@@ -255,7 +256,7 @@ function MetricItem({ label, value, subValue, icon, trend, color }: MetricItemPr
           {value}
         </span>
         {subValue && (
-          <span className="text-sm text-gray-400 font-medium">{subValue}</span>
+          <span className="text-base text-gray-400 font-medium">{subValue}</span>
         )}
       </div>
     </div>

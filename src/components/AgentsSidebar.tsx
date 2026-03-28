@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ChevronRight, ChevronLeft, Zap, ZapOff, Loader2, BarChart3, Sparkles } from 'lucide-react';
+import { Plus, ChevronRight, ChevronLeft, Zap, ZapOff, Loader2 } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 
 type FilterTab = 'all' | 'active' | 'idle';
@@ -141,9 +141,9 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                 <button
                   key={tab}
                   onClick={() => setFilter(tab)}
-                  className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                  className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
                     filter === tab
-                      ? 'bg-indigo-600 text-white'
+                      ? 'bg-brand-600 text-white'
                       : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
                   }`}
                 >
@@ -155,53 +155,6 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
         )}
       </div>
 
-      {/* Performance Board Button — distinctly different from department tabs */}
-      {!isMinimized && (
-        <div className="px-3 pt-3 pb-1">
-          <button
-            onClick={() => window.location.href = '/ceo-board'}
-            className="group w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-purple-600 text-white shadow-md hover:shadow-xl hover:shadow-indigo-200/50 transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] relative overflow-hidden"
-          >
-            {/* Animated shimmer effect */}
-            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
-
-            {/* Pulse dot */}
-            <div className="relative flex-shrink-0">
-              <BarChart3 className="w-5 h-5" />
-              <div className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            </div>
-
-            {/* Text */}
-            <div className="flex-1 text-left">
-              <div className="font-bold text-sm flex items-center gap-1.5">
-                Performance Board
-                <Sparkles className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
-              </div>
-              <div className="text-[10px] text-white/70 mt-0.5">CEO Dashboard &bull; Analytics</div>
-            </div>
-
-            {/* Arrow */}
-            <ChevronRight className="w-4 h-4 text-white/60 group-hover:text-white group-hover:translate-x-0.5 transition-all duration-200" />
-          </button>
-        </div>
-      )}
-
-      {/* Minimized Performance Board — just icon */}
-      {isMinimized && (
-        <div className="px-2 pt-3">
-          <button
-            onClick={() => window.location.href = '/ceo-board'}
-            className="w-full flex justify-center py-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 hover:shadow-md transition-all duration-200"
-            title="Performance Board"
-          >
-            <div className="relative">
-              <BarChart3 className="w-5 h-5 text-white" />
-              <div className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            </div>
-          </button>
-        </div>
-      )}
-
       {/* Department List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
         {/* All Departments Option */}
@@ -210,7 +163,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
             onClick={() => setSelectedDepartment(null)}
             className={`w-full rounded-lg transition-colors text-left ${
               selectedDepartment === null
-                ? 'bg-indigo-50 border border-indigo-200 ring-1 ring-indigo-200'
+                ? 'bg-brand-50 border border-brand-200 ring-1 ring-brand-200'
                 : 'hover:bg-gray-50'
             }`}
           >
@@ -218,18 +171,18 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
               <div className="text-2xl">🏢</div>
               <div className="flex-1 min-w-0">
                 <div className={`font-medium text-sm truncate ${
-                  selectedDepartment === null ? 'text-indigo-900' : 'text-gray-900'
+                  selectedDepartment === null ? 'text-brand-900' : 'text-gray-900'
                 }`}>
                   All Departments
                 </div>
-                <div className={`text-xs truncate ${
-                  selectedDepartment === null ? 'text-indigo-600' : 'text-gray-500'
+                <div className={`text-sm truncate ${
+                  selectedDepartment === null ? 'text-brand-600' : 'text-gray-500'
                 }`}>
                   View all tasks
                 </div>
               </div>
               {selectedDepartment === null && (
-                <span className="w-2 h-2 rounded-full bg-indigo-500" />
+                <span className="w-2 h-2 rounded-full bg-brand-500" />
               )}
             </div>
           </button>
@@ -248,7 +201,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                 key={dept.id}
                 onClick={() => setSelectedDepartment(dept.id)}
                 className={`flex justify-center py-2 w-full ${
-                  isSelected ? 'bg-indigo-50 rounded-lg' : ''
+                  isSelected ? 'bg-brand-50 rounded-lg' : ''
                 }`}
               >
                 <div
@@ -259,7 +212,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                   {/* Status indicator */}
                   <span
                     className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
-                      isSelected ? 'bg-indigo-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
+                      isSelected ? 'bg-brand-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
                     }`}
                   />
                   {/* Tooltip */}
@@ -278,7 +231,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
               onClick={() => setSelectedDepartment(dept.id)}
               className={`w-full rounded-lg transition-colors text-left ${
                 isSelected
-                  ? 'bg-indigo-50 border border-indigo-200 ring-1 ring-indigo-200'
+                  ? 'bg-brand-50 border border-brand-200 ring-1 ring-brand-200'
                   : 'hover:bg-gray-50'
               }`}
             >
@@ -288,7 +241,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                   {dept.emoji}
                   <span
                     className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
-                      isSelected ? 'bg-indigo-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
+                      isSelected ? 'bg-brand-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
                     }`}
                   />
                 </div>
@@ -296,12 +249,12 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                 {/* Info */}
                 <div className="flex-1 min-w-0">
                   <div className={`font-medium text-sm truncate ${
-                    isSelected ? 'text-indigo-900' : 'text-gray-900'
+                    isSelected ? 'text-brand-900' : 'text-gray-900'
                   }`}>
                     {dept.name}
                   </div>
-                  <div className={`text-xs truncate ${
-                    isSelected ? 'text-indigo-600' : 'text-gray-500'
+                  <div className={`text-sm truncate ${
+                    isSelected ? 'text-brand-600' : 'text-gray-500'
                   }`}>
                     {dept.headTitle}
                   </div>
@@ -309,7 +262,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
 
                 {/* Status or Selected indicator */}
                 {isSelected ? (
-                  <span className="w-2 h-2 rounded-full bg-indigo-500" />
+                  <span className="w-2 h-2 rounded-full bg-brand-500" />
                 ) : (
                   <span
                     className={`text-xs px-2 py-0.5 rounded-full font-medium uppercase ${getStatusBadge(

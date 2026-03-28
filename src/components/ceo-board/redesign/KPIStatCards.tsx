@@ -192,14 +192,15 @@ export function KPIStatCards() {
             WebkitBackdropFilter: 'blur(8px)',
           }}
         >
-          {/* Circle drill-down button - top right */}
+          {/* Circle drill-down - decorative (drill-down coming soon) */}
           <div
             className={`absolute top-4 right-4 w-9 h-9 rounded-full border-2 flex items-center justify-center ${
-              card.dark ? 'border-white/30' : 'border-gray-300'
+              card.dark ? 'border-white/20' : 'border-gray-200'
             }`}
+            title="Drill-down coming soon"
           >
             <ArrowUpRight
-              className={`h-4 w-4 ${card.dark ? 'text-white/70' : 'text-gray-500'}`}
+              className={`h-4 w-4 ${card.dark ? 'text-white/40' : 'text-gray-300'}`}
             />
           </div>
 

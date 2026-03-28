@@ -30,7 +30,7 @@ export function DepartmentGrid({ departments, filter, isLoading }: DepartmentGri
       <div className="flex min-h-[400px] items-center justify-center rounded-2xl border border-dashed border-gray-200 bg-gray-50/50">
         <div className="flex flex-col items-center gap-3 text-gray-500">
           <Loader2 className="h-8 w-8 animate-spin" />
-          <span className="text-sm font-medium">Loading departments...</span>
+          <span className="text-base font-medium">Loading departments...</span>
         </div>
       </div>
     );

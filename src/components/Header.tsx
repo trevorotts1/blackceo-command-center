@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Settings, ChevronLeft, LayoutGrid, Menu, X, BarChart3, Home, Sparkles, ChevronDown } from 'lucide-react';
+import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -208,7 +208,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 hover:border-gray-300 transition-colors"
           >
             <LayoutGrid className="w-4 h-4 text-gray-500" />
-            <span className="text-sm font-medium text-gray-700">All Workspaces</span>
+            <span className="text-sm font-medium text-gray-700">All Departments</span>
           </Link>
         )}
       </div>
@@ -217,12 +217,12 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
       {workspace && (
         <div className="flex items-center gap-8">
           <div className="text-center">
-            <div className="text-2xl font-bold text-indigo-600">{activeAgents}</div>
-            <div className="text-xs text-gray-500 uppercase tracking-wide">Agents Active</div>
+            <div className="text-2xl font-bold text-brand-600">{activeAgents}</div>
+            <div className="text-sm text-gray-500 uppercase tracking-wide">Agents Active</div>
           </div>
           <div className="text-center">
-            <div className="text-2xl font-bold text-purple-600">{tasksInQueue}</div>
-            <div className="text-xs text-gray-500 uppercase tracking-wide">Tasks in Queue</div>
+            <div className="text-2xl font-bold text-brand-700">{tasksInQueue}</div>
+            <div className="text-sm text-gray-500 uppercase tracking-wide">Tasks in Queue</div>
           </div>
         </div>
       )}
@@ -246,16 +246,8 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
           />
           {isOnline ? 'ONLINE' : 'OFFLINE'}
         </div>
-        <button
-          onClick={() => router.push('/ceo-board')}
-          className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium rounded-lg hover:shadow-md transition-all duration-200"
-          title="CEO Performance Board"
-        >
-          <BarChart3 className="w-4 h-4" />
-          <span className="hidden sm:inline">Performance Board</span>
-        </button>
 
-        {/* AI Settings - only visible in department workspace view */}
+        {/* AI Settings - only visible in department view */}
         {workspace && (
           <div className="relative">
             <button
@@ -264,7 +256,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
                 setAiPanelOpen((prev) => !prev);
                 if (!aiPanelOpen) setAiLoaded(false);
               }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-violet-200 text-violet-700 text-sm font-medium rounded-lg hover:bg-violet-50 hover:border-violet-300 transition-all duration-200"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-brand-200 text-brand-700 text-sm font-medium rounded-lg hover:bg-brand-50 hover:border-brand-300 transition-all duration-200"
               title="AI Settings for this department"
             >
               <Sparkles className="w-4 h-4" />
@@ -286,14 +278,14 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
                 {/* Model selector */}
                 <div className="mb-3">
-                  <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+                  <label className="block text-sm font-medium text-gray-500 uppercase tracking-wide mb-1">
                     Model
                   </label>
                   <div className="relative">
                     <select
                       value={aiModel}
                       onChange={(e) => setAiModel(e.target.value)}
-                      className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 pr-8 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 transition-colors"
+                      className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 pr-8 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition-colors"
                     >
                       {MODEL_OPTIONS.map((m) => (
                         <option key={m.value} value={m.value}>
@@ -307,14 +299,14 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
                 {/* Persona selector */}
                 <div className="mb-4">
-                  <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+                  <label className="block text-sm font-medium text-gray-500 uppercase tracking-wide mb-1">
                     Persona
                   </label>
                   <div className="relative">
                     <select
                       value={aiPersona}
                       onChange={(e) => setAiPersona(e.target.value)}
-                      className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 pr-8 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 transition-colors"
+                      className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 pr-8 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition-colors"
                     >
                       {PERSONA_OPTIONS.map((p) => (
                         <option key={p.value} value={p.value}>
@@ -333,7 +325,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
                   className={`w-full py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
                     aiSaved
                       ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-                      : 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:shadow-md'
+                      : 'bg-gradient-to-r from-brand-500 to-brand-700 text-white hover:shadow-md'
                   }`}
                 >
                   {aiSaving ? 'Saving...' : aiSaved ? 'Saved' : 'Save'}

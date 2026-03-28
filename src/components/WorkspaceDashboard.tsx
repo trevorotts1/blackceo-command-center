@@ -45,7 +45,7 @@ export function WorkspaceDashboard() {
             alt="Loading"
             className="h-12 w-auto mb-4 animate-pulse"
           />
-          <p className="text-gray-500">Loading workspaces...</p>
+          <p className="text-gray-500">Loading departments...</p>
         </div>
       </div>
     );
@@ -80,7 +80,7 @@ export function WorkspaceDashboard() {
               className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 hover:shadow-xl hover:shadow-indigo-200"
             >
               <Plus className="w-4 h-4" />
-              New Workspace
+              New Department
             </button>
           </div>
         </div>
@@ -98,7 +98,7 @@ export function WorkspaceDashboard() {
             Welcome back, Trevor
           </h1>
           <p className="text-gray-500 text-lg max-w-2xl">
-            Manage your AI workforce across all workspaces. Dispatch tasks, monitor progress, and review deliverables from one central hub.
+            Manage your AI workforce across all departments. Dispatch tasks, monitor progress, and review deliverables from one central hub.
           </p>
         </div>
 
@@ -107,7 +107,7 @@ export function WorkspaceDashboard() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
             <StatCard 
               icon={<Folder className="w-5 h-5 text-indigo-600" />}
-              label="Workspaces"
+              label="Departments"
               value={workspaces.length}
               color="indigo"
             />
@@ -130,11 +130,11 @@ export function WorkspaceDashboard() {
         {/* Section Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="text-xl font-bold text-gray-900">Your Workspaces</h2>
+            <h2 className="text-xl font-bold text-gray-900">Your Departments</h2>
             <p className="text-gray-500 text-sm mt-0.5">
               {workspaces.length === 0 
-                ? 'Get started by creating your first workspace'
-                : `Select a workspace to view tasks and agents`
+                ? 'Get started by creating your first department'
+                : `Select a department to view tasks and agents`
               }
             </p>
           </div>
@@ -168,7 +168,7 @@ export function WorkspaceDashboard() {
                 <Plus className="w-7 h-7 text-gray-400 group-hover:text-indigo-600 transition-colors" />
               </div>
               <div className="text-center">
-                <span className="block text-gray-900 font-medium mb-1">Create Workspace</span>
+                <span className="block text-gray-900 font-medium mb-1">Create Department</span>
                 <span className="text-gray-400 text-sm">Add a new project area</span>
               </div>
             </button>
@@ -227,16 +227,16 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       <div className="w-20 h-20 rounded-2xl bg-indigo-50 flex items-center justify-center mx-auto mb-6">
         <Zap className="w-10 h-10 text-indigo-500" />
       </div>
-      <h3 className="text-xl font-bold text-gray-900 mb-2">Launch Your First Workspace</h3>
+      <h3 className="text-xl font-bold text-gray-900 mb-2">Launch Your First Department</h3>
       <p className="text-gray-500 mb-8 max-w-md mx-auto">
-        Workspaces are dedicated areas for managing AI agents and tasks. Create one for each project, department, or client.
+        Departments are dedicated areas for managing AI agents and tasks. Create one for each project, department, or client.
       </p>
       <button
         onClick={onCreate}
         className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
       >
         <Plus className="w-5 h-5" />
-        Create Workspace
+        Create Department
       </button>
     </div>
   );
@@ -256,10 +256,10 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
         onDelete(workspace.id);
       } else {
         const data = await res.json();
-        alert(data.error || 'Failed to delete workspace');
+        alert(data.error || 'Failed to delete department');
       }
     } catch {
-      alert('Failed to delete workspace');
+      alert('Failed to delete department');
     } finally {
       setDeleting(false);
       setShowDeleteConfirm(false);
@@ -311,7 +311,7 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
                   setShowDeleteConfirm(true);
                 }}
                 className="p-2 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                title="Delete workspace"
+                title="Delete department"
               >
                 <Trash2 className="w-4 h-4" />
               </button>
@@ -367,7 +367,7 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
               <AlertTriangle className="w-6 h-6 text-red-600" />
             </div>
             <div>
-              <h3 className="font-semibold text-lg text-gray-900">Delete Workspace</h3>
+              <h3 className="font-semibold text-lg text-gray-900">Delete Department</h3>
               <p className="text-sm text-gray-500">This action cannot be undone</p>
             </div>
           </div>
@@ -376,7 +376,7 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
             Are you sure you want to delete <strong className="text-gray-900">{workspace.name}</strong>? 
             {safeTaskCounts.total > 0 && (
               <span className="block mt-2 text-red-600">
-                This workspace has {safeTaskCounts.total} task(s). Delete them first.
+                This department has {safeTaskCounts.total} task(s). Delete them first.
               </span>
             )}
           </p>
@@ -393,7 +393,7 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
               disabled={deleting || safeTaskCounts.total > 0 || (workspace.agentCount || 0) > 0}
               className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
             >
-              {deleting ? 'Deleting...' : 'Delete Workspace'}
+              {deleting ? 'Deleting...' : 'Delete Department'}
             </button>
           </div>
         </div>
@@ -429,10 +429,10 @@ function CreateWorkspaceModal({ onClose, onCreated }: { onClose: () => void; onC
         onCreated();
       } else {
         const data = await res.json();
-        setError(data.error || 'Failed to create workspace');
+        setError(data.error || 'Failed to create department');
       }
     } catch {
-      setError('Failed to create workspace');
+      setError('Failed to create department');
     } finally {
       setIsSubmitting(false);
     }
@@ -442,7 +442,7 @@ function CreateWorkspaceModal({ onClose, onCreated }: { onClose: () => void; onC
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white border border-gray-200 rounded-xl w-full max-w-md shadow-xl">
         <div className="p-6 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Create New Workspace</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Create New Department</h2>
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
@@ -497,7 +497,7 @@ function CreateWorkspaceModal({ onClose, onCreated }: { onClose: () => void; onC
               disabled={!name.trim() || isSubmitting}
               className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
             >
-              {isSubmitting ? 'Creating...' : 'Create Workspace'}
+              {isSubmitting ? 'Creating...' : 'Create Department'}
             </button>
           </div>
         </form>
@@ -505,3 +505,4 @@ function CreateWorkspaceModal({ onClose, onCreated }: { onClose: () => void; onC
     </div>
   );
 }
+

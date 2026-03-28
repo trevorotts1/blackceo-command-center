@@ -2,11 +2,12 @@ import type { Metadata } from 'next';
 import './globals.css';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import DemoBanner from '@/components/DemoBanner';
+import AppShell from '@/components/AppShell';
 
 const inter = Inter({
   subsets: ['latin'],
   variable: '--font-inter',
-  weight: ['400', '500', '600', '700'],
+  weight: ['400', '500', '600', '700', '800', '900'],
   display: 'swap',
 });
 
@@ -23,6 +24,11 @@ export const metadata: Metadata = {
   icons: {
     icon: '/favicon.svg',
   },
+  viewport: {
+    width: 'device-width',
+    initialScale: 1,
+    maximumScale: 1,
+  },
 };
 
 export default function RootLayout({
@@ -34,7 +40,9 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
       <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-screen`}>
         <DemoBanner />
-        {children}
+        <AppShell>
+          {children}
+        </AppShell>
       </body>
     </html>
   );

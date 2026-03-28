@@ -233,23 +233,17 @@ function PairedBarChart({
     );
 
     const today = new Date().getDay();
-    const fallbackLeft = [30, 55, 65, 90, 75, 60, 40];
-    const fallbackRight = [40, 65, 75, 85, 80, 70, 50];
 
     return DAY_LABELS.map((_, i) => {
       const isPastOrToday = i <= today;
       if (!isPastOrToday) {
-        return { left: fallbackLeft[i], right: fallbackRight[i], isPending: true };
+        return { left: 0, right: 0, isPending: true };
       }
       if (total === 0) {
-        return { left: fallbackLeft[i], right: fallbackRight[i], isPending: false };
+        return { left: 0, right: 0, isPending: false };
       }
       const base = Math.round((done / total) * 100);
-      const lVar = Math.sin(i * 0.9) * 15;
-      const rVar = Math.cos(i * 0.7) * 12;
-      const left = Math.max(5, Math.min(95, Math.round(base + lVar)));
-      const right = Math.max(5, Math.min(95, Math.round(base + rVar)));
-      return { left, right, isPending: false };
+      return { left: base, right: base, isPending: false };
     });
   }, [departments]);
 

@@ -79,7 +79,7 @@ function ProgressBar({ progress, status }: { progress: number; status: Departmen
       : progress >= 80
         ? 'bg-emerald-500'
         : progress >= 50
-          ? 'bg-indigo-500'
+          ? 'bg-brand-500'
           : 'bg-amber-500';
 
   return (
@@ -112,7 +112,7 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
         transition: { duration: 0.2 },
       }}
       onClick={onClick}
-      className={`group relative bg-white rounded-2xl border border-gray-200 p-4 shadow-sm hover:shadow-lg hover:shadow-gray-200/50 hover:border-indigo-200 transition-all duration-300 ${onClick ? 'cursor-pointer' : ''}`}
+      className={`group relative bg-white rounded-2xl border border-gray-200 p-4 shadow-sm hover:shadow-lg hover:shadow-gray-200/50 hover:border-brand-200 transition-all duration-300 ${onClick ? 'cursor-pointer' : ''}`}
     >
       {/* Header: Icon + Name + Status */}
       <div className="flex items-start justify-between gap-3 mb-4">
@@ -121,7 +121,7 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
             {department.icon}
           </div>
           <div>
-            <h3 className="font-semibold text-gray-900 text-sm leading-tight">
+            <h3 className="font-semibold text-gray-900 text-base leading-tight">
               {department.name}
             </h3>
             <div className="flex items-center gap-1.5 mt-1">
@@ -133,7 +133,7 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
                 )}
                 <span className={`relative inline-flex rounded-full h-2 w-2 ${status.dotColor}`} />
               </span>
-              <span className={`text-xs font-medium ${status.labelColor}`}>
+              <span className={`text-badge font-medium ${status.labelColor}`}>
                 {status.label}
               </span>
             </div>
@@ -149,7 +149,7 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
             title={department.blockers?.join(', ')}
           >
             <AlertCircle className="h-3.5 w-3.5 text-red-500" />
-            <span className="text-xs font-semibold text-red-600">
+            <span className="text-badge font-semibold text-red-600">
               {department.blockers?.length}
             </span>
           </motion.div>
@@ -157,15 +157,15 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
       </div>
 
       {/* Stats Row */}
-      <div className="mb-4 text-xs text-gray-400">
-        <span className="font-medium text-indigo-400">{department.stats.inProgress}</span> active · <span className="font-medium text-emerald-400">{department.stats.done}</span> done · <span className="font-medium text-gray-400">{department.stats.backlog}</span> backlog
+      <div className="mb-4 text-sm text-gray-500">
+        <span className="font-medium text-brand-500">{department.stats.inProgress}</span> active · <span className="font-medium text-emerald-500">{department.stats.done}</span> done · <span className="font-medium text-gray-400">{department.stats.backlog}</span> backlog
       </div>
 
       {/* Progress Bar */}
       <div className="mb-4">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-medium text-gray-500">Completion</span>
-          <span className="text-xs font-semibold text-gray-900">
+          <span className="text-sm font-medium text-gray-500">Completion</span>
+          <span className="text-sm font-semibold text-gray-900">
             {department.progress}%
           </span>
         </div>
@@ -176,7 +176,7 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
       {department.activePersona && (
         <div className="mb-3 flex items-center gap-1.5 px-2 py-1.5 bg-violet-50 border border-violet-100 rounded-lg">
           <span className="text-xs">🧠</span>
-          <span className="text-xs font-medium text-violet-700 truncate">
+          <span className="text-sm font-medium text-violet-700 truncate">
             {department.activePersona}
           </span>
         </div>
@@ -186,13 +186,13 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
       <div className="flex items-center justify-between pt-3 border-t border-gray-100">
         <div className="flex items-center gap-1.5 text-gray-500">
           <Users className="h-3.5 w-3.5" />
-          <span className="text-xs font-medium">
+          <span className="text-sm font-medium">
             {department.agentCount} {department.agentCount === 1 ? 'agent' : 'agents'}
           </span>
         </div>
         <div className="flex items-center gap-1.5 text-gray-400">
           <Clock className="h-3.5 w-3.5" />
-          <span className="text-xs">
+          <span className="text-sm">
             {formatLastActivity(department.lastActivity)}
           </span>
         </div>

@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ChevronLeft,
   Home,
   Target,
   Users,
@@ -22,6 +21,7 @@ import {
 } from 'lucide-react';
 import { Sparkline } from '@/components/ceo-board/Sparkline';
 import DepartmentMemorySection from '@/components/ceo-board/DepartmentMemorySection';
+import { SectionContainer } from '@/components/ceo-board/redesign/SectionContainer';
 
 // Types
 interface DepartmentData {
@@ -71,8 +71,6 @@ interface Recommendation {
   supportingData: string;
 }
 
-// Department data is fetched dynamically from /api/workspaces (no hardcoded departments)
-
 function formatValue(value: number, unit: string): string {
   if (unit === 'currency') return `$${value.toLocaleString()}`;
   if (unit === 'percent') return `${value}%`;
@@ -82,7 +80,7 @@ function formatValue(value: number, unit: string): string {
 function getGradeColor(grade: string): string {
   switch (grade) {
     case 'A': return 'text-emerald-600 bg-emerald-50 border-emerald-200';
-    case 'B': return 'text-indigo-600 bg-indigo-50 border-indigo-200';
+    case 'B': return 'text-brand-700 bg-brand-50 border-brand-200';
     case 'C': return 'text-amber-600 bg-amber-50 border-amber-200';
     case 'D': return 'text-orange-600 bg-orange-50 border-orange-200';
     case 'F': return 'text-rose-600 bg-rose-50 border-rose-200';
@@ -95,7 +93,7 @@ function getCategoryColor(category: string): string {
     case 'do-more': return 'bg-emerald-100 text-emerald-700 border-emerald-200';
     case 'stop': return 'bg-rose-100 text-rose-700 border-rose-200';
     case 'watch': return 'bg-amber-100 text-amber-700 border-amber-200';
-    case 'try': return 'bg-indigo-100 text-indigo-700 border-indigo-200';
+    case 'try': return 'bg-brand-100 text-brand-700 border-brand-200';
     default: return 'bg-gray-100 text-gray-700 border-gray-200';
   }
 }
@@ -110,7 +108,6 @@ function getCategoryLabel(category: string): string {
   }
 }
 
-// Compute trend from sparkline data
 function computeTrend(data: number[]): { trend: 'up' | 'down' | 'flat'; changePercent: number } {
   if (data.length < 2) return { trend: 'flat', changePercent: 0 };
   const first = data[0];
@@ -123,27 +120,147 @@ function computeTrend(data: number[]): { trend: 'up' | 'down' | 'flat'; changePe
   };
 }
 
-// KPI Card with SVG sparkline + benchmark label
-function KPICard({ kpi }: { kpi: KPIData }) {
+// --- Loading Skeletons ---
+
+function PageSkeleton() {
+  return (
+    <div className="min-h-screen bg-[#F8F9FB]">
+      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200 px-4 sm:px-6 lg:px-8">
+        <div className="h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="h-5 w-12 bg-gray-200 rounded animate-pulse" />
+            <div className="text-gray-300">/</div>
+            <div className="h-5 w-28 bg-gray-200 rounded animate-pulse" />
+            <div className="text-gray-300">/</div>
+            <div className="h-5 w-24 bg-gray-200 rounded animate-pulse" />
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="h-2 w-2 rounded-full bg-gray-200 animate-pulse" />
+            <div className="h-4 w-8 bg-gray-200 rounded animate-pulse" />
+          </div>
+        </div>
+      </header>
+      <main className="p-8">
+        <div className="max-w-[1400px] mx-auto space-y-12">
+          {/* Hero skeleton */}
+          <div className="bg-white rounded-3xl border border-gray-200 p-8 shadow-sm">
+            <div className="flex flex-col lg:flex-row lg:items-center gap-6">
+              <div className="flex items-center gap-5">
+                <div className="h-16 w-16 bg-gray-200 rounded-2xl animate-pulse" />
+                <div className="space-y-2">
+                  <div className="h-8 w-48 bg-gray-200 rounded animate-pulse" />
+                  <div className="h-5 w-32 bg-gray-100 rounded animate-pulse" />
+                </div>
+              </div>
+              <div className="lg:ml-auto">
+                <div className="h-24 w-48 bg-gray-200 rounded-2xl animate-pulse" />
+              </div>
+            </div>
+            <div className="mt-6 h-16 bg-gray-100 rounded-xl animate-pulse" />
+          </div>
+          {/* KPI skeleton */}
+          <div>
+            <div className="flex items-center gap-3 mb-6">
+              <div className="h-10 w-10 bg-gray-200 rounded-xl animate-pulse" />
+              <div className="h-6 w-36 bg-gray-200 rounded animate-pulse" />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="rounded-2xl p-8 min-h-[200px] flex flex-col justify-between bg-gray-100 animate-pulse">
+                  <div className="h-4 w-24 bg-gray-200 rounded" />
+                  <div className="h-14 w-24 bg-gray-200 rounded mt-4" />
+                  <div className="h-3 w-36 bg-gray-200 rounded mt-4" />
+                  <div className="h-8 w-full bg-gray-200 rounded mt-4" />
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Agent skeleton */}
+          <div className="rounded-2xl bg-white/90 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100">
+              <div className="h-6 w-32 bg-gray-200 rounded animate-pulse" />
+            </div>
+            <div className="p-6">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="flex items-center gap-4 px-4 py-3">
+                  <div className="h-12 w-12 rounded-full bg-gray-200 animate-pulse" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-4 w-32 bg-gray-200 rounded animate-pulse" />
+                    <div className="h-3 w-48 bg-gray-100 rounded animate-pulse" />
+                  </div>
+                  <div className="h-6 w-20 bg-gray-200 rounded-full animate-pulse" />
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Rec skeleton */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="rounded-xl bg-gray-100 p-5 animate-pulse min-h-[180px]">
+                <div className="h-5 w-20 bg-gray-200 rounded-full mb-3" />
+                <div className="h-5 w-3/4 bg-gray-200 rounded mb-3" />
+                <div className="h-4 w-full bg-gray-200 rounded mb-2" />
+                <div className="h-4 w-2/3 bg-gray-200 rounded" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+// --- KPI Card ---
+
+function KPICard({ kpi, dark }: { kpi: KPIData; dark?: boolean }) {
   const TrendIcon = kpi.trend === 'up' ? TrendingUp : kpi.trend === 'down' ? TrendingDown : Minus;
   const trendColor = kpi.trend === 'up' ? 'text-emerald-600' : kpi.trend === 'down' ? 'text-rose-600' : 'text-gray-500';
   const trendBg = kpi.trend === 'up' ? 'bg-emerald-50' : kpi.trend === 'down' ? 'bg-rose-50' : 'bg-gray-100';
 
-  // Benchmark comparison
   const benchmarkLabel = kpi.benchmark !== undefined
     ? kpi.value >= kpi.benchmark ? 'above' : 'below'
     : null;
 
+  if (dark) {
+    return (
+      <div className="bg-brand-800 rounded-2xl shadow-md p-8 hover:shadow-lg transition-shadow duration-200">
+        <div className="flex items-start justify-between mb-4">
+          <div>
+            <p className="text-sm font-medium text-white/70">{kpi.name}</p>
+            <p className="text-kpi-value text-white mt-1">{formatValue(kpi.value, kpi.unit)}</p>
+          </div>
+          <div className={`flex items-center gap-1 px-2 py-1 rounded-lg ${kpi.trend === 'up' ? 'bg-emerald-500/20' : kpi.trend === 'down' ? 'bg-rose-500/20' : 'bg-white/10'}`}>
+            <TrendIcon className={`h-4 w-4 ${kpi.trend === 'up' ? 'text-emerald-300' : kpi.trend === 'down' ? 'text-rose-300' : 'text-white/50'}`} />
+            <span className={`text-sm font-semibold ${kpi.trend === 'up' ? 'text-emerald-300' : kpi.trend === 'down' ? 'text-rose-300' : 'text-white/50'}`}>
+              {kpi.changePercent > 0 ? '+' : ''}{kpi.changePercent}%
+            </span>
+          </div>
+        </div>
+        <div className="h-12">
+          <Sparkline data={kpi.sparkline} width={200} height={48} />
+        </div>
+        <div className="mt-3 flex items-center justify-between text-sm">
+          <span className="text-white/50">Target: {formatValue(kpi.target, kpi.unit)}</span>
+          {benchmarkLabel && (
+            <span className={`font-medium ${benchmarkLabel === 'above' ? 'text-emerald-300' : 'text-amber-300'}`}>
+              {benchmarkLabel === 'above' ? '↑' : '↓'} vs avg ({formatValue(kpi.benchmark!, kpi.unit)})
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow duration-200">
+    <div className="bg-white rounded-2xl shadow-md p-8 hover:shadow-lg transition-shadow duration-200">
       <div className="flex items-start justify-between mb-4">
         <div>
-          <p className="text-sm font-medium text-gray-500">{kpi.name}</p>
-          <p className="text-2xl font-bold text-gray-900 mt-1">{formatValue(kpi.value, kpi.unit)}</p>
+          <p className="text-base font-medium text-gray-500">{kpi.name}</p>
+          <p className="text-kpi-value text-gray-900 mt-1">{formatValue(kpi.value, kpi.unit)}</p>
         </div>
         <div className={`flex items-center gap-1 px-2 py-1 rounded-lg ${trendBg}`}>
           <TrendIcon className={`h-4 w-4 ${trendColor}`} />
-          <span className={`text-xs font-semibold ${trendColor}`}>
+          <span className={`text-sm font-semibold ${trendColor}`}>
             {kpi.changePercent > 0 ? '+' : ''}{kpi.changePercent}%
           </span>
         </div>
@@ -151,7 +268,7 @@ function KPICard({ kpi }: { kpi: KPIData }) {
       <div className="h-12">
         <Sparkline data={kpi.sparkline} width={200} height={48} />
       </div>
-      <div className="mt-3 flex items-center justify-between text-xs">
+      <div className="mt-3 flex items-center justify-between text-sm">
         <span className="text-gray-400">Target: {formatValue(kpi.target, kpi.unit)}</span>
         {benchmarkLabel && (
           <span className={`font-medium ${benchmarkLabel === 'above' ? 'text-emerald-600' : 'text-amber-600'}`}>
@@ -163,43 +280,45 @@ function KPICard({ kpi }: { kpi: KPIData }) {
   );
 }
 
-function AgentCard({ agent }: { agent: AgentData }) {
+// --- Agent Card (inline row style) ---
+
+function AgentRow({ agent }: { agent: AgentData }) {
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow duration-200">
-      <div className="flex items-start gap-4">
-        <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-indigo-100 to-indigo-50 flex items-center justify-center text-2xl">
-          🤖
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h4 className="font-semibold text-gray-900 truncate">{agent.name}</h4>
-          </div>
-          <p className="text-sm text-gray-500">Persona: {agent.persona}</p>
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100 mt-2">
-            <Zap className="h-3 w-3 mr-1" />
-            {agent.model}
-          </span>
-        </div>
+    <div className="flex items-center gap-4 px-4 py-3 hover:bg-gray-50/50 transition-colors">
+      <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-brand-100 to-brand-50 flex items-center justify-center text-2xl flex-shrink-0">
+        🤖
       </div>
-      <div className="grid grid-cols-3 gap-3 mt-5 pt-4 border-t border-gray-100">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <h4 className="text-base font-semibold text-gray-900 truncate">{agent.name}</h4>
+        </div>
+        <p className="text-sm text-gray-500 truncate">Persona: {agent.persona}</p>
+      </div>
+      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-badge font-medium bg-brand-50 text-brand-700 border border-brand-100 flex-shrink-0">
+        <Zap className="h-3 w-3 mr-1" />
+        {agent.model}
+      </span>
+      <div className="flex items-center gap-4 flex-shrink-0">
         <div className="text-center">
-          <p className="text-lg font-bold text-gray-900">{agent.actionsCompleted}</p>
-          <p className="text-xs text-gray-500">Actions</p>
+          <p className="text-base font-bold text-gray-900">{agent.actionsCompleted}</p>
+          <p className="text-sm text-gray-500">Actions</p>
         </div>
         <div className="text-center">
-          <p className={`text-lg font-bold ${agent.idlePercent > 15 ? 'text-amber-600' : 'text-gray-900'}`}>
+          <p className={`text-base font-bold ${agent.idlePercent > 15 ? 'text-amber-600' : 'text-gray-900'}`}>
             {agent.idlePercent}%
           </p>
-          <p className="text-xs text-gray-500">Idle</p>
+          <p className="text-sm text-gray-500">Idle</p>
         </div>
         <div className="text-center">
-          <p className="text-lg font-bold text-emerald-600">{agent.qualityScore}%</p>
-          <p className="text-xs text-gray-500">Quality</p>
+          <p className="text-base font-bold text-emerald-600">{agent.qualityScore}%</p>
+          <p className="text-sm text-gray-500">Quality</p>
         </div>
       </div>
     </div>
   );
 }
+
+// --- Recommendation Card ---
 
 function RecommendationCard({
   recommendation,
@@ -251,7 +370,7 @@ function RecommendationCard({
           <CheckCircle className="h-6 w-6 text-emerald-600" />
           <div>
             <p className="font-semibold text-emerald-900">Approved</p>
-            <p className="text-sm text-emerald-700">Task created in department workspace</p>
+            <p className="text-sm text-emerald-700">Task created in department</p>
           </div>
         </div>
       </div>
@@ -274,12 +393,12 @@ function RecommendationCard({
 
   if (status === 'saved') {
     return (
-      <div className="bg-indigo-50 rounded-xl border border-indigo-200 p-5">
+      <div className="bg-brand-50 rounded-xl border border-brand-200 p-5">
         <div className="flex items-center gap-3">
-          <Clock className="h-6 w-6 text-indigo-600" />
+          <Clock className="h-6 w-6 text-brand-600" />
           <div>
-            <p className="font-semibold text-indigo-900">Saved for Later</p>
-            <p className="text-sm text-indigo-700">Added to your revisit queue</p>
+            <p className="font-semibold text-brand-900">Saved for Later</p>
+            <p className="text-sm text-brand-700">Added to your revisit queue</p>
           </div>
         </div>
       </div>
@@ -287,22 +406,22 @@ function RecommendationCard({
   }
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow duration-200">
+    <div className="rounded-xl bg-gray-50/80 p-5 hover:bg-gray-100/80 transition-colors">
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex-1">
-          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${getCategoryColor(recommendation.category)}`}>
+          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-badge font-medium border ${getCategoryColor(recommendation.category)}`}>
             {getCategoryLabel(recommendation.category)}
           </span>
-          <h4 className="font-semibold text-gray-900 mt-2">{recommendation.title}</h4>
+          <h4 className="text-lg font-bold text-gray-900 mt-2">{recommendation.title}</h4>
         </div>
-        <div className="flex items-center gap-1 px-2 py-1 bg-indigo-50 rounded-lg">
-          <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
-          <span className="text-xs font-semibold text-indigo-700">
+        <div className="flex items-center gap-1 px-2 py-1 bg-brand-50 rounded-lg">
+          <Sparkles className="h-4 w-4 text-brand-600" />
+          <span className="text-sm font-semibold text-brand-700">
             {Math.round(recommendation.confidence * 100)}%
           </span>
         </div>
       </div>
-      <p className="text-sm text-gray-600 mb-4">{recommendation.description}</p>
+      <p className="text-base text-gray-600 mb-4">{recommendation.description}</p>
       <AnimatePresence>
         {showWhy && (
           <motion.div
@@ -311,9 +430,9 @@ function RecommendationCard({
             exit={{ height: 0, opacity: 0 }}
             className="overflow-hidden"
           >
-            <div className="bg-gray-50 rounded-lg p-3 mb-4 border border-gray-100">
-              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Supporting Data</p>
-              <p className="text-sm text-gray-700">{recommendation.supportingData}</p>
+            <div className="bg-white rounded-lg p-3 mb-4 border border-gray-100">
+              <p className="text-sm font-medium text-gray-500 uppercase tracking-wide mb-1">Supporting Data</p>
+              <p className="text-base text-gray-700">{recommendation.supportingData}</p>
             </div>
           </motion.div>
         )}
@@ -321,7 +440,7 @@ function RecommendationCard({
       <div className="flex items-center gap-2">
         <button
           onClick={handleApprove}
-          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors"
         >
           <CheckCircle className="h-4 w-4" />
           Approve
@@ -342,7 +461,7 @@ function RecommendationCard({
         </button>
         <button
           onClick={() => setShowWhy(!showWhy)}
-          className="flex items-center justify-center gap-1.5 px-3 py-2 bg-white text-indigo-600 text-sm font-medium rounded-lg border border-indigo-200 hover:bg-indigo-50 transition-colors"
+          className="flex items-center justify-center gap-1.5 px-3 py-2 bg-white text-brand-600 text-sm font-medium rounded-lg border border-brand-200 hover:bg-brand-50 transition-colors"
         >
           <HelpCircle className="h-4 w-4" />
           {showWhy ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
@@ -352,57 +471,10 @@ function RecommendationCard({
   );
 }
 
-const FALLBACK_PERSONAS = [
-  'Alex Hormozi', 'Chris Voss', 'Neil Rackham', 'Daniel Pink', 'Phil Jones', 'Brendan Kane', 'Daniel Priestley',
-  'Donald Miller', 'Seth Godin', 'Robert Bly', 'Joanna Wiebe', 'Robert Cialdini', 'Shelle Rose Charvet',
-  'Simon Sinek', 'Jim Collins', 'Jay Samit', 'Vishen Lakhiani', 'Tim Grover',
-  'James Clear', 'Tiago Forte', 'Brian Moran', 'Charles Duhigg',
-  'Mike Michalowicz',
-  'Mel Robbins', 'Robin Sharma', 'David Goggins', 'TD Jakes', 'Janet Attwood', 'Grenny Patterson',
-  'Nedra Tawwab', 'Brené Brown', 'Michelle Obama'
-];
+// --- No hardcoded fallbacks: empty array when API has no data ---
 
-function generateDemoAgents(deptId: string, livePersonas?: string[]): AgentData[] {
-  const personas = livePersonas && livePersonas.length > 0 ? livePersonas : FALLBACK_PERSONAS;
-  const models = ['Kimi 2.5', 'Sonnet 4.6', 'GPT 5.4', 'Opus 4.6'];
-  return Array.from({ length: 3 }, (_, i) => ({
-    id: `${deptId}-agent-${i}`,
-    name: `${deptId.charAt(0).toUpperCase() + deptId.slice(1)} Specialist ${i + 1}`,
-    persona: personas[i % personas.length],
-    model: models[Math.floor(Math.random() * models.length)],
-    actionsCompleted: Math.floor(Math.random() * 100) + 50,
-    idlePercent: Math.floor(Math.random() * 20) + 5,
-    qualityScore: Math.floor(Math.random() * 15) + 85,
-  }));
-}
-
-function generateDemoRecommendations(deptId: string): Recommendation[] {
-  return [
-    {
-      id: `${deptId}-rec-1`,
-      title: 'Increase email frequency by 20%',
-      description: 'Current open rates are above industry average. Testing shows your audience can handle more touchpoints without fatigue.',
-      category: 'try',
-      confidence: 0.82,
-      supportingData: 'Open rate: 34% (industry avg: 25%). Unsubscribe rate: 0.3% (industry avg: 0.5%).',
-    },
-    {
-      id: `${deptId}-rec-2`,
-      title: 'Pause underperforming ad creative',
-      description: 'Three ad variants are consuming 40% of budget but generating only 8% of conversions.',
-      category: 'stop',
-      confidence: 0.91,
-      supportingData: 'Ad spend analysis: Top performer: $400 spent, 18 conversions vs underperformers at 1-3 conversions each.',
-    },
-    {
-      id: `${deptId}-rec-3`,
-      title: 'Double down on top channel',
-      description: 'Your best channel is generating 3x more qualified leads than others at half the cost.',
-      category: 'do-more',
-      confidence: 0.88,
-      supportingData: 'Top channel: 45 leads @ $12 CPL. Next best: 23 leads @ $38 CPL.',
-    },
-  ];
+function getDefaultAgents(_deptId: string): AgentData[] {
+  return [];
 }
 
 // Main Page Component
@@ -423,7 +495,6 @@ export default function DepartmentSubBoardPage() {
 
       let dept: DepartmentData | undefined;
 
-      // Fetch department data dynamically from the workspaces API
       try {
         const wsRes = await fetch('/api/workspaces');
         if (wsRes.ok) {
@@ -455,15 +526,12 @@ export default function DepartmentSubBoardPage() {
       setDepartment(dept);
 
       try {
-        // Fetch 30 days of KPI history for this department
         const historyRes = await fetch(`/api/kpi-history?department_id=${deptId}&days=30`);
         const historyData = await historyRes.json();
 
-        // Fetch benchmarks for this department
         const benchRes = await fetch(`/api/benchmarks?department=${deptId}`);
         const benchData = await benchRes.json();
 
-        // Build a map: kpi_id -> { points: KPIHistoryPoint[], latest: value }
         const kpiMap: Record<string, KPIHistoryPoint[]> = {};
         if (historyData.data) {
           for (const row of historyData.data) {
@@ -472,7 +540,6 @@ export default function DepartmentSubBoardPage() {
           }
         }
 
-        // Build benchmark map: kpi_name -> benchmark value
         const benchMap: Record<string, number> = {};
         if (benchData.benchmarks) {
           for (const b of benchData.benchmarks) {
@@ -480,18 +547,12 @@ export default function DepartmentSubBoardPage() {
           }
         }
 
-        // Convert to KPIData[]
         const kpiList: KPIData[] = Object.entries(kpiMap).map(([kpiId, points]) => {
           const values = points.map(p => p.value);
           const latest = values[values.length - 1];
-          const first = values[0];
           const { trend, changePercent } = computeTrend(values);
-
-          // Find matching benchmark by name
           const kpiName = points.length > 0 ? (historyData.data.find((d: { kpi_id: string; kpi_name: string }) => d.kpi_id === kpiId)?.kpi_name || kpiId) : kpiId;
           const benchmark = benchMap[kpiName];
-
-          // Get target and unit from first data row
           const dataRow = historyData.data?.find((d: { kpi_id: string }) => d.kpi_id === kpiId);
 
           return {
@@ -511,26 +572,51 @@ export default function DepartmentSubBoardPage() {
         setKpis(kpiList);
       } catch (err) {
         console.error('Failed to load KPI data:', err);
-        // Fall back to empty - UI will still render
         setKpis([]);
       }
 
-      // Try to load real personas from governing-personas.md
-      let livePersonas: string[] | undefined;
+      // Load agents from API, fall back to static defaults (no random)
       try {
-        const personaRes = await fetch(`/api/departments/${deptId}/personas`);
-        if (personaRes.ok) {
-          const personaData = await personaRes.json();
-          if (personaData.personas && personaData.personas.length > 0) {
-            livePersonas = personaData.personas;
+        const agentRes = await fetch(`/api/agents?department=${deptId}`);
+        if (agentRes.ok) {
+          const agentData = await agentRes.json();
+          if (agentData.agents && agentData.agents.length > 0) {
+            setAgents(agentData.agents.map((a: { id: string; name: string; persona?: string; model?: string; actions_completed?: number; idle_percent?: number; quality_score?: number }) => ({
+              id: a.id,
+              name: a.name,
+              persona: a.persona || 'General',
+              model: a.model || 'Sonnet 4.6',
+              actionsCompleted: a.actions_completed || 0,
+              idlePercent: a.idle_percent || 0,
+              qualityScore: a.quality_score || 0,
+            })));
+          } else {
+            setAgents(getDefaultAgents(deptId));
           }
+        } else {
+          setAgents(getDefaultAgents(deptId));
         }
       } catch {
-        // Fall back to demo personas silently
+        setAgents(getDefaultAgents(deptId));
       }
 
-      setAgents(generateDemoAgents(deptId, livePersonas));
-      setRecommendations(generateDemoRecommendations(deptId));
+      // Load recommendations from API, fall back to empty
+      try {
+        const recRes = await fetch(`/api/recommendations?department=${deptId}`);
+        if (recRes.ok) {
+          const recData = await recRes.json();
+          if (recData.recommendations && recData.recommendations.length > 0) {
+            setRecommendations(recData.recommendations);
+          } else {
+            setRecommendations([]);
+          }
+        } else {
+          setRecommendations([]);
+        }
+      } catch {
+        setRecommendations([]);
+      }
+
       setIsLoading(false);
     };
 
@@ -540,14 +626,7 @@ export default function DepartmentSubBoardPage() {
   const gradeColors = getGradeColor(department?.grade || 'B');
 
   if (isLoading) {
-    return (
-      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
-        <div className="flex items-center gap-3 text-gray-500">
-          <div className="h-8 w-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-          <span className="font-medium">Loading department data...</span>
-        </div>
-      </div>
-    );
+    return <PageSkeleton />;
   }
 
   if (!department) {
@@ -558,7 +637,7 @@ export default function DepartmentSubBoardPage() {
           <p className="text-gray-500 mt-2">The department &quot;{deptId}&quot; does not exist.</p>
           <button
             onClick={() => router.push('/ceo-board')}
-            className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+            className="mt-4 px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700"
           >
             Back to Company Overview
           </button>
@@ -566,6 +645,11 @@ export default function DepartmentSubBoardPage() {
       </div>
     );
   }
+
+  const sectionVariants = {
+    hidden: { opacity: 0, y: 20 },
+    visible: { opacity: 1, y: 0 },
+  };
 
   return (
     <div className="min-h-screen bg-[#F8F9FB]">
@@ -584,137 +668,130 @@ export default function DepartmentSubBoardPage() {
               onClick={() => router.push('/ceo-board')}
               className="flex items-center gap-1.5 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
             >
-              Performance Board
+              CEO Board
             </button>
             <span className="text-gray-300">/</span>
-            <button
-              onClick={() => router.push('/workspace')}
-              className="flex items-center gap-1.5 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
-            >
-              Kanban
-            </button>
-            <span className="text-gray-300">/</span>
-            <span className="px-3 py-2 text-gray-900 font-semibold text-sm flex items-center gap-1.5">
-              <ChevronLeft className="h-3.5 w-3.5 text-gray-400" />
+            <span className="px-3 py-2 text-gray-900 font-semibold text-sm">
               {department?.name || deptId}
             </span>
           </div>
           <div className="flex items-center gap-2">
             <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-xs font-medium text-emerald-600">Live</span>
+            <span className="text-sm font-medium text-emerald-600">Live</span>
           </div>
         </div>
       </header>
-      <main className="p-4 sm:p-6 lg:p-8">
-        <div className="max-w-[1400px] mx-auto space-y-8">
+      <main className="p-8">
+        <div className="max-w-[1400px] mx-auto space-y-12">
+          {/* Hero Section */}
           <motion.section
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-white rounded-3xl border border-gray-200 p-6 sm:p-8 shadow-sm"
+            className="bg-gradient-to-br from-brand-900 to-brand-800 rounded-3xl p-6 sm:p-8 shadow-lg"
           >
             <div className="flex flex-col lg:flex-row lg:items-center gap-6">
               <div className="flex items-center gap-5">
-                <div className="h-16 w-16 flex items-center justify-center text-4xl bg-gradient-to-br from-gray-50 to-gray-100 rounded-2xl border border-gray-200">
+                <div className="h-16 w-16 flex items-center justify-center text-4xl bg-white/10 rounded-2xl">
                   {department.emoji}
                 </div>
                 <div>
-                  <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">{department.name}</h1>
-                  <p className="text-gray-500">{department.headTitle}</p>
+                  <h1 className="text-2xl sm:text-3xl font-bold text-white">{department.name}</h1>
+                  <p className="text-white/70">{department.headTitle}</p>
                 </div>
               </div>
               <div className="lg:ml-auto flex items-center gap-6">
-                <div className={`flex items-center gap-4 px-6 py-4 rounded-2xl border ${gradeColors}`}>
+                <div className="flex items-center gap-4 px-6 py-4 rounded-2xl bg-white/10">
                   <div className="text-center">
-                    <p className="text-xs font-medium uppercase tracking-wide opacity-70">Grade</p>
-                    <p className="text-4xl font-bold">{department.grade}</p>
+                    <p className="text-sm font-medium uppercase tracking-wide text-white/70">Grade</p>
+                    <p className="text-display text-white">{department.grade}</p>
                   </div>
-                  <div className="h-12 w-px bg-current opacity-20" />
+                  <div className="h-12 w-px bg-white/20" />
                   <div>
-                    <p className="text-sm font-medium opacity-70">Performance Score</p>
-                    <p className="text-2xl font-bold">{department.gradeScore}%</p>
+                    <p className="text-sm font-medium text-white/70">Performance Score</p>
+                    <p className="text-kpi-value text-white">{department.gradeScore}%</p>
                   </div>
                 </div>
               </div>
             </div>
-            <div className="mt-6 p-4 bg-indigo-50 rounded-xl border border-indigo-100">
-              <p className="text-gray-700">
-                <span className="font-semibold text-indigo-900">{department.name}</span> earned a{' '}
-                <span className="font-semibold text-indigo-900">{department.grade}</span> this week.{' '}
+            <div className="mt-6 p-4 bg-white/10 rounded-xl">
+              <p className="text-white/90">
+                <span className="font-semibold text-white">{department.name}</span> earned a{' '}
+                <span className="font-semibold text-white">{department.grade}</span> this week.{' '}
                 {department.insight}
               </p>
             </div>
           </motion.section>
-          <motion.section
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
-                <Target className="h-5 w-5" />
-              </div>
-              <h2 className="text-xl font-bold text-gray-900">Department KPIs</h2>
-              <span className="text-xs text-gray-400 ml-2">30-day trend</span>
-            </div>
-            {kpis.length > 0 ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {kpis.map((kpi) => (
-                  <KPICard key={kpi.id} kpi={kpi} />
-                ))}
-              </div>
-            ) : (
-              <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-                <p className="text-gray-500">No KPI data available yet for this department.</p>
-              </div>
-            )}
+
+          {/* KPIs */}
+          <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.1 }}>
+            <SectionContainer
+              title="Department KPIs"
+              accentColor="bg-brand-500"
+              context={kpis.length > 0 ? `${kpis.length} metrics` : undefined}
+            >
+              {kpis.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {kpis.map((kpi, idx) => (
+                    <KPICard key={kpi.id} kpi={kpi} dark={idx === 0} />
+                  ))}
+                </div>
+              ) : (
+                <div className="bg-gray-50 rounded-xl p-8 text-center">
+                  <p className="text-gray-500">No KPI data available yet for this department.</p>
+                </div>
+              )}
+            </SectionContainer>
           </motion.section>
-          <motion.section
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.15 }}
-          >
+
+          {/* Department Memory */}
+          <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.15 }}>
             <DepartmentMemorySection workspaceId={deptId} />
           </motion.section>
-          <motion.section
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-teal-50 text-teal-600">
-                <Users className="h-5 w-5" />
-              </div>
-              <h2 className="text-xl font-bold text-gray-900">Department Agent Activity</h2>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {agents.map((agent) => (
-                <AgentCard key={agent.id} agent={agent} />
-              ))}
-            </div>
+
+          {/* Agent Activity */}
+          <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.2 }}>
+            <SectionContainer
+              title="Department Agents"
+              accentColor="bg-emerald-500"
+              context={agents.length > 0 ? `${agents.length} active` : undefined}
+            >
+              {agents.length > 0 ? (
+                <div className="divide-y divide-gray-100">
+                  {agents.map((agent) => (
+                    <AgentRow key={agent.id} agent={agent} />
+                  ))}
+                </div>
+              ) : (
+                <div className="bg-gray-50 rounded-xl p-8 text-center">
+                  <p className="text-gray-500">No agents assigned to this department.</p>
+                </div>
+              )}
+            </SectionContainer>
           </motion.section>
-          <motion.section
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 }}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
-                <Sparkles className="h-5 w-5" />
-              </div>
-              <h2 className="text-xl font-bold text-gray-900">Department Recommendations</h2>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              {recommendations.map((rec) => (
-                <RecommendationCard
-                  key={rec.id}
-                  recommendation={rec}
-                  onApprove={() => {}}
-                  onDismiss={() => {}}
-                  onSave={() => {}}
-                />
-              ))}
-            </div>
-          </motion.section>
+
+          {/* Recommendations */}
+          {recommendations.length > 0 && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.3 }}>
+              <SectionContainer
+                title="Department Recommendations"
+                accentColor="bg-amber-500"
+                context={`${recommendations.length} suggestions`}
+              >
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  {recommendations.map((rec) => (
+                    <RecommendationCard
+                      key={rec.id}
+                      recommendation={rec}
+                      onApprove={() => {}}
+                      onDismiss={() => {}}
+                      onSave={() => {}}
+                    />
+                  ))}
+                </div>
+              </SectionContainer>
+            </motion.section>
+          )}
+
           <div className="h-8" />
         </div>
       </main>

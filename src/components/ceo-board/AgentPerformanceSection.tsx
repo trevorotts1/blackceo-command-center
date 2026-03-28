@@ -206,7 +206,7 @@ export function AgentPerformanceSection() {
                       e.stopPropagation();
                       router.push(`/workspace/${dept}`);
                     }}
-                    title={`Go to ${deptLabel} workspace`}
+                    title={`Go to ${deptLabel} department`}
                   >
                     {deptLabel}
                   </span>

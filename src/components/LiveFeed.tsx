@@ -98,9 +98,9 @@ export function LiveFeed() {
               <button
                 key={tab}
                 onClick={() => setFilter(tab)}
-                className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
                   filter === tab
-                    ? 'bg-indigo-600 text-white'
+                    ? 'bg-brand-600 text-white'
                     : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
                 }`}
               >
@@ -135,13 +135,13 @@ function EventItem({ event }: { event: Event }) {
       case 'task_created':
         return 'bg-blue-500';
       case 'task_assigned':
-        return 'bg-purple-500';
+        return 'bg-brand-500';
       case 'task_status_changed':
         return 'bg-amber-500';
       case 'task_completed':
         return 'bg-emerald-500';
       case 'message_sent':
-        return 'bg-indigo-500';
+        return 'bg-brand-500';
       case 'agent_joined':
         return 'bg-cyan-500';
       case 'agent_status_changed':
@@ -159,7 +159,7 @@ function EventItem({ event }: { event: Event }) {
     <div
       className={`p-2.5 rounded-lg animate-slide-in transition-colors ${
         isHighlight
-          ? 'bg-indigo-50 border border-indigo-100'
+          ? 'bg-brand-50 border border-brand-100'
           : 'hover:bg-gray-50'
       }`}
     >
@@ -169,7 +169,7 @@ function EventItem({ event }: { event: Event }) {
           <p className="text-sm text-gray-700 leading-snug">
             {event.message}
           </p>
-          <div className="flex items-center gap-1 mt-1 text-xs text-gray-400">
+          <div className="flex items-center gap-1 mt-1 text-sm text-gray-400">
             <Clock className="w-3 h-3" />
             {formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}
           </div>

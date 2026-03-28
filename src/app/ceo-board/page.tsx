@@ -14,6 +14,7 @@ import { PerformanceGaugeChart } from '@/components/ceo-board/redesign/Performan
 import { NeedsAttentionSection } from '@/components/ceo-board/redesign/NeedsAttentionSection';
 import { RecommendationsRow } from '@/components/ceo-board/redesign/RecommendationsRow';
 import { SectionContainer } from '@/components/ceo-board/redesign/SectionContainer';
+import { Breadcrumb } from '@/components/Breadcrumb';
 
 // Existing bottom sections (kept as-is)
 import { DevilsAdvocateFeed } from '@/components/ceo-board/DevilsAdvocateFeed';
@@ -172,8 +173,12 @@ export default function CEOPerformanceBoardPage() {
             <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
             <span className="text-sm font-medium text-emerald-600">Live</span>
           </div>
-          <button className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-gray-200/60 transition-colors">
-            <Settings className="h-5 w-5 text-gray-500" />
+          <button
+            disabled
+            title="Settings coming soon"
+            className="flex items-center justify-center w-10 h-10 rounded-full text-gray-300 cursor-not-allowed transition-colors"
+          >
+            <Settings className="h-5 w-5" />
           </button>
           <div className="flex items-center gap-1">
             <div className="h-9 w-9 rounded-full bg-emerald-600 flex items-center justify-center">
@@ -187,6 +192,14 @@ export default function CEOPerformanceBoardPage() {
       {/* Main Content */}
       <main className="relative z-10 p-8">
         <div className="max-w-[1600px] mx-auto space-y-12">
+          {/* Breadcrumb */}
+          <Breadcrumb
+            items={[
+              { label: 'Home', href: '/' },
+              { label: 'CEO Board' },
+            ]}
+          />
+
           {/* 1. Company Health Hero */}
           <motion.section variants={sectionVariants}>
             <CompanyHeroCard />

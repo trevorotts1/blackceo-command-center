@@ -59,9 +59,9 @@ const config: Config = {
         'bcc-text-muted': '#9CA3AF',
         
         // Brand colors
-        'bcc-primary': '#4F46E5',
-        'bcc-primary-hover': '#4338CA',
-        'bcc-primary-light': '#EEF2FF',
+        'bcc-primary': '#43A047',
+        'bcc-primary-hover': '#388E3C',
+        'bcc-primary-light': '#E8F5E9',
         
         // Status colors for column pills
         'bcc-inbox': '#3B82F6',

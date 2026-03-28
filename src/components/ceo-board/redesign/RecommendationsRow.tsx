@@ -1,31 +1,23 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowRight, Zap, TrendingUp, Shield } from 'lucide-react';
+import { ArrowRight, Zap, TrendingUp, Shield, Eye } from 'lucide-react';
 
-const PLACEHOLDER_RECOMMENDATIONS = [
-  {
-    id: '1',
-    icon: Zap,
-    gradient: 'from-indigo-500 to-violet-600',
-    title: 'Boost Agent Velocity',
-    body: 'Assign parallel tasks to idle agents to increase throughput by up to 40%.',
-  },
-  {
-    id: '2',
-    icon: TrendingUp,
-    gradient: 'from-amber-500 to-orange-600',
-    title: 'Clear Blocked Tasks',
-    body: 'Resolve dependency chains in 3 departments to unblock 5 pending tasks.',
-  },
-  {
-    id: '3',
-    icon: Shield,
-    gradient: 'from-emerald-500 to-teal-600',
-    title: 'Review Compliance',
-    body: "Devil's Advocate flagged 2 recommendations that haven't been addressed.",
-  },
-];
+interface Recommendation {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  confidence: number;
+}
+
+const CATEGORY_CONFIG: Record<string, { icon: typeof Zap; gradient: string }> = {
+  'do-more': { icon: Zap, gradient: 'from-indigo-500 to-violet-600' },
+  'try': { icon: TrendingUp, gradient: 'from-amber-500 to-orange-600' },
+  'stop': { icon: Shield, gradient: 'from-red-500 to-rose-600' },
+  'watch': { icon: Eye, gradient: 'from-emerald-500 to-teal-600' },
+};
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -48,6 +40,44 @@ const cardVariants = {
 };
 
 export function RecommendationsRow() {
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchRecommendations() {
+      try {
+        const res = await fetch('/api/recommendations?status=pending&limit=3');
+        if (res.ok) {
+          const data = await res.json();
+          setRecommendations(Array.isArray(data) ? data : []);
+        }
+      } catch {
+        // empty state
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchRecommendations();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {[1, 2, 3].map((i) => (
+          <div key={i} className="rounded-2xl shadow-sm p-6 animate-pulse bg-white/88 h-40" />
+        ))}
+      </div>
+    );
+  }
+
+  if (recommendations.length === 0) {
+    return (
+      <div className="text-center py-8 text-gray-400 text-sm">
+        No recommendations yet
+      </div>
+    );
+  }
+
   return (
     <motion.div
       className="grid grid-cols-1 md:grid-cols-3 gap-4"
@@ -55,8 +85,9 @@ export function RecommendationsRow() {
       initial="hidden"
       animate="visible"
     >
-      {PLACEHOLDER_RECOMMENDATIONS.map((rec) => {
-        const Icon = rec.icon;
+      {recommendations.map((rec) => {
+        const config = CATEGORY_CONFIG[rec.category] || CATEGORY_CONFIG['watch'];
+        const Icon = config.icon;
         return (
           <motion.div
             key={rec.id}
@@ -70,7 +101,7 @@ export function RecommendationsRow() {
           >
             {/* Icon */}
             <div
-              className={`flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br ${rec.gradient}`}
+              className={`flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br ${config.gradient}`}
             >
               <Icon className="h-5 w-5 text-white" />
             </div>
@@ -81,13 +112,18 @@ export function RecommendationsRow() {
             </h3>
 
             {/* Body */}
-            <p className="text-base text-gray-600 mt-1 line-clamp-2">{rec.body}</p>
+            <p className="text-base text-gray-600 mt-1 line-clamp-2">{rec.description}</p>
 
-            {/* Action Link */}
-            <button className="flex items-center gap-1 mt-3 text-sm font-medium text-emerald-600 hover:text-emerald-700 transition-colors">
-              Take action
-              <ArrowRight className="h-3 w-3" />
-            </button>
+            {/* Confidence */}
+            <div className="flex items-center gap-2 mt-3">
+              <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 rounded-full"
+                  style={{ width: `${Math.round(rec.confidence * 100)}%` }}
+                />
+              </div>
+              <span className="text-xs text-gray-500">{Math.round(rec.confidence * 100)}%</span>
+            </div>
           </motion.div>
         );
       })}

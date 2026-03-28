@@ -60,16 +60,16 @@ export default function DepartmentBreakdownsPage() {
                 items={[
                   { label: 'Home', href: '/' },
                   { label: 'CEO Board', href: '/ceo-board' },
-                  { label: 'Department Breakdowns' },
+                  { label: 'Departments' },
                 ]}
               />
-              <h1 className="text-xl font-bold text-gray-900 mt-1">Department Breakdowns</h1>
+              <h1 className="text-page-title text-gray-900 mt-1">Departments</h1>
             </div>
           </div>
 
           {/* Right - Subtitle */}
           <div className="hidden sm:block">
-            <p className="text-sm text-gray-500">Performance overview by department</p>
+            <p className="text-base text-gray-500">Performance overview by department</p>
           </div>
         </div>
       </motion.header>
