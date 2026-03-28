@@ -2,7 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import DemoBanner from '@/components/DemoBanner';
-import AppShell from '@/components/AppShell';
+// AppShell sidebar removed — top header + breadcrumbs handle navigation
+// import AppShell from '@/components/AppShell';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -40,9 +41,7 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
       <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-screen`}>
         <DemoBanner />
-        <AppShell>
-          {children}
-        </AppShell>
+        {children}
       </body>
     </html>
   );
