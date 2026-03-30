@@ -18,12 +18,51 @@ import {
   ChevronDown,
   ChevronUp,
   Zap,
+  Activity,
+  Play,
+  Scissors,
 } from 'lucide-react';
 import { Sparkline } from '@/components/ceo-board/Sparkline';
 import DepartmentMemorySection from '@/components/ceo-board/DepartmentMemorySection';
 import { SectionContainer } from '@/components/ceo-board/redesign/SectionContainer';
+import { GoalsSection } from '@/components/ceo-board/redesign/GoalsSection';
+import { TeamContextSection } from '@/components/ceo-board/redesign/TeamContextSection';
+import { LessonsSection } from '@/components/ceo-board/redesign/LessonsSection';
+import { HRCultureSpotlight } from '@/components/ceo-board/HRCultureSpotlight';
+import { HRTalentPipeline } from '@/components/ceo-board/HRTalentPipeline';
+import { HRVoiceCommand } from '@/components/ceo-board/HRVoiceCommand';
+import EnvironmentStatusSection from '@/components/ceo-board/EnvironmentStatusSection';
+import LiveLogsSection from '@/components/ceo-board/LiveLogsSection';
+import CampaignSpotlightCard from '@/components/ceo-board/CampaignSpotlightCard';
+import MarketingMemoryDefaults from '@/components/ceo-board/MarketingMemoryDefaults';
+import SupportDashboardExtras from '@/components/ceo-board/SupportDashboardExtras';
+import { ResearchInsightsSection } from '@/components/ceo-board/ResearchInsightsSection';
+import OperationsKPITiles from '@/components/ceo-board/ops/OperationsKPITiles';
+import CreativeHeroMetrics from '@/components/ceo-board/creative/CreativeHeroMetrics';
+import CreativeMemoryGrid from '@/components/ceo-board/creative/CreativeMemoryGrid';
+import CreativeSprints from '@/components/ceo-board/creative/CreativeSprints';
+import ActiveSprintCard from '@/components/ceo-board/ops/ActiveSprintCard';
+import AutomationRoadmap from '@/components/ceo-board/ops/AutomationRoadmap';
+import RecentIncidents from '@/components/ceo-board/ops/RecentIncidents';
 
-// Types
+interface DeptMemoryItem {
+  id: string;
+  workspace_id: string;
+  memory_type: 'goal' | 'constraint' | 'context' | 'decision' | 'lesson';
+  content: string;
+  importance: number;
+  created_at: string;
+}
+interface DepartmentData {
+  id: string;
+  name: string;
+  emoji: string;
+  headTitle: string;
+  grade: 'A' | 'B' | 'C' | 'D' | 'F';
+  gradeScore: number;
+  insight: string;
+}
+
 interface DepartmentData {
   id: string;
   name: string;
@@ -120,6 +159,26 @@ function computeTrend(data: number[]): { trend: 'up' | 'down' | 'flat'; changePe
   };
 }
 
+function isOperationsDept(id: string, name?: string): boolean {
+  const needle = `${id} ${name || ''}`.toLowerCase();
+  return needle.includes('operations') || needle.includes('ops');
+}
+
+function isHrDept(id: string, name?: string): boolean {
+  const needle = `${id} ${name || ''}`.toLowerCase();
+  return needle.includes('hr') || needle.includes('human resource') || needle.includes('people');
+}
+
+function isMarketingDept(id: string, name?: string): boolean {
+  const needle = `${id} ${name || ''}`.toLowerCase();
+  return needle.includes('marketing') || needle.includes('growth');
+}
+
+function isLegalDept(id: string, name?: string): boolean {
+  const needle = `${id} ${name || ''}`.toLowerCase();
+  return needle.includes('legal') || needle.includes('compliance');
+}
+
 // --- Loading Skeletons ---
 
 function PageSkeleton() {
@@ -212,7 +271,77 @@ function PageSkeleton() {
 
 // --- KPI Card ---
 
-function KPICard({ kpi, dark }: { kpi: KPIData; dark?: boolean }) {
+function getHrKpiKind(name: string): 'onboarding' | 'satisfaction' | 'time-to-hire' | 'retention' | null {
+  const label = name.toLowerCase();
+  if (label.includes('onboarding')) return 'onboarding';
+  if (label.includes('satisfaction')) return 'satisfaction';
+  if (label.includes('time to hire') || label.includes('hire')) return 'time-to-hire';
+  if (label.includes('retention')) return 'retention';
+  return null;
+}
+
+function HrKpiFooter({ kpi, dark }: { kpi: KPIData; dark?: boolean }) {
+  const kind = getHrKpiKind(kpi.name);
+
+  if (kind === 'retention') {
+    return (
+      <div className="mt-4 flex items-center justify-between">
+        <div className="flex -space-x-2">
+          {['AL', 'JR', 'MK', 'TS'].map((initials, idx) => (
+            <div
+              key={initials}
+              className={`h-8 w-8 rounded-full border-2 flex items-center justify-center text-[10px] font-semibold ${dark ? 'border-brand-800 bg-white/90 text-gray-800' : 'border-white bg-emerald-100 text-emerald-700'}`}
+              style={{ zIndex: 5 - idx }}
+            >
+              {initials}
+            </div>
+          ))}
+        </div>
+        <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${dark ? 'bg-white/15 text-white/85' : 'bg-gray-100 text-gray-600'}`}>
+          +42
+        </span>
+      </div>
+    );
+  }
+
+  if (kind === 'time-to-hire') {
+    const threshold = Math.max(kpi.target || 30, 30);
+    const progress = Math.max(0, Math.min(100, (kpi.value / threshold) * 100));
+    return (
+      <div className="mt-4 space-y-2">
+        <p className={`text-[11px] font-semibold uppercase tracking-widest ${dark ? 'text-white/55' : 'text-amber-700/80'}`}>
+          Efficiency threshold: {threshold}d
+        </p>
+        <div className={`h-2 rounded-full overflow-hidden ${dark ? 'bg-white/10' : 'bg-amber-100'}`}>
+          <div className="h-full rounded-full bg-amber-400" style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+    );
+  }
+
+  if (kind === 'satisfaction') {
+    return (
+      <div className="mt-4 flex gap-1">
+        {['bg-emerald-500', 'bg-emerald-400', 'bg-amber-300', 'bg-orange-300'].map((segment, idx) => (
+          <div key={segment + idx} className={`h-2 flex-1 rounded-full ${segment} ${dark ? 'opacity-90' : ''}`} />
+        ))}
+      </div>
+    );
+  }
+
+  if (kind === 'onboarding') {
+    const progress = Math.max(0, Math.min(100, kpi.value));
+    return (
+      <div className={`mt-4 h-2 rounded-full overflow-hidden ${dark ? 'bg-white/10' : 'bg-emerald-100'}`}>
+        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${progress}%` }} />
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function KPICard({ kpi, dark, hrMode }: { kpi: KPIData; dark?: boolean; hrMode?: boolean }) {
   const TrendIcon = kpi.trend === 'up' ? TrendingUp : kpi.trend === 'down' ? TrendingDown : Minus;
   const trendColor = kpi.trend === 'up' ? 'text-emerald-600' : kpi.trend === 'down' ? 'text-rose-600' : 'text-gray-500';
   const trendBg = kpi.trend === 'up' ? 'bg-emerald-50' : kpi.trend === 'down' ? 'bg-rose-50' : 'bg-gray-100';
@@ -239,10 +368,11 @@ function KPICard({ kpi, dark }: { kpi: KPIData; dark?: boolean }) {
         <div className="h-12">
           <Sparkline data={kpi.sparkline} width={200} height={48} />
         </div>
-        <div className="mt-3 flex items-center justify-between text-sm">
+        {hrMode && <HrKpiFooter kpi={kpi} dark />}
+        <div className="mt-3 flex items-center justify-between text-sm gap-3">
           <span className="text-white/50">Target: {formatValue(kpi.target, kpi.unit)}</span>
           {benchmarkLabel && (
-            <span className={`font-medium ${benchmarkLabel === 'above' ? 'text-emerald-300' : 'text-amber-300'}`}>
+            <span className={`font-medium text-right ${benchmarkLabel === 'above' ? 'text-emerald-300' : 'text-amber-300'}`}>
               {benchmarkLabel === 'above' ? '↑' : '↓'} vs avg ({formatValue(kpi.benchmark!, kpi.unit)})
             </span>
           )}
@@ -268,14 +398,93 @@ function KPICard({ kpi, dark }: { kpi: KPIData; dark?: boolean }) {
       <div className="h-12">
         <Sparkline data={kpi.sparkline} width={200} height={48} />
       </div>
-      <div className="mt-3 flex items-center justify-between text-sm">
+      {hrMode && <HrKpiFooter kpi={kpi} />}
+      <div className="mt-3 flex items-center justify-between text-sm gap-3">
         <span className="text-gray-400">Target: {formatValue(kpi.target, kpi.unit)}</span>
         {benchmarkLabel && (
-          <span className={`font-medium ${benchmarkLabel === 'above' ? 'text-emerald-600' : 'text-amber-600'}`}>
+          <span className={`font-medium text-right ${benchmarkLabel === 'above' ? 'text-emerald-600' : 'text-amber-600'}`}>
             {benchmarkLabel === 'above' ? '↑' : '↓'} vs industry avg ({formatValue(kpi.benchmark!, kpi.unit)})
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+// --- AI Department Pulse ---
+
+function AIDepartmentPulse({ insight }: { insight: string }) {
+  return (
+    <div className="rounded-[28px] bg-gradient-to-br from-[#535456] to-[#3f4042] p-6 shadow-xl relative overflow-hidden group min-h-[240px] flex flex-col justify-between">
+      <div className="absolute top-0 right-0 p-5 opacity-10 group-hover:scale-110 transition-transform">
+        <Activity className="h-16 w-16 text-white" />
+      </div>
+      <div>
+        <p className="text-xs font-bold uppercase tracking-[0.28em] text-white/70 mb-4">AI Department Pulse</p>
+        <p className="text-[30px] leading-[1.2] font-medium text-white max-w-[22rem]">
+          &ldquo;{insight}&rdquo;
+        </p>
+      </div>
+      <div className="mt-8 flex gap-1 items-end">
+        {[3, 5, 4, 2, 6, 3, 5, 4, 2, 5, 3, 6, 4].map((h, i) => (
+          <div
+            key={i}
+            className="w-1.5 rounded-full bg-white/45 animate-pulse"
+            style={{ height: `${h * 5}px`, animationDelay: `${i * 100}ms` }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// --- Media Preview Cards ---
+
+function MediaPreviewCards() {
+  const cards = [
+    {
+      label: 'Latest Production',
+      subtitle: 'Current shoot slate',
+      icon: <Play className="h-4 w-4" />,
+      className: 'from-neutral-950 via-neutral-900 to-neutral-800',
+    },
+    {
+      label: 'Post-Processing',
+      subtitle: 'Edit and finishing queue',
+      icon: <Scissors className="h-4 w-4" />,
+      className: 'from-zinc-900 via-slate-900 to-neutral-800',
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      {cards.map((card) => (
+        <div
+          key={card.label}
+          className={`rounded-[28px] overflow-hidden aspect-[1.45] relative group cursor-pointer shadow-xl bg-gradient-to-br ${card.className}`}
+        >
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(34,197,94,0.18),transparent_35%),linear-gradient(to_top,rgba(0,0,0,0.72),rgba(0,0,0,0.08))]" />
+          <div className="absolute inset-0 p-6 flex flex-col justify-between">
+            <div className="flex justify-end">
+              <div className="rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/80 backdrop-blur-sm">
+                Preview
+              </div>
+            </div>
+            <div className="flex items-end justify-between gap-4">
+              <div className="flex items-center gap-2 text-white">
+                {card.icon}
+                <div>
+                  <div className="text-xs font-bold tracking-[0.24em] uppercase">{card.label}</div>
+                  <div className="mt-1 text-sm text-white/70">{card.subtitle}</div>
+                </div>
+              </div>
+              <div className="h-12 w-12 rounded-full bg-[#ffd54a] text-black flex items-center justify-center text-3xl leading-none shadow-lg">
+                +
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -487,6 +696,7 @@ export default function DepartmentSubBoardPage() {
   const [kpis, setKpis] = useState<KPIData[]>([]);
   const [agents, setAgents] = useState<AgentData[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [deptMemories, setDeptMemories] = useState<DeptMemoryItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -617,6 +827,18 @@ export default function DepartmentSubBoardPage() {
         setRecommendations([]);
       }
 
+      try {
+        const memoryRes = await fetch(`/api/dept-memory?workspace_id=${deptId}`);
+        if (memoryRes.ok) {
+          const memoryJson = await memoryRes.json();
+          setDeptMemories(Array.isArray(memoryJson.data) ? memoryJson.data : []);
+        } else {
+          setDeptMemories([]);
+        }
+      } catch {
+        setDeptMemories([]);
+      }
+
       setIsLoading(false);
     };
 
@@ -650,6 +872,42 @@ export default function DepartmentSubBoardPage() {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0 },
   };
+
+  const marketingDept = deptId === 'marketing';
+  const creativeDept = deptId === 'creative';
+  const hrDept = isHrDept(deptId, department?.name);
+  const supportDept = deptId === 'support';
+  const operationsDept = isOperationsDept(deptId, department?.name);
+
+  const hrGoals = [
+    {
+      name: 'Onboarding Velocity',
+      target: '7 Days',
+      progress: 50,
+      description: 'Reduce onboarding completion time from 14 days to 7 days.',
+    },
+  ];
+
+  const hrConstraints = [
+    {
+      text: 'All job postings must include salary range and benefits.',
+    },
+  ];
+
+  const hrTeamContext = {
+    location: '100% Fully Remote',
+    locationDetail: '85% US-based operation',
+    communication: 'Async-First',
+    communicationDetail: 'High communication autonomy',
+  };
+
+  const hrLessons = [
+    {
+      title: 'Efficiency Boost',
+      text: 'Pre-approved hiring templates reduced recruiter turnaround time by 40%.',
+      color: 'emerald',
+    },
+  ];
 
   return (
     <div className="min-h-screen bg-[#F8F9FB]">
@@ -695,11 +953,31 @@ export default function DepartmentSubBoardPage() {
                   {department.emoji}
                 </div>
                 <div>
+                  {supportDept && (
+                    <span className="mb-2 inline-flex rounded-full bg-emerald-400/15 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.22em] text-emerald-200">
+                      Real-time Performance
+                    </span>
+                  )}
                   <h1 className="text-2xl sm:text-3xl font-bold text-white">{department.name}</h1>
                   <p className="text-white/70">{department.headTitle}</p>
                 </div>
               </div>
-              <div className="lg:ml-auto flex items-center gap-6">
+              <div className="lg:ml-auto flex flex-wrap items-center gap-4">
+                {hrDept && (
+                  <div className="min-w-[220px] rounded-2xl bg-white/10 px-5 py-4">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/60">Current Period</p>
+                    <p className="mt-1 text-sm font-semibold text-white">Oct 2023 - Dec 2023</p>
+                    <div className="mt-4">
+                      <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-[0.18em] text-white/60">
+                        <span>Active Utilization</span>
+                        <span className="text-white/85">75%</span>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/10">
+                        <div className="h-full w-3/4 rounded-full bg-amber-300" />
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className="flex items-center gap-4 px-6 py-4 rounded-2xl bg-white/10">
                   <div className="text-center">
                     <p className="text-sm font-medium uppercase tracking-wide text-white/70">Grade</p>
@@ -720,54 +998,292 @@ export default function DepartmentSubBoardPage() {
                 {department.insight}
               </p>
             </div>
+            {deptId === 'research' && (
+              <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-6 border-t border-white/10 pt-6">
+                <div className="md:col-span-2">
+                  <h3 className="text-xs uppercase tracking-widest text-white/50 font-bold mb-2">Description</h3>
+                  <p className="text-white/80 leading-relaxed text-sm">
+                    {department.insight} Focusing on deep market synthesis and trend forecasting.
+                  </p>
+                </div>
+                <div>
+                  <h3 className="text-xs uppercase tracking-widest text-white/50 font-bold mb-2">Department Goal</h3>
+                  <p className="text-white/70 text-sm italic">
+                    &ldquo;Deliver quarterly market analysis reports 2 weeks ahead of board meetings.&rdquo;
+                  </p>
+                </div>
+              </div>
+            )}
           </motion.section>
 
-          {/* KPIs */}
+          {creativeDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.08 }}>
+              <CreativeHeroMetrics />
+            </motion.section>
+          )}
+
+          {operationsDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.09 }}>
+              <OperationsKPITiles />
+            </motion.section>
+          )}
+
+          {/* KPI + memory board */}
           <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.1 }}>
-            <SectionContainer
-              title="Department KPIs"
-              accentColor="bg-brand-500"
-              context={kpis.length > 0 ? `${kpis.length} metrics` : undefined}
-            >
-              {kpis.length > 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                  {kpis.map((kpi, idx) => (
-                    <KPICard key={kpi.id} kpi={kpi} dark={idx === 0} />
-                  ))}
+            {marketingDept ? (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                <div className="lg:col-span-8 space-y-6">
+                  <SectionContainer
+                    title="Department KPIs"
+                    accentColor="bg-brand-500"
+                    context={kpis.length > 0 ? `${kpis.length} metrics` : undefined}
+                  >
+                    {kpis.length > 0 ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {kpis.map((kpi, idx) => (
+                          <KPICard key={kpi.id} kpi={kpi} dark={idx === 0} hrMode={hrDept} />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="bg-gray-50 rounded-xl p-8 text-center">
+                        <p className="text-gray-500">No KPI data available yet for this department.</p>
+                      </div>
+                    )}
+                  </SectionContainer>
+
+                  <SectionContainer
+                    title="Department Memory"
+                    accentColor="bg-brand-500"
+                    context="4 memories stored"
+                  >
+                    <MarketingMemoryDefaults />
+                  </SectionContainer>
                 </div>
-              ) : (
-                <div className="bg-gray-50 rounded-xl p-8 text-center">
-                  <p className="text-gray-500">No KPI data available yet for this department.</p>
+
+                <div className="lg:col-span-4 space-y-6">
+                  <SectionContainer
+                    title="Department Agents"
+                    accentColor="bg-emerald-500"
+                    context={agents.length > 0 ? `${agents.length} active` : undefined}
+                  >
+                    {agents.length > 0 ? (
+                      <div className="divide-y divide-gray-100">
+                        {agents.map((agent) => (
+                          <AgentRow key={agent.id} agent={agent} />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-[28px] border border-dashed border-gray-200 bg-[#FAFAF8] px-6 py-10 min-h-[360px] flex flex-col items-center justify-center text-center">
+                        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-white shadow-sm">
+                          <Users className="h-9 w-9 text-gray-300" />
+                        </div>
+                        <p className="text-xl font-semibold text-gray-900">No agents assigned</p>
+                        <p className="mt-3 max-w-[220px] text-sm text-gray-500">
+                          There are currently no agents assigned to this department.
+                        </p>
+                        <button
+                          type="button"
+                          className="mt-6 inline-flex items-center justify-center rounded-full bg-brand-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm"
+                        >
+                          Assign Agent
+                        </button>
+                      </div>
+                    )}
+                  </SectionContainer>
+
+                  <CampaignSpotlightCard
+                    title="The BlackCEO Summit 2025"
+                    label="Campaign Spotlight"
+                  />
                 </div>
-              )}
-            </SectionContainer>
+              </div>
+            ) : hrDept ? (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                <div className="lg:col-span-8 space-y-6">
+                  <SectionContainer
+                    title="Department KPIs"
+                    accentColor="bg-brand-500"
+                    context={kpis.length > 0 ? `${kpis.length} metrics` : undefined}
+                  >
+                    {kpis.length > 0 ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {kpis.map((kpi, idx) => (
+                          <KPICard key={kpi.id} kpi={kpi} dark={idx === 0} hrMode={hrDept} />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="bg-gray-50 rounded-xl p-8 text-center">
+                        <p className="text-gray-500">No KPI data available yet for this department.</p>
+                      </div>
+                    )}
+                  </SectionContainer>
+                  <GoalsSection goals={hrGoals} constraints={hrConstraints} />
+                </div>
+                <div className="lg:col-span-4 space-y-6">
+                  <TeamContextSection data={hrTeamContext} />
+                  <LessonsSection lessons={hrLessons} />
+                </div>
+              </div>
+            ) : (
+              <SectionContainer
+                title="Department KPIs"
+                accentColor="bg-brand-500"
+                context={kpis.length > 0 ? `${kpis.length} metrics` : undefined}
+              >
+                {kpis.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {kpis.map((kpi, idx) => (
+                      <KPICard key={kpi.id} kpi={kpi} dark={idx === 0} hrMode={hrDept} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="bg-gray-50 rounded-xl p-8 text-center">
+                    <p className="text-gray-500">No KPI data available yet for this department.</p>
+                  </div>
+                )}
+              </SectionContainer>
+            )}
           </motion.section>
 
-          {/* Department Memory */}
-          <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.15 }}>
-            <DepartmentMemorySection workspaceId={deptId} />
-          </motion.section>
+          {deptId === 'research' && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.12 }}>
+              <ResearchInsightsSection />
+            </motion.section>
+          )}
 
-          {/* Agent Activity */}
-          <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.2 }}>
-            <SectionContainer
-              title="Department Agents"
-              accentColor="bg-emerald-500"
-              context={agents.length > 0 ? `${agents.length} active` : undefined}
-            >
-              {agents.length > 0 ? (
-                <div className="divide-y divide-gray-100">
-                  {agents.map((agent) => (
-                    <AgentRow key={agent.id} agent={agent} />
-                  ))}
+          {supportDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.13 }}>
+              <SupportDashboardExtras workspaceId={deptId} kpiCount={kpis.length} />
+            </motion.section>
+          )}
+
+          {/* Department Memory - creative, IT, and HR get richer layouts */}
+          {!marketingDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.15 }}>
+              {creativeDept ? (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                  <div className="lg:col-span-8">
+                    <CreativeMemoryGrid />
+                  </div>
+                  <div className="lg:col-span-4">
+                    <CreativeSprints />
+                  </div>
+                </div>
+              ) : deptId === 'it' ? (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                  {/* Left: Memory + Environment Status */}
+                  <div className="lg:col-span-8 space-y-6">
+                    <DepartmentMemorySection workspaceId={deptId} />
+                    <EnvironmentStatusSection />
+                  </div>
+                  {/* Right: Agents + Live Logs */}
+                  <div className="lg:col-span-4 space-y-6">
+                    <SectionContainer
+                      title="Department Agents"
+                      accentColor="bg-emerald-500"
+                      context={agents.length > 0 ? `${agents.length} active` : undefined}
+                    >
+                      {agents.length > 0 ? (
+                        <div className="divide-y divide-gray-100">
+                          {agents.map((agent) => (
+                            <AgentRow key={agent.id} agent={agent} />
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="bg-gray-50 rounded-xl p-8 text-center">
+                          <p className="text-gray-500">No agents assigned to this department.</p>
+                          <button className="mt-4 inline-flex items-center justify-center rounded-full border border-gray-300 px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-white">
+                            Assign Agent
+                          </button>
+                        </div>
+                      )}
+                    </SectionContainer>
+                    <LiveLogsSection />
+                  </div>
+                </div>
+              ) : hrDept ? (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                  <div className="lg:col-span-8 space-y-6">
+                    <DepartmentMemorySection workspaceId={deptId} />
+                    <HRCultureSpotlight
+                      data={{
+                        badge: 'Culture Spotlight',
+                        headline: 'Onboarding Velocity Push',
+                        body: 'The people team is tightening onboarding workflows and reinforcing clear compensation guidance to cut ramp time while keeping employee experience high.',
+                        ctaLabel: 'Coordinate Session',
+                      }}
+                    />
+                  </div>
+                  <div className="lg:col-span-4 space-y-6">
+                    <div className="rounded-2xl bg-white/90 backdrop-blur-md shadow-sm p-6">
+                      <HRTalentPipeline />
+                    </div>
+                    <HRVoiceCommand />
+                  </div>
+                </div>
+              ) : operationsDept ? (
+                <div className="space-y-6">
+                  <ActiveSprintCard />
+                  <DepartmentMemorySection workspaceId={deptId} />
                 </div>
               ) : (
-                <div className="bg-gray-50 rounded-xl p-8 text-center">
-                  <p className="text-gray-500">No agents assigned to this department.</p>
-                </div>
+                <DepartmentMemorySection workspaceId={deptId} />
               )}
-            </SectionContainer>
-          </motion.section>
+            </motion.section>
+          )}
+
+          {operationsDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.18 }}>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="md:col-span-2">
+                  <AutomationRoadmap />
+                </div>
+                <div>
+                  <RecentIncidents />
+                </div>
+              </div>
+            </motion.section>
+          )}
+
+          {/* Video dashboard extras from Stitch direction */}
+          {deptId === 'video' && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.17 }}>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+                <div className="lg:col-span-4">
+                  <AIDepartmentPulse insight={department.insight} />
+                </div>
+                <div className="lg:col-span-8">
+                  <MediaPreviewCards />
+                </div>
+              </div>
+            </motion.section>
+          )}
+
+          {/* Agent Activity - hidden for IT and Marketing (shown above) */}
+          {!marketingDept && deptId !== 'it' && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.2 }}>
+              <SectionContainer
+                title="Department Agents"
+                accentColor="bg-emerald-500"
+                context={agents.length > 0 ? `${agents.length} active` : undefined}
+              >
+                {agents.length > 0 ? (
+                  <div className="divide-y divide-gray-100">
+                    {agents.map((agent) => (
+                      <AgentRow key={agent.id} agent={agent} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="bg-gray-50 rounded-xl p-8 text-center">
+                    <p className="text-gray-500">No agents assigned to this department.</p>
+                    <button className="mt-4 inline-flex items-center justify-center rounded-full border border-gray-300 px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-white">
+                      Assign Agent
+                    </button>
+                  </div>
+                )}
+              </SectionContainer>
+            </motion.section>
+          )}
 
           {/* Recommendations */}
           {recommendations.length > 0 && (
