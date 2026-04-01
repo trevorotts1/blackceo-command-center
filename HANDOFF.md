@@ -11,7 +11,7 @@ BlackCEO Command Center is Trevor's AI agent orchestration dashboard. A Next.js 
 
 - **Location:** ~/projects/mission-control
 - **Tech:** Next.js 15 + React + TypeScript + Tailwind CSS + SQLite (better-sqlite3) + Zustand
-- **Port:** 3000 (PM2 process: "mission-control")
+- **Port:** 4000 (Mac: 3000 | VPS: 4000) (PM2 process: "mission-control")
 - **DB:** ~/projects/mission-control/mission-control.db (SQLite)
 
 ---

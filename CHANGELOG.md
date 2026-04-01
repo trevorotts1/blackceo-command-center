@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.9.2 — April 1, 2026
+- Fix HANDOFF.md port header to show Mac: 3000 | VPS: 4000 (QC fix)
+
+
 ## v2.9.1 - April 1, 2026
 
 ### Fixed — VPS Deployment Readiness
