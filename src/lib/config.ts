@@ -109,7 +109,7 @@ export function expandPath(path: string): string {
   }
 
   // This is client-side only - server will handle actual expansion
-  return path.replace(/^~/, process.env.HOME || '/Users/user');
+  return path.replace(/^~/, process.env.HOME || '/root');
 }
 
 /**

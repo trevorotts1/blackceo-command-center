@@ -70,7 +70,7 @@ npm install
 npm run dev
 ```
 
-Then open `http://localhost:3000` to see:
+Then open `http://localhost:4000` to see:
 1. Polished home screen with welcome message and stats
 2. Enhanced workspace cards with progress bars
 3. Kanban board with improved pill tags on task cards

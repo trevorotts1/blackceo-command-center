@@ -6,6 +6,10 @@ BACKUP_DIR=$APP_DIR/.next-backup
 PM2_NAME="mission-control"
 SITE_URL="https://trevor.zerohumanworkforce.com"
 
+# VPS: Override these variables for your deployment
+# Example: APP_DIR=/data/mission-control
+# Example: SITE_URL=http://YOUR_VPS_IP:4000
+
 echo "=== Mission Control Safe Deploy ==="
 
 # Step 1: Backup current .next build

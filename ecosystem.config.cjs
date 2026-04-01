@@ -1,7 +1,9 @@
 module.exports = {
   apps: [{
     name: 'mission-control',
-    script: '/opt/homebrew/bin/npx',
+    // Mac: /opt/homebrew/bin/npx | VPS/Docker: npx (from PATH, install via npm i -g)
+    // If npx not found, replace with full path: which npx
+    script: 'npx',
     args: `next start -p ${process.env.PORT || 4000} -H 0.0.0.0`,
     cwd: process.cwd(),
     env: {

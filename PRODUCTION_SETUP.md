@@ -44,7 +44,7 @@ DATABASE_PATH=./mission-control.db
 OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
 OPENCLAW_GATEWAY_TOKEN=your-token-here
 
-# Workspace Paths
+# Workspace Paths (Mac: ~/Documents/Shared | VPS: /data/workspace)
 WORKSPACE_BASE_PATH=~/Documents/Shared
 PROJECTS_PATH=~/Documents/Shared/projects
 
@@ -192,6 +192,25 @@ PROJECTS_PATH=/var/lib/mission-control/workspace/projects
 MISSION_CONTROL_URL=https://mission-control.yourdomain.com
 OPENCLAW_GATEWAY_URL=wss://gateway.yourdomain.com
 OPENCLAW_GATEWAY_TOKEN=your-production-token
+```
+
+> **VPS/Docker note:** Replace workspace paths with `/data/workspace` and `/data/workspace/projects`.
+> The container's `/data/` directory is the only persistent storage.
+
+### PM2 Setup
+
+**Mac (standard install):**
+```bash
+npm install -g pm2
+```
+
+**VPS/Docker (persistent install — must use /data/ prefix):**
+```bash
+# Inside the Docker container
+npm install -g pm2 --prefix /data/.npm-global
+export PATH=/data/.npm-global/bin:$PATH
+# Add to shell profile so it persists:
+echo 'export PATH=/data/.npm-global/bin:$PATH' >> ~/.bashrc
 ```
 
 ### Database Backups

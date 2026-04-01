@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.9.1 - April 1, 2026
+
+### Fixed — VPS Deployment Readiness
+- **ecosystem.config.cjs:** Changed `/opt/homebrew/bin/npx` to `npx` (Mac-only path broke VPS/Docker)
+- **HANDOFF.md:** Updated port 3000 references to 4000, removed hardcoded Mac IPs
+- **UI_CHANGES_SUMMARY.md:** Fixed localhost:3000 to localhost:4000
+- **config.ts:** Fixed `/Users/user` fallback path to `/root` for Linux/VPS compatibility
+
+### Added — VPS Deployment Docs
+- **DEPLOYMENT.md:** Added "Cloudflare Tunnel (Mac Only)" section with VPS skip instructions
+- **DEPLOYMENT.md:** Added VPS-specific PM2 install instructions (`--prefix /data/.npm-global`)
+- **PRODUCTION_SETUP.md:** Added VPS PM2 install section with persistent /data/ paths
+- **PRODUCTION_SETUP.md:** Added VPS note about replacing workspace paths with /data/ equivalents
+- **n8n-workflow-builder/TOOLS.md:** Populated with n8n API connection details and env var requirements
+
+### n8n Integration Status
+- n8n-workflow-builder agent exists but was a blank template (TOOLS.md had no config)
+- Updated TOOLS.md with n8n URL (main.blackceoautomations.com), API key env var name, and auth header format
+- Agent still needs: actual workflow templates, webhook URL configuration, and API integration testing
+- n8n is NOT integrated with Command Center's task system — it's a standalone agent for building n8n workflows manually
+
 ## v2.9.0 - April 1, 2026
 
 ### Fixed
