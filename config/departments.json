@@ -1,1 +1,121 @@
-[]
+[
+  {
+    "id": "dep-appdev",
+    "emoji": "\ud83d\udee0\ufe0f",
+    "name": "App Development",
+    "headTitle": "Head of App Development",
+    "workspacePath": "departments/appdev"
+  },
+  {
+    "id": "dep-audio",
+    "emoji": "\ud83c\udfb5",
+    "name": "Audio Production",
+    "headTitle": "Head of Audio Production",
+    "workspacePath": "departments/audio"
+  },
+  {
+    "id": "dep-billing",
+    "emoji": "\ud83d\udcb3",
+    "name": "Billing",
+    "headTitle": "Chief Financial Officer",
+    "workspacePath": "departments/billing"
+  },
+  {
+    "id": "dep-ceo",
+    "emoji": "\ud83d\udc54",
+    "name": "CEO",
+    "headTitle": "Chief Executive Officer",
+    "workspacePath": "departments/ceo"
+  },
+  {
+    "id": "dep-comms",
+    "emoji": "\ud83d\udce1",
+    "name": "Communications",
+    "headTitle": "Head of Communications",
+    "workspacePath": "departments/comms"
+  },
+  {
+    "id": "dep-creative",
+    "emoji": "\ud83c\udfa8",
+    "name": "Creative",
+    "headTitle": "Chief Creative Officer",
+    "workspacePath": "departments/creative"
+  },
+  {
+    "id": "dep-graphics",
+    "emoji": "\ud83d\uddbc\ufe0f",
+    "name": "Graphics",
+    "headTitle": "Head of Graphics",
+    "workspacePath": "departments/graphics"
+  },
+  {
+    "id": "dep-hr",
+    "emoji": "\ud83d\udc65",
+    "name": "Human Resources",
+    "headTitle": "Chief People Officer",
+    "workspacePath": "departments/hr"
+  },
+  {
+    "id": "dep-it",
+    "emoji": "\ud83d\udcbb",
+    "name": "IT",
+    "headTitle": "Chief Technology Officer",
+    "workspacePath": "departments/it"
+  },
+  {
+    "id": "dep-legal",
+    "emoji": "\u2696\ufe0f",
+    "name": "Legal",
+    "headTitle": "Chief Legal Officer",
+    "workspacePath": "departments/legal"
+  },
+  {
+    "id": "dep-marketing",
+    "emoji": "\ud83d\udce2",
+    "name": "Marketing",
+    "headTitle": "Chief Marketing Officer",
+    "workspacePath": "departments/marketing"
+  },
+  {
+    "id": "dep-operations",
+    "emoji": "\u2699\ufe0f",
+    "name": "Operations",
+    "headTitle": "Chief Operations Officer",
+    "workspacePath": "departments/operations"
+  },
+  {
+    "id": "dep-research",
+    "emoji": "\ud83d\udd2c",
+    "name": "Research",
+    "headTitle": "Head of Research",
+    "workspacePath": "departments/research"
+  },
+  {
+    "id": "dep-sales",
+    "emoji": "\ud83d\udcb0",
+    "name": "Sales",
+    "headTitle": "Chief Revenue Officer",
+    "workspacePath": "departments/sales"
+  },
+  {
+    "id": "dep-support",
+    "emoji": "\ud83d\udedf",
+    "name": "Support",
+    "headTitle": "Chief Support Officer",
+    "workspacePath": "departments/support"
+  },
+  {
+    "id": "dep-video",
+    "emoji": "\ud83c\udfac",
+    "name": "Video Production",
+    "headTitle": "Head of Video Production",
+    "workspacePath": "departments/video"
+  },
+  {
+    "id": "dep-webdev",
+    "emoji": "\ud83c\udf10",
+    "name": "Web Development",
+    "headTitle": "Head of Web Development",
+    "workspacePath": "departments/webdev"
+  }
+]
