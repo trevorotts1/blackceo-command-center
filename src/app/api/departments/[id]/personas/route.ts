@@ -40,13 +40,8 @@ export async function GET(
     ? resolve(process.env.WORKSPACE_BASE_PATH.replace(/^~/, homedir))
     : join(homedir, 'clawd');
 
-  // Department folder uses -dept suffix
-  const deptSlug = safeId.endsWith('-dept') ? safeId : `${safeId}-dept`;
-
+  // Department folder uses no suffix — bare slug like "marketing", "it", "webdev"
   const candidatePaths = [
-    join(homedir, 'clawd', 'departments', deptSlug, 'governing-personas.md'),
-    join(workspaceBase, 'departments', deptSlug, 'governing-personas.md'),
-    // Also check without -dept suffix for flexibility
     join(homedir, 'clawd', 'departments', safeId, 'governing-personas.md'),
     join(workspaceBase, 'departments', safeId, 'governing-personas.md'),
   ];
