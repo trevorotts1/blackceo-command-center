@@ -44,6 +44,9 @@ import CreativeSprints from '@/components/ceo-board/creative/CreativeSprints';
 import ActiveSprintCard from '@/components/ceo-board/ops/ActiveSprintCard';
 import AutomationRoadmap from '@/components/ceo-board/ops/AutomationRoadmap';
 import RecentIncidents from '@/components/ceo-board/ops/RecentIncidents';
+import { KPIStatCardsRow } from '@/components/ceo-board/KPIStatCardsRow';
+import { DeploymentHealthChart } from '@/components/ceo-board/DeploymentHealthChart';
+import { RepositoryStatusCard } from '@/components/ceo-board/RepositoryStatusCard';
 
 interface DeptMemoryItem {
   id: string;
@@ -878,6 +881,7 @@ export default function DepartmentSubBoardPage() {
   const hrDept = isHrDept(deptId, department?.name);
   const supportDept = deptId === 'support';
   const operationsDept = isOperationsDept(deptId, department?.name);
+  const appdevDept = deptId === 'appdev';
 
   const hrGoals = [
     {
@@ -1025,6 +1029,31 @@ export default function DepartmentSubBoardPage() {
           {operationsDept && (
             <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.09 }}>
               <OperationsKPITiles />
+            </motion.section>
+          )}
+
+          {/* App Dev: KPI Stat Cards Row - Stitch direction */}
+          {appdevDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.08 }}>
+              <KPIStatCardsRow
+                testCoverage={kpis.find(k => k.kpiId === 'test-coverage')?.value || 84.36}
+                avgBugFixTime={kpis.find(k => k.kpiId === 'bug-fix-time')?.value || 52.83}
+                featuresShipped={kpis.find(k => k.kpiId === 'features-shipped')?.value || 4.38}
+              />
+            </motion.section>
+          )}
+
+          {/* App Dev: Deployment Health + Repository - Stitch direction */}
+          {appdevDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.09 }}>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                <div className="lg:col-span-9">
+                  <DeploymentHealthChart />
+                </div>
+                <div className="lg:col-span-3">
+                  <RepositoryStatusCard />
+                </div>
+              </div>
             </motion.section>
           )}
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Settings, ChevronDown } from 'lucide-react';
@@ -10,6 +10,9 @@ import { CompanyHeroCard } from '@/components/ceo-board/redesign/CompanyHeroCard
 import { KPIStatCards } from '@/components/ceo-board/redesign/KPIStatCards';
 import { ActiveAgentsStrip } from '@/components/ceo-board/redesign/ActiveAgentsStrip';
 import { DepartmentPulseStrip } from '@/components/ceo-board/redesign/DepartmentPulseStrip';
+import { MonthlyActivityChart } from '@/components/ceo-board/redesign/MonthlyActivityChart';
+import { CompletionRateDonut } from '@/components/ceo-board/redesign/CompletionRateDonut';
+import { SystemPulseSection } from '@/components/ceo-board/redesign/SystemPulseSection';
 import { PerformanceGaugeChart } from '@/components/ceo-board/redesign/PerformanceGaugeChart';
 import { NeedsAttentionSection } from '@/components/ceo-board/redesign/NeedsAttentionSection';
 import { RecommendationsRow } from '@/components/ceo-board/redesign/RecommendationsRow';
@@ -51,56 +54,6 @@ const sectionVariants = {
 export default function CEOPerformanceBoardPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState('Dashboard');
-  const [monthlyStats, setMonthlyStats] = useState({ tasksDone: 0, agentsActive: 0, tasksPerWeek: 0 });
-  const [activeAgentCount, setActiveAgentCount] = useState(0);
-  const [deptCount, setDeptCount] = useState(0);
-  const [attentionCount, setAttentionCount] = useState(0);
-
-  useEffect(() => {
-    async function loadMonthlyStats() {
-      try {
-        const [wsRes, agentsRes] = await Promise.all([
-          fetch('/api/workspaces?stats=true'),
-          fetch('/api/agents'),
-        ]);
-
-        let departments: any[] = [];
-        let agents: any[] = [];
-
-        if (wsRes.ok) {
-          departments = (await wsRes.json()).filter((d: any) => {
-            const slug = d.slug || d.id;
-            return slug !== 'default' && !slug.startsWith('acme-') && !slug.startsWith('zhw-');
-          });
-        }
-        if (agentsRes.ok) agents = await agentsRes.json();
-
-        const tasksDone = departments.reduce((s: number, d: any) => s + (d.taskCounts?.done || 0), 0);
-        const agentsActive = agents.filter((a: any) => a.status === 'active' || a.status === 'working').length;
-        const tasksPerWeek = tasksDone > 0 ? Math.max(1, Math.round(tasksDone / 4)) : 0;
-
-        setMonthlyStats({ tasksDone, agentsActive, tasksPerWeek });
-        setActiveAgentCount(agentsActive);
-        setDeptCount(departments.length);
-
-        // Count items needing attention
-        let needsAttention = 0;
-        for (const d of departments) {
-          const total = d.taskCounts?.total || 0;
-          const done = d.taskCounts?.done || 0;
-          const blocked = d.taskCounts?.blocked || 0;
-          const inProgress = d.taskCounts?.in_progress || 0;
-          if (total === 0) continue;
-          const score = Math.round(((done + inProgress * 0.5) / total) * 100);
-          if (score < 60 || blocked > 0) needsAttention++;
-        }
-        setAttentionCount(needsAttention);
-      } catch {
-        // handled
-      }
-    }
-    loadMonthlyStats();
-  }, []);
 
   const currentDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
@@ -200,6 +153,16 @@ export default function CEOPerformanceBoardPage() {
             ]}
           />
 
+          {/* Page Title + Strategic Framing */}
+          <div className="mb-2">
+            <h1 className="text-3xl font-black text-gray-900 tracking-tight">
+              CEO Overview
+            </h1>
+            <p className="text-base text-gray-500 font-medium mt-1">
+              Strategic performance &amp; execution roadmap
+            </p>
+          </div>
+
           {/* 1. Company Health Hero */}
           <motion.section variants={sectionVariants}>
             <CompanyHeroCard />
@@ -210,71 +173,86 @@ export default function CEOPerformanceBoardPage() {
             <KPIStatCards />
           </motion.section>
 
-          {/* 2b. Monthly Activity Card */}
+          {/* 3. Bento Grid: Monthly Activity (8col) + Completion Rate & System Pulse (4col) */}
           <motion.section variants={sectionVariants}>
-            <div className="bg-amber-50 rounded-2xl shadow-sm p-8 border-l-4 border-l-amber-400">
-              <h3 className="text-xl font-bold text-gray-900 mb-6">Monthly Activity</h3>
-              <div className="flex items-center justify-between">
-                <div className="text-center flex-1">
-                  <span className="text-kpi-value text-gray-900">{monthlyStats.tasksDone}</span>
-                  <p className="text-base text-gray-600 mt-1">Tasks Done</p>
+            <div className="grid grid-cols-12 gap-6">
+              {/* Monthly Activity Chart - 8 columns */}
+              <div className="col-span-12 lg:col-span-8">
+                <MonthlyActivityChart />
+              </div>
+              {/* Performance Sidebar - 4 columns, stacked */}
+              <div className="col-span-12 lg:col-span-4 flex flex-col gap-6">
+                {/* Completion Rate Donut */}
+                <div
+                  className="rounded-2xl shadow-sm border-0 p-6 flex-1 flex items-center justify-center"
+                  style={{
+                    backgroundColor: 'rgba(255,255,255,0.88)',
+                    backdropFilter: 'blur(8px)',
+                    WebkitBackdropFilter: 'blur(8px)',
+                  }}
+                >
+                  <CompletionRateDonut />
                 </div>
-                <div className="w-px h-16 bg-amber-200" />
-                <div className="text-center flex-1">
-                  <span className="text-kpi-value text-gray-900">{monthlyStats.agentsActive}</span>
-                  <p className="text-base text-gray-600 mt-1">Agents Active</p>
-                </div>
-                <div className="w-px h-16 bg-amber-200" />
-                <div className="text-center flex-1">
-                  <span className="text-kpi-value text-gray-900">{monthlyStats.tasksPerWeek}</span>
-                  <p className="text-base text-gray-600 mt-1">Tasks/Week</p>
+                {/* System Pulse */}
+                <div
+                  className="rounded-2xl shadow-sm border-0 p-6"
+                  style={{
+                    backgroundColor: 'rgba(255,255,255,0.88)',
+                    backdropFilter: 'blur(8px)',
+                    WebkitBackdropFilter: 'blur(8px)',
+                  }}
+                >
+                  <SystemPulseSection />
                 </div>
               </div>
             </div>
           </motion.section>
 
-          {/* 3. Active Agents Strip */}
+          {/* 4. Active Agents Strip */}
           <motion.section variants={sectionVariants}>
-            <SectionContainer title="Active Agents" accentColor="bg-emerald-500" context={`${activeAgentCount} active`}>
+            <SectionContainer title="Active Agents" accentColor="bg-emerald-500">
               <ActiveAgentsStrip />
             </SectionContainer>
           </motion.section>
 
-          {/* 4. Department Pulse Strip */}
+          {/* 5. Department Pulse Strip */}
           <motion.section variants={sectionVariants}>
-            <SectionContainer title="Department Pulse" accentColor="bg-brand-500" context={`${deptCount} departments`}>
+            <SectionContainer title="Department Pulse" accentColor="bg-brand-500">
               <DepartmentPulseStrip />
             </SectionContainer>
           </motion.section>
 
-          {/* 5. Performance Gauge + Chart */}
+          {/* 6. Performance Gauge + Chart */}
           <motion.section variants={sectionVariants}>
             <SectionContainer title="Performance" accentColor="bg-blue-500">
               <PerformanceGaugeChart />
             </SectionContainer>
           </motion.section>
 
-          {/* 6. Needs Attention */}
+          {/* 7. Bento Grid: Execution Queue (4col) + Needs Attention (4col) + Devil's Advocate (4col) */}
           <motion.section variants={sectionVariants}>
-            <NeedsAttentionSection />
+            <div className="grid grid-cols-12 gap-6">
+              {/* Execution Queue */}
+              <div className="col-span-12 lg:col-span-4">
+                <ExecutionQueueSection />
+              </div>
+              {/* Needs Attention */}
+              <div className="col-span-12 lg:col-span-4">
+                <NeedsAttentionSection />
+              </div>
+              {/* Devil's Advocate */}
+              <div className="col-span-12 lg:col-span-4">
+                <DevilsAdvocateFeed />
+              </div>
+            </div>
           </motion.section>
 
-          {/* 7. Recommendations */}
+          {/* 8. Recommendations */}
           <motion.section variants={sectionVariants}>
             <RecommendationsRow />
           </motion.section>
 
-          {/* 8. Devil's Advocate Feed */}
-          <motion.section variants={sectionVariants}>
-            <DevilsAdvocateFeed />
-          </motion.section>
-
-          {/* 9. Execution Queue */}
-          <motion.section variants={sectionVariants}>
-            <ExecutionQueueSection />
-          </motion.section>
-
-          {/* 10. Manual KPI Entry */}
+          {/* 9. Manual KPI Entry */}
           <motion.section variants={sectionVariants}>
             <ManualKPISection />
           </motion.section>

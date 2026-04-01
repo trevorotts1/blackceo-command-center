@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.9.0 - April 1, 2026
+
+### Fixed
+- config/departments.json: populated with 17 real departments (was empty [])
+- Department IDs now use dept-[slug] format matching openclaw.json agent IDs
+- Department schema corrected: id, emoji, name, headTitle, workspacePath fields
+- Persona route path resolution fixed: strips dep- prefix for correct file lookup
+
+### Added
+- New department section components: CampaignSpotlightCard, ComplianceContextCard, DepartmentMemoryPreviewCard
+- DeploymentHealthChart, EnvironmentStatusSection, GoalsConstraintsSection
+- HRCultureSpotlight, HRTalentPipeline, HRVoiceCommand
+- KPIStatCardsRow, LiveLogsSection, MarketingMemoryDefaults
+- RepositoryStatusCard, ResearchInsightsSection, SupportDashboardExtras
+- Creative and Operations sub-sections
+
 ## v2.4.0 - March 27, 2026
 
 ### Added - Intelligence Settings

@@ -1,1 +1,121 @@
-[]
+[
+  {
+    "id": "dept-ceo",
+    "emoji": "👔",
+    "name": "CEO",
+    "headTitle": "Chief Executive Officer",
+    "workspacePath": "departments/ceo"
+  },
+  {
+    "id": "dept-operations",
+    "emoji": "⚙️",
+    "name": "Operations",
+    "headTitle": "Chief Operations Officer",
+    "workspacePath": "departments/operations"
+  },
+  {
+    "id": "dept-appdev",
+    "emoji": "🛠️",
+    "name": "App Development",
+    "headTitle": "Head of App Development",
+    "workspacePath": "departments/appdev"
+  },
+  {
+    "id": "dept-audio",
+    "emoji": "🎵",
+    "name": "Audio Production",
+    "headTitle": "Head of Audio Production",
+    "workspacePath": "departments/audio"
+  },
+  {
+    "id": "dept-billing",
+    "emoji": "💳",
+    "name": "Billing / Finance",
+    "headTitle": "Chief Financial Officer",
+    "workspacePath": "departments/billing"
+  },
+  {
+    "id": "dept-comms",
+    "emoji": "📡",
+    "name": "Communications",
+    "headTitle": "Head of Communications",
+    "workspacePath": "departments/comms"
+  },
+  {
+    "id": "dept-creative",
+    "emoji": "🎨",
+    "name": "Creative",
+    "headTitle": "Chief Creative Officer",
+    "workspacePath": "departments/creative"
+  },
+  {
+    "id": "dept-graphics",
+    "emoji": "🖼️",
+    "name": "Graphics",
+    "headTitle": "Head of Graphics",
+    "workspacePath": "departments/graphics"
+  },
+  {
+    "id": "dept-hr",
+    "emoji": "👥",
+    "name": "HR / People",
+    "headTitle": "Chief People Officer",
+    "workspacePath": "departments/hr"
+  },
+  {
+    "id": "dept-it",
+    "emoji": "💻",
+    "name": "IT / Tech",
+    "headTitle": "Chief Technology Officer",
+    "workspacePath": "departments/it"
+  },
+  {
+    "id": "dept-legal",
+    "emoji": "⚖️",
+    "name": "Legal / Compliance",
+    "headTitle": "Chief Legal Officer",
+    "workspacePath": "departments/legal"
+  },
+  {
+    "id": "dept-marketing",
+    "emoji": "📢",
+    "name": "Marketing",
+    "headTitle": "Chief Marketing Officer",
+    "workspacePath": "departments/marketing"
+  },
+  {
+    "id": "dept-research",
+    "emoji": "🔬",
+    "name": "Research",
+    "headTitle": "Head of Research",
+    "workspacePath": "departments/research"
+  },
+  {
+    "id": "dept-sales",
+    "emoji": "💰",
+    "name": "Sales",
+    "headTitle": "Chief Revenue Officer",
+    "workspacePath": "departments/sales"
+  },
+  {
+    "id": "dept-support",
+    "emoji": "🛟",
+    "name": "Customer Support",
+    "headTitle": "Chief Support Officer",
+    "workspacePath": "departments/support"
+  },
+  {
+    "id": "dept-video",
+    "emoji": "🎬",
+    "name": "Video Production",
+    "headTitle": "Head of Video Production",
+    "workspacePath": "departments/video"
+  },
+  {
+    "id": "dept-webdev",
+    "emoji": "🌐",
+    "name": "Web Development",
+    "headTitle": "Head of Web Development",
+    "workspacePath": "departments/webdev"
+  }
+]
