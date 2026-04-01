@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.9.3 - April 1, 2026
+
+### Upgraded — n8n TOOLS.md to 10/10
+- **agents/n8n-workflow-builder/TOOLS.md:** Complete rewrite with full API documentation
+- Added authentication example with curl and header format
+- Added 7 real API call examples: list, get, create, activate, deactivate, webhook execute, delete
+- Added working Webhook-to-Telegram workflow JSON template with deploy command
+- Added environment variables table (N8N_API_KEY, N8N_BASE_URL)
+- Added 6 common BlackCEO automation use cases
+- Added troubleshooting section covering 6 common errors and fixes
+
 ## v2.9.2 — April 1, 2026
 - Fix HANDOFF.md port header to show Mac: 3000 | VPS: 4000 (QC fix)
 
