@@ -78,7 +78,7 @@ export default function CEOPerformanceBoardPage() {
       {/* Navigation Header */}
       <motion.header
         variants={sectionVariants}
-        className="sticky top-0 z-50 h-16 flex items-center justify-between px-6"
+        className="sticky top-0 z-50 flex min-h-16 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-6 sm:py-0"
         style={{
           backgroundColor: '#F0F0F0',
           boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
@@ -88,7 +88,7 @@ export default function CEOPerformanceBoardPage() {
         <div className="flex items-center">
           <button
             onClick={() => router.push('/')}
-            className="px-4 py-2 rounded-full bg-white hover:bg-gray-50 transition-colors"
+            className="min-h-[40px] rounded-full bg-white px-4 py-2 transition-colors hover:bg-gray-50"
             style={{ border: '1px solid #CCCCCC' }}
           >
             <span className="text-sm font-medium text-[#1A1A1A]">BlackCEO</span>
@@ -96,7 +96,7 @@ export default function CEOPerformanceBoardPage() {
         </div>
 
         {/* CENTER - Text-only pill tabs */}
-        <nav className="flex items-center gap-1">
+        <nav className="order-3 flex w-full items-center gap-1 overflow-x-auto pb-1 sm:order-none sm:w-auto">
           {NAV_TABS.map((tab) => (
             <button
               key={tab}
@@ -105,7 +105,7 @@ export default function CEOPerformanceBoardPage() {
                 if (tab === 'Departments') router.push('/ceo-board/departments');
                 if (tab === 'Agents') router.push('/agent-roster');
               }}
-              className={`px-4 py-2 text-sm transition-colors ${
+              className={`min-h-[40px] shrink-0 px-4 py-2 text-sm transition-colors ${
                 activeTab === tab
                   ? 'bg-[#1A1A1A] text-white rounded-full font-medium'
                   : 'text-[#666666] hover:text-[#1A1A1A]'
@@ -117,7 +117,7 @@ export default function CEOPerformanceBoardPage() {
         </nav>
 
         {/* RIGHT - Date + separator + LIVE + settings + avatar */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 sm:gap-4">
           <span className="text-base text-gray-500 hidden sm:block">
             {currentDate}
           </span>
@@ -129,7 +129,7 @@ export default function CEOPerformanceBoardPage() {
           <button
             disabled
             title="Settings coming soon"
-            className="flex items-center justify-center w-10 h-10 rounded-full text-gray-300 cursor-not-allowed transition-colors"
+            className="flex h-10 w-10 items-center justify-center rounded-full text-gray-300 transition-colors cursor-not-allowed"
           >
             <Settings className="h-5 w-5" />
           </button>
@@ -143,7 +143,7 @@ export default function CEOPerformanceBoardPage() {
       </motion.header>
 
       {/* Main Content */}
-      <main className="relative z-10 p-8">
+      <main className="relative z-10 p-4 sm:p-6 lg:p-8">
         <div className="max-w-[1600px] mx-auto space-y-6">
           {/* Breadcrumb */}
           <Breadcrumb

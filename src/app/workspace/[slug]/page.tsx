@@ -292,9 +292,20 @@ export default function WorkspacePage() {
     <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
       <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
 
-      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
+      <div className="relative flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
+        {sidebarOpen && (
+          <button
+            type="button"
+            aria-label="Close departments menu"
+            className="fixed inset-0 z-20 bg-black/25 lg:hidden"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+
         {/* Agents Sidebar */}
-        <AgentsSidebar workspaceId={workspace.id} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-30 pt-[76px] transition-transform duration-200 lg:static lg:translate-x-0 lg:pt-0`}>
+          <AgentsSidebar workspaceId={workspace.id} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        </div>
 
         {/* Main Content Area */}
         {showTaskBoard ? (
@@ -304,7 +315,9 @@ export default function WorkspacePage() {
         )}
 
         {/* Live Feed */}
-        <LiveFeed />
+        <div className="hidden lg:block">
+          <LiveFeed />
+        </div>
       </div>
 
       {/* Debug Panel - only shows when debug mode enabled */}

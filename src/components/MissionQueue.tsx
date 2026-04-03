@@ -164,12 +164,12 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
           {effectiveDepartment && (
             <>
               <span className="hidden sm:block text-gray-300 mx-1">|</span>
-              <div className="flex items-center gap-2 bg-brand-50 text-brand-700 px-2 lg:px-3 py-1 lg:py-1.5 rounded-lg border border-brand-100 ml-auto lg:ml-0">
+              <div className="ml-auto flex min-h-[40px] items-center gap-2 rounded-lg border border-brand-100 bg-brand-50 px-2 lg:ml-0 lg:px-3 py-1 lg:py-1.5 text-brand-700">
                 <span className="text-base lg:text-lg leading-none">{departmentEmojis[effectiveDepartment] || '📋'}</span>
                 <span className="font-semibold text-sm hidden sm:inline">{departmentNames[effectiveDepartment] || effectiveDepartment}</span>
                 <button 
                   onClick={() => setSelectedDepartment(null)}
-                  className="ml-1 p-0.5 rounded-md hover:bg-brand-100 text-brand-400 hover:text-brand-900 transition-colors"
+                  className="ml-1 flex h-8 w-8 items-center justify-center rounded-md text-brand-400 transition-colors hover:bg-brand-100 hover:text-brand-900"
                   title="Clear filter"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -181,7 +181,7 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
         <div className="flex items-center gap-2 lg:gap-3 w-full lg:w-auto justify-end">
           <button
             onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-1.5 lg:gap-2 px-3 lg:px-5 py-2 lg:py-2.5 rounded-xl bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 transition-all shadow-md shadow-brand-200"
+            className="flex min-h-[44px] items-center gap-1.5 rounded-xl bg-brand-600 px-3 py-2 text-sm font-semibold text-white shadow-md shadow-brand-200 transition-all hover:bg-brand-700 lg:gap-2 lg:px-5 lg:py-2.5"
           >
             <Plus className="w-4 h-4" />
             <span className="hidden sm:inline">New Task</span>
@@ -197,7 +197,7 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
             <button
               key={filter.id}
               onClick={() => setActiveFilter(filter.id)}
-              className={`px-3 lg:px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 lg:gap-2 whitespace-nowrap ${
+              className={`flex min-h-[40px] items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition-all lg:gap-2 lg:px-4 ${
                 activeFilter === filter.id
                   ? 'text-gray-900 bg-gray-100 font-semibold'
                   : 'text-gray-500 hover:bg-gray-50'
@@ -216,14 +216,14 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
       </div>
 
       {/* Kanban Columns */}
-      <div className="flex-1 overflow-x-auto overflow-y-auto lg:overflow-y-hidden p-4 lg:p-8">
-        <div className="flex flex-col lg:flex-row gap-6 h-full min-w-0 lg:min-w-max pb-4">
+      <div className="flex-1 overflow-x-auto overflow-y-auto p-3 sm:p-4 lg:overflow-y-hidden lg:p-8">
+        <div className="flex h-full min-w-0 flex-col gap-4 pb-20 lg:min-w-max lg:flex-row lg:gap-6 lg:pb-4">
           {COLUMNS.map((column) => {
             const columnTasks = getTasksByStatus(column.id);
             return (
               <div
                 key={column.id}
-                className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                className="flex w-full flex-col gap-4 lg:w-80 lg:gap-6"
                 onDragOver={handleDragOver}
                 onDrop={(e) => handleDrop(e, column.id)}
               >
@@ -235,7 +235,7 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
                     </span>
                     <span className="text-sm font-bold">{column.label}</span>
                   </div>
-                  <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
+                  <button className="flex h-10 w-10 items-center justify-center rounded-lg border border-gray-100 bg-white text-gray-400 transition-all hover:text-gray-900 hover:shadow-sm lg:h-8 lg:w-8">
                     <Plus className="w-4 h-4" />
                   </button>
                 </div>
@@ -339,7 +339,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onClick}
-      className={`bg-white rounded-xl lg:rounded-2xl p-4 lg:p-5 card-shadow card-hover cursor-pointer border border-gray-50 w-full ${
+      className={`card-shadow card-hover w-full min-h-[88px] cursor-pointer rounded-xl border border-gray-50 bg-white p-4 lg:rounded-2xl lg:p-5 ${
         isDragging ? 'opacity-50 scale-95' : ''
       } ${isCompleted ? 'opacity-75' : ''}`}
     >
@@ -349,7 +349,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
       </h3>
 
       {/* Pill Tags Row */}
-      <div className="flex flex-wrap gap-1.5 mb-3">
+      <div className="mb-3 flex flex-wrap gap-1.5 overflow-hidden">
         {/* Status Pill */}
         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
           statusPillStyles[task.status] || 'bg-gray-100 text-gray-600'
@@ -359,8 +359,9 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
 
         {/* Persona Pill */}
         {(task as any).persona && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700">
-            🧠 {(task as any).persona}
+          <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700" title={(task as any).persona}>
+            <span className="shrink-0">🧠</span>
+            <span className="truncate">{(task as any).persona}</span>
           </span>
         )}
 
@@ -373,15 +374,16 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
 
         {/* Department Pill */}
         {task.department && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {departmentNames[task.department.toLowerCase()] || task.department}
+          <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700" title={departmentNames[task.department.toLowerCase()] || task.department}>
+            <span className="shrink-0">{departmentEmojis[task.department.toLowerCase()] || '🏢'}</span>
+            <span className="truncate">{departmentNames[task.department.toLowerCase()] || task.department}</span>
           </span>
         )}
 
         {/* Agent Pill */}
         {task.assigned_agent && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700">
-            {(task.assigned_agent as { name: string }).name}
+          <span className="inline-flex max-w-full items-center rounded-full bg-teal-100 px-2 py-0.5 text-xs font-medium text-teal-700" title={(task.assigned_agent as { name: string }).name}>
+            <span className="truncate">{(task.assigned_agent as { name: string }).name}</span>
           </span>
         )}
       </div>

@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown } from 'lucide-react';
+import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown, Menu } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -165,55 +165,63 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const tasksInQueue = tasks.filter((t) => t.status !== 'done' && t.status !== 'review').length;
 
   return (
-    <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4">
-      {/* Left: Logo & Title */}
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <img
-            src={logoUrl}
-            alt={LogoConfig.alt}
-            className="h-8 w-auto"
-          />
-        </div>
+    <header className="border-b border-gray-200 bg-white px-3 py-2 sm:px-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+          {workspace && onMenuClick && (
+            <button
+              onClick={onMenuClick}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-gray-200 text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900 lg:hidden"
+              aria-label={sidebarOpen ? 'Close departments menu' : 'Open departments menu'}
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+          )}
 
-        {/* Workspace indicator or back to dashboard */}
-        {workspace ? (
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <img
+              src={logoUrl}
+              alt={LogoConfig.alt}
+              className="h-8 w-auto"
+            />
+          </div>
+
+          {workspace ? (
+            <div className="hidden min-w-0 items-center gap-2 md:flex">
+              <Link
+                href="/"
+                className="flex min-h-[40px] items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50"
+              >
+                <Home className="w-4 h-4" />
+                <span>Home</span>
+              </Link>
+              <span className="text-gray-300">/</span>
+              <Link
+                href="/workspace"
+                className="flex min-h-[40px] items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                <span>All Departments</span>
+              </Link>
+              <span className="text-gray-300">/</span>
+              <div className="flex min-h-[40px] min-w-0 items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5">
+                <span className="text-lg">{workspace.icon}</span>
+                <span className="truncate font-semibold text-gray-900">{workspace.name}</span>
+              </div>
+            </div>
+          ) : (
             <Link
               href="/"
-              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
+              className="flex min-h-[40px] items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 transition-colors hover:border-gray-300 hover:bg-gray-100"
             >
-              <Home className="w-4 h-4" />
-              <span>Home</span>
+              <LayoutGrid className="w-4 h-4 text-gray-500" />
+              <span className="text-sm font-medium text-gray-700">All Departments</span>
             </Link>
-            <span className="text-gray-300">/</span>
-            <Link
-              href="/workspace"
-              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
-            >
-              <ChevronLeft className="w-4 h-4" />
-              <span>All Departments</span>
-            </Link>
-            <span className="text-gray-300">/</span>
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg">
-              <span className="text-lg">{workspace.icon}</span>
-              <span className="font-semibold text-gray-900">{workspace.name}</span>
-            </div>
-          </div>
-        ) : (
-          <Link
-            href="/"
-            className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 hover:border-gray-300 transition-colors"
-          >
-            <LayoutGrid className="w-4 h-4 text-gray-500" />
-            <span className="text-sm font-medium text-gray-700">All Departments</span>
-          </Link>
-        )}
-      </div>
+          )}
+        </div>
 
-      {/* Center: Stats - only show in workspace view */}
-      {workspace && (
-        <div className="flex items-center gap-8">
+        {workspace && (
+          <div className="hidden items-center gap-6 xl:flex">
           <div className="text-center">
             <div className="text-2xl font-bold text-brand-600">{activeAgents}</div>
             <div className="text-sm text-gray-500 uppercase tracking-wide">Agents Active</div>
@@ -226,23 +234,23 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
       )}
 
       {/* Right: Time & Status */}
-      <div className="flex items-center gap-4">
-        <span className="text-gray-500 text-sm font-mono">
+      <div className="flex items-center gap-2 sm:gap-3">
+        <span className="hidden text-sm font-mono text-gray-500 sm:inline">
           {format(currentTime, 'HH:mm:ss')}
         </span>
         <div
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
+          className={`flex min-h-[40px] items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium sm:px-3 sm:text-sm ${
             isOnline
-              ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
-              : 'bg-red-50 border border-red-200 text-red-700'
+              ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
+              : 'border border-red-200 bg-red-50 text-red-700'
           }`}
         >
           <span
-            className={`w-2 h-2 rounded-full ${
+            className={`h-2 w-2 rounded-full ${
               isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
             }`}
           />
-          {isOnline ? 'ONLINE' : 'OFFLINE'}
+          <span className="hidden sm:inline">{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
         </div>
 
         {/* AI Settings - only visible in department view */}
@@ -254,7 +262,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
                 setAiPanelOpen((prev) => !prev);
                 if (!aiPanelOpen) setAiLoaded(false);
               }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-brand-200 text-brand-700 text-sm font-medium rounded-lg hover:bg-brand-50 hover:border-brand-300 transition-all duration-200"
+              className="flex min-h-[40px] items-center gap-1.5 rounded-lg border border-brand-200 bg-white px-2.5 py-1.5 text-sm font-medium text-brand-700 transition-all duration-200 hover:border-brand-300 hover:bg-brand-50 sm:px-3"
               title="AI Settings for this department"
             >
               <Sparkles className="w-4 h-4" />
@@ -266,7 +274,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
             {aiPanelOpen && (
               <div
                 ref={aiPanelRef}
-                className="absolute right-0 top-full mt-2 w-72 bg-white border border-gray-200 rounded-xl shadow-lg z-50 p-4"
+                className="absolute right-0 top-full z-50 mt-2 w-[min(20rem,calc(100vw-1.5rem))] rounded-xl border border-gray-200 bg-white p-4 shadow-lg"
               >
                 {/* Department name */}
                 <div className="flex items-center gap-2 mb-3 pb-3 border-b border-gray-100">
@@ -335,12 +343,36 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
         <button
           onClick={() => router.push('/settings')}
-          className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors"
+          className="flex h-10 w-10 items-center justify-center rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700"
           title="Settings"
         >
           <Settings className="w-5 h-5" />
         </button>
       </div>
+    </div>
+
+      {workspace && (
+        <div className="mt-2 flex items-center gap-2 overflow-x-auto pb-1 md:hidden">
+          <Link
+            href="/"
+            className="flex min-h-[40px] shrink-0 items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50"
+          >
+            <Home className="w-4 h-4" />
+            <span>Home</span>
+          </Link>
+          <Link
+            href="/workspace"
+            className="flex min-h-[40px] shrink-0 items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            <span>Departments</span>
+          </Link>
+          <div className="flex min-h-[40px] min-w-0 shrink-0 items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5">
+            <span className="text-lg">{workspace.icon}</span>
+            <span className="max-w-[11rem] truncate text-sm font-semibold text-gray-900">{workspace.name}</span>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

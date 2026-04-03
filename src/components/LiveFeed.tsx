@@ -77,7 +77,7 @@ export function LiveFeed() {
         <div className="flex items-center">
           <button
             onClick={toggleMinimize}
-            className="p-1 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+            className="flex h-10 w-10 items-center justify-center rounded text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700"
             aria-label={isMinimized ? 'Expand feed' : 'Minimize feed'}
           >
             {isMinimized ? (
@@ -98,7 +98,7 @@ export function LiveFeed() {
               <button
                 key={tab}
                 onClick={() => setFilter(tab)}
-                className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
+                className={`min-h-[40px] rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                   filter === tab
                     ? 'bg-brand-600 text-white'
                     : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'

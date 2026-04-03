@@ -94,16 +94,16 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
 
   return (
     <aside
-      className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
-        isMinimized ? 'w-12' : 'w-72'
-      }`}
+      className={`h-full bg-white border-r border-gray-200 shadow-xl transition-all duration-300 ease-in-out lg:shadow-none ${
+        isMinimized ? 'w-12' : 'w-[85vw] max-w-[18rem] lg:w-72'
+      } flex flex-col`}
     >
       {/* Header */}
       <div className="p-3 border-b border-gray-100">
         <div className="flex items-center">
           <button
             onClick={toggleMinimize}
-            className="p-1 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+            className="flex h-10 w-10 items-center justify-center rounded text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700"
             aria-label={isMinimized ? 'Expand departments' : 'Minimize departments'}
           >
             {isMinimized ? (
@@ -141,7 +141,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                 <button
                   key={tab}
                   onClick={() => setFilter(tab)}
-                  className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
+                  className={`min-h-[40px] rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                     filter === tab
                       ? 'bg-brand-600 text-white'
                       : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
@@ -160,7 +160,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
         {/* All Departments Option */}
         {!isMinimized && (
           <button
-            onClick={() => setSelectedDepartment(null)}
+            onClick={() => { setSelectedDepartment(null); onClose?.(); }}
             className={`w-full rounded-lg transition-colors text-left ${
               selectedDepartment === null
                 ? 'bg-brand-50 border border-brand-200 ring-1 ring-brand-200'
@@ -199,7 +199,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
             return (
               <button
                 key={dept.id}
-                onClick={() => setSelectedDepartment(dept.id)}
+                onClick={() => { setSelectedDepartment(dept.id); onClose?.(); }}
                 className={`flex justify-center py-2 w-full ${
                   isSelected ? 'bg-brand-50 rounded-lg' : ''
                 }`}
@@ -228,7 +228,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
           return (
             <button
               key={dept.id}
-              onClick={() => setSelectedDepartment(dept.id)}
+              onClick={() => { setSelectedDepartment(dept.id); onClose?.(); }}
               className={`w-full rounded-lg transition-colors text-left ${
                 isSelected
                   ? 'bg-brand-50 border border-brand-200 ring-1 ring-brand-200'

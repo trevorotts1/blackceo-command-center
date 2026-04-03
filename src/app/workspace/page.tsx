@@ -125,15 +125,15 @@ function WorkspaceSelectorInner() {
   return (
     <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
       {/* Header */}
-      <header className="h-16 bg-white border-b border-gray-200 px-6 flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <header className="border-b border-gray-200 bg-white px-4 py-3 sm:flex sm:min-h-16 sm:items-center sm:justify-between sm:px-6 sm:py-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
           <div className="flex items-center gap-2">
             <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
               <Building2 className="w-5 h-5 text-white" />
             </div>
-            <span className="text-gray-900 font-bold text-xl tracking-tight">{companyName}</span>
+            <span className="max-w-[11rem] truncate text-lg font-bold tracking-tight text-gray-900 sm:max-w-none sm:text-xl">{companyName}</span>
           </div>
-          <div className="h-6 w-px bg-gray-200 mx-2" />
+          <div className="mx-2 hidden h-6 w-px bg-gray-200 sm:block" />
           <h1 className="text-gray-900 font-semibold text-lg">Workspaces</h1>
           {saving && (
             <span className="text-xs text-indigo-500 font-medium animate-pulse ml-2">Saving order...</span>
@@ -141,10 +141,10 @@ function WorkspaceSelectorInner() {
         </div>
 
         {/* Nav buttons */}
-        <div className="flex items-center gap-3">
+        <div className="mt-3 flex items-center gap-2 sm:mt-0 sm:gap-3">
           <motion.button
             onClick={() => router.push('/')}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-xl font-medium text-sm hover:bg-gray-50 transition-all"
+            className="flex min-h-[44px] items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-all hover:bg-gray-50 sm:px-4"
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
           >
@@ -153,7 +153,7 @@ function WorkspaceSelectorInner() {
           </motion.button>
           <motion.button
             onClick={() => router.push('/ceo-board')}
-            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-medium text-sm shadow-sm hover:shadow-md transition-all"
+            className="flex min-h-[44px] items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition-all hover:shadow-md sm:px-4"
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
           >
@@ -164,17 +164,17 @@ function WorkspaceSelectorInner() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col items-center px-6 py-12">
+      <main className="flex-1 flex flex-col items-center px-4 py-8 sm:px-6 sm:py-12">
         <motion.div
           className="max-w-6xl w-full"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
-          <div className="text-center mb-12">
-            <h2 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
+          <div className="mb-8 text-center sm:mb-12">
+            <h2 className="mb-4 text-3xl font-bold text-gray-900 sm:text-4xl lg:text-5xl">
               Select a Department
             </h2>
-            <p className="text-gray-500 text-lg max-w-xl mx-auto">
+            <p className="mx-auto max-w-xl px-2 text-base text-gray-500 sm:px-0 sm:text-lg">
               Click any department to open its Kanban board. Drag to reorder.
             </p>
           </div>
@@ -223,7 +223,7 @@ function WorkspaceSelectorInner() {
                                 {/* Drag handle */}
                                 <div
                                   {...dragProvided.dragHandleProps}
-                                  className="absolute top-3 right-3 z-20 p-1.5 rounded-lg bg-white/20 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing"
+                                  className="absolute top-3 right-3 z-20 rounded-lg bg-white/20 p-2 backdrop-blur-sm opacity-100 transition-opacity cursor-grab active:cursor-grabbing sm:opacity-0 sm:group-hover:opacity-100"
                                   title="Drag to reorder"
                                 >
                                   <GripVertical className="w-4 h-4 text-white/80" />
