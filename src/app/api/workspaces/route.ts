@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
+import { readFile, writeFile } from 'fs/promises';
+import { join } from 'path';
 import type { Workspace, WorkspaceStats, TaskStatus } from '@/lib/types';
+
+const DEPARTMENTS_CONFIG_PATH = join(process.cwd(), 'config', 'departments.json');
 
 // Helper to generate slug from name
 function generateSlug(name: string): string {
@@ -8,6 +12,69 @@ function generateSlug(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
+}
+
+// Helper to sync workspace to departments.json
+async function syncWorkspaceToDepartments(workspace: { id: string; name: string; slug: string; icon?: string | null }) {
+  try {
+    const raw = await readFile(DEPARTMENTS_CONFIG_PATH, 'utf-8');
+    const departments = JSON.parse(raw) as Array<{
+      id: string;
+      emoji: string;
+      name: string;
+      headTitle: string;
+      workspacePath?: string;
+    }>;
+
+    // Check if department already exists
+    const existingIndex = departments.findIndex((d) => d.id === workspace.slug);
+
+    const departmentEntry = {
+      id: workspace.slug,
+      emoji: workspace.icon || '📁',
+      name: workspace.name,
+      headTitle: `Head of ${workspace.name}`,
+      workspacePath: `departments/${workspace.slug}`,
+    };
+
+    if (existingIndex >= 0) {
+      // Update existing
+      departments[existingIndex] = { ...departments[existingIndex], ...departmentEntry };
+    } else {
+      // Add new
+      departments.push(departmentEntry);
+    }
+
+    await writeFile(DEPARTMENTS_CONFIG_PATH, JSON.stringify(departments, null, 2), 'utf-8');
+    console.log(`[Workspaces API] Synced workspace "${workspace.name}" to departments.json`);
+  } catch (err) {
+    console.error('[Workspaces API] Failed to sync to departments.json:', err);
+    // Don't throw - workspace creation should succeed even if sync fails
+  }
+}
+
+// Helper to remove workspace from departments.json
+async function removeWorkspaceFromDepartments(slug: string) {
+  try {
+    const raw = await readFile(DEPARTMENTS_CONFIG_PATH, 'utf-8');
+    const departments = JSON.parse(raw) as Array<{
+      id: string;
+      emoji: string;
+      name: string;
+      headTitle: string;
+      workspacePath?: string;
+    }>;
+
+    const filtered = departments.filter((d) => d.id !== slug);
+
+    if (filtered.length < departments.length) {
+      await writeFile(DEPARTMENTS_CONFIG_PATH, JSON.stringify(filtered, null, 2), 'utf-8');
+      console.log(`[Workspaces API] Removed workspace "${slug}" from departments.json`);
+    }
+  } catch (err) {
+    console.error('[Workspaces API] Failed to remove from departments.json:', err);
+    // Don't throw - workspace deletion should succeed even if sync fails
+  }
 }
 
 // GET /api/workspaces - List all workspaces with stats
@@ -132,7 +199,11 @@ export async function POST(request: NextRequest) {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(id, name.trim(), slug, description || null, icon || '📁', nextOrder);
 
-    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id);
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as Workspace;
+
+    // Sync to departments.json
+    await syncWorkspaceToDepartments(workspace);
+
     return NextResponse.json(workspace, { status: 201 });
   } catch (error) {
     console.error('Failed to create workspace:', error);
