@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.4 - April 3, 2026
+
+### Fixed — Kanban Race Condition
+- **src/app/workspace/[slug]/page.tsx:** Removed duplicate Breadcrumb components
+- **src/components/MissionQueue.tsx:** Added setTasks([]) on navigation to prevent Zustand store flash
+- **src/components/MissionQueue.tsx:** Added departmentFilter prop to override Zustand store
+- Version bumped from 2.9.3 to 2.9.4
+
 ## v2.9.3 - April 1, 2026
 
 ### Upgraded — n8n TOOLS.md to 10/10
