@@ -293,7 +293,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
               <option value="">Unassigned</option>
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
-                  {agent.avatar_emoji} {agent.name} - {agent.role}
+                  <span className="emoji-sm">{agent.avatar_emoji}</span> {agent.name} - {agent.role}
                 </option>
               ))}
               <option value="__add_new__" className="text-indigo-600">

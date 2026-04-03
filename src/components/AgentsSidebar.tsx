@@ -168,7 +168,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
             }`}
           >
             <div className="flex items-center gap-3 p-2.5">
-              <div className="text-2xl">🏢</div>
+              <div className="text-2xl"><span className="emoji">🏢</span></div>
               <div className="flex-1 min-w-0">
                 <div className={`font-medium text-sm truncate ${
                   selectedDepartment === null ? 'text-brand-900' : 'text-gray-900'
@@ -208,7 +208,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                   className="relative group"
                   title={`${dept.name} - ${dept.headTitle}`}
                 >
-                  <span className="text-2xl">{dept.emoji}</span>
+                  <span className="text-2xl"><span className="emoji">{dept.emoji}</span></span>
                   {/* Status indicator */}
                   <span
                     className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
@@ -238,7 +238,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
               <div className="flex items-center gap-3 p-2.5">
                 {/* Emoji */}
                 <div className="text-2xl relative">
-                  {dept.emoji}
+                  <span className="emoji">{dept.emoji}</span>
                   <span
                     className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
                       isSelected ? 'bg-brand-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'

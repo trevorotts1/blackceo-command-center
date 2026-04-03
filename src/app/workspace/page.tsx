@@ -242,7 +242,7 @@ function WorkspaceSelectorInner() {
                                   </div>
 
                                   <h3 className="text-white font-bold text-2xl mb-2 leading-tight">
-                                    {workspace.icon ? `${workspace.icon} ` : ''}{workspace.name}
+                                    {workspace.icon ? <span className="emoji-lg">{workspace.icon}</span> : ''} {workspace.name}
                                   </h3>
 
                                   {workspace.description && (

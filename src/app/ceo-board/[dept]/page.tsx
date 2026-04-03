@@ -950,7 +950,7 @@ export default function DepartmentSubBoardPage() {
             <div className="flex flex-col lg:flex-row lg:items-center gap-6">
               <div className="flex items-center gap-5">
                 <div className="h-16 w-16 flex items-center justify-center text-4xl bg-white/10 rounded-2xl">
-                  {department.emoji}
+                  <span className="emoji-lg">{department.emoji}</span>
                 </div>
                 <div>
                   {supportDept && (

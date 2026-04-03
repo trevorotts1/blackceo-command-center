@@ -176,7 +176,7 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
                           : 'bg-gray-50'
                       }`}
                     >
-                      {emoji}
+                      <span className="emoji">{emoji}</span>
                     </button>
                   ))}
                 </div>

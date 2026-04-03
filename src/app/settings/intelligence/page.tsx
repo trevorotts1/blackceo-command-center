@@ -586,7 +586,7 @@ export default function IntelligenceSettingsPage() {
                               >
                                 {/* Agent Name + Type Badge */}
                                 <div className="flex items-center gap-3 mb-3">
-                                  <span className="text-xl">{role.emoji}</span>
+                                  <span className="text-xl"><span className="emoji">{role.emoji}</span></span>
                                   <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2 flex-wrap">
                                       <span className="text-base font-semibold text-gray-900">

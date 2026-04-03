@@ -94,8 +94,10 @@ const config: Config = {
         'mc-accent-cyan': '#FF0000',
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+        /* Added emoji font fallbacks for consistent cross-browser emoji rendering */
+        sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', 'Apple Color Emoji', 'sans-serif'],
         mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        emoji: ['Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', 'Apple Color Emoji', 'sans-serif'],
       },
       boxShadow: {
         'card': '0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04)',

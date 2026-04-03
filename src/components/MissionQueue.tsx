@@ -163,7 +163,7 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
             <>
               <span className="hidden sm:block text-gray-300 mx-1">|</span>
               <div className="flex items-center gap-2 bg-brand-50 text-brand-700 px-2 lg:px-3 py-1 lg:py-1.5 rounded-lg border border-brand-100 ml-auto lg:ml-0">
-                <span className="text-base lg:text-lg leading-none">{departmentEmojis[selectedDepartment] || '📋'}</span>
+                <span className="text-base lg:text-lg leading-none"><span className="emoji">{departmentEmojis[selectedDepartment] || '📋'}</span></span>
                 <span className="font-semibold text-sm hidden sm:inline">{departmentNames[selectedDepartment] || selectedDepartment}</span>
                 <button 
                   onClick={() => setSelectedDepartment(null)}
@@ -358,7 +358,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         {/* Persona Pill */}
         {(task as any).persona && (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700">
-            🧠 {(task as any).persona}
+            <span className="emoji-sm">🧠</span> {(task as any).persona}
           </span>
         )}
 
@@ -372,7 +372,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         {/* Department Pill */}
         {task.department && (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {departmentNames[task.department.toLowerCase()] || task.department}
+            <span className="emoji-sm">{departmentEmojis[task.department.toLowerCase()] || '🏢'}</span> {departmentNames[task.department.toLowerCase()] || task.department}
           </span>
         )}
 
@@ -389,7 +389,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-gray-400">
           {task.sprint && (
             <span className="flex items-center gap-1">
-              <span>🏃</span> {task.sprint}
+              <span className="emoji-sm">🏃</span> {task.sprint}
             </span>
           )}
           {task.sprint && task.due_date && (
@@ -397,7 +397,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
           )}
           {task.due_date && (
             <span className="flex items-center gap-1">
-              <span>📅</span> {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              <span className="emoji-sm">📅</span> {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
             </span>
           )}
         </div>
