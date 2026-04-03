@@ -297,6 +297,7 @@ CREATE INDEX IF NOT EXISTS idx_dept_memory_importance ON dept_memory(importance 
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_position ON tasks(status, position);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
