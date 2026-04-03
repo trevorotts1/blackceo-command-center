@@ -8,49 +8,71 @@ import { registerClient, unregisterClient } from '@/lib/events';
 
 export const dynamic = 'force-dynamic';
 
+const KEEP_ALIVE_INTERVAL_MS = 30000;
+
 export async function GET(request: NextRequest) {
   const encoder = new TextEncoder();
 
-  // Create a readable stream for SSE
   const stream = new ReadableStream({
     start(controller) {
-      // Register this client
+      let closed = false;
+      let keepAliveInterval: NodeJS.Timeout | null = null;
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+
+        if (keepAliveInterval) {
+          clearInterval(keepAliveInterval);
+          keepAliveInterval = null;
+        }
+
+        unregisterClient(controller);
+
+        try {
+          controller.close();
+        } catch {
+          // Controller may already be closed
+        }
+      };
+
       registerClient(controller);
 
-      // Send initial connection message
-      const connectMsg = encoder.encode(`: connected\n\n`);
-      controller.enqueue(connectMsg);
+      try {
+        controller.enqueue(encoder.encode(`: connected\n\n`));
+      } catch (error) {
+        console.error('[SSE] Failed to send initial connection event:', error);
+        cleanup();
+        return;
+      }
 
-      // Set up keep-alive ping every 30 seconds
-      const keepAliveInterval = setInterval(() => {
+      keepAliveInterval = setInterval(() => {
+        if (closed) {
+          cleanup();
+          return;
+        }
+
         try {
           controller.enqueue(encoder.encode(`: keep-alive\n\n`));
         } catch (error) {
-          // Client disconnected
-          clearInterval(keepAliveInterval);
+          console.warn('[SSE] Keep-alive failed, closing client connection');
+          cleanup();
         }
-      }, 30000);
+      }, KEEP_ALIVE_INTERVAL_MS);
 
-      // Handle client disconnect
-      request.signal.addEventListener('abort', () => {
-        clearInterval(keepAliveInterval);
-        unregisterClient(controller);
-        try {
-          controller.close();
-        } catch (error) {
-          // Controller may already be closed
-        }
-      });
+      request.signal.addEventListener('abort', cleanup, { once: true });
+    },
+    cancel() {
+      // The abort listener handles cleanup for normal client disconnects.
     },
   });
 
-  // Return SSE response
   return new Response(stream, {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no', // Disable nginx buffering
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
     },
   });
 }

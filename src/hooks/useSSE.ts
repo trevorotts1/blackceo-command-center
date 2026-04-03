@@ -5,16 +5,22 @@
 
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useMissionControl } from '@/lib/store';
 import { debug } from '@/lib/debug';
 import type { SSEEvent, Task } from '@/lib/types';
 
+const INITIAL_RETRY_DELAY_MS = 1000;
+const MAX_RETRY_DELAY_MS = 30000;
+
 export function useSSE() {
   const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  // Use ref to track selectedTask ID without causing re-renders
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const selectedTaskIdRef = useRef<string | undefined>();
+  const isMountedRef = useRef(false);
+  const isConnectingRef = useRef(false);
+  const retryDelayRef = useRef(INITIAL_RETRY_DELAY_MS);
+
   const {
     updateTask,
     addTask,
@@ -23,38 +29,89 @@ export function useSSE() {
     setSelectedTask,
   } = useMissionControl();
 
-  // Update ref when selectedTask changes (outside the SSE effect)
   useEffect(() => {
     selectedTaskIdRef.current = selectedTask?.id;
   }, [selectedTask]);
 
-  useEffect(() => {
-    let isConnecting = false;
+  const clearReconnectTimeout = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+  }, []);
 
-    const connect = () => {
-      if (isConnecting || eventSourceRef.current?.readyState === EventSource.OPEN) {
+  const cleanupConnection = useCallback(() => {
+    clearReconnectTimeout();
+
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
+    isConnectingRef.current = false;
+  }, [clearReconnectTimeout]);
+
+  const scheduleReconnect = useCallback((connect: () => void) => {
+    if (!isMountedRef.current || reconnectTimeoutRef.current) {
+      return;
+    }
+
+    const delay = retryDelayRef.current;
+    retryDelayRef.current = Math.min(retryDelayRef.current * 2, MAX_RETRY_DELAY_MS);
+
+    debug.sse(`Attempting reconnect in ${delay}ms`);
+
+    reconnectTimeoutRef.current = setTimeout(() => {
+      reconnectTimeoutRef.current = null;
+
+      if (!isMountedRef.current) {
         return;
       }
 
-      isConnecting = true;
+      connect();
+    }, delay);
+  }, []);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    const connect = () => {
+      if (!isMountedRef.current) return;
+
+      if (isConnectingRef.current) {
+        debug.sse('Connection already in progress');
+        return;
+      }
+
+      const readyState = eventSourceRef.current?.readyState;
+      if (readyState === EventSource.OPEN || readyState === EventSource.CONNECTING) {
+        return;
+      }
+
+      clearReconnectTimeout();
+      isConnectingRef.current = true;
       debug.sse('Connecting to event stream...');
 
       const eventSource = new EventSource('/api/events/stream');
       eventSourceRef.current = eventSource;
 
       eventSource.onopen = () => {
+        if (!isMountedRef.current) {
+          eventSource.close();
+          return;
+        }
+
         debug.sse('Connected');
         setIsOnline(true);
-        isConnecting = false;
-        // Clear any pending reconnect
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
+        isConnectingRef.current = false;
+        retryDelayRef.current = INITIAL_RETRY_DELAY_MS;
+        clearReconnectTimeout();
       };
 
       eventSource.onmessage = (event) => {
+        if (!isMountedRef.current) return;
+
         try {
-          // Skip keep-alive messages (they start with ":")
           if (event.data.startsWith(':')) {
             return;
           }
@@ -68,36 +125,32 @@ export function useSSE() {
               addTask(sseEvent.payload as Task);
               break;
 
-            case 'task_updated':
+            case 'task_updated': {
               const incomingTask = sseEvent.payload as Task;
               debug.sse('Task update received', {
                 id: incomingTask.id,
                 status: incomingTask.status,
-                title: incomingTask.title
+                title: incomingTask.title,
               });
               updateTask(incomingTask);
 
-              // Update selected task if viewing this task (for modal)
-              // Use ref to avoid dependency on selectedTask
               if (selectedTaskIdRef.current === incomingTask.id) {
                 debug.sse('Also updating selectedTask for modal');
                 setSelectedTask(incomingTask);
               }
               break;
+            }
 
             case 'activity_logged':
               debug.sse('Activity logged', sseEvent.payload);
-              // Activities are fetched when task detail is opened
               break;
 
             case 'deliverable_added':
               debug.sse('Deliverable added', sseEvent.payload);
-              // Deliverables are fetched when task detail is opened
               break;
 
             case 'agent_spawned':
               debug.sse('Agent spawned', sseEvent.payload);
-              // Will trigger re-fetch of sub-agent count
               break;
 
             case 'agent_completed':
@@ -114,50 +167,42 @@ export function useSSE() {
 
       eventSource.onerror = (error) => {
         debug.sse('Connection error', error);
-        isConnecting = false;
+        isConnectingRef.current = false;
 
-        // Close the connection
         eventSource.close();
-        eventSourceRef.current = null;
+        if (eventSourceRef.current === eventSource) {
+          eventSourceRef.current = null;
+        }
 
-        // Health check via fetch before showing offline (SSE can fail through Cloudflare even when API works)
         fetch('/api/workspaces', { method: 'GET', cache: 'no-store' })
           .then((res) => {
+            if (!isMountedRef.current) return;
+
             if (res.ok) {
-              debug.sse('SSE failed but API is healthy - staying online');
+              debug.sse('SSE failed but API is healthy - keeping online indicator on');
               setIsOnline(true);
             } else {
               setIsOnline(false);
             }
           })
           .catch(() => {
+            if (!isMountedRef.current) return;
+
             debug.sse('Both SSE and health check failed - going offline');
             setIsOnline(false);
+          })
+          .finally(() => {
+            scheduleReconnect(connect);
           });
-
-        // Attempt reconnection after 10 seconds
-        reconnectTimeoutRef.current = setTimeout(() => {
-          debug.sse('Attempting to reconnect...');
-          connect();
-        }, 10000);
       };
     };
 
-    // Initial connection
     connect();
 
-    // Cleanup on unmount
     return () => {
-      if (eventSourceRef.current) {
-        debug.sse('Disconnecting...');
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
+      isMountedRef.current = false;
+      debug.sse('Disconnecting...');
+      cleanupConnection();
     };
-  // selectedTask removed from deps to prevent re-connection loop
-  // We use selectedTaskIdRef to check the current selected task ID without triggering re-renders
-  }, [addTask, updateTask, setIsOnline, setSelectedTask]);
+  }, [addTask, clearReconnectTimeout, cleanupConnection, scheduleReconnect, setIsOnline, setSelectedTask, updateTask]);
 }
