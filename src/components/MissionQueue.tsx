@@ -11,6 +11,7 @@ import { formatDistanceToNow } from 'date-fns';
 
 interface MissionQueueProps {
   workspaceId?: string;
+  departmentFilter?: string | null;
 }
 
 const COLUMNS: { id: TaskStatus; label: string; gradient: string }[] = [
@@ -61,16 +62,17 @@ const departmentNames: Record<string, string> = {
   'communications': 'Communications',
 };
 
-export function MissionQueue({ workspaceId }: MissionQueueProps) {
+export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProps) {
   const { tasks, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
+  const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
 
   const getTasksByStatus = (statusId: string) => {
-    const filteredByDept = selectedDepartment
-      ? tasks.filter((task) => task.department === selectedDepartment)
+    const filteredByDept = effectiveDepartment
+      ? tasks.filter((task) => task.department === effectiveDepartment)
       : tasks;
     return filteredByDept.filter((task) => {
       if (statusId === 'backlog') {
@@ -141,8 +143,8 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
   };
 
   // Filter tasks by selected department for accurate counts
-  const filteredTasks = selectedDepartment
-    ? tasks.filter((task) => task.department === selectedDepartment)
+  const filteredTasks = effectiveDepartment
+    ? tasks.filter((task) => task.department === effectiveDepartment)
     : tasks;
 
   const filters = [
@@ -159,12 +161,12 @@ export function MissionQueue({ workspaceId }: MissionQueueProps) {
       <header className="bg-white h-auto lg:h-20 px-4 lg:px-8 py-3 lg:py-0 flex flex-col lg:flex-row items-start lg:items-center justify-between border-b border-gray-100 shrink-0 gap-3 lg:gap-0">
         <div className="flex items-center gap-3 w-full lg:w-auto">
           <h1 className="text-xl lg:text-2xl font-bold text-gray-900 tracking-tight">Task Board</h1>
-          {selectedDepartment && (
+          {effectiveDepartment && (
             <>
               <span className="hidden sm:block text-gray-300 mx-1">|</span>
               <div className="flex items-center gap-2 bg-brand-50 text-brand-700 px-2 lg:px-3 py-1 lg:py-1.5 rounded-lg border border-brand-100 ml-auto lg:ml-0">
-                <span className="text-base lg:text-lg leading-none">{departmentEmojis[selectedDepartment] || '📋'}</span>
-                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[selectedDepartment] || selectedDepartment}</span>
+                <span className="text-base lg:text-lg leading-none">{departmentEmojis[effectiveDepartment] || '📋'}</span>
+                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[effectiveDepartment] || effectiveDepartment}</span>
                 <button 
                   onClick={() => setSelectedDepartment(null)}
                   className="ml-1 p-0.5 rounded-md hover:bg-brand-100 text-brand-400 hover:text-brand-900 transition-colors"

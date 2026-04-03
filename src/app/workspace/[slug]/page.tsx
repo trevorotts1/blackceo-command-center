@@ -14,7 +14,6 @@ import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
-import { Breadcrumb } from '@/components/Breadcrumb';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -43,6 +42,7 @@ export default function WorkspacePage() {
   // Load workspace data
   useEffect(() => {
     async function loadWorkspace() {
+      setTasks([]);
       try {
         const res = await fetch(`/api/workspaces/${slug}`);
         if (res.ok) {
@@ -282,6 +282,9 @@ export default function WorkspacePage() {
   }
 
   const isCEOWorkspace = workspace.slug === 'ceo' || workspace.slug === 'default';
+  const routeDepartment = workspace.slug === 'default' || workspace.slug === 'ceo'
+    ? null
+    : workspace.slug;
   // Show task board when a department is selected, even on CEO workspace
   const showTaskBoard = true;
 
@@ -289,24 +292,13 @@ export default function WorkspacePage() {
     <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
       <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
 
-      {/* Breadcrumb */}
-      <div className="px-4 sm:px-6 lg:px-8 bg-[#F8F9FB] border-b border-gray-200">
-        <Breadcrumb
-          items={[
-            { label: 'Home', href: '/' },
-            { label: 'Departments', href: '/workspace' },
-            { label: workspace.name },
-          ]}
-        />
-      </div>
-
       <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar */}
         <AgentsSidebar workspaceId={workspace.id} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
         {/* Main Content Area */}
         {showTaskBoard ? (
-          <MissionQueue workspaceId={workspace.id} />
+          <MissionQueue workspaceId={workspace.id} departmentFilter={routeDepartment} />
         ) : (
           <CEODashboard workspace={workspace} />
         )}
