@@ -37,7 +37,7 @@ cat > .env.local << 'EOF'
 # Demo mode — read-only, no auth needed
 DEMO_MODE=true
 DATABASE_PATH=./mission-control-demo.db
-PORT=4000
+PORT=3000
 EOF
 ```
 
@@ -51,9 +51,9 @@ npm run build
 
 ```bash
 # Start briefly to create schema
-PORT=4000 npx next start -p 4000 &
+PORT=3000 npx next start -p 3000 &
 sleep 5
-curl -s http://localhost:4000/api/workspaces > /dev/null
+curl -s http://localhost:3000/api/workspaces > /dev/null
 kill %1
 sleep 2
 
@@ -67,7 +67,7 @@ node scripts/demo-seed.js --db ./mission-control-demo.db
 npm install -g pm2
 
 # Start Mission Control
-pm2 start "npx next start -p 4000" --name mc-demo --cwd /var/www/mission-control-demo
+pm2 start "npx next start -p 3000" --name mc-demo --cwd /var/www/mission-control-demo
 
 # Start the simulator (generates live activity every 15 seconds)
 pm2 start scripts/demo-simulator.js --name mc-simulator --cwd /var/www/mission-control-demo -- --db ./mission-control-demo.db --interval 15000
@@ -91,7 +91,7 @@ In the Cloudflare dashboard for `ghray.com`:
 cloudflared tunnel route dns <tunnel-id> missioncontrol.ghray.com
 ```
 
-3. Add the tunnel config to route `missioncontrol.ghray.com` → `http://localhost:4000`
+3. Add the tunnel config to route `missioncontrol.ghray.com` → `http://localhost:3000`
 
 ---
 
@@ -117,7 +117,7 @@ pm2 stop mc-simulator mc-demo
 rm mission-control-demo.db*
 pm2 start mc-demo
 sleep 5
-curl -s http://localhost:4000/api/workspaces > /dev/null
+curl -s http://localhost:3000/api/workspaces > /dev/null
 pm2 stop mc-demo
 node scripts/demo-seed.js --db ./mission-control-demo.db
 pm2 start mc-demo mc-simulator

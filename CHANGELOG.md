@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.9.5 - April 3, 2026
+
+### Fixed — Port Standardization to 3000
+- Standardized app defaults, PM2 config, API fallbacks, scripts, and docs from port 4000 to port 3000.
+- Updated Cloudflare tunnel documentation examples to point at `http://localhost:3000`.
+- Bumped version from 2.9.4 to 2.9.5.
+
 ## v2.9.4 - April 3, 2026
 
 ### Fixed — Kanban Race Condition

@@ -118,8 +118,8 @@ curl -s -o /dev/null -w "%{http_code}" https://trevor.zerohumanworkforce.com
 ## Cloudflare Tunnel (Mac Only)
 
 > **If you are on VPS/Hostinger: SKIP this entire section.**
-> Your dashboard is already publicly accessible via your VPS IP on port 4000.
-> No tunnel needed. Just make sure port 4000 is open in your firewall.
+> Your dashboard is already publicly accessible via your VPS IP on port 3000.
+> No tunnel needed. Just make sure port 3000 is open in your firewall.
 
 For Mac Mini deployments, use `scripts/setup-tunnel-daemon.sh` to set up a Cloudflare tunnel.
 This creates a macOS LaunchAgent that auto-restarts the tunnel if it dies.

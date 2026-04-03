@@ -8,7 +8,7 @@ SITE_URL="https://trevor.zerohumanworkforce.com"
 
 # VPS: Override these variables for your deployment
 # Example: APP_DIR=/data/mission-control
-# Example: SITE_URL=http://YOUR_VPS_IP:4000
+# Example: SITE_URL=http://YOUR_VPS_IP:3000
 
 echo "=== Mission Control Safe Deploy ==="
 
