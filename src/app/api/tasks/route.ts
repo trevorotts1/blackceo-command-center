@@ -5,6 +5,33 @@ import { broadcast } from '@/lib/events';
 import { CreateTaskSchema } from '@/lib/validation';
 import type { Task, CreateTaskRequest, Agent } from '@/lib/types';
 
+interface JoinedTaskRow extends Task {
+  assigned_agent_name?: string;
+  assigned_agent_emoji?: string;
+  created_by_agent_name?: string;
+  created_by_agent_emoji?: string;
+}
+
+function serializeTask(task: JoinedTaskRow) {
+  return {
+    ...task,
+    assigned_agent: task.assigned_agent_id
+      ? {
+          id: task.assigned_agent_id,
+          name: task.assigned_agent_name,
+          avatar_emoji: task.assigned_agent_emoji,
+        }
+      : undefined,
+    created_by_agent: task.created_by_agent_id
+      ? {
+          id: task.created_by_agent_id,
+          name: task.created_by_agent_name,
+          avatar_emoji: task.created_by_agent_emoji,
+        }
+      : undefined,
+  };
+}
+
 // GET /api/tasks - List all tasks with optional filters
 export async function GET(request: NextRequest) {
   try {
@@ -58,21 +85,9 @@ export async function GET(request: NextRequest) {
 
     sql += ' ORDER BY t.created_at DESC';
 
-    const tasks = queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; created_by_agent_name?: string }>(sql, params);
+    const tasks = queryAll<JoinedTaskRow>(sql, params);
 
-    // Transform to include nested agent info
-    const transformedTasks = tasks.map((task) => ({
-      ...task,
-      assigned_agent: task.assigned_agent_id
-        ? {
-            id: task.assigned_agent_id,
-            name: task.assigned_agent_name,
-            avatar_emoji: task.assigned_agent_emoji,
-          }
-        : undefined,
-    }));
-
-    return NextResponse.json(transformedTasks);
+    return NextResponse.json(tasks.map(serializeTask));
   } catch (error) {
     console.error('Failed to fetch tasks:', error);
     return NextResponse.json({ error: 'Failed to fetch tasks' }, { status: 500 });
@@ -101,10 +116,32 @@ export async function POST(request: NextRequest) {
 
     const workspaceId = validatedData.workspace_id || 'default';
     const status = validatedData.status || 'backlog';
+    const department = validatedData.department || (workspaceId !== 'default' && workspaceId !== 'ceo' ? workspaceId : null);
+
+    if (validatedData.assigned_agent_id) {
+      const assignedAgent = queryOne<Pick<Agent, 'id' | 'workspace_id'>>(
+        'SELECT id, workspace_id FROM agents WHERE id = ?',
+        [validatedData.assigned_agent_id]
+      );
+
+      if (!assignedAgent) {
+        return NextResponse.json(
+          { error: 'Validation failed', details: [{ message: 'Assigned agent not found', path: ['assigned_agent_id'] }] },
+          { status: 400 }
+        );
+      }
+
+      if (workspaceId !== 'default' && assignedAgent.workspace_id !== workspaceId) {
+        return NextResponse.json(
+          { error: 'Validation failed', details: [{ message: 'Assigned agent must belong to the same workspace as the task', path: ['assigned_agent_id'] }] },
+          { status: 400 }
+        );
+      }
+    }
 
     run(
-      `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, due_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         validatedData.title,
@@ -115,6 +152,7 @@ export async function POST(request: NextRequest) {
         validatedData.created_by_agent_id || null,
         workspaceId,
         validatedData.business_id || 'default',
+        department,
         validatedData.due_date || null,
         now,
         now,
@@ -137,7 +175,7 @@ export async function POST(request: NextRequest) {
     );
 
     // Fetch created task with all joined fields
-    const task = queryOne<Task>(
+    const task = queryOne<JoinedTaskRow>(
       `SELECT t.*,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji,
@@ -187,7 +225,7 @@ export async function POST(request: NextRequest) {
       })();
     }
     
-    return NextResponse.json(task, { status: 201 });
+    return NextResponse.json(task ? serializeTask(task) : task, { status: 201 });
   } catch (error) {
     console.error('Failed to create task:', error);
     return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });

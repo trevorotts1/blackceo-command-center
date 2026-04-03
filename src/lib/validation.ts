@@ -32,6 +32,11 @@ export const CreateTaskSchema = z.object({
   business_id: z.string().optional(),
   workspace_id: z.string().optional(),
   due_date: z.string().optional(),
+  department: z.string().optional(),
+  dependencies: z.array(z.string()).optional(),
+  parallel_candidates: z.array(z.string()).optional(),
+  block_reason: z.string().optional(),
+  sprint: z.string().optional(),
 });
 
 export const UpdateTaskSchema = z.object({
@@ -42,6 +47,9 @@ export const UpdateTaskSchema = z.object({
   assigned_agent_id: z.string().uuid().optional().nullable(),
   due_date: z.string().optional().nullable(),
   updated_by_agent_id: z.string().uuid().optional(),
+  department: z.string().optional().nullable(),
+  block_reason: z.string().optional().nullable(),
+  sprint: z.string().optional().nullable(),
 });
 
 // Activity validation schema

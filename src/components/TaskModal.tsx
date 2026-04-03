@@ -22,6 +22,7 @@ interface TaskModalProps {
 export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
   const { agents, addTask, updateTask, addEvent } = useMissionControl();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [usePlanningMode, setUsePlanningMode] = useState(false);
   // Auto-switch to planning tab if task has planning session
@@ -41,9 +42,15 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
     due_date: task?.due_date || '',
   });
 
+  const effectiveWorkspaceId = workspaceId || task?.workspace_id || 'default';
+  const filteredAgents = effectiveWorkspaceId === 'default' || effectiveWorkspaceId === 'ceo'
+    ? agents
+    : agents.filter((agent) => agent.workspace_id === effectiveWorkspaceId);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setErrorMessage(null);
 
     try {
       const url = task ? `/api/tasks/${task.id}` : '/api/tasks';
@@ -55,7 +62,8 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
         // New tasks always start in 'backlog'
         assigned_agent_id: form.assigned_agent_id || null,
         due_date: form.due_date || null,
-        workspace_id: workspaceId || task?.workspace_id || 'default',
+        workspace_id: effectiveWorkspaceId,
+        department: task?.department || (effectiveWorkspaceId !== 'default' && effectiveWorkspaceId !== 'ceo' ? effectiveWorkspaceId : null),
       };
 
       const res = await fetch(url, {
@@ -116,9 +124,16 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
           }
           onClose();
         }
+      } else {
+        const errorData = await res.json().catch(() => ({ error: 'Failed to save task' }));
+        const detailMessage = Array.isArray(errorData.details) && errorData.details[0]?.message
+          ? errorData.details[0].message
+          : null;
+        setErrorMessage(detailMessage || errorData.error || 'Failed to save task');
       }
     } catch (error) {
       console.error('Failed to save task:', error);
+      setErrorMessage('Failed to save task');
     } finally {
       setIsSubmitting(false);
     }
@@ -217,6 +232,12 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
             />
           </div>
 
+          {errorMessage && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {errorMessage}
+            </div>
+          )}
+
           {/* Planning Mode Toggle - only for new tasks */}
           {!task && (
             <div className="p-3 bg-indigo-50 rounded-lg border border-indigo-200">
@@ -291,7 +312,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
               className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
             >
               <option value="">Unassigned</option>
-              {agents.map((agent) => (
+              {filteredAgents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
                   {agent.avatar_emoji} {agent.name} - {agent.role}
                 </option>
@@ -380,7 +401,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
       {/* Nested Agent Modal for inline agent creation */}
       {showAgentModal && (
         <AgentModal
-          workspaceId={workspaceId}
+          workspaceId={effectiveWorkspaceId}
           onClose={() => setShowAgentModal(false)}
           onAgentCreated={(agentId) => {
             // Auto-select the newly created agent

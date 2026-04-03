@@ -1,10 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
-import { queryOne, run, queryAll } from '@/lib/db';
+import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
-import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/types';
+import type { Task, UpdateTaskRequest, Agent } from '@/lib/types';
+
+interface JoinedTaskRow extends Task {
+  assigned_agent_name?: string;
+  assigned_agent_emoji?: string;
+  created_by_agent_name?: string;
+  created_by_agent_emoji?: string;
+}
+
+function serializeTask(task: JoinedTaskRow) {
+  return {
+    ...task,
+    assigned_agent: task.assigned_agent_id
+      ? {
+          id: task.assigned_agent_id,
+          name: task.assigned_agent_name,
+          avatar_emoji: task.assigned_agent_emoji,
+        }
+      : undefined,
+    created_by_agent: task.created_by_agent_id
+      ? {
+          id: task.created_by_agent_id,
+          name: task.created_by_agent_name,
+          avatar_emoji: task.created_by_agent_emoji,
+        }
+      : undefined,
+  };
+}
 
 // GET /api/tasks/[id] - Get a single task
 export async function GET(
@@ -13,12 +40,15 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const task = queryOne<Task>(
+    const task = queryOne<JoinedTaskRow>(
       `SELECT t.*,
         aa.name as assigned_agent_name,
-        aa.avatar_emoji as assigned_agent_emoji
+        aa.avatar_emoji as assigned_agent_emoji,
+        ca.name as created_by_agent_name,
+        ca.avatar_emoji as created_by_agent_emoji
        FROM tasks t
        LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+       LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
        WHERE t.id = ?`,
       [id]
     );
@@ -27,7 +57,7 @@ export async function GET(
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    return NextResponse.json(task);
+    return NextResponse.json(serializeTask(task));
   } catch (error) {
     console.error('Failed to fetch task:', error);
     return NextResponse.json({ error: 'Failed to fetch task' }, { status: 500 });
@@ -96,6 +126,10 @@ export async function PATCH(
       updates.push('due_date = ?');
       values.push(validatedData.due_date);
     }
+    if (validatedData.department !== undefined) {
+      updates.push('department = ?');
+      values.push(validatedData.department);
+    }
 
     // Track if we need to dispatch task
     let shouldDispatch = false;
@@ -121,24 +155,46 @@ export async function PATCH(
 
     // Handle assignment change
     if (validatedData.assigned_agent_id !== undefined && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
+      if (validatedData.assigned_agent_id) {
+        const agent = queryOne<Pick<Agent, 'id' | 'name' | 'workspace_id'>>(
+          'SELECT id, name, workspace_id FROM agents WHERE id = ?',
+          [validatedData.assigned_agent_id]
+        );
+
+        if (!agent) {
+          return NextResponse.json(
+            { error: 'Validation failed', details: [{ message: 'Assigned agent not found', path: ['assigned_agent_id'] }] },
+            { status: 400 }
+          );
+        }
+
+        if (existing.workspace_id !== 'default' && existing.workspace_id !== 'ceo' && agent.workspace_id !== existing.workspace_id) {
+          return NextResponse.json(
+            { error: 'Validation failed', details: [{ message: 'Assigned agent must belong to the same workspace as the task', path: ['assigned_agent_id'] }] },
+            { status: 400 }
+          );
+        }
+
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`, now]
+        );
+
+        // Auto-dispatch if already in in_progress status or being moved to in_progress now
+        if (existing.status === 'in_progress' || validatedData.status === 'in_progress') {
+          shouldDispatch = true;
+        }
+      } else {
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'task_status_changed', id, `Task "${existing.title}" was unassigned`, now]
+        );
+      }
+
       updates.push('assigned_agent_id = ?');
       values.push(validatedData.assigned_agent_id);
-
-      if (validatedData.assigned_agent_id) {
-        const agent = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [validatedData.assigned_agent_id]);
-        if (agent) {
-          run(
-            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`, now]
-          );
-
-          // Auto-dispatch if already in in_progress status or being moved to in_progress now
-          if (existing.status === 'in_progress' || validatedData.status === 'in_progress') {
-            shouldDispatch = true;
-          }
-        }
-      }
     }
 
     if (updates.length === 0) {
@@ -152,7 +208,7 @@ export async function PATCH(
     run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
 
     // Fetch updated task with all joined fields
-    const task = queryOne<Task>(
+    const task = queryOne<JoinedTaskRow>(
       `SELECT t.*,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji,
@@ -169,13 +225,12 @@ export async function PATCH(
     if (task) {
       broadcast({
         type: 'task_updated',
-        payload: task,
+        payload: serializeTask(task),
       });
     }
 
     // Trigger auto-dispatch if needed
     if (shouldDispatch) {
-      // Call dispatch endpoint asynchronously (don't wait for response)
       const missionControlUrl = getMissionControlUrl();
       fetch(`${missionControlUrl}/api/tasks/${id}/dispatch`, {
         method: 'POST',
@@ -185,7 +240,7 @@ export async function PATCH(
       });
     }
 
-    return NextResponse.json(task);
+    return NextResponse.json(task ? serializeTask(task) : task);
   } catch (error) {
     console.error('Failed to update task:', error);
     return NextResponse.json({ error: 'Failed to update task' }, { status: 500 });
@@ -209,13 +264,10 @@ export async function DELETE(
     // Note: task_activities and task_deliverables have ON DELETE CASCADE
     run('DELETE FROM openclaw_sessions WHERE task_id = ?', [id]);
     run('DELETE FROM events WHERE task_id = ?', [id]);
-    // Conversations reference tasks - nullify or delete
     run('UPDATE conversations SET task_id = NULL WHERE task_id = ?', [id]);
 
-    // Now delete the task (cascades to task_activities and task_deliverables)
     run('DELETE FROM tasks WHERE id = ?', [id]);
 
-    // Broadcast deletion via SSE
     broadcast({
       type: 'task_deleted',
       payload: { id },
