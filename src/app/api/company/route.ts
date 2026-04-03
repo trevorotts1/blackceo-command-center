@@ -9,7 +9,8 @@ export async function GET() {
       return NextResponse.json(company);
     }
     return NextResponse.json({ name: process.env.COMPANY_NAME || 'Command Center' });
-  } catch {
+  } catch (error) {
+    console.error('Failed to fetch company:', error);
     return NextResponse.json({ name: process.env.COMPANY_NAME || 'Command Center' });
   }
 }

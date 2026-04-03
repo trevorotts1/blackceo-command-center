@@ -21,7 +21,8 @@ export async function GET() {
   try {
     const departments = await readDepartments();
     return NextResponse.json({ success: true, departments });
-  } catch {
+  } catch (error) {
+    console.error('Failed to load departments:', error);
     return NextResponse.json(
       { success: false, message: 'Failed to load departments configuration.' },
       { status: 500 }
@@ -96,7 +97,8 @@ export async function POST(request: NextRequest) {
       message: 'Department updated successfully.',
       department: departments[index],
     });
-  } catch {
+  } catch (error) {
+    console.error('Failed to save departments:', error);
     return NextResponse.json(
       { success: false, message: 'Failed to save departments configuration.' },
       { status: 500 }

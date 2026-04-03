@@ -43,7 +43,8 @@ export async function GET() {
       raw,
       source: filePath,
     });
-  } catch {
+  } catch (error) {
+    console.error('Failed to read ORG-CHART.md:', error);
     return NextResponse.json(
       { success: false, message: 'Failed to read ORG-CHART.md' },
       { status: 500 }

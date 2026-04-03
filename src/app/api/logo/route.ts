@@ -59,7 +59,8 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-  } catch {
+  } catch (error) {
+    console.error('Failed to fetch logo URL:', error);
     return NextResponse.json(
       {
         success: false,
@@ -72,7 +73,8 @@ export async function POST(request: NextRequest) {
   // Write the validated URL to logo-config.json
   try {
     await writeFile(LOGO_CONFIG_PATH, JSON.stringify({ logoUrl }, null, 2), 'utf-8');
-  } catch {
+  } catch (error) {
+    console.error('Failed to save logo config:', error);
     return NextResponse.json(
       { success: false, message: 'The logo URL was valid, but there was a problem saving the configuration on the server.' },
       { status: 500 }

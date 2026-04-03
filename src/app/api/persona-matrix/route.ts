@@ -43,7 +43,8 @@ export async function GET() {
       raw,
       source: filePath,
     });
-  } catch {
+  } catch (error) {
+    console.error('Failed to read persona-matrix.md:', error);
     return NextResponse.json(
       { success: false, message: 'Failed to read persona-matrix.md' },
       { status: 500 }

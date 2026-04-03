@@ -94,7 +94,8 @@ export async function GET(
       raw,
       source: filePath,
     });
-  } catch {
+  } catch (error) {
+    console.error('Failed to read governing-personas.md:', error);
     return NextResponse.json(
       { success: false, message: 'Failed to read governing-personas.md' },
       { status: 500 }
