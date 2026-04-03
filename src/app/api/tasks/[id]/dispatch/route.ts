@@ -5,6 +5,7 @@ import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { resolvePersonaContent } from '@/lib/persona-resolver';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
 interface RouteParams {
@@ -140,6 +141,15 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     console.log(`[Dispatch] Task ${task.id} → Agent "${agent.name}" | model=${settings.model} (${settings.modelSource}) | persona=${settings.persona} (${settings.personaSource}) | specialist=${specialistType}`);
     // --- END INTELLIGENCE RESOLUTION ---
 
+    // --- PERSONA CONTENT RESOLUTION ---
+    // Fetch and inject persona content into the task message
+    const taskDescription = `${task.title} ${task.description || ''}`;
+    const personaPrompt = resolvePersonaContent(settings.persona, taskDescription);
+    if (personaPrompt) {
+      console.log(`[Dispatch] Injected persona content for task ${task.id}`);
+    }
+    // --- END PERSONA CONTENT RESOLUTION ---
+
     // Build task message for agent
     const priorityEmoji = {
       low: '🔵',
@@ -154,7 +164,15 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const taskProjectDir = `${projectsPath}/${projectDir}`;
     const missionControlUrl = getMissionControlUrl();
 
-    const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
+    // Build the full task message with persona injection
+    let taskMessage = '';
+    
+    // Prepend persona content if available
+    if (personaPrompt) {
+      taskMessage += personaPrompt + '\n';
+    }
+    
+    taskMessage += `${priorityEmoji} **NEW TASK ASSIGNED**
 
 **Title:** ${task.title}
 ${task.description ? `**Description:** ${task.description}\n` : ''}
@@ -228,10 +246,19 @@ If you need help or clarification, ask the orchestrator.`;
 
       // Log dispatch activity to task_activities table (for Activity tab)
       const activityId = crypto.randomUUID();
+      const personaMessage = personaPrompt 
+        ? `Task dispatched to ${agent.name} with ACTIVE PERSONA injected`
+        : `Task dispatched to ${agent.name} - Agent is now working on this task`;
       run(
-        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [activityId, task.id, agent.id, 'status_changed', `Task dispatched to ${agent.name} - Agent is now working on this task`, now]
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [activityId, task.id, agent.id, 'status_changed', personaMessage, JSON.stringify({
+          persona: settings.persona,
+          personaSource: settings.personaSource,
+          personaInjected: !!personaPrompt,
+          model: settings.model,
+          modelSource: settings.modelSource,
+        }), now]
       );
 
       return NextResponse.json({
@@ -239,7 +266,9 @@ If you need help or clarification, ask the orchestrator.`;
         task_id: task.id,
         agent_id: agent.id,
         session_id: session.openclaw_session_id,
-        message: 'Task dispatched to agent'
+        message: 'Task dispatched to agent',
+        persona_injected: !!personaPrompt,
+        persona: settings.persona,
       });
     } catch (err) {
       console.error('Failed to send message to agent:', err);
