@@ -452,6 +452,44 @@ const migrations: Migration[] = [
         console.log('[Migration 015] specialist_type column already exists, skipping');
       }
     }
+  },
+  {
+    id: '016',
+    name: 'add_task_position',
+    up: (db) => {
+      console.log('[Migration 016] Adding task position support...');
+
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      if (!tasksInfo.some(col => col.name === 'position')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN position INTEGER DEFAULT 0`);
+        console.log('[Migration 016] Added position column to tasks');
+      }
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_position ON tasks(status, position)`);
+
+      const groups = [
+        ['backlog', 'inbox', 'planning', 'assigned', 'pending_dispatch'],
+        ['in_progress'],
+        ['review', 'testing'],
+        ['blocked'],
+        ['done'],
+      ];
+
+      for (const statuses of groups) {
+        const placeholders = statuses.map(() => '?').join(', ');
+        const tasks = db.prepare(`
+          SELECT id
+          FROM tasks
+          WHERE status IN (${placeholders})
+          ORDER BY created_at ASC
+        `).all(...statuses) as { id: string }[];
+
+        const stmt = db.prepare('UPDATE tasks SET position = ? WHERE id = ?');
+        tasks.forEach((task, index) => stmt.run(index, task.id));
+      }
+
+      console.log('[Migration 016] Task positions initialized');
+    }
   }
 ];
 
