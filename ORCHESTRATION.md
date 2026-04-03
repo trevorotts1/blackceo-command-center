@@ -9,7 +9,7 @@ This document explains how to orchestrate tasks in Mission Control, including ho
 ## API Base URL
 
 ```
-http://localhost:4000
+http://localhost:3000
 ```
 
 Or use the `MISSION_CONTROL_URL` environment variable.

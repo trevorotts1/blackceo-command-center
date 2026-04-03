@@ -49,6 +49,7 @@ export interface Task {
   description?: string;
   status: TaskStatus;
   priority: TaskPriority;
+  position: number;
   assigned_agent_id: string | null;
   created_by_agent_id: string | null;
   workspace_id: string;

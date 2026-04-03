@@ -4,11 +4,11 @@ module.exports = {
     // Mac: /opt/homebrew/bin/npx | VPS/Docker: npx (from PATH, install via npm i -g)
     // If npx not found, replace with full path: which npx
     script: 'npx',
-    args: `next start -p ${process.env.PORT || 4000} -H 0.0.0.0`,
+    args: `next start -p ${process.env.PORT || 3000} -H 0.0.0.0`,
     cwd: process.cwd(),
     env: {
       NODE_ENV: 'production',
-      PORT: process.env.PORT || 4000
+      PORT: process.env.PORT || 3000
     },
     // PM2 settings
     instances: 1,

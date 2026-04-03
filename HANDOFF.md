@@ -11,16 +11,16 @@ BlackCEO Command Center is Trevor's AI agent orchestration dashboard. A Next.js 
 
 - **Location:** ~/projects/mission-control
 - **Tech:** Next.js 15 + React + TypeScript + Tailwind CSS + SQLite (better-sqlite3) + Zustand
-- **Port:** 4000 (Mac: 3000 | VPS: 4000) (PM2 process: "mission-control")
+- **Port:** 3000 (PM2 process: "mission-control")
 - **DB:** ~/projects/mission-control/mission-control.db (SQLite)
 
 ---
 
 ## Access URLs
 
-- Local: http://localhost:4000 (Mac: 3000 | VPS: 4000)
-- Network: http://YOUR_IP:4000
-- Tailscale: http://YOUR_TAILSCALE_IP:4000
+- Local: http://localhost:3000
+- Network: http://YOUR_IP:3000
+- Tailscale: http://YOUR_TAILSCALE_IP:3000
 
 ---
 
@@ -28,7 +28,7 @@ BlackCEO Command Center is Trevor's AI agent orchestration dashboard. A Next.js 
 
 ```bash
 cd ~/projects/mission-control
-npm run dev              # Dev server (port 4000)
+npm run dev              # Dev server (port 3000)
 npm run build            # Production build
 npx pm2 restart mission-control  # Restart prod
 npx pm2 logs mission-control     # View logs

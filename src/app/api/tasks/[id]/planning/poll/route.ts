@@ -114,7 +114,7 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
 
   // Trigger dispatch - use localhost since we're in the same process
   if (firstAgentId && !skipDispatch) {
-    const dispatchUrl = `http://localhost:${process.env.PORT || 4000}/api/tasks/${taskId}/dispatch`;
+    const dispatchUrl = `http://localhost:${process.env.PORT || 3000}/api/tasks/${taskId}/dispatch`;
     console.log(`[Planning Poll] Triggering dispatch: ${dispatchUrl}`);
 
     try {

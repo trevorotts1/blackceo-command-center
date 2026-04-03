@@ -30,7 +30,7 @@
 # Design: Fails silently if MC is down (never blocks ARIA).
 # ─────────────────────────────────────────────────────────────────
 
-MC_URL="${MC_URL:-http://localhost:4000}"
+MC_URL="${MC_URL:-http://localhost:3000}"
 BRIDGE="$(dirname "$0")/mc-bridge.py"
 TIMEOUT=5
 

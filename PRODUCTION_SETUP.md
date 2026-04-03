@@ -69,7 +69,7 @@ This creates the database and seeds it with:
 npm run dev
 ```
 
-Visit [http://localhost:4000](http://localhost:4000)
+Visit [http://localhost:3000](http://localhost:3000)
 
 ## ⚙️ Configuration Management
 
@@ -238,7 +238,7 @@ ls -la mission-control.db
 ### 2. Test OpenClaw Connection
 
 1. Start OpenClaw Gateway: `openclaw gateway`
-2. Open Mission Control: `http://localhost:4000`
+2. Open Mission Control: `http://localhost:3000`
 3. Check status indicator (top-right): Should show **ONLINE** (green)
 
 ### 3. Test Real-Time Updates

@@ -6,7 +6,7 @@
 set -e
 
 # Configuration - use environment variable or default
-MISSION_CONTROL_URL="${MISSION_CONTROL_URL:-http://localhost:4000}"
+MISSION_CONTROL_URL="${MISSION_CONTROL_URL:-http://localhost:3000}"
 LOG_FILE="${LOG_FILE:-/tmp/standup-heartbeat.log}"
 
 # Logging function
