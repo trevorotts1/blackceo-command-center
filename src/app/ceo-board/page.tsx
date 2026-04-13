@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Settings, ChevronDown } from 'lucide-react';
@@ -54,6 +54,23 @@ const sectionVariants = {
 export default function CEOPerformanceBoardPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState('Dashboard');
+  const [companyName, setCompanyName] = useState('Command Center');
+
+  // Load company name from config
+  useEffect(() => {
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/company/config');
+        if (res.ok) {
+          const config = await res.json();
+          if (config.companyName) setCompanyName(config.companyName);
+        }
+      } catch {
+        // fallback to default
+      }
+    }
+    loadConfig();
+  }, []);
 
   const currentDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
@@ -91,7 +108,7 @@ export default function CEOPerformanceBoardPage() {
             className="px-4 py-2 rounded-full bg-white hover:bg-gray-50 transition-colors"
             style={{ border: '1px solid #CCCCCC' }}
           >
-            <span className="text-sm font-medium text-[#1A1A1A]">BlackCEO</span>
+            <span className="text-sm font-medium text-[#1A1A1A]">{companyName}</span>
           </button>
         </div>
 
@@ -168,6 +185,19 @@ export default function CEOPerformanceBoardPage() {
             <CompanyHeroCard />
           </motion.section>
 
+          {/* ============================================================ */}
+          {/* LENS 1: Business Operations KPIs                              */}
+          {/* ============================================================ */}
+          <motion.div variants={sectionVariants}>
+            <div className="flex items-center gap-3 mb-4 mt-2">
+              <div className="w-1.5 h-8 rounded-full bg-indigo-500 flex-shrink-0" />
+              <div>
+                <h2 className="text-xl font-bold text-gray-900 tracking-tight">Business Operations KPIs</h2>
+                <p className="text-sm text-gray-500">Key performance indicators across your organization</p>
+              </div>
+            </div>
+          </motion.div>
+
           {/* 2. KPI Stat Cards */}
           <motion.section variants={sectionVariants}>
             <KPIStatCards />
@@ -208,17 +238,30 @@ export default function CEOPerformanceBoardPage() {
             </div>
           </motion.section>
 
-          {/* 4. Active Agents Strip */}
-          <motion.section variants={sectionVariants}>
-            <SectionContainer title="Active Agents" accentColor="bg-emerald-500">
-              <ActiveAgentsStrip />
-            </SectionContainer>
-          </motion.section>
-
           {/* 5. Department Pulse Strip */}
           <motion.section variants={sectionVariants}>
             <SectionContainer title="Department Pulse" accentColor="bg-brand-500">
               <DepartmentPulseStrip />
+            </SectionContainer>
+          </motion.section>
+
+          {/* ============================================================ */}
+          {/* LENS 2: Agent Performance                                     */}
+          {/* ============================================================ */}
+          <motion.div variants={sectionVariants}>
+            <div className="flex items-center gap-3 mb-4 mt-2">
+              <div className="w-1.5 h-8 rounded-full bg-emerald-500 flex-shrink-0" />
+              <div>
+                <h2 className="text-xl font-bold text-gray-900 tracking-tight">Agent Performance</h2>
+                <p className="text-sm text-gray-500">AI workforce activity, models, and execution metrics</p>
+              </div>
+            </div>
+          </motion.div>
+
+          {/* 4. Active Agents Strip */}
+          <motion.section variants={sectionVariants}>
+            <SectionContainer title="Active Agents" accentColor="bg-emerald-500">
+              <ActiveAgentsStrip />
             </SectionContainer>
           </motion.section>
 
@@ -228,6 +271,19 @@ export default function CEOPerformanceBoardPage() {
               <PerformanceGaugeChart />
             </SectionContainer>
           </motion.section>
+
+          {/* ============================================================ */}
+          {/* LENS 3: Proactive Intelligence                                */}
+          {/* ============================================================ */}
+          <motion.div variants={sectionVariants}>
+            <div className="flex items-center gap-3 mb-4 mt-2">
+              <div className="w-1.5 h-8 rounded-full bg-amber-500 flex-shrink-0" />
+              <div>
+                <h2 className="text-xl font-bold text-gray-900 tracking-tight">Proactive Intelligence</h2>
+                <p className="text-sm text-gray-500">Forward-looking insights, challenges, and recommendations</p>
+              </div>
+            </div>
+          </motion.div>
 
           {/* 7. Bento Grid: Execution Queue (4col) + Needs Attention (4col) + Devil's Advocate (4col) */}
           <motion.section variants={sectionVariants}>

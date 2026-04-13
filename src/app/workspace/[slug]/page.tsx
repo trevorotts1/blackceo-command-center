@@ -14,6 +14,8 @@ import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
+import { Breadcrumb } from '@/components/Breadcrumb';
+import { resolveDepartment } from '@/lib/routing/resolve-department';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -34,6 +36,7 @@ export default function WorkspacePage() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [deptName, setDeptName] = useState<string | null>(null);
   const logoUrl = useLogoUrl();
 
   // Connect to SSE for real-time updates
@@ -48,6 +51,9 @@ export default function WorkspacePage() {
         if (res.ok) {
           const data = await res.json();
           setWorkspace(data);
+          // Resolve department name for breadcrumb (same logic as /ceo-board/[dept])
+          const resolved = await resolveDepartment(slug);
+          setDeptName(resolved?.name || data.name || null);
         } else if (res.status === 404) {
           setNotFound(true);
           setIsLoading(false);
@@ -291,6 +297,25 @@ export default function WorkspacePage() {
   return (
     <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
       <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
+
+      {/* Breadcrumb: shows Home > CEO Board > [Dept Name] > Focus View */}
+      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100">
+        <Breadcrumb
+          items={[
+            { label: 'Home', href: '/' },
+            ...(deptName
+              ? [
+                  { label: 'CEO Board', href: '/ceo-board' },
+                  { label: deptName, href: `/ceo-board/${slug}` },
+                  { label: 'Focus View' },
+                ]
+              : [
+                  { label: 'CEO Board', href: '/ceo-board' },
+                  { label: workspace?.name || slug },
+                ]),
+          ]}
+        />
+      </div>
 
       <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar */}

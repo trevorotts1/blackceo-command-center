@@ -27,7 +27,8 @@ interface KpiFormData {
   'conversion-rate': string;
 }
 
-const companyKPIs = [
+// Default KPIs — can be overridden by company-config.json via /api/company/config
+const DEFAULT_KPIS = [
   { id: 'new-leads', name: 'New Leads This Week', target: 50, unit: 'count', icon: Users },
   { id: 'new-clients', name: 'New Paying Clients', target: 10, unit: 'count', icon: Users },
   { id: 'monthly-revenue', name: 'Monthly Revenue', target: 50000, unit: 'currency', icon: DollarSign },
@@ -35,6 +36,7 @@ const companyKPIs = [
 ];
 
 export function KPIEntryPanel({ isOpen, onClose, onSaved }: KpiEntryPanelProps) {
+  const [companyKPIs, setCompanyKPIs] = useState(DEFAULT_KPIS);
   const [formData, setFormData] = useState<KpiFormData>({
     'new-leads': '',
     'new-clients': '',
@@ -44,6 +46,28 @@ export function KPIEntryPanel({ isOpen, onClose, onSaved }: KpiEntryPanelProps) 
   const [currentValues, setCurrentValues] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [isFetching, setIsFetching] = useState(true);
+
+  // Load KPIs from company config
+  useEffect(() => {
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/company/config');
+        if (res.ok) {
+          const config = await res.json();
+          if (Array.isArray(config.companyKPIs) && config.companyKPIs.length > 0) {
+            const configured = config.companyKPIs.map((kpi: { id: string; name: string; target: number; unit: string; icon?: string }) => ({
+              ...kpi,
+              icon: kpi.unit === 'currency' ? DollarSign : kpi.unit === 'percent' ? Percent : Users,
+            }));
+            setCompanyKPIs(configured);
+          }
+        }
+      } catch {
+        // fallback to defaults
+      }
+    }
+    loadConfig();
+  }, []);
 
   // Fetch current KPI values when panel opens
   useEffect(() => {

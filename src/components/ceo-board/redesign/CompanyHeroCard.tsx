@@ -2,50 +2,30 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { scoreToGrade, gradeToLabel, type Grade } from '@/lib/grading';
+import { scoreToGrade, gradeToLabel } from '@/lib/grading';
+import { calculateWeightedScore, computeAgentPerformanceScore, DEFAULT_GRADE_WEIGHTS, type GradeWeights } from '@/lib/grade-calculator';
 import type { WorkspaceStats, Agent } from '@/lib/types';
 
-function calculateCompanyScore(departments: WorkspaceStats[]): number {
-  const totalDone = departments.reduce((sum, d) => sum + (d.taskCounts?.done || 0), 0);
-  const totalTasks = departments.reduce((sum, d) => sum + (d.taskCounts?.total || 0), 0);
-  if (totalTasks === 0) return 72;
-  const doneRate = totalDone / totalTasks;
-  if (doneRate < 0.25) return 72;
-  let totalScore = 0;
-  let count = 0;
-  for (const dept of departments) {
-    const total = dept.taskCounts?.total || 0;
-    const done = dept.taskCounts?.done || 0;
-    const inProgress = dept.taskCounts?.in_progress || 0;
-    if (total === 0) {
-      totalScore += 72;
-      count++;
-      continue;
-    }
-    const dr = done / total;
-    if (dr < 0.1) {
-      totalScore += 72;
-      count++;
-      continue;
-    }
-    totalScore += Math.round(((done + inProgress * 0.5) / total) * 100);
-    count++;
-  }
-  return count > 0 ? Math.round(totalScore / count) : 72;
+interface CompanyConfig {
+  companyName: string;
+  gradingWeights: GradeWeights;
+  companyKPIs: { id: string; name: string; target: number; unit: string }[];
 }
 
 export function CompanyHeroCard() {
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [config, setConfig] = useState<CompanyConfig | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       try {
         setLoading(true);
-        const [wsRes, agentsRes] = await Promise.all([
+        const [wsRes, agentsRes, configRes] = await Promise.all([
           fetch('/api/workspaces?stats=true'),
           fetch('/api/agents'),
+          fetch('/api/company/config'),
         ]);
         if (wsRes.ok) {
           const data: WorkspaceStats[] = await wsRes.json();
@@ -61,6 +41,9 @@ export function CompanyHeroCard() {
         if (agentsRes.ok) {
           setAgents(await agentsRes.json());
         }
+        if (configRes.ok) {
+          setConfig(await configRes.json());
+        }
       } catch {
         // handled by loading state
       } finally {
@@ -71,10 +54,35 @@ export function CompanyHeroCard() {
   }, []);
 
   const { grade, label, totalTasks, activeAgents, completionRate } = useMemo(() => {
-    const score = calculateCompanyScore(departments);
-    const g = scoreToGrade(score);
+    const weights = config?.gradingWeights || DEFAULT_GRADE_WEIGHTS;
+
+    // Compute agent performance from real workspace stats
+    const agentPerformance = computeAgentPerformanceScore(departments);
+
+    // For now, KPI achievement comes from workspace completion as proxy
+    // until KPI snapshot data is wired in
+    const kpiAchievement = agentPerformance;
+
+    // DA compliance and recommendation follow-through: 0 until wired to real data
+    const daCompliance = 0;
+    const recommendationFollowThrough = 0;
+
+    // If no tasks exist, use bootstrap score
     const total = departments.reduce((s, d) => s + (d.taskCounts?.total || 0), 0);
     const done = departments.reduce((s, d) => s + (d.taskCounts?.done || 0), 0);
+
+    let score: number;
+    if (total === 0) {
+      // No data yet — show bootstrap placeholder
+      score = 72;
+    } else {
+      score = calculateWeightedScore(
+        { kpiAchievement, agentPerformance, daCompliance, recommendationFollowThrough },
+        weights
+      );
+    }
+
+    const g = scoreToGrade(score);
     const active = agents.filter(
       (a) => a.status === 'active' || a.status === 'working'
     ).length;
@@ -85,7 +93,7 @@ export function CompanyHeroCard() {
       activeAgents: active,
       completionRate: total > 0 ? Math.round((done / total) * 100) : 0,
     };
-  }, [departments, agents]);
+  }, [departments, agents, config]);
 
   const statusLine = useMemo(() => {
     const needsAttention = departments.filter((d) => {

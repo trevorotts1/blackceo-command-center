@@ -18,24 +18,11 @@ interface GoalsSectionProps {
   constraints?: Constraint[];
 }
 
-const DEFAULT_GOALS: Goal[] = [
-  {
-    name: 'Onboarding Velocity',
-    target: '7 Days',
-    progress: 50,
-    description: 'Reduce onboarding completion time from 14 days to 7 days.',
-  },
-];
-
-const DEFAULT_CONSTRAINTS: Constraint[] = [
-  {
-    text: 'All job postings must include salary range and benefits.',
-  },
-];
+// No synthetic defaults — goals and constraints come from real data or show empty state
 
 export function GoalsSection({ goals, constraints }: GoalsSectionProps) {
-  const goalList = goals || DEFAULT_GOALS;
-  const constraintList = constraints || DEFAULT_CONSTRAINTS;
+  const goalList = goals || [];
+  const constraintList = constraints || [];
 
   return (
     <div
@@ -50,23 +37,26 @@ export function GoalsSection({ goals, constraints }: GoalsSectionProps) {
       </h3>
 
       <div className="space-y-5">
-        {goalList.map((goal, idx) => (
-          <div key={idx}>
-            <div className="flex items-center justify-between mb-1">
-              <p className="text-sm font-bold text-gray-900">{goal.name}</p>
-              <span className="text-xs font-medium text-gray-400">
-                Target: {goal.target}
-              </span>
+        {goalList.length === 0 ? (
+          <p className="text-sm text-gray-400 italic">No goals set yet. Configure company goals to track strategic progress.</p>
+        ) : (
+          goalList.map((goal, idx) => (
+            <div key={idx}>
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-sm font-bold text-gray-900">{goal.name}</p>
+                <span className="text-xs font-medium text-gray-400">
+                  Target: {goal.target}
+                </span>
+              </div>
+              <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-amber-400 rounded-full transition-all duration-500"
+                  style={{ width: `${goal.progress}%` }} />
+              </div>
+              <p className="text-xs text-gray-500 mt-2">{goal.description}</p>
             </div>
-            <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-amber-400 rounded-full transition-all duration-500"
-                style={{ width: `${goal.progress}%` }}
-              />
-            </div>
-            <p className="text-xs text-gray-500 mt-2">{goal.description}</p>
-          </div>
-        ))}
+          ))
+        )}
 
         {constraintList.length > 0 && (
           <div className="p-4 rounded-xl bg-gray-50/80">

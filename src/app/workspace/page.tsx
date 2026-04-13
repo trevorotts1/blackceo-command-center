@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home, GripVertical, ListTodo } from 'lucide-react';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
+import { Breadcrumb } from '@/components/Breadcrumb';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 
 interface Workspace {
@@ -171,6 +172,14 @@ function WorkspaceSelectorInner() {
           animate={{ opacity: 1, y: 0 }}
         >
           <div className="text-center mb-12">
+            <div className="max-w-6xl mx-auto px-6 mb-4 text-left">
+              <Breadcrumb
+                items={[
+                  { label: 'Home', href: '/' },
+                  { label: 'Departments' },
+                ]}
+              />
+            </div>
             <h2 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
               Select a Department
             </h2>

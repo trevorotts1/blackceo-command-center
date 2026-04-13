@@ -7,6 +7,7 @@ import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain } from 'luci
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
+import { Breadcrumb } from '@/components/Breadcrumb';
 
 const cardVariants = {
   hidden: { opacity: 0, y: 30, scale: 0.95 },
@@ -155,7 +156,10 @@ export default function HomePage() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col items-center justify-center px-6 py-12">
+      <main className="flex-1 flex flex-col items-center justify-center px-6 py-4">
+        <div className="max-w-5xl w-full">
+          <Breadcrumb items={[{ label: 'Home' }]} />
+        </div>
         <motion.div
           className="max-w-5xl w-full"
           initial="hidden"

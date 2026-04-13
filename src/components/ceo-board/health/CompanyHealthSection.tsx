@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { scoreToGrade, gradeToColor, gradeToLabel, type Grade } from '@/lib/grading';
+import { calculateWeightedScore, computeAgentPerformanceScore, DEFAULT_GRADE_WEIGHTS, type GradeWeights } from '@/lib/grade-calculator';
 import type { WorkspaceStats } from '@/lib/types';
 
 const containerVariants = {
@@ -142,9 +143,9 @@ function calculateDepartmentScore(dept: WorkspaceStats): number {
   return Math.round(score);
 }
 
-// Calculate company score with bootstrap logic
-function calculateCompanyScore(departments: WorkspaceStats[]): number {
-  const totalDone = departments.reduce((sum, dept) => sum + (dept.taskCounts?.done || 0), 0);
+// Calculate company score using the 4-factor PRD formula
+function calculateCompanyScore(departments: WorkspaceStats[], weights?: GradeWeights): number {
+  const w = weights || DEFAULT_GRADE_WEIGHTS;
   const totalTasks = departments.reduce((sum, dept) => sum + (dept.taskCounts?.total || 0), 0);
 
   // No data yet - use bootstrap score
@@ -152,29 +153,29 @@ function calculateCompanyScore(departments: WorkspaceStats[]): number {
     return 72; // C+ baseline for new installs
   }
 
-  const doneRate = totalDone / totalTasks;
+  const agentPerformance = computeAgentPerformanceScore(departments);
+  const kpiAchievement = agentPerformance; // Proxy until KPI snapshots wired
+  const daCompliance = 0; // No DA challenge data yet
+  const recommendationFollowThrough = 0; // No recommendation data yet
+
+  const doneTasks = departments.reduce((sum, dept) => sum + (dept.taskCounts?.done || 0), 0);
+  const doneRate = doneTasks / totalTasks;
 
   // Bootstrap condition: too early in deployment for meaningful company grade (< 25% done)
   if (doneRate < 0.25) {
     return 72; // C+ baseline - system is still ramping up
   }
 
-  // Has real progress - use weighted completion rate
-  let totalScore = 0;
-  let deptCount = 0;
-
-  for (const dept of departments) {
-    const score = calculateDepartmentScore(dept);
-    totalScore += score;
-    deptCount++;
-  }
-
-  return deptCount > 0 ? Math.round(totalScore / deptCount) : 72;
+  return calculateWeightedScore(
+    { kpiAchievement, agentPerformance, daCompliance, recommendationFollowThrough },
+    w
+  );
 }
 
 export function CompanyHealthSection() {
   const router = useRouter();
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
+  const [gradingWeights, setGradingWeights] = useState<GradeWeights | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -182,25 +183,34 @@ export function CompanyHealthSection() {
       try {
         setLoading(true);
 
-        const res = await fetch('/api/workspaces?stats=true');
-        if (!res.ok) {
-          throw new Error('Failed to load workspace stats');
+        const [wsRes, configRes] = await Promise.all([
+          fetch('/api/workspaces?stats=true'),
+          fetch('/api/company/config'),
+        ]);
+
+        if (wsRes.ok) {
+          const data: WorkspaceStats[] = await wsRes.json();
+          
+          // Filter to only show workspaces belonging to the default company (Trevor's board)
+          // Exclude ceo, default, and any seeded demo workspaces (acme-*, zhw-*)
+          const filteredDepartments = data.filter(
+            (item) => {
+              const slug = item.slug || item.id;
+              return slug !== 'default' && 
+                     !slug.startsWith('acme-') && 
+                     !slug.startsWith('zhw-');
+            }
+          );
+
+          setDepartments(filteredDepartments);
         }
 
-        const data: WorkspaceStats[] = await res.json();
-        
-        // Filter to only show workspaces belonging to the default company (Trevor's board)
-        // Exclude ceo, default, and any seeded demo workspaces (acme-*, zhw-*)
-        const filteredDepartments = data.filter(
-          (item) => {
-            const slug = item.slug || item.id;
-            return slug !== 'default' && 
-                   !slug.startsWith('acme-') && 
-                   !slug.startsWith('zhw-');
+        if (configRes.ok) {
+          const config = await configRes.json();
+          if (config.gradingWeights) {
+            setGradingWeights(config.gradingWeights);
           }
-        );
-
-        setDepartments(filteredDepartments);
+        }
       } catch (err) {
         console.error('Failed to load department stats:', err);
         setDepartments([]);
@@ -213,7 +223,8 @@ export function CompanyHealthSection() {
   }, []);
 
   const { companyScore, companyGrade, isBootstrap, sortedDepartments } = useMemo(() => {
-    const score = calculateCompanyScore(departments);
+    const weights = gradingWeights || undefined;
+    const score = calculateCompanyScore(departments, weights);
     const grade = scoreToGrade(score);
 
     // Check if we're in bootstrap mode (no meaningful data yet)
@@ -239,7 +250,7 @@ export function CompanyHealthSection() {
       isBootstrap: isBootstrapMode,
       sortedDepartments: sorted,
     };
-  }, [departments]);
+  }, [departments, gradingWeights]);
 
   // Find best and worst performing departments for the explanation
   const bestDept = sortedDepartments[0];

@@ -518,7 +518,9 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
     // Look for departments.json
     const configPaths = [
       path.join(process.cwd(), 'config', 'departments.json'),
+      path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', 'departments.json'),
       path.join(os.homedir(), 'projects', 'mission-control', 'config', 'departments.json'),
+      path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'departments.json'),
       path.join('/opt', 'mission-control', 'config', 'departments.json'),
     ];
     

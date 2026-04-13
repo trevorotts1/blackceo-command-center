@@ -45,7 +45,7 @@ pm2 start ecosystem.config.cjs
 
 - **Company name:** Set via `COMPANY_NAME` env var or populated from database
 - **Departments:** Loaded dynamically from database workspaces; configure via `config/departments.json` or Skill 23 seed
-- **Port:** `${PORT:-4000}` (env var, defaults to 4000 for clients, 3000 for Trevor's machine)
+- **Port:** `${PORT:-4000}` (env var, defaults to 4000)
 - **Logo:** Place at `public/logo.png` or set `NEXT_PUBLIC_LOGO_URL`
 - **Brand colors:** Set primary/secondary hex colors on the company record; palette auto-generates
 - **Intelligence:** Settings > Intelligence for per-department AI model and persona assignment

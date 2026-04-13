@@ -1,64 +1,75 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '@/lib/db';
+import { readFileSync, existsSync } from 'fs';
+import { join, resolve } from 'path';
 
 const DEFAULT_MODEL = 'openrouter/free';
 const DEFAULT_PERSONA = 'auto';
 
-/* ── Persona details: book titles and categories ── */
-const PERSONA_DETAILS: Record<string, { author: string; book: string; category: string }> = {
-  // Sales & Revenue
-  'hormozi-100m-offers':          { author: 'Alex Hormozi',      book: '$100M Offers',                    category: 'Sales & Revenue' },
-  'voss-never-split-difference':  { author: 'Chris Voss',        book: 'Never Split the Difference',      category: 'Sales & Revenue' },
-  'rackham-spin-selling':         { author: 'Neil Rackham',      book: 'SPIN Selling',                    category: 'Sales & Revenue' },
-  'pink-to-sell-is-human':        { author: 'Daniel Pink',       book: 'To Sell Is Human',                category: 'Sales & Revenue' },
-  'jones-exactly-what-to-say':    { author: 'Phil Jones',        book: 'Exactly What to Say',             category: 'Sales & Revenue' },
-  'kane-hook-point':              { author: 'Brendan Kane',      book: 'Hook Point',                      category: 'Sales & Revenue' },
-  'priestley-oversubscribed':     { author: 'Daniel Priestley',  book: 'Oversubscribed',                  category: 'Sales & Revenue' },
-  // Marketing & Content
-  'miller-building-storybrand-2': { author: 'Donald Miller',     book: 'Building a StoryBrand',           category: 'Marketing & Content' },
-  'godin-this-is-marketing':      { author: 'Seth Godin',        book: 'This Is Marketing',              category: 'Marketing & Content' },
-  'bly-copywriters-handbook':     { author: 'Robert Bly',        book: "The Copywriter's Handbook",       category: 'Marketing & Content' },
-  'wiebe-copy-hackers':           { author: 'Joanna Wiebe',      book: 'Copy Hackers',                    category: 'Marketing & Content' },
-  'cialdini-influence':           { author: 'Robert Cialdini',   book: 'Influence',                       category: 'Marketing & Content' },
-  'charvet-words-change-minds':   { author: 'Shelle Rose Charvet', book: 'Words That Change Minds',       category: 'Marketing & Content' },
-  // Leadership & Strategy
-  'sinek-start-with-why':         { author: 'Simon Sinek',       book: 'Start With Why',                  category: 'Leadership & Strategy' },
-  'sinek-find-your-why':          { author: 'Simon Sinek',       book: 'Find Your Why',                   category: 'Leadership & Strategy' },
-  'collins-good-to-great':        { author: 'Jim Collins',       book: 'Good to Great',                   category: 'Leadership & Strategy' },
-  'samit-disrupt-yourself':       { author: 'Jay Samit',         book: 'Disrupt Yourself',                category: 'Leadership & Strategy' },
-  'lakhiani-extraordinary-mind':  { author: 'Vishen Lakhiani',   book: 'The Code of the Extraordinary Mind', category: 'Leadership & Strategy' },
-  'grover-relentless':            { author: 'Tim Grover',        book: 'Relentless',                      category: 'Leadership & Strategy' },
-  // Productivity & Systems
-  'clear-atomic-habits':          { author: 'James Clear',       book: 'Atomic Habits',                   category: 'Productivity & Systems' },
-  'forte-building-second-brain':  { author: 'Tiago Forte',       book: 'Building a Second Brain',         category: 'Productivity & Systems' },
-  'forte-para-method':            { author: 'Tiago Forte',       book: 'The PARA Method',                 category: 'Productivity & Systems' },
-  'moran-12-week-year':           { author: 'Brian Moran',       book: 'The 12 Week Year',                category: 'Productivity & Systems' },
-  'duhigg-power-of-habit':        { author: 'Charles Duhigg',    book: 'The Power of Habit',              category: 'Productivity & Systems' },
-  'pink-when':                    { author: 'Daniel Pink',       book: 'When',                            category: 'Productivity & Systems' },
-  // Finance & Business Health
-  'michalowicz-profit-first':     { author: 'Mike Michalowicz',  book: 'Profit First',                    category: 'Finance & Business Health' },
-  // Coaching & Human Development
-  'robbins-five-second-rule':     { author: 'Mel Robbins',       book: 'The 5 Second Rule',               category: 'Coaching & Development' },
-  'robbins-let-them-theory':      { author: 'Mel Robbins',       book: 'The Let Them Theory',             category: 'Coaching & Development' },
-  'sharma-5am-club':              { author: 'Robin Sharma',      book: 'The 5 AM Club',                   category: 'Coaching & Development' },
-  'goggins-cant-hurt-me':         { author: 'David Goggins',     book: "Can't Hurt Me",                   category: 'Coaching & Development' },
-  'jakes-instinct':               { author: 'T.D. Jakes',        book: 'Instinct',                        category: 'Coaching & Development' },
-  'pink-drive':                   { author: 'Daniel Pink',       book: 'Drive',                           category: 'Coaching & Development' },
-  'attwood-passion-test':         { author: 'Janet Attwood',     book: 'The Passion Test',                category: 'Coaching & Development' },
-  'grenny-crucial-conversations': { author: 'Joseph Grenny',     book: 'Crucial Conversations',           category: 'Coaching & Development' },
-  // Emotional Intelligence & Relationships
-  'tawwab-set-boundaries-find-peace': { author: 'Nedra Glover Tawwab', book: 'Set Boundaries, Find Peace', category: 'Emotional Intelligence' },
-  'brown-atlas-of-heart':         { author: 'Brene Brown',       book: 'Atlas of the Heart',              category: 'Emotional Intelligence' },
-  'obama-becoming':               { author: 'Michelle Obama',    book: 'Becoming',                        category: 'Emotional Intelligence' },
-  'obama-light-we-carry':         { author: 'Michelle Obama',    book: 'The Light We Carry',              category: 'Emotional Intelligence' },
+/* ── Persona details: loaded at runtime from persona-categories.json ── */
+interface PersonaCategoryEntry {
+  author: string;
+  book: string;
+  domain: string[];
+  perspective: string[];
+  custom: string[];
+}
+
+function loadPersonaCategories(): Record<string, PersonaCategoryEntry> {
+  const homedir = process.env.HOME || process.env.USERPROFILE || '/root';
+  const workspaceBase = process.env.WORKSPACE_BASE_PATH
+    ? resolve(process.env.WORKSPACE_BASE_PATH.replace(/^~/, homedir))
+    : join(homedir, 'clawd');
+
+  const candidatePaths = [
+    join(workspaceBase, 'coaching-personas', 'persona-categories.json'),
+    join(homedir, 'Downloads', 'openclaw-master-files', 'coaching-personas', 'persona-categories.json'),
+    join(homedir, '.openclaw', 'skills', '22-book-to-persona-coaching-leadership-system', 'persona-categories.json'),
+  ];
+
+  for (const p of candidatePaths) {
+    if (existsSync(p)) {
+      try {
+        const raw = JSON.parse(readFileSync(p, 'utf-8'));
+        return raw.personas || {};
+      } catch {
+        console.error(`[Intelligence] Failed to parse ${p}`);
+      }
+    }
+  }
+  console.warn('[Intelligence] No persona-categories.json found, using empty list');
+  return {};
+}
+
+const DOMAIN_TO_CATEGORY: Record<string, string> = {
+  'marketing': 'Marketing & Content',
+  'sales': 'Sales & Revenue',
+  'leadership': 'Leadership & Strategy',
+  'finance': 'Finance & Business Health',
+  'operations': 'Productivity & Systems',
+  'communication': 'Communication',
+  'copywriting': 'Marketing & Content',
+  'mindset': 'Coaching & Development',
+  'productivity-systems': 'Productivity & Systems',
+  'coaching': 'Coaching & Development',
+  'strategy-innovation': 'Leadership & Strategy',
+  'personal-development': 'Coaching & Development',
 };
+
+function getPersonaCategory(entry: PersonaCategoryEntry): string {
+  for (const d of entry.domain || []) {
+    if (DOMAIN_TO_CATEGORY[d]) return DOMAIN_TO_CATEGORY[d];
+  }
+  return 'General';
+}
 
 function formatPersonaLabel(id: string): string {
   if (id === 'auto') return 'Auto-assign (recommended)';
-  const details = PERSONA_DETAILS[id];
-  if (!details) return id.replace(/-/g, ' ');
-  return `${details.author} — "${details.book}" (${details.category})`;
+  const personas = loadPersonaCategories();
+  const entry = personas[id];
+  if (!entry) return id.replace(/-/g, ' ');
+  return `${entry.author} - ${entry.book} (${getPersonaCategory(entry)})`;
 }
 
 const AVAILABLE_MODELS = [

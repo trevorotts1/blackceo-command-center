@@ -4,3 +4,4 @@ export { AgentModal } from './AgentModal';
 export { MissionQueue } from './MissionQueue';
 export { TaskModal } from './TaskModal';
 export { LiveFeed } from './LiveFeed';
+export { Breadcrumb, type BreadcrumbItem } from './Breadcrumb';

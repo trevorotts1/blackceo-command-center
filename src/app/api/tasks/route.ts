@@ -14,6 +14,7 @@ export async function GET(request: NextRequest) {
     const workspaceId = searchParams.get('workspace_id');
     const assignedAgentId = searchParams.get('assigned_agent_id');
     const department = searchParams.get('department');
+    const departmentId = searchParams.get('department_id');
 
     let sql = `
       SELECT
@@ -54,6 +55,11 @@ export async function GET(request: NextRequest) {
     if (department) {
       sql += ' AND t.department = ?';
       params.push(department);
+    }
+    if (departmentId) {
+      // department_id maps to workspace_id (workspaces = departments)
+      sql += ' AND t.workspace_id = ?';
+      params.push(departmentId);
     }
 
     sql += ' ORDER BY t.created_at DESC';

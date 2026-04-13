@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Home,
   Target,
   Users,
   Sparkles,
@@ -24,6 +23,8 @@ import {
 } from 'lucide-react';
 import { Sparkline } from '@/components/ceo-board/Sparkline';
 import DepartmentMemorySection from '@/components/ceo-board/DepartmentMemorySection';
+import { Breadcrumb } from '@/components/Breadcrumb';
+import { resolveDepartment, type DepartmentResolution } from '@/lib/routing/resolve-department';
 import { SectionContainer } from '@/components/ceo-board/redesign/SectionContainer';
 import { GoalsSection } from '@/components/ceo-board/redesign/GoalsSection';
 import { TeamContextSection } from '@/components/ceo-board/redesign/TeamContextSection';
@@ -696,6 +697,7 @@ export default function DepartmentSubBoardPage() {
   const deptId = params.dept as string;
 
   const [department, setDepartment] = useState<DepartmentData | null>(null);
+  const [resolvedDept, setResolvedDept] = useState<DepartmentResolution | null>(null);
   const [kpis, setKpis] = useState<KPIData[]>([]);
   const [agents, setAgents] = useState<AgentData[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
@@ -706,29 +708,22 @@ export default function DepartmentSubBoardPage() {
     const loadDepartmentData = async () => {
       setIsLoading(true);
 
+      // Use shared resolution function (same logic as /workspace/[slug])
+      const resolved = await resolveDepartment(deptId);
+      setResolvedDept(resolved);
+
       let dept: DepartmentData | undefined;
 
-      try {
-        const wsRes = await fetch('/api/workspaces');
-        if (wsRes.ok) {
-          const workspaces = await wsRes.json();
-          const ws = workspaces.find((w: { id: string; slug?: string; name: string; icon?: string; description?: string }) =>
-            w.id === deptId || w.slug === deptId
-          );
-          if (ws) {
-            dept = {
-              id: ws.id,
-              name: ws.name,
-              emoji: ws.icon || '🏢',
-              headTitle: `Head of ${ws.name}`,
-              grade: 'B',
-              gradeScore: 75,
-              insight: ws.description || `${ws.name} department is active and operational.`,
-            };
-          }
-        }
-      } catch (e) {
-        console.error('Failed to fetch workspace for dept page:', e);
+      if (resolved) {
+        dept = {
+          id: resolved.id,
+          name: resolved.name,
+          emoji: resolved.emoji,
+          headTitle: resolved.headTitle,
+          grade: resolved.grade,
+          gradeScore: resolved.gradeScore,
+          insight: resolved.insight,
+        };
       }
 
       if (!dept) {
@@ -918,24 +913,13 @@ export default function DepartmentSubBoardPage() {
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200 px-4 sm:px-6 lg:px-8">
         <div className="h-16 flex items-center justify-between">
           <div className="flex items-center gap-1">
-            <button
-              onClick={() => router.push('/')}
-              className="flex items-center gap-1.5 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
-            >
-              <Home className="h-4 w-4" />
-              Home
-            </button>
-            <span className="text-gray-300">/</span>
-            <button
-              onClick={() => router.push('/ceo-board')}
-              className="flex items-center gap-1.5 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
-            >
-              CEO Board
-            </button>
-            <span className="text-gray-300">/</span>
-            <span className="px-3 py-2 text-gray-900 font-semibold text-sm">
-              {department?.name || deptId}
-            </span>
+            <Breadcrumb
+              items={[
+                { label: 'Home', href: '/' },
+                { label: 'CEO Board', href: '/ceo-board' },
+                { label: department?.name || deptId },
+              ]}
+            />
           </div>
           <div className="flex items-center gap-2">
             <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />

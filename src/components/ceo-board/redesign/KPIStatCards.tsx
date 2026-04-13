@@ -6,6 +6,14 @@ import { ArrowUpRight, ArrowUp, ArrowDown, Minus } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer } from 'recharts';
 import type { WorkspaceStats, Agent } from '@/lib/types';
 
+interface CompanyKpiConfig {
+  id: string;
+  name: string;
+  target: number;
+  unit: string;
+  icon?: string;
+}
+
 interface KPICardData {
   label: string;
   value: number;
@@ -15,13 +23,6 @@ interface KPICardData {
   isZeroAgents?: boolean;
   sparkline: number[];
 }
-
-const SPARKLINES: Record<string, number[]> = {
-  'Tasks Completed': [3, 5, 4, 7, 6, 8, 5],
-  'Active Agents': [2, 3, 2, 4, 3, 5, 4],
-  'Blocked Tasks': [1, 2, 1, 3, 2, 1, 2],
-  'Avg Velocity': [4, 5, 6, 5, 7, 8, 6],
-};
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -81,15 +82,17 @@ function TrendBadge({
 export function KPIStatCards() {
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [companyKPIs, setCompanyKPIs] = useState<CompanyKpiConfig[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       try {
         setLoading(true);
-        const [wsRes, agentsRes] = await Promise.all([
+        const [wsRes, agentsRes, configRes] = await Promise.all([
           fetch('/api/workspaces?stats=true'),
           fetch('/api/agents'),
+          fetch('/api/company/config'),
         ]);
         if (wsRes.ok) {
           const data: WorkspaceStats[] = await wsRes.json();
@@ -103,6 +106,12 @@ export function KPIStatCards() {
           );
         }
         if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (configRes.ok) {
+          const config = await configRes.json();
+          if (Array.isArray(config.companyKPIs) && config.companyKPIs.length > 0) {
+            setCompanyKPIs(config.companyKPIs);
+          }
+        }
       } catch {
         // handled by loading
       } finally {
@@ -123,6 +132,18 @@ export function KPIStatCards() {
     ).length;
     const velocity = totalDone > 0 ? Math.max(1, Math.round(totalDone / 4)) : 0;
 
+    // Use configured KPIs if available, otherwise default task-based KPIs
+    if (companyKPIs.length > 0) {
+      return companyKPIs.map((kpi) => ({
+        label: kpi.name,
+        value: 0, // Value will be populated from KPI snapshot API when wired
+        trend: 'neutral' as const,
+        trendLabel: 'No data yet',
+        sparkline: [],
+      }));
+    }
+
+    // Default cards based on real workspace stats
     return [
       {
         label: 'Tasks Completed',
@@ -130,7 +151,7 @@ export function KPIStatCards() {
         trend: 'up' as const,
         trendLabel: 'Increased from last week',
         dark: true,
-        sparkline: SPARKLINES['Tasks Completed'],
+        sparkline: [], // No hardcoded sparkline — real KPI history needed
       },
       {
         label: 'Active Agents',
@@ -138,7 +159,7 @@ export function KPIStatCards() {
         trend: activeCount > 0 ? ('up' as const) : ('neutral' as const),
         trendLabel: activeCount > 0 ? `${activeCount} working now` : 'No active agents',
         isZeroAgents: activeCount === 0,
-        sparkline: SPARKLINES['Active Agents'],
+        sparkline: [],
       },
       {
         label: 'Blocked Tasks',
@@ -148,17 +169,17 @@ export function KPIStatCards() {
           totalBlocked > 0
             ? `${totalBlocked} need attention`
             : 'No blocked tasks',
-        sparkline: SPARKLINES['Blocked Tasks'],
+        sparkline: [],
       },
       {
         label: 'Avg Velocity',
         value: velocity,
         trend: 'up' as const,
         trendLabel: 'tasks per week',
-        sparkline: SPARKLINES['Avg Velocity'],
+        sparkline: [],
       },
     ];
-  }, [departments, agents]);
+  }, [departments, agents, companyKPIs]);
 
   if (loading) {
     return (
@@ -252,20 +273,22 @@ export function KPIStatCards() {
             )}
           </div>
 
-          {/* Mini sparkline */}
-          <div className="mt-2 w-full" style={{ height: 32 }}>
-            <ResponsiveContainer width="100%" height={32}>
-              <LineChart data={card.sparkline.map((v) => ({ v }))}>
-                <Line
-                  type="monotone"
-                  dataKey="v"
-                  stroke={card.dark ? 'rgba(255,255,255,0.3)' : '#34d399'}
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+          {/* Mini sparkline — only show when real KPI history data is available */}
+          {card.sparkline.length > 0 && (
+            <div className="mt-2 w-full" style={{ height: 32 }}>
+              <ResponsiveContainer width="100%" height={32}>
+                <LineChart data={card.sparkline.map((v) => ({ v }))}>
+                  <Line
+                    type="monotone"
+                    dataKey="v"
+                    stroke={card.dark ? 'rgba(255,255,255,0.3)' : '#34d399'}
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </motion.div>
       ))}
     </motion.div>
