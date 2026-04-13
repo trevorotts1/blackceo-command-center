@@ -2,6 +2,8 @@
 
 AI Agent Management Dashboard - A universal template for any organization.
 
+**Current Version: v8.0.0** — April 13, 2026
+
 ## Overview
 
 Command Center is a sophisticated web application for managing and orchestrating AI agents. It provides a visual dashboard for task management, agent coordination, and real-time monitoring of agent activities.
@@ -26,6 +28,12 @@ Command Center is a sophisticated web application for managing and orchestrating
 - **Dynamic Departments:** Departments loaded from database workspaces, not hardcoded lists
 - **Brand Palette:** Automatic complementary color generation from company primary/secondary colors
 - **CEO Performance Board:** Company health grading, department analytics, recommendations, benchmarks
+- **Department Browser (`DepartmentBrowser.tsx`):** Visual Kanban browser for all departments
+- **Focus View (`/ceo-board/[dept]/focus`):** Dedicated task focus page per department
+- **Grade Calculator:** 40/30/15/15 formula (Revenue/Mission/Efficiency/Team)
+- **company-config.json Runtime Loader:** Dynamic persona and config loading
+- **Three-Lens Performance Board:** Revenue, Mission, and Operational Excellence views
+- **Breadcrumb Navigation:** Consistent breadcrumbs on all pages
 
 ## Setup
 
