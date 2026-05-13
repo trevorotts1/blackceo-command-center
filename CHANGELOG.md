@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.9.5 - May 13, 2026 - Update Check + Updater Scripts
+
+### Added
+- **`check-updates.sh` at repo root** — READ-ONLY script that compares the locally-installed Command Center version against the GitHub `version` file + extracts the latest CHANGELOG entry. Emits structured JSON. Never modifies anything. Designed to be called by the Sunday weekly update cron (lives in the openclaw-onboarding repos).
+- **`update.sh` at repo root** — Destructive update script: backs up critical files to `~/Downloads/blackceo-cc-backups/` (Mac) or `~/blackceo-cc-backups/` (VPS), runs `git fetch + reset --hard origin/main`, reinstalls npm dependencies, attempts PM2 reload, writes a `COMMAND CENTER UPDATE PENDING` flag to the workspace AGENTS.md so the agent knows to verify the post-update state. Does NOT auto-apply database migrations — surfaces them as warnings for manual review.
+
+### Changed
+- **version file** bumped to v2.9.5.
+
+### Risk: low
+Adds tooling, does not change app code or schema. The update.sh script is destructive when invoked but only by explicit user action (or by the Sunday cron after the client explicitly confirms). No effect on running Command Center installs until someone runs update.sh.
+
+### Notes
+- These scripts pair with the v9.2.0 weekly-onboarding-update cron in the openclaw-onboarding / openclaw-onboarding-vps repos. The cron calls check-updates.sh from BOTH the onboarding repo AND this repo, composes a single Telegram summary, asks the client which (if any) to update, then calls update.sh here if Command Center was selected.
+
+---
+
 ## v2.9.4 - April 3, 2026
 
 ### Fixed — Kanban Race Condition
