@@ -1,3 +1,34 @@
+## [v10.5.0] — 2026-05-17 — Wave 3: v2.1 Integration Layer
+
+This Command Center release aligns the dashboard with the onboarding repos' v10.5.0 integration layer. No new dashboard features in this wave — all migrations and pages shipped in Wave 2 (v10.4.1).
+
+The onboarding repos now ship:
+- `persona-selector-v2.py` — the v2.1-aware persona selector with stickiness + adaptive weights
+- `post-build-role-workspaces.py` — creates role-level workspaces post-build
+- `gemini-section-indexer.py` — section-level Gemini indexing
+- `run-v2.1-migrations.sh` — one-command migration runner
+- `verify-v2.1-installation.sh` — smoke-test all 36 checks
+- `RUNBOOK-v2.1.md` — operator runbook
+
+### Optional hand-touch (RUNBOOK Section 5B)
+
+To wire persona-selector-v2 into the Command Center, edit `src/lib/persona-selector.ts`:
+
+```typescript
+// Change:
+scriptPath = path.join(openclaw_root, "skills", "23-ai-workforce-blueprint", "scripts", "select-persona-for-task.py");
+// To:
+scriptPath = path.join(openclaw_root, "skills", "23-ai-workforce-blueprint", "scripts", "persona-selector-v2.py");
+```
+
+The v2 selector emits compatible JSON plus extra fields (`task_category`, `secondary_persona_id`, `secondary_persona_name`, `secondary_persona_score`, `weights_used`, `layers`). Existing callers continue to work — new fields are ignored by old consumers.
+
+### Version
+
+Root `version` file bumped to `v3.0.0` (major bump aligns with onboarding v10.5.0 integration milestone).
+
+---
+
 ## [v10.4.1] — 2026-05-17 — Wave 2 Execution
 
 ### Added — Database Migrations
