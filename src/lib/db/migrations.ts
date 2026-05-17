@@ -452,7 +452,195 @@ const migrations: Migration[] = [
         console.log('[Migration 015] specialist_type column already exists, skipping');
       }
     }
-  }
+  },
+
+  // ============================================================
+  // v2.1 wave 2 — Zero-Human Company spec migrations
+  // ============================================================
+  {
+    id: '016',
+    name: 'add_task_persona_fields',
+    up: (db) => {
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      const columnNames = tasksInfo.map((c) => c.name);
+      const adds: Record<string, string> = {
+        persona_id: 'TEXT',
+        persona_name: 'TEXT',
+        persona_mode: 'TEXT',
+        persona_score: 'REAL',
+        persona_selected_at: 'TEXT',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.includes(col)) {
+          db.prepare(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS persona_selection_log (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT NOT NULL,
+          persona_id TEXT NOT NULL,
+          persona_name TEXT,
+          mode TEXT,
+          score REAL,
+          layer_scores TEXT,
+          department_id TEXT,
+          selected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (task_id) REFERENCES tasks(id)
+        )
+      `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_persona_log_task ON persona_selection_log(task_id)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_persona_log_dept ON persona_selection_log(department_id)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_persona_log_persona ON persona_selection_log(persona_id)`).run();
+      console.log('[Migration 016] Persona fields + persona_selection_log table ready');
+    }
+  },
+  {
+    id: '017',
+    name: 'add_campaigns_and_campaign_id',
+    up: (db) => {
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS campaigns (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          name TEXT NOT NULL,
+          description TEXT,
+          status TEXT DEFAULT 'planning' CHECK(status IN ('planning', 'active', 'review', 'complete', 'archived')),
+          department_ids TEXT,
+          start_date TEXT,
+          target_date TEXT,
+          workspace_id TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      if (!tasksInfo.find((c) => c.name === 'campaign_id')) {
+        db.prepare(`ALTER TABLE tasks ADD COLUMN campaign_id TEXT REFERENCES campaigns(id)`).run();
+      }
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_tasks_campaign ON tasks(campaign_id)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_campaign_workspace ON campaigns(workspace_id)`).run();
+      console.log('[Migration 017] Campaigns table + tasks.campaign_id ready');
+    }
+  },
+  {
+    id: '018',
+    name: 'add_persona_performance',
+    up: (db) => {
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS persona_performance (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT NOT NULL,
+          persona_id TEXT NOT NULL,
+          persona_version INTEGER NOT NULL DEFAULT 1,
+          department_id TEXT,
+          task_category TEXT,
+          mode TEXT,
+          score_at_selection REAL,
+          owner_rating INTEGER CHECK(owner_rating IN (-1, 0, 1)),
+          owner_feedback_note TEXT,
+          revision_count INTEGER DEFAULT 0,
+          time_to_complete_seconds INTEGER,
+          kpi_attribution TEXT,
+          completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (task_id) REFERENCES tasks(id)
+        )
+      `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_perf_persona ON persona_performance(persona_id)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_perf_dept_task ON persona_performance(department_id, task_category)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_perf_completed ON persona_performance(completed_at)`).run();
+
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS persona_weight_overrides (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          persona_id TEXT NOT NULL,
+          department_id TEXT,
+          task_category TEXT,
+          adjustment_factor REAL NOT NULL,
+          reason TEXT,
+          applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          expires_at TEXT
+        )
+      `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_override_persona ON persona_weight_overrides(persona_id)`).run();
+      console.log('[Migration 018] persona_performance + persona_weight_overrides ready');
+    }
+  },
+  {
+    id: '019',
+    name: 'add_persona_assignment_and_version',
+    up: (db) => {
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS persona_assignment (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          department_id TEXT NOT NULL,
+          task_category TEXT NOT NULL,
+          persona_id TEXT NOT NULL,
+          persona_name TEXT,
+          persona_mode TEXT,
+          persona_version INTEGER DEFAULT 1,
+          last_score REAL,
+          last_assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          switch_count INTEGER DEFAULT 0,
+          UNIQUE (department_id, task_category)
+        )
+      `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_assign_dept ON persona_assignment(department_id)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_assign_persona ON persona_assignment(persona_id)`).run();
+
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      if (!tasksInfo.find((c) => c.name === 'persona_version')) {
+        db.prepare(`ALTER TABLE tasks ADD COLUMN persona_version INTEGER`).run();
+      }
+      console.log('[Migration 019] persona_assignment + tasks.persona_version ready');
+    }
+  },
+  {
+    id: '020',
+    name: 'add_da_challenges',
+    up: (db) => {
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS da_challenges (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT,
+          campaign_id TEXT,
+          trigger_type TEXT NOT NULL,
+          challenge TEXT NOT NULL,
+          specific_concern TEXT,
+          assumptions TEXT,
+          severity TEXT CHECK(severity IN ('low', 'medium', 'high')),
+          confidence REAL,
+          status TEXT DEFAULT 'open' CHECK(status IN ('open', 'accepted', 'dismissed', 'overridden')),
+          dismissal_reason TEXT,
+          outcome TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT
+        )
+      `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_task ON da_challenges(task_id)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_status ON da_challenges(status)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_severity ON da_challenges(severity)`).run();
+      console.log('[Migration 020] da_challenges table ready');
+    }
+  },
+  {
+    id: '021',
+    name: 'add_hybrid_task_secondary_persona',
+    up: (db) => {
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      const columnNames = tasksInfo.map((c) => c.name);
+      const adds: Record<string, string> = {
+        secondary_persona_id: 'TEXT',
+        secondary_persona_name: 'TEXT',
+        secondary_persona_score: 'REAL',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.includes(col)) {
+          db.prepare(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+      console.log('[Migration 021] Hybrid task secondary persona fields ready');
+    }
+  },
 ];
 
 /**

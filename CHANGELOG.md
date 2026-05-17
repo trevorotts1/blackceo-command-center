@@ -1,3 +1,40 @@
+## [v10.4.1] — 2026-05-17 — Wave 2 Execution
+
+### Added — Database Migrations
+
+Six new migrations (016 → 021) applied automatically on next server startup:
+
+- **016 `add_task_persona_fields`** — Adds `persona_id`, `persona_name`, `persona_mode`, `persona_score`, `persona_selected_at` columns to `tasks` table. Creates `persona_selection_log` table with indexes on task_id, department_id, persona_id.
+- **017 `add_campaigns_and_campaign_id`** — Creates `campaigns` table (planning/active/review/complete/archived states). Adds `tasks.campaign_id` foreign key. Adds indexes for tasks-by-campaign and campaigns-by-workspace.
+- **018 `add_persona_performance`** — Creates `persona_performance` table for outcome tracking (owner_rating -1/0/+1, revision_count, time_to_complete_seconds, kpi_attribution). Creates `persona_weight_overrides` table for auto-rebalancing (-15% weight when persona gets 3+ negative ratings in 7 days).
+- **019 `add_persona_assignment_and_version`** — Creates `persona_assignment` table for sticky (department, task_category) → persona mapping. Adds `tasks.persona_version` column for version-pinning at dispatch time.
+- **020 `add_da_challenges`** — Creates `da_challenges` table for Devil's Advocate workflow (open/accepted/dismissed/overridden states, severity, confidence, dismissal_reason).
+- **021 `add_hybrid_task_secondary_persona`** — Adds `secondary_persona_id`, `secondary_persona_name`, `secondary_persona_score` columns to `tasks` for hybrid-mode tasks (one persona executes work, the other engages the owner).
+
+All migrations are idempotent (re-runnable safely) — they check for existing columns/tables before adding.
+
+### Added — Pages
+
+- `/campaigns/[id]/page.tsx` — Cross-department Kanban view for a single campaign. Shows all 5 columns (New, Queued, In Progress, Review, Done), live persona pills (blue=leadership, purple=coaching), secondary persona pill for hybrid tasks, department badges, dept-filter chips, and a campaign progress bar.
+- `/onboarding/building/page.tsx` — Real-time progress page for the full AI workforce build. Polls `/api/onboarding/build-status` every 4 seconds. Shows overall doc count progress + per-department progress bars + ETA. Telegram notification recommended when complete.
+
+### Added — API Routes
+
+- `GET/POST /api/campaigns` — list and create campaigns
+- `GET/PATCH/DELETE /api/campaigns/[id]` — read, update, delete a single campaign
+- `GET /api/persona-performance` — performance rollup by persona for `?period=7d|30d|90d|all`, filterable by `?department=`
+- `GET /api/persona-selection-log` — recent persona selections (default 20), filterable by `?department=`
+- `POST /api/tasks/[id]/rating` — submit owner rating (-1, 0, +1) for a completed task. Triggers auto-rebalance check (3+ negatives in 7d → -15% weight override for 30 days).
+- `GET/POST /api/weight-profiles` — read/write the company's adaptive weight profiles. Persists to `[OPENCLAW_ROOT]/workspace/weight-profiles.json` on whichever platform is detected.
+- `GET /api/onboarding/build-status` — current build progress (idle/manifest/research/departments/roles/qc/assembly/complete) read from `[ZHC]/[active-company]/build-progress.json`.
+
+### Notes
+
+- Existing intelligence settings page (`/settings/intelligence/page.tsx`) and existing DA challenges API + persona matrix API were left intact — they were already implemented in an earlier wave.
+- `crypto.randomUUID()` used in API routes — requires Node 18+ (already standard in Next.js 14 deployments).
+
+---
+
 ## [v10.4.0] — 2026-05-17 — Zero-Human Company Spec (PRD v2.1)
 
 ### Added
