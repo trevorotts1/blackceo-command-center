@@ -1,3 +1,17 @@
+## [v3.0.1] — 2026-05-17 — Wave 4: Hand-Touch Integration
+
+### Added — `src/lib/persona-selector.ts`
+
+The server-side persona selector module that the task dispatch API uses. Spawns `persona-selector-v2.py` from the installed OpenClaw skill folder (resolves path via `OPENCLAW_ROOT` env var with Mac/VPS defaults). Returns a typed `PersonaSelectionResult` that's a superset of the v1 selector: same `persona_id`, `score`, `interaction_mode`, plus new fields `task_category`, `secondary_persona_id` / `secondary_persona_name` / `secondary_persona_score` (hybrid mode), `weights_used`, `layers`, `breakdown`.
+
+Existing callers continue to work — new fields are optional. The v2 selector handles stickiness, adaptive weights, behavioral profile reading, hybrid mode, and weight overrides via the `persona_assignment`, `persona_weight_overrides`, and `persona_performance` tables shipped in Wave 2 migrations 016-021.
+
+### Version
+
+Root `version` file bumped to **v3.0.1**.
+
+---
+
 ## [v10.5.0] — 2026-05-17 — Wave 3: v2.1 Integration Layer
 
 This Command Center release aligns the dashboard with the onboarding repos' v10.5.0 integration layer. No new dashboard features in this wave — all migrations and pages shipped in Wave 2 (v10.4.1).
