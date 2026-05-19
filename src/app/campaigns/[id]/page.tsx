@@ -93,8 +93,8 @@ export default function CampaignKanbanPage() {
       setError(null);
       const res = await fetch(`/api/tasks?campaign_id=${campaignId}`);
       if (!res.ok) throw new Error('Failed to fetch tasks');
-      const data: any[] = await res.json();
-      const list = Array.isArray(data) ? data : (data.tasks || []);
+      const data: any = await res.json();
+      const list: any[] = Array.isArray(data) ? data : (data.tasks || []);
       setTasks(list.map((t: any) => ({
         id: t.id, title: t.title, status: t.status, priority: t.priority,
         department_id: t.department_id,

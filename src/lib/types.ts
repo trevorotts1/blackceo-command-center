@@ -181,7 +181,7 @@ export interface OpenClawSession {
   updated_at: string;
 }
 
-export type ActivityType = 'spawned' | 'updated' | 'completed' | 'file_created' | 'status_changed';
+export type ActivityType = 'spawned' | 'updated' | 'completed' | 'file_created' | 'status_changed' | 'owner_message' | 'agent_message';
 
 export interface TaskActivity {
   id: string;
@@ -367,6 +367,7 @@ export type SSEEventType =
   | 'task_created'
   | 'task_deleted'
   | 'activity_logged'
+  | 'task_message'
   | 'deliverable_added'
   | 'agent_spawned'
   | 'agent_completed'
@@ -388,6 +389,9 @@ export interface SSEEvent {
   } | {
     recommendation_id: string;
     outcome: unknown;
+  } | {
+    task_id: string;
+    activity: TaskActivity;
   };
 }
 

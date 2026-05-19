@@ -55,6 +55,16 @@ export default function CEOPerformanceBoardPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState('Dashboard');
   const [companyName, setCompanyName] = useState('Command Center');
+  const [showCampaignModal, setShowCampaignModal] = useState(false);
+  const [campaignForm, setCampaignForm] = useState({
+    name: '',
+    description: '',
+    department_ids: [] as string[],
+    start_date: '',
+    target_date: '',
+  });
+  const [campaignSubmitting, setCampaignSubmitting] = useState(false);
+  const [availableDepartments, setAvailableDepartments] = useState<string[]>([]);
 
   // Load company name from config
   useEffect(() => {
@@ -70,7 +80,48 @@ export default function CEOPerformanceBoardPage() {
       }
     }
     loadConfig();
+    async function loadDepartments() {
+      try {
+        const res = await fetch('/api/departments');
+        if (res.ok) {
+          const data = await res.json();
+          const names = (data.departments || []).map((d: any) => d.id || d.name).filter(Boolean);
+          setAvailableDepartments(names);
+        }
+      } catch {
+        // fallback: leave empty, user can still type department names manually
+      }
+    }
+    loadDepartments();
   }, []);
+
+  async function handleCreateCampaign(e: React.FormEvent) {
+    e.preventDefault();
+    if (!campaignForm.name.trim()) return;
+    setCampaignSubmitting(true);
+    try {
+      const res = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: campaignForm.name.trim(),
+          description: campaignForm.description.trim(),
+          department_ids: campaignForm.department_ids,
+          start_date: campaignForm.start_date || null,
+          target_date: campaignForm.target_date || null,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to create campaign');
+      const { campaign } = await res.json();
+      setShowCampaignModal(false);
+      setCampaignForm({ name: '', description: '', department_ids: [], start_date: '', target_date: '' });
+      router.push(`/campaigns/${campaign.id}`);
+    } catch (err) {
+      console.error('[campaign-create]', err);
+    } finally {
+      setCampaignSubmitting(false);
+    }
+  }
 
   const currentDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
@@ -133,8 +184,16 @@ export default function CEOPerformanceBoardPage() {
           ))}
         </nav>
 
-        {/* RIGHT - Date + separator + LIVE + settings + avatar */}
+        {/* RIGHT - New Campaign + Date + separator + LIVE + settings + avatar */}
         <div className="flex items-center gap-4">
+            {/* New Campaign button */}
+            <button
+              onClick={() => setShowCampaignModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+            >
+              <span className="text-base leading-none">+</span>
+              New Campaign
+            </button>
           <span className="text-base text-gray-500 hidden sm:block">
             {currentDate}
           </span>
@@ -312,6 +371,135 @@ export default function CEOPerformanceBoardPage() {
           <motion.section variants={sectionVariants}>
             <ManualKPISection />
           </motion.section>
+
+          {/* Campaign Creation Modal */}
+          {showCampaignModal && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center">
+              {/* Backdrop */}
+              <div
+                className="absolute inset-0 bg-black/40"
+                onClick={() => setShowCampaignModal(false)}
+              />
+              {/* Modal panel */}
+              <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6">
+                <h2 className="text-lg font-bold text-gray-900 mb-1">New Campaign</h2>
+                <p className="text-sm text-gray-500 mb-5">
+                  Create a cross-department initiative. Tasks from any department can be assigned to it.
+                </p>
+
+                <form onSubmit={handleCreateCampaign} className="space-y-4">
+                  {/* Campaign name */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Campaign Name <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Q3 Book Launch"
+                      value={campaignForm.name}
+                      onChange={e => setCampaignForm(f => ({ ...f, name: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  {/* Description */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Description
+                    </label>
+                    <textarea
+                      rows={2}
+                      placeholder="What is this campaign trying to achieve?"
+                      value={campaignForm.description}
+                      onChange={e => setCampaignForm(f => ({ ...f, description: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                    />
+                  </div>
+
+                  {/* Department multi-select */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Departments Involved
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {availableDepartments.map(dept => {
+                        const selected = campaignForm.department_ids.includes(dept);
+                        return (
+                          <button
+                            key={dept}
+                            type="button"
+                            onClick={() =>
+                              setCampaignForm(f => ({
+                                ...f,
+                                department_ids: selected
+                                  ? f.department_ids.filter(d => d !== dept)
+                                  : [...f.department_ids, dept],
+                              }))
+                            }
+                            className={`text-xs px-3 py-1 rounded-full font-medium capitalize transition-colors ${
+                              selected
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            }`}
+                          >
+                            {dept}
+                          </button>
+                        );
+                      })}
+                      {availableDepartments.length === 0 && (
+                        <span className="text-xs text-gray-400">No departments loaded</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Date range */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Start Date
+                      </label>
+                      <input
+                        type="date"
+                        value={campaignForm.start_date}
+                        onChange={e => setCampaignForm(f => ({ ...f, start_date: e.target.value }))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Target Date
+                      </label>
+                      <input
+                        type="date"
+                        value={campaignForm.target_date}
+                        onChange={e => setCampaignForm(f => ({ ...f, target_date: e.target.value }))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Action buttons */}
+                  <div className="flex justify-end gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowCampaignModal(false)}
+                      className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={campaignSubmitting || !campaignForm.name.trim()}
+                      className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {campaignSubmitting ? 'Creating...' : 'Create Campaign'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
 
           {/* Footer Spacer */}
           <motion.div variants={sectionVariants} className="h-8" />
