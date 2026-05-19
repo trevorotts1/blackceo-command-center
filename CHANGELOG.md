@@ -1,3 +1,43 @@
+## [v3.1.0] — 2026-05-19 — Version Alignment + Drift Prevention Infrastructure
+
+Aligns all 5 BlackCEO Command Center version locations after 6+ months of accumulated drift, AND ports the v10.6.2 drift-prevention infrastructure from the onboarding repos to this dashboard so it can't drift silently again.
+
+### The drift that just got fixed
+
+| Location | Before this release | After this release |
+|---|---|---|
+| `/version` | `v3.0.1` | **`v3.1.0`** |
+| `package.json` `"version"` | **`2.9.4`** (stale ~6 months) | **`3.1.0`** |
+| `package-lock.json` root `"version"` | **`2.9.4`** (stale ~6 months) | **`3.1.0`** |
+| `package-lock.json` `packages[""].version` | **`2.9.4`** (stale ~6 months) | **`3.1.0`** |
+| `CHANGELOG.md` top entry | `## [v3.0.1]` (2026-05-17) | **`## [v3.1.0]`** (this entry) |
+
+### Why this happened
+Earlier sessions in 2026-Q1/Q2 prepended CHANGELOG entries (v3.0.0, v3.0.1, and a bunch of v10.4.x / v10.5.x entries mixed in to track onboarding-repo waves) but **never actually bumped `package.json` or `package-lock.json`**. The result: every `npm install` and every CI artifact for the past 6 months has shipped under "v2.9.4" while documentation claimed newer versions. Same drift problem the onboarding repos had pre-v10.6.2 — caught here by the Phase 1 audit of the Onboarding Repos Analysis & Hardening PRD.
+
+### Added — `scripts/bump-version.sh`
+Atomic 5-location version bumper. CC-specific (the onboarding version targets different files). Usage:
+```bash
+./scripts/bump-version.sh v3.1.1
+./scripts/bump-version.sh --check
+```
+
+### Added — `.github/workflows/version-consistency.yml`
+GitHub Actions check. Runs on every push to main and every PR. Fails the build if any of the 5 CC version locations disagree, with explicit remediation guidance. Status check name: `Version consistency`. Verified passing on this merge.
+
+### Note on historical CHANGELOG entries
+Pre-v3.1.0 entries claiming v10.4.0, v10.4.1, v10.5.0, etc. were the CC's documentation OF the onboarding-repo waves (the CC repo participated in the v2.1 multi-wave releases by adding migrations + pages + APIs to support them). Those entries are NOT claims that the CC itself was at v10.x.x — they're records of CC-side changes shipped alongside onboarding-repo waves of the same name. The CC's own version track is and has always been `2.x.x` / `3.x.x`. Confusing in retrospect; this entry is the last time the CC will share heading-numbers with an onboarding wave.
+
+### Files in this commit
+- `package.json` → `"version": "3.1.0"`
+- `package-lock.json` → root `"version"` + `packages[""].version` both `"3.1.0"`
+- `version` → `v3.1.0`
+- `scripts/bump-version.sh` (new, executable)
+- `.github/workflows/version-consistency.yml` (new)
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [v3.0.1] — 2026-05-17 — Wave 4: Hand-Touch Integration
 
 ### Added — `src/lib/persona-selector.ts`
