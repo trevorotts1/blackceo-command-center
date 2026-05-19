@@ -1,0 +1,58 @@
+name: Version consistency
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-version-drift:
+    name: Verify all 5 CC version locations agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify version consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          V_ROOT=$(head -1 version | tr -d '[:space:]')
+          V_PKG=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
+          V_LOCK=$(python3 -c "import json; print(json.load(open('package-lock.json'))['version'])")
+          V_LOCK_PKG=$(python3 -c "import json; print(json.load(open('package-lock.json'))['packages'][''].get('version','MISSING'))")
+          V_CL=$(grep -oE '## \[v[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | head -1 | sed -E 's/## \[(v[0-9]+\.[0-9]+\.[0-9]+)\]/\1/')
+
+          norm() { echo "${1#v}"; }
+          N_ROOT=$(norm "$V_ROOT")
+          N_PKG=$(norm "$V_PKG")
+          N_LOCK=$(norm "$V_LOCK")
+          N_LOCK_PKG=$(norm "$V_LOCK_PKG")
+          N_CL=$(norm "$V_CL")
+
+          echo ""
+          echo "Version state:"
+          printf "  %-40s %s\n" "/version"                         "$V_ROOT"
+          printf "  %-40s %s\n" "package.json"                     "$V_PKG"
+          printf "  %-40s %s\n" "package-lock.json root"           "$V_LOCK"
+          printf "  %-40s %s\n" "package-lock.json packages['']"   "$V_LOCK_PKG"
+          printf "  %-40s %s\n" "CHANGELOG.md top entry"           "$V_CL"
+          echo ""
+
+          FAIL=""
+          [ "$N_ROOT" = "$N_PKG"      ] || FAIL="$FAIL package.json($N_PKG)"
+          [ "$N_ROOT" = "$N_LOCK"     ] || FAIL="$FAIL package-lock.json($N_LOCK)"
+          [ "$N_ROOT" = "$N_LOCK_PKG" ] || FAIL="$FAIL package-lock.packages($N_LOCK_PKG)"
+          [ "$N_ROOT" = "$N_CL"       ] || FAIL="$FAIL CHANGELOG.md($N_CL)"
+
+          if [ -n "$FAIL" ]; then
+            echo "❌ VERSION DRIFT DETECTED"
+            echo "   /version says: $N_ROOT"
+            echo "   Disagrees with:$FAIL"
+            echo ""
+            echo "FIX: run ./scripts/bump-version.sh v$N_ROOT to rewrite all locations, then commit + push."
+            exit 1
+          fi
+          echo "✅ All 5 version locations agree at $V_ROOT"
