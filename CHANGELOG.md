@@ -1,3 +1,22 @@
+## [v3.4.0] — 2026-05-20 — Dashboard-side closeout for v2.0 audit
+
+Companion release to onboarding-repo v10.12.0. The v10.11.0 audit found two dashboard-side gaps:
+
+1. **CEO_DEFERRAL heading drift** — `agents/master-orchestrator/IDENTITY.md` used the heading "Persona Governance — CEO Mode" while the onboarding `AGENTS.md` files used "CEO_DEFERRAL — Persona Governance Override (Master Orchestrator Mode)". The onboarding docs claimed the three sources were "kept in sync." They were on substance, not on heading. Now they are on both.
+
+2. **Missing `check-wave-concurrency.sh`** — `AGENTS.md` (across all repos) references this script as a universal concurrency-gate enforcement mechanism, but the dashboard repo didn't have it. Copied byte-identical from the onboarding repos to `scripts/check-wave-concurrency.sh`.
+
+### Files touched
+
+- `agents/master-orchestrator/IDENTITY.md` — heading renamed.
+- `scripts/check-wave-concurrency.sh` — NEW (Mac=10 / VPS=5 cap, standing-observer exclusion, JSON output + exit codes).
+- `version`, `package.json` — bumped to 3.4.0.
+
+### Risk: low
+Heading-only change in IDENTITY.md (no semantic shift). New script is opt-in (must be called explicitly).
+
+---
+
 ## [v3.3.0] — 2026-05-20 — Hop 10 Wire-Up: intelligence-resolver consumes persona_assignment
 
 Companion release to onboarding-repo v10.11.0. Closes the last P0 from the v2.0 re-audit: the dashboard ignored what `persona-selector-v2.py` writes to the database, so persona governance stopped at the selector and never made it to dispatch.
