@@ -1,3 +1,38 @@
+## [v3.3.0] — 2026-05-20 — Hop 10 Wire-Up: intelligence-resolver consumes persona_assignment
+
+Companion release to onboarding-repo v10.11.0. Closes the last P0 from the v2.0 re-audit: the dashboard ignored what `persona-selector-v2.py` writes to the database, so persona governance stopped at the selector and never made it to dispatch.
+
+### Risk: low
+Backward-compatible. New `taskId` parameter on `resolveSettings()` is optional (existing callers without it get the old cascade). The new persona sources (`task_pinned`, `sticky_assignment`) only fire when the relevant tables have data — older DBs without migration 016/019 fall through to `agent_settings` exactly as before.
+
+### Fix — `intelligence-resolver.ts` reads `tasks` + `persona_assignment` at dispatch time
+
+**Before:** `resolveSettings(agentId, departmentId)` queried only `agent_settings`. Persona resolved to `'auto'` for every dispatch unless an admin had hand-set a dept-level default in `agent_settings`. The 5-layer scoring matrix in `persona-selector-v2.py` ran on every dispatch and wrote results to `tasks.persona_id` / `tasks.persona_name` / `tasks.persona_mode` AND upserted into `persona_assignment` — but the dispatch path **never read either**. Hop 10 ("dashboard consumes what the selector wrote") was the last unwired hop.
+
+**Now:** `resolveSettings(agentId, departmentId, taskId?)` cascade is:
+
+1. **`task_pinned`** — if `taskId` is provided and `tasks.persona_id` is set, use `tasks.persona_name` directly. This is the highest-priority source: it's the live output of the 5-layer matrix for THIS task.
+2. **`sticky_assignment`** — query `persona_assignment` for the most-recently-assigned row for this `department_id` (`ORDER BY last_assigned_at DESC LIMIT 1`). This is the "what did we pick last time for this department" memory the selector maintains via `ON CONFLICT (department_id, task_category) DO UPDATE`.
+3. **`role_override`** — `agent_settings` row with matching `role_id`.
+4. **`department_default`** — `agent_settings` row with `role_id IS NULL`.
+5. **`hardcoded_default`** — `DEFAULT_PERSONA = 'auto'`.
+
+`PersonaSource` type extended to include `'task_pinned' | 'sticky_assignment'`. `ResolvedSettings` gained optional `personaMode` and `taskCategory` fields. `resolveAndLog` automatically threads `taskId` through; existing dispatch caller (`src/app/api/tasks/[id]/dispatch/route.ts`) already passes `task.id` as first argument so it picks up Hop 10 with no caller-side change.
+
+The dispatch resolution log line now records `personaMode` and `taskCategory` in metadata for the Activity tab.
+
+### Files touched
+
+- `src/lib/intelligence-resolver.ts` — Hop 10 wire-up.
+
+### Verification
+
+- TS type-check on `src/lib/intelligence-resolver.ts` against project `tsconfig.json`: 0 errors.
+- Queries tolerant of older DBs missing `tasks.persona_id` columns or the `persona_assignment` table (both wrapped in `try { … } catch { … }`).
+- Existing call in `dispatch/route.ts` (`resolveAndLog(task.id, agent.id, task.workspace_id)`) unchanged — Hop 10 fires automatically because `task.id` is the first arg and `resolveAndLog` now threads it into `resolveSettings`.
+
+---
+
 ## [v3.2.0] — 2026-05-20 — Post-Analysis Remediation: Departments, ZHC Layout, Persona UI, QC
 
 Companion release to onboarding-repo v10.7.0. Fixes the four dashboard-side findings from the 2026-05-19 15-phase analysis: N17 department mismatch (Phase 7 IW4 = 3.0/10), N19 agents/ ZHC layout (Phase 10 = 1.5/10), no persona-display UI (Phase 11 CC4 = 5.0/10), and zero QC coverage (Phase 13 QC5 = 5.0/10).
