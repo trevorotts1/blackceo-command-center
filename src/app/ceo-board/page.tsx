@@ -22,6 +22,7 @@ import { Breadcrumb } from '@/components/Breadcrumb';
 // Existing bottom sections (kept as-is)
 import { DevilsAdvocateFeed } from '@/components/ceo-board/DevilsAdvocateFeed';
 import { ExecutionQueueSection } from '@/components/ceo-board/ExecutionQueueSection';
+import { PersonaGovernanceBoard } from '@/components/ceo-board/PersonaGovernanceBoard';
 import { ManualKPISection } from '@/components/ceo-board/ManualKPISection';
 
 // Nav tabs - only functional ones
@@ -360,6 +361,11 @@ export default function CEOPerformanceBoardPage() {
                 <DevilsAdvocateFeed />
               </div>
             </div>
+          </motion.section>
+
+          {/* 7b. Persona Governance (Wave 4 — live persona_assignment table) */}
+          <motion.section variants={sectionVariants}>
+            <PersonaGovernanceBoard />
           </motion.section>
 
           {/* 8. Recommendations */}
