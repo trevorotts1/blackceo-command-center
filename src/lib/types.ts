@@ -69,6 +69,15 @@ export interface Task {
   planning_spec?: string;
   planning_agents?: string;
   planning_dispatch_error?: string;
+  // Persona governance fields (Hop 10 — written by persona-selector-v2.py
+  // at dispatch time; consumed by intelligence-resolver and the dashboard UI).
+  // Migration 016 adds these columns to the `tasks` table.
+  persona_id?: string | null;
+  persona_name?: string | null;
+  persona_mode?: string | null;
+  persona_score?: number | null;
+  persona_selected_at?: string | null;
+  persona_version?: number | null;
   // Joined fields
   assigned_agent?: Agent;
   created_by_agent?: Agent;

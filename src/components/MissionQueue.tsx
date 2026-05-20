@@ -357,10 +357,16 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
           {statusLabels[task.status] || task.status}
         </span>
 
-        {/* Persona Pill */}
-        {(task as any).persona && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700">
-            🧠 {(task as any).persona}
+        {/* Persona Pill — typed fields from Task interface (Hop 10) */}
+        {task.persona_name && (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700"
+            title={task.persona_mode ? `${task.persona_name} (${task.persona_mode})` : task.persona_name ?? undefined}
+          >
+            🧠 {task.persona_name}
+            {task.persona_mode && task.persona_mode !== 'leadership' && (
+              <span className="text-[10px] opacity-70">· {task.persona_mode}</span>
+            )}
           </span>
         )}
 
