@@ -1,3 +1,21 @@
+## [v3.5.0] — 2026-05-20 — Companion bump for onboarding v10.13.0
+
+No dashboard-side fixes needed in the v10.12.0 audit (Phase 19 = 8.80, PASS — only minor changes already covered by the v3.4.1 P1-003/P1-004 typed-persona cleanup). Bumping to v3.5.0 to align with the onboarding v10.13.0 release that closed 5 new P0 blockers and every below-threshold phase across the audit framework.
+
+### Risk: none
+Version bump only — no code changes. The dashboard's persona governance (Phase 16 = 9.28, Phase 17 = 9.08) continues to clear the raised 9.0 threshold for the bread-and-butter pillars.
+
+---
+
+## [v3.4.1] — 2026-05-20 — P1-003 + P1-004 dashboard cleanup
+
+Closes the two deferred P1 tickets from the v10.11.0 audit (Phase 19).
+
+- **P1-003** — `Task` interface in `src/lib/types.ts` gained typed persona fields: `persona_id`, `persona_name`, `persona_mode`, `persona_score`, `persona_selected_at`, `persona_version`. Backed by migration 016 on the `tasks` table.
+- **P1-004** — `MissionQueue.tsx` dropped `(task as any).persona` cast; now uses `task.persona_name` with `persona_mode` surfaced in the title tooltip + suffix.
+
+---
+
 ## [v3.4.0] — 2026-05-20 — Dashboard-side closeout for v2.0 audit
 
 Companion release to onboarding-repo v10.12.0. The v10.11.0 audit found two dashboard-side gaps:
