@@ -1,0 +1,50 @@
+name: QC Command Center
+
+# Wave 5.2 of the post-analysis remediation. Runs scripts/qc-cc.sh as a CI
+# gate so the dashboard never regresses on N17 (departments), N19 (ZHC
+# agents/ layout), migrations, no-Anthropic policy, or persona UI presence.
+#
+# Triggers on every push to main and every PR targeting main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  qc-cc:
+    name: QC Command Center
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node (for package.json version probe)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Ensure jq is available
+        run: |
+          command -v jq >/dev/null 2>&1 || sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Run qc-cc.sh
+        run: bash scripts/qc-cc.sh
+
+  build-smoke:
+    name: Build smoke test
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Don't block the QC gate on build issues — track separately.
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
