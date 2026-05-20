@@ -1,3 +1,52 @@
+## [v3.2.0] — 2026-05-20 — Post-Analysis Remediation: Departments, ZHC Layout, Persona UI, QC
+
+Companion release to onboarding-repo v10.7.0. Fixes the four dashboard-side findings from the 2026-05-19 15-phase analysis: N17 department mismatch (Phase 7 IW4 = 3.0/10), N19 agents/ ZHC layout (Phase 10 = 1.5/10), no persona-display UI (Phase 11 CC4 = 5.0/10), and zero QC coverage (Phase 13 QC5 = 5.0/10).
+
+### Wave 1.2 — Department canonical set (N17)
+Dashboard `DEFAULT_DEPARTMENTS` and `config/departments.json` had four departments the AI Workforce Interview never produces, while missing four it does. Direct N17 binary-gate violation.
+
+- `src/lib/routing/departments.config.ts`: dropped Operations / Creative / HR-People / IT-Tech. Added CRM (priority 8 — GHL focus), OpenClaw Maintenance (priority 9 — Sunday update / skill bumps / QC), Social Media (priority 7 — organic channels), Paid Advertisement (priority 7 — Meta/Google/YouTube/TikTok with ROAS/CPA keywords).
+- `config/departments.json`: full rewrite to the 17 canonical departments matching `INSTRUCTIONS.md` mandatory list.
+- `src/components/MissionQueue.tsx`: emoji + name maps updated to match new dept set.
+
+### Wave 2 — N19 ZHC layout for `agents/`
+Dashboard's `agents/` directory was a pre-v9.6.0 artifact: 23 agents × 4 real files, missing IDENTITY/HEARTBEAT/USER, zero symlinks where the spec required 69. Scored 1.5/10 against an 8.5 threshold.
+
+- `agents/_shared/AGENTS.md` (NEW): canonical company-wide agent behavior rules.
+- `agents/_shared/TOOLS.md` (NEW): canonical tool registry. LLM infrastructure (DeepSeek V4 Pro Ollama Cloud → Gemini 3.1 Flash Lite OpenRouter, Anthropic reserved for Master Orchestrator), GHL/n8n/Vercel/Hostinger integrations.
+- `agents/_shared/USER.md` (NEW): owner profile (Trevor Otts / BlackCEO) with Behavioral Identity Profile section that persona-selector Layer 2 reads.
+- 23 agents × IDENTITY.md (NEW): each with the Persona Governance Override clause. Master Orchestrator gets CEO_DEFERRAL (mission/owner override persona on conflict). Other 22 agents get STANDARD_DEFERRAL.
+- 23 agents × HEARTBEAT.md (NEW): default 30-minute cadence + startup checklist.
+- 23 agents × {AGENTS,TOOLS,USER}.md: converted from real files to relative symlinks pointing to `agents/_shared/`. **69 symlinks total** — matches the spec exactly.
+- `scripts/migrate-agents-to-zhc.py` (NEW, executable): the one-shot migration that built this. Idempotent — safe to re-run.
+
+### Wave 4.3 — Persona governance UI + API
+The dashboard had persona infrastructure (DB tables + `/api/persona-matrix` route) but the UI never surfaced any of it. After the onboarding repo's Wave 4.1+4.2 writers populate the data, this commit makes it visible.
+
+- `src/app/api/persona-assignment/route.ts` (NEW): `GET /api/persona-assignment` returns the live `persona_assignment` table sorted by `last_assigned_at DESC`. Query params: `?department=<id>` filter, `?limit=<n>` (default 200), `?include_verification=true` joins in the verification fields. Tolerant of older DBs missing the table or verification columns — returns hint instead of 500.
+- `src/components/ceo-board/PersonaGovernanceBoard.tsx` (NEW): CEO-board section showing every active persona assignment grouped by department. Per row: persona name, mode (leadership/coaching/hybrid), task category, time since last assignment, last_score (color-coded), adherence % when verified, "high churn" warning when `switch_count >= 5`. Auto-refresh every 30 seconds.
+- `src/app/ceo-board/page.tsx`: mounts the new section as 7b, between the Bento Grid and the Recommendations row.
+
+### Wave 5.3 — Dashboard QC framework + CI gate
+Dashboard had zero QC coverage. Phase 13 QC5 = 5.0/10.
+
+- `QC.md` (NEW): 10-point rubric adapted from v9.3.0 standard for a deployed Next.js dashboard. Gate at 8.5 to ship.
+- `scripts/qc-cc.sh` (NEW, executable): 27 mechanical checks across 6 sections (version, departments, agents ZHC, migrations, no-Anthropic, persona infra). On current state: **27/27 green, 0 warnings**.
+- `.github/workflows/qc-cc.yml` (NEW): runs `qc-cc.sh` on every push to main + every PR. Non-blocking build smoke test as secondary job.
+
+### Wave 6 — Housekeeping
+- `src/lib/db/migrations.ts`: added a no-op placeholder for migration `008` so the sequence is no longer 007 → 010 / 009. Clears the QC rubric warning.
+- Removed dead `.superdesign/` directory (design-system.md, init folder, 3 reference PNGs, replica HTML templates) — Phase 11 CC1 bloat flag.
+- Removed `mission-control.png` (191KB legacy binary at repo root) — same flag.
+
+### Bump path
+- `v3.1.0` → `v3.2.0` — minor bump for additive features (4 departments swapped, 23 agents migrated, 1 new API route, 1 new CEO-board section, 1 new QC framework, 1 new CI workflow). No breaking changes to existing routes / DB schema.
+
+### Compatible with
+- onboarding-repo v10.7.0 (companion release — persona-selector-v2.py writes the data this dashboard now reads).
+
+---
+
 ## [v3.1.0] — 2026-05-19 — Version Alignment + Drift Prevention Infrastructure
 
 Aligns all 5 BlackCEO Command Center version locations after 6+ months of accumulated drift, AND ports the v10.6.2 drift-prevention infrastructure from the onboarding repos to this dashboard so it can't drift silently again.
