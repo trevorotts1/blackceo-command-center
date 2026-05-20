@@ -28,11 +28,7 @@ const departmentEmojis: Record<string, string> = {
   'sales': '💰',
   'billing': '💳',
   'customer-support': '🎧', 'support': '🎧',
-  'operations': '⚙️',
-  'creative': '✍️',
-  'hr-people': '👥', 'hr': '👥',
   'legal-compliance': '⚖️', 'legal': '⚖️',
-  'it-tech': '🖥️', 'it': '🖥️',
   'web-development': '🌐', 'webdev': '🌐',
   'app-development': '📱', 'appdev': '📱',
   'graphics': '🎨',
@@ -40,6 +36,10 @@ const departmentEmojis: Record<string, string> = {
   'audio-production': '🎙️', 'audio': '🎙️',
   'research': '🔬',
   'communications': '📣', 'comms': '📣',
+  'crm': '📇',
+  'openclaw-maintenance': '🦾', 'openclaw': '🦾',
+  'social-media': '📱', 'social': '📱',
+  'paid-advertisement': '🎯', 'paid-ads': '🎯',
 };
 
 const departmentNames: Record<string, string> = {
@@ -48,11 +48,7 @@ const departmentNames: Record<string, string> = {
   'sales': 'Sales',
   'billing': 'Billing',
   'customer-support': 'Customer Support',
-  'operations': 'Operations',
-  'creative': 'Creative',
-  'hr-people': 'HR / People',
   'legal-compliance': 'Legal / Compliance',
-  'it-tech': 'IT / Tech',
   'web-development': 'Web Development',
   'app-development': 'App Development',
   'graphics': 'Graphics',
@@ -60,6 +56,10 @@ const departmentNames: Record<string, string> = {
   'audio-production': 'Audio Production',
   'research': 'Research',
   'communications': 'Communications',
+  'crm': 'CRM',
+  'openclaw-maintenance': 'OpenClaw Maintenance',
+  'social-media': 'Social Media',
+  'paid-advertisement': 'Paid Advertisement',
 };
 
 export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProps) {
