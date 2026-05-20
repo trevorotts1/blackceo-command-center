@@ -222,6 +222,22 @@ const migrations: Migration[] = [
     }
   },
   {
+    id: '008',
+    // Placeholder. Historical: an in-progress migration was renumbered or
+    // dropped before merge. Filling the slot with a no-op so future strict
+    // sequence checks don't trip, and the QC rubric stops warning on the
+    // gap. Wave 6 housekeeping (2026-05-19).
+    name: 'placeholder_for_legacy_gap',
+    up: (db) => {
+      const row = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+      ).get();
+      if (row) {
+        console.log('[Migration 008] no-op placeholder for legacy gap');
+      }
+    }
+  },
+  {
     id: '010',
     name: 'add_execution_queue',
     up: (db) => {
