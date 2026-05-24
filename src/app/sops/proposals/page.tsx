@@ -1,15 +1,23 @@
 'use client';
 
 /**
- * /sops/proposals — review queue for auto-detected candidate SOPs.
+ * /sops/proposals — review queue for both:
+ *   • Track N pattern-detected proposals (status='pending')
+ *   • Track S auto-research replacements (status='auto-generated-pending-review')
  *
- * Each card shows the proposal name, department, evidence summary, the
- * draft steps the learning job extracted, and the IDs of the tasks that
- * triggered the pattern. Owner picks Approve / Reject (with optional
- * reason). Approve creates a real `sops` row at version=1; reject stamps
- * the proposal so it never re-surfaces.
+ * For auto-research items the card surfaces the 🤖 badge, the deleted v1
+ * side-by-side, and the research-source URLs so the operator can spot-check.
+ * Approving an auto-research proposal atomically inserts v2 and re-points
+ * every task that referenced v1.
  */
 import { useEffect, useState, useCallback } from 'react';
+
+type ProposalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'auto-generated-pending-review'
+  | 'escalated';
 
 interface Proposal {
   id: string;
@@ -18,11 +26,22 @@ interface Proposal {
   draft_steps: string;
   based_on_task_ids: string;
   evidence_summary: string | null;
-  status: 'pending' | 'approved' | 'rejected';
+  status: ProposalStatus;
   created_at: string;
   reviewed_at: string | null;
   reviewed_by: string | null;
   approved_sop_id: string | null;
+  replaces_sop_id?: string | null;
+  confidence?: number | null;
+  auto_research_attempts?: number | null;
+  research_sources?: string | null;
+}
+
+interface V1Sop {
+  id: string;
+  name: string;
+  steps: string;
+  version: number;
 }
 
 interface DraftStep {
@@ -31,9 +50,17 @@ interface DraftStep {
   success_criteria?: string;
 }
 
+interface ResearchSource {
+  title: string;
+  url: string;
+}
+
+type FilterTab = 'pending' | 'auto-generated-pending-review' | 'approved' | 'rejected' | 'escalated';
+
 export default function SOPProposalsPage() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
-  const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
+  const [v1Map, setV1Map] = useState<Record<string, V1Sop | null>>({});
+  const [statusFilter, setStatusFilter] = useState<FilterTab>('auto-generated-pending-review');
   const [rescanning, setRescanning] = useState(false);
   const [lastScanResult, setLastScanResult] = useState<string | null>(null);
   const [pendingReject, setPendingReject] = useState<string | null>(null);
@@ -41,7 +68,30 @@ export default function SOPProposalsPage() {
 
   const load = useCallback(async () => {
     const r = await fetch(`/api/sops/proposals?status=${statusFilter}`);
-    if (r.ok) setProposals(await r.json());
+    if (!r.ok) {
+      setProposals([]);
+      return;
+    }
+    const data: Proposal[] = await r.json();
+    setProposals(data);
+
+    // Bulk-fetch the v1 SOPs for each auto-research proposal so we can show
+    // the side-by-side diff inline.
+    const needsDiff = data.filter((p) => p.replaces_sop_id);
+    const map: Record<string, V1Sop | null> = {};
+    await Promise.all(
+      needsDiff.map(async (p) => {
+        try {
+          const bundle = await fetch(`/api/sops/proposals/${p.id}?include_diff=true`).then((r2) =>
+            r2.ok ? r2.json() : null
+          );
+          map[p.id] = bundle?.v1 ?? null;
+        } catch {
+          map[p.id] = null;
+        }
+      })
+    );
+    setV1Map(map);
   }, [statusFilter]);
 
   useEffect(() => {
@@ -96,7 +146,7 @@ export default function SOPProposalsPage() {
         <div>
           <h1 className="text-2xl font-semibold text-zinc-100">SOP Proposals</h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Auto-detected patterns in completed tasks. Approve to add as v1 SOP, reject to dismiss.
+            Auto-researched replacements (🤖) and pattern-detected drafts. Approve to add as a new SOP version, reject to dismiss.
           </p>
         </div>
         <button
@@ -112,42 +162,64 @@ export default function SOPProposalsPage() {
       {lastScanResult && <div className="mb-4 rounded border border-zinc-700 bg-zinc-900 p-3 text-sm text-zinc-300">{lastScanResult}</div>}
 
       <div className="mb-4 flex gap-2">
-        {(['pending', 'approved', 'rejected'] as const).map((s) => (
+        {(['auto-generated-pending-review', 'pending', 'approved', 'rejected', 'escalated'] as FilterTab[]).map((s) => (
           <button
             key={s}
             type="button"
             onClick={() => setStatusFilter(s)}
             className={`rounded px-3 py-1 text-xs ${statusFilter === s ? 'bg-zinc-200 text-zinc-900' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}`}
           >
-            {s}
+            {s === 'auto-generated-pending-review' ? '🤖 auto-research' : s}
           </button>
         ))}
       </div>
 
       {proposals.length === 0 ? (
         <div className="rounded border border-dashed border-zinc-700 p-6 text-center text-sm text-zinc-500">
-          No {statusFilter} proposals. The learning job runs nightly — patterns appear once enough completed tasks share a signature.
+          No {statusFilter} proposals.
         </div>
       ) : (
         <ul className="space-y-4">
           {proposals.map((p) => {
             let steps: DraftStep[] = [];
+            let v1Steps: DraftStep[] = [];
             let taskIds: string[] = [];
+            let sources: ResearchSource[] = [];
             try {
               steps = JSON.parse(p.draft_steps);
             } catch {}
             try {
               taskIds = JSON.parse(p.based_on_task_ids);
             } catch {}
+            try {
+              if (p.research_sources) sources = JSON.parse(p.research_sources);
+            } catch {}
+            const v1 = v1Map[p.id];
+            try {
+              if (v1?.steps) v1Steps = JSON.parse(v1.steps);
+            } catch {}
+
+            const isAutoResearch = p.status === 'auto-generated-pending-review';
+            const isEscalated = p.status === 'escalated';
 
             return (
               <li key={p.id} className="rounded-lg border border-zinc-700 bg-zinc-900 p-4">
                 <div className="mb-2 flex items-start justify-between gap-4">
                   <div>
-                    <h2 className="text-lg font-medium text-zinc-100">{p.proposed_name}</h2>
+                    <h2 className="text-lg font-medium text-zinc-100">
+                      {isAutoResearch && <span className="mr-2" title="Auto-researched">🤖</span>}
+                      {isEscalated && <span className="mr-2" title="Escalated — safety cap hit">⚠️</span>}
+                      {p.proposed_name}
+                    </h2>
                     <div className="mt-1 text-xs text-zinc-500">
                       {p.proposed_department || 'no department'} · created {new Date(p.created_at).toLocaleString()}
-                      {p.status !== 'pending' && (
+                      {typeof p.confidence === 'number' && (
+                        <> · confidence <span className="font-mono">{p.confidence.toFixed(2)}</span></>
+                      )}
+                      {typeof p.auto_research_attempts === 'number' && p.auto_research_attempts > 0 && (
+                        <> · attempt {p.auto_research_attempts}/3</>
+                      )}
+                      {p.status !== 'pending' && p.status !== 'auto-generated-pending-review' && (
                         <>
                           {' · '}
                           <span className={p.status === 'approved' ? 'text-emerald-400' : 'text-red-400'}>{p.status}</span>
@@ -156,14 +228,14 @@ export default function SOPProposalsPage() {
                       )}
                     </div>
                   </div>
-                  {p.status === 'pending' && (
+                  {(p.status === 'pending' || isAutoResearch) && (
                     <div className="flex gap-2">
                       <button
                         type="button"
                         onClick={() => approve(p.id)}
                         className="rounded bg-emerald-700 px-3 py-1.5 text-xs text-white hover:bg-emerald-600"
                       >
-                        Approve
+                        Approve {isAutoResearch ? '+ swap' : ''}
                       </button>
                       <button
                         type="button"
@@ -176,25 +248,73 @@ export default function SOPProposalsPage() {
                   )}
                 </div>
 
+                {sources.length > 0 && (
+                  <div className="mb-3 rounded border border-blue-900/40 bg-blue-950/20 p-2 text-xs">
+                    <div className="mb-1 font-medium text-blue-300">Research sources</div>
+                    <ul className="space-y-0.5">
+                      {sources.map((s, i) => (
+                        <li key={i} className="truncate">
+                          <span className="text-zinc-500">[{i + 1}]</span>{' '}
+                          <a href={s.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
+                            {s.title || s.url}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {p.evidence_summary && (
                   <pre className="mb-3 whitespace-pre-wrap rounded bg-zinc-950 p-2 text-xs text-zinc-400">{p.evidence_summary}</pre>
                 )}
 
-                <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">Draft steps</div>
-                <ol className="ml-4 list-decimal space-y-1 text-sm text-zinc-300">
-                  {steps.map((s, i) => (
-                    <li key={i}>
-                      <span className="font-medium">{s.name}</span>
-                      {s.checklist && s.checklist.length > 0 && (
-                        <ul className="ml-4 mt-1 list-disc text-xs text-zinc-500">
-                          {s.checklist.map((c, j) => (
-                            <li key={j}>{c}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </li>
-                  ))}
-                </ol>
+                {isAutoResearch && v1 ? (
+                  <div className="mb-3 grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-red-400">Deleted v1: {v1.name}</div>
+                      <ol className="ml-4 list-decimal space-y-1 text-sm text-zinc-400 line-through decoration-red-500/40">
+                        {v1Steps.map((s, i) => (
+                          <li key={i}>{s.name}</li>
+                        ))}
+                      </ol>
+                    </div>
+                    <div>
+                      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-emerald-400">Proposed v2</div>
+                      <ol className="ml-4 list-decimal space-y-1 text-sm text-zinc-200">
+                        {steps.map((s, i) => (
+                          <li key={i}>
+                            <span className="font-medium">{s.name}</span>
+                            {s.checklist && s.checklist.length > 0 && (
+                              <ul className="ml-4 mt-1 list-disc text-xs text-zinc-500">
+                                {s.checklist.map((c, j) => (
+                                  <li key={j}>{c}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">Draft steps</div>
+                    <ol className="ml-4 list-decimal space-y-1 text-sm text-zinc-300">
+                      {steps.map((s, i) => (
+                        <li key={i}>
+                          <span className="font-medium">{s.name}</span>
+                          {s.checklist && s.checklist.length > 0 && (
+                            <ul className="ml-4 mt-1 list-disc text-xs text-zinc-500">
+                              {s.checklist.map((c, j) => (
+                                <li key={j}>{c}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  </>
+                )}
 
                 {taskIds.length > 0 && (
                   <div className="mt-3 text-xs text-zinc-500">
