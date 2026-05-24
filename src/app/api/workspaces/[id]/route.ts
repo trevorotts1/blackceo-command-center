@@ -11,10 +11,16 @@ export async function GET(
   try {
     const db = getDb();
     
-    // Try to find by ID or slug
-    const workspace = db.prepare(
-      'SELECT * FROM workspaces WHERE id = ? OR slug = ?'
-    ).get(id, id);
+    // Try to find by ID or slug. Join the dept-head agent so the workspace
+    // detail page can render the head's avatar + name (migration 028).
+    const workspace = db.prepare(`
+      SELECT w.*,
+             a.name AS head_agent_name,
+             a.avatar_emoji AS head_agent_avatar
+        FROM workspaces w
+        LEFT JOIN agents a ON a.id = w.head_agent_id
+       WHERE w.id = ? OR w.slug = ?
+    `).get(id, id);
     
     if (!workspace) {
       return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });

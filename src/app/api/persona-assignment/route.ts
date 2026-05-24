@@ -1,5 +1,74 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
+import { selectPersonaForTask } from '@/lib/persona-selector';
+
+/**
+ * POST /api/persona-assignment
+ *
+ * Auto-suggest + attach a persona to a single task. Used by the TaskModal's
+ * "Auto-suggest persona" CTA when the backend's Triad gate refuses a task
+ * for missing persona_id.
+ *
+ * Body: { task_id: string, auto_assign?: boolean }
+ *  - When auto_assign=true (the dashboard's default), the chosen persona_id
+ *    is written back to the tasks row so the next status PATCH satisfies
+ *    the Triad Rule.
+ */
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const taskId = body?.task_id as string | undefined;
+    const autoAssign = body?.auto_assign !== false;
+    if (!taskId) {
+      return NextResponse.json({ error: 'task_id is required' }, { status: 400 });
+    }
+
+    const db = getDb();
+    const task = db.prepare(
+      'SELECT id, title, description, department FROM tasks WHERE id = ?'
+    ).get(taskId) as
+      | { id: string; title: string; description: string | null; department: string | null }
+      | undefined;
+    if (!task) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+
+    const textForScoring = [task.title, task.description].filter(Boolean).join('\n\n');
+    const result = await selectPersonaForTask(task.id, textForScoring, task.department);
+
+    if (!result || !result.persona_id) {
+      return NextResponse.json(
+        { error: 'No persona match found', result },
+        { status: 422 }
+      );
+    }
+
+    if (autoAssign) {
+      db.prepare(
+        `UPDATE tasks
+          SET persona_id = ?, persona_name = ?, persona_mode = ?, persona_score = ?,
+              persona_selected_at = datetime('now'), updated_at = datetime('now')
+          WHERE id = ?`
+      ).run(
+        result.persona_id,
+        result.persona_name,
+        result.interaction_mode,
+        result.score,
+        task.id
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      task_id: task.id,
+      persona: result,
+      assigned: autoAssign,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
+  }
+}
 
 /**
  * GET /api/persona-assignment

@@ -18,8 +18,16 @@ export async function GET(request: NextRequest) {
     const db = getDb();
 
     if (includeStats) {
-      // Get workspaces with task counts and agent counts, ordered by sort_order
-      const workspaces = db.prepare('SELECT * FROM workspaces ORDER BY sort_order ASC, name ASC').all() as Workspace[];
+      // Get workspaces + dept-head agent details in one query so the dashboard
+      // can render the head's avatar/name without a per-row N+1 lookup.
+      const workspaces = db.prepare(`
+        SELECT w.*,
+               a.name AS head_agent_name,
+               a.avatar_emoji AS head_agent_avatar
+          FROM workspaces w
+          LEFT JOIN agents a ON a.id = w.head_agent_id
+          ORDER BY w.sort_order ASC, w.name ASC
+      `).all() as Array<Workspace & { head_agent_name: string | null; head_agent_avatar: string | null }>;
 
       const stats: WorkspaceStats[] = workspaces.map(workspace => {
         // Get task counts by status
@@ -57,6 +65,9 @@ export async function GET(request: NextRequest) {
           slug: workspace.slug,
           icon: workspace.icon,
           sort_order: workspace.sort_order,
+          head_agent_id: workspace.head_agent_id ?? null,
+          head_agent_name: workspace.head_agent_name ?? null,
+          head_agent_avatar: workspace.head_agent_avatar ?? null,
           taskCounts: counts,
           agentCount: agentCount.count
         };
@@ -65,7 +76,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(stats);
     }
 
-    const workspaces = db.prepare('SELECT * FROM workspaces ORDER BY sort_order ASC, name ASC').all();
+    const workspaces = db.prepare(`
+      SELECT w.*,
+             a.name AS head_agent_name,
+             a.avatar_emoji AS head_agent_avatar
+        FROM workspaces w
+        LEFT JOIN agents a ON a.id = w.head_agent_id
+        ORDER BY w.sort_order ASC, w.name ASC
+    `).all();
     return NextResponse.json(workspaces);
   } catch (error) {
     console.error('Failed to fetch workspaces:', error);

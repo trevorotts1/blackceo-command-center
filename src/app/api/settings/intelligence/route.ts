@@ -72,13 +72,23 @@ function formatPersonaLabel(id: string): string {
   return `${entry.author} - ${entry.book} (${getPersonaCategory(entry)})`;
 }
 
+/**
+ * Per-million-token pricing in USD. Sourced from each provider's public pricing
+ * page (2026-05-24 snapshot). Free-tier routers report $0 even though the
+ * provider may upsell paid tiers — that's intentional, the cost we display is
+ * the cost the operator actually pays for THIS routed call.
+ *
+ * When adding a new model: include the cost columns. The intelligence
+ * settings UI will surface them next to the model name so operators know what
+ * each model will run them per request.
+ */
 const AVAILABLE_MODELS = [
-  { id: 'openrouter/free', label: 'Free Models Router' },
-  { id: 'moonshot/kimi-k2.5', label: 'Kimi K2.5' },
-  { id: 'openrouter/xiaomi/mimo-v2-pro', label: 'MiMo V2 Pro' },
-  { id: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet' },
-  { id: 'openai-codex/gpt-5.4', label: 'GPT 5.4' },
-  { id: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash' },
+  { id: 'openrouter/free',                  label: 'Free Models Router',  cost_per_million_input: 0,    cost_per_million_output: 0 },
+  { id: 'moonshot/kimi-k2.5',               label: 'Kimi K2.5',           cost_per_million_input: 0.15, cost_per_million_output: 2.50 },
+  { id: 'openrouter/xiaomi/mimo-v2-pro',    label: 'MiMo V2 Pro',         cost_per_million_input: 0.50, cost_per_million_output: 2.00 },
+  { id: 'anthropic/claude-sonnet-4-6',      label: 'Claude Sonnet',       cost_per_million_input: 3.00, cost_per_million_output: 15.00 },
+  { id: 'openai-codex/gpt-5.4',             label: 'GPT 5.4',             cost_per_million_input: 2.50, cost_per_million_output: 10.00 },
+  { id: 'google/gemini-3-flash-preview',    label: 'Gemini 3 Flash',      cost_per_million_input: 0.30, cost_per_million_output: 2.50 },
 ];
 
 const AVAILABLE_PERSONAS = [
@@ -136,8 +146,18 @@ interface AgentSetting {
   role_id: string | null;
   setting_type: string;
   value: string;
+  locked_by: string | null;
+  lock_reason: string | null;
+  locked_at: string | null;
+  lock_token: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface LockInfo {
+  locked_by: string;
+  lock_reason: string | null;
+  locked_at: string | null;
 }
 
 interface Workspace {
@@ -193,11 +213,31 @@ export async function GET() {
     // Build lookup maps
     const modelSettings = new Map<string, string>(); // key: deptId or deptId:roleId
     const personaSettings = new Map<string, string>();
+    const modelLocks = new Map<string, LockInfo>();
+    const personaLocks = new Map<string, LockInfo>();
 
     for (const s of settings) {
       const key = s.role_id ? `${s.department_id}:${s.role_id}` : s.department_id;
-      if (s.setting_type === 'model') modelSettings.set(key, s.value);
-      if (s.setting_type === 'persona') personaSettings.set(key, s.value);
+      if (s.setting_type === 'model') {
+        modelSettings.set(key, s.value);
+        if (s.locked_by) {
+          modelLocks.set(key, {
+            locked_by: s.locked_by,
+            lock_reason: s.lock_reason,
+            locked_at: s.locked_at,
+          });
+        }
+      }
+      if (s.setting_type === 'persona') {
+        personaSettings.set(key, s.value);
+        if (s.locked_by) {
+          personaLocks.set(key, {
+            locked_by: s.locked_by,
+            lock_reason: s.lock_reason,
+            locked_at: s.locked_at,
+          });
+        }
+      }
     }
 
     // Build department structure with inherited values
@@ -222,8 +262,10 @@ export async function GET() {
           emoji: agent.avatar_emoji,
           model: roleModel || deptModel,
           modelInherited: !roleModel,
+          modelLock: modelLocks.get(roleKey) || null,
           persona: rolePersona || deptPersona,
           personaInherited: !rolePersona,
+          personaLock: personaLocks.get(roleKey) || null,
           agentType,
           specialistType,
         };
@@ -236,6 +278,8 @@ export async function GET() {
         icon: dept.icon,
         model: deptModel,
         persona: deptPersona,
+        modelLock: modelLocks.get(dept.id) || null,
+        personaLock: personaLocks.get(dept.id) || null,
         roles,
       };
     });
@@ -259,7 +303,14 @@ export async function GET() {
                 for (const m of models) {
                   const fullId = `${prov}/${m.id}`;
                   if (!enrichedModels.find(x => x.id === fullId)) {
-                    enrichedModels.push({ id: fullId, label: m.name || m.id });
+                    // OpenClaw config doesn't carry pricing; default to 0/0 so
+                    // the UI can show "unpriced" without crashing.
+                    enrichedModels.push({
+                      id: fullId,
+                      label: m.name || m.id,
+                      cost_per_million_input: 0,
+                      cost_per_million_output: 0,
+                    });
                   }
                 }
               }
@@ -361,6 +412,54 @@ export async function PUT(request: NextRequest) {
 
     const db = getDb();
 
+    // ── Model Lock Protocol ────────────────────────────────────────────
+    // If the target setting is locked, the caller MUST present the matching
+    // X-Lock-Token. Otherwise we 423 Locked with the lock_by/lock_reason so
+    // the UI can render a clear "Locked by X for Y — request unlock?" CTA.
+    const providedToken = request.headers.get('x-lock-token');
+
+    const lockedConflict: Array<{
+      department_id: string;
+      role_id: string | null;
+      setting_type: string;
+      locked_by: string;
+      lock_reason: string | null;
+    }> = [];
+
+    for (const a of assignments) {
+      if (!a.department_id || !a.setting_type || !a.value) continue;
+      if (a.setting_type !== 'model' && a.setting_type !== 'persona') continue;
+      const roleId = a.role_id || null;
+      const existing = db
+        .prepare(
+          'SELECT locked_by, lock_reason, lock_token FROM agent_settings WHERE department_id = ? AND role_id IS ? AND setting_type = ?'
+        )
+        .get(a.department_id, roleId, a.setting_type) as
+        | { locked_by: string | null; lock_reason: string | null; lock_token: string | null }
+        | undefined;
+
+      if (existing && existing.locked_by && existing.lock_token && existing.lock_token !== providedToken) {
+        lockedConflict.push({
+          department_id: a.department_id,
+          role_id: roleId,
+          setting_type: a.setting_type,
+          locked_by: existing.locked_by,
+          lock_reason: existing.lock_reason,
+        });
+      }
+    }
+
+    if (lockedConflict.length > 0) {
+      return NextResponse.json(
+        {
+          error: 'Locked',
+          message: 'One or more target settings are locked. Provide X-Lock-Token to override.',
+          locked: lockedConflict,
+        },
+        { status: 423 }
+      );
+    }
+
     const upsert = db.transaction(() => {
       for (const a of assignments) {
         if (!a.department_id || !a.setting_type || !a.value) {
@@ -398,6 +497,116 @@ export async function PUT(request: NextRequest) {
     console.error('Failed to save intelligence settings:', error);
     return NextResponse.json(
       { error: 'Failed to save intelligence settings' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * PATCH /api/settings/intelligence
+ *
+ * Lock/unlock a setting. Body:
+ *   { department_id, role_id?, setting_type, action: 'lock'|'unlock',
+ *     locked_by?, lock_reason?, lock_token? }
+ *
+ * Returns the new lock_token in the response body. The caller must store
+ * this token and present it via X-Lock-Token on subsequent PUT requests
+ * targeting the same setting until it's unlocked.
+ */
+export async function PATCH(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const {
+      department_id,
+      role_id,
+      setting_type,
+      action,
+      locked_by,
+      lock_reason,
+    } = body as {
+      department_id: string;
+      role_id?: string | null;
+      setting_type: 'model' | 'persona';
+      action: 'lock' | 'unlock';
+      locked_by?: string;
+      lock_reason?: string;
+    };
+
+    if (!department_id || !setting_type || !action) {
+      return NextResponse.json(
+        { error: 'department_id, setting_type, and action are required' },
+        { status: 400 }
+      );
+    }
+    if (setting_type !== 'model' && setting_type !== 'persona') {
+      return NextResponse.json({ error: 'invalid setting_type' }, { status: 400 });
+    }
+
+    const db = getDb();
+    const roleId = role_id || null;
+    const providedToken = request.headers.get('x-lock-token');
+
+    const existing = db
+      .prepare(
+        'SELECT id, locked_by, lock_token FROM agent_settings WHERE department_id = ? AND role_id IS ? AND setting_type = ?'
+      )
+      .get(department_id, roleId, setting_type) as
+      | { id: string; locked_by: string | null; lock_token: string | null }
+      | undefined;
+
+    if (!existing) {
+      return NextResponse.json(
+        { error: 'Setting not found. Create it via PUT first before locking.' },
+        { status: 404 }
+      );
+    }
+
+    if (action === 'lock') {
+      if (!locked_by) {
+        return NextResponse.json(
+          { error: 'locked_by is required when action=lock' },
+          { status: 400 }
+        );
+      }
+      // If already locked by someone else, require the existing token.
+      if (existing.locked_by && existing.lock_token && existing.lock_token !== providedToken) {
+        return NextResponse.json(
+          {
+            error: 'Already locked',
+            locked_by: existing.locked_by,
+          },
+          { status: 423 }
+        );
+      }
+      const newToken = uuidv4();
+      db.prepare(
+        `UPDATE agent_settings
+         SET locked_by = ?, lock_reason = ?, locked_at = datetime('now'), lock_token = ?, updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(locked_by, lock_reason || null, newToken, existing.id);
+      return NextResponse.json({ success: true, lock_token: newToken });
+    }
+
+    // Unlock
+    if (existing.locked_by && existing.lock_token && existing.lock_token !== providedToken) {
+      return NextResponse.json(
+        {
+          error: 'Locked by another agent — present that agent\'s X-Lock-Token to unlock.',
+          locked_by: existing.locked_by,
+        },
+        { status: 423 }
+      );
+    }
+    db.prepare(
+      `UPDATE agent_settings
+       SET locked_by = NULL, lock_reason = NULL, locked_at = NULL, lock_token = NULL, updated_at = datetime('now')
+       WHERE id = ?`
+    ).run(existing.id);
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Failed to PATCH intelligence settings:', error);
+    return NextResponse.json(
+      { error: 'Failed to update lock state' },
       { status: 500 }
     );
   }

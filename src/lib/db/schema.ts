@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   company_id TEXT DEFAULT 'default' REFERENCES companies(id),
   user_md TEXT,
   sort_order INTEGER DEFAULT 1000,
+  head_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -82,9 +83,33 @@ CREATE TABLE IF NOT EXISTS tasks (
   planning_spec TEXT,
   planning_agents TEXT,
   planning_dispatch_error TEXT,
+  completed_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Task history table — every status transition is recorded here for
+-- performance analytics (avg completion time, throughput, agent attribution).
+CREATE TABLE IF NOT EXISTS task_history (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  status_from TEXT,
+  status_to TEXT NOT NULL,
+  changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  changed_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  agent_name TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_task_history_task ON task_history(task_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_history_changed ON task_history(changed_at DESC);
+
+-- Auto-set completed_at when a task transitions into 'done'.
+CREATE TRIGGER IF NOT EXISTS trg_tasks_completed_at
+AFTER UPDATE OF status ON tasks
+FOR EACH ROW
+WHEN NEW.status = 'done' AND (OLD.status IS NULL OR OLD.status <> 'done')
+BEGIN
+  UPDATE tasks SET completed_at = datetime('now') WHERE id = NEW.id;
+END;
 
 -- Planning questions table
 CREATE TABLE IF NOT EXISTS planning_questions (
@@ -304,6 +329,10 @@ CREATE TABLE IF NOT EXISTS agent_settings (
   role_id TEXT,
   setting_type TEXT NOT NULL CHECK (setting_type IN ('model', 'persona')),
   value TEXT NOT NULL,
+  locked_by TEXT,
+  lock_reason TEXT,
+  locked_at TEXT,
+  lock_token TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

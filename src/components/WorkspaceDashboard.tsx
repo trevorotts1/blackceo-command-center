@@ -322,6 +322,20 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
           </div>
         </div>
 
+        {/* Department head — surfaces the agent designated as the head of this
+            workspace (migration 028). Falls back gracefully when none assigned. */}
+        {workspace.head_agent_name && (
+          <div className="mb-4 flex items-center gap-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2">
+            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-base shadow-sm">
+              {workspace.head_agent_avatar || '🤖'}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-indigo-600">Department Head</p>
+              <p className="truncate text-sm font-semibold text-gray-900">{workspace.head_agent_name}</p>
+            </div>
+          </div>
+        )}
+
         {/* Task stats with pills */}
         <div className="flex flex-wrap items-center gap-2 mb-4">
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-100 text-gray-600">
