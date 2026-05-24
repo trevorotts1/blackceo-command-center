@@ -89,7 +89,7 @@ export default function HomePage() {
       detail: 'See all active tasks, work in progress, and completed items across every department in one unified view. This is where work gets done.',
       icon: <Kanban className="w-7 h-7 text-white" />,
       gradient: 'from-indigo-500 via-purple-500 to-pink-500',
-      route: '/workspace/default',
+      route: '/kanban',
       cta: 'Open Kanban Board',
     },
     {
