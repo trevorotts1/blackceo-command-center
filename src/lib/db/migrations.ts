@@ -614,6 +614,22 @@ const migrations: Migration[] = [
     id: '020',
     name: 'add_da_challenges',
     up: (db) => {
+      // Defensive: if a legacy da_challenges table is already present
+      // (from an old schema.ts shape) the canonical indexes below would
+      // 500 with "no such column: task_id". Migration 024 owns the
+      // legacy → canonical reconciliation; here we just no-op and let
+      // 024 do the work on the next pass.
+      const existing = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='da_challenges'`
+      ).get() as { name: string } | undefined;
+      if (existing) {
+        const cols = db.prepare(`PRAGMA table_info(da_challenges)`).all() as { name: string }[];
+        const hasTaskId = cols.some((c) => c.name === 'task_id');
+        if (!hasTaskId) {
+          console.log('[Migration 020] legacy da_challenges detected — deferring to migration 024');
+          return;
+        }
+      }
       db.prepare(`
         CREATE TABLE IF NOT EXISTS da_challenges (
           id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -658,43 +674,65 @@ const migrations: Migration[] = [
     }
   },
   {
-    id: '022',
-    name: 'add_sops_and_task_sop_fields',
+    id: '024',
+    name: 'reconcile_da_challenges_shape',
     up: (db) => {
-      console.log('[Migration 022] Adding sops table + tasks.sop_id / sop_step_progress...');
+      // Background: schema.ts historically created da_challenges with a
+      // legacy shape (department_id / challenge_text / response_text and a
+      // status enum of open|responded|escalated). Migration 020 introduced
+      // the canonical Devil's-Advocate shape (task_id / campaign_id /
+      // trigger_type / challenge / severity, status enum of
+      // open|accepted|dismissed|overridden). On fresh installs the legacy
+      // table is created first, then `CREATE TABLE IF NOT EXISTS` in 020 is
+      // a no-op, and the follow-up `CREATE INDEX ... ON da_challenges(task_id)`
+      // 500s with "no such column: task_id".
+      //
+      // This migration is idempotent: it only acts if the legacy shape is
+      // present. It preserves any rows by renaming the legacy table to
+      // da_challenges_legacy, then re-creates da_challenges with the
+      // canonical shape and re-applies the migration-020 indexes.
+      const cols = db.prepare("PRAGMA table_info(da_challenges)").all() as { name: string }[];
+      const colNames = cols.map((c) => c.name);
+      const hasLegacy = colNames.includes('department_id') && !colNames.includes('task_id');
 
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS sops (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          slug TEXT NOT NULL UNIQUE,
-          description TEXT,
-          version INTEGER NOT NULL DEFAULT 1,
-          department TEXT,
-          task_keywords TEXT,
-          steps TEXT NOT NULL,
-          success_criteria TEXT,
-          persona_hints TEXT,
-          deleted_at TEXT,
-          created_at TEXT DEFAULT (datetime('now')),
-          updated_at TEXT DEFAULT (datetime('now'))
-        );
-      `);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_department ON sops(department)`);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_slug ON sops(slug)`);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_deleted ON sops(deleted_at)`);
-
-      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
-      const taskCols = new Set(tasksInfo.map((c) => c.name));
-      if (!taskCols.has('sop_id')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN sop_id TEXT REFERENCES sops(id)`);
+      if (!hasLegacy) {
+        console.log('[Migration 024] da_challenges already canonical — skipping');
+        return;
       }
-      if (!taskCols.has('sop_step_progress')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN sop_step_progress TEXT`);
-      }
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_sop ON tasks(sop_id)`);
 
-      console.log('[Migration 022] sops table + task SOP fields ready');
+      // Drop indexes that reference legacy columns before renaming.
+      db.prepare(`DROP INDEX IF EXISTS idx_da_challenges_status`).run();
+      db.prepare(`DROP INDEX IF EXISTS idx_da_challenges_department`).run();
+
+      // Preserve any existing legacy rows under a side table for forensics.
+      db.prepare(`DROP TABLE IF EXISTS da_challenges_legacy`).run();
+      db.prepare(`ALTER TABLE da_challenges RENAME TO da_challenges_legacy`).run();
+
+      // Recreate with the canonical migration-020 shape.
+      db.prepare(`
+        CREATE TABLE da_challenges (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT,
+          campaign_id TEXT,
+          trigger_type TEXT NOT NULL,
+          challenge TEXT NOT NULL,
+          specific_concern TEXT,
+          assumptions TEXT,
+          severity TEXT CHECK(severity IN ('low', 'medium', 'high')),
+          confidence REAL,
+          status TEXT DEFAULT 'open' CHECK(status IN ('open', 'accepted', 'dismissed', 'overridden')),
+          dismissal_reason TEXT,
+          outcome TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT
+        )
+      `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_task ON da_challenges(task_id)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_status ON da_challenges(status)`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_severity ON da_challenges(severity)`).run();
+
+      const legacyCount = (db.prepare(`SELECT COUNT(*) AS n FROM da_challenges_legacy`).get() as { n: number }).n;
+      console.log(`[Migration 024] da_challenges reconciled (legacy rows preserved: ${legacyCount})`);
     }
   },
 ];
