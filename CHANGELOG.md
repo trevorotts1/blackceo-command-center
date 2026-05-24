@@ -1,3 +1,27 @@
+## [v3.6.0] — 2026-05-24 — SOP Layer 3 (learning loop)
+
+Builds on top of the Track J SOP Hybrid System (PR #8) to make the SOP library self-improving instead of static. Three loops added:
+
+1. **Thumbs feedback** — `sop_feedback` table + `POST /api/sops/feedback` + `SOPFeedbackModal` component. Surfaces a one-line prompt when a task moves to `done`. Thumbs-up is fire-and-forget; thumbs-down opens a notes box; skip / dismiss is one click. Modal silently no-ops if feedback for the (sop, task) pair already exists.
+2. **Pattern detection** — `sop_proposals` table + `detectPatternsAndPropose()` (clusters completed tasks by department + dominant keyword, flags clusters of ≥5 tasks with ≥3 un-SOP'd members, drafts steps from the exemplar's bullet list). New `/sops/proposals` review queue page; approve creates a real v1 SOP row, reject stamps with optional reason and never re-surfaces.
+3. **Performance scoring** — `computePerformance()` aggregates last 30 days of feedback per SOP; `GET /api/sops/:id/performance` returns score + pos/neg sample notes + ranking signal (`boost` ≥0.7, `flag` ≤-0.3) + suggested revisions.
+
+Trigger options: external cron pings `/api/cron/sop-learning` (recommended, supports `CRON_SECRET`), or `scripts/sop-learning-job.ts` for direct invocation. A smoke-test (`scripts/smoke-test-sop-learning.ts`) seeds 13 tasks across two recurring patterns and verifies the job proposes both.
+
+### Migration
+- 023 — `sop_feedback` (id, sop_id, task_id, rating, notes, agent_id, created_at) + `sop_proposals` (proposed_name, proposed_department, draft_steps JSON, based_on_task_ids JSON, evidence_summary, status, reviewed_*, approved_sop_id).
+
+### Risk: low
+Additive only — no changes to existing tables, no changes to Track J's API surface, no changes to the task-done route. The feedback modal is opt-in (a dashboard component renders it; existing pages keep working without it). The cron endpoint is gated on `CRON_SECRET` if set.
+
+### Open dependencies
+- External nightly cron (or launchd timer) must ping `/api/cron/sop-learning` for the learning loop to fire autonomously. Manual `Re-scan now` button on `/sops/proposals` works in the meantime.
+
+### Depends on
+- Track J PR #8 (feat/hybrid-sop-system) — must merge before this branches can rebase to main.
+
+---
+
 ## [v3.5.0] — 2026-05-20 — Companion bump for onboarding v10.13.0
 
 No dashboard-side fixes needed in the v10.12.0 audit (Phase 19 = 8.80, PASS — only minor changes already covered by the v3.4.1 P1-003/P1-004 typed-persona cleanup). Bumping to v3.5.0 to align with the onboarding v10.13.0 release that closed 5 new P0 blockers and every below-threshold phase across the audit framework.
