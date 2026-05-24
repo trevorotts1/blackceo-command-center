@@ -41,9 +41,17 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
     due_date: task?.due_date || '',
   });
 
+  // Triad gate error — populated when the backend refuses a backlog → start
+  // transition because the task is missing description / SOP / persona.
+  // Wired to a banner with inline remediation CTAs.
+  const [triadError, setTriadError] = useState<{ missing: string[] } | null>(null);
+  const [suggestingPersona, setSuggestingPersona] = useState(false);
+  const [suggestingSop, setSuggestingSop] = useState(false);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setTriadError(null);
 
     try {
       const url = task ? `/api/tasks/${task.id}` : '/api/tasks';
@@ -63,6 +71,19 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
+
+      if (!res.ok && res.status === 400) {
+        try {
+          const errBody = await res.json();
+          if (errBody?.error === 'Triad incomplete' && Array.isArray(errBody.missing)) {
+            setTriadError({ missing: errBody.missing });
+            setIsSubmitting(false);
+            return;
+          }
+        } catch {
+          // not a Triad error — fall through to generic handling
+        }
+      }
 
       if (res.ok) {
         const savedTask = await res.json();
@@ -143,6 +164,91 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
   const statuses: TaskStatus[] = ['backlog', 'in_progress', 'review', 'blocked', 'done'];
   const priorities: TaskPriority[] = ['low', 'medium', 'high', 'critical'];
 
+  /**
+   * Auto-suggest a persona for the current task using the persona-selector-v2
+   * scoring endpoint. On success the persona is attached server-side and we
+   * clear the Triad error so the user can retry the transition.
+   */
+  const handleSuggestPersona = async () => {
+    if (!task?.id) return;
+    setSuggestingPersona(true);
+    try {
+      const res = await fetch('/api/persona-assignment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: task.id, auto_assign: true }),
+      });
+      if (res.ok) {
+        // Reload the task in the store so the persona pill re-renders.
+        const fresh = await fetch(`/api/tasks/${task.id}`);
+        if (fresh.ok) {
+          const updated = await fresh.json();
+          updateTask(updated);
+        }
+        setTriadError((prev) => {
+          if (!prev) return prev;
+          const remaining = prev.missing.filter((m) => m !== 'persona' && m !== 'persona_id');
+          return remaining.length === 0 ? null : { missing: remaining };
+        });
+      } else {
+        console.error('Persona auto-suggest failed:', await res.text());
+      }
+    } catch (err) {
+      console.error('Persona auto-suggest failed:', err);
+    } finally {
+      setSuggestingPersona(false);
+    }
+  };
+
+  /**
+   * Auto-attach a suggested SOP via /api/sops/suggest. The suggest endpoint
+   * returns a ranked list — we take the top hit and PATCH it onto the task.
+   */
+  const handleAttachSop = async () => {
+    if (!task?.id) return;
+    setSuggestingSop(true);
+    try {
+      const params = new URLSearchParams();
+      if (task.department) params.set('department', task.department);
+      if (form.title || task.title) params.set('task_title', form.title || task.title);
+      if (form.description || task.description)
+        params.set('task_description', form.description || task.description || '');
+
+      const sugRes = await fetch(`/api/sops/suggest?${params.toString()}`);
+      if (!sugRes.ok) {
+        console.error('SOP suggest failed:', sugRes.status);
+        return;
+      }
+      const body = await sugRes.json();
+      const topSopId =
+        Array.isArray(body?.suggestions) && body.suggestions[0]?.sop?.id;
+      if (!topSopId) {
+        // Nothing matched — fall back to the SOP library in a new tab so the
+        // user can pick one manually.
+        window.open('/sops/proposals', '_blank');
+        return;
+      }
+      const patchRes = await fetch(`/api/tasks/${task.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sop_id: topSopId }),
+      });
+      if (patchRes.ok) {
+        const updated = await patchRes.json();
+        updateTask(updated);
+        setTriadError((prev) => {
+          if (!prev) return prev;
+          const remaining = prev.missing.filter((m) => m !== 'sop' && m !== 'sop_id');
+          return remaining.length === 0 ? null : { missing: remaining };
+        });
+      }
+    } catch (err) {
+      console.error('SOP attach failed:', err);
+    } finally {
+      setSuggestingSop(false);
+    }
+  };
+
   const tabs = [
     { id: 'overview' as TabType, label: 'Overview', icon: null },
     { id: 'planning' as TabType, label: 'Planning', icon: <ClipboardList className="w-4 h-4" /> },
@@ -192,6 +298,79 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
           {/* Overview Tab */}
           {activeTab === 'overview' && (
             <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Triad Rule error banner — surfaces when /api/tasks PATCH refuses
+              a backlog → start transition because the task is missing one or
+              more of: description, SOP, persona. Each missing piece gets its
+              own inline remediation CTA. */}
+          {triadError && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-full bg-amber-100 p-1.5">
+                  <ClipboardList className="h-4 w-4 text-amber-700" />
+                </div>
+                <div className="flex-1">
+                  <h4 className="text-sm font-semibold text-amber-900">
+                    Triad Rule — can&apos;t start this task yet
+                  </h4>
+                  <p className="mt-1 text-xs text-amber-800">
+                    Every task needs a description, a SOP, and a persona before it can
+                    leave Backlog. Missing:{' '}
+                    <strong>{triadError.missing.join(', ')}</strong>.
+                  </p>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(triadError.missing.includes('sop') ||
+                      triadError.missing.includes('sop_id')) && (
+                      <button
+                        type="button"
+                        onClick={handleAttachSop}
+                        disabled={suggestingSop}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-amber-700 disabled:opacity-60"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        {suggestingSop ? 'Finding SOP...' : 'Add an SOP'}
+                      </button>
+                    )}
+                    {(triadError.missing.includes('persona') ||
+                      triadError.missing.includes('persona_id')) && (
+                      <button
+                        type="button"
+                        onClick={handleSuggestPersona}
+                        disabled={suggestingPersona}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:opacity-60"
+                      >
+                        <Bot className="h-3.5 w-3.5" />
+                        {suggestingPersona ? 'Suggesting...' : 'Auto-suggest persona'}
+                      </button>
+                    )}
+                    {triadError.missing.includes('description') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Focus the description textarea below.
+                          const el = document.querySelector<HTMLTextAreaElement>(
+                            'textarea[placeholder="Add details..."]'
+                          );
+                          el?.focus();
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-gray-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-gray-800"
+                      >
+                        Add description
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setTriadError(null)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Title */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>

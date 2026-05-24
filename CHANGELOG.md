@@ -1,3 +1,47 @@
+## [v3.7.0] — 2026-05-24 — Clear v2.0 eval backlog (Tier 1+2+3+4 + Triad UI)
+
+Closes the entire v2.0 evaluation backlog in one sweep. Performance Review went from 3/10 to first-class, Model Lock Protocol shipped, Kanban grew its 6th column, the Persona library got a viewer page, and the TaskModal now resolves Triad-Rule violations inline.
+
+### Added
+
+- **`/api/performance`** (NEW) — full executive aggregator returning task counts, avg completion time, agent utilization, department workload distribution, 7/30/90-day trend buckets, top-3 bottleneck clusters, and persona coverage %. Backs the new CEODashboard trend chart + bottleneck + persona-coverage cards.
+- **`/api/personas`** (NEW) — exposes the full persona catalog from `persona-categories.json` (Skill 22). Powers the new `/personas` viewer route — searchable, category-grouped library of all coaching personas with domain/perspective tags + blueprint preview.
+- **`POST /api/persona-assignment`** (NEW handler on existing route) — auto-suggest + attach a persona to a single task using persona-selector-v2. Backs the TaskModal's "Auto-suggest persona" CTA.
+- **`PATCH /api/settings/intelligence`** (NEW handler) — Model Lock Protocol. Lock/unlock a per-department or per-role model/persona setting; returns a `lock_token` the caller must echo via `X-Lock-Token` on subsequent PUTs (423 Locked otherwise).
+- **`completed_at` column + `task_history` table + auto-trigger** — `tasks.completed_at` is now set automatically when a row transitions to `done`. Every status change appends a row to `task_history` via the PATCH handler so /api/performance can compute durations and agent attribution.
+- **`workspaces.head_agent_id` column + UI** — each workspace now designates a department head. Rendered as a banner on the workspace page and as a card-top pill on the workspace grid. Backfill assigns the first agent created for each workspace.
+- **6th Kanban column (`Backlog` separated from `To-Do`)** — Backlog = raw inbox, To-Do = groomed/prioritized, In Progress / Review / Blocked / Done unchanged. Decorative filter chips (`By Status`, `Tasks Due`, `By Agent`, `Completed`) now actually filter the board.
+- **TaskModal Triad-Rule banner** — when a backlog → start PATCH returns `{ error: "Triad incomplete", missing: [...] }`, the modal renders a clear banner with "Add an SOP", "Auto-suggest persona", and "Add description" CTAs that each resolve their missing piece inline. Dragging a Triad-incomplete card on the Kanban also re-opens the modal with the same banner.
+- **Model cost columns** — `AVAILABLE_MODELS` now carries `cost_per_million_input` / `cost_per_million_output` for every entry. The Intelligence Settings UI will display these next to each model.
+- **`/personas` page** — searchable persona library viewer at `src/app/personas/page.tsx`.
+
+### Fixed
+
+- **`/api/company` returns the wrong row** — endpoint used `ORDER BY rowid LIMIT 1`, which surfaced the bootstrap "Command Center" placeholder forever on installs that pre-existed Skill 23. Now prefers `$COMPANY_SLUG` / `$COMPANY_NAME` matches, then any non-placeholder row, and migration 030 deletes the placeholder once a real client row exists.
+- **Migration runner ran in file declaration order, not numeric id order** — fixed by sorting `migrations` numerically before iterating. Today's deploy disaster (later migration firing before an earlier one because of a renumbered slot) cannot recur.
+
+### Migrations
+
+- **027** — `add_task_completed_at_and_history` — adds `tasks.completed_at`, `task_history` table, and the `trg_tasks_completed_at` trigger.
+- **028** — `add_workspace_head_agent` — adds `workspaces.head_agent_id` + backfills.
+- **029** — `add_agent_settings_lock_protocol` — adds `locked_by` / `lock_reason` / `locked_at` / `lock_token` to `agent_settings`.
+- **030** — `cleanup_demo_company_row` — deletes the "Command Center" placeholder when a real client row is present.
+
+### Risk: medium
+
+New tables + triggers + four new migrations. The trigger is `CREATE TRIGGER IF NOT EXISTS` — safe to re-apply. The migration runner change is the highest-leverage fix: file order is no longer load-bearing.
+
+### Deploy checklist
+
+1. `git pull origin main`
+2. `npm install`
+3. `npm rebuild better-sqlite3` (Angeleen VPS especially)
+4. `npm run build`
+5. `unset PORT && PORT=4000 pm2 start --update-env ecosystem.config.cjs`
+6. Verify: `/api/performance`, `/personas`, `/api/sops`, and `/` all return 200.
+
+---
+
 ## [v3.6.0] — 2026-05-24 — Skill 35 Marketing "Publish" button + /api/skill-35/publish (Track M, companion to onboarding v10.14.33)
 
 Closes the third trigger path that `35-social-media-planner/INSTRUCTIONS.md` has documented since v10.12.0 but never existed in code:

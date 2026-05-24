@@ -317,6 +317,22 @@ export default function WorkspacePage() {
         />
       </div>
 
+      {/* Department head banner — migration 028. Surfaces the agent designated
+          as the head of this workspace so visitors immediately know who owns it. */}
+      {workspace.head_agent_name && (
+        <div className="border-b border-indigo-100 bg-indigo-50/60 px-4 py-2 sm:px-6 lg:px-8">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-lg shadow-sm">
+              {workspace.head_agent_avatar || '🤖'}
+            </div>
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-indigo-600">Department Head</p>
+              <p className="text-sm font-semibold text-gray-900">{workspace.head_agent_name}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar */}
         <AgentsSidebar workspaceId={workspace.id} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />

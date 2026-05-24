@@ -710,11 +710,159 @@ const migrations: Migration[] = [
   // ============================================================
   // NOTE: migration 024 is reserved by PR #11 (da_challenges shape
   // reconciliation). Track S takes 025.
+  // ============================================================
+  // v3.7.0 — Eval v2.0 backlog clearance migrations
+  // ============================================================
+  {
+    id: '027',
+    name: 'add_task_completed_at_and_history',
+    up: (db) => {
+      console.log('[Migration 027] Adding completed_at + task_history...');
+      const info = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      if (!info.some((c) => c.name === 'completed_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN completed_at TEXT`);
+        // Backfill existing 'done' tasks with updated_at as completed_at.
+        db.exec(`UPDATE tasks SET completed_at = updated_at WHERE status = 'done' AND completed_at IS NULL`);
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_history (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          status_from TEXT,
+          status_to TEXT NOT NULL,
+          changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+          changed_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          agent_name TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_task_history_task ON task_history(task_id, changed_at DESC)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_task_history_changed ON task_history(changed_at DESC)`);
+
+      // Trigger to set completed_at when status transitions to 'done'.
+      db.exec(`DROP TRIGGER IF EXISTS trg_tasks_completed_at`);
+      db.exec(`
+        CREATE TRIGGER trg_tasks_completed_at
+        AFTER UPDATE OF status ON tasks
+        FOR EACH ROW
+        WHEN NEW.status = 'done' AND (OLD.status IS NULL OR OLD.status <> 'done')
+        BEGIN
+          UPDATE tasks SET completed_at = datetime('now') WHERE id = NEW.id;
+        END;
+      `);
+
+      console.log('[Migration 027] completed_at + task_history ready');
+    }
+  },
+  {
+    id: '028',
+    name: 'add_workspace_head_agent',
+    up: (db) => {
+      console.log('[Migration 028] Adding head_agent_id to workspaces...');
+      const info = db.prepare("PRAGMA table_info(workspaces)").all() as { name: string }[];
+      if (!info.some((c) => c.name === 'head_agent_id')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN head_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL`);
+      }
+
+      const wsRows = db.prepare(
+        "SELECT id FROM workspaces WHERE head_agent_id IS NULL OR head_agent_id = ''"
+      ).all() as { id: string }[];
+      const updateHead = db.prepare('UPDATE workspaces SET head_agent_id = ? WHERE id = ?');
+      for (const ws of wsRows) {
+        const firstAgent = db.prepare(
+          'SELECT id FROM agents WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 1'
+        ).get(ws.id) as { id: string } | undefined;
+        if (firstAgent) {
+          updateHead.run(firstAgent.id, ws.id);
+        }
+      }
+      console.log('[Migration 028] head_agent_id added + backfilled');
+    }
+  },
+  {
+    id: '029',
+    name: 'add_agent_settings_lock_protocol',
+    up: (db) => {
+      console.log('[Migration 029] Adding model lock protocol columns to agent_settings...');
+      const info = db.prepare("PRAGMA table_info(agent_settings)").all() as { name: string }[];
+      const cols = new Set(info.map((c) => c.name));
+      if (!cols.has('locked_by')) {
+        db.exec(`ALTER TABLE agent_settings ADD COLUMN locked_by TEXT`);
+      }
+      if (!cols.has('lock_reason')) {
+        db.exec(`ALTER TABLE agent_settings ADD COLUMN lock_reason TEXT`);
+      }
+      if (!cols.has('locked_at')) {
+        db.exec(`ALTER TABLE agent_settings ADD COLUMN locked_at TEXT`);
+      }
+      if (!cols.has('lock_token')) {
+        db.exec(`ALTER TABLE agent_settings ADD COLUMN lock_token TEXT`);
+      }
+      console.log('[Migration 029] agent_settings lock protocol ready');
+    }
+  },
+  {
+    id: '030',
+    name: 'cleanup_demo_company_row',
+    up: (db) => {
+      console.log('[Migration 030] Cleaning up stray placeholder company row...');
+      try {
+        const realCount = db.prepare(
+          "SELECT COUNT(*) as c FROM companies WHERE slug NOT IN ('default','command-center') AND slug NOT LIKE 'acme-%'"
+        ).get() as { c: number };
+        if (realCount.c > 0) {
+          const result = db.prepare(
+            "DELETE FROM companies WHERE slug IN ('default','command-center') OR name = 'Command Center'"
+          ).run();
+          console.log(`[Migration 030] Removed ${result.changes} placeholder company row(s)`);
+        } else {
+          console.log('[Migration 030] No real company yet, leaving placeholder in place');
+        }
+      } catch (e) {
+        console.log('[Migration 030] Skipped:', (e as Error).message);
+      }
+    }
+  },
   {
     id: '025',
     name: 'sop_proposals_auto_replace_fields',
     up: (db) => {
       console.log('[Migration 025] Adding auto-replace fields to sop_proposals...');
+
+      // Defensive: on a truly fresh install the sop_proposals table may not
+      // exist yet (its CREATE was historically in a migration that pre-dates
+      // the locally-tracked 022/023/024 slots — those numbers are reserved
+      // in the comments above but not present in this file). Create the
+      // canonical shape lazily so this migration succeeds on a brand-new DB.
+      const tableExists = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='sop_proposals'"
+      ).get();
+      if (!tableExists) {
+        db.exec(`
+          CREATE TABLE sop_proposals (
+            id TEXT PRIMARY KEY,
+            proposed_name TEXT NOT NULL,
+            proposed_department TEXT,
+            draft_steps TEXT NOT NULL,
+            based_on_task_ids TEXT NOT NULL,
+            evidence_summary TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'auto-generated-pending-review', 'escalated')),
+            created_at TEXT DEFAULT (datetime('now')),
+            reviewed_at TEXT,
+            reviewed_by TEXT,
+            approved_sop_id TEXT REFERENCES sops(id),
+            replaces_sop_id TEXT REFERENCES sops(id),
+            confidence REAL,
+            auto_research_attempts INTEGER DEFAULT 0,
+            research_sources TEXT
+          );
+        `);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_status ON sop_proposals(status)`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_created ON sop_proposals(created_at DESC)`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_replaces ON sop_proposals(replaces_sop_id)`);
+        console.log('[Migration 025] sop_proposals table created from scratch (fresh-install path)');
+        return;
+      }
 
       const info = db.prepare("PRAGMA table_info(sop_proposals)").all() as { name: string }[];
       const cols = new Set(info.map((c) => c.name));
@@ -800,9 +948,18 @@ export function runMigrations(db: Database.Database): void {
   const applied = new Set(
     (db.prepare('SELECT id FROM _migrations').all() as { id: string }[]).map(m => m.id)
   );
-  
-  // Run pending migrations in order
-  for (const migration of migrations) {
+
+  // Run pending migrations in NUMERIC ID order — never trust file declaration order.
+  // (Today's deploy disaster was caused by file-order vs numerical-order mismatch.
+  //  Sorting here ensures a missing/renumbered slot can't snake-jump the queue.)
+  const ordered = [...migrations].sort((a, b) => {
+    const an = parseInt(a.id, 10);
+    const bn = parseInt(b.id, 10);
+    if (!Number.isNaN(an) && !Number.isNaN(bn) && an !== bn) return an - bn;
+    return a.id.localeCompare(b.id);
+  });
+
+  for (const migration of ordered) {
     if (applied.has(migration.id)) {
       continue;
     }
@@ -832,7 +989,13 @@ export function runMigrations(db: Database.Database): void {
  */
 export function getMigrationStatus(db: Database.Database): { applied: string[]; pending: string[] } {
   const applied = (db.prepare('SELECT id FROM _migrations ORDER BY id').all() as { id: string }[]).map(m => m.id);
-  const pending = migrations.filter(m => !applied.includes(m.id)).map(m => m.id);
+  const sorted = [...migrations].sort((a, b) => {
+    const an = parseInt(a.id, 10);
+    const bn = parseInt(b.id, 10);
+    if (!Number.isNaN(an) && !Number.isNaN(bn) && an !== bn) return an - bn;
+    return a.id.localeCompare(b.id);
+  });
+  const pending = sorted.filter(m => !applied.includes(m.id)).map(m => m.id);
   return { applied, pending };
 }
 

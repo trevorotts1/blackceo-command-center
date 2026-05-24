@@ -148,6 +148,26 @@ export async function PATCH(
          VALUES (?, ?, ?, ?, ?)`,
         [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`, now]
       );
+
+      // Append to task_history (migration 027) so /api/performance can
+      // compute durations + agent attribution per transition. Best-effort:
+      // older DBs without the table won't have this row.
+      try {
+        const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
+        let actingAgentName: string | null = null;
+        if (actingAgentId) {
+          const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
+          actingAgentName = a?.name ?? null;
+        }
+        run(
+          `INSERT INTO task_history (id, task_id, status_from, status_to, changed_at, changed_by_agent_id, agent_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), id, existing.status, validatedData.status, now, actingAgentId, actingAgentName]
+        );
+      } catch (err) {
+        // task_history table missing on older DBs — just log and move on.
+        console.warn('[tasks PATCH] task_history append skipped:', (err as Error).message);
+      }
     }
 
     // Handle assignment change

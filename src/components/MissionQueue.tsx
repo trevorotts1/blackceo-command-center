@@ -15,12 +15,21 @@ interface MissionQueueProps {
   departmentFilter?: string | null;
 }
 
-const COLUMNS: { id: TaskStatus; label: string; gradient: string }[] = [
-  { id: 'backlog', label: 'Backlog / To-Do', gradient: 'column-pill-backlog' },
+// Six-column board (per Eval v2.0 brief, Tier 3):
+// Backlog = raw inbox / unstarted ideas
+// To-Do   = groomed & prioritized, ready for an agent to pick up
+// Drag flow: Backlog → To-Do → In Progress → Review → (Blocked) → Done.
+//
+// "todo" maps to legacy statuses {inbox, planning, assigned, pending_dispatch}
+// which are all forms of "groomed but not started yet." A bare 'backlog' status
+// stays in the Backlog column. The mapping happens in getTasksByStatus below.
+const COLUMNS: { id: TaskStatus | 'todo'; label: string; gradient: string }[] = [
+  { id: 'backlog',     label: 'Backlog',     gradient: 'column-pill-backlog' },
+  { id: 'todo',        label: 'To-Do',       gradient: 'column-pill-backlog' },
   { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress' },
-  { id: 'review', label: 'Review / QC', gradient: 'column-pill-review' },
-  { id: 'blocked', label: 'Blocked', gradient: 'column-pill-blocked' },
-  { id: 'done', label: 'Done', gradient: 'column-pill-done' },
+  { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review' },
+  { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked' },
+  { id: 'done',        label: 'Done',        gradient: 'column-pill-done' },
 ];
 
 const departmentEmojis: Record<string, string> = {
@@ -75,14 +84,43 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
     const filteredByDept = effectiveDepartment
       ? tasks.filter((task) => task.department === effectiveDepartment)
       : tasks;
-    return filteredByDept.filter((task) => {
+    const byColumn = filteredByDept.filter((task) => {
+      // Six-column mapping:
+      //   backlog  → raw inbox (status === 'backlog')
+      //   todo     → groomed (inbox / planning / assigned / pending_dispatch)
+      //   review   → review/testing
+      //   anything else: 1:1 match with status
       if (statusId === 'backlog') {
-        return ['backlog', 'inbox', 'planning', 'assigned', 'pending_dispatch'].includes(task.status);
+        return task.status === 'backlog';
+      }
+      if (statusId === 'todo') {
+        return ['inbox', 'planning', 'assigned', 'pending_dispatch'].includes(task.status);
       }
       if (statusId === 'review') {
         return ['review', 'testing'].includes(task.status);
       }
       return task.status === statusId;
+    });
+
+    // Apply the active filter chip (was previously decorative).
+    return byColumn.filter((task) => {
+      switch (activeFilter) {
+        case 'due':
+          // Only tasks with a due date in the next 7 days OR overdue
+          if (!task.due_date) return false;
+          const due = new Date(task.due_date).getTime();
+          const sevenDays = 7 * 24 * 60 * 60 * 1000;
+          return due - Date.now() <= sevenDays;
+        case 'agent':
+          // Only tasks that have an assigned agent
+          return !!task.assigned_agent_id;
+        case 'completed':
+          return task.status === 'done';
+        case 'status':
+        case 'total':
+        default:
+          return true;
+      }
     });
   };
 
@@ -96,8 +134,14 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
     e.dataTransfer.dropEffect = 'move';
   };
 
-  const handleDrop = async (e: React.DragEvent, targetStatus: TaskStatus) => {
+  const handleDrop = async (e: React.DragEvent, targetColumnId: TaskStatus | 'todo') => {
     e.preventDefault();
+    // The "To-Do" column is a synthetic UI column — when a card lands there,
+    // the actual underlying task status becomes 'assigned' (groomed/queued
+    // but not started). The API enforces Triad Rule at the backlog → !backlog
+    // boundary, so dropping into To-Do also triggers that check.
+    const targetStatus: TaskStatus = targetColumnId === 'todo' ? 'assigned' : (targetColumnId as TaskStatus);
+
     if (!draggedTask || draggedTask.status === targetStatus) {
       setDraggedTask(null);
       return;
@@ -133,6 +177,18 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
           if (!result.success) {
             console.error('Auto-dispatch failed:', result.error);
           }
+        }
+      } else if (res.status === 400) {
+        // Triad incomplete — revert the optimistic update and surface the error.
+        updateTaskStatus(draggedTask.id, draggedTask.status);
+        try {
+          const errBody = await res.json();
+          if (errBody?.error === 'Triad incomplete' && Array.isArray(errBody.missing)) {
+            // Open the task modal so the user can resolve the Triad inline.
+            setEditingTask(draggedTask);
+          }
+        } catch {
+          // ignore body parse errors
         }
       }
     } catch (error) {

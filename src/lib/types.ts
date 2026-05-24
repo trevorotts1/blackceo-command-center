@@ -150,6 +150,10 @@ export interface Workspace {
   company_id?: string;
   user_md?: string;
   sort_order?: number;
+  /** Agent designated as the department head; rendered prominently on the workspace page. */
+  head_agent_id?: string | null;
+  head_agent_name?: string | null;
+  head_agent_avatar?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -169,6 +173,9 @@ export interface WorkspaceStats {
   slug: string;
   icon: string;
   sort_order?: number;
+  head_agent_id?: string | null;
+  head_agent_name?: string | null;
+  head_agent_avatar?: string | null;
   taskCounts: {
     backlog: number;
     in_progress: number;

@@ -2,8 +2,58 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { AlertCircle, Lightbulb, Loader2, Target, Users } from 'lucide-react';
+import {
+  AlertCircle,
+  Lightbulb,
+  Loader2,
+  Target,
+  Users,
+  TrendingUp,
+  AlertTriangle,
+  Sparkles,
+} from 'lucide-react';
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+} from 'recharts';
 import type { Workspace, WorkspaceStats } from '@/lib/types';
+
+interface PerformancePayload {
+  counts: { total: number; backlog: number; in_progress: number; review: number; blocked: number; done: number };
+  avg_completion: { seconds: number; hours: number; n: number };
+  agent_utilization: { active: number; total: number; ratio: number };
+  departments: Array<{
+    workspace_id: string;
+    workspace_name: string;
+    slug: string;
+    total: number;
+    done: number;
+    in_progress: number;
+    blocked: number;
+    stalled_ratio: number;
+  }>;
+  trends: {
+    last_7d: { created: number; completed: number };
+    last_30d: { created: number; completed: number };
+    last_90d: { created: number; completed: number };
+  };
+  trend_series: Array<{ day: string; created: number; completed: number }>;
+  bottlenecks: Array<{
+    workspace_id: string;
+    workspace_name: string;
+    slug: string;
+    total: number;
+    blocked: number;
+    stalled_ratio: number;
+    reason: string;
+  }>;
+  persona_coverage: { covered: number; total: number; ratio: number };
+}
 
 interface CEODashboardProps {
   workspace: Workspace;
@@ -15,6 +65,27 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [performance, setPerformance] = useState<PerformancePayload | null>(null);
+  const [perfLoading, setPerfLoading] = useState(true);
+
+  // Load aggregate performance metrics (powers the trend / bottleneck / persona-coverage cards).
+  useEffect(() => {
+    async function loadPerformance() {
+      try {
+        setPerfLoading(true);
+        const res = await fetch('/api/performance');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as PerformancePayload;
+        setPerformance(data);
+      } catch (err) {
+        console.error('Failed to load performance metrics:', err);
+        setPerformance(null);
+      } finally {
+        setPerfLoading(false);
+      }
+    }
+    loadPerformance();
+  }, []);
 
   useEffect(() => {
     async function loadWorkspaceStats() {
@@ -264,6 +335,119 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
           )}
         </section>
 
+        {/* ─── Performance Review: Trends, Bottlenecks, Persona Coverage ─── */}
+        {!perfLoading && performance && (
+          <>
+            <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
+              <div className="mb-6 flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-900">Task Throughput Trends</h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Created vs. completed tasks over the last 14 days. Buckets:{' '}
+                    <strong>7d</strong> {performance.trends.last_7d.completed}/{performance.trends.last_7d.created} ·{' '}
+                    <strong>30d</strong> {performance.trends.last_30d.completed}/{performance.trends.last_30d.created} ·{' '}
+                    <strong>90d</strong> {performance.trends.last_90d.completed}/{performance.trends.last_90d.created}.
+                  </p>
+                </div>
+                <div className="hidden rounded-xl bg-indigo-50 p-2 sm:flex">
+                  <TrendingUp className="h-5 w-5 text-indigo-600" />
+                </div>
+              </div>
+
+              {performance.trend_series.length === 0 ? (
+                <div className="flex h-40 items-center justify-center rounded-2xl border border-dashed border-gray-200 bg-gray-50 text-sm text-gray-400">
+                  Not enough history yet — trends will populate as tasks are completed.
+                </div>
+              ) : (
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={performance.trend_series}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                      <XAxis dataKey="day" stroke="#9ca3af" fontSize={11} />
+                      <YAxis stroke="#9ca3af" fontSize={11} allowDecimals={false} />
+                      <Tooltip
+                        contentStyle={{
+                          background: 'white',
+                          border: '1px solid #e5e7eb',
+                          borderRadius: '0.75rem',
+                          fontSize: 12,
+                        }}
+                      />
+                      <Line type="monotone" dataKey="created" stroke="#6366f1" strokeWidth={2} dot={false} name="Created" />
+                      <Line type="monotone" dataKey="completed" stroke="#10b981" strokeWidth={2} dot={false} name="Completed" />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <PerfTile
+                  label="Avg completion time"
+                  value={
+                    performance.avg_completion.n === 0
+                      ? '—'
+                      : `${performance.avg_completion.hours.toFixed(1)}h`
+                  }
+                  hint={`Across ${performance.avg_completion.n} completed tasks`}
+                />
+                <PerfTile
+                  label="Agent utilization"
+                  value={`${Math.round(performance.agent_utilization.ratio * 100)}%`}
+                  hint={`${performance.agent_utilization.active} of ${performance.agent_utilization.total} agents active`}
+                />
+                <PerfTile
+                  label="Persona coverage"
+                  value={`${Math.round(performance.persona_coverage.ratio * 100)}%`}
+                  hint={`${performance.persona_coverage.covered} of ${performance.persona_coverage.total} tasks tagged`}
+                  icon={<Sparkles className="h-4 w-4 text-violet-500" />}
+                />
+              </div>
+            </section>
+
+            {/* Bottlenecks card — top 3 stalled-task clusters */}
+            <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
+              <div className="mb-6 flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-900">Bottlenecks</h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Departments where more than 40% of tasks are blocked or stalled.
+                  </p>
+                </div>
+                <div className="hidden rounded-xl bg-rose-50 p-2 sm:flex">
+                  <AlertTriangle className="h-5 w-5 text-rose-600" />
+                </div>
+              </div>
+
+              {performance.bottlenecks.length === 0 ? (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-5 text-sm font-medium text-emerald-800">
+                  No bottlenecks detected. Every department is moving.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  {performance.bottlenecks.map((b) => (
+                    <Link
+                      key={b.workspace_id}
+                      href={`/workspace/${b.slug}`}
+                      className="rounded-2xl border border-rose-200 bg-rose-50 p-4 transition-all hover:border-rose-300 hover:shadow-md"
+                    >
+                      <div className="mb-2 flex items-center justify-between">
+                        <h3 className="text-sm font-bold text-rose-900">{b.workspace_name}</h3>
+                        <span className="rounded-full bg-white px-2 py-0.5 text-xs font-semibold text-rose-700">
+                          {Math.round(b.stalled_ratio * 100)}%
+                        </span>
+                      </div>
+                      <p className="text-xs text-rose-800">{b.reason}</p>
+                      <p className="mt-2 text-[11px] text-rose-700">
+                        {b.blocked} blocked · {b.total} total
+                      </p>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        )}
+
         <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
           <div className="mb-6">
             <h2 className="text-2xl font-bold text-gray-900">Quick Recommendations</h2>
@@ -290,6 +474,29 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
         </section>
       </div>
     </main>
+  );
+}
+
+function PerfTile({
+  label,
+  value,
+  hint,
+  icon,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4">
+      <div className="mb-2 flex items-center justify-between">
+        <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</p>
+        {icon}
+      </div>
+      <p className="text-2xl font-bold text-gray-900">{value}</p>
+      {hint && <p className="mt-1 text-[11px] text-gray-500">{hint}</p>}
+    </div>
   );
 }
 
