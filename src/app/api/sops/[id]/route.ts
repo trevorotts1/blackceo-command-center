@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, run } from '@/lib/db';
 import { parseAndValidateSteps, type SOP } from '@/lib/sops';
+import { enqueueAutoReplace, countImpactedTasks } from '@/lib/sop-auto-replace';
 
 // GET /api/sops/[id]
 export async function GET(
@@ -120,8 +121,13 @@ export async function PATCH(
 
 // DELETE /api/sops/[id] — soft delete. Tasks that reference it keep the FK
 // pointer, but the Triad Rule treats deleted SOPs as missing.
+//
+// Track S: after soft-delete, optionally enqueue an auto-research replacement.
+// The auto-research path is opt-in via `auto_research=true` (default), can be
+// disabled with `?auto_research=false` query param or `{ auto_research: false }`
+// in the JSON body.
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
@@ -133,9 +139,77 @@ export async function DELETE(
     if (existing.deleted_at) {
       return NextResponse.json({ success: true, already_deleted: true });
     }
+
+    // Resolve `auto_research` from query param (preferred) or JSON body.
+    const url = new URL(request.url);
+    const qpAutoResearch = url.searchParams.get('auto_research');
+    let autoResearch = qpAutoResearch === null ? true : qpAutoResearch !== 'false';
+    let useFixtures = url.searchParams.get('use_fixtures') === 'true';
+    try {
+      const body = await request.json();
+      if (typeof body?.auto_research === 'boolean') autoResearch = body.auto_research;
+      if (typeof body?.use_fixtures === 'boolean') useFixtures = body.use_fixtures;
+    } catch {
+      // body may be empty — that's fine, defaults apply
+    }
+
+    const impactedTasks = countImpactedTasks(existing.id);
+
     const now = new Date().toISOString();
     run('UPDATE sops SET deleted_at = ?, updated_at = ? WHERE id = ?', [now, now, existing.id]);
-    return NextResponse.json({ success: true });
+
+    // Only fire auto-research if there are actually impacted tasks AND the
+    // operator opted in. Use fixtures during smoke testing to keep cost $0.
+    let replacementProposalId: string | null = null;
+    let escalated = false;
+    if (autoResearch && impactedTasks > 0) {
+      try {
+        // Fire-and-await: keep this synchronous so the response carries the
+        // proposal id. For long-running research, swap to setImmediate + a
+        // queue table — for now Tavily + Gemini round-trip is fast enough.
+        const prevTavily = process.env.TAVILY_FIXTURE_JSON_PATH;
+        const prevGemini = process.env.GEMINI_FIXTURE_JSON_PATH;
+        const prevTelegram = process.env.SOP_AUTO_REPLACE_TELEGRAM_DISABLED;
+        try {
+          if (useFixtures) {
+            // Fixture paths come from request body if provided; otherwise
+            // fall back to repo-default fixtures.
+            process.env.TAVILY_FIXTURE_JSON_PATH = process.env.TAVILY_FIXTURE_JSON_PATH || '';
+            process.env.GEMINI_FIXTURE_JSON_PATH = process.env.GEMINI_FIXTURE_JSON_PATH || '';
+            process.env.SOP_AUTO_REPLACE_TELEGRAM_DISABLED = '1';
+          }
+          const result = await enqueueAutoReplace(existing.id, {
+            impactedTasks,
+            notify: !useFixtures,
+          });
+          replacementProposalId = result.proposal_id;
+          escalated = result.escalated;
+        } finally {
+          if (useFixtures) {
+            process.env.TAVILY_FIXTURE_JSON_PATH = prevTavily;
+            process.env.GEMINI_FIXTURE_JSON_PATH = prevGemini;
+            process.env.SOP_AUTO_REPLACE_TELEGRAM_DISABLED = prevTelegram;
+          }
+        }
+      } catch (err) {
+        console.error('[DELETE /api/sops/[id]] auto-research failed:', err);
+        // Don't fail the delete — the soft-delete already succeeded. Just
+        // surface the error so the operator knows to manually author.
+        return NextResponse.json({
+          deleted: true,
+          impacted_tasks: impactedTasks,
+          replacement_proposal_id: null,
+          auto_research_error: (err as Error).message,
+        });
+      }
+    }
+
+    return NextResponse.json({
+      deleted: true,
+      impacted_tasks: impactedTasks,
+      replacement_proposal_id: replacementProposalId,
+      escalated,
+    });
   } catch (error) {
     console.error('[DELETE /api/sops/[id]] Failed:', error);
     return NextResponse.json({ error: 'Failed to delete SOP' }, { status: 500 });

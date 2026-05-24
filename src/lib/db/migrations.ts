@@ -780,6 +780,82 @@ const migrations: Migration[] = [
       console.log('[Migration 023] sop_feedback + sop_proposals ready');
     }
   },
+  // ============================================================
+  // Track S — Auto-research + auto-replace deleted SOPs
+  // ============================================================
+  // NOTE: migration 024 is reserved by PR #11 (da_challenges shape
+  // reconciliation). Track S takes 025.
+  {
+    id: '025',
+    name: 'sop_proposals_auto_replace_fields',
+    up: (db) => {
+      console.log('[Migration 025] Adding auto-replace fields to sop_proposals...');
+
+      const info = db.prepare("PRAGMA table_info(sop_proposals)").all() as { name: string }[];
+      const cols = new Set(info.map((c) => c.name));
+
+      if (!cols.has('replaces_sop_id')) {
+        db.exec(`ALTER TABLE sop_proposals ADD COLUMN replaces_sop_id TEXT REFERENCES sops(id)`);
+      }
+      if (!cols.has('confidence')) {
+        db.exec(`ALTER TABLE sop_proposals ADD COLUMN confidence REAL`);
+      }
+      if (!cols.has('auto_research_attempts')) {
+        db.exec(`ALTER TABLE sop_proposals ADD COLUMN auto_research_attempts INTEGER DEFAULT 0`);
+      }
+      if (!cols.has('research_sources')) {
+        db.exec(`ALTER TABLE sop_proposals ADD COLUMN research_sources TEXT`);
+      }
+
+      // Expand the status CHECK to include the auto-research statuses.
+      // SQLite cannot ALTER ... DROP CONSTRAINT — rebuild the table when the
+      // legacy CHECK is still in place.
+      const tableSql = (
+        db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sop_proposals'").get() as { sql: string } | undefined
+      )?.sql || '';
+      const hasLegacyCheck = tableSql.includes("CHECK (status IN ('pending', 'approved', 'rejected'))");
+      if (hasLegacyCheck) {
+        db.exec(`
+          CREATE TABLE sop_proposals_new (
+            id TEXT PRIMARY KEY,
+            proposed_name TEXT NOT NULL,
+            proposed_department TEXT,
+            draft_steps TEXT NOT NULL,
+            based_on_task_ids TEXT NOT NULL,
+            evidence_summary TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'auto-generated-pending-review', 'escalated')),
+            created_at TEXT DEFAULT (datetime('now')),
+            reviewed_at TEXT,
+            reviewed_by TEXT,
+            approved_sop_id TEXT REFERENCES sops(id),
+            replaces_sop_id TEXT REFERENCES sops(id),
+            confidence REAL,
+            auto_research_attempts INTEGER DEFAULT 0,
+            research_sources TEXT
+          );
+        `);
+        db.exec(`
+          INSERT INTO sop_proposals_new
+            (id, proposed_name, proposed_department, draft_steps, based_on_task_ids,
+             evidence_summary, status, created_at, reviewed_at, reviewed_by, approved_sop_id,
+             replaces_sop_id, confidence, auto_research_attempts, research_sources)
+          SELECT id, proposed_name, proposed_department, draft_steps, based_on_task_ids,
+                 evidence_summary, status, created_at, reviewed_at, reviewed_by, approved_sop_id,
+                 replaces_sop_id, confidence,
+                 COALESCE(auto_research_attempts, 0), research_sources
+          FROM sop_proposals;
+        `);
+        db.exec(`DROP TABLE sop_proposals;`);
+        db.exec(`ALTER TABLE sop_proposals_new RENAME TO sop_proposals;`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_status ON sop_proposals(status)`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_created ON sop_proposals(created_at DESC)`);
+      }
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_replaces ON sop_proposals(replaces_sop_id)`);
+
+      console.log('[Migration 025] sop_proposals auto-replace fields ready');
+    }
+  },
 ];
 
 /**
