@@ -78,6 +78,9 @@ export interface Task {
   persona_score?: number | null;
   persona_selected_at?: string | null;
   persona_version?: number | null;
+  // SOP / Triad Rule fields (migration 022)
+  sop_id?: string | null;
+  sop_step_progress?: string | null;
   // Joined fields
   assigned_agent?: Agent;
   created_by_agent?: Agent;
@@ -327,10 +330,13 @@ export interface CreateTaskRequest {
   block_reason?: string;
   sprint?: string;
   department?: string;
+  workspace_id?: string;
+  sop_id?: string | null;
 }
 
 export interface UpdateTaskRequest extends Partial<CreateTaskRequest> {
   status?: TaskStatus;
+  sop_step_progress?: string | null;
 }
 
 export interface SendMessageRequest {

@@ -657,6 +657,46 @@ const migrations: Migration[] = [
       console.log('[Migration 021] Hybrid task secondary persona fields ready');
     }
   },
+  {
+    id: '022',
+    name: 'add_sops_and_task_sop_fields',
+    up: (db) => {
+      console.log('[Migration 022] Adding sops table + tasks.sop_id / sop_step_progress...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sops (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL UNIQUE,
+          description TEXT,
+          version INTEGER NOT NULL DEFAULT 1,
+          department TEXT,
+          task_keywords TEXT,
+          steps TEXT NOT NULL,
+          success_criteria TEXT,
+          persona_hints TEXT,
+          deleted_at TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_department ON sops(department)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_slug ON sops(slug)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_deleted ON sops(deleted_at)`);
+
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      const taskCols = new Set(tasksInfo.map((c) => c.name));
+      if (!taskCols.has('sop_id')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN sop_id TEXT REFERENCES sops(id)`);
+      }
+      if (!taskCols.has('sop_step_progress')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN sop_step_progress TEXT`);
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_sop ON tasks(sop_id)`);
+
+      console.log('[Migration 022] sops table + task SOP fields ready');
+    }
+  },
 ];
 
 /**

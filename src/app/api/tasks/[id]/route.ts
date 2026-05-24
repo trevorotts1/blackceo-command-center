@@ -5,6 +5,7 @@ import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
 import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/types';
+import { checkTriad } from '@/lib/sops';
 
 // GET /api/tasks/[id] - Get a single task
 export async function GET(
@@ -96,12 +97,42 @@ export async function PATCH(
       updates.push('due_date = ?');
       values.push(validatedData.due_date);
     }
+    if (validatedData.sop_id !== undefined) {
+      updates.push('sop_id = ?');
+      values.push(validatedData.sop_id);
+    }
+    if (validatedData.sop_step_progress !== undefined) {
+      updates.push('sop_step_progress = ?');
+      values.push(validatedData.sop_step_progress);
+    }
 
     // Track if we need to dispatch task
     let shouldDispatch = false;
 
     // Handle status change
     if (validatedData.status !== undefined && validatedData.status !== existing.status) {
+      // Triad Rule gate: leaving backlog requires description + valid SOP + valid persona.
+      // Evaluated against the POST-merge state (incoming sop_id beats existing).
+      if (existing.status === 'backlog' && validatedData.status !== 'backlog') {
+        const merged = {
+          description: validatedData.description !== undefined ? validatedData.description : existing.description,
+          sop_id: validatedData.sop_id !== undefined ? validatedData.sop_id : (existing as Task).sop_id,
+          persona_id: (existing as Task).persona_id,
+        };
+        const { missing } = checkTriad(merged);
+        if (missing.length > 0) {
+          return NextResponse.json(
+            {
+              error: 'Triad incomplete',
+              missing,
+              task_id: id,
+              message: `Cannot leave backlog. Missing: ${missing.join(', ')}. The Triad Rule requires a description, a SOP, and a persona before a task can start.`,
+            },
+            { status: 400 }
+          );
+        }
+      }
+
       updates.push('status = ?');
       values.push(validatedData.status);
 
