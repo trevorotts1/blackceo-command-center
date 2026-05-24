@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 
+// Runtime route — opt out of static prerender (uses request data / DB).
+export const dynamic = 'force-dynamic';
+
 interface DAChallenge {
   id: string;
   department_id: string;

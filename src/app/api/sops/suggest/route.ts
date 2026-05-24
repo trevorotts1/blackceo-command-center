@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { suggestSOPsForTask } from '@/lib/sops';
 
+// Runtime route — opt out of static prerender (uses request data / DB).
+export const dynamic = 'force-dynamic';
+
 /**
  * GET /api/sops/suggest?department=X&task_title=Y&task_description=Z
  *

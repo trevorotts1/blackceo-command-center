@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 
+// Route reads runtime query params + runs SQLite queries at request time.
+// Opt out of static prerender to avoid build-time DB execution.
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   const db = getDb();
   const { searchParams } = new URL(request.url);

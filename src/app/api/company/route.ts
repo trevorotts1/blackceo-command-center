@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 
+// Runtime route — opt out of static prerender (uses request data / DB).
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     const db = getDb();

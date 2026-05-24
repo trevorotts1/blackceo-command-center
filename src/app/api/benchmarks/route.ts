@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryAll } from '@/lib/db';
 
+// Runtime route — opt out of static prerender (uses request data / DB).
+export const dynamic = 'force-dynamic';
+
 // Industry benchmark constants
 const BENCHMARKS: Record<string, { kpi_name: string; benchmark: number; unit: string }[]> = {
   marketing: [
