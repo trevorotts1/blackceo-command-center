@@ -31,7 +31,7 @@ export default function OnboardingBuildingPage() {
   const [progress, setProgress] = useState<BuildProgress | null>(null);
 
   useEffect(() => {
-    let interval: any;
+    const interval: ReturnType<typeof setInterval> = setInterval(poll, 4000);
     async function poll() {
       try {
         const res = await fetch('/api/onboarding/build-status');
@@ -47,7 +47,6 @@ export default function OnboardingBuildingPage() {
       }
     }
     poll();
-    interval = setInterval(poll, 4000);
     return () => clearInterval(interval);
   }, []);
 
