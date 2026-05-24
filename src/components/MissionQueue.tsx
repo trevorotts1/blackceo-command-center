@@ -7,6 +7,7 @@ import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import type { Task, TaskStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
+import { MarketingPublishButton } from './MarketingPublishButton';
 import { formatDistanceToNow } from 'date-fns';
 
 interface MissionQueueProps {
@@ -390,6 +391,9 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
             {(task.assigned_agent as { name: string }).name}
           </span>
         )}
+
+        {/* Skill 35 — Marketing-dept Publish button (no-op for non-marketing) */}
+        <MarketingPublishButton task={task} />
       </div>
 
       {/* Sprint and Due Date */}

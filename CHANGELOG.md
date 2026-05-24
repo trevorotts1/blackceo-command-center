@@ -1,24 +1,26 @@
-## [v3.6.0] — 2026-05-24 — SOP Layer 3 (learning loop)
+## [v3.6.0] — 2026-05-24 — Skill 35 Marketing "Publish" button + /api/skill-35/publish (Track M, companion to onboarding v10.14.33)
 
-Builds on top of the Track J SOP Hybrid System (PR #8) to make the SOP library self-improving instead of static. Three loops added:
+Closes the third trigger path that `35-social-media-planner/INSTRUCTIONS.md` has documented since v10.12.0 but never existed in code:
 
-1. **Thumbs feedback** — `sop_feedback` table + `POST /api/sops/feedback` + `SOPFeedbackModal` component. Surfaces a one-line prompt when a task moves to `done`. Thumbs-up is fire-and-forget; thumbs-down opens a notes box; skip / dismiss is one click. Modal silently no-ops if feedback for the (sop, task) pair already exists.
-2. **Pattern detection** — `sop_proposals` table + `detectPatternsAndPropose()` (clusters completed tasks by department + dominant keyword, flags clusters of ≥5 tasks with ≥3 un-SOP'd members, drafts steps from the exemplar's bullet list). New `/sops/proposals` review queue page; approve creates a real v1 SOP row, reject stamps with optional reason and never re-surfaces.
-3. **Performance scoring** — `computePerformance()` aggregates last 30 days of feedback per SOP; `GET /api/sops/:id/performance` returns score + pos/neg sample notes + ranking signal (`boost` ≥0.7, `flag` ≤-0.3) + suggested revisions.
+> *"From the dashboard: The Marketing department in the dashboard has a 'Publish' button on each campaign. Clicking it queues a cycle for this skill."*
 
-Trigger options: external cron pings `/api/cron/sop-learning` (recommended, supports `CRON_SECRET`), or `scripts/sop-learning-job.ts` for direct invocation. A smoke-test (`scripts/smoke-test-sop-learning.ts`) seeds 13 tasks across two recurring patterns and verifies the job proposes both.
+### Added
 
-### Migration
-- 023 — `sop_feedback` (id, sop_id, task_id, rating, notes, agent_id, created_at) + `sop_proposals` (proposed_name, proposed_department, draft_steps JSON, based_on_task_ids JSON, evidence_summary, status, reviewed_*, approved_sop_id).
+- **`src/components/MarketingPublishButton.tsx`** (NEW) — pink Publish pill rendered on Marketing-department task cards. Hidden (returns null) for non-Marketing tasks, so it can safely live on every TaskCard. States: idle → queuing → queued (or error → retry).
+- **`src/app/api/skill-35/publish/route.ts`** (NEW) — `POST` queues a `{ task_id, topic, platforms[], schedule?, requested_by? }` intent, validates+normalizes platforms (twitter → x, dedupe, supported-list check), records it in the new `publish_queue` table, and emits a `publish_queued` SSE event. `GET` lists with `task_id`/`status`/`limit` filters.
+- **`src/lib/db/migrations.ts`** — migration `022 add_skill_35_publish_queue` creates the `publish_queue` table (+ 3 indexes on status/task/created_at).
+- **`src/lib/types.ts`** — new `PublishQueueItem` interface; `SSEEventType` extended with `'publish_queued'`; `SSEEvent.payload` union accepts `PublishQueueItem`.
+- **`src/components/MissionQueue.tsx`** — TaskCard renders `<MarketingPublishButton task={task} />` inside the pill row (no-op for non-marketing departments).
+
+### Companion onboarding PR
+
+This release pairs with **`openclaw-onboarding-vps` v10.14.33** (and Mac `openclaw-onboarding` v10.13.25), which ship the two server-side scripts (`run-publishing-cycle.sh`, `weekly-batch.sh`) referenced by the same `INSTRUCTIONS.md`. The Publish button queues an intent; a downstream worker / the OpenClaw master orchestrator picks up `status='queued'` rows and invokes the cycle script.
 
 ### Risk: low
-Additive only — no changes to existing tables, no changes to Track J's API surface, no changes to the task-done route. The feedback modal is opt-in (a dashboard component renders it; existing pages keep working without it). The cron endpoint is gated on `CRON_SECRET` if set.
 
-### Open dependencies
-- External nightly cron (or launchd timer) must ping `/api/cron/sop-learning` for the learning loop to fire autonomously. Manual `Re-scan now` button on `/sops/proposals` works in the meantime.
-
-### Depends on
-- Track J PR #8 (feat/hybrid-sop-system) — must merge before this branches can rebase to main.
+- New API route; no existing route touched.
+- New migration is additive (CREATE TABLE IF NOT EXISTS + indexes); cannot collide with existing data.
+- Button is gated on `task.department ∈ {marketing, marketing-dept, social-media, social}`; renders nothing otherwise.
 
 ---
 

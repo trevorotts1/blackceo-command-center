@@ -389,7 +389,8 @@ export type SSEEventType =
   | 'recommendation_created'
   | 'recommendation_updated'
   | 'execution_queue_updated'
-  | 'recommendation_outcome_recorded';
+  | 'recommendation_outcome_recorded'
+  | 'publish_queued';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -407,7 +408,24 @@ export interface SSEEvent {
   } | {
     task_id: string;
     activity: TaskActivity;
-  };
+  } | PublishQueueItem;
+}
+
+// Skill 35 publish-queue row (mirrors the publish_queue table from migration 022)
+export interface PublishQueueItem {
+  id: string;
+  task_id: string | null;
+  topic: string;
+  platforms: string[];                 // decoded from the stored JSON string
+  schedule: 'auto' | 'now' | string;   // ISO 8601 also allowed
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+  run_id: string | null;
+  requested_by: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 export interface Recommendation {
