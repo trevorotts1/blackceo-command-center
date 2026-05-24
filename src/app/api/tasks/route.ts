@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { CreateTaskSchema } from '@/lib/validation';
+import { selectPersonaForTask } from '@/lib/persona-selector';
 import type { Task, CreateTaskRequest, Agent } from '@/lib/types';
 import { getBestSOPForTask } from '@/lib/sops';
 
@@ -162,6 +163,70 @@ export async function POST(request: NextRequest) {
       [uuidv4(), 'task_created', body.created_by_agent_id || null, id, eventMessage, now]
     );
 
+    // Persona selection (Hop 10): spawn persona-selector-v2.py and pin the
+    // result onto the new task before we re-fetch. Failures are non-blocking
+    // — task creation must still succeed if the selector can't run.
+    //
+    // Skips known sentinel/fallback IDs ("schemaVersion" et al.) that come
+    // out of an unpatched selector on a stale install — see the Hop 10
+    // selector bug-hunt notes.
+    try {
+      const taskDescription =
+        `${validatedData.title}${validatedData.description ? `. ${validatedData.description}` : ''}`.trim();
+      const departmentForSelector = workspaceId || 'general';
+
+      const persona = await selectPersonaForTask(id, taskDescription, departmentForSelector);
+
+      const SENTINEL_IDS = new Set([
+        'schemaVersion',
+        'created',
+        'domainTags',
+        'perspectiveTags',
+        'personas',
+      ]);
+
+      if (
+        persona &&
+        persona.persona_id &&
+        !SENTINEL_IDS.has(persona.persona_id) &&
+        !persona.no_persona_required
+      ) {
+        const personaSelectedAt = new Date().toISOString();
+        run(
+          `UPDATE tasks
+              SET persona_id = ?,
+                  persona_name = ?,
+                  persona_mode = ?,
+                  persona_score = ?,
+                  persona_version = ?,
+                  persona_selected_at = ?
+            WHERE id = ?`,
+          [
+            persona.persona_id,
+            persona.persona_name,
+            persona.interaction_mode,
+            persona.score ?? null,
+            persona.persona_version ?? 1,
+            personaSelectedAt,
+            id,
+          ]
+        );
+        console.log(
+          `[POST /api/tasks] Persona assigned: task=${id} persona=${persona.persona_id} ` +
+            `score=${persona.score?.toFixed(3) ?? '?'} mode=${persona.interaction_mode}`
+        );
+      } else if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
+        console.warn(
+          `[POST /api/tasks] Persona selector returned sentinel id "${persona.persona_id}" for task ${id} — ignoring (selector needs patching).`
+        );
+      } else {
+        console.warn(`[POST /api/tasks] No persona assigned for task ${id} (selector returned ${persona ? 'unusable result' : 'null'}).`);
+      }
+    } catch (personaError) {
+      // Never fail task creation on persona-selector errors.
+      console.error(`[POST /api/tasks] Persona selection threw for task ${id}:`, personaError);
+    }
+
     // Fetch created task with all joined fields
     const task = queryOne<Task>(
       `SELECT t.*,
@@ -175,7 +240,7 @@ export async function POST(request: NextRequest) {
        WHERE t.id = ?`,
       [id]
     );
-    
+
     // Broadcast task creation via SSE
     if (task) {
       broadcast({
