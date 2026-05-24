@@ -242,17 +242,9 @@ CREATE TABLE IF NOT EXISTS recommendation_outcomes (
 CREATE INDEX IF NOT EXISTS idx_outcomes_rec ON recommendation_outcomes(recommendation_id);
 CREATE INDEX IF NOT EXISTS idx_outcomes_measured ON recommendation_outcomes(measured_at DESC);
 
--- DA Challenges table (Devil's Advocate Feed)
-CREATE TABLE IF NOT EXISTS da_challenges (
-  id TEXT PRIMARY KEY,
-  department_id TEXT NOT NULL,
-  challenge_text TEXT NOT NULL,
-  response_text TEXT,
-  status TEXT DEFAULT 'open' CHECK (status IN ('open', 'responded', 'escalated')),
-  created_at TEXT DEFAULT (datetime('now')),
-  response_deadline TEXT,
-  resolved_at TEXT
-);
+-- DA Challenges table (Devil's Advocate Feed) is created in migration 020.
+-- The legacy shape that used to live here drifted from migration 020 and
+-- broke fresh installs (see migration 024 for the reconciliation path).
 
 -- Execution Queue table (Out-of-Hours Task Queue)
 CREATE TABLE IF NOT EXISTS execution_queue (
@@ -274,10 +266,6 @@ CREATE TABLE IF NOT EXISTS execution_queue (
 -- Index for execution queue
 CREATE INDEX IF NOT EXISTS idx_execution_queue_status ON execution_queue(status);
 CREATE INDEX IF NOT EXISTS idx_execution_queue_queued ON execution_queue(queued_at DESC);
-
--- Index for DA challenges
-CREATE INDEX IF NOT EXISTS idx_da_challenges_status ON da_challenges(status);
-CREATE INDEX IF NOT EXISTS idx_da_challenges_department ON da_challenges(department_id);
 
 -- Department Memory table
 CREATE TABLE IF NOT EXISTS dept_memory (
