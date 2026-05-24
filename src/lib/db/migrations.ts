@@ -674,110 +674,35 @@ const migrations: Migration[] = [
     }
   },
   {
-    id: '024',
-    name: 'reconcile_da_challenges_shape',
+    id: '026',
+    name: 'add_skill_35_publish_queue',
     up: (db) => {
-      // Background: schema.ts historically created da_challenges with a
-      // legacy shape (department_id / challenge_text / response_text and a
-      // status enum of open|responded|escalated). Migration 020 introduced
-      // the canonical Devil's-Advocate shape (task_id / campaign_id /
-      // trigger_type / challenge / severity, status enum of
-      // open|accepted|dismissed|overridden). On fresh installs the legacy
-      // table is created first, then `CREATE TABLE IF NOT EXISTS` in 020 is
-      // a no-op, and the follow-up `CREATE INDEX ... ON da_challenges(task_id)`
-      // 500s with "no such column: task_id".
-      //
-      // This migration is idempotent: it only acts if the legacy shape is
-      // present. It preserves any rows by renaming the legacy table to
-      // da_challenges_legacy, then re-creates da_challenges with the
-      // canonical shape and re-applies the migration-020 indexes.
-      const cols = db.prepare("PRAGMA table_info(da_challenges)").all() as { name: string }[];
-      const colNames = cols.map((c) => c.name);
-      const hasLegacy = colNames.includes('department_id') && !colNames.includes('task_id');
-
-      if (!hasLegacy) {
-        console.log('[Migration 024] da_challenges already canonical — skipping');
-        return;
-      }
-
-      // Drop indexes that reference legacy columns before renaming.
-      db.prepare(`DROP INDEX IF EXISTS idx_da_challenges_status`).run();
-      db.prepare(`DROP INDEX IF EXISTS idx_da_challenges_department`).run();
-
-      // Preserve any existing legacy rows under a side table for forensics.
-      db.prepare(`DROP TABLE IF EXISTS da_challenges_legacy`).run();
-      db.prepare(`ALTER TABLE da_challenges RENAME TO da_challenges_legacy`).run();
-
-      // Recreate with the canonical migration-020 shape.
-      db.prepare(`
-        CREATE TABLE da_challenges (
-          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-          task_id TEXT,
-          campaign_id TEXT,
-          trigger_type TEXT NOT NULL,
-          challenge TEXT NOT NULL,
-          specific_concern TEXT,
-          assumptions TEXT,
-          severity TEXT CHECK(severity IN ('low', 'medium', 'high')),
-          confidence REAL,
-          status TEXT DEFAULT 'open' CHECK(status IN ('open', 'accepted', 'dismissed', 'overridden')),
-          dismissal_reason TEXT,
-          outcome TEXT,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          resolved_at TEXT
-        )
-      `).run();
-      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_task ON da_challenges(task_id)`).run();
-      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_status ON da_challenges(status)`).run();
-      db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_severity ON da_challenges(severity)`).run();
-
-      const legacyCount = (db.prepare(`SELECT COUNT(*) AS n FROM da_challenges_legacy`).get() as { n: number }).n;
-      console.log(`[Migration 024] da_challenges reconciled (legacy rows preserved: ${legacyCount})`);
-    }
-  },
-  // ============================================================
-  // SOP Layer 3 — learning loop (feedback + proposals)
-  // ============================================================
-  {
-    id: '023',
-    name: 'add_sop_feedback_and_proposals',
-    up: (db) => {
-      console.log('[Migration 023] Adding sop_feedback + sop_proposals tables...');
-
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS sop_feedback (
-          id TEXT PRIMARY KEY,
-          sop_id TEXT NOT NULL REFERENCES sops(id),
-          task_id TEXT NOT NULL REFERENCES tasks(id),
-          rating INTEGER NOT NULL CHECK (rating IN (-1, 0, 1)),
-          notes TEXT,
-          agent_id TEXT,
-          created_at TEXT DEFAULT (datetime('now'))
-        );
-      `);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_sop ON sop_feedback(sop_id)`);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_task ON sop_feedback(task_id)`);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_created ON sop_feedback(created_at DESC)`);
-
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS sop_proposals (
-          id TEXT PRIMARY KEY,
-          proposed_name TEXT NOT NULL,
-          proposed_department TEXT,
-          draft_steps TEXT NOT NULL,
-          based_on_task_ids TEXT NOT NULL,
-          evidence_summary TEXT,
-          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
-          created_at TEXT DEFAULT (datetime('now')),
-          reviewed_at TEXT,
-          reviewed_by TEXT,
-          approved_sop_id TEXT REFERENCES sops(id)
-        );
-      `);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_status ON sop_proposals(status)`);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_created ON sop_proposals(created_at DESC)`);
-
-      console.log('[Migration 023] sop_feedback + sop_proposals ready');
+      // Skill 35 publish queue — backs the Marketing "Publish" button.
+      // Each row is one publish intent queued from the dashboard; a downstream
+      // worker / OpenClaw orchestrator picks it up and runs the 5-phase cycle
+      // via 35-social-media-planner/scripts/run-publishing-cycle.sh.
+      const sqlCreate = [
+        'CREATE TABLE IF NOT EXISTS publish_queue (',
+        '  id TEXT PRIMARY KEY,',
+        '  task_id TEXT,',
+        '  topic TEXT NOT NULL,',
+        '  platforms TEXT NOT NULL,',
+        '  schedule TEXT DEFAULT \'auto\',',
+        '  status TEXT NOT NULL DEFAULT \'queued\',',
+        '  run_id TEXT,',
+        '  requested_by TEXT,',
+        '  error TEXT,',
+        '  created_at TEXT DEFAULT (datetime(\'now\')),',
+        '  updated_at TEXT DEFAULT (datetime(\'now\')),',
+        '  started_at TEXT,',
+        '  completed_at TEXT',
+        ')',
+      ].join('\n');
+      db.prepare(sqlCreate).run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_publish_queue_status ON publish_queue(status)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_publish_queue_task ON publish_queue(task_id)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_publish_queue_created ON publish_queue(created_at DESC)').run();
+      console.log('[Migration 026] publish_queue table ready (Skill 35)');
     }
   },
   // ============================================================
