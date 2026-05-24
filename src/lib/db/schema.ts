@@ -323,4 +323,24 @@ CREATE TABLE IF NOT EXISTS agent_settings (
 CREATE INDEX IF NOT EXISTS idx_agent_settings_dept ON agent_settings(department_id);
 CREATE INDEX IF NOT EXISTS idx_agent_settings_role ON agent_settings(role_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_settings_unique ON agent_settings(department_id, role_id, setting_type);
+
+-- SOPs table (Hybrid SOP system — Triad Rule: Task + SOP + Persona)
+CREATE TABLE IF NOT EXISTS sops (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  description TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  department TEXT,
+  task_keywords TEXT,
+  steps TEXT NOT NULL,
+  success_criteria TEXT,
+  persona_hints TEXT,
+  deleted_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sops_department ON sops(department);
+CREATE INDEX IF NOT EXISTS idx_sops_slug ON sops(slug);
+CREATE INDEX IF NOT EXISTS idx_sops_deleted ON sops(deleted_at);
 `;

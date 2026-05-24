@@ -4,6 +4,7 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { CreateTaskSchema } from '@/lib/validation';
 import type { Task, CreateTaskRequest, Agent } from '@/lib/types';
+import { getBestSOPForTask } from '@/lib/sops';
 
 // GET /api/tasks - List all tasks with optional filters
 export async function GET(request: NextRequest) {
@@ -108,9 +109,26 @@ export async function POST(request: NextRequest) {
     const workspaceId = validatedData.workspace_id || 'default';
     const status = validatedData.status || 'backlog';
 
+    // Auto-suggest SOP if none provided. Scored by department + keyword overlap;
+    // anything below 0.5 leaves sop_id NULL so the operator picks manually.
+    let sopId: string | null = validatedData.sop_id ?? null;
+    if (!sopId) {
+      try {
+        const best = getBestSOPForTask({
+          title: validatedData.title,
+          description: validatedData.description,
+          department: validatedData.department,
+          workspace_id: workspaceId,
+        });
+        if (best) sopId = best.id;
+      } catch (err) {
+        console.warn('[POST /api/tasks] SOP auto-suggest failed (non-fatal):', err);
+      }
+    }
+
     run(
-      `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, due_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         validatedData.title,
@@ -121,7 +139,9 @@ export async function POST(request: NextRequest) {
         validatedData.created_by_agent_id || null,
         workspaceId,
         validatedData.business_id || 'default',
+        validatedData.department || null,
         validatedData.due_date || null,
+        sopId,
         now,
         now,
       ]

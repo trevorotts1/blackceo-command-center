@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryAll } from '@/lib/db';
 
+// Runtime route — opt out of static prerender (uses request data / DB).
+export const dynamic = 'force-dynamic';
+
 // GET /api/kpi-history?workspace_id=X&metric=Y&days=30
 export async function GET(request: NextRequest) {
   try {
