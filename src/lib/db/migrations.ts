@@ -697,6 +697,51 @@ const migrations: Migration[] = [
       console.log('[Migration 022] sops table + task SOP fields ready');
     }
   },
+  // ============================================================
+  // SOP Layer 3 — learning loop (feedback + proposals)
+  // ============================================================
+  {
+    id: '023',
+    name: 'add_sop_feedback_and_proposals',
+    up: (db) => {
+      console.log('[Migration 023] Adding sop_feedback + sop_proposals tables...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sop_feedback (
+          id TEXT PRIMARY KEY,
+          sop_id TEXT NOT NULL REFERENCES sops(id),
+          task_id TEXT NOT NULL REFERENCES tasks(id),
+          rating INTEGER NOT NULL CHECK (rating IN (-1, 0, 1)),
+          notes TEXT,
+          agent_id TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_sop ON sop_feedback(sop_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_task ON sop_feedback(task_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_created ON sop_feedback(created_at DESC)`);
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sop_proposals (
+          id TEXT PRIMARY KEY,
+          proposed_name TEXT NOT NULL,
+          proposed_department TEXT,
+          draft_steps TEXT NOT NULL,
+          based_on_task_ids TEXT NOT NULL,
+          evidence_summary TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+          created_at TEXT DEFAULT (datetime('now')),
+          reviewed_at TEXT,
+          reviewed_by TEXT,
+          approved_sop_id TEXT REFERENCES sops(id)
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_status ON sop_proposals(status)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_proposals_created ON sop_proposals(created_at DESC)`);
+
+      console.log('[Migration 023] sop_feedback + sop_proposals ready');
+    }
+  },
 ];
 
 /**
