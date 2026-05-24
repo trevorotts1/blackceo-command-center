@@ -1,0 +1,50 @@
+{
+  "name": "Marketing — Cold Outreach Email v2 (Trigger-Anchored)",
+  "description": "Replacement for the deleted v1. Anchors every cold email on a recent trigger event and runs a 5-touch 14-day cadence.",
+  "department": "marketing",
+  "task_keywords": "cold,email,outreach,outbound,trigger,cadence",
+  "success_criteria": "Send 25 trigger-anchored cold emails per day; reply rate >= 8% after 14-day cadence completes.",
+  "steps": [
+    {
+      "name": "Detect a trigger event for each prospect",
+      "checklist": [
+        "Pull funding/hire/launch signals from Apollo + Crunchbase",
+        "Verify the trigger is from the last 30 days",
+        "Capture the URL of the source so the email can cite it"
+      ],
+      "success_criteria": "Every prospect on today's list has a dated trigger event captured."
+    },
+    {
+      "name": "Draft a 4-line personalized opener",
+      "checklist": [
+        "Open with a one-sentence relevance proof tied to the trigger",
+        "State the value framing in plain English (no jargon)",
+        "Include exactly one soft CTA (no calendar links)",
+        "Keep total length under 90 words"
+      ],
+      "success_criteria": "Each draft passes the 90-word, single-CTA, trigger-mention checklist."
+    },
+    {
+      "name": "Schedule the 5-touch cadence",
+      "checklist": [
+        "Day 1: initial cold email",
+        "Day 3: LinkedIn touch with no link",
+        "Day 5: short follow-up referencing the initial",
+        "Day 9: value-add resource (case study or 1-pager)",
+        "Day 14: break-up email"
+      ],
+      "success_criteria": "Cadence is scheduled and live in the sequencing tool for every prospect."
+    },
+    {
+      "name": "Review replies daily and route to next action",
+      "checklist": [
+        "Categorize each reply: positive, objection, not-now, unsubscribe",
+        "Route positives to the closer immediately",
+        "Park not-now in the 90-day nurture",
+        "Update CRM with reply category + sentiment"
+      ],
+      "success_criteria": "All replies categorized within 24 hours; closer notified same day for positives."
+    }
+  ],
+  "confidence": 0.82
+}

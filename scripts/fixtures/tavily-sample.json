@@ -1,0 +1,24 @@
+{
+  "query": "marketing cold email best practices 2026",
+  "answer": "Modern B2B cold-email best practices in 2026 emphasize hyper-personalized openers, single-question CTAs, and follow-up sequences of 4-6 touches spaced 3-5 days apart.",
+  "results": [
+    {
+      "title": "The 2026 State of Cold Email — Lavender Annual Report",
+      "url": "https://example.com/lavender-cold-email-2026",
+      "content": "Cold-email reply rates have climbed back above 12% for sequences that combine personalized first-lines, a single soft CTA, and a follow-up cadence of 4-6 touches over 14 days. Open-loop subject lines outperform value-prop subjects by 2.3x. Senders are now expected to include a one-sentence relevance proof tied to a recent trigger event (funding, hire, launch).",
+      "score": 0.92
+    },
+    {
+      "title": "Cold Email Frameworks That Still Work in 2026 — Belkins",
+      "url": "https://example.com/belkins-frameworks-2026",
+      "content": "The AIDA, PAS, and Before-After-Bridge frameworks remain effective when paired with a measurable trigger event. A 6-step framework: 1) trigger detection, 2) relevance proof, 3) pattern interrupt, 4) value framing, 5) single CTA, 6) follow-up cadence. Plain-text outperforms HTML by 18% in deliverability.",
+      "score": 0.88
+    },
+    {
+      "title": "Outbound Sequence Cadence Benchmarks — Apollo 2026",
+      "url": "https://example.com/apollo-cadence-2026",
+      "content": "Optimal cadence: Day 1 cold email, Day 3 LinkedIn touch, Day 5 follow-up email referencing prior, Day 9 value-add (case study), Day 14 break-up email. Stop after the break-up. Replies past 14 days drop below 1%.",
+      "score": 0.83
+    }
+  ]
+}
