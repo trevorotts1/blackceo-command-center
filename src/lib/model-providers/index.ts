@@ -24,7 +24,10 @@ import { kieProvider } from './kie';
 import { falProvider } from './fal';
 import { replicateProvider } from './replicate';
 import { elevenlabsProvider } from './elevenlabs';
+import { fishAudioProvider } from './fish-audio';
+import { xiaomiProvider } from './xiaomi';
 import ollamaCloudProvider from './ollama-cloud';
+import ollamaLocalProvider from './ollama-local';
 
 /**
  * Every provider connector available in the registry. Iteration order is the
@@ -34,6 +37,7 @@ import ollamaCloudProvider from './ollama-cloud';
  */
 export const ALL_PROVIDERS: ModelProvider[] = [
   ollamaCloudProvider,
+  ollamaLocalProvider,
   openaiProvider,
   anthropicProvider,
   googleProvider,
@@ -46,6 +50,8 @@ export const ALL_PROVIDERS: ModelProvider[] = [
   falProvider,
   replicateProvider,
   elevenlabsProvider,
+  fishAudioProvider,
+  xiaomiProvider,
 ];
 
 /**
@@ -88,7 +94,9 @@ export {
   falProvider,
   replicateProvider,
   elevenlabsProvider,
+  fishAudioProvider,
   ollamaCloudProvider,
+  ollamaLocalProvider,
 };
 
 export type { ModelProvider } from './types';

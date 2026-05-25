@@ -1,7 +1,7 @@
 /**
  * /api/operator/tts
  *
- * Track B8 (SCOPE-ADDITION Section 6.4, 6.5).
+ * Track B8 (SCOPE-ADDITION Section 6.4, 6.5) + v4.0.1 P0-4 / P0-5.
  *
  * GET  → reports which TTS providers are configured on this deployment.
  * POST → proxies a synthesis request to the chosen provider and streams the
@@ -10,15 +10,17 @@
  * Provider selection order when no explicit `?provider=` is supplied:
  *   1. DEFAULT_CALL_TTS_PROVIDER env var (if set)
  *   2. openai     (OPENAI_API_KEY)
- *   3. elevenlabs (ELEVENLABS_API_KEY)
- *
- * Fish Audio and xAI voice are listed in the full priority order in
- * SCOPE-ADDITION Section 6.3 (positions 2 and 3). They are not wired here in
- * this commit; Track C2 may add them by appending to the switch statement.
+ *   3. fish_audio (FISH_AUDIO_API_KEY)
+ *   4. xai        (X_AI_API_KEY)
+ *   5. elevenlabs (ELEVENLABS_API_KEY)
  *
  * On provider error the route falls back to the next configured provider in
  * the priority list and surfaces `x-tts-provider` so the client can display
  * a "fell back to X" toast.
+ *
+ * xAI voice availability is plan-gated. On 403/404 we mark the provider as
+ * unavailable for the remainder of the process lifetime so subsequent
+ * requests skip it without an extra round-trip.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -36,7 +38,13 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
   browser: 'Browser (built-in)',
 };
 
+// Session-level disable flags. Set when a provider returns a hard "plan does
+// not include this feature" response (e.g. xAI voice 403/404). Persists for
+// the lifetime of the Node process; the next deploy or restart clears it.
+const sessionDisabled: Partial<Record<ProviderId, boolean>> = {};
+
 function isProviderConfigured(id: ProviderId): boolean {
+  if (sessionDisabled[id]) return false;
   switch (id) {
     case 'openai':
       return Boolean(process.env.OPENAI_API_KEY);
@@ -137,9 +145,22 @@ interface SynthResult {
 }
 
 async function synthesize(provider: ProviderId, text: string, voice: string | undefined): Promise<SynthResult> {
-  if (provider === 'openai') return synthesizeOpenAi(text, voice);
-  if (provider === 'elevenlabs') return synthesizeElevenLabs(text, voice);
-  throw new Error(`Provider ${provider} is not implemented in this build`);
+  switch (provider) {
+    case 'openai':
+      return synthesizeOpenAi(text, voice);
+    case 'elevenlabs':
+      return synthesizeElevenLabs(text, voice);
+    case 'fish_audio':
+      return synthesizeFishAudio(text, voice);
+    case 'xai':
+      return synthesizeXai(text, voice);
+    case 'browser':
+      throw new Error('Browser TTS is rendered client-side and cannot be synthesized on the server');
+    default: {
+      const exhaustive: never = provider;
+      throw new Error(`Provider ${exhaustive as string} is not implemented in this build`);
+    }
+  }
 }
 
 async function synthesizeOpenAi(text: string, voice: string | undefined): Promise<SynthResult> {
@@ -189,6 +210,69 @@ async function synthesizeElevenLabs(text: string, voice: string | undefined): Pr
   if (!res.ok) {
     const detail = await safeReadText(res);
     throw new Error(`ElevenLabs TTS ${res.status}: ${detail}`);
+  }
+  const buf = await res.arrayBuffer();
+  return { body: buf, contentType: res.headers.get('content-type') || 'audio/mpeg' };
+}
+
+async function synthesizeFishAudio(text: string, voice: string | undefined): Promise<SynthResult> {
+  const apiKey = process.env.FISH_AUDIO_API_KEY;
+  if (!apiKey) throw new Error('FISH_AUDIO_API_KEY is not set');
+  const referenceId = voice || process.env.FISH_AUDIO_VOICE_ID;
+  if (!referenceId) throw new Error('FISH_AUDIO_VOICE_ID is not set');
+  const res = await fetch('https://api.fish.audio/v1/tts', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      text,
+      reference_id: referenceId,
+      format: 'mp3',
+      mp3_bitrate: 128,
+      chunk_length: 200,
+      normalize: true,
+      latency: 'normal',
+    }),
+  });
+  if (!res.ok) {
+    const detail = await safeReadText(res);
+    // 401/403/429/5xx all fall through to the next provider in priority order.
+    // Surface the status code so the caller's catch block can log it.
+    throw new Error(`Fish Audio TTS ${res.status}: ${detail}`);
+  }
+  const buf = await res.arrayBuffer();
+  return { body: buf, contentType: res.headers.get('content-type') || 'audio/mpeg' };
+}
+
+async function synthesizeXai(text: string, voice: string | undefined): Promise<SynthResult> {
+  const apiKey = process.env.X_AI_API_KEY;
+  if (!apiKey) throw new Error('X_AI_API_KEY is not set');
+  const model = process.env.X_AI_VOICE_MODEL || 'grok-2-voice-1212';
+  const v = voice || process.env.X_AI_VOICE;
+  if (!v) throw new Error('X_AI_VOICE is not set');
+  const res = await fetch('https://api.x.ai/v1/audio/speech', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      input: text,
+      voice: v,
+      response_format: 'mp3',
+    }),
+  });
+  if (!res.ok) {
+    const detail = await safeReadText(res);
+    if (res.status === 403 || res.status === 404) {
+      // Plan does not include voice. Disable for the rest of the session so
+      // subsequent requests skip xAI without an extra round-trip.
+      sessionDisabled.xai = true;
+    }
+    throw new Error(`xAI TTS ${res.status}: ${detail}`);
   }
   const buf = await res.arrayBuffer();
   return { body: buf, contentType: res.headers.get('content-type') || 'audio/mpeg' };

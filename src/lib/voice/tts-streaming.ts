@@ -1,22 +1,18 @@
 /**
  * TTS provider abstraction with streaming.
  *
- * Track B8 (SCOPE-ADDITION Section 6.3, 6.4).
+ * Track B8 (SCOPE-ADDITION Section 6.3, 6.4) + v4.0.1 P0-4 / P0-5.
  *
- * Server-side providers (OpenAI, ElevenLabs) are proxied through
- * `/api/operator/tts` so the browser never sees the API key. The browser
- * fallback (`browser`) uses `window.speechSynthesis` directly.
+ * Server-side providers (OpenAI, Fish Audio, xAI, ElevenLabs) are proxied
+ * through `/api/operator/tts` so the browser never sees the API key. The
+ * browser fallback (`browser`) uses `window.speechSynthesis` directly.
  *
  * Provider priority order when no explicit selection is made:
  *   1. openai     (OPENAI_API_KEY)
- *   2. elevenlabs (ELEVENLABS_API_KEY)
- *   3. browser    (always)
- *
- * Fish Audio and xAI voice are listed in the full spec (SCOPE-ADDITION 6.3
- * priority order positions 2 and 3) but their server-side adapters are NOT
- * implemented in this commit. The router skips unknown providers gracefully.
- * Track C2 may add them as additional `case` branches in
- * `src/app/api/operator/tts/route.ts` without touching this client module.
+ *   2. fish_audio (FISH_AUDIO_API_KEY + FISH_AUDIO_VOICE_ID)
+ *   3. xai        (X_AI_API_KEY + X_AI_VOICE)
+ *   4. elevenlabs (ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)
+ *   5. browser    (always)
  *
  * Half-duplex use: caller awaits `speak()` before re-opening the mic.
  */

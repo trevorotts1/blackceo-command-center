@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import OperatorSidebar from '@/components/OperatorSidebar';
-import CommandPalette from '@/components/CommandPalette';
 
 export const metadata: Metadata = {
   title: 'Operator Console',
@@ -17,7 +16,6 @@ export default function OperatorLayout({ children }: { children: ReactNode }) {
           {children}
         </div>
       </main>
-      <CommandPalette />
     </div>
   );
 }

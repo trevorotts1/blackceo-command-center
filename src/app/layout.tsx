@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { Inter, JetBrains_Mono } from 'next/font/google';
+import CommandPalette from '@/components/CommandPalette';
 // DemoBanner removed by Track A1 (Wave 1 cleanup). Top header + breadcrumbs
 // handle navigation; AppShell sidebar import also retired.
 // import AppShell from '@/components/AppShell';
@@ -41,6 +42,7 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
       <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-screen`}>
         {children}
+        <CommandPalette />
       </body>
     </html>
   );
