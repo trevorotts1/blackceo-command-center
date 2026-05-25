@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -88,7 +88,7 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, []);
 
-  // PRD 3.8: 5-card landing layout. Card 1 + 2 titles/subtitles fixed by spec.
+  // PRD 3.8 + v4.0.1 P0-1: 6-card landing layout. Operator Console is the 5th card.
   const cards: EntryCard[] = [
     {
       title: 'View All Tasks',
@@ -125,6 +125,15 @@ export default function HomePage() {
       gradient: 'from-violet-500 via-purple-500 to-fuchsia-500',
       route: '/settings/intelligence',
       cta: 'Configure AI',
+    },
+    {
+      title: 'Operator Console',
+      description: 'Your direct workspace',
+      detail: 'Chat with operator-level AIs, generate media, take notes, track goals, journal, search your memory, run research, make voice calls, and dispatch the Web Agent.',
+      icon: <Terminal className="w-7 h-7 text-white" />,
+      gradient: 'from-cyan-500 via-sky-500 to-blue-600',
+      route: '/operator',
+      cta: 'Open Console',
     },
     {
       title: 'Company Settings',
@@ -210,7 +219,7 @@ export default function HomePage() {
 
           {/* Entry Cards */}
           <motion.div
-            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 items-stretch"
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-stretch"
             variants={containerVariants}
           >
             {cards.map((card) => (
