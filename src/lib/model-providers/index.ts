@@ -95,6 +95,7 @@ export {
   replicateProvider,
   elevenlabsProvider,
   fishAudioProvider,
+  xiaomiProvider,
   ollamaCloudProvider,
   ollamaLocalProvider,
 };
