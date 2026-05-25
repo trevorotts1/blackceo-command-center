@@ -74,3 +74,21 @@ These dependencies are referenced by Depth 1 code but are NOT yet in `package.js
 8. **`jq` presence check.** PRD compat tests pipe to `jq -e` without checking that jq is installed. On a fresh Mac Mini before brew-installed-tools land, jq may be missing and the test would die with an opaque "command not found". I added an explicit `command -v jq` guard that fails with a clear message.
 
 9. **Compat test exit codes.** PRD 12.3 uses `|| exit 1` only for the curl calls. I made every failure path emit a `FAIL:` line and `exit 1`. `set -euo pipefail` plus the explicit exits guarantees compat scripts exit 0 only on success.
+
+## Depth 1 Track C1 (model_registry library + /api/models routes)
+
+### Decisions outside the PRD's explicit spec
+
+1. **Capability filter implemented as `LIKE '%"<cap>"%'`.** PRD Section 5.1 stores `capabilities` as a JSON array of strings in a TEXT column. To filter by capability without depending on the json1 extension (not guaranteed loaded on every deployment target), I match the quoted token against the raw JSON text. Quoting prevents prefix collisions (for example, the cap `audio` would otherwise match `audio_generation`). When json1 becomes a hard requirement we can swap to `json_each`.
+
+2. **`status` query param defaults to `active`, accepts `all` sentinel.** PRD 5.4 says the UI calls `/api/models?status=active`. To keep the route useful for admin views (deprecated audit, preview rollout) I support every concrete status plus an `all` sentinel that disables the filter entirely. The default matches the PRD's documented call shape.
+
+3. **`markMissingAsDeprecated` refuses to act on an empty seen-list.** PRD 5.3 pseudocode calls this after a successful provider fetch. If a provider's API hiccups and returns zero models, the literal pseudocode would mass-deprecate the entire catalog. I guard against that: zero seen models means "do nothing". The refresh log is the place to surface the outage. The refresh cron (separate track) should treat a zero-result fetch as a soft failure for the same reason.
+
+4. **`/api/models/[id]` accepts natural key OR numeric pk.** The PRD says "GET returns one model's full record" without specifying the id form. Natural key (provider-scoped `model_id`) is the obvious choice for the Intelligence Settings UI. I also accept a bare integer as a fallback for admin tooling that already has the surrogate id in hand. The natural-key lookup runs first so a `model_id` that happens to be numeric still wins.
+
+5. **`bulkUpsertModels` wrapped in a single transaction.** PRD 5.3 leaves the granularity unspecified. Wrapping per-provider keeps an in-flight refresh atomic so a partial failure mid-provider does not leave the catalog half-rewritten. The refresh cron should call `bulkUpsertModels` once per provider (not once across all providers) so providers stay independent, matching the `Promise.allSettled` pattern in the PRD.
+
+6. **Exported types surface.** PRD only explicitly required `ModelRegistryEntry`. I also exported `ModelCapability`, `ModelStatus`, `ModelPricingModel`, `MODEL_CAPABILITIES`, `ModelRegistryUpsertInput`, `ModelRegistryListOptions`, `ModelRegistryRefreshLogEntry`, `BulkUpsertResult`, `UpsertOutcome`. These are surface area the provider connectors (Section 5.2) and the refresh cron (Section 5.3) will need to import without redefining locally.
+
+7. **`raw_metadata` decoded eagerly.** Migration 031 stores it as TEXT (JSON). Callers always want it as an object, never as a string, so `decodeRow` parses it once at read time. Bad JSON logs an error and falls back to `{}` so a single poisoned row cannot 500 the entire `/api/models` list.
