@@ -199,7 +199,8 @@ export default function JournalEntry({ initialDate }: JournalEntryProps) {
           ) : lastSavedAt ? (
             <span>Saved {new Date(lastSavedAt).toLocaleTimeString()}</span>
           ) : (
-            <span>New entry</span>
+            // Bug 6 (v4.0.2): clearer empty-state copy.
+            <span>No journal entry for today. Start writing to begin.</span>
           )}
           <button
             type="button"
@@ -256,7 +257,11 @@ export default function JournalEntry({ initialDate }: JournalEntryProps) {
           />
         ) : (
           <pre className="px-4 py-3 text-[14px] leading-relaxed whitespace-pre-wrap font-sans">
-            {body || <span className="text-bcc-text-muted">Nothing written yet.</span>}
+            {body || (
+              <span className="text-bcc-text-muted">
+                No journal entry for today. Switch to the Edit tab to start writing.
+              </span>
+            )}
           </pre>
         )}
       </div>
