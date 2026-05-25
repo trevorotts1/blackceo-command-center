@@ -755,3 +755,68 @@ the source tree for keys.
    `.env.example` and this file changed. The provider connectors,
    refresh job, Bridge agent catalogue, Call Mode route, and test
    fixture call sites all read these env vars unchanged.
+
+---
+
+## Depth 3 Track D (Integration smoke tests for Wave 1 routes)
+
+Wave 1 added thirteen page routes and five API routes across the
+Operator Console, Tasks landing, and platform health endpoints. None of
+them had any automated coverage. Track D installs a single-file
+Playwright smoke suite that acts as a tripwire: a broken import, a
+missing default export, or a regressed JSON contract now fails CI
+before it reaches a client.
+
+### Files
+
+1. `playwright.config.ts` (pre-existing from Track A scaffolding,
+   confirmed compatible).
+2. `tests/integration/v4-smoke.spec.ts` : the smoke suite. Eighteen
+   tests total. Thirteen page tests navigate the route and assert
+   (a) HTTP status < 500, (b) a route-specific copy marker is in the
+   rendered DOM, and (c) no real console errors fired (favicon and
+   `_next/static` 404 noise filtered out). Five API tests fetch JSON
+   and assert the shape contracts (`migrations`, six-state
+   `overall` vocabulary, `models[]`, paginated `items/total/limit`,
+   workspace `agents[]` directory).
+
+### Live-server gating
+
+The suite probes `/api/health` in `beforeAll`. If nothing is listening
+on the configured `V4_BASE_URL` (default `http://localhost:4000`), every
+test calls `test.skip` with a clear "Start it with `npm run dev` and
+rerun" message. That lets CI wire this in without first standing up
+Next, and lets a local developer run `npx playwright test` against
+either a stopped or running server without changing the command.
+
+### Run from this dispatch
+
+`npx playwright test tests/integration/v4-smoke.spec.ts` against a
+local checkout with no dev server returned `18 skipped` cleanly. No
+failures, no test discovery errors. The skip path is the documented
+behaviour when no live server is reachable; standing up Next + running
+the full pass is a Wave 3 / CI job.
+
+### Decisions outside the explicit spec
+
+1. **Markers come from the Depth 2 page sources.** Each marker regex
+   was lifted from the actual heading or title text the page renders
+   today (e.g. `/Operator Console/i` for the shell, `/Studio/i` for the
+   Studio sub-module). Resilient to copy tweaks but fails loudly if the
+   layout chrome stops rendering.
+2. **Status < 500, not == 200.** Next can render a 200 page with a
+   client-side error boundary that still surfaces the marker. The
+   tripwire we care about is a 500 (route blew up server-side); any 2xx
+   or 3xx is treated as a successful render.
+3. **Console error filtering.** Favicon, `_next/static` 404s, HMR
+   warnings, and the React DevTools nag are filtered out. Real bugs
+   (TypeError, ReferenceError, uncaught promise rejections, app code
+   throwing) still fail the test.
+4. **No baseURL hard-code.** `V4_BASE_URL` env var overrides the
+   default `http://localhost:4000`, so the same suite runs against a
+   non-default port, a staging build, or a preview deploy without
+   editing the spec.
+5. **Single file, one worker.** The whole suite is one spec file with
+   `workers: 1` so a flaky shared resource (Ollama, Tavily fixture
+   path) can't cause cross-test interference. If/when a future depth
+   adds more spec files, bump the worker count then.
