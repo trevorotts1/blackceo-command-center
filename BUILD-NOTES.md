@@ -380,3 +380,48 @@ These are referenced by Track B3 code but NOT yet in `package.json` (consistent 
   - `highlight.js` (transitive dep of `rehype-highlight`)
 
 All four are React 18 compatible at their current versions (`react-markdown@9.x`, `remark-gfm@4.x`, `rehype-highlight@7.x`, `highlight.js@11.x`).
+
+## Depth 2 Wave 1, Track B6 (Operator Console Goals + Journal + Memory)
+
+PRD Section 4.7. Three new operator console sub-modules backed by Migration 037 (`operator_goals`, `operator_journal_entries`, `operator_chat_sessions`, `operator_chat_messages`).
+
+Files added (all new, no overlap with other Wave 1 tracks):
+
+- `src/lib/operator/goals.ts` (DB helpers + vault mirror writer)
+- `src/lib/operator/journal.ts` (DB helpers + per-day vault mirror writer)
+- `src/lib/operator/memory-search.ts` (lexical aggregator over 8 sources)
+- `src/app/api/operator/goals/route.ts` + `[id]/route.ts`
+- `src/app/api/operator/journal/route.ts` + `[id]/route.ts`
+- `src/app/api/operator/memory/search/route.ts`
+- `src/components/operator/GoalsList.tsx`
+- `src/components/operator/JournalEntry.tsx`
+- `src/components/operator/MemorySearch.tsx`
+- `src/app/operator/goals/page.tsx`
+- `src/app/operator/journal/page.tsx`
+- `src/app/operator/memory/page.tsx`
+
+### Decisions outside the PRD's explicit spec
+
+1. **DB row is the source of truth, vault markdown is a mirror.** PRD 4.7 describes Goals as either `[vault]/goals.md` (single file) or `[vault]/goals/[category].md` (per-category). Both layouts make sense, so I write BOTH on every mutation: the top-level master `goals.md` plus one per-category subfile. Memory search and Obsidian indexers see whichever layout they prefer. The same posture applies to Journal: the DB row is canonical, the per-day markdown file at `<vault>/journal/YYYY/MM/YYYY-MM-DD.md` is regenerated on every save.
+
+2. **Mirror writes are best effort.** A filesystem error (vault directory does not exist yet, permissions, full disk) never fails an API mutation. The error is logged and the DB row stays consistent. Memory search will pick the entry up from the DB regardless. PRD does not say what to do here; treating filesystem write as advisory keeps the operator unblocked even when the vault volume is sick.
+
+3. **Lexical search, not FTS5.** PRD 4.7 specifies SQLite FTS5 with an hourly re-indexing background job. Track B6 does not own a migration (the brief explicitly forbids `migrations.ts` edits and 037 ships the canonical tables without FTS5 virtual tables). I shipped the user-facing API and a scoring function tuned to match what an FTS5 rank would feel like (phrase boost, term match counts, title position multiplier, coverage bonus, density penalty). The interface returned by `/api/operator/memory/search` is identical to what an FTS5 rewrite would expose, so swapping the backend later is internal to `memory-search.ts`.
+
+4. **Eight sources, not the four PRD lists.** PRD 4.7 lists: vault folder, `operator_chat_messages`, task descriptions, persona blueprints. The orchestrator brief expanded that to: vault, scratch dirs, research_searches, journal entries, plus the PRD four. I shipped all eight in one aggregator (`vault`, `scratch`, `journal`, `chat`, `goal`, `research`, `task`, `persona`) so the operator can include/exclude any subset with `?sources=`. `research_searches` is strictly read-only here (Track B7 owns writes per the brief), with a defensive try/catch so a fresh DB without Migration 042 does not crash search.
+
+5. **Filesystem search guardrails.** A naive recursive walk over `~/clawd` would melt the search box if the operator happens to have a node_modules-heavy project there. I cap at 2000 files per root, 256 KB per file (oversized files are truncated, flagged in `meta.truncated`), and skip common heavy directories (`node_modules`, `.git`, `.next`, `.turbo`, `dist`, `build`, `.venv`, `__pycache__`) plus any dot-directory. Iterative DFS so we never blow the call stack on huge trees.
+
+6. **Memory hit `href` deep links into the existing UI.** Vault/scratch files link to `/operator/workspace?path=<file>` (Track B3 owns the matching workspace deep-link handler). Journal hits link to `/operator/journal?date=YYYY-MM-DD`. Chat hits link to `/operator/bridge?session=<id>` (Track B2). Research links to `/operator/research/<id>` (Track B7). Tasks link to `/tasks/<id>`. Personas link to `/agents/<id>`. None of those targets is owned by B6; each track wires the inbound query/path param at its own pace, and Memory search keeps working today regardless.
+
+7. **Journal `[id]` segment is dual-keyed.** The route accepts either a UUID primary key OR a YYYY-MM-DD date string. The Command Palette and Memory deep links use the date form (`?date=2026-05-25`); the page resolves it through `getJournalEntryByDate`. DELETE is restricted to the UUID form so a deep-linked date URL cannot wipe a day's writing by accident.
+
+8. **Auto-save runs every 5s on dirty bodies.** PRD 4.7 says "Auto-save every 5 seconds". I use `setInterval` rather than a debounced effect so the operator gets predictable cadence. On unmount we fire one last `fetch` with `keepalive: true` so navigating away mid-sentence does not lose a turn of writing.
+
+9. **Markdown preview is text-only today.** B3 owns the `react-markdown` + `remark-gfm` + `rehype-highlight` chain through `FilePreview.tsx`. Importing those modules from B6 components would step on B3's posture (where the deps are intentionally `package.json`-pending). The Journal Preview tab renders the body in a styled `<pre>` block with `whitespace-pre-wrap`. Swapping it for B3's chain is a one-line replacement once the deps land.
+
+10. **No new dependencies.** Everything ships on the existing stack: `next`, `react`, `zod`, `better-sqlite3`, `lucide-react`. The `crypto.randomUUID()` API is Node 14.17+ and already used elsewhere in the repo. No npm install needed before this track can boot.
+
+11. **Voice input on add-goal and journal box: deferred.** PRD 4.7 calls for voice input on both. Track B8 (Call Mode) owns the Web Speech API integration and ships the shared `src/lib/voice/*` module. Wiring a mic button into `GoalsList.tsx` and `JournalEntry.tsx` is a five-line follow-up once B8 lands. The forms are designed so a mic button slots in next to the submit button without layout changes.
+
+12. **Background reindex job: deferred to FTS5 swap.** PRD 4.7 says "Background job re-indexes hourly." Lexical search has nothing to reindex, so the job is a no-op until FTS5 is wired. When FTS5 lands the cron hook goes in `src/lib/jobs/` (Track A1's domain) and triggers `populateFts5()` against the same tables this module reads.
