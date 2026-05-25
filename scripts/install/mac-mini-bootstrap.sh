@@ -108,6 +108,39 @@ mkdir -p "$HOME/Documents/Obsidian Vault/studio"
 mkdir -p "$HOME/operator-scratch"
 
 #
+# Step 8b: Write ecosystem.config.cjs template (Bug 7, v4.0.2)
+#
+# Hardcode the port in BOTH the args and the env block so a stray PORT in
+# the shell env can't override the dashboard's listening port.
+#
+ECOSYSTEM_DIR="$HOME/projects/command-center"
+ECOSYSTEM_FILE="$ECOSYSTEM_DIR/ecosystem.config.cjs"
+mkdir -p "$ECOSYSTEM_DIR"
+if [ ! -f "$ECOSYSTEM_FILE" ]; then
+  echo "[8b/9] Writing PM2 ecosystem template to $ECOSYSTEM_FILE..."
+  cat > "$ECOSYSTEM_FILE" <<EOF
+module.exports = {
+  apps: [{
+    name: "command-center",
+    cwd: "$ECOSYSTEM_DIR",
+    script: "npm",
+    args: "run start -- -p 4000 -H 0.0.0.0",
+    env: {
+      PORT: "4000",
+      NODE_ENV: "production"
+    },
+    instances: 1,
+    autorestart: true,
+    max_restarts: 5,
+    exec_mode: "fork"
+  }]
+};
+EOF
+else
+  echo "[8b/9] PM2 ecosystem already present at $ECOSYSTEM_FILE — leaving as-is"
+fi
+
+#
 # Step 9: PM2 launchd startup
 #
 echo "[9/9] Configuring PM2 to start on boot..."
