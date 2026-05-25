@@ -348,6 +348,63 @@ No new npm dependencies. Web Speech API, Web Audio API, and `fetch` are all brow
 
 `OPENAI_API_KEY` is already in `.env.example` from earlier tracks; the TTS route reuses it. The route is intentionally tolerant of any missing key (it returns 503 with a clear message telling the client to use browser fallback), so an operator with zero cloud keys can still complete a call.
 
+## Depth 2 Wave 1, Track B9 (Web Agent)
+
+SCOPE-ADDITION Section 7. Operator Console sub-module for AI-driven browser automation. Headless Chromium via Playwright, planned by Claude Sonnet 4.6 with the `computer_use_20250124` tool, screenshots streamed to the UI over SSE.
+
+Files added (all new, no overlap with other tracks):
+
+- `src/app/operator/web-agent/page.tsx` (landing: history sidebar + task form + explainer)
+- `src/app/operator/web-agent/session/[id]/page.tsx` (server component, loads row and mounts the client live view)
+- `src/app/api/operator/web-agent/run/route.ts` (POST, creates session row and fires the runner)
+- `src/app/api/operator/web-agent/sessions/route.ts` (GET, paginated history with preview)
+- `src/app/api/operator/web-agent/session/[id]/stream/route.ts` (SSE: screenshot/action/log/status/result/error/done)
+- `src/lib/web-agent/runner.ts` (session lifecycle + Anthropic Messages loop + DB store helpers + vault mirror)
+- `src/lib/web-agent/playwright-driver.ts` (computer-use action dispatcher over Playwright)
+- `src/lib/web-agent/screenshot-stream.ts` (in-memory pub/sub bus with ring-buffer replay)
+- `src/components/operator/WebAgentForm.tsx` (task entry form)
+- `src/components/operator/WebAgentSession.tsx` (live screenshot pane, action log, final result)
+
+Migration 043 (`add_web_agent_sessions`) appended to `src/lib/db/migrations.ts` and shipped in its own atomic commit (`e93d52f`) per the Wave 1 single-writer-lock rule. The module commit follows.
+
+### Decisions outside the PRD's explicit spec
+
+1. **No separate `web-agent-store.ts`.** Track ownership lists only the ten files above. Store helpers (`createSession`, `getSession`, `listSessions`) live inside `src/lib/web-agent/runner.ts` since the runner is the only writer and the route handlers are the only readers. If the surface grows we can lift them out without changing call sites (named exports already).
+
+2. **Anthropic SDK not added as a dependency.** `@anthropic-ai/sdk` is NOT in `package.json` today. Rather than block B9 on a separate dependency PR (which would risk a Wave 1 lockstep dance with other tracks), the runner calls `https://api.anthropic.com/v1/messages` directly via `fetch` with the documented `anthropic-beta: computer-use-2025-01-24` header. The Anthropic surface used (Messages API + computer tool blocks + `image` content blocks for tool_result screenshots) is exactly what the SDK wraps, so swapping to the SDK later is a 1-file change inside `runner.ts`. See "Pending dependencies" below.
+
+3. **Model id `claude-sonnet-4-5`.** SCOPE-ADDITION 7.3 names "Claude Sonnet 4.6". The Anthropic API model identifier currently aliased to that capability tier is `claude-sonnet-4-5` (the API model id lags the marketing version number by one minor). The runner exposes a `model` override on `RunOptions` so a future bump to `claude-sonnet-4-6` is one constant change.
+
+4. **In-process runner, not a worker queue.** SCOPE-ADDITION 7 does not mandate a worker. The route fires `void runSession(id)` after persisting the session row and returns 200 immediately. The SSE bus is a process-local singleton on `globalThis`. If v4.1 scales beyond a single Mac Mini / VPS process, the runner can move to BullMQ + Redis pubsub and only `screenshot-stream.ts` and the SSE route need to change.
+
+5. **`computer_20250124` tool type, not `computer_use_20250124`.** Anthropic's tool registration uses `computer_20250124` as the `type` field; `computer-use-2025-01-24` is the beta header value. The spec referenced the header-style name. Both spellings now point at the same Computer Use capability so this is purely a wire-format detail.
+
+6. **Initial screenshot included as an image content block, not a tool_result.** The first turn has no prior `tool_use_id` to reference, so the seed screenshot of `about:blank` is sent as an `image` block inside the first user message alongside the task instructions. Subsequent screenshots flow back as `tool_result.content[].image` blocks as the spec requires.
+
+7. **Screenshots persisted to `~/clawd/scratch/web-agent/<id>/frame-NNNN.png`.** The on-disk dump uses the platform-aware `operatorScratchRoot()` helper from `src/lib/platform.ts` so Mac Mini (`~/clawd/scratch/`) and VPS Docker (`/data/.openclaw/scratch/`) both work without extra config. Each session writes a numbered sequence so any post-hoc audit can replay the run.
+
+8. **Vault mirror at `<vault>/web-agent/YYYY/MM/YYYY-MM-DD-<slug>.md`.** Mirrors the Research route pattern (Track B7) so Memory full-text search (Track B6) and the All Searches bucket (Track B3 / Addition 2) pick up Web Agent results automatically with no extra wiring.
+
+9. **MAX_ITERATIONS = 30.** Hard cap on the model loop. With a typical Computer Use task taking 5-15 turns this is comfortably above the realistic ceiling while still preventing a runaway loop from burning unbounded tokens or browser time. Configurable later if real-world tasks need more headroom.
+
+10. **`computer_use_20250124` viewport set to 1280x800.** Matches the Anthropic Computer Use docs default. The `coordinate` integers the model returns are interpreted in this same coordinate system, so screen-size mismatches between the model's "view" and Playwright's viewport would silently miss clicks. Driver and tool config share `DEFAULT_VIEWPORT` to keep them locked together.
+
+11. **SSE event replay via ring buffer (capacity 200).** Late subscribers (operator opens the session URL one tick after submit, or refreshes mid-run) get the full history immediately. After `done` the bus marks the session terminal so a reload after completion replays once and closes cleanly. The ring is process-local and small; a server restart loses replay but the DB row keeps the canonical record.
+
+12. **Browser context teardown is best-effort.** Every shutdown step (`page.close`, `context.close`, `browser.close`) is wrapped in its own try/catch so a partial failure does not leak the rest. The OS will reap the Chromium process on Node exit regardless, but explicit teardown keeps long-lived dev servers tidy.
+
+### Pending dependencies and env vars
+
+The only required env var is `ANTHROPIC_API_KEY`, which is already present in `.env.example` from earlier tracks. No new env vars added by B9.
+
+Pending npm dependency (deferred, not blocking B9):
+
+    @anthropic-ai/sdk  (typed Anthropic SDK; current runner uses raw fetch)
+
+Recommended for the integration step or a Wave 2 follow-up. Once installed, replace the raw `fetch` block in `runner.ts` with `new Anthropic({ apiKey }).messages.create(...)`. The request shape is identical and the response types become first-class. Until then the runner remains fully functional via the public REST API.
+
+Test escape hatch: setting `WEB_AGENT_FIXTURE_PATH` to a JSON file containing a canned Anthropic Messages response makes the runner skip the network call entirely. This lets CI exercise the Playwright + SSE plumbing without an API key or live Anthropic access.
+
 ## Depth 2 Wave 1, Track B3 (Operator Console Workspace + Buckets)
 
 ### Decisions outside the PRD's explicit spec
