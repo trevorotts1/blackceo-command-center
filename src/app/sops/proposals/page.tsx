@@ -208,7 +208,7 @@ export default function SOPProposalsPage() {
                   <div>
                     <h2 className="text-lg font-medium text-zinc-100">
                       {isAutoResearch && <span className="mr-2" title="Auto-researched">🤖</span>}
-                      {isEscalated && <span className="mr-2" title="Escalated — safety cap hit">⚠️</span>}
+                      {isEscalated && <span className="mr-2" title="Escalated (safety cap hit)">⚠️</span>}
                       {p.proposed_name}
                     </h2>
                     <div className="mt-1 text-xs text-zinc-500">

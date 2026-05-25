@@ -1,125 +1,174 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Log warning at startup if auth is disabled
+/**
+ * Layered authentication middleware per PRD Section 3.1 (Fix #1).
+ *
+ * Two independent auth layers protect this deployment:
+ *
+ *   1. Cloudflare Access (page + API). Cloudflare sits in front of the
+ *      subdomain and gates ALL traffic. Authenticated requests arrive with
+ *      `Cf-Access-Jwt-Assertion` and `Cf-Access-Authenticated-User-Email`
+ *      headers populated. The Next.js app never validates the JWT itself
+ *      (Cloudflare already did that), it just checks that the headers are
+ *      present and surfaces the email to downstream code via the request
+ *      headers.
+ *
+ *   2. MC_API_TOKEN (API only). A long-lived bearer token used by external
+ *      integrations (CLIs, scripts, OpenClaw, SSE consumers) that cannot go
+ *      through the Cloudflare Access browser flow. Same-origin browser
+ *      requests do NOT need the bearer token because Cloudflare Access
+ *      already gates them.
+ *
+ * Bypass routes:
+ *   - `/api/health` (Cloudflare health checks) bypasses both layers.
+ *
+ * Local dev (no Cloudflare in front, no MC_API_TOKEN set) is fully open with
+ * a startup warning so the operator notices.
+ *
+ * Production misconfiguration (Cloudflare Access not enabled on the
+ * subdomain) returns 401 with a clear error message so the operator knows
+ * exactly what to fix.
+ */
+
 const MC_API_TOKEN = process.env.MC_API_TOKEN;
-if (!MC_API_TOKEN) {
-  console.warn('[SECURITY WARNING] MC_API_TOKEN not set - API authentication is DISABLED (local dev mode)');
+const REQUIRE_CF_ACCESS = process.env.REQUIRE_CF_ACCESS === 'true';
+const DEMO_MODE = process.env.DEMO_MODE === 'true';
+
+if (!MC_API_TOKEN && !DEMO_MODE) {
+  console.warn('[SECURITY WARNING] MC_API_TOKEN not set, external API auth is DISABLED (local dev mode)');
+}
+if (!REQUIRE_CF_ACCESS && !DEMO_MODE) {
+  console.warn('[SECURITY WARNING] REQUIRE_CF_ACCESS not set, Cloudflare Access enforcement is OFF (local dev mode). Set REQUIRE_CF_ACCESS=true in production.');
+}
+if (DEMO_MODE) {
+  console.log('[DEMO] Running in demo mode, all write operations are blocked');
 }
 
-/**
- * Check if a request originates from the same host (browser UI).
- * Same-origin browser requests include a Referer or Origin header
- * pointing to the MC server itself. Server-side render fetches
- * (Next.js RSC) come from the same process and have no Origin.
- */
 function isSameOriginRequest(request: NextRequest): boolean {
   const host = request.headers.get('host');
   if (!host) return false;
 
-  // Server-side fetches from Next.js (no origin/referer) — same process
   const origin = request.headers.get('origin');
   const referer = request.headers.get('referer');
 
-  // If neither origin nor referer is set, this is likely a server-side
-  // fetch or a direct curl. Require auth for these (external API calls).
   if (!origin && !referer) return false;
 
-  // Check if Origin matches the host
   if (origin) {
     try {
-      const originUrl = new URL(origin);
-      if (originUrl.host === host) return true;
+      if (new URL(origin).host === host) return true;
     } catch {
-      // Invalid origin header
+      // ignore invalid origin
     }
   }
 
-  // Check if Referer matches the host
   if (referer) {
     try {
-      const refererUrl = new URL(referer);
-      if (refererUrl.host === host) return true;
+      if (new URL(referer).host === host) return true;
     } catch {
-      // Invalid referer header
+      // ignore invalid referer
     }
   }
 
   return false;
 }
 
-// Demo mode — read-only, blocks all mutations
-const DEMO_MODE = process.env.DEMO_MODE === 'true';
-if (DEMO_MODE) {
-  console.log('[DEMO] Running in demo mode — all write operations are blocked');
+function unauthorized(message: string, status = 401): NextResponse {
+  return NextResponse.json({ error: message }, { status });
 }
 
-export function middleware(request: NextRequest) {
+export function middleware(request: NextRequest): NextResponse {
   const { pathname } = request.nextUrl;
 
-  // Only protect /api/* routes
-  if (!pathname.startsWith('/api/')) {
-    // Add demo mode header for UI detection
-    if (DEMO_MODE) {
-      const response = NextResponse.next();
-      response.headers.set('X-Demo-Mode', 'true');
-      return response;
-    }
+  // Cloudflare health checks must bypass everything.
+  if (pathname === '/api/health' || pathname === '/api/health/') {
     return NextResponse.next();
   }
 
-  // Demo mode: block all write operations
+  // Demo mode, read-only public deployment.
   if (DEMO_MODE) {
-    const method = request.method.toUpperCase();
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-      return NextResponse.json(
-        { error: 'Demo mode — this is a read-only instance. Visit github.com/crshdn/mission-control to run your own!' },
-        { status: 403 }
+    if (pathname.startsWith('/api/')) {
+      const method = request.method.toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+        return NextResponse.json(
+          { error: 'Demo mode, this is a read-only instance.' },
+          { status: 403 }
+        );
+      }
+    }
+    const response = NextResponse.next();
+    response.headers.set('X-Demo-Mode', 'true');
+    return response;
+  }
+
+  // Layer 1: Cloudflare Access.
+  // When REQUIRE_CF_ACCESS is on, every non-health route must carry the CF
+  // Access headers. Cloudflare populates these on its edge. Absence means
+  // either the request bypassed Cloudflare or Access is not configured on
+  // the subdomain.
+  const cfJwt = request.headers.get('cf-access-jwt-assertion');
+  const cfEmail = request.headers.get('cf-access-authenticated-user-email');
+
+  if (REQUIRE_CF_ACCESS) {
+    if (!cfJwt || !cfEmail) {
+      return unauthorized(
+        'This deployment is misconfigured. Cloudflare Access is not active on this subdomain. Contact the operator.'
       );
     }
-    return NextResponse.next();
   }
 
-  // If MC_API_TOKEN is not set, auth is disabled (dev mode)
-  if (!MC_API_TOKEN) {
-    return NextResponse.next();
-  }
-
-  // Allow same-origin browser requests (UI fetching its own API)
-  if (isSameOriginRequest(request)) {
-    return NextResponse.next();
-  }
-
-  // Special case: /api/events/stream (SSE) - allow token as query param
-  if (pathname === '/api/events/stream') {
-    const queryToken = request.nextUrl.searchParams.get('token');
-    if (queryToken && queryToken === MC_API_TOKEN) {
-      return NextResponse.next();
+  // Layer 2: MC_API_TOKEN for /api/* external callers.
+  if (pathname.startsWith('/api/')) {
+    // If MC_API_TOKEN is not configured, skip API token enforcement (dev mode).
+    if (!MC_API_TOKEN) {
+      const passthrough = NextResponse.next();
+      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+      return passthrough;
     }
-    // Fall through to header check below
+
+    // Same-origin browser requests are already gated by CF Access (layer 1)
+    // so they don't need the bearer token.
+    if (isSameOriginRequest(request)) {
+      const passthrough = NextResponse.next();
+      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+      return passthrough;
+    }
+
+    // Special case: /api/events/stream (SSE) accepts the token as a query
+    // param because EventSource cannot set custom headers.
+    if (pathname === '/api/events/stream') {
+      const queryToken = request.nextUrl.searchParams.get('token');
+      if (queryToken && queryToken === MC_API_TOKEN) {
+        return NextResponse.next();
+      }
+    }
+
+    const authHeader = request.headers.get('authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return unauthorized('Unauthorized');
+    }
+    const token = authHeader.substring(7);
+    if (token !== MC_API_TOKEN) {
+      return unauthorized('Unauthorized');
+    }
+
+    const passthrough = NextResponse.next();
+    if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+    return passthrough;
   }
 
-  // Check Authorization header for bearer token
-  const authHeader = request.headers.get('authorization');
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return NextResponse.json(
-      { error: 'Unauthorized' },
-      { status: 401 }
-    );
-  }
-
-  const token = authHeader.substring(7); // Remove 'Bearer ' prefix
-  
-  if (token !== MC_API_TOKEN) {
-    return NextResponse.json(
-      { error: 'Unauthorized' },
-      { status: 401 }
-    );
-  }
-
-  return NextResponse.next();
+  // Non-API path. CF Access already enforced above (or not required).
+  const response = NextResponse.next();
+  if (cfEmail) response.headers.set('x-operator-email', cfEmail);
+  return response;
 }
 
+/**
+ * Matcher: every route except Next.js internals, static assets, and
+ * favicon. `/api/health` is bypassed inside the middleware body so it stays
+ * matched (we want this code to run, just to early-return for it).
+ */
 export const config = {
-  matcher: '/api/:path*',
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|public/).*)',
+  ],
 };

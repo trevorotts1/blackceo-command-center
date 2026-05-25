@@ -91,7 +91,7 @@ export async function selectPersonaForTask(
         result.persona_name ||
         (result.persona_id
           ? result.persona_id.replace(/-/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())
-          : "—"),
+          : "N/A"),
       persona_version: result.persona_version,
       score: typeof result.score === "number" ? result.score : 0,
       interaction_mode: (result.interaction_mode as PersonaInteractionMode) || "leadership",

@@ -929,6 +929,459 @@ const migrations: Migration[] = [
       console.log('[Migration 025] sop_proposals auto-replace fields ready');
     }
   },
+  {
+    id: '031',
+    name: 'add_model_registry',
+    up: (db) => {
+      console.log('[Migration 031] Adding model_registry table for the dynamic model catalog...');
+      // PRD Section 5.1 schema. Replaces the hardcoded AVAILABLE_MODELS array.
+      // Provider connectors populate this table on the weekly refresh job.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS model_registry (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          model_id TEXT UNIQUE NOT NULL,
+          label TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          family TEXT,
+          context_window INTEGER,
+          input_cost_per_million REAL,
+          output_cost_per_million REAL,
+          pricing_model TEXT DEFAULT 'per_token' CHECK (pricing_model IN ('per_token', 'flat_rate_plan', 'free')),
+          pricing_source TEXT DEFAULT 'auto',
+          capabilities TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deprecated', 'preview', 'unavailable')),
+          added_at TEXT DEFAULT (datetime('now')),
+          last_seen_at TEXT DEFAULT (datetime('now')),
+          raw_metadata TEXT DEFAULT '{}'
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_model_registry_provider ON model_registry(provider)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_model_registry_status ON model_registry(status)`);
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS model_registry_refresh_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_at TEXT DEFAULT (datetime('now')),
+          provider TEXT NOT NULL,
+          success INTEGER NOT NULL,
+          models_added INTEGER DEFAULT 0,
+          models_updated INTEGER DEFAULT 0,
+          models_deprecated INTEGER DEFAULT 0,
+          error_message TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_model_registry_refresh_log_run_at ON model_registry_refresh_log(run_at DESC)`);
+
+      console.log('[Migration 031] model_registry + model_registry_refresh_log ready');
+    }
+  },
+  {
+    id: '032',
+    name: 'add_cloudflare_access_config',
+    up: (db) => {
+      console.log('[Migration 032] Adding cloudflare_access_config table...');
+      // Tracks per-deployment Cloudflare Access settings. allowed_email_domains
+      // is a JSON array of strings (for example, ["acme.com", "example.org"]).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS cloudflare_access_config (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          team_domain TEXT,
+          audience TEXT,
+          allowed_email_domains TEXT NOT NULL DEFAULT '[]',
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      console.log('[Migration 032] cloudflare_access_config ready');
+    }
+  },
+  {
+    id: '033',
+    name: 'add_system_status_snapshots',
+    up: (db) => {
+      console.log('[Migration 033] Adding system_status_snapshots time-series table...');
+      // PRD Section 3.12. Time-series probe results for the System Status Panel.
+      // status accepts both the new six-state vocabulary (live/working/busy/
+      // degraded/offline/unknown) and the simpler ok/down tokens listed in the
+      // brief for backward compatibility with simpler probes.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS system_status_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          probed_at TEXT NOT NULL DEFAULT (datetime('now')),
+          component TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('live', 'working', 'busy', 'degraded', 'offline', 'unknown', 'ok', 'down')),
+          latency_ms INTEGER,
+          error TEXT,
+          metadata TEXT DEFAULT '{}'
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_system_status_component_probed ON system_status_snapshots(component, probed_at DESC)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_system_status_probed_at ON system_status_snapshots(probed_at DESC)`);
+      console.log('[Migration 033] system_status_snapshots ready');
+    }
+  },
+  {
+    id: '034',
+    name: 'expand_agents_status_busy_degraded',
+    up: (db) => {
+      console.log('[Migration 034] Expanding agents.status CHECK to include busy and degraded...');
+      // SQLite cannot ALTER a CHECK constraint in place. Rebuild via the
+      // official 12-step procedure (https://sqlite.org/lang_altertable.html).
+      // FK references from the 9 dependent tables (workspaces.head_agent_id,
+      // tasks.assigned_agent_id, tasks.created_by_agent_id,
+      // task_history.changed_by_agent_id, agent_activity, sub_agent_sessions
+      // and agent_messages, kpi_snapshots.agent_id, recommendations,
+      // agent_daily_logs) resolve by table name in SQLite, so dropping the old
+      // table and renaming the new one to agents keeps them valid.
+      const tableSqlRow = db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'"
+      ).get() as { sql: string } | undefined;
+      const currentSql = tableSqlRow?.sql || '';
+      if (currentSql.includes("'busy'") && currentSql.includes("'degraded'")) {
+        console.log('[Migration 034] agents.status already includes busy and degraded, nothing to do');
+        return;
+      }
+
+      // Use defer_foreign_keys (the SQLite-documented in-transaction
+      // alternative to toggling PRAGMA foreign_keys, which is blocked inside
+      // an open transaction). The migration runner already wraps us in one.
+      db.exec('PRAGMA defer_foreign_keys = ON');
+
+      // Snapshot the column list so we copy whatever the live table actually
+      // has, in case later migrations added columns we cannot predict here.
+      const cols = (db.prepare("PRAGMA table_info(agents)").all() as { name: string }[]).map(c => c.name);
+      const colList = cols.join(', ');
+
+      db.exec(`
+        CREATE TABLE agents_new (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          role TEXT NOT NULL,
+          description TEXT,
+          avatar_emoji TEXT DEFAULT '🤖',
+          status TEXT DEFAULT 'standby' CHECK (status IN ('standby', 'working', 'busy', 'degraded', 'offline')),
+          is_master INTEGER DEFAULT 0,
+          workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+          soul_md TEXT,
+          user_md TEXT,
+          agents_md TEXT,
+          tools_md TEXT,
+          memory_md TEXT,
+          model TEXT,
+          specialist_type TEXT DEFAULT 'on-call' CHECK (specialist_type IN ('permanent', 'on-call')),
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
+      db.exec(`INSERT INTO agents_new (${colList}) SELECT ${colList} FROM agents;`);
+
+      db.exec('DROP TABLE agents;');
+      db.exec('ALTER TABLE agents_new RENAME TO agents;');
+
+      db.exec('CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status)');
+
+      const violations = db.prepare('PRAGMA foreign_key_check').all() as unknown[];
+      if (violations.length > 0) {
+        throw new Error(`[Migration 034] foreign_key_check returned ${violations.length} violation(s) after rebuild`);
+      }
+
+      console.log('[Migration 034] agents.status now accepts standby, working, busy, degraded, offline');
+    }
+  },
+  {
+    id: '035',
+    name: 'add_client_platform',
+    up: (db) => {
+      console.log('[Migration 035] Adding client_platform single-row config table...');
+      // One row (id=1) describing the deployment target. Written by the
+      // platform detector on first boot. Reading the DB is the canonical way
+      // for code paths that should not re-run filesystem detection on every
+      // request.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_platform (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          platform TEXT NOT NULL CHECK (platform IN ('mac-mini', 'vps-docker')),
+          config_path TEXT,
+          vault_root TEXT,
+          scratch_root TEXT,
+          detected_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      console.log('[Migration 035] client_platform ready');
+    }
+  },
+  {
+    id: '036',
+    name: 'add_operator_workspaces',
+    up: (db) => {
+      console.log('[Migration 036] Adding operator_workspaces table...');
+      // Per-agent scratch directory registry for the Bridge sub-module.
+      // agent_id is the CLI agent slug (claude, codex, antigravity, hermes,
+      // gemini, fcc, openclaw), not a workforce agent. No FK to agents table.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operator_workspaces (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_id TEXT NOT NULL UNIQUE,
+          path TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operator_workspaces_agent ON operator_workspaces(agent_id)`);
+      console.log('[Migration 036] operator_workspaces ready');
+    }
+  },
+  {
+    id: '037',
+    name: 'add_operator_console_tables',
+    up: (db) => {
+      console.log('[Migration 037] Adding operator_goals, operator_journal_entries, operator_chat_sessions, operator_chat_messages...');
+      // Four tables backing the Operator Console sub-modules (PRD Section 4.7).
+      // operator_goals is the DB-canonical store; the markdown file at
+      // [vault]/goals.md (or per-category subfiles) is a human-editable mirror.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operator_goals (
+          id TEXT PRIMARY KEY,
+          category TEXT,
+          title TEXT NOT NULL,
+          body TEXT,
+          completed INTEGER NOT NULL DEFAULT 0,
+          completed_at TEXT,
+          sort_order INTEGER DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operator_goals_category ON operator_goals(category)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operator_goals_completed ON operator_goals(completed)`);
+
+      // One journal row per day. Mirrored to [vault]/journal/YYYY/MM/YYYY-MM-DD.md.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operator_journal_entries (
+          id TEXT PRIMARY KEY,
+          entry_date TEXT NOT NULL UNIQUE,
+          body TEXT NOT NULL DEFAULT '',
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operator_journal_entry_date ON operator_journal_entries(entry_date DESC)`);
+
+      // Bridge chat sessions plus their messages. PRD says one session per
+      // (agent, day, topic) by convention; the runner is responsible for
+      // picking or creating. No DB constraint enforces uniqueness because the
+      // operator may want multiple parallel topics with the same agent.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operator_chat_sessions (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          title TEXT,
+          scratch_dir TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operator_chat_sessions_agent ON operator_chat_sessions(agent_id, updated_at DESC)`);
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operator_chat_messages (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES operator_chat_sessions(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+          content TEXT NOT NULL,
+          metadata TEXT DEFAULT '{}',
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operator_chat_messages_session ON operator_chat_messages(session_id, created_at)`);
+
+      console.log('[Migration 037] operator console tables ready');
+    }
+  },
+  {
+    id: '038',
+    name: 'add_provider_credentials_and_usage',
+    up: (db) => {
+      console.log('[Migration 038] Adding provider_credentials and provider_usage tables...');
+      // PRD Section 5.1. api_key_env_var names the env var to read at runtime.
+      // We deliberately do NOT persist the key itself in the DB. base_url lets
+      // self-hosted or proxied providers override the default endpoint.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_credentials (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT UNIQUE NOT NULL,
+          api_key_env_var TEXT,
+          base_url TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_usage (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          snapshot_at TEXT NOT NULL DEFAULT (datetime('now')),
+          metric TEXT NOT NULL,
+          value REAL NOT NULL,
+          raw_response TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_provider_usage_lookup ON provider_usage(provider, metric, snapshot_at DESC)`);
+
+      console.log('[Migration 038] provider_credentials + provider_usage ready');
+    }
+  },
+  {
+    id: '039',
+    name: 'add_agent_settings_lock_flag',
+    up: (db) => {
+      console.log('[Migration 039] Adding lock flag column to agent_settings...');
+      // Migration 029 already added the full lock protocol (locked_by,
+      // lock_reason, locked_at, lock_token). This migration adds the simple
+      // boolean lock flag requested in the Depth 0 brief so callers can SELECT
+      // lock without parsing the protocol columns. Both stay: lock is the
+      // simple flag, the protocol columns carry the audit trail.
+      const info = db.prepare("PRAGMA table_info(agent_settings)").all() as { name: string }[];
+      const cols = new Set(info.map(c => c.name));
+      if (!cols.has('lock')) {
+        db.exec(`ALTER TABLE agent_settings ADD COLUMN "lock" INTEGER NOT NULL DEFAULT 0`);
+        // Backfill from the protocol: if lock_token or locked_by is set, the
+        // row is currently locked.
+        if (cols.has('lock_token') || cols.has('locked_by')) {
+          db.exec(`
+            UPDATE agent_settings
+            SET "lock" = 1
+            WHERE (lock_token IS NOT NULL AND lock_token <> '')
+               OR (locked_by IS NOT NULL AND locked_by <> '')
+          `);
+        }
+      }
+      console.log('[Migration 039] agent_settings.lock ready');
+    }
+  },
+  {
+    id: '040',
+    name: 'add_notebooks_and_notebook_sources',
+    up: (db) => {
+      console.log('[Migration 040] Adding notebooks and notebook_sources tables...');
+      // PRD Section 4.6. Backs the Notebook sub-module (NotebookLM client).
+      // backend selects between Google NotebookLM (default) and the
+      // Gemini-CLI-driven local fallback when NotebookLM credentials are
+      // missing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS notebooks (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT,
+          backend TEXT NOT NULL DEFAULT 'notebooklm' CHECK (backend IN ('notebooklm', 'gemini-local')),
+          remote_id TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_notebooks_updated ON notebooks(updated_at DESC)`);
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS notebook_sources (
+          id TEXT PRIMARY KEY,
+          notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+          source_type TEXT NOT NULL CHECK (source_type IN ('pdf', 'text', 'markdown', 'url', 'audio', 'video')),
+          title TEXT,
+          path TEXT,
+          url TEXT,
+          remote_id TEXT,
+          byte_size INTEGER,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_notebook_sources_notebook ON notebook_sources(notebook_id)`);
+
+      console.log('[Migration 040] notebooks + notebook_sources ready');
+    }
+  },
+  {
+    id: '041',
+    name: 'add_cli_install_registry',
+    up: (db) => {
+      console.log('[Migration 041] Adding cli_install_registry table...');
+      // PRD Section 6.4. Tracks the install state of each operator CLI on this
+      // deployment. The bootstrap script writes here on success; runtime
+      // probes and the System Status Panel read it as the source of truth for
+      // CLI paths.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS cli_install_registry (
+          cli_name TEXT PRIMARY KEY,
+          binary_path TEXT,
+          version TEXT,
+          installed_at TEXT,
+          last_verified_at TEXT,
+          install_method TEXT
+        );
+      `);
+      console.log('[Migration 041] cli_install_registry ready');
+    }
+  },
+  {
+    id: '042',
+    name: 'add_research_searches',
+    up: (db) => {
+      console.log('[Migration 042] Adding research_searches table (Track B7 Research sub-module)...');
+      // SCOPE-ADDITION Section 5.3. Backs the Operator Console Research sub-module
+      // (xAI Grok Live Search). result_markdown holds the full grounded answer;
+      // search_metadata is a JSON blob (depth, token counts, source urls, etc).
+      // The same markdown is mirrored to vault/research/YYYY/MM/YYYY-MM-DD-<slug>.md
+      // by the route handler so it shows up in Memory search (Track B6) and the
+      // All Searches bucket (Addition 2 / Track B3).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS research_searches (
+          id TEXT PRIMARY KEY,
+          query TEXT NOT NULL,
+          model TEXT NOT NULL,
+          result_markdown TEXT NOT NULL,
+          search_metadata TEXT DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_research_searches_created ON research_searches(created_at DESC)`);
+      console.log('[Migration 042] research_searches ready');
+    }
+  },
+  {
+    id: '043',
+    name: 'add_web_agent_sessions',
+    up: (db) => {
+      console.log('[Migration 043] Adding web_agent_sessions table (Track B9 Web Agent sub-module)...');
+      // SCOPE-ADDITION Section 7.4. Backs the Operator Console Web Agent
+      // sub-module (Anthropic Computer Use + Playwright). result_markdown
+      // holds the final task report; action_log is a JSON array of the
+      // tool-call timeline the agent executed (click, type, screenshot,
+      // navigate). The same markdown is mirrored to
+      // vault/web-agent/YYYY/MM/YYYY-MM-DD-<slug>.md by the route handler
+      // so it shows up in Memory search (Track B6) and the All Searches
+      // bucket (Addition 2 / Track B3). screenshots_dir is the on-disk
+      // location of the per-session PNG stream used by the live SSE view
+      // and any post-hoc audit.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS web_agent_sessions (
+          id TEXT PRIMARY KEY,
+          task TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending','running','completed','failed','cancelled')),
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          ended_at TEXT,
+          result_markdown TEXT,
+          action_log TEXT DEFAULT '[]',
+          screenshots_dir TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_web_agent_sessions_created ON web_agent_sessions(created_at DESC)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_web_agent_sessions_status ON web_agent_sessions(status)`);
+      console.log('[Migration 043] web_agent_sessions ready');
+    }
+  },
 ];
 
 /**

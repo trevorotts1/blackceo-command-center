@@ -105,7 +105,7 @@ export async function GET(request: Request) {
       return NextResponse.json({
         success: true,
         assignments: [],
-        message: 'persona_assignment table missing — run migrations to upgrade.',
+        message: 'persona_assignment table missing. Run migrations to upgrade.',
       });
     }
 

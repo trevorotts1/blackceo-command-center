@@ -111,7 +111,7 @@ export function computePerformance(sopId: string, windowDays = 30): PerformanceR
     if (negativeNotes.length > 0) {
       suggestedRevisions.push(`Address recurring complaints: ${negativeNotes.slice(0, 3).join(' | ')}`);
     } else {
-      suggestedRevisions.push('SOP is being thumbed-down but no notes were left — capture WHY on next failure.');
+      suggestedRevisions.push('SOP is being thumbed-down but no notes were left. Capture WHY on next failure.');
     }
   }
 

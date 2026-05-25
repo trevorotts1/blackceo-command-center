@@ -11,11 +11,29 @@ export function WorkspaceDashboard() {
   const [workspaces, setWorkspaces] = useState<WorkspaceStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  // PRD 3.7 white-label: company name comes from /api/company, empty until loaded.
+  const [companyName, setCompanyName] = useState('');
+  const [companyLoaded, setCompanyLoaded] = useState(false);
   const logoUrl = useLogoUrl();
 
   useEffect(() => {
     loadWorkspaces();
+    loadCompany();
   }, []);
+
+  const loadCompany = async () => {
+    try {
+      const res = await fetch('/api/company', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        const name = data?.name || data?.company?.name || '';
+        if (name) setCompanyName(name);
+      }
+    } catch {}
+    finally {
+      setCompanyLoaded(true);
+    }
+  };
 
   const loadWorkspaces = async () => {
     try {
@@ -69,11 +87,7 @@ export function WorkspaceDashboard() {
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                 </span>
               </div>
-              {/* Live Demo Badge */}
-              <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gradient-to-r from-amber-400 to-orange-500 text-white text-xs font-bold uppercase tracking-wide shadow-sm">
-                <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
-                Live Demo
-              </span>
+              {/* PRD 3.7 white-label: Live Demo badge removed. */}
             </div>
             <button
               onClick={() => setShowCreateModal(true)}
@@ -95,7 +109,14 @@ export function WorkspaceDashboard() {
             <span className="text-sm font-medium text-amber-600 uppercase tracking-wide">Command Center</span>
           </div>
           <h1 className="text-3xl font-bold text-gray-900 mb-3">
-            Welcome back, Trevor
+            {companyLoaded ? (
+              companyName ? `Welcome back to ${companyName}` : 'Welcome back'
+            ) : (
+              <span
+                aria-hidden="true"
+                className="inline-block h-8 w-72 rounded bg-gray-200 animate-pulse align-middle"
+              />
+            )}
           </h1>
           <p className="text-gray-500 text-lg max-w-2xl">
             Manage your AI workforce across all departments. Dispatch tasks, monitor progress, and review deliverables from one central hub.

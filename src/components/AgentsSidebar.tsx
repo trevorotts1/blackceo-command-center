@@ -5,14 +5,53 @@ import { Plus, ChevronRight, ChevronLeft, Zap, ZapOff, Loader2 } from 'lucide-re
 import { useMissionControl } from '@/lib/store';
 
 type FilterTab = 'all' | 'active' | 'idle';
+/**
+ * PRD Section 3.13: agent status states must include busy and degraded in
+ * addition to standby, working, and offline. We aggregate the worst per
+ * workspace and render the appropriate dot color and tooltip.
+ */
+type AgentStatus = 'standby' | 'working' | 'busy' | 'degraded' | 'offline';
 type DepartmentStatus = 'active' | 'idle';
+
+const AGENT_STATUS_STYLES: Record<AgentStatus, { dot: string; tooltip: string }> = {
+  standby: { dot: 'bg-blue-500', tooltip: 'Idle, ready for tasks' },
+  working: { dot: 'bg-emerald-500 animate-pulse', tooltip: 'Actively processing' },
+  busy: { dot: 'bg-amber-500 animate-pulse', tooltip: 'High load, fully functional but strained' },
+  degraded: { dot: 'bg-orange-500', tooltip: 'Some operations failing, intervention recommended' },
+  offline: { dot: 'bg-gray-400', tooltip: 'Unreachable' },
+};
+
+/** Order from worst to best for aggregation across a workspace's agents. */
+const STATUS_PRIORITY: AgentStatus[] = ['offline', 'degraded', 'busy', 'working', 'standby'];
+
+function worstAgentStatus(statuses: AgentStatus[]): AgentStatus {
+  for (const s of STATUS_PRIORITY) {
+    if (statuses.includes(s)) return s;
+  }
+  return 'standby';
+}
+
+function normalizeAgentStatus(value: string | undefined | null): AgentStatus | null {
+  if (
+    value === 'standby' ||
+    value === 'working' ||
+    value === 'busy' ||
+    value === 'degraded' ||
+    value === 'offline'
+  ) {
+    return value;
+  }
+  return null;
+}
 
 interface Department {
   id: string;
+  workspaceId: string;
   emoji: string;
   name: string;
   headTitle: string;
   status: DepartmentStatus;
+  agentStatus: AgentStatus;
 }
 
 interface AgentsSidebarProps {
@@ -31,31 +70,70 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
 
   const toggleMinimize = () => setIsMinimized(!isMinimized);
 
-  // Load departments dynamically from the workspaces database
+  // Load departments dynamically from the workspaces database. For each
+  // workspace we also pull its agents so we can aggregate the worst agent
+  // status (PRD 3.13) into the department's dot color.
   useEffect(() => {
+    let cancelled = false;
     const loadDepartments = async () => {
       try {
         const res = await fetch('/api/workspaces');
-        if (res.ok) {
-          const workspaces = await res.json();
-          if (Array.isArray(workspaces)) {
-            setDepartments(
-              workspaces.map((ws: { id: string; name: string; icon?: string; slug: string }) => ({
+        if (!res.ok) return;
+        const workspaces = await res.json();
+        if (!Array.isArray(workspaces)) return;
+
+        const enriched = await Promise.all(
+          workspaces.map(
+            async (ws: { id: string; name: string; icon?: string; slug: string }) => {
+              let agentStatus: AgentStatus = 'standby';
+              try {
+                const ar = await fetch(
+                  `/api/agents?workspace_id=${encodeURIComponent(ws.id)}`,
+                  { cache: 'no-store' }
+                );
+                if (ar.ok) {
+                  const agents = (await ar.json()) as Array<{ status?: string }>;
+                  if (Array.isArray(agents) && agents.length > 0) {
+                    const statuses = agents
+                      .map((a) => normalizeAgentStatus(a.status))
+                      .filter((s): s is AgentStatus => !!s);
+                    if (statuses.length > 0) {
+                      agentStatus = worstAgentStatus(statuses);
+                    }
+                  }
+                }
+              } catch {
+                // Non-fatal: leave at standby.
+              }
+              const deptStatus: DepartmentStatus =
+                agentStatus === 'working' || agentStatus === 'busy' || agentStatus === 'degraded'
+                  ? 'active'
+                  : 'idle';
+              return {
                 id: ws.slug || ws.id,
+                workspaceId: ws.id,
                 emoji: ws.icon || '📁',
                 name: ws.name,
                 headTitle: ws.name,
-                status: 'active' as DepartmentStatus,
-              }))
-            );
-          }
-        }
+                status: deptStatus,
+                agentStatus,
+              } as Department;
+            }
+          )
+        );
+        if (!cancelled) setDepartments(enriched);
       } catch {
-        // Fall back silently to empty list
+        // Fall back silently to empty list.
       }
     };
 
     loadDepartments();
+    // Refresh agent status every 30s to keep the sidebar in sync.
+    const id = setInterval(loadDepartments, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   // Load active sub-agent count
@@ -90,6 +168,11 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
       idle: 'status-idle',
     };
     return styles[status] || 'status-idle';
+  };
+
+  const dotClassFor = (dept: Department, isSelected: boolean): string => {
+    if (isSelected) return 'bg-brand-500';
+    return AGENT_STATUS_STYLES[dept.agentStatus].dot;
   };
 
   return (
@@ -206,14 +289,12 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
               >
                 <div
                   className="relative group"
-                  title={`${dept.name} - ${dept.headTitle}`}
+                  title={`${dept.name} - ${AGENT_STATUS_STYLES[dept.agentStatus].tooltip}`}
                 >
                   <span className="text-2xl">{dept.emoji}</span>
-                  {/* Status indicator */}
+                  {/* Status indicator - reflects worst agent status (PRD 3.13) */}
                   <span
-                    className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
-                      isSelected ? 'bg-brand-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
-                    }`}
+                    className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${dotClassFor(dept, isSelected)}`}
                   />
                   {/* Tooltip */}
                   <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 px-2 py-1 bg-gray-900 text-white text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50 shadow-lg">
@@ -235,14 +316,15 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
                   : 'hover:bg-gray-50'
               }`}
             >
-              <div className="flex items-center gap-3 p-2.5">
+              <div
+                className="flex items-center gap-3 p-2.5"
+                title={AGENT_STATUS_STYLES[dept.agentStatus].tooltip}
+              >
                 {/* Emoji */}
                 <div className="text-2xl relative">
                   {dept.emoji}
                   <span
-                    className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
-                      isSelected ? 'bg-brand-500' : dept.status === 'active' ? 'bg-emerald-500' : 'bg-gray-400'
-                    }`}
+                    className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${dotClassFor(dept, isSelected)}`}
                   />
                 </div>
 

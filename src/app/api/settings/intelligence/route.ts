@@ -3,9 +3,90 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '@/lib/db';
 import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
+import { openclawConfigPath } from '@/lib/platform';
 
 const DEFAULT_MODEL = 'openrouter/free';
 const DEFAULT_PERSONA = 'auto';
+
+/**
+ * Shape returned to the UI for one available model. Matches the columns the
+ * UI surfaces in the Intelligence Settings dropdowns (id, label, cost columns).
+ * The full row shape lives in `model_registry` per PRD Section 5.1.
+ */
+interface AvailableModel {
+  id: string;
+  label: string;
+  cost_per_million_input: number;
+  cost_per_million_output: number;
+  provider?: string;
+  family?: string;
+  capabilities?: string[];
+  status?: string;
+}
+
+interface ModelRegistryRow {
+  model_id: string;
+  label: string;
+  provider: string;
+  family: string | null;
+  context_window: number | null;
+  input_cost_per_million: number | null;
+  output_cost_per_million: number | null;
+  pricing_model: string;
+  capabilities: string;
+  status: string;
+}
+
+/**
+ * Read the active model catalog from `model_registry` (Migration 031).
+ *
+ * Per PRD Section 3.2 (Fix #2), this REPLACES the previous hardcoded
+ * AVAILABLE_MODELS array. The registry is populated by the weekly refresh
+ * job in `src/lib/jobs/refresh-models.ts` plus per-provider connectors in
+ * `src/lib/model-providers/`.
+ *
+ * Includes `active` and `preview` rows. Deprecated rows are excluded from
+ * the dropdown (existing assignments still resolve, but operators should
+ * not pick a deprecated model for a new assignment).
+ */
+function loadModelsFromRegistry(): AvailableModel[] {
+  try {
+    const db = getDb();
+    const rows = db
+      .prepare(
+        `SELECT model_id, label, provider, family, context_window,
+                input_cost_per_million, output_cost_per_million,
+                pricing_model, capabilities, status
+         FROM model_registry
+         WHERE status IN ('active', 'preview')
+         ORDER BY provider, label`
+      )
+      .all() as ModelRegistryRow[];
+
+    return rows.map((r) => {
+      let capabilities: string[] = [];
+      try {
+        const parsed = JSON.parse(r.capabilities);
+        if (Array.isArray(parsed)) capabilities = parsed.filter((c) => typeof c === 'string');
+      } catch {
+        // ignore malformed capability JSON
+      }
+      return {
+        id: r.model_id,
+        label: r.label,
+        cost_per_million_input: r.input_cost_per_million ?? 0,
+        cost_per_million_output: r.output_cost_per_million ?? 0,
+        provider: r.provider,
+        family: r.family ?? undefined,
+        capabilities,
+        status: r.status,
+      };
+    });
+  } catch (err) {
+    console.warn('[Intelligence] Failed to load model_registry, returning empty list:', err);
+    return [];
+  }
+}
 
 /* ── Persona details: loaded at runtime from persona-categories.json ── */
 interface PersonaCategoryEntry {
@@ -73,23 +154,15 @@ function formatPersonaLabel(id: string): string {
 }
 
 /**
- * Per-million-token pricing in USD. Sourced from each provider's public pricing
- * page (2026-05-24 snapshot). Free-tier routers report $0 even though the
- * provider may upsell paid tiers — that's intentional, the cost we display is
- * the cost the operator actually pays for THIS routed call.
+ * The hardcoded AVAILABLE_MODELS array was removed per PRD Section 3.2
+ * (Fix #2). The model catalog now lives in `model_registry` (Migration 031)
+ * and is populated by the weekly refresh job. See `loadModelsFromRegistry()`
+ * above.
  *
- * When adding a new model: include the cost columns. The intelligence
- * settings UI will surface them next to the model name so operators know what
- * each model will run them per request.
+ * The OpenClaw config enrichment block below is preserved as a fallback for
+ * fresh installs where the refresh job has not yet run. Once the registry
+ * has any rows, those take precedence.
  */
-const AVAILABLE_MODELS = [
-  { id: 'openrouter/free',                  label: 'Free Models Router',  cost_per_million_input: 0,    cost_per_million_output: 0 },
-  { id: 'moonshot/kimi-k2.5',               label: 'Kimi K2.5',           cost_per_million_input: 0.15, cost_per_million_output: 2.50 },
-  { id: 'openrouter/xiaomi/mimo-v2-pro',    label: 'MiMo V2 Pro',         cost_per_million_input: 0.50, cost_per_million_output: 2.00 },
-  { id: 'anthropic/claude-sonnet-4-6',      label: 'Claude Sonnet',       cost_per_million_input: 3.00, cost_per_million_output: 15.00 },
-  { id: 'openai-codex/gpt-5.4',             label: 'GPT 5.4',             cost_per_million_input: 2.50, cost_per_million_output: 10.00 },
-  { id: 'google/gemini-3-flash-preview',    label: 'Gemini 3 Flash',      cost_per_million_input: 0.30, cost_per_million_output: 2.50 },
-];
 
 const AVAILABLE_PERSONAS = [
   { id: 'auto', label: formatPersonaLabel('auto') },
@@ -284,13 +357,14 @@ export async function GET() {
       };
     });
 
-    // Try to enrich available models from OpenClaw config
-    const enrichedModels = [...AVAILABLE_MODELS];
+    // Load the active catalog from `model_registry`. Per PRD Section 3.2,
+    // this is the canonical source. The OpenClaw config enrichment below is
+    // a fallback for fresh installs where the weekly refresh has not yet
+    // run.
+    const enrichedModels: AvailableModel[] = loadModelsFromRegistry();
     try {
       const { existsSync, readFileSync, statSync } = await import('fs');
-      const { homedir } = await import('os');
-      const { join } = await import('path');
-      const configPath = join(homedir(), '.openclaw', 'openclaw.json');
+      const configPath = openclawConfigPath();
       if (existsSync(configPath)) {
         const stats = statSync(configPath);
         if (stats.size < 1024 * 1024) {
@@ -302,7 +376,7 @@ export async function GET() {
               if (models) {
                 for (const m of models) {
                   const fullId = `${prov}/${m.id}`;
-                  if (!enrichedModels.find(x => x.id === fullId)) {
+                  if (!enrichedModels.find((x) => x.id === fullId)) {
                     // OpenClaw config doesn't carry pricing; default to 0/0 so
                     // the UI can show "unpriced" without crashing.
                     enrichedModels.push({
@@ -310,6 +384,7 @@ export async function GET() {
                       label: m.name || m.id,
                       cost_per_million_input: 0,
                       cost_per_million_output: 0,
+                      provider: prov,
                     });
                   }
                 }
@@ -319,7 +394,7 @@ export async function GET() {
         }
       }
     } catch {
-      // Use static list
+      // Fall through with whatever the registry gave us.
     }
 
     // Try to enrich personas from persona-matrix.md
@@ -415,7 +490,7 @@ export async function PUT(request: NextRequest) {
     // ── Model Lock Protocol ────────────────────────────────────────────
     // If the target setting is locked, the caller MUST present the matching
     // X-Lock-Token. Otherwise we 423 Locked with the lock_by/lock_reason so
-    // the UI can render a clear "Locked by X for Y — request unlock?" CTA.
+    // the UI can render a clear "Locked by X for Y, request unlock?" CTA.
     const providedToken = request.headers.get('x-lock-token');
 
     const lockedConflict: Array<{
@@ -591,7 +666,7 @@ export async function PATCH(request: NextRequest) {
     if (existing.locked_by && existing.lock_token && existing.lock_token !== providedToken) {
       return NextResponse.json(
         {
-          error: 'Locked by another agent — present that agent\'s X-Lock-Token to unlock.',
+          error: 'Locked by another agent. Present that agent\'s X-Lock-Token to unlock.',
           locked_by: existing.locked_by,
         },
         { status: 423 }

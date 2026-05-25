@@ -179,7 +179,7 @@ export async function POST(request: NextRequest) {
     const slug = rawSlug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     if (!slug) {
       return NextResponse.json(
-        { success: false, message: 'slug normalized to empty — provide a valid slug.' },
+        { success: false, message: 'slug normalized to empty. Provide a valid slug.' },
         { status: 400 }
       );
     }
@@ -210,8 +210,8 @@ export async function POST(request: NextRequest) {
           mode: 'direct',
           department: result,
           note: scriptResult
-            ? `host script present but failed: ${scriptResult.stderr ?? 'unknown'} — fell back to JS-only path (steps 1-3 only; role-library / openclaw.json / brand.css NOT updated)`
-            : 'host add-department.sh not found at /data/.openclaw/skills/32-command-center-setup/scripts/add-department.sh — fell back to JS-only path (steps 1-3 only)',
+            ? `host script present but failed: ${scriptResult.stderr ?? 'unknown'}. Fell back to JS-only path (steps 1-3 only; role-library / openclaw.json / brand.css NOT updated).`
+            : 'host add-department.sh not found at /data/.openclaw/skills/32-command-center-setup/scripts/add-department.sh. Fell back to JS-only path (steps 1-3 only).',
         },
         { status: 201 }
       );

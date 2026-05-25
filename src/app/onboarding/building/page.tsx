@@ -150,7 +150,7 @@ export default function OnboardingBuildingPage() {
 
         {!isComplete && (
           <div className="text-center text-sm text-gray-500">
-            <p>You can close this tab — we&apos;ll Telegram you when it&apos;s done.</p>
+            <p>You can close this tab. We&apos;ll Telegram you when it&apos;s done.</p>
           </div>
         )}
       </div>

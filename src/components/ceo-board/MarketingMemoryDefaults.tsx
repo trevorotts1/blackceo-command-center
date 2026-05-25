@@ -23,7 +23,7 @@ const MARKETING_MEMORIES: MemoryCard[] = [
   {
     icon: <Lock className="h-5 w-5" />,
     title: 'Constraints',
-    description: 'All campaigns must use BlackCEO brand colors (navy, gold, white).',
+    description: 'All campaigns must use the configured brand colors and tone from company-config.',
     borderColor: 'border-rose-200',
     iconColor: 'text-rose-500',
   },

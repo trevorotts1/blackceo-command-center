@@ -1,4 +1,19 @@
-// Database seed script - creates initial data including the master orchestrator agent
+// Database seed script per PRD Section 3.5 (Fix #5).
+//
+// White-label deployments must not ship with any "Command Center" / demo
+// company / placeholder content. The seed therefore:
+//
+//   1. ALWAYS inserts the structural master orchestrator agent. Every
+//      install needs this regardless of branding.
+//   2. ONLY inserts demo agents, tasks, messages, and events when
+//      `SKIP_DEMO_SEED` is NOT set to 'true'. The demo content is intended
+//      for the public github.com/crshdn/mission-control demo deployment.
+//      Real client deployments set `SKIP_DEMO_SEED=true` in their env so
+//      the database boots structurally empty and Skill 23 (AI Workforce
+//      Interview) populates it for that specific client.
+//   3. NEVER inserts a "Command Center" / "BlackCEO" / placeholder company
+//      row. The companies table stays empty until Skill 23 writes the real
+//      one. The bootstrap page handles the empty-state UX.
 
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, closeDb } from './index';
@@ -90,18 +105,18 @@ If agents disagree:
 `;
 
 async function seed() {
-  console.log('🌱 Seeding database...');
+  console.log('Seeding database...');
 
   const db = getDb();
   const now = new Date().toISOString();
+  const skipDemoSeed = process.env.SKIP_DEMO_SEED === 'true';
 
-  // No hardcoded company or business entries.
-  // Company and workspaces are created by:
-  //   1. seed-workspaces.py (reads Skill 23 interview answers)
-  //   2. Auto-seed from departments.json on first boot (migrations.ts)
-  const businessId = 'default';
-
-  // Create master orchestrator agent
+  // Structural seed: master orchestrator agent always exists.
+  //
+  // No hardcoded company or business entries here. Companies are created
+  // by Skill 23 (AI Workforce Interview) or by the auto-seed from
+  // departments.json on first boot (migrations.ts). Until then the
+  // bootstrap page renders.
   const orchestratorId = uuidv4();
   db.prepare(
     `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, specialist_type, soul_md, user_md, agents_md, created_at, updated_at)
@@ -122,7 +137,23 @@ async function seed() {
     now
   );
 
-  // Create some example agents
+  // Seed department memories (structural, no demo content).
+  seedDeptMemory();
+
+  if (skipDemoSeed) {
+    console.log('SKIP_DEMO_SEED=true, skipping demo agents, tasks, conversations, events.');
+    console.log('Database seeded structurally.');
+    console.log(`   - Created Orchestrator (master agent): ${orchestratorId}`);
+    closeDb();
+    return;
+  }
+
+  // Demo seed (only when SKIP_DEMO_SEED is unset). This is for the public
+  // demo deployment only. Client installs MUST set SKIP_DEMO_SEED=true.
+  console.log('SKIP_DEMO_SEED not set, inserting demo agents, tasks, and conversations.');
+
+  const businessId = 'default';
+
   const agents = [
     { name: 'Developer', role: 'Code & Automation', emoji: '💻', desc: 'Writes code, creates automations, handles technical tasks' },
     { name: 'Researcher', role: 'Research & Analysis', emoji: '🔍', desc: 'Gathers information, analyzes data, provides insights' },
@@ -141,14 +172,12 @@ async function seed() {
     ).run(agentId, agent.name, agent.role, agent.desc, agent.emoji, 'standby', 0, 'on-call', now, now);
   }
 
-  // Create a team conversation
   const teamConvoId = uuidv4();
   db.prepare(
     `INSERT INTO conversations (id, title, type, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?)`
   ).run(teamConvoId, 'Team Chat', 'group', now, now);
 
-  // Add all agents to the team conversation
   for (const agentId of agentIds) {
     db.prepare(
       `INSERT INTO conversation_participants (conversation_id, agent_id, joined_at)
@@ -156,7 +185,6 @@ async function seed() {
     ).run(teamConvoId, agentId, now);
   }
 
-  // Create some example tasks
   const tasks = [
     { title: 'Set up development environment', status: 'done', priority: 'high' },
     { title: 'Create project documentation', status: 'in_progress', priority: 'medium' },
@@ -175,7 +203,6 @@ async function seed() {
     ).run(taskId, task.title, task.status, task.priority, assignedTo, orchestratorId, businessId, now, now);
   }
 
-  // Create initial events
   const events = [
     { type: 'system', message: 'Database seeded with initial data' },
     { type: 'agent_joined', agentId: orchestratorId, message: 'Orchestrator joined the team' },
@@ -189,7 +216,6 @@ async function seed() {
     ).run(uuidv4(), event.type, event.agentId || null, event.message, now);
   }
 
-  // Add a welcome message from the orchestrator
   db.prepare(
     `INSERT INTO messages (id, conversation_id, sender_agent_id, content, message_type, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`
@@ -197,18 +223,15 @@ async function seed() {
     uuidv4(),
     teamConvoId,
     orchestratorId,
-    "Welcome to Command Center, team! I'm your orchestrator. Let's get to work.",
+    "Welcome to Command Center, team. I am your orchestrator. Let us get to work.",
     'text',
     now
   );
 
-  // Seed department memories
-  seedDeptMemory();
-
-  console.log('✅ Database seeded successfully!');
+  console.log('Database seeded successfully.');
   console.log(`   - Created Orchestrator (master agent): ${orchestratorId}`);
-  console.log(`   - Created ${agents.length} additional agents`);
-  console.log(`   - Created ${tasks.length} sample tasks`);
+  console.log(`   - Created ${agents.length} additional demo agents`);
+  console.log(`   - Created ${tasks.length} sample demo tasks`);
   console.log(`   - Created team conversation`);
 
   closeDb();

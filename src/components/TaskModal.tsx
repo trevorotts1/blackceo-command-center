@@ -310,7 +310,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
                 </div>
                 <div className="flex-1">
                   <h4 className="text-sm font-semibold text-amber-900">
-                    Triad Rule — can&apos;t start this task yet
+                    Triad Rule, can&apos;t start this task yet
                   </h4>
                   <p className="mt-1 text-xs text-amber-800">
                     Every task needs a description, a SOP, and a persona before it can
