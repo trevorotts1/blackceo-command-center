@@ -11,7 +11,7 @@ interface CampaignSpotlightCardProps {
 const DEFAULT_IMAGE = 'https://images.unsplash.com/photo-1552664730-d307ca884978?w=800&q=80';
 
 export default function CampaignSpotlightCard({
-  title = 'The BlackCEO Summit 2025',
+  title = 'Annual Summit 2026',
   label = 'Campaign Spotlight',
   imageUrl,
 }: CampaignSpotlightCardProps) {

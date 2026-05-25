@@ -30,7 +30,7 @@ const KIND_META: Record<StudioKind, { label: string; icon: React.ReactNode; acce
     label: 'Audio',
     icon: <MicIcon size={14} />,
     accent: '#22D3EE',
-    placeholder: 'Welcome to BlackCEO Command Center. Your studio is online and ready.',
+    placeholder: 'Welcome to the Operator Console. Try generating a quick voice line.',
   },
 };
 

@@ -1105,7 +1105,7 @@ export default function DepartmentSubBoardPage() {
                   </SectionContainer>
 
                   <CampaignSpotlightCard
-                    title="The BlackCEO Summit 2025"
+                    title="Annual Summit 2026"
                     label="Campaign Spotlight"
                   />
                 </div>
