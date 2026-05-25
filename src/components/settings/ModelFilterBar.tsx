@@ -51,6 +51,19 @@ function toggle<T>(list: T[], value: T): T[] {
   return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
 }
 
+/**
+ * Map a provider slug to its user-facing display label. Slugs themselves
+ * are stable DB keys (e.g. `xai`); UI surfaces should render the friendlier
+ * label when one exists. Slug stays unchanged for DB and API contracts.
+ */
+const PROVIDER_DISPLAY_LABELS: Record<string, string> = {
+  xai: 'xAI (Grok)',
+};
+
+export function formatProviderLabel(slug: string): string {
+  return PROVIDER_DISPLAY_LABELS[slug] ?? slug;
+}
+
 export function ModelFilterBar({ models, state, onChange, visibleCount }: ModelFilterBarProps) {
   const providers = useMemo(() => {
     const set = new Set<string>();
@@ -106,7 +119,7 @@ export function ModelFilterBar({ models, state, onChange, visibleCount }: ModelF
               active={state.providers.includes(p)}
               onClick={() => onChange({ ...state, providers: toggle(state.providers, p) })}
             >
-              {p}
+              {formatProviderLabel(p)}
             </Chip>
           ))}
         </FilterRow>

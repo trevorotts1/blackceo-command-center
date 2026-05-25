@@ -13,6 +13,19 @@ import { CapabilityBadge } from './CapabilityBadge';
  * happen in the existing department picker below.
  */
 
+/**
+ * Map a provider slug to its user-facing display label. The slug itself
+ * stays unchanged (DB key and API contract); only the rendered string is
+ * adjusted for client recognition.
+ */
+const PROVIDER_DISPLAY_LABELS: Record<string, string> = {
+  xai: 'xAI (Grok)',
+};
+
+function formatProviderLabel(slug: string): string {
+  return PROVIDER_DISPLAY_LABELS[slug] ?? slug;
+}
+
 export interface ModelCardData {
   id: string;
   label: string;
@@ -124,7 +137,7 @@ export function ModelCard({ model, selected = false, onSelect }: ModelCardProps)
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         {model.provider && (
           <span className="inline-flex items-center rounded-md border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-700">
-            {model.provider}
+            {formatProviderLabel(model.provider)}
           </span>
         )}
         {model.family && (
