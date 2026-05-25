@@ -1348,6 +1348,40 @@ const migrations: Migration[] = [
       console.log('[Migration 042] research_searches ready');
     }
   },
+  {
+    id: '043',
+    name: 'add_web_agent_sessions',
+    up: (db) => {
+      console.log('[Migration 043] Adding web_agent_sessions table (Track B9 Web Agent sub-module)...');
+      // SCOPE-ADDITION Section 7.4. Backs the Operator Console Web Agent
+      // sub-module (Anthropic Computer Use + Playwright). result_markdown
+      // holds the final task report; action_log is a JSON array of the
+      // tool-call timeline the agent executed (click, type, screenshot,
+      // navigate). The same markdown is mirrored to
+      // vault/web-agent/YYYY/MM/YYYY-MM-DD-<slug>.md by the route handler
+      // so it shows up in Memory search (Track B6) and the All Searches
+      // bucket (Addition 2 / Track B3). screenshots_dir is the on-disk
+      // location of the per-session PNG stream used by the live SSE view
+      // and any post-hoc audit.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS web_agent_sessions (
+          id TEXT PRIMARY KEY,
+          task TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending','running','completed','failed','cancelled')),
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          ended_at TEXT,
+          result_markdown TEXT,
+          action_log TEXT DEFAULT '[]',
+          screenshots_dir TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_web_agent_sessions_created ON web_agent_sessions(created_at DESC)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_web_agent_sessions_status ON web_agent_sessions(status)`);
+      console.log('[Migration 043] web_agent_sessions ready');
+    }
+  },
 ];
 
 /**
