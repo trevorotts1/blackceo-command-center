@@ -2,6 +2,9 @@
 const nextConfig = {
   experimental: {
     serverComponentsExternalPackages: ['better-sqlite3'],
+    // Required in Next 14.2 to load the project-root `instrumentation.ts` file
+    // that registers in-process cron jobs on app boot (v4.0.1 P0-6).
+    instrumentationHook: true,
   },
   webpack: (config) => {
     config.externals.push({

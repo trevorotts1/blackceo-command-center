@@ -1,15 +1,9 @@
 /**
  * Weekly model-registry refresh job per PRD Section 3.4 (Fix #4).
  *
- * Status: SKELETON. Track A1 lays down the contract and the database write
- * shape. Track C4 (primary owner per PRD Section 16.4) fills in:
- *   - the node-cron schedule registration (Sunday 03:00 local)
- *   - the full provider iteration loop
- *   - the cron registration in `src/app/api/cron/register/route.ts`
- *   - the manual-trigger route `POST /api/cron/refresh-models`
- *
- * What this file currently exposes:
- *   - `refreshModels()`           run a refresh pass NOW
+ * Exposes:
+ *   - `refreshModels()`           run a refresh pass for every provider (or a
+ *                                 provided subset)
  *   - `refreshOneProvider()`      run a refresh pass for one provider
  *   - `logRefreshOutcome()`       append to `model_registry_refresh_log`
  *
@@ -28,6 +22,7 @@
 import { getDb } from '@/lib/db';
 import type { Database as BetterDatabase } from 'better-sqlite3';
 import type { ModelProvider, ProviderModel } from '@/lib/model-providers/types';
+import { ALL_PROVIDERS } from '@/lib/model-providers';
 
 export interface RefreshOutcome {
   provider: string;
@@ -231,17 +226,43 @@ export async function refreshOneProvider(provider: ModelProvider): Promise<Refre
 }
 
 /**
- * Run a refresh pass for every provider supplied. The provider registry
- * (owned by Track C2 in `src/lib/model-providers/index.ts`) will pass the
- * full list. Until that exists, callers pass an explicit array.
+ * Run a refresh pass for every provider supplied (defaults to ALL_PROVIDERS
+ * from the central registry). Uses `Promise.allSettled` so one bad connector
+ * cannot block the others. Per-provider errors are already logged inside
+ * `refreshOneProvider()` via `logRefreshOutcome()`.
  */
-export async function refreshModels(providers: ModelProvider[]): Promise<RefreshOutcome[]> {
+export async function refreshModels(
+  providers: ModelProvider[] = ALL_PROVIDERS
+): Promise<RefreshOutcome[]> {
+  const settled = await Promise.allSettled(
+    providers.map((p) => refreshOneProvider(p))
+  );
+
   const results: RefreshOutcome[] = [];
-  for (const provider of providers) {
-    // Sequential, not parallel, so a slow provider does not stack with
-    // others and we can rate-limit politely.
-    const outcome = await refreshOneProvider(provider);
-    results.push(outcome);
+  for (let i = 0; i < settled.length; i += 1) {
+    const r = settled[i];
+    if (r.status === 'fulfilled') {
+      results.push(r.value);
+    } else {
+      // refreshOneProvider catches internally, but defensively log any
+      // pathological case where the wrapper itself rejected.
+      const provider = providers[i];
+      const outcome: RefreshOutcome = {
+        provider: provider.slug,
+        success: false,
+        models_added: 0,
+        models_updated: 0,
+        models_deprecated: 0,
+        error_message: r.reason instanceof Error ? r.reason.message : String(r.reason),
+        run_at: new Date().toISOString(),
+      };
+      try {
+        logRefreshOutcome(outcome);
+      } catch (logError) {
+        console.error(`[refresh-models] failed to log outcome for ${provider.slug}:`, logError);
+      }
+      results.push(outcome);
+    }
   }
   return results;
 }
