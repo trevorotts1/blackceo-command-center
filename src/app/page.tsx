@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -37,7 +37,9 @@ export default function HomePage() {
   const brand = useCompanyBrand();
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isOnline, setIsOnline] = useState(true);
-  const [companyName, setCompanyName] = useState('BlackCEO');
+  // PRD 3.7: initial state must be empty so white-label deployments never flash "BlackCEO".
+  const [companyName, setCompanyName] = useState('');
+  const [companyLoaded, setCompanyLoaded] = useState(false);
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
   const cardBackground = hasBrand
@@ -58,9 +60,13 @@ export default function HomePage() {
         const res = await fetch('/api/company', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
-          if (data.name) setCompanyName(data.name);
+          const name = data?.name || data?.company?.name || '';
+          if (name) setCompanyName(name);
         }
       } catch {}
+      finally {
+        setCompanyLoaded(true);
+      }
     }
     fetchCompany();
   }, []);
@@ -82,29 +88,30 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, []);
 
+  // PRD 3.8: 5-card landing layout. Card 1 + 2 titles/subtitles fixed by spec.
   const cards: EntryCard[] = [
     {
-      title: `${companyName} Kanban`,
-      description: 'Task Management Board',
-      detail: 'See all active tasks, work in progress, and completed items across every department in one unified view. This is where work gets done.',
+      title: 'View All Tasks',
+      description: 'Master view with department sidebar',
+      detail: 'Every active task across every department in one Kanban. Use the left sidebar to switch the focused department without losing the view.',
       icon: <Kanban className="w-7 h-7 text-white" />,
       gradient: 'from-indigo-500 via-purple-500 to-pink-500',
-      route: '/kanban',
-      cta: 'Open Kanban Board',
+      route: '/tasks/all',
+      cta: 'Open All Tasks',
     },
     {
-      title: `${companyName} Departments`,
-      description: 'Department View',
-      detail: 'Browse all departments. Click any department to open its dedicated Kanban board, agents, and live feed.',
+      title: 'Departments',
+      description: 'Focus mode, one department at a time',
+      detail: 'Pick a department, get a department-only Kanban and department-only KPIs. Use the back button to return to the picker.',
       icon: <LayoutGrid className="w-7 h-7 text-white" />,
       gradient: 'from-emerald-400 via-teal-500 to-cyan-500',
-      route: '/workspace',
-      cta: 'View Departments',
+      route: '/tasks/by-department',
+      cta: 'Pick a Department',
     },
     {
-      title: `${companyName} Performance`,
-      description: 'CEO Performance Board',
-      detail: 'Company-wide analytics, department grades, agent roster, KPIs, benchmarks, and strategic recommendations. Your executive overview.',
+      title: 'Performance Board',
+      description: 'CEO Performance Overview',
+      detail: 'Company-wide analytics, department grades, agent roster, KPIs, benchmarks, and strategic recommendations.',
       icon: <BarChart3 className="w-7 h-7 text-white" />,
       gradient: 'from-amber-400 via-orange-500 to-red-500',
       route: '/ceo-board',
@@ -118,6 +125,15 @@ export default function HomePage() {
       gradient: 'from-violet-500 via-purple-500 to-fuchsia-500',
       route: '/settings/intelligence',
       cta: 'Configure AI',
+    },
+    {
+      title: 'Company Settings',
+      description: 'Company configuration',
+      detail: 'Update company name, brand colors, logo, and white-label settings for this deployment.',
+      icon: <Settings className="w-7 h-7 text-white" />,
+      gradient: 'from-slate-500 via-gray-600 to-zinc-700',
+      route: '/settings/company',
+      cta: 'Open Settings',
     },
   ];
 
@@ -133,7 +149,16 @@ export default function HomePage() {
               <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
                 <BarChart3 className="w-5 h-5 text-white" />
               </div>
-              <span className="text-gray-900 font-bold text-xl tracking-tight">{companyName}</span>
+              {companyLoaded ? (
+                companyName ? (
+                  <span className="text-gray-900 font-bold text-xl tracking-tight">{companyName}</span>
+                ) : null
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="inline-block h-5 w-32 rounded bg-gray-200 animate-pulse"
+                />
+              )}
             </div>
           )}
           <div className="h-6 w-px bg-gray-200 mx-2" />
@@ -157,11 +182,11 @@ export default function HomePage() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col items-center justify-center px-6 py-4">
-        <div className="max-w-5xl w-full">
+        <div className="max-w-7xl w-full">
           <Breadcrumb items={[{ label: 'Home' }]} />
         </div>
         <motion.div
-          className="max-w-5xl w-full"
+          className="max-w-7xl w-full"
           initial="hidden"
           animate="visible"
           variants={containerVariants}
@@ -169,7 +194,14 @@ export default function HomePage() {
           {/* Title */}
           <motion.div className="text-center mb-12" variants={cardVariants}>
             <h2 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
-              Welcome to {companyName}
+              {companyLoaded ? (
+                companyName ? `Welcome to ${companyName}` : 'Welcome to your Command Center'
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="inline-block h-10 sm:h-12 w-72 rounded bg-gray-200 animate-pulse align-middle"
+                />
+              )}
             </h2>
             <p className="text-gray-500 text-lg max-w-xl mx-auto">
               Choose where you want to go
@@ -178,7 +210,7 @@ export default function HomePage() {
 
           {/* Entry Cards */}
           <motion.div
-            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 items-stretch"
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 items-stretch"
             variants={containerVariants}
           >
             {cards.map((card) => (
