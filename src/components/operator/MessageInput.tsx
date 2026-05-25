@@ -22,13 +22,14 @@
  * parent can drive the SSE fetch and persist state. The component does
  * not own any chat history.
  *
- * Track B8 (Call Mode) will add a phone button next to the mic in a
- * separate follow-up commit. The layout intentionally keeps space to the
- * right of the mic so that addition is a small visual delta.
+ * The phone button next to the mic links into Call Mode (`/operator/call`,
+ * shipped by Track B8). Added in the Wave 1 orchestrator follow-up so the
+ * Bridge composer can hand off to hands-free voice without leaving the row.
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Send, Square } from 'lucide-react';
+import Link from 'next/link';
+import { Send, Square, Phone } from 'lucide-react';
 import VoiceButton from './VoiceButton';
 
 interface Props {
@@ -91,6 +92,19 @@ export default function MessageInput({
         style={{ borderColor: '#E5E7EB' }}
       >
         <VoiceButton onTranscript={handleVoice} size={38} />
+        <Link
+          href="/operator/call"
+          aria-label="Open Call Mode for hands-free voice conversation"
+          title="Open Call Mode"
+          className="grid place-items-center rounded-lg border bg-bcc-white text-bcc-text-muted hover:text-bcc-text hover:border-bcc-text-muted transition"
+          style={{
+            width: 38,
+            height: 38,
+            borderColor: '#E5E7EB',
+          }}
+        >
+          <Phone size={17} />
+        </Link>
         <textarea
           ref={taRef}
           value={input}

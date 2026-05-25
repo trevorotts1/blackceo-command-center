@@ -482,3 +482,15 @@ Files added (all new, no overlap with other Wave 1 tracks):
 11. **Voice input on add-goal and journal box: deferred.** PRD 4.7 calls for voice input on both. Track B8 (Call Mode) owns the Web Speech API integration and ships the shared `src/lib/voice/*` module. Wiring a mic button into `GoalsList.tsx` and `JournalEntry.tsx` is a five-line follow-up once B8 lands. The forms are designed so a mic button slots in next to the submit button without layout changes.
 
 12. **Background reindex job: deferred to FTS5 swap.** PRD 4.7 says "Background job re-indexes hourly." Lexical search has nothing to reindex, so the job is a no-op until FTS5 is wired. When FTS5 lands the cron hook goes in `src/lib/jobs/` (Track A1's domain) and triggers `populateFts5()` against the same tables this module reads.
+
+
+---
+
+## Wave 1 orchestrator follow-up (2026-05-25)
+
+Three small atomic commits to wire cross-track touches the parallel Wave 1 tracks could not own themselves.
+
+### 1. BridgeChat phone button (Addition 5 cross-track touch)
+
+`MessageInput.tsx` now mounts a `Phone` button between the `VoiceButton` mic and the textarea. The button is an anchor to `/operator/call` (the Call Mode route Track B8 shipped). Visual style matches the idle `VoiceButton`: same 38x38 footprint, same `#E5E7EB` border, same `#FFFFFF` background, `text-bcc-text-muted` icon color with a subtle hover into `text-bcc-text`. Implemented as a Next.js `Link` rather than a button + `router.push` so it remains a native middle-click / cmd-click target and works without JS. The file header comment that reserved the slot for the follow-up was updated to reflect the new wiring.
+
