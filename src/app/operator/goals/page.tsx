@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import GoalsList from '@/components/operator/GoalsList';
 
 export const metadata: Metadata = {
-  title: 'Goals — Operator Console',
+  title: 'Goals | Operator Console',
   description: 'Personal goal tracker, mirrored to the operator vault.',
 };
 

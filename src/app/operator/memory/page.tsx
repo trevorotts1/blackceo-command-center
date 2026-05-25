@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import MemorySearch from '@/components/operator/MemorySearch';
 
 export const metadata: Metadata = {
-  title: 'Memory — Operator Console',
+  title: 'Memory | Operator Console',
   description: 'Full-text search across the vault, scratch dirs, chats, journal, goals, research, tasks, and personas.',
 };
 

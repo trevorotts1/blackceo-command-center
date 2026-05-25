@@ -238,7 +238,7 @@ export function comDispatch(
       agentName: masters[0].name,
       department: 'CEO / COM',
       score: 0,
-      reason: `No department match — routed to CEO / COM master agent (load: ${masters[0].active_tasks} tasks)`,
+      reason: `No department match. Routed to CEO / COM master agent (load: ${masters[0].active_tasks} tasks)`,
     };
   }
 

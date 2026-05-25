@@ -184,7 +184,7 @@ export async function writeJournalMirror(entry: JournalEntry): Promise<string | 
 
 function renderEntry(entry: JournalEntry): string {
   const lines: string[] = [];
-  lines.push(`# Journal — ${entry.entry_date}`);
+  lines.push(`# Journal: ${entry.entry_date}`);
   lines.push('');
   lines.push(`_Last updated ${entry.updated_at}._`);
   lines.push('');

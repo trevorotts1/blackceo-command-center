@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import JournalEntry from '@/components/operator/JournalEntry';
 
 export const metadata: Metadata = {
-  title: 'Journal — Operator Console',
+  title: 'Journal | Operator Console',
   description: 'Daily journal entries mirrored to the operator vault.',
 };
 

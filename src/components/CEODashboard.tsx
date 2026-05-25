@@ -356,7 +356,7 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
 
               {performance.trend_series.length === 0 ? (
                 <div className="flex h-40 items-center justify-center rounded-2xl border border-dashed border-gray-200 bg-gray-50 text-sm text-gray-400">
-                  Not enough history yet — trends will populate as tasks are completed.
+                  Not enough history yet. Trends will populate as tasks are completed.
                 </div>
               ) : (
                 <div className="h-64">
@@ -385,7 +385,7 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
                   label="Avg completion time"
                   value={
                     performance.avg_completion.n === 0
-                      ? '—'
+                      ? 'N/A'
                       : `${performance.avg_completion.hours.toFixed(1)}h`
                   }
                   hint={`Across ${performance.avg_completion.n} completed tasks`}

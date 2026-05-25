@@ -207,7 +207,7 @@ export function PersonaGovernanceBoard() {
                           {(a.switch_count ?? 0) >= 5 && (
                             <span
                               className="text-xs px-1.5 py-0.5 bg-amber-100 border border-amber-200 rounded text-amber-700"
-                              title="Stale assignment — persona has rotated 5+ times here"
+                              title="Stale assignment (persona has rotated 5+ times here)"
                             >
                               high churn
                             </span>
@@ -229,7 +229,7 @@ export function PersonaGovernanceBoard() {
                       </div>
                       <div className="flex flex-col items-end">
                         <div className={`text-sm font-semibold ${scoreColor(a.last_score)}`}>
-                          {a.last_score != null ? a.last_score.toFixed(2) : '—'}
+                          {a.last_score != null ? a.last_score.toFixed(2) : 'N/A'}
                         </div>
                         {a.verification_last_score != null && (
                           <div

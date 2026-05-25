@@ -15,7 +15,7 @@ import BridgeChat from '@/components/operator/BridgeChat';
  */
 
 export const metadata: Metadata = {
-  title: 'Bridge — Operator Console',
+  title: 'Bridge | Operator Console',
   description:
     'Direct chat with Claude Code, Codex, Antigravity, Hermes, Gemini, Free Claude Code, and OpenClaw.',
 };

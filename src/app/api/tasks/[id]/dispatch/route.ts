@@ -162,7 +162,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
 **Agent Model:** ${settings.model}
-**Agent Persona:** ${settings.persona === 'auto' ? 'AUTO-SELECT — Run the 5-Layer Persona Matching Protocol before starting:' : settings.persona}
+**Agent Persona:** ${settings.persona === 'auto' ? 'AUTO-SELECT. Run the 5-Layer Persona Matching Protocol before starting:' : settings.persona}
 ${settings.persona === 'auto' ? `
 1. **Layer 1 (Company Mission):** Does this persona align with the company's stated mission?
 2. **Layer 2 (Owner Values):** Does this persona match the owner's beliefs and style (see USER.md)?
