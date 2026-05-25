@@ -175,13 +175,13 @@ PRD Sections 3.12 and 3.13.
 
 12. **`?force=1` is intentionally GET-only.** The API contract is read-only. A POST endpoint that triggers probes could be a future addition for the "Re-run bootstrap" button mentioned in PRD 3.6, but that is a different action and belongs to Track Install.
 
-## Wave 1 B7 (Research sub-module — xAI Grok Live Search)
+## Wave 1 B7 (Research sub-module , xAI Grok Live Search)
 
 SCOPE-ADDITION Section 5. Pre-wave: migration 042 was committed alone first to unblock B9 (migration 043) without single-writer collisions on `src/lib/db/migrations.ts`.
 
 ### Decisions outside the explicit spec
 
-1. **Migration 042 uses `id TEXT PRIMARY KEY`.** SCOPE-ADDITION 5.3 specifies TEXT; the inline dispatch brief said INTEGER AUTOINCREMENT. The scope doc is the source of truth, and TEXT lines up with the v4.0 convention (every operator-console table — operator_goals, operator_journal_entries, operator_chat_sessions, notebooks, etc.) uses TEXT primary keys with `randomUUID()` from the route handler. INTEGER would have been a one-off across this slice of the schema.
+1. **Migration 042 uses `id TEXT PRIMARY KEY`.** SCOPE-ADDITION 5.3 specifies TEXT; the inline dispatch brief said INTEGER AUTOINCREMENT. The scope doc is the source of truth, and TEXT lines up with the v4.0 convention (every operator-console table , operator_goals, operator_journal_entries, operator_chat_sessions, notebooks, etc.) uses TEXT primary keys with `randomUUID()` from the route handler. INTEGER would have been a one-off across this slice of the schema.
 
 2. **xAI provider is called inline by the search route.** Track C2 (Wave 2) owns the canonical xAI provider connector. Until it lands, `src/app/api/operator/research/search/route.ts` calls `https://api.x.ai/v1/chat/completions` directly using the OpenAI-compatible payload shape, with `search_parameters: { mode: 'on', return_citations: true, max_search_results }`. The route resolves the model via `listModels({ provider: 'xai' })` so once C2 populates the registry, the route picks the right grok variant without code changes; absent a registry hit it falls back to the string `grok-4-fast`. C2 can replace the inline `fetch` with a typed provider client without touching the route signature.
 
@@ -296,8 +296,87 @@ PRD Section 4.5 + Section 16.4 ownership list.
 
 7. **`STUDIO_FIXTURE_<KIND>_PATH` env vars short-circuit provider calls.** Set `STUDIO_FIXTURE_IMAGE_PATH=/tmp/test.png` and the image job copies that file verbatim into the vault and reports `succeeded`. Mirrors the `X_AI_FIXTURE_JSON_PATH` pattern Track B7 used so CI / offline development can exercise the full UI flow without a network round trip.
 
-8. **No SSE / WebSocket — UI polls every 1.5s.** PRD 4.5 mentions "polls or subscribes via SSE". SSE adds a runtime dependency on a long-lived connection that we do not have a framework helper for yet (the OpenClaw client uses websockets but that is a different transport). Polling at 1.5s gives sub-2s UX for typical 8-30s generations with negligible server load (one row read per tick). When a global SSE substrate lands, swap `setInterval` in `StudioCanvas` for an `EventSource`.
+8. **No SSE / WebSocket , UI polls every 1.5s.** PRD 4.5 mentions "polls or subscribes via SSE". SSE adds a runtime dependency on a long-lived connection that we do not have a framework helper for yet (the OpenClaw client uses websockets but that is a different transport). Polling at 1.5s gives sub-2s UX for typical 8-30s generations with negligible server load (one row read per tick). When a global SSE substrate lands, swap `setInterval` in `StudioCanvas` for an `EventSource`.
 
 9. **Output URL is served via the existing `/api/media/file?path=` endpoint.** Donor `MediaView` uses this route. PRD 4.5 does not specify a new endpoint, and the existing route already enforces a vault-root scope check. Reusing it avoids building a parallel preview pipeline and keeps download semantics identical to the Hermes media pages.
 
 10. **No thumbnail generation.** PRD 4.5 says "a thumbnail (for images and videos) is generated using ffmpeg". For images we just display the original (browsers handle thumbnailing). For videos we set `preload="metadata"` and let the browser draw the first frame, which is the standard pattern and avoids spawning a child process per job. Real ffmpeg thumbnails belong in a follow-up after the install script's ffmpeg dependency is verified across Mac Mini + VPS Docker.
+
+## Depth 2 Wave 1, Track B8 (Call Mode)
+
+SCOPE-ADDITION Section 6. Half-duplex push-to-talk voice call UI sitting on top of the existing Bridge agents.
+
+Files added (all new, no overlap with other tracks):
+
+- `src/app/operator/call/page.tsx` (route placeholder that mounts the full-screen modal)
+- `src/components/operator/CallMode.tsx` (full-screen call UI: animated waveform, live transcript, End call, voice + provider pickers)
+- `src/lib/voice/vad.ts` (Web Audio API VAD wrapper, 1.5s silence-after-speech trigger)
+- `src/lib/voice/tts-streaming.ts` (client-side TTS abstraction over `/api/operator/tts` with browser fallback)
+- `src/app/api/operator/tts/route.ts` (server proxy; provider priority + fallback)
+
+### Decisions outside the PRD's explicit spec
+
+1. **Track-isolated build, no BridgeChat edit.** Section 6.5 permits B8 to add the phone button to `src/components/operator/BridgeChat.tsx` directly. The orchestrator brief overrode that: B2 owns BridgeChat exclusively in Wave 1, and the phone button wiring is a separate follow-up commit after both B2 and B8 land. I shipped `CallMode.tsx` as a fully standalone modal. Track B1 already pointed the operator landing tile and the sidebar at `/operator/call`, and that route now renders the modal immediately and routes back to `/operator` on End call. The phone-button wire is a five-line change in BridgeChat (import + state + onClick that renders `<CallMode />`); the integration step or a B2 follow-up commit will do that.
+
+2. **TTS provider scope narrowed to OpenAI + ElevenLabs + browser.** SCOPE-ADDITION 6.3 lists five providers (OpenAI, Fish Audio, xAI voice, ElevenLabs, browser). The orchestrator brief only required ElevenLabs, OpenAI TTS, and browser-native fallback. I wired all three end-to-end and left Fish Audio + xAI as documented switch-statement extension points in `src/app/api/operator/tts/route.ts`. Adding either is one `case` branch plus one `isProviderConfigured` line. The priority order in `priorityOrder()` and `DEFAULT_CALL_TTS_PROVIDER` vocabulary still recognize all five values so a future addition does not break operator preferences stored in localStorage.
+
+3. **`src/lib/voice/tts-streaming.ts` instead of the spec's `tts-router.ts` + per-provider files.** SCOPE-ADDITION 6.5 lists `tts-router.ts` plus five per-provider files. The orchestrator brief replaced that with a single `tts-streaming.ts`. I followed the brief: one client-side TTS abstraction (`listTtsProviders`, `speak`) sitting on top of the server proxy at `/api/operator/tts`. The provider-specific HTTP code lives inside the API route (`synthesizeOpenAi`, `synthesizeElevenLabs`) since that is the only side of the wire that needs the API keys. This keeps the surface much smaller and matches the orchestrator-mandated file list exactly.
+
+4. **TTS playback via Blob, not MediaSource.** The spec talks about streaming TTS. True MSE chunk-by-chunk streaming works in Chromium but breaks on Safari's stricter MSE codec policy for MP3, and the TTFB savings are < 200ms for a typical agent reply. I collect the upstream response into a Blob and play it through `new Audio()`. This works in every modern browser including iOS Safari. If TTFB becomes a real problem, the route can be swapped to PCM + Web Audio buffering without touching `CallMode.tsx`.
+
+5. **VAD: simple RMS threshold, browser-only.** SCOPE-ADDITION 6.2 says "simple browser-side `MediaStreamAudioSourceNode` + AnalyserNode threshold check". I implemented it that way: 1024-sample float buffer, RMS energy, threshold 0.015, 1.5s silence-after-speech trigger. No noise floor adaptation. The threshold is tuned for typical desktop mic levels; if a deployment has a noisy room the operator can speak louder or future work can add a calibration step.
+
+6. **Per-turn mic acquisition.** Each turn calls `getUserMedia()` fresh and tears the stream down on silence. This is slightly more allocation than holding one stream open for the whole call, but it guarantees the VAD analyser sees a clean stream every turn (some browsers throttle the AnalyserNode while playback is active on the same context). Cost is a single permission-cached `getUserMedia()` call per turn.
+
+7. **`SpeechRecognition` ambient typings inlined in CallMode.tsx.** Next.js + TypeScript do not bundle Web Speech API types. Rather than add `@types/dom-speech-recognition` to the dependency list, I declared the minimal interface surface area we call (`continuous`, `interimResults`, `lang`, `onresult`, `onerror`, `start`, `stop`) at the bottom of `CallMode.tsx`. If another file ever needs these types, lift them into `src/types/speech.d.ts`.
+
+8. **Call-turn endpoint is referenced but not built by this track.** When the operator's utterance is ready, CallMode POSTs to `/api/operator/bridge/call-turn` for the agent reply. That route is owned by Track B2 (Bridge). Until B2 ships it, `sendUtterance()` falls back to a polite "endpoint not wired yet" line so the call loop still exercises VAD + TTS end-to-end. Callers or tests can pass a custom `onUserUtterance` prop to bypass the fetch entirely.
+
+9. **Provider + voice preference persisted to localStorage.** Section 6.3 requires the operator's TTS pick to survive page refreshes. I use `bcc.call.tts.provider` and `bcc.call.tts.voice` keys. The picker only shows providers with `available: true` in the `/api/operator/tts` GET response, so a stored pick for a provider whose key was removed automatically falls back to the first available provider on next mount.
+
+10. **Voice list for OpenAI is hardcoded.** The OpenAI TTS API does not expose a `/voices` endpoint; the six built-in voices (`alloy, echo, fable, onyx, nova, shimmer`) are documented in the model card and stable across releases. The picker exposes them inline. ElevenLabs voices are operator-keyed and would require a `/voices` proxy round trip; for now the operator's `ELEVENLABS_VOICE_ID` env value is used and the voice picker hides for that provider. Track C2 can add a `GET /api/operator/tts/voices?provider=elevenlabs` later if richer voice management is wanted.
+
+### Pending dependencies and env vars
+
+No new npm dependencies. Web Speech API, Web Audio API, and `fetch` are all browser-built-in. New env vars to add to `.env.example` by the integration step:
+
+    DEFAULT_CALL_TTS_PROVIDER=openai
+    OPENAI_TTS_VOICE=alloy
+    OPENAI_TTS_MODEL=gpt-4o-mini-tts
+    ELEVENLABS_API_KEY=
+    ELEVENLABS_VOICE_ID=
+
+`OPENAI_API_KEY` is already in `.env.example` from earlier tracks; the TTS route reuses it. The route is intentionally tolerant of any missing key (it returns 503 with a clear message telling the client to use browser fallback), so an operator with zero cloud keys can still complete a call.
+
+## Depth 2 Wave 1, Track B3 (Operator Console Workspace + Buckets)
+
+### Decisions outside the PRD's explicit spec
+
+1. **One unified workspace API, not per-agent.** PRD Section 4.4 lists per-agent `src/app/api/operator/[agent]/workspace/route.ts` plus per-agent preview catch-alls. The B3 brief specified the unified shape under `/api/operator/workspace/{list,file,buckets}` with `agent` as a query parameter. I followed the brief because it produces seven fewer API folders and keeps the security guardrail (`resolveSafe`) in one place. The buckets view also benefits from a single agent-agnostic file URL builder. If a future track wants the per-agent catch-all preview for HTML asset resolution inside iframes, it can be added later without rewriting the listing API.
+
+2. **Path-based preview through query params, not catch-all.** Donor `04-WORKSPACE-PATTERN.md` uses `/api/<agent>/preview/[...path]` so HTML's relative asset resolution works inside an iframe. The unified API uses `?agent=&path=` instead. Trade-off: HTML files previewed with `srcDoc` cannot resolve relative `<link>`/`<script>` URLs to the same endpoint. Mitigation: the HTML preview is rendered as `srcDoc` (sandboxed) which inlines the content the operator already fetched. Multi-asset HTML apps belong in the "All Apps" bucket where they can be opened in a dedicated app preview later. If the operator needs full asset resolution today, the `Source` toggle exposes the file content as raw text.
+
+3. **HTTP Range support in the file route.** The donor pattern documents Range for video scrub. I kept that capability on the unified file route: any binary kind that the browser requests with `Range:` gets a 206 response with `Content-Range`. Non-Range requests get a normal 200. Same handler, no duplication.
+
+4. **Buckets read research_searches but never write it.** Per the brief, Track B7 owns the write side of `research_searches`. `buckets.ts` calls `listResearchSearches({ limit: 200 })` read-only and wraps it in try/catch so a fresh database (Migration 042 not yet applied) does not crash the buckets endpoint.
+
+5. **Vault file URL placeholder.** Studio and Research files surface in buckets through a `/api/operator/vault/file?source=&path=` URL. That route is NOT in Track B3's ownership; Track B6 (Memory) is the most natural owner. Until B6 ships it, image/video thumbnails for vault items will 404, but the listing itself works. This is documented inline in `buckets.ts`.
+
+6. **Markdown preview deps are import-time, runtime-pending.** `react-markdown`, `remark-gfm`, `rehype-highlight`, and `highlight.js` are PRD 0.3 pending. They are imported in `FilePreview.tsx` with one `@ts-expect-error` per import. TypeScript is happy; `npm run build` will fail until the deps install (same posture as Track B1's `cmdk` posture).
+
+7. **Bucket of `apps` operates on directories.** Section 3 of SCOPE-ADDITION.md defines an "App" as any directory containing `index.html`. The bucket aggregator groups files by parent directory across all agent scratch roots and emits one app entry per matching directory. The entry's `fileUrl` points at the `index.html` itself so the existing file API still serves it.
+
+8. **`text` files split between Documents and Code.** SCOPE-ADDITION.md puts `.txt` in Documents and `.json`/`.yaml` in Code. The aggregator's classifier marks both as `kind: 'text'` or `kind: 'code'`. The buckets router treats `.txt` (via the `text` kind) as Documents and everything else text-flagged as Code, so `.json`/`.yaml` land in Code as specified.
+
+9. **No write API.** PRD's pattern includes `POST /api/<agent>/workspace { name }` for project creation. Project creation comes from the Bridge agent (Track B2) pinning `cwd`, not from the Workspace UI. I omitted the POST. If Bridge needs an explicit "scratch this project" endpoint later it can be added without touching the listing/file/buckets routes.
+
+### Pending dependencies
+
+These are referenced by Track B3 code but NOT yet in `package.json` (consistent with PRD 0.3 pending):
+
+  - `react-markdown` (Addition 1 markdown preview), imported by `src/components/operator/FilePreview.tsx`
+  - `remark-gfm` (GitHub Flavored Markdown plugin), imported by `src/components/operator/FilePreview.tsx`
+  - `rehype-highlight` (code block syntax highlighting), imported by `src/components/operator/FilePreview.tsx`
+  - `highlight.js` (transitive dep of `rehype-highlight`)
+
+All four are React 18 compatible at their current versions (`react-markdown@9.x`, `remark-gfm@4.x`, `rehype-highlight@7.x`, `highlight.js@11.x`).
