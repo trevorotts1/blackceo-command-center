@@ -13,67 +13,34 @@
  */
 
 import { queryAll, queryOne, run, transaction } from './db';
+import type {
+  ModelCapability,
+  ModelStatus,
+  ModelPricingModel,
+  ModelRegistryEntry,
+  ModelRegistryUpsertInput,
+  ModelRegistryListOptions,
+  UpsertOutcome,
+  BulkUpsertResult,
+  ModelRegistryRefreshLogEntry,
+} from './model-registry-types';
 
-// Canonical UNION capability vocabulary. Single source of truth shared with
-// `src/lib/model-providers/types.ts` (producer side) and the UI badge / filter
-// (consumer side). v4.0 Depth 3 Track B aligned these three previously
-// divergent vocabularies.
-//
-// Stored as a JSON array of strings in the `capabilities` column. The column
-// accepts any string so future capabilities can be added without a code
-// change, but producers and consumers should stick to the list below.
-export const MODEL_CAPABILITIES = [
-  // Output kinds
-  'text',
-  'embeddings',
-  'image_generation',
-  'video_generation',
-  'audio_generation',
-  'audio_transcription',
-  // Input kinds
-  'vision',
-  'audio_input',
-  // Behaviors
-  'streaming',
-  'reasoning',
-  'tool_use',
-  'structured_output',
-  'long_context',
-  'code_execution',
-  'web_search',
-  'computer_use',
-] as const;
-
-export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
-
-export type ModelStatus = 'active' | 'deprecated' | 'preview' | 'unavailable';
-
-export type ModelPricingModel = 'per_token' | 'flat_rate_plan' | 'free';
-
-/**
- * Mirrors the migration 031 column set, with JSON columns deserialized.
- *
- * `capabilities` is stored as a JSON array of strings in SQLite and surfaced
- * as a typed string array here. `raw_metadata` is stored as JSON text and
- * surfaced as an arbitrary object so callers don't have to re-parse.
- */
-export interface ModelRegistryEntry {
-  id: number;
-  model_id: string;
-  label: string;
-  provider: string;
-  family: string | null;
-  context_window: number | null;
-  input_cost_per_million: number | null;
-  output_cost_per_million: number | null;
-  pricing_model: ModelPricingModel;
-  pricing_source: string;
-  capabilities: ModelCapability[];
-  status: ModelStatus;
-  added_at: string;
-  last_seen_at: string;
-  raw_metadata: Record<string, unknown>;
-}
+// Re-export the client-safe types and constants so existing server-side
+// callers that `import { ... } from '@/lib/model-registry'` keep working.
+// Client code should import directly from `'@/lib/model-registry-types'`
+// to avoid pulling the DB module into the browser bundle.
+export {
+  MODEL_CAPABILITIES,
+  type ModelCapability,
+  type ModelStatus,
+  type ModelPricingModel,
+  type ModelRegistryEntry,
+  type ModelRegistryUpsertInput,
+  type ModelRegistryListOptions,
+  type UpsertOutcome,
+  type BulkUpsertResult,
+  type ModelRegistryRefreshLogEntry,
+} from './model-registry-types';
 
 /**
  * Raw row shape as returned by better-sqlite3 before JSON decode.
@@ -94,44 +61,6 @@ interface ModelRegistryRow {
   added_at: string;
   last_seen_at: string;
   raw_metadata: string;
-}
-
-/**
- * Input shape for upsert. `model_id` is the natural key (unique constraint
- * from migration 031). Everything else is optional on update; on insert the
- * non-nullable columns default per the schema.
- */
-export interface ModelRegistryUpsertInput {
-  model_id: string;
-  label: string;
-  provider: string;
-  family?: string | null;
-  context_window?: number | null;
-  input_cost_per_million?: number | null;
-  output_cost_per_million?: number | null;
-  pricing_model?: ModelPricingModel;
-  pricing_source?: string;
-  capabilities?: ModelCapability[];
-  status?: ModelStatus;
-  raw_metadata?: Record<string, unknown>;
-}
-
-/**
- * Filters supported by `listModels`. All are AND-combined.
- *
- * - `provider`: exact match on the provider slug
- * - `capability`: model must include this capability tag
- * - `status`: defaults to 'active' unless explicitly overridden (pass `null`
- *   to list models in every status, useful for admin views)
- * - `family`: exact match on the family column
- */
-export interface ModelRegistryListOptions {
-  provider?: string;
-  capability?: ModelCapability | string;
-  status?: ModelStatus | null;
-  family?: string;
-  limit?: number;
-  offset?: number;
 }
 
 function decodeRow(row: ModelRegistryRow): ModelRegistryEntry {
@@ -262,12 +191,6 @@ export function listProviders(): string[] {
 }
 
 /**
- * Result of an upsert. `inserted` means a new row was created; `updated`
- * means the existing row was rewritten.
- */
-export type UpsertOutcome = 'inserted' | 'updated';
-
-/**
  * Insert-or-update a single model. The natural key is `model_id`. Updates
  * always bump `last_seen_at` to now so the weekly refresh job can detect
  * stale entries (those not seen this run = deprecated).
@@ -341,15 +264,6 @@ export function upsertModel(input: ModelRegistryUpsertInput): UpsertOutcome {
 }
 
 /**
- * Aggregate counters returned by `bulkUpsertModels`. Mirrors the column names
- * on `model_registry_refresh_log` so the refresh cron can log directly.
- */
-export interface BulkUpsertResult {
-  models_added: number;
-  models_updated: number;
-}
-
-/**
  * Bulk upsert wrapped in a single SQLite transaction. Use this from the
  * weekly refresh job so a provider's full catalog is applied atomically.
  */
@@ -391,21 +305,6 @@ export function markMissingAsDeprecated(provider: string, seenModelIds: string[]
     [provider, ...seenModelIds]
   );
   return result.changes;
-}
-
-/**
- * Most recent refresh log row per provider. Used by the System Status Panel
- * and the Model Configuration screen ("last refreshed at" + success badge).
- */
-export interface ModelRegistryRefreshLogEntry {
-  id: number;
-  run_at: string;
-  provider: string;
-  success: boolean;
-  models_added: number;
-  models_updated: number;
-  models_deprecated: number;
-  error_message: string | null;
 }
 
 interface ModelRegistryRefreshLogRow {

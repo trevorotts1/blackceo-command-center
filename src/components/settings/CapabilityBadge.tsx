@@ -19,7 +19,7 @@ import {
   MousePointerClick,
   type LucideIcon,
 } from 'lucide-react';
-import { MODEL_CAPABILITIES, type ModelCapability } from '@/lib/model-registry';
+import { MODEL_CAPABILITIES, type ModelCapability } from '@/lib/model-registry-types';
 
 /**
  * CapabilityBadge - single capability pill used on ModelCard.
