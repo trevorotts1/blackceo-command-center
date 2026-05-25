@@ -509,3 +509,129 @@ The other two suspects from the orchestrator brief were already clean on `v4.0-i
 
 Final `npx tsc --noEmit -p .` exit: zero output, zero errors.
 
+---
+
+## Wave 2 — Provider connectors (12 new + index)
+
+Ships the 12 remaining provider connectors required by PRD Section 5.2 plus
+the central `ALL_PROVIDERS` registry. The Ollama Cloud connector was already
+on disk from Wave 1 (Track A1); Wave 2 leaves that file untouched and imports
+it as the 13th member of the registry.
+
+### Files landed (one per provider, lowercase slug)
+
+- `src/lib/model-providers/openai.ts` — slug `openai`
+- `src/lib/model-providers/anthropic.ts` — slug `anthropic`
+- `src/lib/model-providers/google.ts` — slug `google`
+- `src/lib/model-providers/xai.ts` — slug `xai` (SCOPE-ADDITION Addition 3)
+- `src/lib/model-providers/openrouter.ts` — slug `openrouter`
+- `src/lib/model-providers/zai.ts` — slug `zai`
+- `src/lib/model-providers/moonshot.ts` — slug `moonshot`
+- `src/lib/model-providers/minimax.ts` — slug `minimax`
+- `src/lib/model-providers/kie.ts` — slug `kie`
+- `src/lib/model-providers/fal.ts` — slug `fal`
+- `src/lib/model-providers/replicate.ts` — slug `replicate`
+- `src/lib/model-providers/elevenlabs.ts` — slug `elevenlabs`
+- `src/lib/model-providers/index.ts` — barrel + `ALL_PROVIDERS` + `getProvider()`
+
+### Env vars pending in `.env.example` (integration step adds these)
+
+The Wave 2 connectors read API keys directly via `apiKey` arguments at call
+sites (per the `ModelProvider` interface signature), so they do not import
+`process.env` themselves for credentials. The weekly refresh job (Track C2)
+will resolve each provider's key from env. The pending env keys are:
+
+- `OPENAI_API_KEY` — Bearer for `openai`
+- `ANTHROPIC_API_KEY` — `x-api-key` for `anthropic`
+- `ANTHROPIC_API_VERSION` (optional, defaults to `2023-06-01`)
+- `GEMINI_API_KEY` — query param for `google`
+- `X_AI_API_KEY` — Bearer for `xai`
+- `OPENROUTER_API_KEY` — Bearer for `openrouter`
+- `OPENROUTER_HTTP_REFERER` (optional, OpenRouter routing analytics)
+- `OPENROUTER_X_TITLE` (optional, OpenRouter routing analytics)
+- `ZAI_API_KEY` — Bearer for `zai`
+- `MOONSHOT_API_KEY` — Bearer for `moonshot`
+- `MOONSHOT_BASE_URL` (optional, override for `.ai` vs `.cn` endpoint)
+- `MINIMAX_API_KEY` — Bearer for `minimax`
+- `KIE_API_KEY` — Bearer for `kie`
+- `FAL_KEY` — `Authorization: Key <FAL_KEY>` scheme for `fal`
+- `FAL_EXTRA_MODELS` (optional, comma-separated slugs to widen the curated catalog)
+- `REPLICATE_API_TOKEN` — `Authorization: Token <token>` for `replicate`
+- `REPLICATE_MODEL_LIMIT` (optional, defaults to 200; caps `fetchModels` pagination)
+- `ELEVENLABS_API_KEY` — `xi-api-key` header for `elevenlabs`
+
+Base URLs are also overridable via `<PROVIDER>_BASE_URL` env where it made
+sense, so the integration step can route through a corporate proxy or the
+operator can hit a region-specific endpoint without redeploy.
+
+### Decisions outside the literal PRD
+
+1. **`ModelProvider` interface gap for non-chat providers.** Kie, Fal,
+   Replicate, and ElevenLabs are not chat providers. The interface only
+   exposes `chatCompletion?`, so they omit it and expose their native verbs
+   on the module surface (not on `ModelProvider`): `generate` / `getJob`
+   (Kie), `run` / `enqueue` / `getStatus` / `getResult` (Fal),
+   `createPrediction` / `getPrediction` / `cancelPrediction` (Replicate),
+   `textToSpeech` / `speechToText` / `listVoices` (ElevenLabs). Call sites
+   that need these use the named imports from `model-providers/index.ts`
+   rather than the generic `ModelProvider` cast. A future interface
+   refinement could add an optional `generate(kind, request)` discriminated
+   union; flagged for Track A1 follow-up.
+
+2. **Anthropic and Google chat translation.** Both providers use non-OpenAI
+   request shapes (Anthropic Messages, Gemini generateContent). Each
+   connector translates the OpenAI-style `ChatCompletionRequest` to/from
+   the native shape inside `chatCompletion`, so consumer routes do not
+   branch by provider. System messages are hoisted to Anthropic `system` /
+   Gemini `systemInstruction`. Assistant role maps to `assistant` /
+   `model`. Usage fields are normalized to `prompt_tokens` /
+   `completion_tokens` / `total_tokens`.
+
+3. **OpenRouter pricing conversion.** OpenRouter exposes per-token pricing
+   (USD per single token, as strings). The connector multiplies by 1e6 so
+   the registry stores per-million-token USD like every other provider.
+   Models ending in `:free` are tagged `pricing_model: 'free'` and zeroed,
+   matching the legacy hardcoded behavior.
+
+4. **MiniMax / Kie / Fal curated catalogs.** None of these three expose a
+   /models endpoint with a stable shape. Each connector probes the
+   optional endpoint first; on 404 / unexpected shape / empty array it
+   falls back to a curated catalog of the model ids the operator is
+   actively using (MiniMax-M2, Veo 3, Flux Pro Kontext, etc.). `pricing_source`
+   is `hardcoded` for curated rows so the admin UI can flag them for
+   manual price entry.
+
+5. **Replicate pagination cap.** Replicate has 10k+ public models. The
+   connector follows pagination until `REPLICATE_MODEL_LIMIT` (default
+   200) rows are collected. Operator extends via env without redeploy.
+
+6. **xAI Live Search.** The xAI connector forwards the request body as-is
+   so callers set `search_parameters: { mode: 'on' }` per request to
+   enable Live Search. No special handling in the connector — by design,
+   so future search modes work without a connector change.
+
+7. **ElevenLabs binary response.** `textToSpeech` returns
+   `{ audio: ArrayBuffer, contentType }` rather than a JSON-shaped
+   `ChatCompletionResponse`. The interface doesn't cover binary outputs
+   cleanly, so this lives outside the `ModelProvider` contract.
+
+### Capabilities vocabulary drift
+
+`src/lib/model-providers/types.ts` defines `ModelCapability` as
+`'chat' | 'completion' | 'embedding' | 'vision' | 'tool_use' | 'json_mode' |
+'reasoning' | 'long_context' | 'code' | 'image_input' | 'audio_input' |
+'streaming'` (12 tags). `src/lib/model-registry.ts` defines a different
+12-tag set (`'text' | 'vision' | 'image_generation' | 'video_generation' |
+'audio_generation' | 'audio_transcription' | 'embeddings' | 'tool_use' |
+'code_execution' | 'web_search'`). The two are not aligned. Wave 2
+connectors emit the types.ts set since that is the connector contract; the
+registry stores capabilities as a JSON array of strings and accepts any
+tag, so the storage layer does not enforce one vocabulary. Flagged for
+Track A1 / refresh job (C2) to settle on one canonical vocabulary and add
+a translation step if both sets must coexist.
+
+### Type-check
+
+Final `npx tsc --noEmit -p .` exit: zero output, zero errors after all 13
+new files landed.
+
