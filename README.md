@@ -1,6 +1,8 @@
 # Command Center
 
-> **v4.0.0 (2026-05-25)** ships the Operator Console (10 sub-modules), a fully dynamic 13-provider model registry, the System Status Panel, Cloudflare Access + `MC_API_TOKEN` middleware, and a Cmd+K palette. Old routes `/kanban` and `/workspace` 308-redirect to `/tasks/all` and `/tasks/by-department`. See `CHANGELOG.md` for the full v4.0.0 entry and `BUILD-NOTES.md` for the Depth 4 Master QC table.
+> **v4.0.1 (2026-05-25)** is the v4.0 fix pass: Operator Console added to the home screen as the 5th of 6 cards, global Header link, global Cmd+K, real Fish Audio + xAI Grok TTS providers, weekly model-refresh cron (node-cron), 🤖 model pill on task cards, three new provider connectors (ollama-local, xiaomi, fish-audio), Cloudflare Access one-shot setup script, five new docs files, three new system-status probes (CLI / CF Tunnel / CF Access), and a streaming `/api/system/bootstrap` re-run endpoint. xAI label now reads "xAI (Grok)". See `CHANGELOG.md` for the full v4.0.1 entry.
+>
+> **v4.0.0 (2026-05-25)** shipped the Operator Console (10 sub-modules), a fully dynamic 13-provider model registry, the System Status Panel, Cloudflare Access + `MC_API_TOKEN` middleware, and a Cmd+K palette. Old routes `/kanban` and `/workspace` 308-redirect to `/tasks/all` and `/tasks/by-department`.
 
 <!-- BEGIN v2.1 SECTION -->
 ## v2.1 — Zero-Human Company Spec (PRD v2.1)

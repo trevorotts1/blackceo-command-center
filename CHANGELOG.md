@@ -1,3 +1,80 @@
+## [v4.0.1] - 2026-05-25 - Post-v4.0 fix pass (17 fixes, multi-client rollout-ready)
+
+Closes the v4.0.1 fix pass per BLACKCEO-V4-POST-BUILD-FIXES.md. 17 fixes across UI, TTS providers, cron, model registry, infrastructure, and docs. No breaking schema changes (migration 044 is additive). Ready for multi-client rollout to existing v4.0 deployments.
+
+### Added
+
+- **Operator Console card on the home screen** (5th of 6 cards). Terminal icon, cyan-sky-blue gradient, routes to `/operator`.
+- **Global Operator Console nav link in the Header** so the console is reachable from every non-home page.
+- **Global Cmd+K Command Palette** mounted at the root layout. Works on every page now, not just `/operator`.
+- **Fish Audio TTS provider** (`fish_audio`) wired into `/api/operator/tts`. Streams MP3 via `https://api.fish.audio/v1/tts` with bearer auth. Falls through on 401/403/429/5xx.
+- **xAI / Grok TTS provider** (`xai`) wired into `/api/operator/tts`. POST `https://api.x.ai/v1/audio/speech` (OpenAI-compatible). Marks the provider session-disabled on 403/404 (plan does not include voice).
+- **node-cron weekly model refresh scheduler.** `instrumentation.ts` calls `registerCronJobs()` on app boot. Jobs: model refresh Sunday 03:00, usage refresh every 6h, memory index rebuild hourly.
+- **`/api/cron/register` (GET)** lists every registered cron job with next-run timestamps.
+- **`/api/cron/refresh-models` (POST + GET)** manually triggers a registry refresh. Optional `CRON_SECRET` bearer auth.
+- **🤖 Model pill on task cards** (`MissionQueue.tsx`) alongside the existing 🧠 persona pill. Tooltip shows full name + provider + cost-per-million. Click navigates to `/settings/intelligence?focus={model_id}`.
+- **Migration 044 `add_task_model_id`** adds nullable `tasks.model_id TEXT` column + index. FK enforced at the app layer (SQLite limitation on `ALTER TABLE`).
+- **Three new provider connectors**: `ollama-local` (localhost:11434, free pricing), `xiaomi` (MiMo V2 Pro, manual catalog), `fish-audio` (registry side, audio_generation capability).
+- **xAI provider label renamed to "xAI (Grok)"** in filter chips + model cards. Internal slug stays `xai`.
+- **Cloudflare Access setup script** at `scripts/cloudflare/setup-access-app.sh` (251 lines, idempotent). Creates One-Time PIN IdP, Access App for a subdomain, email allow policy, 336h session.
+- **5 new docs files** (832 lines total): `docs/CLOUDFLARE_ACCESS_SETUP.md`, `docs/OPERATOR_CONSOLE_GUIDE.md`, `docs/PLATFORM_DETECTION.md`, `docs/MULTI_CLIENT_ROLLOUT.md`, `docs/ENV_FILE_PERSISTENCE.md`, `docs/MODEL_CAPABILITIES.md`.
+- **Three new system-status probes**: CLI install registry, Cloudflare Tunnel (pm2 jlist on Mac, systemctl on VPS Docker), Cloudflare Access (30s sliding-window header observation). All wired into `/api/system/status`.
+- **`/api/system/bootstrap` SSE endpoint** + "Re-run bootstrap" button in `SystemStatusDrawer.tsx`. Streams stdout/stderr live, requires MC_API_TOKEN bearer.
+
+### Fixed
+
+- **P0-1**: Operator Console missing from home screen. Now the 5th card.
+- **P0-2**: No global nav to Operator Console. Header link added.
+- **P0-3**: Cmd+K only mounted inside `/operator`. Now global at root layout.
+- **P0-4**: Fish Audio TTS skeleton. Real implementation shipped.
+- **P0-5**: xAI / Grok TTS skeleton. Real implementation shipped.
+- **P0-6**: node-cron not installed. Installed + scheduler + 3 jobs registered at boot.
+- **P0-7**: Model pill missing from task cards. Added with tooltip + deep-link.
+- **P0-8**: Missing connectors (ollama-local, xiaomi, fish-audio). Shipped.
+- **P0-9**: xAI label readability. Now "xAI (Grok)".
+- **P1-10**: Cloudflare Access setup script missing. Idempotent script + README.
+- **P1-11**: Five docs files missing. All written (832 lines).
+- **P1-12**: CLI + CF Tunnel + CF Access probes missing. Shipped + wired into `/api/system/status`.
+- **P1-13**: `/api/system/bootstrap` endpoint missing. SSE endpoint + drawer button.
+- **P1-14**: Replicate provider keep/remove. Decision: KEEP. Documented in BUILD-NOTES.md.
+- **P2-15**: Capability vocab grouped into 4 chip categories (Input modalities / Output modalities / Capabilities / Other).
+- **P2-16**: `@ts-expect-error` count target 75% reduction. Final count: 0 (Depth 3 Track A had already removed all 4 baseline guards).
+- **P2-17**: BUILD-NOTES.md consolidation. "Outstanding work" section at top, 0 items pending.
+
+### Migrations
+
+- **044** `add_task_model_id` — adds nullable `tasks.model_id TEXT` + `idx_tasks_model_id`. FK enforced at app layer.
+
+### Dependencies added
+
+- `node-cron@^4.2.1` + `@types/node-cron@^3.0.11`
+
+### Decisions
+
+- **6 home screen cards** (was 5). Operator Console is the 5th. Company Settings is the 6th.
+- **Replicate provider stays.** Long-tail OSS models not on Fal/KIE, near-zero maintenance cost, useful provider-failover headroom.
+- **xAI label reads "xAI (Grok)"** for client recognition. Slug remains `xai`.
+- **Multi-bot Telegram via `channels.telegram.accounts`** (per OpenClaw docs). Replaced the Python bridge daemon workaround. Slash commands (/models, /memory, /tasks) work natively now.
+
+### Risk: low
+
+- Additive migration (044). No table renames, no destructive changes.
+- All new providers/probes/endpoints are opt-in via env vars.
+- Existing `/api/settings/intelligence` shape preserved.
+- The home-screen layout went from 5 to 6 cards, which is a visible change.
+
+### Deploy checklist
+
+1. `git pull && npm install && npm rebuild better-sqlite3`
+2. Migration 044 auto-applies on next boot.
+3. Verify `/api/health` shows migration 044 applied.
+4. Verify `/api/system/status` includes new `cli`, `cloudflare_tunnel`, `cloudflare_access` keys.
+5. Verify `/operator` is reachable from the Operator Console card AND the Header link.
+6. (Optional) Run `scripts/cloudflare/setup-access-app.sh <subdomain> <operator-email>` to wire CF Access for a fresh deployment.
+7. (Optional) Set new env vars: `FISH_AUDIO_API_KEY`, `FISH_AUDIO_VOICE_ID`, `X_AI_VOICE_MODEL`, `X_AI_VOICE`, `OLLAMA_LOCAL_HOST`, `XIAOMI_API_KEY`, `CRON_SECRET`.
+
+---
+
 ## [v4.0.0] - 2026-05-25 - Operator Console, dynamic model registry, white-label release
 
 Closes the v4.0 build: a from-scratch Operator Console with 10 sub-modules, a fully dynamic provider/model registry replacing the hardcoded AVAILABLE_MODELS array, a System Status Panel, platform abstraction, Cloudflare Access + MC_API_TOKEN middleware, a Cmd+K palette, and a white-label cleanup pass. The dashboard now ships with first-class Research (xAI/Grok Live Search), half-duplex Call Mode, and a Web Agent powered by Anthropic Computer Use.
