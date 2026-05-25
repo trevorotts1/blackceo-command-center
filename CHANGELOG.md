@@ -1,3 +1,78 @@
+## [v4.0.0] - 2026-05-25 - Operator Console, dynamic model registry, white-label release
+
+Closes the v4.0 build: a from-scratch Operator Console with 10 sub-modules, a fully dynamic provider/model registry replacing the hardcoded AVAILABLE_MODELS array, a System Status Panel, platform abstraction, Cloudflare Access + MC_API_TOKEN middleware, a Cmd+K palette, and a white-label cleanup pass. The dashboard now ships with first-class Research (xAI/Grok Live Search), half-duplex Call Mode, and a Web Agent powered by Anthropic Computer Use.
+
+### Added
+
+- **Operator Console (10 sub-modules)** at `src/app/operator/` - Bridge, Workspace, Studio, Notebook, Goals, Journal, Memory, Research, Call, Web Agent, plus the operator landing tile board.
+- **Dynamic model registry** at `src/lib/model-registry.ts` + `src/lib/model-providers/` covering 13 providers (Anthropic, OpenAI, Google, xAI, Replicate, Fal, KIE, ElevenLabs, Ollama Cloud, OpenRouter, Z.AI, MiniMax, Moonshot) with normalized `ProviderModel` shape, weekly refresh job, and `/api/models` routes.
+- **System Status Panel** - `src/components/SystemStatusPill.tsx`, `src/components/SystemStatusDrawer.tsx`, and `/api/system/status` returning the six-state agent vocabulary (idle / busy / degraded / offline / starting / error).
+- **Platform abstraction** at `src/lib/platform.ts` - clean Mac vs VPS-Docker code paths for workspace base, persona file lookup, and disk probes.
+- **CF Access + MC_API_TOKEN middleware** at `src/middleware.ts` - dual auth: external API bearer token via `MC_API_TOKEN`, browser path gated by `cf-access-jwt-assertion` when `REQUIRE_CF_ACCESS=true`. Local dev stays open with explicit warnings.
+- **Cmd+K command palette** at `src/components/CommandPalette.tsx` (cmdk-powered) - global navigation, search, and quick actions from any route.
+- **xAI / Grok Live Search Research sub-module** - `src/app/operator/research/` + `src/lib/providers/xai` wired to Grok Live Search with persisted history.
+- **Half-duplex Call Mode** - `src/components/operator/CallMode.tsx` plus voice button on the Bridge composer; push-to-talk turn-taking, no full-duplex audio yet.
+- **Web Agent (Anthropic Computer Use)** - `src/app/operator/web-agent/` + runner; uses the `computer_use` capability tag on supported Claude models.
+- **18 Playwright smoke tests** at `tests/integration/v4-smoke.spec.ts` covering 13 page routes + 5 API contracts (health / system status / models / research history / workspace list).
+- **Install bootstrap and integration compat scripts** under `scripts/install/` and `scripts/integration-tests/` for mac-mini and vps-docker.
+
+### Changed
+
+- **White-label cleanup** - removed every "BlackCEO", "Welcome back, Trevor", and "Live Demo" string from runtime UI; remaining references are explanatory comments only. Landing initial state is empty so white-label deploys never flash the old brand.
+- **Route consolidation with 308 redirects** - `/kanban` -> `/tasks/all` (cross-department board) and `/workspace` -> `/tasks/by-department`. Implemented via App Router `permanentRedirect()` so external links keep working.
+- **`/api/health` migrations report** - now returns the full migration manifest (id, name, applied_at) so operators can verify the schema state from the outside.
+- **Capability vocabulary unified to the 16-tag canonical** - `text, vision, audio_input, streaming, reasoning, tool_use, structured_output, long_context, code_execution, embeddings, image_generation, video_generation, audio_generation, audio_transcription, web_search, computer_use`. Legacy aliases (`chat`, `completion`, `embedding`, `image_input`, `json_mode`, `code`) dropped across all 13 provider connectors and the UI.
+
+### Migrations
+
+- **031** - `model_registry` (replaces hardcoded AVAILABLE_MODELS) + `pricing_model`, `status` CHECK constraints.
+- **032** - `provider_credentials` and refresh metadata.
+- **033** - `system_status_history` for the six-state vocabulary.
+- **034** - `agent_capabilities` join table.
+- **035** - `operator_sessions` (Bridge SSE state).
+- **036** - `operator_buckets` (Workspace 7-bucket output store).
+- **037** - `studio_jobs` (image/video/audio generation queue).
+- **038** - `notebook_documents` (NotebookLM-compatible store).
+- **039** - `operator_goals` + `operator_journal`.
+- **040** - `operator_memory` (long-term recall index).
+- **041** - `call_sessions` (half-duplex Call Mode transcripts).
+- **042** - `research_searches` (Grok Live Search history).
+- **043** - `web_agent_sessions` (Computer Use runs + screenshots).
+
+### Dependencies added
+
+- `cmdk` (Cmd+K palette)
+- `react-markdown` + `remark-gfm` + `rehype-highlight` + `highlight.js` (Workspace markdown preview, Notebook viewer)
+- `@anthropic-ai/sdk` (Web Agent / Computer Use)
+- `playwright` (dev) for the integration smoke suite
+
+### Infrastructure
+
+- `scripts/install/mac-mini-bootstrap.sh` and `scripts/install/vps-docker-bootstrap.sh` - cold-start helpers that install Node deps, rebuild `better-sqlite3`, run migrations, and verify the env matrix.
+- `scripts/integration-tests/` - shell harness that walks Wave 1 routes with `jq` selectors.
+- `playwright.config.ts` at repo root + 18 specs under `tests/integration/`.
+
+### Removed
+
+- `src/components/DemoBanner.tsx` - deleted along with its `src/app/layout.tsx` import.
+- The hardcoded `AVAILABLE_MODELS` array in `src/app/api/settings/intelligence/route.ts`. The registry now hydrates the same shape at request time from the `model_registry` table.
+
+### Risk: high
+
+26 commits on `v4.0-integration` since `main`, 13 new migrations, 13 new provider connectors, a new auth middleware, and a top-level route reshape. The 308 redirects preserve old URLs and the registry hydrate path keeps `/api/settings/intelligence` backwards-shape-compatible, but operators should run `/api/health` immediately after deploy to confirm 043 applied and `/api/system/status` to confirm the six-state vocabulary returns.
+
+### Deploy checklist
+
+1. `git pull origin main` (after Trevor approves the merge from `v4.0-integration`).
+2. `npm install` (picks up cmdk, react-markdown chain, @anthropic-ai/sdk).
+3. `npm rebuild better-sqlite3` (VPS containers especially).
+4. `npm run build`.
+5. Set `MC_API_TOKEN` and `REQUIRE_CF_ACCESS=true` in production env.
+6. `unset PORT && PORT=4000 pm2 start --update-env ecosystem.config.cjs`.
+7. Verify: `/api/health` shows migrations through 043, `/api/system/status` returns six-state, `/api/models` lists the 13 providers, `/operator` loads, `/kanban` 308s to `/tasks/all`, `/workspace` 308s to `/tasks/by-department`.
+
+---
+
 ## [v3.7.0] — 2026-05-24 — Clear v2.0 eval backlog (Tier 1+2+3+4 + Triad UI)
 
 Closes the entire v2.0 evaluation backlog in one sweep. Performance Review went from 3/10 to first-class, Model Lock Protocol shipped, Kanban grew its 6th column, the Persona library got a viewer page, and the TaskModal now resolves Triad-Rule violations inline.

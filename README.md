@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.0.0 (2026-05-25)** ships the Operator Console (10 sub-modules), a fully dynamic 13-provider model registry, the System Status Panel, Cloudflare Access + `MC_API_TOKEN` middleware, and a Cmd+K palette. Old routes `/kanban` and `/workspace` 308-redirect to `/tasks/all` and `/tasks/by-department`. See `CHANGELOG.md` for the full v4.0.0 entry and `BUILD-NOTES.md` for the Depth 4 Master QC table.
+
 <!-- BEGIN v2.1 SECTION -->
 ## v2.1 — Zero-Human Company Spec (PRD v2.1)
 

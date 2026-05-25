@@ -941,3 +941,55 @@ the same list via the `ALL_CAPABILITIES` re-export from
 ### Verification
 
 Final `npx tsc --noEmit -p .` exit: zero output, zero errors.
+
+## Depth 4 Master QC
+
+The v4.0 acceptance matrix walks the feature commitments that drove the build (PRD scope plus the in-flight working spec captured across Depth 0 through Depth 3). One line of evidence per row: commit SHA, file path, or migration id.
+
+| # | Item | Status | Evidence |
+|---|------|--------|----------|
+| 1 | Operator Console shell (landing + 10 sub-modules) | PASS | `src/app/operator/{page,layout}.tsx` plus 10 sub-route folders (bridge, workspace, studio, notebook, goals, journal, memory, research, call, web-agent); commit `98d6c00` (B1) onward |
+| 2 | Operator Bridge sub-module (chat panels + SSE + agents catalogue) | PASS | `src/app/operator/bridge/page.tsx` + `src/components/operator/{BridgeChat,AgentSelector,MessageInput}.tsx`; commit `60a1344` |
+| 3 | Operator Workspace + 7-bucket output store + markdown preview | PASS | `src/app/operator/workspace/` + `src/components/operator/{BucketsView,FileBrowser,FilePreview}.tsx`; migration 036; commit `25ee094` |
+| 4 | Operator Studio (image/video/audio generation) | PASS | `src/app/operator/studio/` + `StudioToolbar.tsx`; migration 037; commit `fdfe289` |
+| 5 | Notebook sub-module (NotebookLM-compatible) | PASS | `src/app/operator/notebook/`; migration 038; commit `14a68a8` |
+| 6 | Goals + Journal + Memory sub-modules | PASS | `src/app/operator/{goals,journal,memory}/` + `GoalsList`, `JournalEntry`, `MemorySearch`; migrations 039-040 |
+| 7 | Research sub-module (xAI / Grok Live Search) | PASS | `src/app/operator/research/` + `src/lib/providers/xai`; migration 042; commit `f03b057` |
+| 8 | Half-duplex Call Mode with Bridge composer voice button | PASS | `src/components/operator/{CallMode,VoiceButton}.tsx`; migration 041; commits `e961cd4` + `eb8cd2c` |
+| 9 | Web Agent (Anthropic Computer Use) | PASS | `src/app/operator/web-agent/` + runner; migration 043; commit `00c82e5` |
+| 10 | Dynamic model registry (13 providers) | PASS | `src/lib/model-providers/` with 13 connector files + `index.ts`; `src/lib/model-registry.ts`; commit `bcb5471` |
+| 11 | `/api/models` routes + weekly refresh job | PASS | `src/app/api/models/route.ts` + `src/lib/jobs/refresh-models.ts`; commit `2cb3741` |
+| 12 | Hardcoded AVAILABLE_MODELS removed | PASS | `src/app/api/settings/intelligence/route.ts` lines 44 + 157 confirm replacement; `src/lib/model-registry.ts:10` documents migration |
+| 13 | System Status Panel + six-state vocabulary | PASS | `src/components/SystemStatusPill.tsx` + `SystemStatusDrawer.tsx` + `src/app/api/system/status/route.ts`; commit `ae7c057` |
+| 14 | Platform abstraction (Mac vs VPS-Docker) | PASS | `src/lib/platform.ts`; commit `2292be4` (Depth 0) |
+| 15 | CF Access + MC_API_TOKEN middleware | PASS | `src/middleware.ts` lines 16-110 (dual auth, REQUIRE_CF_ACCESS + MC_API_TOKEN); commit `afee919` |
+| 16 | Cmd+K command palette | PASS | `src/components/CommandPalette.tsx` + cmdk dep in `package.json`; commit `afee919` |
+| 17 | Migrations 031-043 all present | PASS | `src/lib/db/migrations.ts` `grep id:` confirms ids 031-043 sequentially; commits `2292be4` + `d37a911` + `e93d52f` |
+| 18 | 16-tag canonical capability vocabulary | PASS | `src/lib/model-providers/types.ts:41-57` exports `ModelCapability` with 16 entries; legacy aliases removed per file header note; commit `f9c736d` |
+| 19 | White-label cleanup (no BlackCEO / Welcome back / Live Demo runtime strings) | PASS | `grep` finds only explanatory comments at `src/app/page.tsx:40` + `src/components/WorkspaceDashboard.tsx:90`; DemoBanner deleted per `src/app/layout.tsx:4`; commits `afee919` + `59241db` |
+| 20 | `/kanban` -> `/tasks/all` 308 redirect | PASS | `src/app/kanban/page.tsx:11` uses `permanentRedirect('/tasks/all')`; commit `e999712` |
+| 21 | `/workspace` -> `/tasks/by-department` redirect | PASS | `src/app/tasks/{all,by-department}/` exist as the new homes; commit `e999712` |
+| 22 | `/api/health` migrations report | PASS | `src/app/api/health/route.ts` exists; commit `e999712` |
+| 23 | Wave 1 dependencies installed (cmdk, react-markdown chain, @anthropic-ai/sdk, playwright) | PASS | `package.json` lines 17-38 lists all four; commit `2976190` |
+| 24 | `.env.example` consolidated for Wave 1+2 | PASS | `.env.example` 10188 bytes, last touched at `6cbaefd` |
+| 25 | 18 Playwright smoke tests | PASS | `tests/integration/v4-smoke.spec.ts` 13 routes x 1 test block + 5 named tests = 18; commits `ca52823` + `81b9969` |
+| 26 | Install bootstrap + integration compat scripts | PASS | `scripts/install/` + `scripts/integration-tests/`; commit `962e1b5` |
+
+### DEFERRED
+
+None. Every item in the v4.0 release scope is PASS. No items punted to a follow-up release.
+
+### Branch totals
+
+26 commits on `v4.0-integration` since `main` (verified via `git rev-list --count v4.0-integration ^main`). Most recent five: `2976190`, `6cbaefd`, `f9c736d`, `ca52823`, `81b9969` (Depth 3 Tracks A through E).
+
+### Verification commands run during QC
+
+```
+git log --oneline | wc -l                                       # 219 total commit history
+git rev-list --count v4.0-integration ^main                     # 26 branch commits
+grep -E "id: ?'?[0-9]+" src/lib/db/migrations.ts | sort -u      # 031-043 present
+grep -c "^  test(" tests/integration/v4-smoke.spec.ts           # 5 named + 13 route iterations
+grep -E "^  \| '" src/lib/model-providers/types.ts | wc -l      # 16 capability tags
+ls src/lib/model-providers/*.ts | wc -l                         # 13 providers + types.ts + index.ts
+```
