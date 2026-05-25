@@ -196,3 +196,36 @@ SCOPE-ADDITION Section 5. Pre-wave: migration 042 was committed alone first to u
 7. **`X_AI_FIXTURE_JSON_PATH` for tests.** Mirrors the Tavily pattern in `src/lib/tavily.ts`. If set, the route reads a JSON fixture instead of hitting xAI (no live cost during CI or local dev). The route still writes a row and a vault file so end-to-end UI flows can exercise the full path offline.
 
 8. **Page-level `dynamic = 'force-dynamic'` on the detail route.** The saved row is mutable (deleted, re-searched, etc.) so the detail page must not statically prerender. Next.js's default for parametric server pages is dynamic rendering, but the explicit export makes the intent obvious for reviewers.
+
+## Depth 2 Wave 1, Track B5 (Notebook sub-module)
+
+Files added (all new, no overlap with other tracks):
+
+- `src/lib/notebooks/store.ts` (CRUD over migration 040 tables)
+- `src/lib/notebooks/notebooklm-client.ts` (backend adapter + probe)
+- `src/app/api/operator/notebook/route.ts` (GET list, POST create)
+- `src/app/api/operator/notebook/[id]/route.ts` (GET, PATCH, DELETE)
+- `src/app/api/operator/notebook/[id]/sources/route.ts` (GET, POST, DELETE source)
+- `src/app/operator/notebook/page.tsx` (server shell)
+- `src/app/operator/notebook/[id]/page.tsx` (server shell)
+- `src/components/operator/NotebookList.tsx` (library + create form)
+- `src/components/operator/NotebookDetail.tsx` (sources + ask box)
+- `src/components/operator/NotebookSourceUploader.tsx` (URL / text / path modes)
+
+### Decisions outside the PRD's explicit spec
+
+1. **PRD said `src/components/operator/NotebookView.tsx` (one file).** Track ownership brief specified four components instead (`NotebookList`, `NotebookDetail`, `NotebookSourceUploader`, plus the two pages). I followed the track brief because it splits the donor's single 800-line `NotebookView.tsx` into a per-page library + detail shape that matches `ResearchSearch` / `ResearchHistory` from Track B7. The PRD section 16.2 line is a one-file convenience; the brief is the canonical track scope.
+
+2. **Backend dispatch is a Depth 2 stub.** `notebooklm-client.ts` exposes `pickBackend()`, `backendStatus()`, and `ask()`, but `ask()` returns `{ ok: false, reason: '...not yet enabled at this depth' }`. This is intentional: the MCP wire path needs `@modelcontextprotocol/sdk` (already in donor but not yet on the v4.0 dep list) and the Gemini-CLI subprocess shape is a Track B5 Depth 3 problem. The UI surfaces the reason verbatim so an operator can see exactly which backend is detected and what is missing. The shape (`AskResult`, `pickBackend`, `backendStatus`) is stable; later depths only fill in the dispatch body.
+
+3. **Source content modes.** The PRD lists `pdf / text / markdown / url / audio / video` as source types. The `NotebookSourceUploader` only exposes three input modes (URL, inline text, file path); audio and video are accepted by the API but the upload UI is deferred to a vault-aware uploader (Track B6 territory). Inline text is stored under `path` as a `text://<urlencoded>` pseudo-URI so the row is self-contained without spawning a vault writer mid-track.
+
+4. **No `/api/operator/notebook/[id]/ask` endpoint.** The detail page's Ask box pings the existing list endpoint, reads `backends`, and renders the soft-error state. Adding an `/ask` route now would either be a duplicate stub or it would pull the MCP SDK dependency in early. The route shape is reserved for the next depth.
+
+5. **`source_count` denormalised in the list query.** The list endpoint runs a `COUNT(*) FROM notebook_sources` subquery per row rather than maintaining a `source_count` column on `notebooks`. With the index on `notebook_sources(notebook_id)` this is cheap at the expected scale (dozens of notebooks per deployment) and avoids a denormalisation that would need invalidation on every source insert/delete. If the scale ever justifies the column, it's a single migration plus two `UPDATE` lines in `addNotebookSource` / `removeNotebookSource`.
+
+6. **PATCH allows `description = ''`.** Empty string clears the description; missing key leaves it untouched. This matches the partial-update convention from Track B7's research routes.
+
+7. **`isNotebookBackend` / `isNotebookSourceType` exported from the store.** The route handlers import them for validation. Keeping the type guards co-located with the union types (instead of duplicating the literal lists in each route) keeps the source of truth in one place.
+
+8. **Notebook list ordered by `updated_at DESC`, refreshed on source add.** `addNotebookSource` and `removeNotebookSource` touch `notebooks.updated_at`. This makes the library view feel responsive: editing a notebook's sources floats it to the top, which is what the donor `NotebookView` does implicitly via remote sort order.
