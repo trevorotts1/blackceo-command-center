@@ -28,10 +28,11 @@
  *   - Switching agent mid-stream is forbidden (the AgentSelector reads
  *     `disabled={streaming}`).
  *
- * Track B8 (Call Mode) will mount a phone button next to the mic in a
- * follow-up commit on `MessageInput.tsx`. This file is the message thread
- * owner and exposes no extra hooks for Call Mode (the donor pattern proves
- * the integration can ride the same SSE stream without coupling).
+ * Call Mode handoff: the phone button lives next to the mic inside
+ * `MessageInput.tsx` (link to `/operator/call`), so this file owns only
+ * the message thread and exposes no extra hooks for Call Mode. The donor
+ * pattern showed the integration can ride the same SSE stream without
+ * coupling, so the composer-level link is enough.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
