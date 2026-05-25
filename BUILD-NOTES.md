@@ -229,3 +229,25 @@ Files added (all new, no overlap with other tracks):
 7. **`isNotebookBackend` / `isNotebookSourceType` exported from the store.** The route handlers import them for validation. Keeping the type guards co-located with the union types (instead of duplicating the literal lists in each route) keeps the source of truth in one place.
 
 8. **Notebook list ordered by `updated_at DESC`, refreshed on source add.** `addNotebookSource` and `removeNotebookSource` touch `notebooks.updated_at`. This makes the library view feel responsive: editing a notebook's sources floats it to the top, which is what the donor `NotebookView` does implicitly via remote sort order.
+
+---
+
+## Depth 2 Wave 1 Track C3 (Intelligence Settings UI refresh)
+
+PRD Section 5.4 and line 750 (persona system stays exactly as it is).
+
+### Decisions outside the PRD's explicit spec
+
+1. **Catalog browser sits above the assignment cards, not inside them.** PRD 5.4 lists filter chips, capability icons, cost, and last-refreshed timestamp without prescribing where on the page these surfaces live. I chose a stacked layout: provider freshness panel, then catalog browser (with filter chips), then the existing department assignment cards. The browser is read-only on purpose. Operators still pick a model in the per-department select below. This keeps the persona system completely untouched (line 750) and lets filter tweaks never disturb unsaved persona changes pending in the assignment cards.
+
+2. **Cost band thresholds (free / low / mid / high) are anchored to the AVG of input+output cost per million tokens.** PRD says "filter by cost range" without numbers. I picked 0 (free), <$2 (low), <$10 (mid), >=$10 (premium). The same getCostBand function powers both the card pill and the filter chip so a model that the chip says is "mid" always renders the "mid" pill. When the team decides on numbers they only need to edit `getCostBand` in `src/components/settings/ModelCard.tsx`.
+
+3. **Catalog source has a graceful fallback.** `/api/models` is the new source of truth (committed at 2cb3741), but on a fresh install the model_registry table may be empty until the weekly cron runs. The page calls `/api/models?refresh=1` first; if the response has no models it falls back to the `models` array embedded in `/api/settings/intelligence` (which already pulls from `model_registry` server-side per the existing route). Operators see SOME catalog regardless of registry state.
+
+4. **Capability filter chips use AND semantics (every selected capability must be present).** The PRD says "filter by capability (multi-select)" without specifying AND/OR. AND is the more common operator intent ("show me models that have vision AND tool_use") and matches the LIKE-per-needle implementation in the model-registry helper. If we later want OR semantics, `applyModelFilters` in `ModelFilterBar.tsx` is the single change point.
+
+5. **Manual "Refresh now" hits `POST /api/cron/refresh-models`.** PRD 5.3 says "Also expose `POST /api/cron/refresh-models` for manual triggering (button in Model Configuration UI)." That endpoint is owned by the C2/C4 tracks (refresh cron + provider connectors). If it 404s on this branch in isolation, the UI surfaces the error inline rather than failing silently. No cross-track file edits needed.
+
+6. **Existing `MODEL_DESCRIPTIONS` hardcoded map is gone.** The legacy page hardcoded human-readable descriptions for ~10 model ids. With the registry as the source of truth, `getModelDescription` now reads label + cost from the loaded model list. This avoids drift the moment the cron adds a new model id that the operator wants to assign.
+
+7. **`PersonaModelAssignment` is a structural extraction, not a behavior change.** Per line 750 the persona system must continue working. I extracted the department card body into a controlled component that takes effective-value lookups + setters from the page. All inherit/override mechanics, the auto-assign option, the reset arrow, the agent-type badges, and the 5-layer alignment note copy are preserved verbatim. PUT body to `/api/settings/intelligence` is identical.
