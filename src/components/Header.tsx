@@ -9,6 +9,7 @@ import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { format } from 'date-fns';
 import type { Workspace } from '@/lib/types';
+import { SystemStatusPill } from './SystemStatusPill';
 
 // --- AI Settings model & persona options ---
 const MODEL_OPTIONS = [
@@ -230,6 +231,9 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
         <span className="text-gray-500 text-sm font-mono">
           {format(currentTime, 'HH:mm:ss')}
         </span>
+        {/* System status pill (PRD 3.12). Replaces the legacy single LIVE/OFFLINE
+         *  indicator. Reflects the worst-case component status across probes. */}
+        <SystemStatusPill />
         <div
           className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
             isOnline

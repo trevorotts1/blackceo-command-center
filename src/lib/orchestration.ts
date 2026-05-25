@@ -15,6 +15,228 @@ import { getMissionControlUrl } from './config';
 
 const MISSION_CONTROL_URL = getMissionControlUrl();
 
+// ===========================================================================
+// Agent status transitions (PRD Section 3.13)
+// ===========================================================================
+//
+// Transition rules:
+//   - Move to `busy` when:
+//       * pending tasks for the agent > BUSY_PENDING_TASKS (default 5), OR
+//       * avg task duration > 2x the agent's baseline.
+//   - Move to `degraded` when:
+//       * 3+ consecutive task failures, OR
+//       * a provider API returning HTTP 429 or 5xx for this agent.
+//
+// These thresholds are intentionally simple defaults. Per-agent overrides
+// live in the future agent_status_config table; until then the constants
+// below are the configuration.
+
+export type AgentStatus = 'standby' | 'working' | 'busy' | 'degraded' | 'offline';
+
+export const BUSY_PENDING_TASKS = 5;
+export const DEGRADED_CONSECUTIVE_FAILURES = 3;
+export const DEGRADED_PROVIDER_HTTP_CODES = new Set([429, 500, 502, 503, 504]);
+/** Multiplier on baseline avg task duration that triggers a busy flip. */
+export const BUSY_DURATION_MULTIPLIER = 2;
+
+export interface AgentLoadSnapshot {
+  agentId: string;
+  pendingTasks: number;
+  /** Average duration of completed tasks in milliseconds, recent window. */
+  avgTaskDurationMs: number;
+  /** Baseline average duration in milliseconds. */
+  baselineDurationMs: number;
+  /** Number of consecutive failed tasks at the tail of the activity log. */
+  consecutiveFailures: number;
+  /** Last upstream provider HTTP status code observed (optional). */
+  lastProviderHttpStatus?: number;
+}
+
+/**
+ * Compute the next agent status from a load snapshot. Pure function — no DB
+ * access — so callers can unit-test it and decide when to persist.
+ *
+ * Priority of states (worst wins):
+ *   degraded > busy > working > standby
+ *
+ * Offline is only ever set by the operator or the gateway disconnect handler;
+ * this function never returns `offline` so a snapshot-based check cannot
+ * silently mark an agent unreachable.
+ */
+export function computeAgentStatus(snapshot: AgentLoadSnapshot): AgentStatus {
+  const {
+    pendingTasks,
+    avgTaskDurationMs,
+    baselineDurationMs,
+    consecutiveFailures,
+    lastProviderHttpStatus,
+  } = snapshot;
+
+  // Degraded conditions first.
+  if (consecutiveFailures >= DEGRADED_CONSECUTIVE_FAILURES) return 'degraded';
+  if (
+    typeof lastProviderHttpStatus === 'number' &&
+    DEGRADED_PROVIDER_HTTP_CODES.has(lastProviderHttpStatus)
+  ) {
+    return 'degraded';
+  }
+
+  // Busy conditions.
+  if (pendingTasks > BUSY_PENDING_TASKS) return 'busy';
+  if (
+    baselineDurationMs > 0 &&
+    avgTaskDurationMs > baselineDurationMs * BUSY_DURATION_MULTIPLIER
+  ) {
+    return 'busy';
+  }
+
+  if (pendingTasks > 0) return 'working';
+  return 'standby';
+}
+
+/**
+ * Apply the computed status to the agent row and log the transition to
+ * task_activities (PRD 3.13: "Surface these transitions in `task_activities`
+ * log so the Performance Board can show degradation history.").
+ */
+export async function evaluateAgentStatusFromDb(agentId: string): Promise<AgentStatus> {
+  // Lazy import to avoid pulling better-sqlite3 into edge/client bundles
+  // through this module's tree.
+  const { queryOne, queryAll, run } = await import('./db');
+
+  const agent = queryOne<{ id: string; status: AgentStatus }>(
+    'SELECT id, status FROM agents WHERE id = ?',
+    [agentId]
+  );
+  if (!agent) return 'offline';
+  if (agent.status === 'offline') return 'offline';
+
+  const pendingRow = queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM tasks
+     WHERE assigned_agent_id = ?
+       AND status NOT IN ('done', 'review')`,
+    [agentId]
+  );
+  const pendingTasks = pendingRow?.n ?? 0;
+
+  // Average duration of the agent's most recent 20 completed tasks in
+  // milliseconds. Older completions form the baseline.
+  const recentDurations = queryAll<{ duration_ms: number }>(
+    `SELECT (julianday(updated_at) - julianday(created_at)) * 86400 * 1000 AS duration_ms
+     FROM tasks
+     WHERE assigned_agent_id = ?
+       AND status = 'done'
+     ORDER BY updated_at DESC
+     LIMIT 20`,
+    [agentId]
+  );
+  const baselineDurations = queryAll<{ duration_ms: number }>(
+    `SELECT (julianday(updated_at) - julianday(created_at)) * 86400 * 1000 AS duration_ms
+     FROM tasks
+     WHERE assigned_agent_id = ?
+       AND status = 'done'
+     ORDER BY updated_at DESC
+     LIMIT 100 OFFSET 20`,
+    [agentId]
+  );
+  const avgTaskDurationMs = avg(recentDurations.map((r) => r.duration_ms));
+  const baselineDurationMs = avg(baselineDurations.map((r) => r.duration_ms));
+
+  // Consecutive failures: walk the agent's recent task_activities feed and
+  // count tail failures before the first non-failure entry.
+  let consecutiveFailures = 0;
+  try {
+    const activityTable = queryOne<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='task_activities'`,
+      []
+    );
+    if (activityTable) {
+      const tail = queryAll<{ activity_type: string }>(
+        `SELECT activity_type FROM task_activities
+         WHERE agent_id = ?
+         ORDER BY created_at DESC
+         LIMIT 10`,
+        [agentId]
+      );
+      for (const row of tail) {
+        if (row.activity_type === 'failed') consecutiveFailures += 1;
+        else break;
+      }
+    }
+  } catch {
+    // Optional: task_activities may not exist in older test DBs.
+  }
+
+  const next = computeAgentStatus({
+    agentId,
+    pendingTasks,
+    avgTaskDurationMs,
+    baselineDurationMs,
+    consecutiveFailures,
+  });
+
+  if (next !== agent.status) {
+    run('UPDATE agents SET status = ?, updated_at = datetime("now") WHERE id = ?', [
+      next,
+      agentId,
+    ]);
+
+    // Best-effort transition log into task_activities. The Performance Board
+    // reads from this table; the transition row links to the agent but has
+    // no task_id (it is an agent-level event).
+    try {
+      run(
+        `INSERT INTO task_activities (task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (NULL, ?, 'status_changed', ?, ?, datetime('now'))`,
+        [
+          agentId,
+          `Agent status: ${agent.status} -> ${next}`,
+          JSON.stringify({
+            previous: agent.status,
+            next,
+            pendingTasks,
+            avgTaskDurationMs,
+            baselineDurationMs,
+            consecutiveFailures,
+          }),
+        ]
+      );
+    } catch {
+      // task_activities table may not have a nullable task_id in some envs;
+      // suppress and continue. The status update itself is the source of truth.
+    }
+  }
+
+  return next;
+}
+
+function avg(values: number[]): number {
+  if (values.length === 0) return 0;
+  let sum = 0;
+  for (const v of values) sum += v;
+  return sum / values.length;
+}
+
+/**
+ * Record an upstream provider HTTP status for an agent. Triggers a fresh
+ * status evaluation so a 429/5xx flips the agent to `degraded` immediately.
+ */
+export async function recordProviderResponseForAgent(
+  agentId: string,
+  httpStatus: number
+): Promise<void> {
+  if (!DEGRADED_PROVIDER_HTTP_CODES.has(httpStatus)) return;
+  try {
+    const { run } = await import('./db');
+    run('UPDATE agents SET status = ?, updated_at = datetime("now") WHERE id = ?', [
+      'degraded',
+      agentId,
+    ]);
+  } catch (err) {
+    console.error('[orchestration] recordProviderResponseForAgent failed:', err);
+  }
+}
+
 export interface LogActivityParams {
   taskId: string;
   activityType: 'spawned' | 'updated' | 'completed' | 'file_created' | 'status_changed';

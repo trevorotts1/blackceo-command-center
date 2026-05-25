@@ -142,3 +142,35 @@ These dependencies are referenced by Depth 1 code but are NOT yet in `package.js
 12. **`seed.ts` gates ALL demo content behind `SKIP_DEMO_SEED`.** PRD 3.5 says the seed should "only insert structural data like the default master orchestrator agent, never a company row". The previous seed inserted 4 demo agents, 4 demo tasks, demo events, demo messages, and a "Team Chat" conversation. I moved every single one of those behind `if (!skipDemoSeed)`. Real client deployments set `SKIP_DEMO_SEED=true` in their env (this env var must be added to `.env.example` by the integration step) and boot structurally empty. The orchestrator agent and `seedDeptMemory()` always run because those are structural, not demo content. The startup bootstrap-page check that PRD 3.5 also mentions (rendering "This deployment has not been initialized" when companies is empty AND `config/departments.json` is missing) is NOT in my ownership list. It belongs in `src/app/page.tsx` / `src/app/layout.tsx` which are owned by A2 and the integration step respectively.
 
 13. **`platform.ts` already exists at Depth 0.** My ownership list said `src/lib/platform.ts` as NEW but Depth 0 already shipped it with the two-platform `mac-mini`/`vps-docker` shape. I used the existing `openclawConfigPath()` helper instead of reimplementing it. The PRD 3.6 four-platform variant (`mac_mini_legacy`/`mac_mini_new`/`vps_docker`/`unknown`) is documented in Depth 0 note 7 as a deferred consideration.
+
+---
+
+## Depth 1 Track A3 (System Status Panel + agent busy/degraded states)
+
+PRD Sections 3.12 and 3.13.
+
+### Decisions outside the PRD's explicit spec
+
+1. **Probe set and module layout.** PRD 3.12 lists ~13 components to monitor (OpenClaw Gateway, each operator CLI, Cloudflare Tunnel, Cloudflare Access, Ollama Cloud, OpenRouter, Anthropic/OpenAI/Google/Z.AI/Moonshot/MiniMax/Kie.ai/Fal.ai, model registry, jobs, migrations, DB, disk). Many of those (CLIs, Cloudflare Tunnel, Cloudflare Access, model registry) are surface area owned by other tracks (A1 cron, B11 Cloudflare, C1 model registry). For Track A3 I shipped 8 probe files covering what this track can probe cleanly from inside the Next.js process: `db`, `openclaw-gateway`, `model-providers` (10 providers in one file, one ProbeResult each), `telegram`, `memory`, `jobs`, `disk`, `agents`. CLI/Cloudflare/registry probes are easy follow-ups (add a file under `src/lib/probes/` and an import in `system-status.ts`).
+
+2. **OpenClaw probe does NOT use the live websocket client.** `getOpenClawClient()` holds the production websocket and has reconnect backoff. Calling `.connect()` from a health probe would race with real reconnects. Instead the probe issues a one-shot HTTP GET to the websocket port (ws->http URL rewrite). The gateway responds with 426 Upgrade Required when it is up and refuses the connection when it is not, which is exactly the signal we want without touching the live socket.
+
+3. **Telegram probe uses `getMe`, not `openclaw message send`.** MEMORY.md forbids bypassing OpenClaw's gateway for Telegram sends. `getMe` is the documented read-only API health endpoint and does not deliver any content, so it does not violate that rule. The probe never invokes the send pipeline.
+
+4. **Cache strategy.** PRD 3.12 says "30-second cache to avoid hammering". I store every probe result in `system_status_snapshots` (migration 033) and serve from the latest-row-per-component view as long as the newest snapshot is < 30s old. `?force=1` bypasses the cache and reruns all probes in parallel. Each probe enforces a 3s timeout via `withTimeout`, so the orchestrator's worst-case wall time is ~3s even if every probe stalls.
+
+5. **Migration count gap.** `src/lib/db/migrations.ts` does not export its `migrations` array. Rather than reach into the module's internals or call `runMigrations` from a probe, I derive `expectedMigrations` from the applied count (so the probe never reports a false gap). When Track A1 exports a canonical registry, swap the constant in `probes/db.ts`. The probe still surfaces applied count, file size, and last backup timestamp.
+
+6. **Overall pill aggregation ignores `unknown` providers.** Providers without an API key configured surface as `unknown`. If we let `unknown` participate in the worst-case computation, every fresh install would render the pill as gray. The orchestrator filters `provider_*` + `unknown` out of the overall computation. Core components (db, gateway, jobs, memory, disk, agents) still propagate `unknown` so genuine gaps are not hidden.
+
+7. **Pill replaces the legacy LIVE/OFFLINE indicator additively.** PRD 3.12 specifies the pill goes in the top bar but does not say what to do with the existing `ONLINE/OFFLINE` chip in `Header.tsx`. I left that chip in place and inserted the new pill next to it so other tracks that depend on the legacy `isOnline` store flag keep working. Removing the legacy chip is a one-line edit when the team confirms it.
+
+8. **Agent status transition rules in `orchestration.ts`.** PRD 3.13 defines thresholds verbally ("> N pending, default 5", "3+ consecutive failures", "provider 429/500"). I made them named constants (`BUSY_PENDING_TASKS = 5`, `DEGRADED_CONSECUTIVE_FAILURES = 3`, `DEGRADED_PROVIDER_HTTP_CODES = {429, 500, 502, 503, 504}`, `BUSY_DURATION_MULTIPLIER = 2`) so a future per-agent override table can read them as defaults. The compute function is pure; the DB-aware wrapper `evaluateAgentStatusFromDb` reads pending/durations/activity-tail and writes the transition with a `status_changed` row in `task_activities` for the Performance Board.
+
+9. **`offline` is never auto-assigned.** `computeAgentStatus` returns only `standby | working | busy | degraded`. Moving an agent to `offline` is reserved for the operator action and the gateway disconnect handler. A snapshot of "many failures" should not be enough to declare an agent unreachable; it should declare it degraded.
+
+10. **AgentsSidebar dot semantics.** The sidebar shows departments (workspaces), not individual agents. I aggregate the worst agent status across each workspace's agents and color the dot per PRD 3.13's five-state palette (`blue/green-pulse/amber-pulse/orange/gray`). The tooltip on each row carries the PRD-specified copy. Each workspace polls `/api/agents?workspace_id=` every 30s.
+
+11. **`fs.statfs` fallback.** The disk probe uses Node's promisified `fs.statfs`. On older Node or non-POSIX volumes it can throw; the probe degrades to `unknown` with a per-volume error string rather than failing the whole status response.
+
+12. **`?force=1` is intentionally GET-only.** The API contract is read-only. A POST endpoint that triggers probes could be a future addition for the "Re-run bootstrap" button mentioned in PRD 3.6, but that is a different action and belongs to Track Install.
