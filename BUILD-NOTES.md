@@ -498,3 +498,14 @@ Three small atomic commits to wire cross-track touches the parallel Wave 1 track
 
 All 10 tiles were already present in `src/app/operator/page.tsx` (Bridge, Workspace, Studio, Notebook, Goals, Journal, Memory, Research, Call Mode, Web Agent) — Track B1 shipped the full list. However, three of them (`Research`, `Call Mode`, `Web Agent`) still had `placeholder: true` from when they pointed at routes that did not yet exist. Wave 1 shipped all three routes (`src/app/operator/research/page.tsx`, `.../call/page.tsx`, `.../web-agent/page.tsx`), so the placeholder flags are now stale. Dropped the flags so the tiles render as live `Link`s instead of `cursor-not-allowed` placeholders. No href changes needed.
 
+### 3. Pre-existing TS error cleanup
+
+Baseline `npx tsc --noEmit -p .` reported **one** error: `src/app/layout.tsx(4,24): TS2307 Cannot find module @/components/DemoBanner`. Track A1 (PRD Section 4.1 layout reset) deleted `DemoBanner` but missed the layout import. Removed the import statement and the `<DemoBanner />` JSX use; left a one-line comment marker so a future reader sees that the slot was intentional, not accidentally cleared.
+
+The other two suspects from the orchestrator brief were already clean on `v4.0-integration`:
+
+- `src/lib/operator/goals.ts` — already uses `Array.from(byCategory.entries())` for the per-category map iteration (B6 anticipated the downlevel-iteration constraint).
+- `src/lib/workspaces/buckets.ts` — no map/set iteration patterns, no errors reported by `tsc`.
+
+Final `npx tsc --noEmit -p .` exit: zero output, zero errors.
+

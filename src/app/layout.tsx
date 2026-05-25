@@ -1,8 +1,8 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { Inter, JetBrains_Mono } from 'next/font/google';
-import DemoBanner from '@/components/DemoBanner';
-// AppShell sidebar removed — top header + breadcrumbs handle navigation
+// DemoBanner removed by Track A1 (Wave 1 cleanup). Top header + breadcrumbs
+// handle navigation; AppShell sidebar import also retired.
 // import AppShell from '@/components/AppShell';
 
 const inter = Inter({
@@ -40,7 +40,6 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
       <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-screen`}>
-        <DemoBanner />
         {children}
       </body>
     </html>
