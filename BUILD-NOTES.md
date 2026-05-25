@@ -635,3 +635,50 @@ a translation step if both sets must coexist.
 Final `npx tsc --noEmit -p .` exit: zero output, zero errors after all 13
 new files landed.
 
+
+## Depth 3 Track A (Pending dependency install + @ts-expect-error sweep)
+
+Wave 1 sub-agents shipped four files with isolated `@ts-expect-error`
+guards on imports for npm deps that were not yet in `package.json`. Track
+A's job is to install them in one batch, strip the guards, and confirm
+`tsc --noEmit` stays at zero.
+
+Dependencies installed (latest stable, React 18 + Next 14.2.21 compatible):
+
+  - `cmdk@^1.1.1` (Track B1 Command Palette, `src/components/CommandPalette.tsx`)
+  - `react-markdown@^9.1.0` (Track B3 FilePreview)
+  - `remark-gfm@^4.0.1` (Track B3 FilePreview)
+  - `rehype-highlight@^7.0.2` (Track B3 FilePreview)
+  - `highlight.js@^11.11.1` (transitive consumer surface for syntax CSS)
+  - `@anthropic-ai/sdk@^0.98.0` (Track B9 Web Agent; runner still uses
+    raw fetch today, swap to SDK is a Wave 2 follow-up per B9 note 2)
+
+Total install footprint: 140 new packages.
+
+### Decisions outside the brief
+
+1. **Guards removed in two files, not three.** The brief expected B6
+   Journal and B7 ResearchResult to also carry `@ts-expect-error` lines
+   referencing `react-markdown`. They do not. Track B6's `JournalEntry.tsx`
+   and Track B7's `ResearchResult.tsx` reference the markdown pipeline in
+   comments only and render with a `<pre>`/plain-text fallback. Only
+   `src/components/CommandPalette.tsx` (1 guard) and
+   `src/components/operator/FilePreview.tsx` (3 guards) carried real
+   import-site guards. All four were removed.
+
+2. **B9 runner left as-is.** B9's Pending Dependencies note flagged the
+   `@anthropic-ai/sdk` swap as a "Wave 2 follow-up". The SDK is installed
+   here so the swap can happen without a separate dep PR, but the runner
+   itself still uses raw fetch. No code change in `src/lib/web-agent/runner.ts`
+   in this track. The BUILD-NOTES.md note in B9 stays accurate.
+
+3. **`highlight.js` pinned explicitly.** `rehype-highlight@7` lists
+   `highlight.js` as a peer/transitive but the Wave 1 note called for it
+   to be pinned at the project root so future theme imports
+   (`highlight.js/styles/...`) resolve unambiguously. Explicit dep keeps
+   the version stable across `npm install` regenerations.
+
+### Type-check
+
+Final `npx tsc --noEmit -p .` exit: zero output, zero errors after the
+dep install + guard removal.

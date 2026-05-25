@@ -16,20 +16,12 @@
  *                 Preview / Source toggle (Addition 1)
  *
  * Binary / pdf / unknown kinds get a download link.
- *
- * react-markdown / remark-gfm / rehype-highlight / highlight.js are listed
- * in PRD 0.3 pending dependencies. Track B3 expansion adds them; the
- * imports below are guarded with `// @ts-expect-error` so the file
- * type-checks before the dependencies install. See BUILD-NOTES.md.
  */
 
 import { useState } from 'react';
 import { Download, Eye, FileCode, Loader2, RefreshCw } from 'lucide-react';
-// @ts-expect-error PRD 0.3 pending dep; installs in the dep batch (BUILD-NOTES).
 import ReactMarkdown from 'react-markdown';
-// @ts-expect-error PRD 0.3 pending dep.
 import remarkGfm from 'remark-gfm';
-// @ts-expect-error PRD 0.3 pending dep.
 import rehypeHighlight from 'rehype-highlight';
 
 export interface FilePreviewProps {

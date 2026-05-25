@@ -4,11 +4,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ChevronRight, Search } from 'lucide-react';
-// NOTE: `cmdk` is not yet in package.json. It is on the BUILD-NOTES.md
-// "Pending dependencies" list. Until the integration step installs it, this
-// import will not resolve. We isolate the error with @ts-expect-error so the
-// rest of the file still type-checks.
-// @ts-expect-error cmdk not yet installed (see BUILD-NOTES.md pending dependencies)
 import { Command } from 'cmdk';
 import { OPERATOR_NAV } from './OperatorSidebar';
 
