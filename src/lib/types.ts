@@ -81,7 +81,14 @@ export interface Task {
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;
-  // Joined fields
+  // Resolved model pinned at dispatch (v4.0.1 P0-7, migration 044).
+  // References model_registry(model_id) at the application layer.
+  model_id?: string | null;
+  // Joined fields (populated by the tasks API GET; not stored on the row)
+  model_label?: string | null;
+  model_provider?: string | null;
+  model_input_cost_per_million?: number | null;
+  model_output_cost_per_million?: number | null;
   assigned_agent?: Agent;
   created_by_agent?: Agent;
 }

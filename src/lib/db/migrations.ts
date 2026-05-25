@@ -1382,6 +1382,26 @@ const migrations: Migration[] = [
       console.log('[Migration 043] web_agent_sessions ready');
     }
   },
+  {
+    id: '044',
+    name: 'add_task_model_id',
+    up: (db) => {
+      console.log('[Migration 044] Adding model_id column to tasks (v4.0.1 P0-7)...');
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      if (!tasksInfo.some((c) => c.name === 'model_id')) {
+        // Note: SQLite cannot ALTER ADD COLUMN with a FK constraint on an
+        // existing table, so we add the column unconstrained. The intent is
+        // that model_id references model_registry(model_id); we enforce that
+        // at the application layer (dispatch route writes a model_id that
+        // was just resolved from model_registry).
+        db.exec(`ALTER TABLE tasks ADD COLUMN model_id TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_model_id ON tasks(model_id)`);
+        console.log('[Migration 044] Added model_id to tasks');
+      } else {
+        console.log('[Migration 044] model_id already present, skipping');
+      }
+    }
+  },
 ];
 
 /**

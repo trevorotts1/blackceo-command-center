@@ -427,6 +427,11 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
           </span>
         )}
 
+        {/* Model Pill (v4.0.1 P0-7) — shows the model resolved at dispatch.
+            If model_id is null, renders a dimmed "no model" placeholder. */}
+        <ModelPill task={task} />
+
+
         {/* Priority Pill */}
         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
           priorityPillStyles[task.priority] || 'bg-gray-100 text-gray-600'
@@ -510,5 +515,59 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Model pill (v4.0.1 P0-7).
+ *
+ * Sibling to the 🧠 persona pill. Renders 🤖 plus the model_registry label
+ * (falls back to raw model_id, then to a dimmed "no model" placeholder when
+ * the task has not been dispatched yet).
+ *
+ * Click navigates to /settings/intelligence?focus={model_id} so the operator
+ * can drill into pricing/capabilities. Hover shows full name, provider, and
+ * cost-per-million if those fields are joined in from model_registry.
+ */
+function ModelPill({ task }: { task: Task }) {
+  const stop = (e: React.MouseEvent) => {
+    // Don't let the click bubble up to the card click handler (which opens
+    // the TaskModal). The pill is its own affordance.
+    e.stopPropagation();
+  };
+
+  if (!task.model_id) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-400 italic"
+        title="No model resolved yet. Dispatch the task to pin a model."
+      >
+        🤖 no model
+      </span>
+    );
+  }
+
+  const label = task.model_label || task.model_id;
+
+  const tooltipParts: string[] = [];
+  tooltipParts.push(task.model_label ? `${task.model_label} (${task.model_id})` : task.model_id);
+  if (task.model_provider) tooltipParts.push(`Provider: ${task.model_provider}`);
+  if (typeof task.model_input_cost_per_million === 'number') {
+    tooltipParts.push(`Input: $${task.model_input_cost_per_million.toFixed(2)} / 1M tok`);
+  }
+  if (typeof task.model_output_cost_per_million === 'number') {
+    tooltipParts.push(`Output: $${task.model_output_cost_per_million.toFixed(2)} / 1M tok`);
+  }
+  const tooltip = tooltipParts.join('\n');
+
+  return (
+    <a
+      href={`/settings/intelligence?focus=${encodeURIComponent(task.model_id)}`}
+      onClick={stop}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-50 text-violet-700 hover:bg-violet-100 transition-colors no-underline"
+      title={tooltip}
+    >
+      🤖 {label}
+    </a>
   );
 }

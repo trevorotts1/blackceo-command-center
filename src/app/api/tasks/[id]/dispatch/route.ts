@@ -206,10 +206,12 @@ If you need help or clarification, ask the orchestrator.`;
         persona: settings.persona,
       });
 
-      // Update task status to in_progress
+      // Update task status to in_progress, and pin the resolved model_id so
+      // the UI (MissionQueue 🤖 pill) and downstream auditing can show which
+      // model this task was actually dispatched against. v4.0.1 P0-7.
       run(
-        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-        ['in_progress', now, id]
+        'UPDATE tasks SET status = ?, model_id = ?, updated_at = ? WHERE id = ?',
+        ['in_progress', settings.model || null, now, id]
       );
 
       // Broadcast task update

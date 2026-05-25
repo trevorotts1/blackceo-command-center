@@ -17,9 +17,14 @@ export async function GET(
     const task = queryOne<Task>(
       `SELECT t.*,
         aa.name as assigned_agent_name,
-        aa.avatar_emoji as assigned_agent_emoji
+        aa.avatar_emoji as assigned_agent_emoji,
+        mr.label as model_label,
+        mr.provider as model_provider,
+        mr.input_cost_per_million as model_input_cost_per_million,
+        mr.output_cost_per_million as model_output_cost_per_million
        FROM tasks t
        LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+       LEFT JOIN model_registry mr ON t.model_id = mr.model_id
        WHERE t.id = ?`,
       [id]
     );

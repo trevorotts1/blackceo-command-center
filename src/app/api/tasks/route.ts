@@ -23,10 +23,15 @@ export async function GET(request: NextRequest) {
         t.*,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji,
-        ca.name as created_by_agent_name
+        ca.name as created_by_agent_name,
+        mr.label as model_label,
+        mr.provider as model_provider,
+        mr.input_cost_per_million as model_input_cost_per_million,
+        mr.output_cost_per_million as model_output_cost_per_million
       FROM tasks t
       LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
       LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+      LEFT JOIN model_registry mr ON t.model_id = mr.model_id
       WHERE 1=1
     `;
     const params: unknown[] = [];
