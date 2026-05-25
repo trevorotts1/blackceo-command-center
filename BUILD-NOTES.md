@@ -682,3 +682,76 @@ Total install footprint: 140 new packages.
 
 Final `npx tsc --noEmit -p .` exit: zero output, zero errors after the
 dep install + guard removal.
+
+---
+
+## Depth 3 Track C (.env.example consolidation)
+
+Wave 1 + Wave 2 sub-agents added many new env vars but only documented
+them inline in this file as "pending in `.env.example` (integration step
+adds these)". Track C is the integration step: every pending env var is
+now present in `.env.example` with a one-line comment, grouped into
+v4.0 categories so a fresh install can boot end-to-end without grep-ing
+the source tree for keys.
+
+### Categories added (each is a comment-banner section in `.env.example`)
+
+1. **v4.0 Deployment Configuration** : `REQUIRE_CF_ACCESS`,
+   `SKIP_DEMO_SEED`, `COMPANY_NAME`, `COMPANY_SLUG`, `CRON_SECRET`,
+   `DEPARTMENTS_CONFIG_PATH`.
+2. **v4.0 Platform Roots (PRD 3.6)** : `OPENCLAW_PLATFORM`,
+   `OPENCLAW_ROOT`, `OPENCLAW_COMPANY_ROOT`, `OPENCLAW_WORKSPACE_PATH`,
+   `VAULT_ROOT`, `SCRATCH_ROOT`.
+3. **v4.0 Model Provider API Keys (PRD 5.2, Wave 2)** : one block per
+   provider (OpenAI, Anthropic, Google Gemini, xAI, OpenRouter, Z.AI,
+   Moonshot, MiniMax, Kie, Fal, Replicate, ElevenLabs, Ollama Cloud)
+   with the canonical `{SLUG_UPPER}_API_KEY` key plus the documented
+   `{SLUG}_BASE_URL` overrides and the dual-name fallbacks called out in
+   Studio note 5 (`FAL_AI_API_KEY` OR `FAL_KEY`, `GOOGLE_API_KEY` OR
+   `GEMINI_API_KEY`, `REPLICATE_API_TOKEN` OR `REPLICATE_API_KEY`,
+   `KIE_AI_API_KEY` OR `KIE_API_KEY`).
+4. **v4.0 Call Mode TTS (Track B8)** : `DEFAULT_CALL_TTS_PROVIDER`,
+   `OPENAI_TTS_VOICE`, `OPENAI_TTS_MODEL`, `ELEVENLABS_VOICE_ID`,
+   `FISH_AUDIO_API_KEY` (reserved for Fish Audio extension).
+5. **v4.0 Research sub-module (Track B7)** : `TAVILY_API_KEY` (Tavily
+   fallback when xAI Grok Live Search is unavailable).
+6. **v4.0 Operator Bridge CLI Paths (Track B2)** : `BCC_CLAUDE_BIN`,
+   `BCC_CODEX_BIN`, `BCC_ANTIGRAVITY_BIN`, `BCC_HERMES_BIN`,
+   `BCC_GEMINI_BIN`, plus `FCC_SERVER_URL` / `FCC_API_KEY` for the Free
+   Claude Code proxy.
+7. **v4.0 Test Fixtures** : `TAVILY_FIXTURE_JSON_PATH`,
+   `X_AI_FIXTURE_JSON_PATH`, `GEMINI_FIXTURE_JSON_PATH`,
+   `WEB_AGENT_FIXTURE_PATH`, `STUDIO_FIXTURE_{IMAGE,VIDEO,AUDIO}_PATH`.
+   Lets CI / offline dev exercise the full code path without API keys.
+8. **v4.0 Misc** : `NEXT_PUBLIC_APP_URL`, `TELEGRAM_BOT_TOKEN`,
+   `SOP_AUTO_REPLACE_TELEGRAM_DISABLED`, `DEMO_MODE` (legacy compat).
+
+### Decisions outside the explicit spec
+
+1. **Optional vars left commented out.** Anything with a sensible
+   default (base URLs, platform roots, CLI paths) is committed as a
+   `# VAR=...` line so a fresh `.env.local` is short by default and the
+   override is one keystroke away. Required-for-real-deployment vars
+   (provider API keys, `OPENAI_TTS_VOICE`, `DEFAULT_CALL_TTS_PROVIDER`,
+   `CRON_SECRET`, `TELEGRAM_BOT_TOKEN`) are uncommented with empty
+   values so the operator notices them.
+
+2. **Already present, not re-added.** The pre-v4.0 section of
+   `.env.example` already declared `DATABASE_PATH`,
+   `NEXT_PUBLIC_LOGO_URL`, `OPENCLAW_GATEWAY_URL`,
+   `OPENCLAW_GATEWAY_TOKEN`, `PLANNING_TIMEOUT_MS`,
+   `PLANNING_POLL_INTERVAL_MS`, `MISSION_CONTROL_URL`,
+   `WORKSPACE_BASE_PATH`, `PROJECTS_PATH`, `MC_API_TOKEN`, and
+   `WEBHOOK_SECRET`. Those were left untouched.
+
+3. **Capabilities vocabulary drift left alone.** Wave 2's final note
+   flagged a 12-tag mismatch between `model-providers/types.ts` and
+   `model-registry.ts`. That is a code-side decision (which vocabulary
+   is canonical) and outside Track C's scope; this track only
+   consolidates env vars. Flagged for Track A1 follow-up per the Wave 2
+   note.
+
+4. **No code files touched.** Per the track's hard rule, only
+   `.env.example` and this file changed. The provider connectors,
+   refresh job, Bridge agent catalogue, Call Mode route, and test
+   fixture call sites all read these env vars unchanged.
