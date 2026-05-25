@@ -9,6 +9,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getResearchSearch } from '@/lib/research-store';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
   const id = ctx.params.id;
   if (!id) {

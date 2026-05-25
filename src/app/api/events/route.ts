@@ -3,6 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryAll, run } from '@/lib/db';
 import type { Event } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/events - List events (live feed)
 export async function GET(request: NextRequest) {
   try {

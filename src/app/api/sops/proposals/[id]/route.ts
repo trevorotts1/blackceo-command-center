@@ -3,6 +3,9 @@ import { queryOne, run } from '@/lib/db';
 import { approveProposal, rejectProposal, type SOPProposalRow } from '@/lib/sop-learning';
 import { approveAutoResearchProposal, loadProposalWithV1 } from '@/lib/sop-auto-replace';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET /api/sops/proposals/[id]
  */

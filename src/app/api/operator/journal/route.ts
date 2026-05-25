@@ -27,6 +27,9 @@ import {
   writeJournalMirror,
 } from '@/lib/operator/journal';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const upsertSchema = z.object({
   entry_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   body: z.string().max(200_000),

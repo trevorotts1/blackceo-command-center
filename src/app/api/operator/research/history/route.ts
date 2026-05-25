@@ -18,6 +18,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { listResearchSearches } from '@/lib/research-store';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 function clampInt(value: string | null, fallback: number, min: number, max: number): number {
   if (!value) return fallback;
   const n = parseInt(value, 10);

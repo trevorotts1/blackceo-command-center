@@ -9,6 +9,9 @@ import { promisify } from 'util';
 import { existsSync } from 'fs';
 import path from 'path';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const execAsync = promisify(exec);
 
 export async function POST(request: NextRequest) {

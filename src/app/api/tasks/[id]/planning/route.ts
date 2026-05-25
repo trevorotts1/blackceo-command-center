@@ -3,6 +3,9 @@ import { getDb, queryAll, queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { extractJSON } from '@/lib/planning-utils';
+
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 // File system imports removed - using OpenClaw API instead
 
 // Planning session prefix for OpenClaw (must match agent:main: format)

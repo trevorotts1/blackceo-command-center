@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { computePerformance } from '@/lib/sop-learning';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET /api/sops/[id]/performance?window=30
  *

@@ -3,6 +3,9 @@ import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { ExecutionQueueItem } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // PATCH /api/execution-queue/[id] - Update a queue item
 export async function PATCH(
   request: NextRequest,

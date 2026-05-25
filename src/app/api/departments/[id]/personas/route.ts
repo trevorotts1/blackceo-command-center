@@ -3,6 +3,9 @@ import { readFile } from 'fs/promises';
 import { join, resolve } from 'path';
 import { existsSync } from 'fs';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET /api/departments/[id]/personas
  *

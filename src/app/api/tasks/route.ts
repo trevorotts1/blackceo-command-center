@@ -7,6 +7,9 @@ import { selectPersonaForTask } from '@/lib/persona-selector';
 import type { Task, CreateTaskRequest, Agent } from '@/lib/types';
 import { getBestSOPForTask } from '@/lib/sops';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/tasks - List all tasks with optional filters
 export async function GET(request: NextRequest) {
   try {

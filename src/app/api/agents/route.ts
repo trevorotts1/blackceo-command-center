@@ -4,6 +4,9 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { createAgentFolder } from '@/lib/agent-files';
 import type { Agent, CreateAgentRequest } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/agents - List all agents
 export async function GET(request: NextRequest) {
   try {

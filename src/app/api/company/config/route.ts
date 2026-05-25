@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { loadCompanyConfig, invalidateCompanyConfigCache } from '@/lib/company-config';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET /api/company/config
  * Returns the company configuration from company-config.json.

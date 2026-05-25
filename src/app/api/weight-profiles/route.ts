@@ -3,6 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 function getProfilesPath(): string {
   const explicitRoot = process.env.OPENCLAW_ROOT;
   if (explicitRoot) {

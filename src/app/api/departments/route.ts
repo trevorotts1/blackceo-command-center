@@ -6,6 +6,9 @@ import { randomBytes } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { getDb } from '@/lib/db';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const DEPARTMENTS_CONFIG_PATH = join(process.cwd(), 'config', 'departments.json');
 
 interface DepartmentEntry {

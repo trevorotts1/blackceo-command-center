@@ -3,6 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * Returns build progress for the active AI Workforce build.
  *

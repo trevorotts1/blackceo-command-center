@@ -4,6 +4,9 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { ExecutionQueueItem } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/execution-queue - List all queued items with computed display status
 export async function GET(request: NextRequest) {
   try {

@@ -10,6 +10,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { deleteGoal, getGoal, updateGoal, writeVaultMirror } from '@/lib/operator/goals';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const patchSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   body: z.string().max(20000).nullable().optional(),

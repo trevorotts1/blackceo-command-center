@@ -4,6 +4,9 @@ import { queryOne, run } from '@/lib/db';
 import { writeAgentFile, deleteAgentFolder } from '@/lib/agent-files';
 import type { Agent, UpdateAgentRequest } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/agents/[id] - Get a single agent
 export async function GET(
   request: NextRequest,

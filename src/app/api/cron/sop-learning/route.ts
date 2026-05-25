@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { detectPatternsAndPropose } from '@/lib/sop-learning';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET/POST /api/cron/sop-learning
  *

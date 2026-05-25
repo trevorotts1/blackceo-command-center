@@ -3,6 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { parseAndValidateSteps, type SOP } from '@/lib/sops';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET /api/sops
  *

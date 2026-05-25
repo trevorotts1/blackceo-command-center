@@ -3,6 +3,9 @@ import { getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { PublishQueueItem } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // Supported platform slugs — mirrors run-publishing-cycle.sh --platforms.
 const SUPPORTED_PLATFORMS = new Set([
   'wordpress', 'medium', 'substack', 'linkedin', 'ghl', 'youtube',

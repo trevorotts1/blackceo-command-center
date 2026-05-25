@@ -22,6 +22,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { searchMemory, type MemorySourceType } from '@/lib/operator/memory-search';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const VALID_SOURCES: MemorySourceType[] = [
   'vault',
   'scratch',

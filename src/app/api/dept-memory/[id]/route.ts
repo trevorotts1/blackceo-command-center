@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, run } from '@/lib/db';
 import type { DeptMemory, UpdateDeptMemoryRequest } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // DELETE /api/dept-memory/[id] -- remove a memory
 export async function DELETE(
   _request: NextRequest,

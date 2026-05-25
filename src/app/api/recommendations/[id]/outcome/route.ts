@@ -3,6 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { run, queryOne } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // PATCH /api/recommendations/[id]/outcome - Record an outcome measurement
 export async function PATCH(
   request: NextRequest,

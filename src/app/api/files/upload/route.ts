@@ -9,6 +9,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import path from 'path';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // Base directory for all uploaded project files
 // Set via PROJECTS_PATH env var (e.g., ~/projects or /var/www/projects)
 const PROJECTS_BASE = (process.env.PROJECTS_PATH || '~/projects').replace(/^~/, process.env.HOME || '');
