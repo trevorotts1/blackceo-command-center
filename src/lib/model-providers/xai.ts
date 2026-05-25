@@ -61,9 +61,9 @@ function inferFamily(modelId: string): string | undefined {
 
 function inferCapabilities(modelId: string): ModelCapability[] {
   const lower = modelId.toLowerCase();
-  const caps: ModelCapability[] = ['chat', 'streaming', 'tool_use', 'long_context'];
+  const caps: ModelCapability[] = ['text', 'streaming', 'tool_use', 'long_context'];
   if (lower.includes('vision') || lower.includes('grok-4') || lower.includes('grok-2-vision') || lower.includes('image')) {
-    caps.push('vision', 'image_input');
+    caps.push('vision');
   }
   if (lower.includes('reasoning') || lower.includes('grok-4')) {
     caps.push('reasoning');

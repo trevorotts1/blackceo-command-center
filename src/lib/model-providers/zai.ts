@@ -61,13 +61,13 @@ function inferFamily(modelId: string): string | undefined {
 
 function inferCapabilities(modelId: string): ModelCapability[] {
   const lower = modelId.toLowerCase();
-  if (lower.includes('embedding')) return ['embedding'];
-  const caps: ModelCapability[] = ['chat', 'streaming', 'tool_use'];
+  if (lower.includes('embedding')) return ['embeddings'];
+  const caps: ModelCapability[] = ['text', 'streaming', 'tool_use'];
   if (lower.includes('glm-4v') || lower.includes('vision') || lower.includes('glm-4.5v')) {
-    caps.push('vision', 'image_input');
+    caps.push('vision');
   }
   if (lower.includes('glm-4') || lower.includes('glm-4.5')) {
-    caps.push('long_context', 'json_mode');
+    caps.push('long_context', 'structured_output');
   }
   if (lower.includes('thinking') || lower.includes('reason') || lower.includes('air')) {
     caps.push('reasoning');

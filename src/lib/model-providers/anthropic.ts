@@ -78,7 +78,7 @@ function inferFamily(modelId: string): string | undefined {
 
 function inferCapabilities(modelId: string): ModelCapability[] {
   const lower = modelId.toLowerCase();
-  const caps: ModelCapability[] = ['chat', 'streaming', 'tool_use', 'long_context', 'vision', 'image_input'];
+  const caps: ModelCapability[] = ['text', 'streaming', 'tool_use', 'long_context', 'vision'];
   if (lower.includes('opus') || lower.includes('sonnet')) {
     caps.push('reasoning');
   }

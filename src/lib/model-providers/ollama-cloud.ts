@@ -101,7 +101,7 @@ function normalizeModel(row: OllamaCloudModelRow): ProviderModel {
     output_cost_per_million: row.pricing?.output_per_million,
     pricing_model: hasPerTokenPricing ? 'per_token' : 'flat_rate_plan',
     pricing_source: 'auto',
-    capabilities: capabilities.length > 0 ? capabilities : ['chat', 'streaming'],
+    capabilities: capabilities.length > 0 ? capabilities : ['text', 'streaming'],
     status: 'active',
     raw_metadata: row as unknown as Record<string, unknown>,
   };

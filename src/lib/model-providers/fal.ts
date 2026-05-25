@@ -56,12 +56,12 @@ function authHeaders(apiKey: string): Record<string, string> {
 }
 
 const CURATED_MODELS: Array<{ id: string; family: string; caps: ModelCapability[] }> = [
-  { id: 'fal-ai/flux/dev', family: 'flux', caps: ['image_input'] },
-  { id: 'fal-ai/flux-pro/v1.1', family: 'flux', caps: ['image_input'] },
-  { id: 'fal-ai/flux-pro/kontext', family: 'flux', caps: ['image_input', 'vision'] },
-  { id: 'fal-ai/flux/schnell', family: 'flux', caps: ['image_input'] },
-  { id: 'fal-ai/recraft-v3', family: 'recraft', caps: ['image_input'] },
-  { id: 'fal-ai/ideogram/v2', family: 'ideogram', caps: ['image_input'] },
+  { id: 'fal-ai/flux/dev', family: 'flux', caps: ['image_generation'] },
+  { id: 'fal-ai/flux-pro/v1.1', family: 'flux', caps: ['image_generation'] },
+  { id: 'fal-ai/flux-pro/kontext', family: 'flux', caps: ['image_generation', 'vision'] },
+  { id: 'fal-ai/flux/schnell', family: 'flux', caps: ['image_generation'] },
+  { id: 'fal-ai/recraft-v3', family: 'recraft', caps: ['image_generation'] },
+  { id: 'fal-ai/ideogram/v2', family: 'ideogram', caps: ['image_generation'] },
   { id: 'fal-ai/veo3', family: 'veo', caps: ['streaming'] },
   { id: 'fal-ai/kling-video/v2/master/text-to-video', family: 'kling', caps: ['streaming'] },
   { id: 'fal-ai/luma-dream-machine', family: 'luma', caps: ['streaming'] },
@@ -93,7 +93,7 @@ function inferCapabilities(modelId: string): ModelCapability[] {
   if (lower.includes('tts') || lower.includes('whisper') || lower.includes('audio') || lower.includes('music')) {
     return ['audio_input'];
   }
-  return ['image_input'];
+  return ['image_generation'];
 }
 
 function normalizeCurated(entry: { id: string; family: string; caps: ModelCapability[] }): ProviderModel {

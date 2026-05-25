@@ -73,10 +73,10 @@ function authHeaders(apiKey: string): Record<string, string> {
 const CURATED_MODELS: Array<{ id: string; kind: ModelCapability; family: string }> = [
   { id: 'veo-3', kind: 'streaming', family: 'veo' },
   { id: 'veo-3-fast', kind: 'streaming', family: 'veo' },
-  { id: 'midjourney-v6', kind: 'image_input', family: 'midjourney' },
-  { id: 'midjourney-v7', kind: 'image_input', family: 'midjourney' },
-  { id: 'flux-1.1-pro', kind: 'image_input', family: 'flux' },
-  { id: 'flux-kontext-pro', kind: 'image_input', family: 'flux' },
+  { id: 'midjourney-v6', kind: 'image_generation', family: 'midjourney' },
+  { id: 'midjourney-v7', kind: 'image_generation', family: 'midjourney' },
+  { id: 'flux-1.1-pro', kind: 'image_generation', family: 'flux' },
+  { id: 'flux-kontext-pro', kind: 'image_generation', family: 'flux' },
   { id: 'suno-v4', kind: 'audio_input', family: 'suno' },
   { id: 'runway-gen3', kind: 'streaming', family: 'runway' },
 ];
@@ -101,7 +101,7 @@ function inferCapabilities(modelId: string): ModelCapability[] {
   if (lower.includes('suno') || lower.includes('audio') || lower.includes('music')) {
     return ['audio_input'];
   }
-  return ['image_input'];
+  return ['image_generation'];
 }
 
 function normalizeRow(row: KieModelRow): ProviderModel | null {

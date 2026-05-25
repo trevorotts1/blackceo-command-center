@@ -84,18 +84,18 @@ function inferCapabilities(row: GeminiModelRow): ModelCapability[] {
   const methods = row.supportedGenerationMethods || [];
   const caps: ModelCapability[] = [];
   if (methods.includes('generateContent') || methods.includes('streamGenerateContent')) {
-    caps.push('chat', 'streaming');
+    caps.push('text', 'streaming');
   }
   if (methods.includes('embedContent') || lower.includes('embedding')) {
-    caps.push('embedding');
+    caps.push('embeddings');
   }
   if (lower.includes('gemini') && !lower.includes('embedding')) {
-    caps.push('vision', 'image_input', 'tool_use', 'long_context');
+    caps.push('vision', 'tool_use', 'long_context');
   }
   if (lower.includes('thinking') || lower.includes('pro')) {
     caps.push('reasoning');
   }
-  return caps.length > 0 ? caps : ['chat'];
+  return caps.length > 0 ? caps : ['text'];
 }
 
 function normalizeModel(row: GeminiModelRow): ProviderModel {

@@ -108,11 +108,11 @@ function inferCapabilities(row: ReplicateModelRow): ModelCapability[] {
   if (blob.includes('audio') || blob.includes('music') || blob.includes('speech') || blob.includes('tts') || blob.includes('whisper')) {
     return ['audio_input'];
   }
-  if (blob.includes('embedding')) return ['embedding'];
+  if (blob.includes('embedding')) return ['embeddings'];
   if (blob.includes('llm') || blob.includes('chat') || blob.includes('text-generation') || name.includes('llama') || name.includes('mistral')) {
-    return ['chat', 'streaming'];
+    return ['text', 'streaming'];
   }
-  return ['image_input'];
+  return ['image_generation'];
 }
 
 function normalizeModel(row: ReplicateModelRow): ProviderModel {

@@ -88,13 +88,13 @@ function inferFamily(modelId: string): string | undefined {
 }
 
 function inferCapabilities(row: OpenRouterModelRow): ModelCapability[] {
-  const caps: ModelCapability[] = ['chat', 'streaming'];
+  const caps: ModelCapability[] = ['text', 'streaming'];
   const inputs = row.architecture?.input_modalities || [];
   const params = row.supported_parameters || [];
-  if (inputs.includes('image')) caps.push('vision', 'image_input');
+  if (inputs.includes('image')) caps.push('vision');
   if (inputs.includes('audio')) caps.push('audio_input');
   if (params.includes('tools') || params.includes('tool_choice')) caps.push('tool_use');
-  if (params.includes('response_format')) caps.push('json_mode');
+  if (params.includes('response_format')) caps.push('structured_output');
   if (params.includes('reasoning')) caps.push('reasoning');
   if ((row.context_length || 0) >= 100000) caps.push('long_context');
   return caps;

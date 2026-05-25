@@ -865,3 +865,79 @@ broken every consumer.
 Both scripts now exercise the same three steps end-to-end: required
 files exist, jq schema probes succeed, and `/api/company` +
 `/api/workspaces` both return 200.
+
+---
+
+## Depth 3 Track B (capability vocabulary alignment)
+
+Resolves the capability-tag drift flagged in the Track C note. Two
+sources of truth had diverged:
+
+- `src/lib/model-providers/types.ts` (producer side) shipped a 12-tag
+  set: `chat, completion, embedding, vision, tool_use, json_mode,
+  reasoning, long_context, code, image_input, audio_input, streaming`.
+- `src/lib/model-registry.ts` (consumer / storage side) shipped a
+  different vocabulary: `text, image_generation, video_generation,
+  audio_transcription, web_search, computer_use, ...`.
+
+UI badge + filter components (`CapabilityBadge.tsx`,
+`ModelFilterBar.tsx`) sat downstream of these and could not display a
+consistent set.
+
+### Final union vocabulary (16 tags, single source of truth)
+
+```
+text                  embeddings            image_generation
+video_generation      audio_generation      audio_transcription
+vision                audio_input           streaming
+reasoning             tool_use              structured_output
+long_context          code_execution        web_search
+computer_use
+```
+
+Grouped as:
+
+- Output kinds: `text`, `embeddings`, `image_generation`,
+  `video_generation`, `audio_generation`, `audio_transcription`
+- Input kinds: `vision` (accepts images), `audio_input` (accepts audio)
+- Behaviors: `streaming`, `reasoning`, `tool_use`,
+  `structured_output`, `long_context`, `code_execution`, `web_search`,
+  `computer_use`
+
+### Legacy alias migration
+
+Producer-side tags rewritten to the union:
+
+```
+chat / completion  -> text
+embedding          -> embeddings
+image_input        -> vision           (LLM accepts images as input)
+image_input        -> image_generation (image-gen models on fal/kie/replicate)
+json_mode          -> structured_output
+code               -> code_execution
+```
+
+`MODEL_CAPABILITIES` is now the canonical constant exported from
+`src/lib/model-registry.ts`. `src/lib/model-providers/types.ts` mirrors
+it as a string union for the `ProviderModel.capabilities` field. The
+UI badge maps every tag in the union to an icon + Tailwind palette;
+unknown tags still render as a neutral grey pill so a future addition
+to the registry does not crash the UI. `ModelFilterBar.tsx` consumes
+the same list via the `ALL_CAPABILITIES` re-export from
+`CapabilityBadge.tsx`.
+
+### Files touched
+
+1. `src/lib/model-providers/types.ts` (producer type)
+2. `src/lib/model-registry.ts` (consumer / storage, owns canonical list)
+3. `src/components/settings/CapabilityBadge.tsx` (badge meta + ALL_CAPABILITIES re-export)
+4. `src/components/settings/ModelFilterBar.tsx` (unchanged, already consumes ALL_CAPABILITIES)
+5. Provider connectors that emitted legacy tags, rewritten to the
+   union to keep tsc clean after the producer type narrowed:
+   `anthropic.ts`, `fal.ts`, `google.ts`, `kie.ts`, `minimax.ts`,
+   `moonshot.ts`, `ollama-cloud.ts`, `openai.ts`, `openrouter.ts`,
+   `replicate.ts`, `xai.ts`, `zai.ts`.
+
+### Verification
+
+Final `npx tsc --noEmit -p .` exit: zero output, zero errors.

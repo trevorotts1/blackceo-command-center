@@ -18,23 +18,43 @@
 
 /**
  * Capabilities are a flat string array stored as JSON in `model_registry`.
- * The known capability strings are listed below for type-safety, but the
- * column accepts any string so future capabilities can be added without
- * a code change.
+ *
+ * This is the canonical UNION vocabulary shared with `src/lib/model-registry.ts`
+ * and the UI badge / filter components. The `model_registry.capabilities`
+ * column accepts any string so future capabilities can be added without a
+ * code change, but providers and consumers should stick to the list below.
+ *
+ * Categories:
+ *   Output kinds:  text, embeddings, image_generation, video_generation,
+ *                  audio_generation, audio_transcription
+ *   Input kinds:   vision (accepts images), audio_input (accepts audio)
+ *   Behaviors:     streaming, reasoning, tool_use, structured_output,
+ *                  long_context, code_execution, web_search, computer_use
+ *
+ * Legacy aliases removed in v4.0 Depth 3 Track B:
+ *   - 'chat' / 'completion'  -> 'text'
+ *   - 'embedding'            -> 'embeddings'
+ *   - 'image_input'          -> 'vision'
+ *   - 'json_mode'            -> 'structured_output'
+ *   - 'code'                 -> 'code_execution'
  */
 export type ModelCapability =
-  | 'chat'
-  | 'completion'
-  | 'embedding'
+  | 'text'
   | 'vision'
-  | 'tool_use'
-  | 'json_mode'
-  | 'reasoning'
-  | 'long_context'
-  | 'code'
-  | 'image_input'
   | 'audio_input'
-  | 'streaming';
+  | 'streaming'
+  | 'reasoning'
+  | 'tool_use'
+  | 'structured_output'
+  | 'long_context'
+  | 'code_execution'
+  | 'embeddings'
+  | 'image_generation'
+  | 'video_generation'
+  | 'audio_generation'
+  | 'audio_transcription'
+  | 'web_search'
+  | 'computer_use';
 
 /**
  * Pricing model maps to the `pricing_model` CHECK in Migration 031.

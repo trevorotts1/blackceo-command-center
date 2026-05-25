@@ -69,9 +69,9 @@ function inferContextWindow(modelId: string): number | undefined {
 
 function inferCapabilities(modelId: string): ModelCapability[] {
   const lower = modelId.toLowerCase();
-  const caps: ModelCapability[] = ['chat', 'streaming', 'tool_use'];
+  const caps: ModelCapability[] = ['text', 'streaming', 'tool_use'];
   if (lower.includes('vision') || lower.includes('vl')) {
-    caps.push('vision', 'image_input');
+    caps.push('vision');
   }
   if (lower.includes('128k') || lower.includes('256k') || lower.includes('1m')) {
     caps.push('long_context');

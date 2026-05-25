@@ -58,10 +58,10 @@ function authHeaders(apiKey: string): Record<string, string> {
  * the /models endpoint returns on top of this baseline.
  */
 const CURATED_MODELS: Array<{ id: string; ctx: number; caps: ModelCapability[]; family: string }> = [
-  { id: 'MiniMax-M2', ctx: 192000, caps: ['chat', 'streaming', 'tool_use', 'long_context', 'reasoning'], family: 'minimax-m' },
-  { id: 'MiniMax-Text-01', ctx: 1_000_000, caps: ['chat', 'streaming', 'tool_use', 'long_context'], family: 'minimax-text' },
-  { id: 'abab6.5s-chat', ctx: 245760, caps: ['chat', 'streaming', 'tool_use', 'long_context'], family: 'abab' },
-  { id: 'abab6.5-chat', ctx: 32768, caps: ['chat', 'streaming', 'tool_use'], family: 'abab' },
+  { id: 'MiniMax-M2', ctx: 192000, caps: ['text', 'streaming', 'tool_use', 'long_context', 'reasoning'], family: 'minimax-m' },
+  { id: 'MiniMax-Text-01', ctx: 1_000_000, caps: ['text', 'streaming', 'tool_use', 'long_context'], family: 'minimax-text' },
+  { id: 'abab6.5s-chat', ctx: 245760, caps: ['text', 'streaming', 'tool_use', 'long_context'], family: 'abab' },
+  { id: 'abab6.5-chat', ctx: 32768, caps: ['text', 'streaming', 'tool_use'], family: 'abab' },
   { id: 'speech-02-hd', ctx: 0, caps: ['audio_input'], family: 'speech' },
   { id: 'video-01', ctx: 0, caps: ['streaming'], family: 'video' },
 ];
@@ -104,7 +104,7 @@ function normalizeRow(row: MinimaxModelRow): ProviderModel | null {
     context_window: row.context_window,
     pricing_model: 'per_token',
     pricing_source: 'auto',
-    capabilities: caps.length > 0 ? caps : ['chat', 'streaming'],
+    capabilities: caps.length > 0 ? caps : ['text', 'streaming'],
     status: 'active',
     raw_metadata: row as unknown as Record<string, unknown>,
   };

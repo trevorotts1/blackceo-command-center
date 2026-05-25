@@ -14,19 +14,34 @@
 
 import { queryAll, queryOne, run, transaction } from './db';
 
-// Valid capability tags per PRD Section 5.1. Stored as a JSON array of strings
-// in the `capabilities` column.
+// Canonical UNION capability vocabulary. Single source of truth shared with
+// `src/lib/model-providers/types.ts` (producer side) and the UI badge / filter
+// (consumer side). v4.0 Depth 3 Track B aligned these three previously
+// divergent vocabularies.
+//
+// Stored as a JSON array of strings in the `capabilities` column. The column
+// accepts any string so future capabilities can be added without a code
+// change, but producers and consumers should stick to the list below.
 export const MODEL_CAPABILITIES = [
+  // Output kinds
   'text',
-  'vision',
+  'embeddings',
   'image_generation',
   'video_generation',
   'audio_generation',
   'audio_transcription',
-  'embeddings',
+  // Input kinds
+  'vision',
+  'audio_input',
+  // Behaviors
+  'streaming',
+  'reasoning',
   'tool_use',
+  'structured_output',
+  'long_context',
   'code_execution',
   'web_search',
+  'computer_use',
 ] as const;
 
 export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];

@@ -56,21 +56,21 @@ function authHeaders(apiKey: string): Record<string, string> {
  */
 function inferCapabilities(modelId: string): ModelCapability[] {
   const lower = modelId.toLowerCase();
-  const caps: ModelCapability[] = ['chat', 'streaming'];
+  const caps: ModelCapability[] = ['text', 'streaming'];
   if (lower.includes('gpt-4') || lower.includes('gpt-5') || lower.includes('o1') || lower.includes('o3') || lower.includes('o4')) {
-    caps.push('tool_use', 'json_mode', 'long_context');
+    caps.push('tool_use', 'structured_output', 'long_context');
   }
   if (lower.includes('vision') || lower.includes('gpt-4o') || lower.includes('gpt-4.1') || lower.includes('gpt-5')) {
-    caps.push('vision', 'image_input');
+    caps.push('vision');
   }
   if (lower.includes('o1') || lower.includes('o3') || lower.includes('o4') || lower.startsWith('gpt-5')) {
     caps.push('reasoning');
   }
   if (lower.includes('embedding')) {
-    return ['embedding'];
+    return ['embeddings'];
   }
   if (lower.includes('whisper') || lower.includes('transcribe')) {
-    return ['audio_input'];
+    return ['audio_transcription'];
   }
   return caps;
 }
