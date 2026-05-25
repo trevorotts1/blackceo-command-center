@@ -2,7 +2,55 @@
 
 Per PRD Section 18.4: log every interpretation decision that was not explicit in the PRD.
 
-## Depth 0 (migrations 031-041 + platform.ts)
+## Outstanding work
+
+Last reviewed 2026-05-25 during v4.0.1 Group G cleanup pass. Every prior
+"Pending dependencies" entry below has been audited; resolved entries are
+marked DONE inline with the commit SHA. No genuinely pending items remain
+on the v4.0 + v4.0.1 surface.
+
+- _(none)_
+
+## v4.0.1 fix pass
+
+### Decisions
+
+1. **Replicate provider KEPT (P1-14).** The v4.0.1 post-build review
+   (`/Users/blackceomacmini/Downloads/BLACKCEO-V4-POST-BUILD-FIXES.md`
+   Section 1 P1-14) raised whether the Replicate connector should be
+   removed in favor of consolidating on Fal + KIE for image/video. The
+   operator decided to KEEP the Replicate provider in
+   `src/lib/model-providers/replicate.ts` because (a) Replicate carries
+   long-tail open-source models (Flux variants, SDXL fine-tunes, niche
+   audio models) that neither Fal nor KIE expose, (b) the connector is
+   already implemented and weekly-refresh-driven, so cost of keeping it
+   is near zero, and (c) the 4-provider image+video portfolio (Replicate
+   + Fal + KIE + Google) gives operators real provider-failover headroom
+   if any single vendor degrades. No code change in this pass; the
+   provider stays in the registry, the connector stays wired, and the
+   weekly refresh job continues to pull its model list. Re-evaluate at
+   v4.1 if usage telemetry shows Replicate is dark for 6+ months.
+
+2. **Capability vocabulary filter UI grouped into 4 categories (P2-15).**
+   The 16-tag canonical vocabulary aligned at commit `f9c736d` (Depth 3
+   Track B) is unchanged. The filter chip row in
+   `src/components/settings/ModelFilterBar.tsx` was regrouped from one
+   flat row into 4 labeled rows (Input modalities, Output modalities,
+   Capabilities, Other) so operators can scan by intent. The canonical
+   union, badge icons, and color tokens are unchanged. Reference doc
+   created at `docs/MODEL_CAPABILITIES.md` documenting each of the 16
+   tags with 1-line description and example models.
+
+3. **@ts-expect-error sweep no-op (P2-16).** Baseline search across the
+   whole repo (`grep -rn "@ts-expect-error\|@ts-ignore" --include="*.ts"
+   --include="*.tsx"` excluding `node_modules/` and `.next/`) found
+   ZERO suppressions remaining. Depth 3 Track A commit `2976190` already
+   removed the four guards added during Wave 1 (cmdk + react-markdown
+   chain). Nothing further to do in this pass; the 75% reduction target
+   is satisfied vacuously (100% reduction relative to Wave 1 peak).
+   Documented here per the post-build-fixes brief.
+
+
 
 ### Decisions outside the PRD's explicit spec
 
@@ -45,6 +93,11 @@ Not authored at Depth 0. Reserved for Wave 1 Tracks B7 (research_searches) and B
 7. **OperatorSidebar exports `OPERATOR_NAV`.** I exported the nav array so CommandPalette can consume it without duplication. This is a deliberate cross-component contract.
 
 ### Pending dependencies
+
+**DONE 2026-05-25 (Depth 3 Track A, commit `2976190`).** All four
+isolated `@ts-expect-error` guards on the cmdk import were stripped after
+the dep landed. See "Depth 3 Track A" section below for the full install
+batch.
 
 These dependencies are referenced by Depth 1 code but are NOT yet in `package.json`. The integration step installs them in one batch:
 
@@ -338,6 +391,10 @@ Files added (all new, no overlap with other tracks):
 
 ### Pending dependencies and env vars
 
+**DONE 2026-05-25 (Depth 3 Track C, commit `6cbaefd`).** The env vars
+below were folded into `.env.example` during the Track C consolidation
+pass. No npm deps were needed for B8.
+
 No new npm dependencies. Web Speech API, Web Audio API, and `fetch` are all browser-built-in. New env vars to add to `.env.example` by the integration step:
 
     DEFAULT_CALL_TTS_PROVIDER=openai
@@ -395,6 +452,12 @@ Migration 043 (`add_web_agent_sessions`) appended to `src/lib/db/migrations.ts` 
 
 ### Pending dependencies and env vars
 
+**DONE 2026-05-25 (Depth 3 Track A, commit `2976190`).**
+`@anthropic-ai/sdk@^0.98.0` is now in `package.json`. The B9 runner
+itself still uses raw fetch by design; swapping to the SDK is a 1-file
+change inside `src/lib/web-agent/runner.ts` and is intentionally
+deferred (see B9 Decision 2 above and Track A Decision 2 below).
+
 The only required env var is `ANTHROPIC_API_KEY`, which is already present in `.env.example` from earlier tracks. No new env vars added by B9.
 
 Pending npm dependency (deferred, not blocking B9):
@@ -428,6 +491,10 @@ Test escape hatch: setting `WEB_AGENT_FIXTURE_PATH` to a JSON file containing a 
 9. **No write API.** PRD's pattern includes `POST /api/<agent>/workspace { name }` for project creation. Project creation comes from the Bridge agent (Track B2) pinning `cwd`, not from the Workspace UI. I omitted the POST. If Bridge needs an explicit "scratch this project" endpoint later it can be added without touching the listing/file/buckets routes.
 
 ### Pending dependencies
+
+**DONE 2026-05-25 (Depth 3 Track A, commit `2976190`).** All four
+markdown-pipeline deps are now in `package.json` and the three isolated
+`@ts-expect-error` guards in `FilePreview.tsx` were stripped.
 
 These are referenced by Track B3 code but NOT yet in `package.json` (consistent with PRD 0.3 pending):
 

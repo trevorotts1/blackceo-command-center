@@ -2,9 +2,54 @@
 
 import { useMemo } from 'react';
 import { Search, X } from 'lucide-react';
-import { ALL_CAPABILITIES, CapabilityBadge } from './CapabilityBadge';
+import { CapabilityBadge } from './CapabilityBadge';
+import type { Capability } from './CapabilityBadge';
 import type { ModelCardData, CostBand } from './ModelCard';
 import { getCostBand } from './ModelCard';
+
+/**
+ * Capability category grouping for the filter bar UI.
+ *
+ * The canonical 16-tag vocabulary lives in `src/lib/model-providers/types.ts`
+ * and `src/lib/model-registry.ts` (kept in sync at commit f9c736d). The
+ * grouping below is purely a UI affordance per v4.0.1 P2-15 so operators
+ * can scan capabilities by intent instead of one long flat row. Every tag
+ * in the canonical list MUST appear in exactly one category here; if a
+ * new tag is added upstream, also add it to one of the four groups below
+ * or the filter chip will silently disappear from the UI.
+ */
+const CAPABILITY_GROUPS: { label: string; capabilities: Capability[] }[] = [
+  {
+    label: 'Input modalities',
+    capabilities: ['text', 'vision', 'audio_input'],
+  },
+  {
+    label: 'Output modalities',
+    capabilities: [
+      'image_generation',
+      'video_generation',
+      'audio_generation',
+      'audio_transcription',
+    ],
+  },
+  {
+    label: 'Capabilities',
+    capabilities: [
+      'tool_use',
+      'reasoning',
+      'streaming',
+      'structured_output',
+      'long_context',
+      'code_execution',
+      'computer_use',
+      'web_search',
+    ],
+  },
+  {
+    label: 'Other',
+    capabilities: ['embeddings'],
+  },
+];
 
 /**
  * ModelFilterBar - multi-axis filter UI for the model catalog browser.
@@ -125,28 +170,44 @@ export function ModelFilterBar({ models, state, onChange, visibleCount }: ModelF
         </FilterRow>
       )}
 
-      {/* Capability chips */}
-      <FilterRow label="Capability">
-        {ALL_CAPABILITIES.map((cap) => {
-          const active = state.capabilities.includes(cap);
-          return (
-            <button
-              key={cap}
-              type="button"
-              onClick={() =>
-                onChange({ ...state, capabilities: toggle(state.capabilities, cap) })
-              }
-              className={`rounded-full transition-all ${
-                active
-                  ? 'ring-2 ring-brand-400 ring-offset-1'
-                  : 'opacity-70 hover:opacity-100'
-              }`}
-            >
-              <CapabilityBadge capability={cap} size="md" />
-            </button>
-          );
-        })}
-      </FilterRow>
+      {/* Capability chips, grouped into 4 categories per v4.0.1 P2-15 */}
+      <div className="border-b border-gray-100">
+        <div className="px-4 pt-2.5 pb-1 flex items-center gap-3">
+          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider w-20 flex-shrink-0">
+            Capability
+          </span>
+        </div>
+        <div className="px-4 pb-2.5 pl-[104px] flex flex-col gap-2">
+          {CAPABILITY_GROUPS.map((group) => (
+            <div key={group.label} className="flex items-center gap-3 flex-wrap">
+              <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide w-28 flex-shrink-0">
+                {group.label}
+              </span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {group.capabilities.map((cap) => {
+                  const active = state.capabilities.includes(cap);
+                  return (
+                    <button
+                      key={cap}
+                      type="button"
+                      onClick={() =>
+                        onChange({ ...state, capabilities: toggle(state.capabilities, cap) })
+                      }
+                      className={`rounded-full transition-all ${
+                        active
+                          ? 'ring-2 ring-brand-400 ring-offset-1'
+                          : 'opacity-70 hover:opacity-100'
+                      }`}
+                    >
+                      <CapabilityBadge capability={cap} size="md" />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* Cost band chips */}
       <FilterRow label="Cost band" lastRow>
