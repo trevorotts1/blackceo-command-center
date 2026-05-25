@@ -174,3 +174,25 @@ PRD Sections 3.12 and 3.13.
 11. **`fs.statfs` fallback.** The disk probe uses Node's promisified `fs.statfs`. On older Node or non-POSIX volumes it can throw; the probe degrades to `unknown` with a per-volume error string rather than failing the whole status response.
 
 12. **`?force=1` is intentionally GET-only.** The API contract is read-only. A POST endpoint that triggers probes could be a future addition for the "Re-run bootstrap" button mentioned in PRD 3.6, but that is a different action and belongs to Track Install.
+
+## Wave 1 B7 (Research sub-module — xAI Grok Live Search)
+
+SCOPE-ADDITION Section 5. Pre-wave: migration 042 was committed alone first to unblock B9 (migration 043) without single-writer collisions on `src/lib/db/migrations.ts`.
+
+### Decisions outside the explicit spec
+
+1. **Migration 042 uses `id TEXT PRIMARY KEY`.** SCOPE-ADDITION 5.3 specifies TEXT; the inline dispatch brief said INTEGER AUTOINCREMENT. The scope doc is the source of truth, and TEXT lines up with the v4.0 convention (every operator-console table — operator_goals, operator_journal_entries, operator_chat_sessions, notebooks, etc.) uses TEXT primary keys with `randomUUID()` from the route handler. INTEGER would have been a one-off across this slice of the schema.
+
+2. **xAI provider is called inline by the search route.** Track C2 (Wave 2) owns the canonical xAI provider connector. Until it lands, `src/app/api/operator/research/search/route.ts` calls `https://api.x.ai/v1/chat/completions` directly using the OpenAI-compatible payload shape, with `search_parameters: { mode: 'on', return_citations: true, max_search_results }`. The route resolves the model via `listModels({ provider: 'xai' })` so once C2 populates the registry, the route picks the right grok variant without code changes; absent a registry hit it falls back to the string `grok-4-fast`. C2 can replace the inline `fetch` with a typed provider client without touching the route signature.
+
+3. **No `react-markdown` dependency yet.** PRD 0.3 / Addition 1 calls for `react-markdown` + `remark-gfm` + `rehype-highlight`. These are not in `package.json` as of Depth 1. Rather than block on dep installation across tracks, `ResearchResult.tsx` ships a small built-in renderer (headings, lists, blockquotes, code blocks, emphasis, links, bare URLs) that turns markdown into React nodes without ever using raw-HTML injection. When Addition 1's shared `<MarkdownView>` ships, replace the body of `ResearchResult.tsx` with one import. Dep list pending: `react-markdown`, `remark-gfm`, `rehype-highlight`, `highlight.js`.
+
+4. **Vault mirror is best-effort.** The route writes the result markdown to `<vault>/research/YYYY/MM/YYYY-MM-DD-<slug>.md` so Memory FTS (B6) and the All Searches bucket (B3 / Addition 2) pick it up. A filesystem failure (read-only FS in a test env, disk full) MUST NOT break the API response. The row is still persisted in `research_searches`, which is the canonical record. The mirror path is returned in `search_metadata.vault_path` so consumers can detect it.
+
+5. **History endpoint returns markdown previews, not full markdown.** The sidebar can render dozens to hundreds of rows; serving the full `result_markdown` on each list call wastes bytes. The list endpoint trims to a 240-character collapsed preview and surfaces `depth` and `citation_count` for sidebar metadata. Full markdown comes from `GET /api/operator/research/[id]`.
+
+6. **Shallow SLA = 30 seconds.** Per the dispatch brief, the shallow path enforces a 30s upstream timeout via `AbortController`; deep is allowed up to 90s. The route returns HTTP 502 on upstream failure so the System Status Panel can flag xAI as degraded if these fire repeatedly.
+
+7. **`X_AI_FIXTURE_JSON_PATH` for tests.** Mirrors the Tavily pattern in `src/lib/tavily.ts`. If set, the route reads a JSON fixture instead of hitting xAI (no live cost during CI or local dev). The route still writes a row and a vault file so end-to-end UI flows can exercise the full path offline.
+
+8. **Page-level `dynamic = 'force-dynamic'` on the detail route.** The saved row is mutable (deleted, re-searched, etc.) so the detail page must not statically prerender. Next.js's default for parametric server pages is dynamic rendering, but the explicit export makes the intent obvious for reviewers.
