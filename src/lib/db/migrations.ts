@@ -1323,6 +1323,31 @@ const migrations: Migration[] = [
       console.log('[Migration 041] cli_install_registry ready');
     }
   },
+  {
+    id: '042',
+    name: 'add_research_searches',
+    up: (db) => {
+      console.log('[Migration 042] Adding research_searches table (Track B7 Research sub-module)...');
+      // SCOPE-ADDITION Section 5.3. Backs the Operator Console Research sub-module
+      // (xAI Grok Live Search). result_markdown holds the full grounded answer;
+      // search_metadata is a JSON blob (depth, token counts, source urls, etc).
+      // The same markdown is mirrored to vault/research/YYYY/MM/YYYY-MM-DD-<slug>.md
+      // by the route handler so it shows up in Memory search (Track B6) and the
+      // All Searches bucket (Addition 2 / Track B3).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS research_searches (
+          id TEXT PRIMARY KEY,
+          query TEXT NOT NULL,
+          model TEXT NOT NULL,
+          result_markdown TEXT NOT NULL,
+          search_metadata TEXT DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_research_searches_created ON research_searches(created_at DESC)`);
+      console.log('[Migration 042] research_searches ready');
+    }
+  },
 ];
 
 /**
