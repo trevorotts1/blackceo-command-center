@@ -494,3 +494,7 @@ Three small atomic commits to wire cross-track touches the parallel Wave 1 track
 
 `MessageInput.tsx` now mounts a `Phone` button between the `VoiceButton` mic and the textarea. The button is an anchor to `/operator/call` (the Call Mode route Track B8 shipped). Visual style matches the idle `VoiceButton`: same 38x38 footprint, same `#E5E7EB` border, same `#FFFFFF` background, `text-bcc-text-muted` icon color with a subtle hover into `text-bcc-text`. Implemented as a Next.js `Link` rather than a button + `router.push` so it remains a native middle-click / cmd-click target and works without JS. The file header comment that reserved the slot for the follow-up was updated to reflect the new wiring.
 
+### 2. Operator landing tile verification
+
+All 10 tiles were already present in `src/app/operator/page.tsx` (Bridge, Workspace, Studio, Notebook, Goals, Journal, Memory, Research, Call Mode, Web Agent) — Track B1 shipped the full list. However, three of them (`Research`, `Call Mode`, `Web Agent`) still had `placeholder: true` from when they pointed at routes that did not yet exist. Wave 1 shipped all three routes (`src/app/operator/research/page.tsx`, `.../call/page.tsx`, `.../web-agent/page.tsx`), so the placeholder flags are now stale. Dropped the flags so the tiles render as live `Link`s instead of `cursor-not-allowed` placeholders. No href changes needed.
+

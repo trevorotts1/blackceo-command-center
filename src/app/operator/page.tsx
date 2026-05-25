@@ -83,7 +83,6 @@ const TILES: OperatorTile[] = [
     tagline: 'Live X/Twitter search through xAI Grok.',
     icon: <Search size={22} />,
     accent: '#06B6D4',
-    placeholder: true,
   },
   {
     href: '/operator/call',
@@ -91,7 +90,6 @@ const TILES: OperatorTile[] = [
     tagline: 'Hands-free voice conversation with the operator-level CLIs.',
     icon: <Phone size={22} />,
     accent: '#10B981',
-    placeholder: true,
   },
   {
     href: '/operator/web-agent',
@@ -99,7 +97,6 @@ const TILES: OperatorTile[] = [
     tagline: 'Browser automation through Anthropic Computer Use.',
     icon: <Globe size={22} />,
     accent: '#6366F1',
-    placeholder: true,
   },
 ];
 
