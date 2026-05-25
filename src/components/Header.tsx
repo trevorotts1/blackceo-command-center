@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown } from 'lucide-react';
+import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown, Terminal } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -228,6 +228,15 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
       {/* Right: Time & Status */}
       <div className="flex items-center gap-4">
+        <Link
+          href="/operator"
+          aria-label="Operator Console"
+          title="Operator Console"
+          className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
+        >
+          <Terminal className="w-4 h-4" />
+          <span className="hidden sm:inline">Operator Console</span>
+        </Link>
         <span className="text-gray-500 text-sm font-mono">
           {format(currentTime, 'HH:mm:ss')}
         </span>
