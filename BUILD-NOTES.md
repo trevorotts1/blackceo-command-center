@@ -820,3 +820,48 @@ the full pass is a Wave 3 / CI job.
    `workers: 1` so a flaky shared resource (Ollama, Tavily fixture
    path) can't cause cross-test interference. If/when a future depth
    adds more spec files, bump the worker count then.
+
+---
+
+## Depth 3 Track E (Mac Mini + VPS Docker compat scripts)
+
+The two PRD-mandated regression scripts under
+`scripts/integration-tests/` were authored against an older schema
+shape. Both encoded jq paths as `departments[0].slug`,
+`departments[0].name`, `departments[0].icon` and ran them as
+`jq -e ".$q"` — which yields the malformed selector
+`..departments[0].slug` (leading dot prepended to a path that already
+starts at the root key) and exits non-zero before any API check fires.
+
+The shipped `config/departments.json` is a top-level array of
+`{ id, name, emoji, headTitle, workspacePath }` objects, not an object
+with a `departments` key. There is no `slug` or `icon` field.
+
+### Fix
+
+Both scripts now declare the schema probes as already-anchored
+selectors (`.[0].id`, `.[0].name`, `.[0].emoji`) and invoke them as
+`jq -e "$q"` without prepending an extra `.`. The selectors match the
+real file shape: array-root, `id` instead of `slug`, `emoji` instead of
+`icon`.
+
+No app code was touched. The schema mismatch was a script bug, not a
+config bug — `config/departments.json` is the source of truth for the
+rest of the app (operator landing, workspace router, departments API),
+and changing its field names to satisfy the old script would have
+broken every consumer.
+
+### Run from this dispatch
+
+1. `bash scripts/integration-tests/mac-mini-compat.sh` against the
+   local dev server on port 4001 (port 4000 was occupied by a
+   pre-existing production next-server outside this dispatch's
+   ownership): `Mac Mini integration: PASS`, exit 0.
+2. `bash scripts/integration-tests/vps-docker-compat.sh` with
+   `VPS_WORKSPACE=$PWD` (so the script's `/data/.openclaw/workspace`
+   default resolves to this repo, since the dispatch runs on Trevor's
+   Mac, not on the VPS): `VPS Docker integration: PASS`, exit 0.
+
+Both scripts now exercise the same three steps end-to-end: required
+files exist, jq schema probes succeed, and `/api/company` +
+`/api/workspaces` both return 200.

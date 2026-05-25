@@ -16,9 +16,9 @@ REQUIRED_FILES=(
 )
 
 REQUIRED_SCHEMAS=(
-  'departments[0].slug'
-  'departments[0].name'
-  'departments[0].icon'
+  '.[0].id'
+  '.[0].name'
+  '.[0].emoji'
 )
 
 API_BASE="${API_BASE:-http://localhost:4000}"
@@ -42,7 +42,7 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 for q in "${REQUIRED_SCHEMAS[@]}"; do
-  if ! jq -e ".$q" config/departments.json >/dev/null; then
+  if ! jq -e "$q" config/departments.json >/dev/null; then
     echo "FAIL: schema missing $q in config/departments.json"
     exit 1
   fi
