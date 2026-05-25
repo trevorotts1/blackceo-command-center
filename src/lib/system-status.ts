@@ -16,6 +16,9 @@ import { probeMemory } from './probes/memory';
 import { probeJobs } from './probes/jobs';
 import { probeDisk } from './probes/disk';
 import { probeAgents } from './probes/agents';
+import { probeCli } from './probes/cli-probe';
+import { probeCloudflareTunnel } from './probes/cloudflare-tunnel-probe';
+import { probeCloudflareAccess } from './probes/cloudflare-access-probe';
 import {
   ProbeResult,
   SystemStatus,
@@ -67,6 +70,9 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     jobs,
     disk,
     agents,
+    cli,
+    cloudflareTunnel,
+    cloudflareAccess,
   ] = await Promise.all([
     probeDatabase(),
     probeOpenClawGateway(),
@@ -76,6 +82,9 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     probeJobs(),
     probeDisk(),
     probeAgents(),
+    probeCli(),
+    probeCloudflareTunnel(),
+    probeCloudflareAccess(),
   ]);
 
   const components: ProbeResult[] = [
@@ -87,6 +96,9 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     jobs,
     disk,
     agents,
+    cli,
+    cloudflareTunnel,
+    cloudflareAccess,
   ];
 
   for (const c of components) persistSnapshot(c);
@@ -215,6 +227,9 @@ function labelFor(component: string): string {
     jobs: 'Background Jobs',
     disk: 'Disk',
     agents: 'Agents',
+    cli: 'Operator CLIs',
+    cloudflare_tunnel: 'Cloudflare Tunnel',
+    cloudflare_access: 'Cloudflare Access',
     provider_openrouter: 'OpenRouter',
     provider_anthropic: 'Anthropic',
     provider_openai: 'OpenAI',

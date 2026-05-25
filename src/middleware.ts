@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).
@@ -107,6 +108,7 @@ export function middleware(request: NextRequest): NextResponse {
   // the subdomain.
   const cfJwt = request.headers.get('cf-access-jwt-assertion');
   const cfEmail = request.headers.get('cf-access-authenticated-user-email');
+  if (cfJwt) recordCfAccessSeen(cfEmail);
 
   if (REQUIRE_CF_ACCESS) {
     if (!cfJwt || !cfEmail) {
