@@ -251,3 +251,53 @@ PRD Section 5.4 and line 750 (persona system stays exactly as it is).
 6. **Existing `MODEL_DESCRIPTIONS` hardcoded map is gone.** The legacy page hardcoded human-readable descriptions for ~10 model ids. With the registry as the source of truth, `getModelDescription` now reads label + cost from the loaded model list. This avoids drift the moment the cron adds a new model id that the operator wants to assign.
 
 7. **`PersonaModelAssignment` is a structural extraction, not a behavior change.** Per line 750 the persona system must continue working. I extracted the department card body into a controlled component that takes effective-value lookups + setters from the page. All inherit/override mechanics, the auto-assign option, the reset arrow, the agent-type badges, and the 5-layer alignment note copy are preserved verbatim. PUT body to `/api/settings/intelligence` is identical.
+
+## Wave 1 Depth 2 / Track B2 (Operator Bridge sub-module)
+
+### Decisions outside the PRD's explicit spec
+
+1. **Streaming over POST instead of GET SSE.** PRD 4.3 says "Streaming output via Server-Sent Events" but does not pin which HTTP verb carries the stream. The agent turn payload (`agent_id`, `session_id`, `content`) is too large to encode in a GET URL and the browser `EventSource` API cannot do POST. So `POST /api/operator/bridge/send` itself returns `text/event-stream` and the client reads with `fetch` + a manual SSE parser (handles frames split across HTTP chunks). The dedicated `GET /api/operator/bridge/stream` is reserved for history replay on agent switch and for future Track B8 (Call Mode) listening.
+
+2. **Agent catalogue lives in `src/lib/bridge/agents.ts`, not in the DB.** The PRD says "CLI path registry stored in DB (set by the auto-install scripts in Section 6)". For Wave 1 the install scripts have not yet wired binary paths into a DB table. The catalogue file is the static metadata source (id, label, accent, transport, expected latency); the per-host binary path comes from an env var (`BCC_<AGENT>_BIN`) with the bare binary name as a fallback. When Section 6's scripts land, the env vars become the single touch point and no agent code needs to change.
+
+3. **OpenClaw transport returns an ack, not a streamed reply.** PRD 4.3 pins the OpenClaw bridge to `getOpenClawClient().sendMessage()`. The gateway's reply arrives on its own event channel (already wired to BlackCEO's broadcast bus in Wave 1 Depth 0). Until Track B8 / future work subscribes the Bridge chat to that bus, we acknowledge the dispatch with a one-line confirmation so the operator can see the message was accepted. The user message and ack both persist to `operator_chat_messages` so the next Bridge UI iteration can backfill the assistant reply once the gateway event lands.
+
+4. **CLI argv mapping is hand-rolled per agent.** Each operator CLI has its own conventions (claude `--print --output-format stream-json`, codex `exec --json`, gemini `--prompt --json`, agy `task`, hermes `chat`). Centralising this in `buildArgv` in the send route keeps the per-agent quirks in one place. The argv shape can be moved into the agent catalogue later if a second consumer needs it; for now only the send route invokes CLIs.
+
+5. **NDJSON delta parser is union-tolerant.** Claude / FCC emit Anthropic-style `stream_event` envelopes, Gemini emits assistant `message` deltas, Codex emits a looser `{ content | text | delta }` shape. `parseDelta` tries each known shape per agent and returns the first matching string. Unknown shapes are dropped silently so a CLI rev that adds new event kinds does not break the stream.
+
+6. **Session scratch directory is created lazily.** PRD 4.4 (Workspace) says scratch roots are per agent. The send route mints a directory at `operatorScratchRoot()/<agent_id>/<session_id>` on first turn, then pins it as the CLI's `cwd`. The directory exists only when a CLI actually needs it, so OpenClaw (gateway transport) does not litter the filesystem with empty per-session folders.
+
+7. **Voice button is browser-side only.** The donor used the Web Speech API directly. PRD 4.3 says "Voice input button on every chat input. Port `agent-os-pack/source/src/components/VoiceButton.tsx`." Voice transcription stays in the browser; the server only sees the final text. This keeps the Bridge route stateless about audio and defers the server-side TTS / STT decisions to Track B8 (Call Mode), per SCOPE-ADDITION Section 5.
+
+8. **Agent switching mid-stream is forbidden.** Streaming locks the AgentSelector via `disabled={streaming}` and locks the textarea send via the `if (streaming) return` guard. The donor pattern allowed it but produced cross-thread bleed when fast-fingered users tapped during a stream. Locking is the safer default; clicking Stop unlocks the picker.
+
+9. **Track B8 reservation for the phone button.** SCOPE-ADDITION Section 5 declares Track B8 will add a phone button next to the mic in `MessageInput.tsx`. The composer layout deliberately leaves room to the right of the `VoiceButton` so B8's follow-up commit is a single button insertion with no layout reflow. No B8 props or hooks are pre-emptively added.
+
+10. **`clearThread` clears only the visible thread, not the DB session.** Donor `UnifiedChat` blew away localStorage. We keep the SQLite session intact and only reset the rendered list. The future Sessions sidebar (PRD 4.3 mentions "Sessions list view in the sidebar") will own session-level archive and delete actions.
+
+## Depth 2 Wave 1 Track B4 (Operator Studio sub-module)
+
+PRD Section 4.5 + Section 16.4 ownership list.
+
+### Decisions outside the PRD's explicit spec
+
+1. **No `media_generation_jobs` SQL table.** PRD 4.5 says jobs persist in `media_generation_jobs` (Migration 040 territory). The Track B4 brief forbids touching `src/lib/db/migrations.ts`, and no migration was authored for this table at Depth 0 (Depth 0 BUILD-NOTES reserved 042/043 for B7 and B9). Resolution: jobs persist as JSON files under `<vault>/studio/.jobs/<id>.json`, with an in-process `Map` cache for the polling endpoint. The persistence helpers in `src/lib/studio/generators.ts` (loadJob/persistJob/listJobs) are the only call sites, so swapping to a SQL-backed implementation later is a one-file change with no UI / API contract impact.
+
+2. **Component layout differs from PRD 4.5 file list.** PRD section 16.4 (Track B4 row) listed `StudioForm.tsx` and `StudioGrid.tsx`, plus per-kind pages (`image/page.tsx`, `video/page.tsx`, `audio/page.tsx`). The Wave 1 brief overrode that with `StudioCanvas.tsx` + `StudioToolbar.tsx` + `StudioOutputPanel.tsx` and a single `/operator/studio/page.tsx`. I followed the brief. Per-kind pages can be a thin wrapper around `StudioCanvas` later (forcing the initial `kind` prop) if direct URLs are needed.
+
+3. **Provider routing keyed off lowercased `provider` slug substring.** The model registry stores provider as a free-form string (PRD 5.1 does not enumerate). I match `provider.toLowerCase().includes('replicate' | 'fal' | 'kie' | 'openai' | 'elevenlabs')` to pick the connector. This survives slugs like `fal.ai`, `fal-ai`, `Fal.AI`, and `replicate-image` without code changes. Once Track C2 lands its canonical provider slugs we can tighten to exact match.
+
+4. **Provider list is registry-driven, NOT a hardcoded enum.** PRD 4.5 lists seven providers (Kie / Fal / OpenAI / Imagen / Anthropic / ElevenLabs / Fish Audio). I implemented connectors for Replicate, Fal.ai, Kie.ai, OpenAI Images, and ElevenLabs. The remaining providers (Imagen, Fish Audio) will surface in the picker as soon as Track C2 / model-registry rows exist for them, but generation will fail with "No generator wired" until a connector branch is added. This was a deliberate trade off: shipping five working connectors beats stubbing seven that all 500.
+
+5. **API key detection map.** `hasApiKey(provider)` maps provider slug to env var names. The default fallback is `${SLUG_UPPERCASE}_API_KEY` (matches the convention used by `refresh-models.ts` per Depth 0 note 11). Explicit overrides exist for Fal (`FAL_AI_API_KEY` OR `FAL_KEY`), Google (`GOOGLE_API_KEY` OR `GEMINI_API_KEY`), and Replicate (`REPLICATE_API_TOKEN` OR `REPLICATE_API_KEY`) because those services ship under two common env names in the wild.
+
+6. **ElevenLabs returns audio bytes inline, not a URL.** Other connectors return a remote URL that the orchestrator then downloads to the vault. ElevenLabs streams `audio/mpeg` in the response body. Rather than special-casing the orchestrator, the ElevenLabs connector writes the file itself and returns the local path with `metadata.skip_download: true`. The orchestrator honors that flag and skips its download step. Same convention is available to any future "response is the bytes" connector.
+
+7. **`STUDIO_FIXTURE_<KIND>_PATH` env vars short-circuit provider calls.** Set `STUDIO_FIXTURE_IMAGE_PATH=/tmp/test.png` and the image job copies that file verbatim into the vault and reports `succeeded`. Mirrors the `X_AI_FIXTURE_JSON_PATH` pattern Track B7 used so CI / offline development can exercise the full UI flow without a network round trip.
+
+8. **No SSE / WebSocket — UI polls every 1.5s.** PRD 4.5 mentions "polls or subscribes via SSE". SSE adds a runtime dependency on a long-lived connection that we do not have a framework helper for yet (the OpenClaw client uses websockets but that is a different transport). Polling at 1.5s gives sub-2s UX for typical 8-30s generations with negligible server load (one row read per tick). When a global SSE substrate lands, swap `setInterval` in `StudioCanvas` for an `EventSource`.
+
+9. **Output URL is served via the existing `/api/media/file?path=` endpoint.** Donor `MediaView` uses this route. PRD 4.5 does not specify a new endpoint, and the existing route already enforces a vault-root scope check. Reusing it avoids building a parallel preview pipeline and keeps download semantics identical to the Hermes media pages.
+
+10. **No thumbnail generation.** PRD 4.5 says "a thumbnail (for images and videos) is generated using ffmpeg". For images we just display the original (browsers handle thumbnailing). For videos we set `preload="metadata"` and let the browser draw the first frame, which is the standard pattern and avoids spawning a child process per job. Real ffmpeg thumbnails belong in a follow-up after the install script's ffmpeg dependency is verified across Mac Mini + VPS Docker.
