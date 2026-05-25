@@ -1402,6 +1402,30 @@ const migrations: Migration[] = [
       }
     }
   },
+  {
+    id: '045',
+    name: 'cleanup_persona_log_orphans',
+    up: (db) => {
+      // Bug 3 cleanup (v4.0.2): deletes orphan rows in persona_selection_log
+      // whose task_id is null/empty/sentinel/no-longer-exists. These rows
+      // were the trigger for the migration-034 FK breakage on the Evelyn
+      // canary deploy.
+      console.log('[Migration 045] Cleaning persona_selection_log orphans...');
+      const info = db.prepare(`SELECT COUNT(*) as c FROM persona_selection_log`).get() as { c: number } | undefined;
+      if (!info || info.c === 0) {
+        console.log('[Migration 045] persona_selection_log is empty, nothing to clean');
+        return;
+      }
+      const result = db.prepare(`
+        DELETE FROM persona_selection_log
+        WHERE task_id IS NULL
+           OR task_id = ''
+           OR task_id = '(no-task-id)'
+           OR task_id NOT IN (SELECT id FROM tasks)
+      `).run();
+      console.log(`[Migration 045] Deleted ${result.changes} orphan rows from persona_selection_log`);
+    }
+  },
 ];
 
 /**
