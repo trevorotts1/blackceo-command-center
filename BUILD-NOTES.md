@@ -4,12 +4,34 @@ Per PRD Section 18.4: log every interpretation decision that was not explicit in
 
 ## Outstanding work
 
-Last reviewed 2026-05-25 during v4.0.1 Group G cleanup pass. Every prior
-"Pending dependencies" entry below has been audited; resolved entries are
-marked DONE inline with the commit SHA. No genuinely pending items remain
-on the v4.0 + v4.0.1 surface.
+Last reviewed 2026-05-25 during v4.0.2 patch cycle. All 8 v4.0.2 patch bugs are closed (tag v4.0.2 shipped). Phase 4 cleanup closed 5 items with one deferred:
 
-- _(none)_
+- **n8n TLS cert renewal (DEFERRED, planned maintenance window).** Architectural blocker: n8n at `72.60.119.151` (Hostinger) is fronted by an `ingress-nginx-controller` inside a K8s cluster (pid 2725). Ports 80/443 owned by the K8s pod, not host nginx. Certbot 2.9.0 + `python3-certbot-nginx` installed but `--nginx` plugin conflicts with K8s; standalone can't bind. **Viable paths:** DNS-01 challenge (requires the rotated CF API token from Item 4 of Phase 4 cleanup), OR migrate cert management to cert-manager inside K8s via Helm. **Current impact: zero** — all agent traffic uses `curl -k` for n8n API; no client browses n8n's UI directly. Revisit in planned maintenance.
+
+- **Cloudflare API token in n8n workflow `i0P3OWCEsXZxVo0N` is hardcoded inline (DEFERRED — Trevor will rotate later).** The `cfut_...` token sits in plaintext inside the workflow's "Create Tunnel + DNS + Token" node (labeled v10.14.21 "Option B: credentials inline"). No evidence of leak, token works fine (verified by deleting 7 tunnels successfully in Phase 4 cleanup). Trevor's call 2026-05-25: defer the rotation, will revisit later. **When you do rotate:** (a) generate new token at https://dash.cloudflare.com/profile/api-tokens with scopes `Account: Cloudflare Tunnel:Edit + Read, DNS:Edit`, (b) create n8n credential `cloudflareTunnel`, (c) update workflow node to reference `{{$credentials.cloudflareTunnel.token}}` instead of inline, (d) revoke old token in Cloudflare dashboard.
+
+- **Orphan tunnel `laurane-simon-pa-realtor-73b4`** (DOWN, 0 connectors). NOT in the Phase 4 delete list. Flag if you want it cleaned up in a follow-on.
+
+- **Cloudflare OTP suppression on `trevor@blackceo.com` (CONFIRMED — not deferred theory, real).** The `blackceo.com` address never receives Cloudflare One-Time PIN emails. Verified via 2 send attempts on 2026-05-25 LATE — both failed to deliver — while parallel sends to `trevelynotts@gmail.com` arrived within seconds on the same nights from the same CF Access app. Cloudflare maintains a per-email suppression list for the OTP IdP sender (`noreply@notify.cloudflare.com`) that is SEPARATE from their general notification list (which DOES deliver to `trevor@blackceo.com` for billing, account, and other transactional emails). Symptom: the CF Access PIN UI still shows "A code has been emailed to you" — this is intentional per CF docs ("blocked users will not receive an email; the login page will always say A code has been emailed to you"). Earlier this session a "blackceo email finally came" report turned out to be the gmail OTP, not the blackceo OTP. **Operator master-access for all 3 CF Access apps** (Evelyn, Angeleen, Lyric) **is `trevelynotts@gmail.com`** to bypass the suppression. **DO NOT** add `trevor@blackceo.com` back to the allow-list — it would silently lock out anyone who tries to use it. **To restore `trevor@blackceo.com` usability:** file a Cloudflare support ticket requesting removal from the One-Time PIN suppression list. Reference team domain `sweet-wave-ca28.cloudflareaccess.com` and the 3 Access app UUIDs (Evelyn `8d3aa0d7-e025-4aef-b356-7d7ac512dbec`, Angeleen `69fa01dc-99c4-4e5b-bc31-bdb320526b60`, Lyric `c3d872b9-45cb-4bde-99fe-ae1709c39836`). Not blocking — tomorrow problem.
+
+- **Bug 7.1 — PORT env isolation in ecosystem.config.cjs (HOT-PATCHED on all 3 clients 2026-05-25 LATE; needs to ship as part of v4.0.3).** v4.0.2's Bug 7 fix used `PORT: "4000"` in the env block but the `args` field was rewritten by Phase 3 agent to `next start -p ${process.env.PORT || 4000} -H 0.0.0.0` — that `process.env.PORT` resolves to Hostinger's injected PORT=40033 at PM2's spawn time (BEFORE the env block applies inside the child process), causing EADDRINUSE every time `pm2 reload --update-env` runs. Plus the `user: "node"` field requires root to set uid/gid, which fails under `docker exec -u node`. **Working ecosystem.config.cjs** (verified on Evelyn with deliberate `--update-env` regression test, plus applied to Angeleen + Lyric):
+  ```js
+  module.exports = {
+    apps: [{
+      name: "mission-control",  // or "command-center" depending on client
+      cwd: "/data/projects/command-center",
+      script: "/bin/bash",
+      args: "-c \"unset PORT; PORT=4000 NODE_ENV=production exec npm run start -- -p 4000 -H 0.0.0.0\"",
+      env: { NODE_ENV: "production" },
+      instances: 1,
+      autorestart: true,
+      max_restarts: 5,
+      exec_mode: "fork"
+      // NO user field — PM2 already runs as node via docker exec -u node
+    }]
+  };
+  ```
+  The shell wrapper `unset PORT; PORT=4000 exec npm` forces the spawn shell to drop Hostinger's PORT injection before npm sees it. **v4.0.3 must update**: (a) `scripts/install/vps-docker-bootstrap.sh`'s ecosystem template, (b) n8n workflow `i0P3OWCEsXZxVo0N` "Create Tunnel + DNS + Token" node's ecosystem write step. Optional Option C also worth considering: change `package.json` `start` script from `"next start -p ${PORT:-4000}"` to `"next start -p 4000"` (hardcode, no env interpolation) for belt-and-suspenders.
 
 ## v4.0.1 fix pass
 
@@ -1060,3 +1082,37 @@ grep -c "^  test(" tests/integration/v4-smoke.spec.ts           # 5 named + 13 r
 grep -E "^  \| '" src/lib/model-providers/types.ts | wc -l      # 16 capability tags
 ls src/lib/model-providers/*.ts | wc -l                         # 13 providers + types.ts + index.ts
 ```
+
+## Phase 3 — Cloudflare Access (One-Time PIN) wired on 3 BCC clients (2026-05-25)
+
+All 3 BCC client subdomains now require One-Time PIN auth at the Cloudflare edge AND have `REQUIRE_CF_ACCESS=true` in the BCC middleware (defense-in-depth).
+
+| Client | Subdomain | CF Access App UUID | AUD | PM2 entry | Telegram (Trevor / Client) |
+|---|---|---|---|---|---|
+| Evelyn | evelyn.zerohumanworkforce.com | 8d3aa0d7-e025-4aef-b356-7d7ac512dbec | 6ffaf86ae1f3c650400e4c6778527b275338ebe8a820b6d3ed05549fe77371e6 | command-center (dupe mission-control deleted) | 50538 / 792 |
+| Angeleen | angeleen.zerohumanworkforce.com | 69fa01dc-99c4-4e5b-bc31-bdb320526b60 | 1e733905921a52b1e31fdd8fe4c58f34cab3c3165d25561f3cffe90ebbd40f42 | command-center (dupe mission-control deleted) | 50539 / 1401 |
+| Lyric | lyric.zerohumanworkforce.com | c3d872b9-45cb-4bde-99fe-ae1709c39836 | f4a6e132643a06762916321a135a1871ddc8cfee63c80f4f73acda9ef17917f9 | mission-control (canonical, no rename) | 50540 / 825 |
+
+OTP IdP: `a485de5a-2bb4-4daa-a294-fa603f850e62` (already existed on the account).
+Team domain: `sweet-wave-ca28.cloudflareaccess.com`.
+Session duration: 336h (14 days).
+
+### TODOs — replace placeholder email allow-list
+
+The allow-list for ALL THREE clients is currently `trevor@blackceo.com` (placeholder). `accounts.md` does not record client emails — replace with the client's real email per client when known. Edit via Cloudflare dashboard → Zero Trust → Access → Applications → [subdomain] Command Center → "Allowed users" policy, OR via API:
+
+```
+curl -X PUT -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps/<app-uuid>/policies/<policy-uuid>" \
+  -d '{"name":"Allowed users","decision":"allow","include":[{"email":{"email":"client@example.com"}}],"require":[{"login_method":{"id":"onetimepin"}}]}'
+```
+
+- [ ] Evelyn — replace `trevor@blackceo.com` with Evelyn Bethune's real email on app `8d3aa0d7-e025-4aef-b356-7d7ac512dbec`.
+- [ ] Angeleen — replace `trevor@blackceo.com` with Angeleen's real email on app `69fa01dc-99c4-4e5b-bc31-bdb320526b60`.
+- [ ] Lyric — replace `trevor@blackceo.com` with Lyric Hawkins's real email on app `c3d872b9-45cb-4bde-99fe-ae1709c39836`.
+
+### Phase 3 lesson — PM2 dupe trap on Evelyn + Angeleen
+
+Both Evelyn and Angeleen had a `command-center` PM2 entry (the actually-running app on port 4000) AND a dormant/stopped `mission-control` entry left over from a prior boot. Running `pm2 reload ecosystem.config.cjs` (whose `name: 'mission-control'`) would relaunch the dupe and create a port-4000 conflict. Fix used: `pm2 delete mission-control` then `pm2 reload command-center --update-env`. Lyric's container already had only `mission-control` (matching ecosystem.config.cjs), so the standard `pm2 reload ecosystem.config.cjs` was safe there.
+
+Going forward: before `pm2 reload ecosystem.config.cjs` on any BCC v4.0.2 host, run `pm2 list` and verify there's only ONE process matching the `name` in ecosystem.config.cjs.
