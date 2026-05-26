@@ -17,6 +17,9 @@ import {
 } from '@/lib/notebooks/store';
 import { backendStatus, pickBackend } from '@/lib/notebooks/notebooklm-client';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export async function GET() {
   try {
     const items = listNotebooks();

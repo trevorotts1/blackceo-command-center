@@ -3,6 +3,9 @@ import { queryOne, run } from '@/lib/db';
 import { parseAndValidateSteps, type SOP } from '@/lib/sops';
 import { enqueueAutoReplace, countImpactedTasks } from '@/lib/sop-auto-replace';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/sops/[id]
 export async function GET(
   _request: NextRequest,

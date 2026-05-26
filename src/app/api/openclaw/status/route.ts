@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/openclaw/status - Check OpenClaw connection status
 export async function GET() {
   try {

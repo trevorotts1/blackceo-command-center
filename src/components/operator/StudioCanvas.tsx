@@ -154,6 +154,31 @@ export default function StudioCanvas({ initialModels }: StudioCanvasProps) {
 
   const historyForKind = useMemo(() => history.filter((j) => j.kind === kind), [history, kind]);
 
+  // Bug 6 (v4.0.2): louder empty state when no providers are configured for
+  // any kind. The previous "No active generation" placeholder looked
+  // identical to a broken page on fresh deploys.
+  const noProvidersConfigured =
+    initialModels.image.length === 0 &&
+    initialModels.video.length === 0 &&
+    initialModels.audio.length === 0;
+
+  if (noProvidersConfigured) {
+    return (
+      <div className="rounded-xl border border-bcc-border bg-bcc-white p-8 text-center">
+        <h2 className="text-base font-semibold text-bcc-text">Studio is ready, but no providers are configured yet.</h2>
+        <p className="mx-auto mt-3 max-w-xl text-sm text-bcc-text-secondary">
+          No image, video, or audio providers configured yet. Add API keys for Fish Audio, xAI Grok, KIE, Fal.ai, or Replicate in Settings, Intelligence Settings to enable generation.
+        </p>
+        <a
+          href="/settings/intelligence"
+          className="mt-5 inline-flex items-center rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+        >
+          Open Intelligence Settings
+        </a>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <StudioToolbar

@@ -7,6 +7,9 @@ import { UpdateTaskSchema } from '@/lib/validation';
 import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/types';
 import { checkTriad } from '@/lib/sops';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/tasks/[id] - Get a single task
 export async function GET(
   request: NextRequest,

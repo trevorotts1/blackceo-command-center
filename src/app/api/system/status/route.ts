@@ -13,6 +13,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSystemStatus } from '@/lib/system-status';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export async function GET(req: NextRequest) {
   const force = req.nextUrl.searchParams.get('force') === '1';
   try {

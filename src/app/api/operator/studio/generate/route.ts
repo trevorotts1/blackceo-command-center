@@ -22,6 +22,9 @@ import { z } from 'zod';
 
 import { createJob } from '@/lib/studio/generators';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const requestSchema = z.object({
   kind: z.enum(['image', 'video', 'audio']),
   prompt: z.string().min(1).max(8000),

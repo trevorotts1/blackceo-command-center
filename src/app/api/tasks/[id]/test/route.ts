@@ -19,6 +19,9 @@ import path from 'path';
 import * as csstree from 'css-tree';
 import type { Task, TaskDeliverable } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 interface CssValidationError {
   message: string;
   line?: number;

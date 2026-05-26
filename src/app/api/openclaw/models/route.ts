@@ -3,6 +3,9 @@ import { existsSync, readFileSync, statSync } from 'fs';
 import { getDb } from '@/lib/db';
 import { openclawConfigPath } from '@/lib/platform';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // Maximum allowed config file size (1MB) to prevent DoS
 const MAX_CONFIG_SIZE_BYTES = 1024 * 1024;
 

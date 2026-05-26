@@ -26,6 +26,9 @@ import {
   resolveSafe,
 } from '@/lib/workspaces/aggregator';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',

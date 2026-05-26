@@ -13,6 +13,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { listJobs } from '@/lib/studio/generators';
 import type { StudioKind } from '@/lib/studio/generators';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const kind = url.searchParams.get('kind') as StudioKind | null;

@@ -1,3 +1,26 @@
+## [v4.0.2] - 2026-05-25 - 8-bug patch (hydration race, frozen timestamps, missing route, port leak, empty states, migration runner, persona log validation)
+
+Patch release closing 8 latent bugs surfaced during v4.0.1 fleet rollout.
+
+### Fixed
+- Bug 1: Migration 034 runs outside wrapper transaction (new useOuterTransaction flag)
+- Bug 2: Closed by Bug 8 (force-dynamic on runtime routes prevents build-time prerender cache)
+- Bug 3: persona_selection_log refuses inserts when task_id is null/empty/sentinel + migration 045 cleanup
+- Bug 4: Header.tsx mount-gates live clock to prevent React hydration mismatch
+- Bug 5: /settings/company route implemented (wraps CompanySettingsForm)
+- Bug 6: Verbose empty-state copy for Studio, Journal, Memory
+- Bug 7: ecosystem.config.cjs template hardcodes port to prevent Hostinger PORT env leak
+- Bug 8: All runtime-state API routes now declare `export const dynamic = 'force-dynamic'`
+
+### Added
+- Migration 045 cleanup_persona_log_orphans (additive, no schema change)
+- Regression test for migration 034 (tests/integration/migration-034.spec.ts)
+
+### Risk: low
+- All fixes are additive or scoped to the v4.0.1-introduced surface
+- Migration 045 is a one-time cleanup of orphan rows
+- No breaking changes to API contracts or DB schema beyond the additive cleanup
+
 ## [v4.0.1] - 2026-05-25 - Post-v4.0 fix pass (17 fixes, multi-client rollout-ready)
 
 Closes the v4.0.1 fix pass per BLACKCEO-V4-POST-BUILD-FIXES.md. 17 fixes across UI, TTS providers, cron, model registry, infrastructure, and docs. No breaking schema changes (migration 044 is additive). Ready for multi-client rollout to existing v4.0 deployments.

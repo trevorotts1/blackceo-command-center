@@ -4,6 +4,9 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { writeAgentDailyLog } from '@/lib/agent-files';
 import type { Agent, AgentMemoryLog } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/agents/[id]/memory-logs - List daily logs for an agent
 export async function GET(
   request: NextRequest,

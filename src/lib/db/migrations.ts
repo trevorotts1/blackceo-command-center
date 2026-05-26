@@ -16,6 +16,17 @@ interface Migration {
   id: string;
   name: string;
   up: (db: Database.Database) => void;
+  /**
+   * If true (default), the migration runner wraps `up` in a single
+   * `db.transaction()`. If false, the runner runs `up` directly and the
+   * migration is responsible for its own transaction boundary and any
+   * constraint-deferral PRAGMAs.
+   *
+   * Required for migrations that need to toggle `PRAGMA foreign_keys`
+   * around a 12-step rebuild — that pragma is blocked inside an open
+   * transaction. (Bug 1, v4.0.2.)
+   */
+  useOuterTransaction?: boolean;
 }
 
 // All migrations in order - NEVER remove or reorder existing migrations
@@ -1023,6 +1034,12 @@ const migrations: Migration[] = [
   {
     id: '034',
     name: 'expand_agents_status_busy_degraded',
+    // Bug 1 (v4.0.2): own the transaction boundary so we can toggle
+    // PRAGMA foreign_keys (blocked inside an open transaction). The
+    // previous defer_foreign_keys approach was silently overridden by the
+    // runner's wrapper transaction, producing FOREIGN KEY constraint
+    // failed at COMMIT even when foreign_key_check returned clean.
+    useOuterTransaction: false,
     up: (db) => {
       console.log('[Migration 034] Expanding agents.status CHECK to include busy and degraded...');
       // SQLite cannot ALTER a CHECK constraint in place. Rebuild via the
@@ -1042,48 +1059,60 @@ const migrations: Migration[] = [
         return;
       }
 
-      // Use defer_foreign_keys (the SQLite-documented in-transaction
-      // alternative to toggling PRAGMA foreign_keys, which is blocked inside
-      // an open transaction). The migration runner already wraps us in one.
-      db.exec('PRAGMA defer_foreign_keys = ON');
+      // Step 1: capture prior FK enforcement so we can restore it.
+      const fkPriorRow = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+      const fkWasOn = fkPriorRow?.foreign_keys === 1;
 
-      // Snapshot the column list so we copy whatever the live table actually
-      // has, in case later migrations added columns we cannot predict here.
-      const cols = (db.prepare("PRAGMA table_info(agents)").all() as { name: string }[]).map(c => c.name);
-      const colList = cols.join(', ');
+      // Step 2: turn FK enforcement OFF (must be outside any open txn).
+      db.exec('PRAGMA foreign_keys = OFF');
 
-      db.exec(`
-        CREATE TABLE agents_new (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          role TEXT NOT NULL,
-          description TEXT,
-          avatar_emoji TEXT DEFAULT '🤖',
-          status TEXT DEFAULT 'standby' CHECK (status IN ('standby', 'working', 'busy', 'degraded', 'offline')),
-          is_master INTEGER DEFAULT 0,
-          workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
-          soul_md TEXT,
-          user_md TEXT,
-          agents_md TEXT,
-          tools_md TEXT,
-          memory_md TEXT,
-          model TEXT,
-          specialist_type TEXT DEFAULT 'on-call' CHECK (specialist_type IN ('permanent', 'on-call')),
-          created_at TEXT DEFAULT (datetime('now')),
-          updated_at TEXT DEFAULT (datetime('now'))
-        );
-      `);
+      try {
+        // Snapshot the column list so we copy whatever the live table actually
+        // has, in case later migrations added columns we cannot predict here.
+        const cols = (db.prepare("PRAGMA table_info(agents)").all() as { name: string }[]).map(c => c.name);
+        const colList = cols.join(', ');
 
-      db.exec(`INSERT INTO agents_new (${colList}) SELECT ${colList} FROM agents;`);
+        // Run the rebuild inside an explicit transaction so it is atomic.
+        const rebuild = db.transaction(() => {
+          db.exec(`
+            CREATE TABLE agents_new (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              role TEXT NOT NULL,
+              description TEXT,
+              avatar_emoji TEXT DEFAULT '🤖',
+              status TEXT DEFAULT 'standby' CHECK (status IN ('standby', 'working', 'busy', 'degraded', 'offline')),
+              is_master INTEGER DEFAULT 0,
+              workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+              soul_md TEXT,
+              user_md TEXT,
+              agents_md TEXT,
+              tools_md TEXT,
+              memory_md TEXT,
+              model TEXT,
+              specialist_type TEXT DEFAULT 'on-call' CHECK (specialist_type IN ('permanent', 'on-call')),
+              created_at TEXT DEFAULT (datetime('now')),
+              updated_at TEXT DEFAULT (datetime('now'))
+            );
+          `);
 
-      db.exec('DROP TABLE agents;');
-      db.exec('ALTER TABLE agents_new RENAME TO agents;');
+          db.exec(`INSERT INTO agents_new (${colList}) SELECT ${colList} FROM agents;`);
+          db.exec('DROP TABLE agents;');
+          db.exec('ALTER TABLE agents_new RENAME TO agents;');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status)');
+        });
+        rebuild();
 
-      db.exec('CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status)');
-
-      const violations = db.prepare('PRAGMA foreign_key_check').all() as unknown[];
-      if (violations.length > 0) {
-        throw new Error(`[Migration 034] foreign_key_check returned ${violations.length} violation(s) after rebuild`);
+        // Step 3: verify FK integrity AFTER the rebuild, before turning FKs back on.
+        const violations = db.prepare('PRAGMA foreign_key_check').all() as unknown[];
+        if (violations.length > 0) {
+          throw new Error(`[Migration 034] foreign_key_check returned ${violations.length} violation(s) after rebuild`);
+        }
+      } finally {
+        // Step 4: restore FK enforcement (always, even on failure).
+        if (fkWasOn) {
+          db.exec('PRAGMA foreign_keys = ON');
+        }
       }
 
       console.log('[Migration 034] agents.status now accepts standby, working, busy, degraded, offline');
@@ -1402,6 +1431,30 @@ const migrations: Migration[] = [
       }
     }
   },
+  {
+    id: '045',
+    name: 'cleanup_persona_log_orphans',
+    up: (db) => {
+      // Bug 3 cleanup (v4.0.2): deletes orphan rows in persona_selection_log
+      // whose task_id is null/empty/sentinel/no-longer-exists. These rows
+      // were the trigger for the migration-034 FK breakage on the Evelyn
+      // canary deploy.
+      console.log('[Migration 045] Cleaning persona_selection_log orphans...');
+      const info = db.prepare(`SELECT COUNT(*) as c FROM persona_selection_log`).get() as { c: number } | undefined;
+      if (!info || info.c === 0) {
+        console.log('[Migration 045] persona_selection_log is empty, nothing to clean');
+        return;
+      }
+      const result = db.prepare(`
+        DELETE FROM persona_selection_log
+        WHERE task_id IS NULL
+           OR task_id = ''
+           OR task_id = '(no-task-id)'
+           OR task_id NOT IN (SELECT id FROM tasks)
+      `).run();
+      console.log(`[Migration 045] Deleted ${result.changes} orphan rows from persona_selection_log`);
+    }
+  },
 ];
 
 /**
@@ -1438,14 +1491,23 @@ export function runMigrations(db: Database.Database): void {
     }
     
     console.log(`[DB] Running migration ${migration.id}: ${migration.name}`);
-    
+
+    const useOuter = migration.useOuterTransaction !== false;
+
     try {
-      // Run migration in a transaction
-      db.transaction(() => {
+      if (useOuter) {
+        // Run migration in a transaction (default for backwards compat).
+        db.transaction(() => {
+          migration.up(db);
+          db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
+        })();
+      } else {
+        // Migration owns its own transaction boundary. Runner only records
+        // the apply (in a tiny independent txn) AFTER up succeeds.
         migration.up(db);
         db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
-      })();
-      
+      }
+
       console.log(`[DB] Migration ${migration.id} completed`);
     } catch (error) {
       console.error(`[DB] Migration ${migration.id} failed:`, error);

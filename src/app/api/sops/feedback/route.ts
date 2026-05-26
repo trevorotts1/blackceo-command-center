@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryAll, queryOne } from '@/lib/db';
 import { recordFeedback, type SOPFeedbackRow } from '@/lib/sop-learning';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * POST /api/sops/feedback
  *

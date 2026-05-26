@@ -29,6 +29,9 @@ import { createResearchSearch, slugifyQuery } from '@/lib/research-store';
 import { listModels } from '@/lib/model-registry';
 import { vaultRoot } from '@/lib/platform';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const requestSchema = z.object({
   query: z.string().min(1).max(4000),
   depth: z.enum(['shallow', 'deep']).optional(),

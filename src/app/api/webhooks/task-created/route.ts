@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * Webhook endpoint that receives task creation events and forwards them
  * to the OpenClaw gateway for COM/CEO agent routing.

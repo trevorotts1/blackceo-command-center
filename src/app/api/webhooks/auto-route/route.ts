@@ -3,6 +3,9 @@ import { run, queryOne } from '@/lib/db';
 import { routeTask } from '@/lib/routing/department-router';
 import type { Task } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * POST /api/webhooks/auto-route
  *

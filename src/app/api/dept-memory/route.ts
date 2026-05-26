@@ -4,6 +4,9 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { seedDeptMemory } from '@/lib/db/seed-dept-memory';
 import type { DeptMemory, CreateDeptMemoryRequest } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/dept-memory?workspace_id=X -- get all memories for a dept
 export async function GET(request: NextRequest) {
   try {

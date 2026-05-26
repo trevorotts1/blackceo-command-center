@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryAll } from '@/lib/db';
 import { detectPatternsAndPropose, type SOPProposalRow } from '@/lib/sop-learning';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET /api/sops/proposals
  *

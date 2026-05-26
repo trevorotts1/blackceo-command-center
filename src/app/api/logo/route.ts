@@ -3,6 +3,9 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { validateLogoUrl } from '@/lib/validation';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const LOGO_CONFIG_PATH = join(process.cwd(), 'public', 'logo-config.json');
 
 export async function POST(request: NextRequest) {

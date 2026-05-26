@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import type { Workspace, WorkspaceStats, TaskStatus } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // Helper to generate slug from name
 function generateSlug(name: string): string {
   return name

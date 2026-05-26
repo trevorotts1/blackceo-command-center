@@ -23,6 +23,9 @@ import {
   type WorkspaceFile,
 } from '@/lib/workspaces/aggregator';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 function stripAbs(file: WorkspaceFile) {
   const { absPath: _abs, ...rest } = file;
   return rest;

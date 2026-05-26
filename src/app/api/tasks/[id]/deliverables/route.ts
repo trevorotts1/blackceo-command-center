@@ -11,6 +11,9 @@ import { existsSync } from 'fs';
 import path from 'path';
 import type { TaskDeliverable } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 /**
  * GET /api/tasks/[id]/deliverables
  * Retrieve all deliverables for a task

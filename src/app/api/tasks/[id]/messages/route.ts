@@ -6,6 +6,9 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { Task, ActivityType, TaskActivity } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
@@ -119,21 +122,38 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
             [switchResult.mode, currentTask.id]
           );
 
-          // Log the mode switch in persona_selection_log for Intelligence Settings history
-          run(
-            `INSERT INTO persona_selection_log
-               (task_id, persona_id, persona_name, mode, score, layer_scores, department_id, selected_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-            [
-              currentTask.id,
-              switchResult.persona_id,
-              currentTask.persona_name,
-              switchResult.mode,
-              currentTask.persona_score,
-              JSON.stringify({ mode_switch: true, previous_mode: switchResult.previous_mode }),
-              currentTask.department_id,
-            ]
-          );
+          // Log the mode switch in persona_selection_log for Intelligence Settings history.
+          //
+          // Bug 3 (v4.0.2): refuse to insert when task_id is null/empty/sentinel.
+          // Orphan rows ('(no-task-id)' sentinel) trigger the FK breakage in
+          // migration 034. This is a non-critical log, so skip + warn rather
+          // than throw.
+          const taskIdForLog = currentTask.id;
+          if (
+            taskIdForLog == null ||
+            taskIdForLog === '' ||
+            taskIdForLog === '(no-task-id)'
+          ) {
+            console.warn(
+              '[persona_selection_log] skipping insert: invalid task_id',
+              { taskIdForLog }
+            );
+          } else {
+            run(
+              `INSERT INTO persona_selection_log
+                 (task_id, persona_id, persona_name, mode, score, layer_scores, department_id, selected_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+              [
+                taskIdForLog,
+                switchResult.persona_id,
+                currentTask.persona_name,
+                switchResult.mode,
+                currentTask.persona_score,
+                JSON.stringify({ mode_switch: true, previous_mode: switchResult.previous_mode }),
+                currentTask.department_id,
+              ]
+            );
+          }
 
           // Prepend mode-switch instruction so the agent knows which blueprint section to use
           body.system_context = switchResult.instruction;

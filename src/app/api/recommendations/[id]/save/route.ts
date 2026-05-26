@@ -3,6 +3,9 @@ import { run, queryOne } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { Recommendation } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // POST /api/recommendations/[id]/save - Save a recommendation for later
 export async function POST(
   request: NextRequest,

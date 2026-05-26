@@ -4,6 +4,9 @@ import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { Recommendation } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // Demo recommendations to seed the database
 const DEMO_RECOMMENDATIONS = [
   {

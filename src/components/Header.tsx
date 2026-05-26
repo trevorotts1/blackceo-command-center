@@ -32,7 +32,10 @@ interface HeaderProps {
 export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const router = useRouter();
   const { agents, tasks, isOnline } = useMissionControl();
-  const [currentTime, setCurrentTime] = useState(new Date());
+  // Bug 4 (v4.0.2): mount-gate the live clock. Initial render must be the
+  // same on server and client (null), then useEffect populates it after
+  // hydration so a fresh Date() does not cause React #418/#423 mismatch.
+  const [currentTime, setCurrentTime] = useState<Date | null>(null);
   const [activeSubAgents, setActiveSubAgents] = useState(0);
   const logoUrl = useLogoUrl();
 
@@ -136,6 +139,8 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   }, [workspace, aiModel, aiPersona]);
 
   useEffect(() => {
+    // Mount-gated: set the initial Date AFTER hydration, then tick.
+    setCurrentTime(new Date());
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
@@ -238,7 +243,11 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
           <span className="hidden sm:inline">Operator Console</span>
         </Link>
         <span className="text-gray-500 text-sm font-mono">
-          {format(currentTime, 'HH:mm:ss')}
+          {currentTime ? (
+            format(currentTime, 'HH:mm:ss')
+          ) : (
+            <span className="inline-block w-20 h-4 bg-gray-100 rounded animate-pulse" aria-hidden />
+          )}
         </span>
         {/* System status pill (PRD 3.12). Replaces the legacy single LIVE/OFFLINE
          *  indicator. Reflects the worst-case component status across probes. */}

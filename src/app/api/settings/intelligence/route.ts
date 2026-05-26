@@ -5,6 +5,9 @@ import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { openclawConfigPath } from '@/lib/platform';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const DEFAULT_MODEL = 'openrouter/free';
 const DEFAULT_PERSONA = 'auto';
 

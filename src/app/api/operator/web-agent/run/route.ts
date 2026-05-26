@@ -20,6 +20,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createSession, runSession } from '@/lib/web-agent/runner';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const requestSchema = z.object({
   task: z.string().min(1).max(4000),
   start_url: z.string().url().optional(),

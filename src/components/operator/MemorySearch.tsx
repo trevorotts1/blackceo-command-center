@@ -208,6 +208,13 @@ export default function MemorySearch({ initialQuery = '' }: MemorySearchProps) {
         </div>
       ) : null}
 
+      {/* Bug 6 (v4.0.2): initial empty state before any search runs. */}
+      {!result && !error && !busy ? (
+        <div className="rounded-xl border border-dashed border-bcc-border bg-bcc-white p-8 text-center text-bcc-text-secondary text-[14px]">
+          Your memory index is empty. Add notes to the vault, chat with an agent, or run a research search to start populating it. Then come back here to search across everything you have done.
+        </div>
+      ) : null}
+
       {grouped ? (
         grouped.size === 0 ? (
           <div className="rounded-xl border border-dashed border-bcc-border bg-bcc-white p-8 text-center text-bcc-text-muted text-[14px]">
