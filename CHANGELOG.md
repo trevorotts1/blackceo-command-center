@@ -1,3 +1,11 @@
+## [v4.0.3] - 2026-05-27 - Empty department template + build-state sync script
+
+Patch release: stop shipping a stale 17-row department template; sync the dashboard from the client's real Zero Human Company build-state.
+
+### Fixed / Added
+- config/departments.json now ships EMPTY ([]). autoSeedFromDepartmentsJson() in migrations.ts already returns early on an empty array, so a fresh dashboard seeds nothing until the client's real build is synced. The previous non-empty 17-row template always won, so every client dashboard showed the same 17 departments regardless of their interview.
+- New scripts/sync-departments-from-build-state.py: regenerates config/departments.json from the client's real ZHC departments.json + .workforce-build-state.json and re-seeds the workspaces table. Invoked by Skill 32's run-full-install.sh PHASE 6c (onboarding repos v10.14.11 / v10.15.11) on every install and resume. Idempotent.
+
 ## [v4.0.2] - 2026-05-25 - 8-bug patch (hydration race, frozen timestamps, missing route, port leak, empty states, migration runner, persona log validation)
 
 Patch release closing 8 latent bugs surfaced during v4.0.1 fleet rollout.

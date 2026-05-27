@@ -1,6 +1,6 @@
 # Command Center
 
-> **v4.0.2 (2026-05-25)** is the v4.0.1 fix pass: 8 bug fixes closing latent issues surfaced during the v4.0.1 fleet rollout. Migration runner now supports per-migration `useOuterTransaction: false` so migration 034 applies cleanly on fresh installs. All runtime-state API routes declare `export const dynamic = 'force-dynamic'` so `/api/health` and similar return fresh timestamps (no more build-time prerender cache). Header.tsx mount-gates the live clock to eliminate React hydration warnings. New `/settings/company` page wraps CompanySettingsForm. ecosystem.config.cjs template hardcodes port to prevent Hostinger PORT env leak. Empty-state copy clarified for Studio, Journal, Memory. `persona_selection_log` refuses sentinel inserts; new migration 045 cleans up existing orphans. See `CHANGELOG.md` for the full v4.0.2 entry.
+> **v4.0.2 (2026-05-25)** is the v4.0.1 fix pass: 8 bug fixes closing latent issues surfaced during the v4.0.1 fleet rollout. Migration runner now supports per-migration `useOuterTransaction: false` so migration 034 applies cleanly on fresh installs. All runtime-state API routes declare `export const dynamic = 'force-dynamic'` so `/api/health` and similar return fresh timestamps (no more build-time prerender cache). Header.tsx mount-gates the live clock to eliminate React hydration warnings. New `/settings/company` page wraps CompanySettingsForm. ecosystem.config.cjs template hardcodes port to prevent Hostinger PORT env leak. Empty-state copy clarified for Studio, Journal, Memory. `persona_selection_log` refuses sentinel inserts; new migration 045 cleans up existing orphans. See `CHANGELOG.md` for the full v4.0.2 entry. **v4.0.3** ships `config/departments.json` empty + adds `scripts/sync-departments-from-build-state.py` so the dashboard always reflects the client's real build-state instead of a stale 17-row template.
 >
 > **v4.0.1 (2026-05-25)** is the v4.0 fix pass: Operator Console added to the home screen as the 5th of 6 cards, global Header link, global Cmd+K, real Fish Audio + xAI Grok TTS providers, weekly model-refresh cron (node-cron), 🤖 model pill on task cards, three new provider connectors (ollama-local, xiaomi, fish-audio), Cloudflare Access one-shot setup script, five new docs files, three new system-status probes (CLI / CF Tunnel / CF Access), and a streaming `/api/system/bootstrap` re-run endpoint. xAI label now reads "xAI (Grok)". See `CHANGELOG.md` for the full v4.0.1 entry.
 >
@@ -128,7 +128,7 @@ pm2 start ecosystem.config.cjs
 ## Configuration
 
 - **Company name:** Set via `COMPANY_NAME` env var or populated from database
-- **Departments:** Loaded dynamically from database workspaces; configure via `config/departments.json` or Skill 23 seed
+- **Departments:** Loaded dynamically from database workspaces. `config/departments.json` ships EMPTY ([]) on purpose; the dashboard is populated from the client's real Zero Human Company build via `scripts/sync-departments-from-build-state.py` (run by Skill 32 PHASE 6c). Never ships a hardcoded department template.
 - **Port:** `${PORT:-4000}` (env var, defaults to 4000)
 - **Logo:** Place at `public/logo.png` or set `NEXT_PUBLIC_LOGO_URL`
 - **Brand colors:** Set primary/secondary hex colors on the company record; palette auto-generates
