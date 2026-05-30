@@ -137,6 +137,59 @@ Mission Control handles:
 - Event logging
 - Workflow enforcement
 
+## Universal Task Capture (Inbound Ingest)
+
+Beyond the human-assigned flow above, agents (or the Telegram bridge, or a
+backfill script) can **register a unit of work onto the Kanban** as it is
+instructed, via a single auth-guarded endpoint. This is the "anywhere the agent
+is told to do something, it lands on the board" front door.
+
+```
+POST /api/tasks/ingest
+Content-Type: application/json
+x-webhook-signature: <HMAC-SHA256(WEBHOOK_SECRET, rawBody)>   # required when WEBHOOK_SECRET is set
+```
+
+Body (friendly external shape — the endpoint maps it onto the canonical task):
+
+```json
+{
+  "title": "Follow up with the lead from this morning",   // required
+  "description": "Optional detail",                        // optional
+  "priority": "low|medium|high|critical",                  // optional, default medium
+  "source": "telegram|bridge|agent|backfill",              // optional provenance
+  "source_ref": "telegram:msg:12345",                      // optional provenance + dedupe fallback
+  "department_slug": "sales",                              // optional; resolves the workspace
+  "persona": "Candace",                                    // optional; resolves the workspace by name
+  "external_session_id": "agent:main:telegram:direct:123", // optional provenance
+  "idempotency_key": "sha256(session_id + message_ts)"     // optional; primary dedupe key
+}
+```
+
+Behavior:
+
+- **Auth** — `x-webhook-signature` is the HMAC-SHA256 of the raw body keyed by
+  `WEBHOOK_SECRET`, identical to `/api/webhooks/agent-completion`. When
+  `WEBHOOK_SECRET` is unset the endpoint runs in dev mode and skips verification.
+- **Workspace resolution** — `department_slug` → `persona`/name → **CEO
+  workspace** as the catch-all (the CEO agent runs all other departments). The
+  resolved workspace is returned as `workspace_id` + `resolved_by`.
+- **No external agent ids** — `assigned_agent_id` / `created_by_agent_id` stay
+  `NULL` (they are `.uuid()` FK columns into `agents` that an OpenClaw payload
+  cannot satisfy). Provenance is stored in the description + the `task_created`
+  event.
+- **Idempotent** — supply `idempotency_key` (or `source_ref`); a retry/backfill
+  re-run that carries the same key returns the existing task
+  (`200 { ok: true, deduped: true, task_id }`) instead of duplicating it.
+- **Same write path as the UI** — the task is inserted via the shared
+  `createTaskCore()`, so it gets SOP auto-suggest, persona selection, the SSE
+  `task_created` broadcast (live-updates `/tasks/all`), and the outbound
+  `/api/webhooks/task-created` gateway notify that tells the COM/CEO agent the
+  task is on the board.
+
+Note: Telegram **sends** still go through the OpenClaw gateway — this ingest
+call is a Command Center API call about task state, not a Telegram send.
+
 ## The orchestrator's Responsibilities
 
 As master orchestrator, the orchestrator:

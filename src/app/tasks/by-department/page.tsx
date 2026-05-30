@@ -81,6 +81,16 @@ function DepartmentPickerInner() {
           );
         }
 
+        // Hoist the CEO department to the top of the drag-reorder picker so it
+        // is pinned #1 here too. A drag that demotes it is cosmetic only — DB
+        // migration 046 (sort_order = 0) plus this hoist keep CEO first on the
+        // next load.
+        const ceoIdx = allWorkspaces.findIndex((w) => {
+          const slug = ((w as any).slug || w.id || '').toLowerCase();
+          return slug === 'ceo' || slug === 'dept-ceo' || (w.name || '').toLowerCase() === 'ceo';
+        });
+        if (ceoIdx > 0) allWorkspaces.unshift(allWorkspaces.splice(ceoIdx, 1)[0]);
+
         setWorkspaces(allWorkspaces);
         const name = companyData?.name || companyData?.company?.name || '';
         setCompanyName(name);
