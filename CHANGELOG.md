@@ -1,3 +1,25 @@
+## [v4.1.9] - 2026-05-30 - Fix fleet-wide missing kpi_snapshots table (migration 047)
+
+Patch release. Fixes a fleet-wide latent bug: the `kpi_snapshots` table was consumed by three code paths but created by no migration, so every Command Center deployment threw `no such table: kpi_snapshots` the moment a KPI page was touched. One additive, idempotent DB migration; zero personal/client data — universal across the fleet.
+
+### The bug
+
+`kpi_snapshots` is read/written by `GET`+`POST /api/kpi-snapshots`, `GET /api/kpi-history`, and seeded by `src/lib/db/seed-kpi-history.ts` — but no migration ever created it and `schema.ts` never defined it. The KPI pages therefore failed with a SQL error on every box.
+
+### The fix — new idempotent migration `047` `add_kpi_snapshots`
+
+- **`CREATE TABLE IF NOT EXISTS kpi_snapshots`** + the two indexes (`idx_kpi_snapshots_dept_date` on `(department_id, snapshot_date)`, `idx_kpi_snapshots_kpi` on `(kpi_id)`). The columns are derived directly from the consumer routes (the source of truth), not invented: `id TEXT PRIMARY KEY, department_id TEXT NOT NULL DEFAULT 'company', kpi_id TEXT NOT NULL, kpi_name TEXT NOT NULL, value REAL NOT NULL, target REAL, unit TEXT NOT NULL DEFAULT 'count', snapshot_date TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))`. The POST defaults (`unit='count'`, `department_id='company'`) and nullable `target` mirror `kpi-snapshots/route.ts`.
+- **`IF NOT EXISTS` everywhere** — boxes whose live DB already has the table (e.g. a hand-repaired install) are untouched; only the boxes missing it self-heal. Runs on every boot via the existing migration chain, so every dashboard self-creates the table on next deploy.
+- **047 is the next free slot** — 046 is `pin_ceo_department_first` (v4.1.8); no collision. The migration runner orders by numeric id, so 047 runs after 046.
+
+### Tests
+
+- New `tests/unit/kpi-snapshots-migration.test.ts` (3 cases) drives a real temp SQLite DB through the full migration chain (incl. 047) and asserts: the table + both indexes exist with the exact consumer column set; the `GET /api/kpi-snapshots` query path (the snapshots + latest queries) returns `{ snapshots: [], latest: [] }` with no SQL error; and the `POST`/seed INSERT column lists round-trip with the POST defaults applied and a nullable `target`.
+
+### QC baseline
+
+QC gate (`scripts/qc-cc.sh`) remains at its documented universal-repo baseline (6 pre-existing failures: 2.1–2.5 `config/departments.json` is the empty per-client template shipped in v4.0.3, and 5.1 a pre-existing `claude-` string in `web-agent/runner.ts`). This change introduces **zero new QC failures**.
+
 ## [v4.1.8] - 2026-05-30 - CEO department pinned #1 + universal task-ingest API
 
 Minor release. The Command Center half of the CEO-department + universal task-capture feature. One additive DB migration, one new API route, zero personal/client data — universal across the fleet. Focus View, Live Feed, and the existing task-creation path are unchanged.

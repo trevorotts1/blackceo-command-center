@@ -1486,6 +1486,48 @@ const migrations: Migration[] = [
       }
     }
   },
+  {
+    id: '047',
+    name: 'add_kpi_snapshots',
+    up: (db) => {
+      // Fleet-wide latent bug fix: the kpi_snapshots table is consumed by three
+      // code paths — GET/POST /api/kpi-snapshots, GET /api/kpi-history, and the
+      // seed-kpi-history.ts seeder — but no migration ever created it and
+      // schema.ts does not define it. Every deployment therefore threw
+      // "no such table: kpi_snapshots" the moment a KPI page was touched.
+      //
+      // Columns are derived directly from the consumers (the source of truth):
+      //   - SELECT lists in kpi-snapshots/route.ts (GET) + kpi-history/route.ts:
+      //       id, department_id, kpi_id, kpi_name, value, target, unit,
+      //       snapshot_date, created_at
+      //   - INSERT in kpi-snapshots/route.ts (POST) + seed-kpi-history.ts:
+      //       id, department_id, kpi_id, kpi_name, value, target, unit,
+      //       snapshot_date   (created_at defaulted)
+      // POST defaults unit to 'count' and department_id to 'company'; target is
+      // nullable (POST passes `target ?? null`); value is always a number.
+      //
+      // CREATE TABLE IF NOT EXISTS so boxes whose live DB already has the table
+      // (e.g. a hand-repaired install) are untouched — this migration only
+      // self-heals the boxes that are missing it.
+      console.log('[Migration 047] Creating kpi_snapshots table (fleet-wide latent-bug fix)...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS kpi_snapshots (
+          id TEXT PRIMARY KEY,
+          department_id TEXT NOT NULL DEFAULT 'company',
+          kpi_id TEXT NOT NULL,
+          kpi_name TEXT NOT NULL,
+          value REAL NOT NULL,
+          target REAL,
+          unit TEXT NOT NULL DEFAULT 'count',
+          snapshot_date TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kpi_snapshots_dept_date ON kpi_snapshots(department_id, snapshot_date)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kpi_snapshots_kpi ON kpi_snapshots(kpi_id)`);
+      console.log('[Migration 047] kpi_snapshots table ready');
+    }
+  },
 ];
 
 /**
