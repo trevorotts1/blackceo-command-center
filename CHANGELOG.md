@@ -1,3 +1,34 @@
+## [v4.1.8] - 2026-05-30 - CEO department pinned #1 + universal task-ingest API
+
+Minor release. The Command Center half of the CEO-department + universal task-capture feature. One additive DB migration, one new API route, zero personal/client data — universal across the fleet. Focus View, Live Feed, and the existing task-creation path are unchanged.
+
+### Feature 1 — CEO department pinned to the top of the rail / Kanban
+
+Two independent guarantees keep the CEO department at position #1 of the department list and the cross-department board, labeled by the client's main-agent persona (config-driven, with a safe default):
+
+- **DB guarantee — new idempotent migration `046` `pin_ceo_department_first`.** Re-pins the CEO workspace to `sort_order = 0` (below migration 014's CEO=1) on every boot, keyed on the stable `slug = 'ceo'` (or a case-insensitive `name = 'ceo'` fallback). Safe to re-run; non-fatal on a universal-template install that has no CEO row yet. The `GET /api/workspaces` ordering (`ORDER BY sort_order ASC, name ASC`) — consumed by both the sidebar and the by-department board — therefore surfaces CEO first.
+- **Auto-seed fix.** `autoSeedFromDepartmentsJson` now seeds a CEO department at `sort_order = 0` (instead of inheriting the schema default of 1000 and landing last) and honors a department's `slug` field, so `{ id: "dept-ceo", slug: "ceo", name: "<persona>" }` seeds with the stable `ceo` slug.
+- **UI guarantee — hoist.** `AgentsSidebar.tsx` and `tasks/by-department/page.tsx` splice any `ceo`/`dept-ceo` (case-insensitive name fallback) department to index 0 on every load, so a drag-reorder that demotes it is cosmetic only — the DB re-pin + UI hoist keep it #1 on the next load.
+- **Display decoupled from key.** All ordering/migration/hoist logic keys on the stable slug `ceo`; the `name` is free display text — the client's main-agent persona (e.g. "Candace", "Sir Jordan", "Temperance"). Per-client personalization needs zero code change; only the seed value differs. Safe default: when no CEO row exists, ordering is simply unaffected.
+
+### Feature 2 — Universal task-ingest endpoint `POST /api/tasks/ingest`
+
+The front door for "anywhere the agent is told to do something, it lands on the Kanban":
+
+- **Auth-guarded** — `x-webhook-signature` HMAC-SHA256 over the raw body using `WEBHOOK_SECRET`, the exact scheme `/api/webhooks/agent-completion` already uses (dev-mode skip when the secret is unset).
+- **Friendly external shape** — `{ title, description?, priority?, source?, source_ref?, department_slug?, persona?, external_session_id?, idempotency_key? }`.
+- **Workspace resolver, never trusts external agent ids** — resolves `workspace_id` from `department_slug`, then `persona`/name, then falls back to the CEO workspace (the CEO agent runs all other departments, so it is the correct catch-all owner). `assigned_agent_id` / `created_by_agent_id` are left **NULL** because they are `.uuid()` + FK columns into `agents` that an external OpenClaw payload cannot satisfy; provenance (source/persona/session/ref) is recorded in the description and the `task_created` event instead.
+- **Idempotent on a source id** — a deterministic `[ingest:<idempotency_key|source_ref>]` marker is embedded in the `task_created` event message and deduped before insert, so a Telegram retry or a backfill re-run returns the existing task (200, `deduped: true`) instead of creating a duplicate. No schema column required.
+- **Reuses the canonical write path** — both `POST /api/tasks` (UI) and `POST /api/tasks/ingest` now delegate to a shared `createTaskCore()` in `src/lib/tasks.ts` (INSERT + `task_created` event + SOP auto-suggest + persona selection + SSE `task_created` broadcast + outbound `/api/webhooks/task-created` gateway notify), so the two front doors can never drift. Ingested tasks live-update `/tasks/all` over SSE and announce themselves to the OpenClaw COM/CEO agent exactly like UI-created ones.
+
+### Tests
+
+- New `tests/unit/ceo-ordering-ingest.test.ts` (5 cases) drives a real temp SQLite DB through the full migration chain (incl. 046) and asserts: CEO pins to `sort_order = 0` and sorts first despite a persona display name that sorts last; the ingest resolver's department_slug / persona / CEO-fallback query paths; and the idempotency dedupe marker match/miss.
+
+### QC baseline
+
+QC gate (`scripts/qc-cc.sh`) remains at its documented universal-repo baseline (6 pre-existing failures: 2.1–2.5 `config/departments.json` is the empty per-client template shipped in v4.0.3, and 5.1 a pre-existing `claude-` string in `web-agent/runner.ts`). This change introduces **zero new QC failures** — `config/departments.json` is intentionally left empty (populated per-client at build time; never client data in the universal repo).
+
 ## [v4.1.7] - 2026-05-30 - Operator Console onboarding walkthrough + per-module vault-write health dots
 
 Patch release. Two universal Operator Console UX features, zero schema changes, zero personal/client data.

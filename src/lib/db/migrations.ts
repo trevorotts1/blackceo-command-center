@@ -1455,6 +1455,37 @@ const migrations: Migration[] = [
       console.log(`[Migration 045] Deleted ${result.changes} orphan rows from persona_selection_log`);
     }
   },
+  {
+    id: '046',
+    name: 'pin_ceo_department_first',
+    up: (db) => {
+      // Durable "CEO is department #1" guarantee. Migration 014 pinned CEO=1 at
+      // column-add time, but only ran once and only when the row already
+      // existed; an auto-seeded or later-created CEO row could land elsewhere.
+      // This idempotent re-pin sets the CEO workspace to sort_order = 0 (below
+      // 014's CEO=1) so it sorts above everything regardless of prior data.
+      //
+      // Keys on slug='ceo' (the stable ordering key) OR a case-insensitive
+      // name match (POST /api/workspaces auto-generates slug from name, so a
+      // CEO row created through the API carries slug 'ceo' anyway; the name
+      // fallback covers rows seeded before this convention). Safe to re-run.
+      console.log('[Migration 046] Pinning CEO department to sort_order = 0...');
+      try {
+        const result = db
+          .prepare(
+            `UPDATE workspaces
+                SET sort_order = 0
+              WHERE lower(slug) = 'ceo'
+                 OR lower(name) = 'ceo'`
+          )
+          .run();
+        console.log(`[Migration 046] Re-pinned ${result.changes} CEO workspace row(s) to sort_order = 0`);
+      } catch (e) {
+        // Universal-template installs may have no CEO row yet — non-fatal.
+        console.log('[Migration 046] Skipped:', (e as Error).message);
+      }
+    }
+  },
 ];
 
 /**
@@ -1576,17 +1607,26 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
     console.log('[Auto-seed] Created company:', companyName);
 
     for (const dept of depts) {
+      // CEO must seed at sort_order = 0 so it sorts above everything; without
+      // this an auto-seeded CEO would inherit the schema default (1000) and
+      // land last (then get re-pinned only on the next boot by migration 046).
+      // The CEO key is the slug 'ceo' or id 'dept-ceo' (display name is free
+      // text — e.g. the client's main-agent persona — so we never match on it).
+      const slugLower = String(dept.slug || dept.id || '').toLowerCase();
+      const isCeo = slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
+      const sortOrder = isCeo ? 0 : 1000;
       db.prepare(
-        'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id) VALUES (?, ?, ?, ?, ?, ?)'
+        'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(
         dept.id,
         dept.name,
-        dept.id,
+        dept.slug || dept.id,
         dept.name + ' department workspace',
         dept.emoji || '📁',
-        companySlug
+        companySlug,
+        sortOrder
       );
-      console.log('[Auto-seed] Created workspace:', dept.id, dept.name);
+      console.log('[Auto-seed] Created workspace:', dept.id, dept.name, isCeo ? '(CEO → sort_order 0)' : '');
     }
 
     console.log('[Auto-seed] Done. Seeded company +', depts.length, 'workspaces');

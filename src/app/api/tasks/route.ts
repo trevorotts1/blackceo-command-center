@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { v4 as uuidv4 } from 'uuid';
-import { queryAll, queryOne, run } from '@/lib/db';
-import { broadcast } from '@/lib/events';
+import { queryAll } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
-import { selectPersonaForTask } from '@/lib/persona-selector';
-import type { Task, CreateTaskRequest, Agent } from '@/lib/types';
-import { getBestSOPForTask } from '@/lib/sops';
+import { createTaskCore } from '@/lib/tasks';
+import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -112,180 +109,25 @@ export async function POST(request: NextRequest) {
 
     const validatedData = validation.data;
 
-    const id = uuidv4();
-    const now = new Date().toISOString();
-
-    const workspaceId = validatedData.workspace_id || 'default';
-    const status = validatedData.status || 'backlog';
-
-    // Auto-suggest SOP if none provided. Scored by department + keyword overlap;
-    // anything below 0.5 leaves sop_id NULL so the operator picks manually.
-    let sopId: string | null = validatedData.sop_id ?? null;
-    if (!sopId) {
-      try {
-        const best = getBestSOPForTask({
-          title: validatedData.title,
-          description: validatedData.description,
-          department: validatedData.department,
-          workspace_id: workspaceId,
-        });
-        if (best) sopId = best.id;
-      } catch (err) {
-        console.warn('[POST /api/tasks] SOP auto-suggest failed (non-fatal):', err);
-      }
-    }
-
-    run(
-      `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        validatedData.title,
-        validatedData.description || null,
-        status,
-        validatedData.priority || 'medium',
-        validatedData.assigned_agent_id || null,
-        validatedData.created_by_agent_id || null,
-        workspaceId,
-        validatedData.business_id || 'default',
-        validatedData.department || null,
-        validatedData.due_date || null,
-        sopId,
-        now,
-        now,
-      ]
+    // Delegate to the shared task-creation core so the UI create path and the
+    // universal ingest endpoint (POST /api/tasks/ingest) can never drift.
+    const task = await createTaskCore(
+      {
+        title: validatedData.title,
+        description: validatedData.description,
+        status: validatedData.status,
+        priority: validatedData.priority,
+        assigned_agent_id: validatedData.assigned_agent_id,
+        created_by_agent_id: validatedData.created_by_agent_id,
+        business_id: validatedData.business_id,
+        workspace_id: validatedData.workspace_id,
+        department: validatedData.department,
+        due_date: validatedData.due_date,
+        sop_id: validatedData.sop_id ?? null,
+      },
+      { origin: request.headers.get('origin') }
     );
 
-    // Log event
-    let eventMessage = `New task: ${validatedData.title}`;
-    if (validatedData.created_by_agent_id) {
-      const creator = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [validatedData.created_by_agent_id]);
-      if (creator) {
-        eventMessage = `${creator.name} created task: ${validatedData.title}`;
-      }
-    }
-
-    run(
-      `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), 'task_created', body.created_by_agent_id || null, id, eventMessage, now]
-    );
-
-    // Persona selection (Hop 10): spawn persona-selector-v2.py and pin the
-    // result onto the new task before we re-fetch. Failures are non-blocking
-    // — task creation must still succeed if the selector can't run.
-    //
-    // Skips known sentinel/fallback IDs ("schemaVersion" et al.) that come
-    // out of an unpatched selector on a stale install — see the Hop 10
-    // selector bug-hunt notes.
-    try {
-      const taskDescription =
-        `${validatedData.title}${validatedData.description ? `. ${validatedData.description}` : ''}`.trim();
-      const departmentForSelector = workspaceId || 'general';
-
-      const persona = await selectPersonaForTask(id, taskDescription, departmentForSelector);
-
-      const SENTINEL_IDS = new Set([
-        'schemaVersion',
-        'created',
-        'domainTags',
-        'perspectiveTags',
-        'personas',
-      ]);
-
-      if (
-        persona &&
-        persona.persona_id &&
-        !SENTINEL_IDS.has(persona.persona_id) &&
-        !persona.no_persona_required
-      ) {
-        const personaSelectedAt = new Date().toISOString();
-        run(
-          `UPDATE tasks
-              SET persona_id = ?,
-                  persona_name = ?,
-                  persona_mode = ?,
-                  persona_score = ?,
-                  persona_version = ?,
-                  persona_selected_at = ?
-            WHERE id = ?`,
-          [
-            persona.persona_id,
-            persona.persona_name,
-            persona.interaction_mode,
-            persona.score ?? null,
-            persona.persona_version ?? 1,
-            personaSelectedAt,
-            id,
-          ]
-        );
-        console.log(
-          `[POST /api/tasks] Persona assigned: task=${id} persona=${persona.persona_id} ` +
-            `score=${persona.score?.toFixed(3) ?? '?'} mode=${persona.interaction_mode}`
-        );
-      } else if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
-        console.warn(
-          `[POST /api/tasks] Persona selector returned sentinel id "${persona.persona_id}" for task ${id} — ignoring (selector needs patching).`
-        );
-      } else {
-        console.warn(`[POST /api/tasks] No persona assigned for task ${id} (selector returned ${persona ? 'unusable result' : 'null'}).`);
-      }
-    } catch (personaError) {
-      // Never fail task creation on persona-selector errors.
-      console.error(`[POST /api/tasks] Persona selection threw for task ${id}:`, personaError);
-    }
-
-    // Fetch created task with all joined fields
-    const task = queryOne<Task>(
-      `SELECT t.*,
-        aa.name as assigned_agent_name,
-        aa.avatar_emoji as assigned_agent_emoji,
-        ca.name as created_by_agent_name,
-        ca.avatar_emoji as created_by_agent_emoji
-       FROM tasks t
-       LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-       LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-       WHERE t.id = ?`,
-      [id]
-    );
-
-    // Broadcast task creation via SSE
-    if (task) {
-      broadcast({
-        type: 'task_created',
-        payload: task,
-      });
-    }
-
-    // Trigger webhook for auto-routing asynchronously (don't block response)
-    if (task) {
-      (async () => {
-        try {
-          const webhookUrl = `${request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:4000'}/api/webhooks/task-created`;
-          const webhookResponse = await fetch(webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              taskId: task.id,
-              title: task.title,
-              description: task.description,
-              department: task.department,
-              priority: task.priority,
-              workspaceId: task.workspace_id,
-            }),
-          });
-          if (!webhookResponse.ok) {
-            console.error('[POST /api/tasks] Webhook notification failed:', await webhookResponse.text());
-          } else {
-            console.log('[POST /api/tasks] Webhook notification sent for task:', task.id);
-          }
-        } catch (webhookError) {
-          // Log error but don't fail the task creation
-          console.error('[POST /api/tasks] Failed to trigger webhook:', webhookError);
-        }
-      })();
-    }
-    
     return NextResponse.json(task, { status: 201 });
   } catch (error) {
     console.error('Failed to create task:', error);

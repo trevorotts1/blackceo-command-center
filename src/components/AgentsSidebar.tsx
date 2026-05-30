@@ -152,6 +152,19 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
             }
           )
         );
+        // Hard UI guarantee: hoist the CEO department to the front of the rail
+        // so it shows first even if a drag-reorder demoted it or its
+        // sort_order was clobbered. This is the UI half of the two
+        // independent guarantees (DB migration 046 sets sort_order = 0; this
+        // hoist re-pins on every load). `id` holds the slug (`ws.slug || ws.id`)
+        // with a case-insensitive name fallback.
+        const ceoIdx = enriched.findIndex(
+          (d) =>
+            (d.id || '').toLowerCase() === 'ceo' ||
+            (d.id || '').toLowerCase() === 'dept-ceo' ||
+            (d.name || '').toLowerCase() === 'ceo'
+        );
+        if (ceoIdx > 0) enriched.unshift(enriched.splice(ceoIdx, 1)[0]);
         if (!cancelled) setDepartments(enriched);
       } catch {
         // Fall back silently to empty list.
