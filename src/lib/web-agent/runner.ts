@@ -204,7 +204,14 @@ export function slugifyTask(task: string): string {
 
 // -- Runner ----------------------------------------------------------------
 
-const MODEL = 'claude-sonnet-4-5'; // Anthropic API model id; aligns with "Sonnet 4.6" naming in the spec.
+// Web-agent inference model. The Operator browser agent is built directly on
+// Anthropic's Messages API tool-use protocol (raw tool_use/tool_result blocks),
+// so it cannot be provider-agnostic — the default must be a valid Anthropic
+// model id. Per the cost policy in QC.md #8 the id is env-overridable
+// (WEB_AGENT_MODEL) rather than a buried hardcoded literal; the operator can
+// point this subsystem at any Messages-API-compatible model.
+const DEFAULT_WEB_AGENT_MODEL = process.env.WEB_AGENT_MODEL || 'claude-sonnet-4-5';
+const MODEL = DEFAULT_WEB_AGENT_MODEL;
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const MAX_ITERATIONS = 30; // Hard cap so a runaway model cannot loop forever.
 const DEFAULT_START_URL = 'about:blank';

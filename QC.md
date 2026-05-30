@@ -16,11 +16,11 @@ yourself honestly.
 | **1**   | 1.0    | Prerequisites + dashboard prerequisites verified |
 | **2**   | 1.0    | All .md root files read before changes (TYP compliance) |
 | **3**   | 1.5    | package.json `version` + `version` file agree |
-| **4**   | 1.0    | All 17 canonical departments present in `config/departments.json` and `src/lib/routing/departments.config.ts` (no Operations/Creative/HR/IT drift) |
+| **4**   | 1.0    | All 17 canonical departments present in `src/lib/routing/departments.config.ts` (the source of truth — no Operations/Creative/HR/IT drift); `config/departments.json` is a valid array (ships empty `[]` per v4.0.3 and is regenerated per-client) with schema-valid entries |
 | **5**   | 1.5    | All 23 agents have the 7 ZHC files (4 unique + 3 symlinks). `find agents -type l | wc -l` reports 69 |
 | **6**   | 1.0    | `agents/_shared/{AGENTS,TOOLS,USER}.md` exist and are real files (symlink targets) |
 | **7**   | 1.5    | All migrations 001-021 present in `src/lib/db/migrations.ts` (no numbered gaps) |
-| **8**   | 0.5    | No Anthropic model references in non-orchestrator code |
+| **8**   | 0.5    | No hardcoded Anthropic model id as an inference target in non-orchestrator business logic. Exempt: the orchestrator layer, `model-providers/anthropic.ts` (emits Claude family *labels* for the UI), and `web-agent/runner.ts` (built on the Anthropic Messages-API tool-use protocol; model id is env-overridable via `WEB_AGENT_MODEL`) |
 | **9**   | 0.5    | `npm run build` exits zero |
 | **10**  | 0.5    | `qc-cc.sh` exits zero |
 
@@ -67,5 +67,5 @@ fail and bring the total below 8.5:
 | Symlink count drops below 69 in agents/ | #5 | N19 ZHC layout |
 | `_shared/AGENTS.md` becomes a symlink itself (loop) | #6 | Breaks every agent |
 | Migration 008 gap reappears | #7 | DB schema drift |
-| `claude-*` / `anthropic/*` model id in code | #8 | Cost policy |
+| New hardcoded `claude-*` / `anthropic/*` model id in non-exempt `src/lib` business logic | #8 | Cost policy |
 | Build fails after dep upgrade | #9 | Smoke check |

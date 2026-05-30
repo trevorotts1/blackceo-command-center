@@ -56,21 +56,28 @@ check "1.2" "package.json version matches /version" \
 
 blue ""
 blue "── 2. Department canonical set (N17) ──"
-check "2.1" "config/departments.json has exactly 17 departments" \
-  '[ "$(jq -r ". | length" config/departments.json)" = "17" ]' \
-  "see Wave 1.2 commit — 17 mandatory + CEO"
-check "2.2" "config/departments.json includes CRM" \
-  'jq -e ". | map(select(.id == \"dept-crm\")) | length > 0" config/departments.json' \
-  ""
-check "2.3" "config/departments.json includes OpenClaw Maintenance" \
-  'jq -e ". | map(select(.id == \"dept-openclaw\")) | length > 0" config/departments.json' \
-  ""
-check "2.4" "config/departments.json includes Social Media" \
-  'jq -e ". | map(select(.id == \"dept-social\")) | length > 0" config/departments.json' \
-  ""
-check "2.5" "config/departments.json includes Paid Advertisement" \
-  'jq -e ". | map(select(.id == \"dept-paid-ads\")) | length > 0" config/departments.json' \
-  ""
+# As of v4.0.3 (commit bc99e90) config/departments.json ships EMPTY ([]) on
+# purpose: the stale 17-row hardcoded template was winning the seed race, and
+# autoSeedFromDepartmentsJson() (src/lib/db/migrations.ts) returns early on an
+# empty array. The file is regenerated PER CLIENT by
+# scripts/sync-departments-from-build-state.py from the client's real Zero
+# Human Company build state. So the canonical-set contract now lives in the
+# TypeScript source of truth (src/lib/routing/departments.config.ts), and
+# departments.json is validated only for SHAPE: it must be a valid JSON array
+# (empty = unseeded template, populated = a client's regenerated set), and any
+# entries it does contain must carry the required schema fields.
+check "2.1" "config/departments.json is a valid JSON array (empty template or client-regenerated)" \
+  '[ "$(jq -r "type" config/departments.json)" = "array" ]' \
+  "must be [] (shipped template) or a populated array; run scripts/sync-departments-from-build-state.py"
+check "2.2" "config/departments.json entries (if any) all have id+name (schema valid)" \
+  '[ "$(jq -r "all(.[]; has(\"id\") and has(\"name\"))" config/departments.json)" = "true" ]' \
+  "every department object needs id and name fields"
+check "2.3" "departments.config.ts includes Social Media (canonical source of truth)" \
+  "grep -q \"id: 'social-media'\" src/lib/routing/departments.config.ts"
+check "2.4" "departments.config.ts includes Paid Advertisement" \
+  "grep -q \"id: 'paid-advertisement'\" src/lib/routing/departments.config.ts"
+check "2.5" "departments.config.ts defines exactly 17 canonical departments" \
+  "[ \"\$(grep -cE \"id: '[a-z-]+'\" src/lib/routing/departments.config.ts)\" = \"17\" ]"
 check "2.6" "departments.config.ts has CRM and OpenClaw Maintenance" \
   "grep -q \"id: 'crm'\" src/lib/routing/departments.config.ts && grep -q \"id: 'openclaw-maintenance'\" src/lib/routing/departments.config.ts"
 check "2.7" "departments.config.ts does NOT include Operations / Creative / HR / IT" \
@@ -107,9 +114,21 @@ warn_check "4.3" "migration 008 not skipped (no numbered gap)" \
   "grep -q \"id: '008'\" src/lib/db/migrations.ts"
 
 blue ""
-blue "── 5. No Anthropic models in non-orchestrator code ──"
-check "5.1" "no 'claude-' string in src/lib (excluding orchestrator)" \
-  "! grep -rE \"'claude-[a-z0-9-]+'\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v -i orchestrator | grep ."
+blue "── 5. No Anthropic models in non-orchestrator code (QC.md #8 cost policy) ──"
+# Cost policy: business logic must NOT hardcode an Anthropic model as an
+# inference target — it should route through the model resolver / cheaper
+# providers. Three classes of match are legitimately exempt:
+#   - *orchestrator*           : the CEO/orchestration layer may name Claude.
+#   - model-providers/anthropic.ts : the dedicated Anthropic connector. Its
+#     job is to emit Anthropic model-family LABELS ('claude-opus', etc.) for
+#     the UI — these are groupings, not hardcoded inference targets.
+#   - web-agent/runner.ts      : the Operator browser agent is built directly
+#     on Anthropic's Messages-API tool-use protocol, so it cannot be
+#     provider-agnostic. Its model id is env-overridable (WEB_AGENT_MODEL); the
+#     fallback literal must stay a valid Anthropic id for the live API call.
+# Any NEW hardcoded 'claude-...' id in other src/lib business logic still fails.
+check "5.1" "no hardcoded 'claude-' model id in src/lib (excl. orchestrator + anthropic connector + web-agent runner)" \
+  "! grep -rE \"'claude-[a-z0-9-]+'\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v -i orchestrator | grep -v 'model-providers/anthropic.ts' | grep -v 'web-agent/runner.ts' | grep ."
 check "5.2" "no 'anthropic/' provider id in src/lib" \
   "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep ."
 
