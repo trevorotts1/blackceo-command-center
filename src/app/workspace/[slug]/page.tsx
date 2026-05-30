@@ -97,12 +97,15 @@ export default function WorkspacePage() {
       try {
         debug.api('Loading workspace data...', { workspaceId, routeDepartment, selectedDepartment });
 
-        // Always derive the task filter from the route itself.
-        // This prevents a race where a stale/null global selection briefly fetches all tasks
-        // and overwrites the single-department board after navigation.
+        // Scope the fetch by the workspace_id FK — the only enforced
+        // relationship between tasks and workspaces. Filtering by the
+        // free-text department slug (the previous behaviour) silently
+        // returned zero rows whenever tasks.department was NULL or carried a
+        // display name / short-slug instead of the workspace slug. The CEO /
+        // default workspace still fetches everything.
         const tasksUrl = routeDepartment === null
           ? '/api/tasks'
-          : `/api/tasks?department=${routeDepartment}`;
+          : `/api/tasks?workspace_id=${encodeURIComponent(workspaceId)}`;
 
         const [agentsRes, tasksRes, eventsRes] = await Promise.all([
           fetch(`/api/agents?workspace_id=${workspaceId}`),
@@ -159,10 +162,12 @@ export default function WorkspacePage() {
     // Poll tasks as SSE fallback every 60 seconds (increased from 10s)
     const taskPoll = setInterval(async () => {
       try {
-        // Use the route-derived filter here too so department pages never drift back to all tasks.
+        // Use the same workspace_id-scoped fetch as the initial load so the
+        // department board never drifts back to all tasks (or to an empty
+        // board when tasks.department doesn't byte-equal the slug).
         const pollUrl = routeDepartment === null
           ? '/api/tasks'
-          : `/api/tasks?department=${routeDepartment}`;
+          : `/api/tasks?workspace_id=${encodeURIComponent(workspaceId)}`;
         const res = await fetch(pollUrl);
         if (res.ok) {
           const newTasks: Task[] = await res.json();
@@ -334,8 +339,14 @@ export default function WorkspacePage() {
       )}
 
       <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
-        {/* Agents Sidebar */}
-        <AgentsSidebar workspaceId={workspace.id} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        {/* Agents Sidebar — focus mode (scoped rail) for a single department,
+            full all-departments list only on the CEO / default workspace. */}
+        <AgentsSidebar
+          workspaceId={workspace.id}
+          focusSlug={routeDepartment ?? undefined}
+          isOpen={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+        />
 
         {/* Main Content Area */}
         {showTaskBoard ? (

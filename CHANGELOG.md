@@ -1,3 +1,27 @@
+## [v4.1.2] - 2026-05-30 - Single-department Focus View: filter by workspace_id + scoped focus rail
+
+Patch release. The single-department Focus View (`/workspace/[slug]`) could open empty for a department that actually had tasks, and clicking a department in the `/tasks/all` left rail did nothing. Both are fixed, and the Focus View left rail is scoped down to a clean focused context.
+
+### Root cause
+
+The Focus View fetched + filtered tasks by the **free-text `tasks.department` slug** (`/api/tasks?department=<slug>` plus a client-side `task.department === slug` re-filter). That column is unreliable: the task-create flow (`TaskModal`) only ever writes `workspace_id` and leaves `department` NULL; the department router stamps the display **name** (e.g. `"Audio Production"`) rather than the slug; and older seed scripts used short slugs (`audio`, `appdev`). The only relationship the schema enforces is `tasks.workspace_id REFERENCES workspaces(id)`. So a department whose tasks carried a NULL / name / short-slug value silently matched zero rows — an empty board for a department that had work.
+
+### Changed
+
+- **`src/app/workspace/[slug]/page.tsx`** — Focus View now fetches tasks by `?workspace_id=<workspace.id>` (the enforced FK) instead of `?department=<slug>`, on both the initial load and the 60s fallback poll. The CEO / default workspace still fetches all tasks. The left rail now renders in focus mode (`focusSlug`).
+- **`src/components/MissionQueue.tsx`** — when a `workspaceId` is provided (Focus View), the board filters by `task.workspace_id === workspaceId` for both the column contents and the "By Total Tasks" count. The cross-department `/tasks/all` board (no `workspaceId`) keeps the legacy department-slug selection so the sidebar pill still works there.
+- **`src/components/AgentsSidebar.tsx`** — added `navigateOnSelect` (used by `/tasks/all`: a department click now navigates to `/workspace/<slug>` deterministically instead of mutating an in-place filter the board ignored) and `focusSlug` (renders a minimal focused rail — a "Back to All Departments" link + the single department in focus — instead of the full all-departments list).
+- **`src/app/tasks/all/page.tsx`** — passes `navigateOnSelect` to the rail.
+- **`README.md`** — documents `/tasks/all`, `/tasks/by-department`, and the `/workspace/[slug]` Focus View (workspace_id scoping + collapsed focus rail).
+
+### Reconciled entry points
+
+All three ways into a single department now land on the same correct, filtered Focus View (`/workspace/<slug>`): the `/tasks/all` left-rail click, the `/tasks/by-department` "Open Department" card, and a direct `/workspace/<slug>` URL. `/tasks/all` (full board) and the picker are unchanged otherwise.
+
+### Risk: low
+
+- No DB schema change, no migration, no API change (the `?workspace_id=` filter already existed in `/api/tasks`). Three component/page edits + README. The v4.1.1 Live Feed collapsible rail is preserved and untouched.
+
 ## [v4.1.1] - 2026-05-30 - Tasks board Live Feed rail: collapsible + resizable (stop crowding the Kanban)
 
 Patch release. The `/tasks/all` Live Feed right rail previously rendered always-expanded at a fixed `w-80` (its in-memory collapse reset on every reload), permanently stealing width from the Kanban so task cards/changelogs were hard to see. The rail is now hidden by default with a floating show-pill, user-resizable when open, and persists its state — giving the board full width unless the user explicitly opens the feed.

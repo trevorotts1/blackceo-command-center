@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ChevronRight, ChevronLeft, Zap, ZapOff, Loader2 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Plus, ChevronRight, ChevronLeft, Zap, ZapOff, Loader2, ArrowLeft } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 
 type FilterTab = 'all' | 'active' | 'idle';
@@ -58,9 +59,25 @@ interface AgentsSidebarProps {
   workspaceId?: string;
   isOpen?: boolean;
   onClose?: () => void;
+  /**
+   * When true, selecting a department NAVIGATES to that department's Focus
+   * View (/workspace/<slug>) instead of mutating the in-place filter. Used by
+   * /tasks/all so a sidebar click deterministically opens the focused board
+   * (the cross-department board ignores selectedDepartment, so an in-place
+   * filter would silently do nothing).
+   */
+  navigateOnSelect?: boolean;
+  /**
+   * When set, the rail renders in FOCUS mode: instead of the full
+   * all-departments list it shows a minimal focused context (a back-to-all
+   * affordance + the single current department) so the Kanban board has the
+   * stage to itself. The value is the slug of the focused department.
+   */
+  focusSlug?: string;
 }
 
-export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSidebarProps) {
+export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOnSelect = false, focusSlug }: AgentsSidebarProps) {
+  const router = useRouter();
   const { agentOpenClawSessions, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const [filter, setFilter] = useState<FilterTab>('all');
   const [connectingAgentId, setConnectingAgentId] = useState<string | null>(null);
@@ -69,6 +86,20 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
   const [departments, setDepartments] = useState<Department[]>([]);
 
   const toggleMinimize = () => setIsMinimized(!isMinimized);
+
+  // Selecting a department: in /tasks/all we navigate to the Focus View so
+  // the click is deterministic; elsewhere we keep the legacy in-place filter.
+  const handleSelectDepartment = useCallback(
+    (slug: string) => {
+      if (navigateOnSelect) {
+        router.push(`/workspace/${slug}`);
+        onClose?.();
+        return;
+      }
+      setSelectedDepartment(slug);
+    },
+    [navigateOnSelect, router, onClose, setSelectedDepartment],
+  );
 
   // Load departments dynamically from the workspaces database. For each
   // workspace we also pull its agents so we can aggregate the worst agent
@@ -174,6 +205,85 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
     if (isSelected) return 'bg-brand-500';
     return AGENT_STATUS_STYLES[dept.agentStatus].dot;
   };
+
+  // ── Focus mode rail ───────────────────────────────────────────────────────
+  // In a single-department Focus View we deliberately do NOT render the full
+  // all-departments list (that crowded the board and let the user wander out of
+  // focus). Instead the rail is a minimal focused context: an obvious
+  // "Back to All Departments" affordance + the one department in focus.
+  if (focusSlug) {
+    const current = departments.find((d) => d.id === focusSlug);
+    return (
+      <aside
+        className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
+          isMinimized ? 'w-12' : 'w-72'
+        }`}
+        aria-label="Department focus rail"
+      >
+        <div className="p-3 border-b border-gray-100 flex items-center">
+          <button
+            onClick={toggleMinimize}
+            className="p-1 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+            aria-label={isMinimized ? 'Expand focus rail' : 'Minimize focus rail'}
+          >
+            {isMinimized ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+          </button>
+          {!isMinimized && <span className="text-sm font-semibold text-gray-900 ml-1">Focus</span>}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-2 space-y-2">
+          {/* Back to All Departments — always available so the user is never stuck */}
+          <button
+            onClick={() => router.push('/tasks/all')}
+            className={`w-full rounded-lg transition-colors text-left hover:bg-gray-50 ${
+              isMinimized ? 'flex justify-center py-2' : ''
+            }`}
+            aria-label="Back to All Departments"
+            title="Back to All Departments"
+          >
+            {isMinimized ? (
+              <ArrowLeft className="w-4 h-4 text-gray-500" />
+            ) : (
+              <div className="flex items-center gap-2 p-2.5 text-gray-600">
+                <ArrowLeft className="w-4 h-4 shrink-0" />
+                <span className="text-sm font-medium">All Departments</span>
+              </div>
+            )}
+          </button>
+
+          {!isMinimized && <div className="border-t border-gray-100 my-1" />}
+
+          {/* The single department in focus */}
+          {!isMinimized && (
+            <div className="w-full rounded-lg bg-brand-50 border border-brand-200 ring-1 ring-brand-200">
+              <div className="flex items-center gap-3 p-2.5">
+                <div className="text-2xl relative">
+                  {current?.emoji || '📁'}
+                  {current && (
+                    <span
+                      className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${dotClassFor(current, true)}`}
+                    />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-sm truncate text-brand-900">
+                    {current?.name || focusSlug}
+                  </div>
+                  <div className="text-sm truncate text-brand-600">In focus</div>
+                </div>
+                <span className="w-2 h-2 rounded-full bg-brand-500" />
+              </div>
+            </div>
+          )}
+          {isMinimized && (
+            <div className="flex justify-center py-2" title={current?.name || focusSlug}>
+              <span className="text-2xl">{current?.emoji || '📁'}</span>
+            </div>
+          )}
+        </div>
+      </aside>
+    );
+  }
 
   return (
     <aside
@@ -282,7 +392,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
             return (
               <button
                 key={dept.id}
-                onClick={() => setSelectedDepartment(dept.id)}
+                onClick={() => handleSelectDepartment(dept.id)}
                 className={`flex justify-center py-2 w-full ${
                   isSelected ? 'bg-brand-50 rounded-lg' : ''
                 }`}
@@ -309,7 +419,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose }: AgentsSi
           return (
             <button
               key={dept.id}
-              onClick={() => setSelectedDepartment(dept.id)}
+              onClick={() => handleSelectDepartment(dept.id)}
               className={`w-full rounded-lg transition-colors text-left ${
                 isSelected
                   ? 'bg-brand-50 border border-brand-200 ring-1 ring-brand-200'

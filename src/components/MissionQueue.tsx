@@ -80,10 +80,25 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
 
+  // Focus View (single department) scopes by the workspace_id FK — the ONLY
+  // relationship the schema enforces (tasks.workspace_id REFERENCES
+  // workspaces.id). The free-text tasks.department column is unreliable: the
+  // task-create flow only ever writes workspace_id (TaskModal sends no
+  // department), the router stamps display NAMES, and seed scripts use short
+  // slugs — so a slug-vs-name-vs-null mismatch silently empties the board.
+  // When a workspaceId is passed (Focus View) we scope by it. The cross-
+  // department /tasks/all view passes no workspaceId, so the legacy
+  // department-slug selection (sidebar pill) still drives that board.
+  const scopeByWorkspace = !!workspaceId && effectiveDepartment !== null && effectiveDepartment !== undefined;
+
+  const matchesScope = (task: Task): boolean => {
+    if (scopeByWorkspace) return task.workspace_id === workspaceId;
+    if (effectiveDepartment) return task.department === effectiveDepartment;
+    return true;
+  };
+
   const getTasksByStatus = (statusId: string) => {
-    const filteredByDept = effectiveDepartment
-      ? tasks.filter((task) => task.department === effectiveDepartment)
-      : tasks;
+    const filteredByDept = tasks.filter(matchesScope);
     const byColumn = filteredByDept.filter((task) => {
       // Six-column mapping:
       //   backlog  → raw inbox (status === 'backlog')
@@ -199,10 +214,10 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
     setDraggedTask(null);
   };
 
-  // Filter tasks by selected department for accurate counts
-  const filteredTasks = effectiveDepartment
-    ? tasks.filter((task) => task.department === effectiveDepartment)
-    : tasks;
+  // Filter tasks by selected department/workspace for accurate counts.
+  // Mirrors the scoping used by getTasksByStatus so the "By Total Tasks"
+  // chip count matches what the columns actually render.
+  const filteredTasks = tasks.filter(matchesScope);
 
   const filters = [
     { id: 'status', label: 'By Status' },
