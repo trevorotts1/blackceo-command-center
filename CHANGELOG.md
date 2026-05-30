@@ -1,3 +1,20 @@
+## [v4.1.1] - 2026-05-30 - Tasks board Live Feed rail: collapsible + resizable (stop crowding the Kanban)
+
+Patch release. The `/tasks/all` Live Feed right rail previously rendered always-expanded at a fixed `w-80` (its in-memory collapse reset on every reload), permanently stealing width from the Kanban so task cards/changelogs were hard to see. The rail is now hidden by default with a floating show-pill, user-resizable when open, and persists its state — giving the board full width unless the user explicitly opens the feed.
+
+### Changed
+
+- **`src/components/LiveFeed.tsx`** — rewrote the rail's container/visibility/sizing layer (the ALL/TASKS/AGENTS tabs, event filtering, and `EventItem` rendering are unchanged):
+  - **Hidden by default** so the board uses the FULL width. Open/closed state persists to `localStorage` key `cc.livefeed.open` (mirrors the existing `AppShell` `bcc-`-style mount-effect read / handler-write pattern), so the user's choice sticks across reloads and navigation.
+  - **Floating show-pill** when collapsed: a top-right `MessagesSquare` + animated live-dot + visible "Live Feed" label button (`aria-label="Show Live Feed"`, `aria-expanded={false}`, ≥44px tap target, `focus-visible` ring). Clicking/Enter/Space opens the rail. When open, the existing `>` chevron (and an `X` on mobile) collapses it again.
+  - **Draggable resize** (desktop/`lg`+): a `role="separator"` splitter on the rail's left edge, `cursor-col-resize`, Pointer Events (mouse + touch), arrow-key resize for a11y. Width clamps to min 300px / max 40% of the viewport so the board can never be crushed, and persists to `localStorage` key `cc.livefeed.width`.
+  - **Responsive**: below `lg` (1024px) the open rail renders as a framer-motion **overlay drawer** (88vw, `max-w-sm`) with a tap-to-close scrim instead of a push-panel, so it never squeezes the board on mobile. On `lg`+ it is a push-panel that resizes the board.
+  - **Accessibility**: `role="complementary"` + `aria-label` on the rail, `aria-expanded` on the open/close controls, `aria-valuenow/aria-valuemin` on the resize separator, icon+label (never color-alone), `focus-visible` rings, native `<button>` keyboard activation. Body font unchanged.
+
+### Risk: low
+
+- Single-file change to one component's container/visibility/sizing. No DB schema change, no migration, no API change, no change to the Kanban board, departments, or any other route. The `/tasks/all` page composition is untouched — the collapsed pill is `position: fixed` (out of flow) so the board reclaims full width with no page edit.
+
 ## [v4.1.0] - 2026-05-30 - Feature 52: Conversational-AI Live Analytics Dashboard
 
 Minor release adding a NEW card + route for conversational-AI analytics, distinct from the existing `/ceo-board` (tasks/agents/KPIs). Reuses the `/ceo-board` redesign component library + the `SystemPulseSection` fetch pattern. No schema changes; no modification to `/ceo-board`.
