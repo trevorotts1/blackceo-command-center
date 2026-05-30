@@ -109,7 +109,7 @@ export default function AllTasksPage() {
       </div>
 
       <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
-        <AgentsSidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        <AgentsSidebar navigateOnSelect isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <MissionQueue departmentFilter={null} />
         <LiveFeed />
       </div>
