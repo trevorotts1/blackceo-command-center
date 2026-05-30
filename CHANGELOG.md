@@ -1,3 +1,25 @@
+## [v4.1.6] - 2026-05-30 - Studio providers: boot-time registry seed (no more week-long "No providers configured")
+
+Patch release. Completes the v4.1.4 Studio provider-discovery fix. Even after v4.1.4 wired env-based auto-discovery, the `model_registry` table that the Studio tabs read was still only written by the **weekly** Sunday-03:00 refresh cron, never on boot. On a fresh deploy (verified live on Evelyn: `model_registry` = 0 rows) every Studio tab showed **"No providers configured"** for up to a week — even with KIE / OpenAI / Fish / Gemini keys present — until that cron ticked or someone manually hit `POST /api/cron/refresh-models`.
+
+### Boot + lazy seed (offline, idempotent, single-flight)
+
+- **Boot seed.** `instrumentation.register()` now fires a non-blocking, never-throw seed **after** env hydration, **only if** the registry is empty (`seedRegistryIfEmpty()` in `src/lib/studio/generators.ts`). It uses the **OFFLINE** provider catalogs in `PROVIDER_DISCOVERY` (fal / replicate / kie / fish-audio / openai / google / …), so it needs **no network** — the registry populates the moment the worker boots. Opt out with `DISABLE_REGISTRY_BOOT_SEED=1`.
+- **Lazy seed (unchanged path, now shares the guard).** `availableModels()` still seeds on the first Studio read when a capability returns 0 rows.
+- **Single-flight.** Both paths funnel through the exported `ensureRegistrySeeded()`, guarded by a process-wide `globalThis` boolean so the seed runs at most once per worker no matter how many reads (or the boot hook) race it. The seed body is fully synchronous (sync hydrate → sync discover → sync `bulkUpsertModels`), so there is no awaited boundary inside the critical section. Idempotent: discovered rows upsert by `model_id`, so the later weekly refresh updates them in place.
+
+### KIE fixes (carried + regression-locked)
+
+- **Env name.** `hasApiKey()` and the `callKie()` generator accept `KIE_API_KEY` (the name the connector + real env use), keeping `KIEAI_API_KEY` / `KIE_AI_API_KEY` as aliases.
+- **Capability tags.** `src/lib/model-providers/kie.ts` tags Veo / Runway / Kling as `video_generation` and Suno as `audio_generation` (never the old `streaming` / `audio_input`), so they match the Studio `CAPABILITY_FOR_KIND` map and appear under the Video / Audio tabs. At least one provider always emits `video_generation`.
+
+### Tests
+
+- New `tests/unit/studio-registry-seed.test.ts` drives the seed end-to-end against a throwaway temp-file SQLite DB: `discoverRegistryRows() → bulkUpsertModels() → listModels({capability})`. Asserts an offline seed with `KIE_API_KEY` + `OPENAI_API_KEY` + `FISH_AUDIO_API_KEY` leaves ≥1 active **image**, **video**, and **audio** row, and that re-seeding is idempotent (no duplicate `model_ids`).
+- New `tests/unit/kie-capabilities.test.ts` locks the KIE capability tags via the connector's offline curated fallback (no `streaming` / `audio_input`).
+
+Universal — no client-specific data. After deploy a box with media keys lights up all three Studio tabs immediately instead of waiting for the weekly cron.
+
 ## [v4.1.5] - 2026-05-30 - Operator Console Research: provider-agnostic (Perplexity / OpenAI / Ollama / xAI)
 
 Patch release. The Operator Console **Research** sub-module (`/operator/research`) was hard-wired to a single provider — xAI Grok Live Search via `X_AI_API_KEY`. On any client box without an xAI key it was effectively dead: the nav tile said "Soon", the page promised "xAI Grok", and a query 502'd with "X_AI_API_KEY is not set" — even when the box had a perfectly good search key (OpenAI / Ollama Cloud / Perplexity) sitting in its environment. Research is now **provider-agnostic and auto-discovered**, the mirror of the v4.1.4 Studio fix.
