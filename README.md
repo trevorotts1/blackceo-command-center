@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.1.5 (2026-05-30)** makes the Operator Console **Research** sub-module provider-agnostic (the mirror of the v4.1.4 Studio fix). Research was hard-wired to xAI Grok via `X_AI_API_KEY` — dead on any box without that key. It now **auto-discovers** the search provider from the environment + OpenClaw secret files and selects one in the order **Perplexity > OpenAI > Ollama (cloud) > xAI**. If a key exists the module is **live** (the `Soon` badge is dropped, a "Live via `<Provider>`" pill shows); if no key exists it shows an **honest empty-state** ("Add a Perplexity/OpenAI/Ollama/xAI key to enable Research") instead of a dead box or a 502. Shallow/Deep preserved. See `## Operator Research — provider auto-discovery (v4.1.5)` below and `CHANGELOG.md`.
+>
 > **v4.1.3 (2026-05-30)** fixes the Operator Console → Bridge → OpenClaw connect failure on VPS deploys. The Bridge device identity now persists on the `/data` volume (VPS) / `~/.mission-control` (Mac) and is **never silently regenerated**, so it survives `docker compose up -d --force-recreate` and the gateway approval is a one-time step. A boot-time pairing bootstrap registers the device as a pending request on the gateway right after deploy; `GET /api/openclaw/status` reports `connected` / `device_id` / `pairing_pending` plus the exact `openclaw devices approve <requestId>` remediation. The Bridge pill strip is now **platform-aware**: a VPS install shows only the OpenClaw pill (the six Mac-desktop CLIs are hidden), Mac installs are unchanged. See `docs/OPENCLAW_BRIDGE_PAIRING.md` for the per-box deploy + pairing runbook, and `CHANGELOG.md` for the full v4.1.3 entry.
 >
 > **v4.1.2 (2026-05-30)** is the single-department Focus View fix: `/tasks/all` rail clicks + the `/tasks/by-department` picker now deterministically open `/workspace/[slug]`, which filters by the workspace's `workspace_id` (the enforced FK) so a department always shows exactly its own tasks. See `CHANGELOG.md` for the full v4.1.2 entry.
@@ -181,3 +183,36 @@ The Operator Console **Studio** (`/operator/studio`) generates Image, Video, and
 Append one entry to `PROVIDER_DISCOVERY` in **`src/lib/studio/provider-discovery.ts`** — its `envCandidates` (in priority order), `slug`, `displayName`, and the `models` it contributes (each with a `capability` + `generates` flag). That is the single source of truth; nothing else needs to change for the provider to appear in the Studio dropdown and tabs. To make it actually generate (not registry-only), also wire a `call<Provider>()` branch in `runJob()` in `generators.ts`.
 
 Run the discovery unit test with `npm run test:unit`.
+
+## Operator Research — provider auto-discovery (v4.1.5)
+
+The Operator Console **Research** sub-module (`/operator/research`) runs live, grounded web search. The provider is **not hardcoded** — it is discovered at runtime from your environment and the OpenClaw secret files (same hydration contract as Studio), so a box "just works" the moment a search key exists. Results are saved to the operator vault so they show up in **Memory** and the **All Searches** bucket.
+
+### Provider preference order
+
+Research selects **one** provider — the highest-preference one whose key is present:
+
+> **Perplexity > OpenAI > Ollama (cloud) > xAI**
+
+| Env var (first present wins) | Provider | Default model | Request shape + scope |
+|---|---|---|---|
+| `PERPLEXITY_API_KEY` (`PPLX_API_KEY`) | Perplexity | `sonar-pro` | `POST api.perplexity.ai/chat/completions` (OpenAI-compatible). Online "sonar" models search the live web every call; sources in `citations[]`. Scope: whole public web, real-time. |
+| `OPENAI_API_KEY` | OpenAI | `gpt-4o-search-preview` | `POST api.openai.com/v1/chat/completions` with a web-search model + `web_search_options`. Source URLs in `message.annotations[].url_citation`. Scope: web. |
+| `OLLAMA_CLOUD_API_KEY` (`OLLAMA_API_KEY`) | Ollama Cloud | `gpt-oss:120b` | `POST ollama.com/api/v1/chat/completions` (OpenAI-compatible) with the hosted `web_search` tool (`tool_choice:"auto"`). Tool results carry source URLs. Scope: web. |
+| `X_AI_API_KEY` (`XAI_API_KEY`) | xAI Grok | `grok-4-fast` | `POST api.x.ai/v1/chat/completions` with `search_parameters.mode="on"` (Live Search). Sources in `citations[]`. Scope: X (Twitter) + the live web. |
+
+The model is resolved from `model_registry` for the selected provider when it has an active row; otherwise the provider's default (above) keeps the module live on a fresh box (no registry seed required). **Shallow** targets a 30s SLA / fewer sources; **Deep** broadens the search and may run longer.
+
+### SOON → live, or an honest empty-state
+
+- **A search key is present →** Research is **live**: the `Soon` nav badge is gone, the page shows a "Live via `<Provider>`" pill, and queries run.
+- **No search key →** the page shows an **honest empty-state** ("Add a Perplexity, OpenAI, Ollama, or xAI key to enable Research", with the exact env vars). The `POST /search` endpoint returns `{ empty_state: true }` (HTTP 200) — never a dead box, never a 502. Keys are never fabricated.
+
+### Per-box deploy
+
+- **VPS (Hostinger Docker):** add the chosen key to host `/docker/<proj>/.env`, then `docker compose up -d --force-recreate` (a plain `restart` does NOT reload `env_file`).
+- **Mac:** add the key to `~/.openclaw/.env` (or `~/.openclaw/secrets/.env`), then restart the dashboard process.
+
+### Adding a provider
+
+Insert one entry into `RESEARCH_PROVIDERS` in **`src/lib/research/provider-discovery.ts`** at the right precedence (`envCandidates` in priority order, `slug`, `displayName`, `defaultModel`, `callSummary`), then add a normalizing adapter in **`src/lib/research/providers.ts`**. `GET /api/operator/research/availability` and the page pick it up automatically. Run the selection unit test with `npm run test:unit`.

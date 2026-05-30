@@ -1,24 +1,25 @@
 /**
  * POST /api/operator/research/search
  *
- * Run a live X/Grok research query.
+ * Run a live, grounded research query through whichever search provider the
+ * box has a key for. Provider-agnostic as of v4.1.5 (was hard-wired to xAI).
  *
  * Request body:  { query: string, depth?: 'shallow' | 'deep' }
- * Response:      { search_id, markdown_result, model, created_at, search_metadata }
+ * Response (live):
+ *   { search_id, markdown_result, model, provider, created_at, search_metadata }
+ * Response (no provider key — HONEST empty-state, HTTP 200, NOT an error):
+ *   { empty_state: true, available: false, message, enable_env_vars }
  *
- * Track B7 (SCOPE-ADDITION Section 5).
+ * PROVIDER SELECTION (see src/lib/research/provider-discovery.ts):
+ *   Auto-discovered from the environment (incl. OpenClaw secret files), in the
+ *   fixed preference order  PERPLEXITY > OPENAI > OLLAMA (cloud) > XAI.
+ *   When no provider key exists we return an honest empty-state so the UI can
+ *   render "add a key to enable Research" instead of a dead box or a 502.
  *
- * The xAI provider connector (Track C2, Wave 2) will eventually own the live
- * model selection. Until that lands we resolve the model in this order:
- *   1. The first `active` row in `model_registry` whose `provider` is xai (or
- *      `provider_metadata.provider_slug` matches) and whose model_id is
- *      `grok-4-fast`, then any active xai model.
- *   2. Fallback to `grok-4-fast` as the model id string.
- *
- * The request body for xAI follows the OpenAI-compatible chat completions
- * shape published at https://docs.x.ai/api. Live Search is requested via the
- * `search_parameters` field on the request body. We mirror the markdown
- * response to the operator vault so Memory and All Searches pick it up.
+ * The model is resolved from `model_registry` when the selected provider has an
+ * active row; otherwise the provider's documented default is used. Results are
+ * mirrored to the operator vault at `<vault>/research/YYYY/MM/...md` so the
+ * Memory full-text index and the All Searches bucket pick them up.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -28,6 +29,12 @@ import { z } from 'zod';
 import { createResearchSearch, slugifyQuery } from '@/lib/research-store';
 import { listModels } from '@/lib/model-registry';
 import { vaultRoot } from '@/lib/platform';
+import {
+  selectResearchProvider,
+  researchAvailability,
+  type ResearchProviderSlug,
+} from '@/lib/research/provider-discovery';
+import { runResearch, type ResearchCitation } from '@/lib/research/providers';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -37,44 +44,27 @@ const requestSchema = z.object({
   depth: z.enum(['shallow', 'deep']).optional(),
 });
 
-interface XaiChoice {
-  message?: { content?: string };
-  finish_reason?: string;
-}
-
-interface XaiCitation {
-  url?: string;
-  title?: string;
-}
-
-interface XaiUsage {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-}
-
-interface XaiResponse {
-  id?: string;
-  model?: string;
-  choices?: XaiChoice[];
-  citations?: XaiCitation[] | string[];
-  usage?: XaiUsage;
-}
-
-function resolveModel(): string {
-  // 1. Look for grok-4-fast specifically in the registry.
+/**
+ * Resolve the model for the selected provider: prefer an active registry row
+ * for that provider, else the provider's documented default. The registry is
+ * often empty on fresh installs, so the default keeps the module live.
+ */
+function resolveModel(slug: ResearchProviderSlug, fallback: string): string {
   try {
-    const active = listModels({ provider: 'xai', status: 'active' });
-    const preferred = active.find((m) => m.model_id === 'grok-4-fast');
-    if (preferred) return preferred.model_id;
-    if (active.length > 0) return active[0].model_id;
+    const active = listModels({ provider: slug, status: 'active' });
+    const exact = active.find((m) => m.model_id === fallback || m.model_id.endsWith(`/${fallback}`));
+    if (exact) return exact.model_id.includes('/') ? exact.model_id.split('/').slice(1).join('/') : exact.model_id;
+    if (active.length > 0) {
+      const id = active[0].model_id;
+      return id.includes('/') ? id.split('/').slice(1).join('/') : id;
+    }
   } catch {
-    // model_registry may be empty on fresh installs; fall through to default.
+    // registry may be empty on fresh installs; fall through to the default.
   }
-  return 'grok-4-fast';
+  return fallback;
 }
 
-function formatMarkdown(query: string, answer: string, citations: XaiCitation[]): string {
+function formatMarkdown(query: string, answer: string, citations: ResearchCitation[]): string {
   const now = new Date().toISOString();
   const lines: string[] = [];
   lines.push('# Research result');
@@ -92,95 +82,13 @@ function formatMarkdown(query: string, answer: string, citations: XaiCitation[])
     lines.push('## Sources');
     lines.push('');
     for (const c of citations) {
-      const url = typeof c === 'string' ? c : c?.url;
-      const title = typeof c === 'string' ? c : c?.title || c?.url;
-      if (url) {
-        lines.push(`- [${title || url}](${url})`);
-      }
+      if (c.url) lines.push(`- [${c.title || c.url}](${c.url})`);
     }
   }
   return lines.join('\n');
 }
 
-function normalizeCitations(raw: XaiResponse['citations']): XaiCitation[] {
-  if (!raw) return [];
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((c) => {
-      if (typeof c === 'string') return { url: c, title: c };
-      if (c && typeof c === 'object') return c;
-      return null;
-    })
-    .filter((c): c is XaiCitation => Boolean(c && c.url));
-}
-
-async function callXaiLiveSearch(params: {
-  query: string;
-  depth: 'shallow' | 'deep';
-  model: string;
-}): Promise<XaiResponse> {
-  // Fixture path for testing — keeps CI/test runs offline.
-  const fixturePath = process.env.X_AI_FIXTURE_JSON_PATH;
-  if (fixturePath) {
-    const raw = await fs.readFile(fixturePath, 'utf8');
-    return JSON.parse(raw) as XaiResponse;
-  }
-
-  const apiKey = process.env.X_AI_API_KEY;
-  if (!apiKey) {
-    throw new Error('X_AI_API_KEY is not set');
-  }
-
-  const isDeep = params.depth === 'deep';
-  const body = {
-    model: params.model,
-    messages: [
-      {
-        role: 'system',
-        content:
-          'You are a research assistant. Answer the user query using live web and X search. Cite sources inline and list URLs at the end. Use Markdown.',
-      },
-      { role: 'user', content: params.query },
-    ],
-    search_parameters: {
-      mode: 'on',
-      // Deep search returns more candidate sources, shallow caps for speed.
-      max_search_results: isDeep ? 20 : 8,
-      return_citations: true,
-    },
-    temperature: 0.2,
-  };
-
-  // 30s SLA target for shallow per the task spec. Deep allowed to run longer.
-  const timeoutMs = isDeep ? 90_000 : 30_000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch('https://api.x.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`xAI search failed: ${res.status} ${text.slice(0, 400)}`);
-    }
-    return (await res.json()) as XaiResponse;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function mirrorToVault(args: {
-  query: string;
-  markdown: string;
-  id: string;
-}): Promise<string | null> {
+async function mirrorToVault(args: { query: string; markdown: string; id: string }): Promise<string | null> {
   try {
     const now = new Date();
     const yyyy = String(now.getFullYear());
@@ -211,37 +119,55 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Provider auto-discovery. No key present => honest empty-state (HTTP 200),
+  // never a dead box or a 502.
+  const selected = selectResearchProvider();
+  if (!selected) {
+    const probe = researchAvailability({ hydrate: false });
+    return NextResponse.json({
+      empty_state: true,
+      available: false,
+      message:
+        'Research is not enabled yet. Add a Perplexity, OpenAI, Ollama, or xAI key to your environment to enable it.',
+      enable_env_vars: probe.enableHintEnvVars,
+    });
+  }
+
   const depth = parsed.depth || 'shallow';
-  const model = resolveModel();
+  const slug = selected.entry.slug;
+  const model = resolveModel(slug, selected.entry.defaultModel);
+  const apiKey = process.env[selected.apiKeyEnv] as string;
   const started = Date.now();
 
-  let xai: XaiResponse;
+  let result;
   try {
-    xai = await callXaiLiveSearch({ query: parsed.query, depth, model });
+    result = await runResearch(slug, { query: parsed.query, depth, model, apiKey });
   } catch (err) {
     return NextResponse.json(
       {
         error: 'provider_failed',
         detail: err instanceof Error ? err.message : 'unknown',
+        provider: slug,
         model,
       },
       { status: 502 }
     );
   }
 
-  const answer = xai.choices?.[0]?.message?.content || '';
-  const citations = normalizeCitations(xai.citations);
-  const markdown = formatMarkdown(parsed.query, answer, citations);
+  const markdown = formatMarkdown(parsed.query, result.answer, result.citations);
 
   const metadata: Record<string, unknown> = {
+    query: parsed.query,
     depth,
     elapsed_ms: Date.now() - started,
-    provider: 'xai',
-    upstream_id: xai.id,
-    upstream_model: xai.model,
-    usage: xai.usage || null,
-    citation_count: citations.length,
-    source_urls: citations.map((c) => c.url).filter(Boolean),
+    provider: slug,
+    provider_display_name: selected.entry.displayName,
+    api_key_env: selected.apiKeyEnv,
+    upstream_id: result.upstreamId,
+    upstream_model: result.upstreamModel,
+    usage: result.usage || null,
+    citation_count: result.citations.length,
+    source_urls: result.citations.map((c) => c.url).filter(Boolean),
   };
 
   const row = createResearchSearch({
@@ -251,16 +177,13 @@ export async function POST(req: NextRequest) {
     search_metadata: metadata,
   });
 
-  const vaultPath = await mirrorToVault({
-    query: parsed.query,
-    markdown,
-    id: row.id,
-  });
+  const vaultPath = await mirrorToVault({ query: parsed.query, markdown, id: row.id });
 
   return NextResponse.json({
     search_id: row.id,
     markdown_result: markdown,
     model,
+    provider: slug,
     created_at: row.created_at,
     search_metadata: { ...metadata, vault_path: vaultPath },
   });

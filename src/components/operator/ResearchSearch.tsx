@@ -48,7 +48,16 @@ export default function ResearchSearch({ onResult, defaultDepth = 'shallow' }: R
         const text = await res.text();
         throw new Error(`Search failed (${res.status}): ${text.slice(0, 200)}`);
       }
-      const json = (await res.json()) as ResearchSearchResult;
+      const json = (await res.json()) as ResearchSearchResult & {
+        empty_state?: boolean;
+        message?: string;
+      };
+      // Honest empty-state: the box has no search-provider key. Surface the
+      // message rather than routing to an empty result.
+      if (json.empty_state) {
+        setError(json.message || 'Research is not enabled. Add a Perplexity, OpenAI, Ollama, or xAI key.');
+        return;
+      }
       onResult?.(json);
       setQuery('');
     } catch (err) {
@@ -66,7 +75,7 @@ export default function ResearchSearch({ onResult, defaultDepth = 'shallow' }: R
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Ask anything. Grok will search X and the live web."
+          placeholder="Ask anything. Your search provider will search the live web."
           aria-label="Research query"
           disabled={busy}
           className="flex-1 bg-transparent outline-none text-[15px] text-bcc-text placeholder:text-bcc-text-muted disabled:opacity-60"

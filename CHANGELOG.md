@@ -1,3 +1,47 @@
+## [v4.1.5] - 2026-05-30 - Operator Console Research: provider-agnostic (Perplexity / OpenAI / Ollama / xAI)
+
+Patch release. The Operator Console **Research** sub-module (`/operator/research`) was hard-wired to a single provider — xAI Grok Live Search via `X_AI_API_KEY`. On any client box without an xAI key it was effectively dead: the nav tile said "Soon", the page promised "xAI Grok", and a query 502'd with "X_AI_API_KEY is not set" — even when the box had a perfectly good search key (OpenAI / Ollama Cloud / Perplexity) sitting in its environment. Research is now **provider-agnostic and auto-discovered**, the mirror of the v4.1.4 Studio fix.
+
+### Provider auto-discovery + preference order
+
+Research auto-discovers which search provider the box has a key for and selects **one**, in a fixed preference order:
+
+> **PERPLEXITY > OPENAI > OLLAMA (cloud) > XAI**
+
+Discovery reads `process.env` (authoritative; on a VPS already loaded from the host `/docker/<proj>/.env`) and, for any key absent there, probes the OpenClaw secret files (host `/docker/<proj>/.env` via `OPENCLAW_PROJECT_DIR`, `~/.openclaw/.env`, `~/.openclaw/secrets/.env`, `openclaw.json` `env`/`env.vars`) — reusing the v4.1.4 Studio hydrator's `parseDotEnv` / `extractOpenclawEnv` primitives so there is exactly one OpenClaw secret-reader contract. A provider is "available" ONLY when one of its candidate env vars is actually present — **keys are never fabricated**.
+
+| Provider (first present wins) | Env var (+ alias) | Default model | How it's called |
+|---|---|---|---|
+| Perplexity | `PERPLEXITY_API_KEY` (`PPLX_API_KEY`) | `sonar-pro` | `POST api.perplexity.ai/chat/completions` (OpenAI-compatible); online "sonar" models search the live web; sources in `citations[]`. |
+| OpenAI | `OPENAI_API_KEY` | `gpt-4o-search-preview` | `POST api.openai.com/v1/chat/completions` with a web-search model; sources in `message.annotations[].url_citation`. |
+| Ollama Cloud | `OLLAMA_CLOUD_API_KEY` (`OLLAMA_API_KEY`) | `gpt-oss:120b` | `POST ollama.com/api/v1/chat/completions` with the hosted `web_search` tool; tool results carry source URLs. |
+| xAI Grok | `X_AI_API_KEY` (`XAI_API_KEY`) | `grok-4-fast` | `POST api.x.ai/v1/chat/completions` with `search_parameters.mode=on` (Live Search over X + web); sources in `citations[]`. |
+
+### SOON → live + honest empty-state
+
+- **If a search key exists, the module is LIVE for that client** — the `Soon` placeholder badge is dropped from the Research nav item, the page shows a "Live via `<Provider>`" pill, and Shallow/Deep both work.
+- **If NO search key exists, the module shows an honest empty-state** — "Add a Perplexity, OpenAI, Ollama, or xAI key to enable Research" with the exact env vars listed — never a dead search box and never a 502. The `POST /search` endpoint returns `{ empty_state: true }` (HTTP 200) in this case.
+
+### Added
+
+- **`src/lib/research/provider-discovery.ts`** — `RESEARCH_PROVIDERS` (the single preference-ordered provider list), `selectResearchProvider()` (picks the highest-preference provider whose key is present, else `null`), `researchAvailability()` (per-provider presence report backing the UI), and `hydrateResearchEnv()` (delegates the OpenClaw secret-file read to the Studio hydrator primitives).
+- **`src/lib/research/providers.ts`** — one normalizing `runResearch(slug, …)` adapter per provider. Each documents its request shape + scope, honors a per-provider fixture env var for offline CI (`PERPLEXITY_FIXTURE_JSON_PATH`, `OPENAI_FIXTURE_JSON_PATH`, `OLLAMA_FIXTURE_JSON_PATH`, `XAI_FIXTURE_JSON_PATH` / legacy `X_AI_FIXTURE_JSON_PATH`), applies the shared shallow/deep breadth+timeout mapping, and never fabricates results.
+- **`GET /api/operator/research/availability`** — reports `available` + the selected provider + the per-provider presence map + the `enable_env_vars` hint.
+- **`tests/unit/research-provider-discovery.test.ts`** — unit test for provider selection given a fake env: preference order (Perplexity > OpenAI > Ollama > xAI), alternate spellings, empty-env honest empty-state, and the availability report.
+
+### Changed
+
+- **`src/app/api/operator/research/search/route.ts`** — now selects the provider via discovery and routes through the adapters; the model is resolved from `model_registry` for the selected provider when present, else the provider's documented default. Returns the honest empty-state when no key exists. Vault mirror + `research_searches` save are unchanged (still feed Memory + the All Searches bucket).
+- **`src/app/operator/research/page.tsx`** — provider-neutral copy, probes availability on mount, renders the "Live via `<Provider>`" pill or the honest empty-state.
+- **`src/components/operator/ResearchSearch.tsx`** — provider-neutral placeholder; surfaces the empty-state message instead of routing to an empty result.
+- **`src/components/OperatorSidebar.tsx`** — dropped `placeholder: true` from the Research nav item (no more `Soon` badge).
+- **`.env.example`** — documented `PERPLEXITY_API_KEY` and the provider preference order for Research.
+
+### Per-box deploy
+
+- **VPS (Hostinger Docker):** add the chosen key to host `/docker/<proj>/.env` (e.g. `PERPLEXITY_API_KEY=...`), then `docker compose up -d --force-recreate` (a plain `restart` does NOT reload `env_file`).
+- **Mac:** add the key to `~/.openclaw/.env` (or `~/.openclaw/secrets/.env`), then restart the dashboard process. No DB migration; no registry seed required — the provider's default model keeps it live on a fresh box.
+
 ## [v4.1.4] - 2026-05-30 - Operator Console Studio: env-based provider auto-discovery (Image / Video / Audio)
 
 Patch release. The Operator Console **Studio** showed "No providers configured" on every tab even on boxes with valid media keys (KIE / OpenAI / Fal / Gemini / Fish), for two compounding reasons now both fixed:
