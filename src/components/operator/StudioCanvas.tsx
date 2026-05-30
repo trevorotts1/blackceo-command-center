@@ -165,9 +165,14 @@ export default function StudioCanvas({ initialModels }: StudioCanvasProps) {
   if (noProvidersConfigured) {
     return (
       <div className="rounded-xl border border-bcc-border bg-bcc-white p-8 text-center">
-        <h2 className="text-base font-semibold text-bcc-text">Studio is ready, but no providers are configured yet.</h2>
+        <h2 className="text-base font-semibold text-bcc-text">Studio is ready, but no provider keys were found yet.</h2>
         <p className="mx-auto mt-3 max-w-xl text-sm text-bcc-text-secondary">
-          No image, video, or audio providers configured yet. Add API keys for Fish Audio, xAI Grok, KIE, Fal.ai, or Replicate in Settings, Intelligence Settings to enable generation.
+          Studio auto-discovers providers from your environment and the OpenClaw secret files. Set any media provider
+          key to light up a tab: <strong>Image</strong> — KIE_API_KEY / OPENAI_API_KEY / FAL_KEY / GEMINI_API_KEY /
+          REPLICATE_API_TOKEN; <strong>Video</strong> — KIE_API_KEY / FAL_KEY / LUMA_API_KEY / GEMINI_API_KEY;{' '}
+          <strong>Audio</strong> — OPENAI_API_KEY / FISH_AUDIO_API_KEY / ELEVENLABS_API_KEY / FAL_KEY. Keys may live in
+          the container env, <code>~/.openclaw/.env</code>, <code>~/.openclaw/secrets/.env</code>, or{' '}
+          <code>openclaw.json</code> <code>env</code>.
         </p>
         <a
           href="/settings/intelligence"

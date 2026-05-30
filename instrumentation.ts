@@ -9,6 +9,23 @@
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
+  // v4.1.2: hydrate provider API keys from the OpenClaw secret files BEFORE
+  // anything reads them. `process.env` (container/host env) is authoritative
+  // and never overwritten; this only fills keys that are absent from the
+  // process env by reading host /docker/<proj>/.env, ~/.openclaw/.env,
+  // ~/.openclaw/secrets/.env, and openclaw.json env/env.vars. Best-effort —
+  // a missing/unreadable source is skipped, never thrown. This makes both the
+  // Studio gate (hasApiKey) and the weekly refresh (apiKeyFor) see the keys.
+  try {
+    const { hydrateProviderEnvFromOpenClaw } = await import('@/lib/studio/provider-discovery');
+    const hydrated = hydrateProviderEnvFromOpenClaw();
+    if (hydrated.length > 0) {
+      console.log('[instrumentation] hydrated provider env from OpenClaw files:', hydrated.join(', '));
+    }
+  } catch (error) {
+    console.error('[instrumentation] provider env hydration failed (non-fatal):', error);
+  }
+
   // Dev mode runs both a webpack worker and the page-runtime worker; we only
   // want one scheduler. Skip when explicitly opted out for tests, builds, or
   // CI smoke runs that do not want background jobs to fire.

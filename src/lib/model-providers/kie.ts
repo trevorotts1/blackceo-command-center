@@ -71,14 +71,14 @@ function authHeaders(apiKey: string): Record<string, string> {
 }
 
 const CURATED_MODELS: Array<{ id: string; kind: ModelCapability; family: string }> = [
-  { id: 'veo-3', kind: 'streaming', family: 'veo' },
-  { id: 'veo-3-fast', kind: 'streaming', family: 'veo' },
+  { id: 'veo-3', kind: 'video_generation', family: 'veo' },
+  { id: 'veo-3-fast', kind: 'video_generation', family: 'veo' },
   { id: 'midjourney-v6', kind: 'image_generation', family: 'midjourney' },
   { id: 'midjourney-v7', kind: 'image_generation', family: 'midjourney' },
   { id: 'flux-1.1-pro', kind: 'image_generation', family: 'flux' },
   { id: 'flux-kontext-pro', kind: 'image_generation', family: 'flux' },
-  { id: 'suno-v4', kind: 'audio_input', family: 'suno' },
-  { id: 'runway-gen3', kind: 'streaming', family: 'runway' },
+  { id: 'suno-v4', kind: 'audio_generation', family: 'suno' },
+  { id: 'runway-gen3', kind: 'video_generation', family: 'runway' },
 ];
 
 function inferFamily(modelId: string): string | undefined {
@@ -95,11 +95,15 @@ function inferFamily(modelId: string): string | undefined {
 
 function inferCapabilities(modelId: string): ModelCapability[] {
   const lower = modelId.toLowerCase();
+  // Video families -> video_generation (NOT 'streaming'); the Studio video tab
+  // filters on the video_generation capability tag.
   if (lower.includes('veo') || lower.includes('runway') || lower.includes('kling') || lower.includes('pika') || lower.includes('video')) {
-    return ['streaming'];
+    return ['video_generation'];
   }
+  // Audio/music families -> audio_generation (NOT 'audio_input', which is an
+  // INPUT capability). The Studio audio tab filters on audio_generation.
   if (lower.includes('suno') || lower.includes('audio') || lower.includes('music')) {
-    return ['audio_input'];
+    return ['audio_generation'];
   }
   return ['image_generation'];
 }
