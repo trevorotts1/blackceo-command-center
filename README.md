@@ -141,3 +141,43 @@ pm2 start ecosystem.config.cjs
 - **Intelligence:** Settings > Intelligence for per-department AI model and persona assignment
 
 See deployment documentation for full setup instructions.
+
+## Operator Studio — provider auto-discovery (v4.1.2)
+
+The Operator Console **Studio** (`/operator/studio`) generates Image, Video, and Audio. The provider set is **not hardcoded** — it is discovered at runtime from your environment and the OpenClaw secret files, so a box "just works" the moment a media key exists.
+
+### How a provider appears in Studio
+
+1. **Env discovery.** On boot (`instrumentation.register()`) and lazily on first Studio read (`availableModels()`), the app scans for known media-provider API keys. `process.env` is authoritative and is never overwritten; on a VPS this already contains the keys loaded from the host `/docker/<proj>/.env`. For any key **absent** from `process.env`, it additionally probes — first hit wins — these OpenClaw secret files (and skips any that don't exist, never crashing):
+   - host `/docker/<proj>/.env` (set `OPENCLAW_PROJECT_DIR` to the project dir)
+   - `~/.openclaw/.env`
+   - `~/.openclaw/secrets/.env`
+   - `openclaw.json` `env` / `env.vars` (Mac `~/.openclaw/openclaw.json`, VPS `/data/.openclaw/openclaw.json`)
+2. **Registry seed.** For every provider whose key is present, discovery emits rows into the existing `model_registry` table (idempotent upsert by `model_id`; the weekly Sunday-03:00 refresh cron then keeps them current). No migration; an absent key emits nothing — keys are never fabricated.
+3. **Studio reads the registry** by capability tag (`image_generation` / `video_generation` / `audio_generation`) and shows only providers whose key is present. If a capability has no key, the tab shows a precise "add one of: `<KEYS>`" hint instead of a blank "No providers configured".
+
+### Provider → capability map
+
+| Env key (first present wins) | Provider | Image | Video | Audio |
+|---|---|:---:|:---:|:---:|
+| `KIE_API_KEY` (`KIEAI_API_KEY`, `KIE_AI_API_KEY`) | Kie.ai | generates | generates | — |
+| `OPENAI_API_KEY` | OpenAI | generates | — | registry-only |
+| `FAL_KEY` (`FAL_API_KEY`) | Fal.ai | generates | generates | generates |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google | registry-only | registry-only | — |
+| `FISH_AUDIO_API_KEY` | Fish Audio | — | — | registry-only |
+| `ELEVENLABS_API_KEY` | ElevenLabs | — | — | generates |
+| `REPLICATE_API_TOKEN` (`REPLICATE_API_KEY`) | Replicate | generates | — | — |
+| `LUMA_API_KEY` | Luma | — | registry-only | — |
+| `STABILITY_API_KEY` | Stability AI | registry-only | — | — |
+| `RUNWAY_API_KEY` | Runway | — | registry-only | — |
+
+- **generates** — a real generation path is wired in `src/lib/studio/generators.ts` today.
+- **registry-only** — selectable in the dropdown but the generate path is "coming soon"; submitting returns an honest error rather than failing silently.
+
+> NOTE: only the OpenAI **API key** is an image/audio provider. A Codex / ChatGPT OAuth login is **not** an image key.
+
+### Adding a provider
+
+Append one entry to `PROVIDER_DISCOVERY` in **`src/lib/studio/provider-discovery.ts`** — its `envCandidates` (in priority order), `slug`, `displayName`, and the `models` it contributes (each with a `capability` + `generates` flag). That is the single source of truth; nothing else needs to change for the provider to appear in the Studio dropdown and tabs. To make it actually generate (not registry-only), also wire a `call<Provider>()` branch in `runJob()` in `generators.ts`.
+
+Run the discovery unit test with `npm run test:unit`.

@@ -1,3 +1,46 @@
+## [v4.1.4] - 2026-05-30 - Operator Console Studio: env-based provider auto-discovery (Image / Video / Audio)
+
+Patch release. The Operator Console **Studio** showed "No providers configured" on every tab even on boxes with valid media keys (KIE / OpenAI / Fal / Gemini / Fish), for two compounding reasons now both fixed:
+
+1. **(Primary) The `model_registry` table was empty on fresh deploys.** It is only ever written by the weekly Sunday-03:00 refresh cron, so a freshly deployed/restarted container had zero rows — and Studio reads the registry by capability tag — until the next Sunday tick (or a manual `POST /api/cron/refresh-models`). Studio now **lazily seeds the registry from env auto-discovery on first read** (`availableModels()`), so it lights up the moment the keys exist. Idempotent: discovered rows upsert by `model_id`, so the later weekly refresh just updates them.
+2. **(Latent) KIE env-var mismatch + wrong capability tags.** Studio's key gate hard-coded `KIE_AI_API_KEY` while the connector + every box use `KIE_API_KEY`; and the Kie connector tagged Veo/Runway `streaming` and Suno `audio_input`, so the Video/Audio tabs stayed empty for Kie regardless of keys. Both fixed (Veo/Runway → `video_generation`, Suno → `audio_generation`; gate accepts `KIE_API_KEY` + legacy spellings).
+
+### Added
+
+- **`src/lib/studio/provider-discovery.ts`** — the new, data-driven discovery surface:
+  - **`PROVIDER_DISCOVERY`** — the single PROVIDER → CAPABILITY map (one place to add a provider). Each entry maps candidate env-var names → a provider slug → its image/video/audio rows (each with a default model + the resolved `api_key_env` + a `generates` flag). A provider contributes rows ONLY when one of its keys is actually present — never fabricates a key.
+  - **`hydrateProviderEnvFromOpenClaw()`** — best-effort, never-throws env hydration. `process.env` (container/host env, loaded from host `/docker/<proj>/.env` on the VPS) is authoritative and never overwritten; for keys absent from `process.env` it additionally probes, first-hit-wins, the OpenClaw secret files: host `/docker/<proj>/.env` (via `OPENCLAW_PROJECT_DIR`), `~/.openclaw/.env`, `~/.openclaw/secrets/.env`, and `openclaw.json` `env` / `env.vars` (path via `platform.ts`). Reuses the F52 defensive multi-root reader idiom.
+  - **`discoverRegistryRows()` / `discoveryReport()` / `parseDotEnv()` / `extractOpenclawEnv()`** helpers.
+- **`tests/unit/provider-discovery.test.ts`** + **`npm run test:unit`** — a `tsx`-runnable, no-network/no-DB unit test for the env→provider map. Core assertion: a fake env with `KIE_API_KEY` + `OPENAI_API_KEY` yields image + video + audio rows.
+
+### Changed
+
+- **`src/lib/studio/generators.ts`** — `availableModels()` lazily seeds the registry from discovery when a capability has zero rows; `hasApiKey()` env map aligned to the connector contract (KIE/Fal accept both spellings; Luma/Stability/Runway added); `callKie()` reads `KIE_API_KEY`; unwired-provider error is now an honest "registry-only (coming soon)" message instead of a silent break.
+- **`src/lib/model-providers/kie.ts`** — Veo/Runway → `video_generation`, Suno → `audio_generation` (curated list + `inferCapabilities`).
+- **`instrumentation.ts`** — hydrates provider env from the OpenClaw files on boot (before the cron + before any read), so both the Studio gate and the weekly refresh see file-sourced keys.
+- **`src/components/operator/StudioToolbar.tsx` / `StudioCanvas.tsx`** — empty states now give a precise per-capability "add one of: `<KEYS>`" hint and document the discovery sources, instead of a blank "No providers configured".
+
+### Provider → capability map shipped
+
+| Key (first present wins) | Provider | image | video | audio |
+|---|---|---|---|---|
+| `KIE_API_KEY` (+ `KIEAI_API_KEY`/`KIE_AI_API_KEY`) | Kie.ai | ✅ generates | ✅ generates | — |
+| `OPENAI_API_KEY` | OpenAI | ✅ generates | — | ⚠ registry-only |
+| `FAL_KEY` (+ `FAL_API_KEY`) | Fal.ai | ✅ generates | ✅ generates | ✅ generates |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google | ⚠ registry-only | ⚠ registry-only | — |
+| `FISH_AUDIO_API_KEY` | Fish Audio | — | — | ⚠ registry-only |
+| `ELEVENLABS_API_KEY` | ElevenLabs | — | — | ✅ generates |
+| `REPLICATE_API_TOKEN` (+ `REPLICATE_API_KEY`) | Replicate | ✅ generates | — | — |
+| `LUMA_API_KEY` | Luma | — | ⚠ registry-only | — |
+| `STABILITY_API_KEY` | Stability AI | ⚠ registry-only | — | — |
+| `RUNWAY_API_KEY` | Runway | — | ⚠ registry-only | — |
+
+"generates" = a real `call*` path is wired in `generators.ts` today; "registry-only" = selectable but the generate path is "coming soon" (honest error on submit, never a silent break).
+
+### Risk: low
+
+- Additive: one new lib module + one unit test; surgical edits to Studio gate/seed, the Kie capability tags, instrumentation, and two Studio components' empty-state copy. **No DB schema change, no migration** (uses the existing `model_registry` table + `bulkUpsertModels`). Discovery is best-effort and never throws; an absent key/source emits nothing. No real keys or client data in code.
+
 ## [v4.1.3] - 2026-05-30 - OpenClaw Bridge connect-failure fix: stable device identity, pairing bootstrap, VPS-aware CLI pills
 
 Patch release. Fixes the Operator Console → Bridge → OpenClaw pill failing to connect on VPS Docker deploys (it showed "OpenClaw Gateway unavailable" / "Not connected to OpenClaw Gateway"). Root cause was two compounding bugs plus a UI defect; all three are fixed and the connect path now reaches an `operator.admin` gateway session without manual device surgery on every redeploy.

@@ -24,8 +24,12 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 
 import { vaultRoot } from '@/lib/platform';
-import { listModels } from '@/lib/model-registry';
+import { listModels, bulkUpsertModels } from '@/lib/model-registry';
 import type { ModelCapability } from '@/lib/model-registry';
+import {
+  discoverRegistryRows,
+  hydrateProviderEnvFromOpenClaw,
+} from '@/lib/studio/provider-discovery';
 
 export type StudioKind = 'image' | 'video' | 'audio';
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -138,13 +142,57 @@ function vaultOutputPath(kind: StudioKind, prompt: string, ext: string): string 
 }
 
 /**
+ * Process-wide guard so the lazy first-run seed runs at most once per worker.
+ * Stored on `globalThis` so Next.js module reloading does not lose it.
+ */
+const SEED_KEY = '__BC_STUDIO_REGISTRY_SEEDED__';
+interface SeedGlobals {
+  [SEED_KEY]?: boolean;
+}
+
+/**
+ * Lazy, idempotent registry seed from env auto-discovery.
+ *
+ * On a fresh deploy the `model_registry` table is EMPTY until the weekly
+ * Sunday-03:00 refresh cron runs. That left every Studio tab showing
+ * "No providers configured" for up to a week. This seeds the registry on the
+ * first Studio read from the environment (hydrated from the OpenClaw secret
+ * files), so a box with KIE/OpenAI/Fal/Gemini/Fish/etc. keys lights up
+ * immediately. Idempotent: the discovered rows upsert by `model_id`, so the
+ * later weekly refresh simply updates them.
+ *
+ * Never throws — discovery failure must not break the Studio render.
+ */
+function ensureRegistrySeeded(): void {
+  const g = globalThis as unknown as SeedGlobals;
+  if (g[SEED_KEY]) return;
+  try {
+    hydrateProviderEnvFromOpenClaw();
+    const rows = discoverRegistryRows({ hydrate: false });
+    if (rows.length > 0) bulkUpsertModels(rows);
+  } catch (err) {
+    console.error('[studio] registry auto-seed failed (non-fatal):', err);
+  } finally {
+    g[SEED_KEY] = true;
+  }
+}
+
+/**
  * Models available for a given kind. Filters by capability against the
  * `model_registry` and hides providers without an API key in the environment.
+ *
+ * If the registry has zero rows for this capability (fresh deploy, weekly
+ * refresh has not run yet), it lazily seeds from env auto-discovery first so
+ * the Studio "just works" the moment the keys exist on the box.
  */
 export function availableModels(kind: StudioKind): StudioModelOption[] {
   const capability = CAPABILITY_FOR_KIND[kind];
   try {
-    const rows = listModels({ capability, status: 'active' });
+    let rows = listModels({ capability, status: 'active' });
+    if (rows.length === 0) {
+      ensureRegistrySeeded();
+      rows = listModels({ capability, status: 'active' });
+    }
     return rows
       .filter((m) => hasApiKey(m.provider))
       .map((m) => ({ model_id: m.model_id, label: m.label, provider: m.provider }));
@@ -158,16 +206,23 @@ function hasApiKey(provider: string): boolean {
   // Provider slug → env var lookup. Mirrors PRD Section 4.5 keys plus the
   // common providers that ship image/video/audio capability.
   const candidates: Record<string, string[]> = {
-    'kie.ai': ['KIE_AI_API_KEY'],
-    'kie': ['KIE_AI_API_KEY'],
-    'fal.ai': ['FAL_AI_API_KEY', 'FAL_KEY'],
-    'fal': ['FAL_AI_API_KEY', 'FAL_KEY'],
+    // Env names follow the connector contract in src/lib/model-providers/*.
+    // kie.ts documents KIE_API_KEY (the box uses KIE_API_KEY); accept the
+    // historical KIE_AI_API_KEY / KIEAI_API_KEY spellings too.
+    'kie.ai': ['KIE_API_KEY', 'KIEAI_API_KEY', 'KIE_AI_API_KEY'],
+    'kie': ['KIE_API_KEY', 'KIEAI_API_KEY', 'KIE_AI_API_KEY'],
+    // fal.ts documents FAL_KEY; the probe used FAL_API_KEY; accept both.
+    'fal.ai': ['FAL_KEY', 'FAL_API_KEY', 'FAL_AI_API_KEY'],
+    'fal': ['FAL_KEY', 'FAL_API_KEY', 'FAL_AI_API_KEY'],
     'replicate': ['REPLICATE_API_TOKEN', 'REPLICATE_API_KEY'],
     'openai': ['OPENAI_API_KEY'],
-    'google': ['GOOGLE_API_KEY', 'GEMINI_API_KEY'],
+    'google': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
     'elevenlabs': ['ELEVENLABS_API_KEY'],
     'fish-audio': ['FISH_AUDIO_API_KEY'],
     'fish': ['FISH_AUDIO_API_KEY'],
+    'luma': ['LUMA_API_KEY', 'LUMAAI_API_KEY'],
+    'stability': ['STABILITY_API_KEY', 'STABILITY_AI_API_KEY'],
+    'runway': ['RUNWAY_API_KEY', 'RUNWAYML_API_SECRET'],
   };
   const envs = candidates[slug] ?? [`${slug.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`];
   return envs.some((e) => Boolean(process.env[e]));
@@ -301,7 +356,14 @@ async function runJob(job: StudioJob, options: Record<string, unknown>): Promise
     } else if (provider.includes('elevenlabs') && job.kind === 'audio') {
       providerResult = await callElevenLabs(job, options);
     } else {
-      throw new Error(`No generator wired for provider "${job.provider}" + kind "${job.kind}"`);
+      // The model is in the registry (so it is selectable) but no generator is
+      // wired for this provider+kind yet. Be honest: this is "coming soon", not
+      // a misconfiguration. Discovered rows carry generates:false metadata.
+      throw new Error(
+        `Generation for provider "${job.provider}" + kind "${job.kind}" is registry-only (coming soon) — ` +
+          `the model is selectable but its generate path is not wired yet. ` +
+          `Wired now: image -> KIE / OpenAI / Fal / Replicate; video -> KIE / Fal; audio -> ElevenLabs / Fal.`
+      );
     }
   } catch (err) {
     await markFailed(job.id, err instanceof Error ? err.message : String(err));
@@ -409,8 +471,9 @@ async function callFal(job: StudioJob, options: Record<string, unknown>): Promis
 }
 
 async function callKie(job: StudioJob, _options: Record<string, unknown>): Promise<{ url: string; metadata?: Record<string, unknown> }> {
-  const key = process.env.KIE_AI_API_KEY;
-  if (!key) throw new Error('KIE_AI_API_KEY missing');
+  // kie.ts documents KIE_API_KEY (what the box has); accept legacy spellings.
+  const key = process.env.KIE_API_KEY || process.env.KIEAI_API_KEY || process.env.KIE_AI_API_KEY;
+  if (!key) throw new Error('KIE_API_KEY missing');
   const res = await fetch('https://api.kie.ai/api/v1/generations', {
     method: 'POST',
     headers: {

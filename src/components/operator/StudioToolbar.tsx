@@ -13,24 +13,33 @@
 import { ImageIcon, VideoIcon, MicIcon, SparklesIcon, Loader2Icon } from 'lucide-react';
 import type { StudioKind, StudioModelOption } from '@/lib/studio/generators';
 
-const KIND_META: Record<StudioKind, { label: string; icon: React.ReactNode; accent: string; placeholder: string }> = {
+const KIND_META: Record<
+  StudioKind,
+  { label: string; icon: React.ReactNode; accent: string; placeholder: string; capability: string; keyHint: string }
+> = {
   image: {
     label: 'Image',
     icon: <ImageIcon size={14} />,
     accent: '#EC4899',
     placeholder: 'A glowing futuristic dashboard floating in deep space, neon accents, cinematic lighting.',
+    capability: 'image_generation',
+    keyHint: 'KIE_API_KEY, OPENAI_API_KEY, FAL_KEY, GEMINI_API_KEY, or REPLICATE_API_TOKEN',
   },
   video: {
     label: 'Video',
     icon: <VideoIcon size={14} />,
     accent: '#A855F7',
     placeholder: 'Slow zoom into a neon lit cyberpunk city street at night, rain reflections, four seconds.',
+    capability: 'video_generation',
+    keyHint: 'KIE_API_KEY (Veo/Runway), FAL_KEY, LUMA_API_KEY, or GEMINI_API_KEY',
   },
   audio: {
     label: 'Audio',
     icon: <MicIcon size={14} />,
     accent: '#22D3EE',
     placeholder: 'Welcome to the Operator Console. Try generating a quick voice line.',
+    capability: 'audio_generation',
+    keyHint: 'OPENAI_API_KEY, FISH_AUDIO_API_KEY, ELEVENLABS_API_KEY, or FAL_KEY',
   },
 };
 
@@ -84,7 +93,7 @@ export default function StudioToolbar(props: StudioToolbarProps) {
             className="rounded-md border border-bcc-border bg-bcc-white px-2 py-1 text-xs text-bcc-text disabled:opacity-50"
           >
             {noModels ? (
-              <option value="">No providers configured</option>
+              <option value="">No {meta.label.toLowerCase()} provider key</option>
             ) : (
               props.models.map((m) => (
                 <option key={m.model_id} value={m.model_id}>
@@ -113,7 +122,7 @@ export default function StudioToolbar(props: StudioToolbarProps) {
       <div className="flex items-center justify-between">
         <p className="text-[11px] uppercase tracking-widest text-bcc-text-muted">
           {noModels
-            ? `No model registry rows with the ${props.kind === 'audio' ? 'audio_generation' : props.kind + '_generation'} capability and a configured API key.`
+            ? `No ${meta.capability} provider key found. Add one of: ${meta.keyHint}.`
             : 'Press Cmd or Ctrl + Enter to generate.'}
         </p>
         <button
