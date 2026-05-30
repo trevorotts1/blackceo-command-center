@@ -360,6 +360,12 @@ async function runGateway(args: {
   // when the gateway has not yet acknowledged).
   try {
     const client = getOpenClawClient();
+    // Establish the operator.admin session before dispatching. This makes the
+    // connect/pairing failure surface here (with an actionable message) rather
+    // than only as the generic "Not connected" thrown by call().
+    if (!client.isConnected()) {
+      await client.connect();
+    }
     // The OpenClaw client expects a sessionId that the gateway minted via
     // sessions.create. We map the operator chat session 1:1 onto a gateway
     // session here. If the mapping has not been built yet a friendly
@@ -370,7 +376,13 @@ async function runGateway(args: {
     args.controller.enqueue(sseEvent('delta', { text: ack }));
     return { reply: ack, aborted: false, errorText: null };
   } catch (err) {
-    const msg = `OpenClaw Gateway unavailable: ${err instanceof Error ? err.message : String(err)}`;
+    const raw = err instanceof Error ? err.message : String(err);
+    const deviceId = getOpenClawClient().getDeviceId();
+    // A rejected handshake = the device is not approved on the gateway yet.
+    const pairingPending = /pairing|Authentication failed|device/i.test(raw);
+    const msg = pairingPending
+      ? `OpenClaw Gateway pairing pending: device ${deviceId ?? 'unknown'} is not approved. On the gateway host run \`openclaw devices list\` then \`openclaw devices approve <requestId>\` (see docs/OPENCLAW_BRIDGE_PAIRING.md), then retry. (${raw})`
+      : `OpenClaw Gateway unavailable: ${raw}`;
     args.controller.enqueue(sseEvent('error', { message: msg }));
     return { reply: '', aborted: true, errorText: msg };
   }

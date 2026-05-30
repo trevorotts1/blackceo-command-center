@@ -22,19 +22,27 @@
 import { BRIDGE_AGENTS, type BridgeAgent } from '@/lib/bridge/agents';
 
 interface Props {
+  /**
+   * The agents to render as pills. Computed server-side from the platform so a
+   * VPS install only shows the CLIs it actually has (OpenClaw). Defaults to the
+   * full catalogue when omitted.
+   */
+  agents?: BridgeAgent[];
   activeId: string;
   onSelect: (id: string) => void;
   disabled?: boolean;
 }
 
-export default function AgentSelector({ activeId, onSelect, disabled }: Props) {
+export default function AgentSelector({ agents, activeId, onSelect, disabled }: Props) {
+  const list: BridgeAgent[] =
+    agents && agents.length > 0 ? agents : (BRIDGE_AGENTS as readonly BridgeAgent[]).slice();
   return (
     <div
       role="tablist"
       aria-label="Choose Bridge agent"
       className="flex flex-wrap items-center gap-1.5"
     >
-      {BRIDGE_AGENTS.map((agent) => (
+      {list.map((agent) => (
         <AgentPill
           key={agent.id}
           agent={agent}

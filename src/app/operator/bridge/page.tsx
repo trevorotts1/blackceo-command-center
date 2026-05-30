@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import BridgeChat from '@/components/operator/BridgeChat';
+import { detectPlatform } from '@/lib/platform';
+import { resolveInstallPlatform, visibleBridgeAgents } from '@/lib/bridge/agents';
 
 /**
  * Operator Console / Bridge sub-module page.
@@ -20,7 +22,17 @@ export const metadata: Metadata = {
     'Direct chat with Claude Code, Codex, Antigravity, Hermes, Gemini, Free Claude Code, and OpenClaw.',
 };
 
+// Force per-request render so the platform probe (filesystem / env) is read
+// at request time on the actual host, not baked in at build time.
+export const dynamic = 'force-dynamic';
+
 export default function OperatorBridgePage() {
+  // Compute the visible agents server-side: on a VPS install the six Mac
+  // desktop CLIs are hidden, leaving OpenClaw. The list is plain, serializable
+  // data so it crosses the server -> client boundary into BridgeChat cleanly.
+  const platform = resolveInstallPlatform(detectPlatform);
+  const agents = visibleBridgeAgents(platform);
+
   return (
     <div className="space-y-5">
       <header>
@@ -38,7 +50,7 @@ export default function OperatorBridgePage() {
         </p>
       </header>
 
-      <BridgeChat />
+      <BridgeChat agents={agents} />
     </div>
   );
 }

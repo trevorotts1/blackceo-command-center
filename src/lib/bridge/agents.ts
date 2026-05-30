@@ -39,6 +39,8 @@
  * install it.
  */
 
+import type { Platform } from '../platform';
+
 export type AgentTransport = 'cli' | 'gateway';
 
 export interface BridgeAgent {
@@ -51,6 +53,16 @@ export interface BridgeAgent {
   envBin?: string;
   streams: boolean;
   expectedLatency: string;
+  /**
+   * Which platforms this agent is available on. The six desktop CLIs
+   * (Claude Code, Codex, Antigravity, Hermes, Gemini, Free Claude Code) are
+   * installed on the operator's Mac Mini, NOT inside the Hostinger VPS Docker
+   * container, so they are `['mac-mini']`-only and the Bridge hides them on a
+   * VPS install. OpenClaw is the one transport that exists on BOTH (it talks
+   * to the in-container gateway over WebSocket), so it has no `platforms`
+   * restriction. Omit `platforms` to mean "available everywhere".
+   */
+  platforms?: Platform[];
 }
 
 export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
@@ -64,6 +76,7 @@ export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
     envBin: 'BCC_CLAUDE_BIN',
     streams: true,
     expectedLatency: 'streams immediately',
+    platforms: ['mac-mini'],
   },
   {
     id: 'codex',
@@ -75,6 +88,7 @@ export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
     envBin: 'BCC_CODEX_BIN',
     streams: true,
     expectedLatency: 'streams in 2 to 6s',
+    platforms: ['mac-mini'],
   },
   {
     id: 'antigravity',
@@ -86,6 +100,7 @@ export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
     envBin: 'BCC_ANTIGRAVITY_BIN',
     streams: false,
     expectedLatency: '10 to 90s (no streaming)',
+    platforms: ['mac-mini'],
   },
   {
     id: 'hermes',
@@ -97,6 +112,7 @@ export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
     envBin: 'BCC_HERMES_BIN',
     streams: false,
     expectedLatency: '5 to 15s (Nous Portal)',
+    platforms: ['mac-mini'],
   },
   {
     id: 'gemini',
@@ -108,6 +124,7 @@ export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
     envBin: 'BCC_GEMINI_BIN',
     streams: true,
     expectedLatency: 'streams in 4 to 10s',
+    platforms: ['mac-mini'],
   },
   {
     id: 'fcc',
@@ -119,6 +136,7 @@ export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
     envBin: 'BCC_CLAUDE_BIN',
     streams: true,
     expectedLatency: 'streams (proxy adds 1 to 2s)',
+    platforms: ['mac-mini'],
   },
   {
     id: 'openclaw',
@@ -141,6 +159,40 @@ const AGENTS_BY_ID = new Map<string, BridgeAgent>(
 
 export function getBridgeAgent(id: string): BridgeAgent | null {
   return AGENTS_BY_ID.get(id) ?? null;
+}
+
+/**
+ * Resolve the install type used to filter the pill strip.
+ *
+ * Precedence:
+ *   1. `BCC_INSTALL_TYPE` env flag (`vps` | `mac`) — the explicit knob the
+ *      installer can set when the filesystem probe is not authoritative.
+ *   2. `detectPlatform()` — auto-detect (`OPENCLAW_PLATFORM` env, then the
+ *      `/data/.openclaw` VPS marker, else `mac-mini`).
+ *
+ * Kept tiny and pure so it can run server-side in a Server Component and be
+ * unit-tested without a filesystem.
+ */
+export function resolveInstallPlatform(detect: () => Platform): Platform {
+  const flag = (process.env.BCC_INSTALL_TYPE ?? '').trim().toLowerCase();
+  if (flag === 'vps' || flag === 'vps-docker') return 'vps-docker';
+  if (flag === 'mac' || flag === 'mac-mini') return 'mac-mini';
+  return detect();
+}
+
+/**
+ * Agents visible on a given platform. An agent shows when it has no
+ * `platforms` restriction OR the current platform is listed. On VPS Docker
+ * this drops the six Mac-desktop CLIs and leaves OpenClaw (the only transport
+ * that exists inside the container). On Mac Mini every agent shows, unchanged.
+ *
+ * Pure (platform passed in) so it is trivially unit-testable and safe to call
+ * from a Server Component.
+ */
+export function visibleBridgeAgents(platform: Platform): BridgeAgent[] {
+  return BRIDGE_AGENTS.filter(
+    (a) => !a.platforms || a.platforms.includes(platform),
+  );
 }
 
 /**
