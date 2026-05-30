@@ -26,6 +26,29 @@ export async function register(): Promise<void> {
     console.error('[instrumentation] provider env hydration failed (non-fatal):', error);
   }
 
+  // v4.1.6: seed the Studio `model_registry` on boot IF it is empty.
+  //
+  // The table is only ever written by the weekly Sunday-03:00 refresh cron, so
+  // a fresh deploy showed "No providers configured" in Studio for up to a week
+  // until that tick. The lazy seed in `availableModels()` already covers the
+  // first Studio read, but this makes the registry populate the moment the
+  // worker boots (with keys just hydrated above) — using the OFFLINE provider
+  // catalogs, so it needs no network. Fire-and-forget and never-throw: a seed
+  // failure must not block boot. Idempotent + single-flight via the shared
+  // `ensureRegistrySeeded` guard, and `seedRegistryIfEmpty` no-ops when the
+  // table is already populated. Opt out with DISABLE_REGISTRY_BOOT_SEED=1.
+  if (process.env.DISABLE_REGISTRY_BOOT_SEED !== '1' && process.env.DISABLE_REGISTRY_BOOT_SEED !== 'true') {
+    void (async () => {
+      try {
+        const { seedRegistryIfEmpty } = await import('@/lib/studio/generators');
+        const covered = seedRegistryIfEmpty();
+        console.log(`[instrumentation] Studio registry boot seed — ${covered}/3 media tabs have an active model`);
+      } catch (error) {
+        console.error('[instrumentation] Studio registry boot seed failed (non-fatal):', error);
+      }
+    })();
+  }
+
   // Dev mode runs both a webpack worker and the page-runtime worker; we only
   // want one scheduler. Skip when explicitly opted out for tests, builds, or
   // CI smoke runs that do not want background jobs to fire.

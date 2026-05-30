@@ -142,8 +142,16 @@ function vaultOutputPath(kind: StudioKind, prompt: string, ext: string): string 
 }
 
 /**
- * Process-wide guard so the lazy first-run seed runs at most once per worker.
- * Stored on `globalThis` so Next.js module reloading does not lose it.
+ * Process-wide single-flight guard so the registry seed runs at most once per
+ * worker, no matter how many concurrent Studio reads (or the boot hook) race
+ * to trigger it. Stored on `globalThis` so Next.js module reloading does not
+ * lose it across HMR boundaries.
+ *
+ * The seed body is fully synchronous (sync env hydration + sync discovery +
+ * sync `bulkUpsertModels`), so the guard is a simple boolean: the first caller
+ * to enter `ensureRegistrySeeded()` completes the seed before any second caller
+ * observes `g[SEED_KEY] === false`. There is no awaited boundary inside the
+ * critical section where a second caller could slip through.
  */
 const SEED_KEY = '__BC_STUDIO_REGISTRY_SEEDED__';
 interface SeedGlobals {
@@ -155,15 +163,21 @@ interface SeedGlobals {
  *
  * On a fresh deploy the `model_registry` table is EMPTY until the weekly
  * Sunday-03:00 refresh cron runs. That left every Studio tab showing
- * "No providers configured" for up to a week. This seeds the registry on the
- * first Studio read from the environment (hydrated from the OpenClaw secret
- * files), so a box with KIE/OpenAI/Fal/Gemini/Fish/etc. keys lights up
- * immediately. Idempotent: the discovered rows upsert by `model_id`, so the
- * later weekly refresh simply updates them.
+ * "No providers configured" for up to a week. This seeds the registry from the
+ * environment (hydrated from the OpenClaw secret files) so a box with
+ * KIE/OpenAI/Fal/Gemini/Fish/etc. keys lights up immediately — driven by the
+ * OFFLINE fallback catalogs in `PROVIDER_DISCOVERY`, so it seeds with no
+ * network call. Idempotent: discovered rows upsert by `model_id`, so the later
+ * weekly refresh (which CAN reach the network) simply updates them in place.
  *
- * Never throws — discovery failure must not break the Studio render.
+ * Single-flight: guarded by `globalThis[SEED_KEY]` so it runs at most once per
+ * worker whether the trigger is the boot hook (instrumentation.ts) or the first
+ * Studio read (`availableModels`). Exported so `instrumentation.register()` can
+ * fire it on boot.
+ *
+ * Never throws — discovery failure must not break the Studio render or boot.
  */
-function ensureRegistrySeeded(): void {
+export function ensureRegistrySeeded(): void {
   const g = globalThis as unknown as SeedGlobals;
   if (g[SEED_KEY]) return;
   try {
@@ -174,6 +188,40 @@ function ensureRegistrySeeded(): void {
     console.error('[studio] registry auto-seed failed (non-fatal):', err);
   } finally {
     g[SEED_KEY] = true;
+  }
+}
+
+/**
+ * Boot-time convenience: seed ONLY when the `model_registry` table is empty.
+ *
+ * Called fire-and-forget from `instrumentation.register()`. The brief is
+ * explicit that the boot refresh must run "only if registry empty" — so we
+ * cheaply count any active row first and bail when the table is already
+ * populated (the weekly refresh has run, or a previous boot already seeded),
+ * avoiding redundant upserts on every worker restart. Falls through to the
+ * shared single-flight `ensureRegistrySeeded()` so it can never double-seed
+ * alongside a concurrent lazy Studio read.
+ *
+ * Returns the number of capability tabs that have at least one active model
+ * after the attempt (0..3), purely for boot-log observability. Never throws.
+ */
+export function seedRegistryIfEmpty(): number {
+  try {
+    const existing = listModels({ status: 'active', limit: 1 });
+    if (existing.length === 0) {
+      ensureRegistrySeeded();
+    }
+    // Report coverage so the boot log shows what lit up.
+    let covered = 0;
+    for (const kind of ['image', 'video', 'audio'] as StudioKind[]) {
+      if (listModels({ capability: CAPABILITY_FOR_KIND[kind], status: 'active', limit: 1 }).length > 0) {
+        covered += 1;
+      }
+    }
+    return covered;
+  } catch (err) {
+    console.error('[studio] boot registry seed failed (non-fatal):', err);
+    return 0;
   }
 }
 
