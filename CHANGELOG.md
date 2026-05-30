@@ -1,3 +1,34 @@
+## [v4.1.7] - 2026-05-30 - Operator Console onboarding walkthrough + per-module vault-write health dots
+
+Patch release. Two universal Operator Console UX features, zero schema changes, zero personal/client data.
+
+### Feature 1 — Onboarding / walkthrough cards
+
+A first-run, re-openable walkthrough overlay that explains every Operator Console sub-module in plain English, one card each (Console, Bridge, Workspace, Studio, Notebook, Goals, Journal, Memory, Research, Call Mode, Web Agent). Written for a non-technical, 60-year-old-friendly reader.
+
+- **First run** auto-opens once; dismissing it persists `bcc-operator-onboarding-seen` in localStorage so it never auto-opens again. (localStorage convention mirrors `bcc-sidebar-collapsed` in `AppShell.tsx`.)
+- **Re-open anytime** via a "Show walkthrough" control in the sidebar footer and on the Console home header, plus a "What is this?" help button in every sub-module page header that jumps straight to that module's card.
+- **Memory card carries the Mac-vs-VPS note** (resolved server-side from `detectPlatform()`): everything you write flows to the vault and is searchable in Memory; on a **Mac Mini** you can ALSO browse the vault in Obsidian; on a **VPS** there is no Obsidian (not cloud-based) so the Memory page IS your window into the brain.
+- **Accessibility:** `role="dialog"` / `aria-modal`, focus moved into the dialog on open, focus trap on Tab/Shift+Tab, focus restored on close, Esc closes, Left/Right arrows move between cards, ≥44px tap targets, ≥16px text, visible focus rings, status conveyed by icon + text (never color alone). Overlay pattern mirrors `CommandPalette.tsx`.
+
+### Feature 2 — Per-module vault-write health indicator
+
+A small status dot + accessible label per persisting module (Goals, Journal, Notebook, Studio, Research) showing whether the module is actually persisting AND whether its **last write reached the operator vault**:
+
+- **green (`live`)** = a vault write is confirmed; **amber (`busy`)** = saved to the DB but the vault mirror is unconfirmed; **red (`offline`)** = DB error or the last vault write failed; **grey (`unknown`)** = nothing determinable yet. Unknown is **never** shown as green — honest by contract.
+- New read-only `GET /api/operator/health` (and `?module=<id>`) returns each module's DB + vault evidence. It never throws and never fabricates a green. Data source: `src/lib/operator/module-health.ts` reuses `vaultRoot()` from `src/lib/platform.ts` (so it is correct on both Mac and VPS), reads a `<vault>/<module>/.health.json` sidecar for Goals/Journal, discovers the newest file on disk for Studio (`studio/.jobs/*.json`) and Research (`research/**/*.md`), and reports Notebook's vault dimension as not-applicable (DB-only by design). Behind the same Cloudflare Access + `MC_API_TOKEN` middleware as every other `/api/*` route.
+- **Closes a real gap:** the Goals/Journal route handlers previously called `void writeVaultMirror()` / `void writeJournalMirror()` and **discarded** the returned path — the only success signal. They now record the mirror outcome via `trackVaultMirror()` so the dot reflects reality.
+- Dots render on the Console home tiles and each sub-module page header. Dot vocabulary matches `SystemStatusPill.tsx`'s `STATUS_STYLES`.
+
+### Changed files
+
+- New: `src/lib/operator/module-health.ts`, `src/app/api/operator/health/route.ts`, `src/components/operator/OperatorOnboarding.tsx`, `src/components/operator/OperatorHelpButton.tsx`, `src/components/operator/onboarding-content.ts`, `src/components/operator/ModuleHealthDot.tsx`, `tests/unit/module-health.test.ts`.
+- Changed: `src/app/operator/layout.tsx` (mount overlay + pass platform), `src/components/OperatorSidebar.tsx` (re-open control), `src/app/operator/page.tsx` (per-tile help + health dots), `src/app/operator/{goals,journal,memory,studio,research,bridge,web-agent}/page.tsx` (page-header help + dots), `src/components/operator/{NotebookList,WorkspaceView}.tsx` (header help + dot), `src/app/api/operator/goals/route.ts`, `src/app/api/operator/goals/[id]/route.ts`, `src/app/api/operator/journal/route.ts`, `src/app/api/operator/journal/[id]/route.ts` (record mirror outcome).
+
+### Risk: low
+
+- No DB schema change, no migration, no provider calls. The health route is read-only and degrades to `unknown` rather than throwing. The mirror-result recording preserves the existing fire-and-forget, non-blocking behavior of the Goals/Journal POST/PATCH handlers. UI additions are additive.
+
 ## [v4.1.6] - 2026-05-30 - Studio providers: boot-time registry seed (no more week-long "No providers configured")
 
 Patch release. Completes the v4.1.4 Studio provider-discovery fix. Even after v4.1.4 wired env-based auto-discovery, the `model_registry` table that the Studio tabs read was still only written by the **weekly** Sunday-03:00 refresh cron, never on boot. On a fresh deploy (verified live on Evelyn: `model_registry` = 0 rows) every Studio tab showed **"No providers configured"** for up to a week — even with KIE / OpenAI / Fish / Gemini keys present — until that cron ticked or someone manually hit `POST /api/cron/refresh-models`.

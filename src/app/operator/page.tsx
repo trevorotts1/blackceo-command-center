@@ -16,6 +16,13 @@ import {
   ArrowUpRight,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
+import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
+import {
+  ModuleHealthDotFromPayload,
+  useModuleHealth,
+  type ModuleHealthPayload,
+} from '@/components/operator/ModuleHealthDot';
+import type { ModuleId } from '@/lib/operator/module-health';
 
 interface OperatorTile {
   href: string;
@@ -23,6 +30,10 @@ interface OperatorTile {
   tagline: string;
   icon: ReactNode;
   accent: string;
+  /** Walkthrough card id for the per-tile "What is this?" affordance. */
+  cardId: string;
+  /** When set, this tile persists and shows a vault-health dot. */
+  healthModule?: ModuleId;
   /** Wave 1 placeholder: route is not yet implemented at this depth. */
   placeholder?: boolean;
 }
@@ -34,6 +45,7 @@ const TILES: OperatorTile[] = [
     tagline: 'Chat with Claude, Codex, Antigravity, Hermes, Gemini, FCC, and OpenClaw.',
     icon: <MessageSquare size={22} />,
     accent: '#3B82F6',
+    cardId: 'bridge',
   },
   {
     href: '/operator/workspace',
@@ -41,6 +53,7 @@ const TILES: OperatorTile[] = [
     tagline: 'Per-agent scratch directories with inline file preview.',
     icon: <FolderOpen size={22} />,
     accent: '#8B5CF6',
+    cardId: 'workspace',
   },
   {
     href: '/operator/studio',
@@ -48,6 +61,8 @@ const TILES: OperatorTile[] = [
     tagline: 'Image, video, and audio generation via Kie.ai, Fal.ai, and more.',
     icon: <Wand2 size={22} />,
     accent: '#EC4899',
+    cardId: 'studio',
+    healthModule: 'studio',
   },
   {
     href: '/operator/notebook',
@@ -55,6 +70,8 @@ const TILES: OperatorTile[] = [
     tagline: 'NotebookLM-style document Q&A grounded in your sources.',
     icon: <NotebookText size={22} />,
     accent: '#F59E0B',
+    cardId: 'notebook',
+    healthModule: 'notebook',
   },
   {
     href: '/operator/goals',
@@ -62,6 +79,8 @@ const TILES: OperatorTile[] = [
     tagline: 'Personal goal tracker writing straight to the vault.',
     icon: <Target size={22} />,
     accent: '#FBBF24',
+    cardId: 'goals',
+    healthModule: 'goals',
   },
   {
     href: '/operator/journal',
@@ -69,6 +88,8 @@ const TILES: OperatorTile[] = [
     tagline: 'One markdown file per day. Voice or text, your call.',
     icon: <BookOpen size={22} />,
     accent: '#A3E635',
+    cardId: 'journal',
+    healthModule: 'journal',
   },
   {
     href: '/operator/memory',
@@ -76,6 +97,7 @@ const TILES: OperatorTile[] = [
     tagline: 'Full-text search across vault notes and chat history.',
     icon: <Brain size={22} />,
     accent: '#22D3EE',
+    cardId: 'memory',
   },
   {
     href: '/operator/research',
@@ -83,6 +105,8 @@ const TILES: OperatorTile[] = [
     tagline: 'Live X/Twitter search through xAI Grok.',
     icon: <Search size={22} />,
     accent: '#06B6D4',
+    cardId: 'research',
+    healthModule: 'research',
   },
   {
     href: '/operator/call',
@@ -90,6 +114,7 @@ const TILES: OperatorTile[] = [
     tagline: 'Hands-free voice conversation with the operator-level CLIs.',
     icon: <Phone size={22} />,
     accent: '#10B981',
+    cardId: 'call',
   },
   {
     href: '/operator/web-agent',
@@ -97,6 +122,7 @@ const TILES: OperatorTile[] = [
     tagline: 'Browser automation through Anthropic Computer Use.',
     icon: <Globe size={22} />,
     accent: '#6366F1',
+    cardId: 'web-agent',
   },
 ];
 
@@ -115,20 +141,29 @@ const tileVariants = {
 };
 
 export default function OperatorLandingPage() {
+  // One shared poll of /api/operator/health feeds every tile's vault-health dot.
+  const { data: health } = useModuleHealth();
+
   return (
     <div className="space-y-10">
       <header>
-        <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
-          Operator Console
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
+              Operator Console
+            </div>
+            <h1 className="mt-2 text-page-title text-bcc-text">
+              Pick a sub-module to dive in.
+            </h1>
+          </div>
+          <OperatorHelpButton label="Show walkthrough" />
         </div>
-        <h1 className="mt-2 text-page-title text-bcc-text">
-          Pick a sub-module to dive in.
-        </h1>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[640px]">
           The Operator Console is your direct line to operator-level CLIs,
           creative tools, and personal vault. Each tile opens a focused
           sub-module. Use <span className="font-mono text-[13px]">Cmd K</span> for
-          fast navigation.
+          fast navigation. New here? Tap <span className="font-medium">Show
+          walkthrough</span>.
         </p>
       </header>
 
@@ -139,18 +174,29 @@ export default function OperatorLandingPage() {
         aria-label="Operator Console sub-modules"
       >
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {TILES.map((tile) => (
-            <motion.div key={tile.href} variants={tileVariants}>
-              <OperatorTileCard tile={tile} />
-            </motion.div>
-          ))}
+          {TILES.map((tile) => {
+            const healthRow = tile.healthModule
+              ? health?.modules.find((m) => m.module === tile.healthModule) ?? null
+              : null;
+            return (
+              <motion.div key={tile.href} variants={tileVariants}>
+                <OperatorTileCard tile={tile} healthRow={healthRow} />
+              </motion.div>
+            );
+          })}
         </div>
       </motion.section>
     </div>
   );
 }
 
-function OperatorTileCard({ tile }: { tile: OperatorTile }) {
+function OperatorTileCard({
+  tile,
+  healthRow,
+}: {
+  tile: OperatorTile;
+  healthRow: ModuleHealthPayload | null;
+}) {
   const content = (
     <div
       className={`group relative overflow-hidden h-full rounded-xl border border-bcc-border bg-bcc-white p-5 transition-shadow ${
@@ -184,7 +230,12 @@ function OperatorTileCard({ tile }: { tile: OperatorTile }) {
         )}
       </div>
       <div className="relative">
-        <h2 className="text-card-title text-bcc-text">{tile.title}</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-card-title text-bcc-text">{tile.title}</h2>
+          {tile.healthModule && (
+            <ModuleHealthDotFromPayload row={healthRow} showLabel />
+          )}
+        </div>
         <p className="mt-1.5 text-[14px] text-bcc-text-secondary leading-relaxed">
           {tile.tagline}
         </p>

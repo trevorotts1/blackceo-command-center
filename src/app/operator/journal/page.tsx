@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import JournalEntry from '@/components/operator/JournalEntry';
+import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
+import ModuleHealthDot from '@/components/operator/ModuleHealthDot';
 
 export const metadata: Metadata = {
   title: 'Journal | Operator Console',
@@ -18,10 +20,18 @@ export default function OperatorJournalPage({ searchParams }: PageProps) {
   return (
     <div className="space-y-8">
       <header>
-        <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
-          Operator Console
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
+              Operator Console
+            </div>
+            <h1 className="mt-2 text-page-title text-bcc-text flex items-center gap-3">
+              Journal
+              <ModuleHealthDot module="journal" showLabel />
+            </h1>
+          </div>
+          <OperatorHelpButton card="journal" />
         </div>
-        <h1 className="mt-2 text-page-title text-bcc-text">Journal</h1>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[640px]">
           One entry per day, mirrored to
           <span className="font-mono"> [vault]/journal/YYYY/MM/YYYY-MM-DD.md</span>.

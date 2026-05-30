@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { deleteGoal, getGoal, updateGoal, writeVaultMirror } from '@/lib/operator/goals';
+import { trackVaultMirror } from '@/lib/operator/module-health';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -45,7 +46,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
     if (!updated) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 });
     }
-    void writeVaultMirror();
+    void trackVaultMirror('goals', writeVaultMirror());
     return NextResponse.json(updated);
   } catch (err) {
     return NextResponse.json(
@@ -61,7 +62,7 @@ export async function DELETE(_req: NextRequest, ctx: { params: { id: string } })
     if (!removed) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 });
     }
-    void writeVaultMirror();
+    void trackVaultMirror('goals', writeVaultMirror());
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(

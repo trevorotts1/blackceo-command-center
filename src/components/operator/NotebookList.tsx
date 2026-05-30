@@ -18,6 +18,8 @@ import {
   AlertCircle,
   Library,
 } from 'lucide-react';
+import OperatorHelpButton from './OperatorHelpButton';
+import ModuleHealthDot from './ModuleHealthDot';
 
 interface NotebookListItem {
   id: string;
@@ -113,20 +115,24 @@ export default function NotebookList() {
 
   return (
     <div className="space-y-6">
-      <header className="flex items-center justify-between">
+      <header className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-3">
           <Library size={20} className="text-bcc-text-muted" />
           <h1 className="text-[22px] font-medium text-bcc-text">Notebook</h1>
+          <ModuleHealthDot module="notebook" showLabel />
         </div>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          className="flex items-center gap-2 text-[12px] uppercase tracking-[0.18em] text-bcc-text-muted hover:text-bcc-text"
-          aria-label="Refresh notebooks"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <OperatorHelpButton card="notebook" />
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            className="flex items-center gap-2 text-[12px] uppercase tracking-[0.18em] text-bcc-text-muted hover:text-bcc-text"
+            aria-label="Refresh notebooks"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
       </header>
 
       {noBackend && (

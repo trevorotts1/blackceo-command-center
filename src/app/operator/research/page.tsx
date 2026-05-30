@@ -26,6 +26,8 @@ import ResearchHistory from '@/components/operator/ResearchHistory';
 import ResearchResult, {
   type ResearchResultData,
 } from '@/components/operator/ResearchResult';
+import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
+import ModuleHealthDot from '@/components/operator/ModuleHealthDot';
 
 interface Availability {
   available: boolean;
@@ -89,10 +91,18 @@ export default function ResearchLandingPage() {
   return (
     <div className="space-y-6">
       <header>
-        <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
-          Operator Console
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
+              Operator Console
+            </div>
+            <h1 className="mt-2 text-page-title text-bcc-text flex items-center gap-3">
+              Research
+              <ModuleHealthDot module="research" showLabel />
+            </h1>
+          </div>
+          <OperatorHelpButton card="research" />
         </div>
-        <h1 className="mt-2 text-page-title text-bcc-text">Research</h1>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[680px]">
           Live, grounded web search. Results cite their sources and are saved to
           your vault so they show up in Memory and the All Searches bucket.

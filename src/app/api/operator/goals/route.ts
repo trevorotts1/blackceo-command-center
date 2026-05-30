@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createGoal, listGoals, writeVaultMirror } from '@/lib/operator/goals';
+import { trackVaultMirror } from '@/lib/operator/module-health';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -67,8 +68,11 @@ export async function POST(req: NextRequest) {
       category: parsed.category ?? null,
       sort_order: parsed.sort_order,
     });
-    // Fire and forget. The DB row is the source of truth.
-    void writeVaultMirror();
+    // Fire and forget. The DB row is the source of truth; the mirror is best
+    // effort. We no longer DISCARD the result — trackVaultMirror records the
+    // written path(s) (or error) to the module health sidecar so the Operator
+    // Console health dot can report whether the write actually reached the vault.
+    void trackVaultMirror('goals', writeVaultMirror());
     return NextResponse.json(goal, { status: 201 });
   } catch (err) {
     return NextResponse.json(
