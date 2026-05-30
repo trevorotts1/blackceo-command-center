@@ -1,12 +1,13 @@
 {
   "name": "mission-control",
-  "version": "4.1.2",
+  "version": "4.1.3",
   "private": true,
   "scripts": {
     "dev": "next dev -p ${PORT:-4000}",
     "build": "next build",
     "start": "next start -p ${PORT:-4000}",
     "lint": "next lint",
+    "test:unit": "node --import tsx --test tests/unit/*.test.ts",
     "db:seed": "tsx src/lib/db/seed.ts",
     "db:seed:sops": "tsx scripts/seed-starter-sops.ts",
     "db:backup": "sqlite3 mission-control.db 'PRAGMA wal_checkpoint(TRUNCATE);' && cp mission-control.db mission-control.db.backup && echo 'Backed up to mission-control.db.backup'",

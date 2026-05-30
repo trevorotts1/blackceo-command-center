@@ -31,6 +31,8 @@ export class OpenClawClient extends EventEmitter {
   private autoReconnect = true;
   private token: string;
   private deviceIdentity: { deviceId: string; publicKeyPem: string; privateKeyPem: string } | null = null;
+  private lastConnectError: string | null = null;
+  private lastConnectErrorAtMs = 0;
   private messageHandlers = new Set<(event: MessageEvent) => void>(); // Track all message handlers for cleanup
   private readonly MAX_PROCESSED_EVENTS = 1000; // Limit the size of the processed events cache
   private readonly CLEANUP_THRESHOLD = 100; // Number of entries to remove when limit exceeded
@@ -185,6 +187,7 @@ export class OpenClawClient extends EventEmitter {
 
         const connectionTimeout = setTimeout(() => {
           if (!this.connected) {
+            this.recordConnectError('Connection timeout (gateway did not complete the handshake in 10s)');
             this.ws?.close();
             reject(new Error('Connection timeout'));
           }
@@ -220,6 +223,7 @@ export class OpenClawClient extends EventEmitter {
           this.emit('error', error);
           if (!this.connected) {
             this.connecting = null;
+            this.recordConnectError(`WebSocket transport error reaching ${this.url}`);
             reject(new Error('Failed to connect to OpenClaw Gateway'));
           }
         };
@@ -311,12 +315,21 @@ export class OpenClawClient extends EventEmitter {
                   this.connected = true;
                   this.authenticated = true;
                   this.connecting = null;
+                  this.lastConnectError = null;
+                  this.lastConnectErrorAtMs = 0;
                   this.emit('connected');
                   console.log('[OpenClaw] Authenticated successfully');
                   resolve();
                 },
                 reject: (error: Error) => {
                   this.connecting = null;
+                  // A rejected `connect` RPC almost always means the gateway
+                  // does not (yet) trust this operator device — i.e. pairing
+                  // is pending. Record a precise, actionable error so the
+                  // status route can tell the operator to approve the device.
+                  this.recordConnectError(
+                    `Gateway rejected device pairing (device ${this.deviceIdentity?.deviceId ?? 'unknown'}): ${error.message}`,
+                  );
                   this.ws?.close();
                   reject(new Error(`Authentication failed: ${error.message}`));
                 }
@@ -469,8 +482,41 @@ export class OpenClawClient extends EventEmitter {
     // Note: globalProcessedEvents is NOT cleared as it's shared across all instances
   }
 
+  private recordConnectError(message: string): void {
+    this.lastConnectError = message;
+    this.lastConnectErrorAtMs = Date.now();
+  }
+
   isConnected(): boolean {
     return this.connected && this.authenticated && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * The gateway URL this client connects to (token stripped). Surfaced by the
+   * status route so the operator can confirm the resolved default vs an
+   * explicit `OPENCLAW_GATEWAY_URL`.
+   */
+  getGatewayUrl(): string {
+    return this.url;
+  }
+
+  /**
+   * The local operator device id (ed25519 public-key fingerprint), or null if
+   * the identity could not be loaded. This is the id the operator approves on
+   * the gateway with `openclaw devices approve <requestId>`.
+   */
+  getDeviceId(): string | null {
+    return this.deviceIdentity?.deviceId ?? null;
+  }
+
+  /**
+   * The most recent connect/auth failure (or null when connected). Lets the
+   * status route distinguish "gateway unreachable" from "device pairing
+   * pending" and render the exact remediation.
+   */
+  getLastConnectError(): { message: string; atMs: number } | null {
+    if (!this.lastConnectError) return null;
+    return { message: this.lastConnectError, atMs: this.lastConnectErrorAtMs };
   }
 
   setAutoReconnect(enabled: boolean): void {

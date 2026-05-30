@@ -60,22 +60,29 @@ interface SSEFrame {
 }
 
 interface Props {
+  /**
+   * The agents visible on this install, computed server-side by the page from
+   * the platform (VPS hides the Mac-desktop CLIs). When omitted, falls back to
+   * the full catalogue so older callers / tests keep working.
+   */
+  agents?: BridgeAgent[];
   initialAgentId?: string;
 }
 
 const STORAGE_KEY = 'bcc-bridge:active-agent';
 
-function loadInitialAgent(initial?: string): string {
-  if (initial && getBridgeAgent(initial)) return initial;
+function loadInitialAgent(visible: BridgeAgent[], initial?: string): string {
+  const isVisible = (id: string) => visible.some((a) => a.id === id);
+  if (initial && isVisible(initial)) return initial;
   if (typeof window !== 'undefined') {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored && getBridgeAgent(stored)) return stored;
+      if (stored && isVisible(stored)) return stored;
     } catch {
       // ignore
     }
   }
-  return BRIDGE_AGENTS[0].id;
+  return visible[0]?.id ?? BRIDGE_AGENTS[0].id;
 }
 
 /**
@@ -105,8 +112,13 @@ function makeSseParser(): (chunk: string) => SSEFrame[] {
   };
 }
 
-export default function BridgeChat({ initialAgentId }: Props) {
-  const [agentId, setAgentId] = useState<string>(() => loadInitialAgent(initialAgentId));
+export default function BridgeChat({ agents, initialAgentId }: Props) {
+  // The visible agent set for this install. Defaults to the full catalogue so
+  // the component still works if rendered without the server-computed prop.
+  const visibleAgents: BridgeAgent[] =
+    agents && agents.length > 0 ? agents : (BRIDGE_AGENTS as readonly BridgeAgent[]).slice();
+
+  const [agentId, setAgentId] = useState<string>(() => loadInitialAgent(visibleAgents, initialAgentId));
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [partial, setPartial] = useState<string>('');
@@ -117,8 +129,13 @@ export default function BridgeChat({ initialAgentId }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const startMsRef = useRef<number>(0);
 
+  // Resolve the active agent within the visible set first; only fall back to
+  // the global catalogue (then the first visible pill) if the id is unknown.
   const agent: BridgeAgent =
-    getBridgeAgent(agentId) ?? (BRIDGE_AGENTS[0] as BridgeAgent);
+    visibleAgents.find((a) => a.id === agentId) ??
+    getBridgeAgent(agentId) ??
+    visibleAgents[0] ??
+    (BRIDGE_AGENTS[0] as BridgeAgent);
 
   // Persist agent choice so a refresh keeps the operator on the same CLI.
   useEffect(() => {
@@ -308,6 +325,7 @@ export default function BridgeChat({ initialAgentId }: Props) {
       {/* Top bar */}
       <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-bcc-border bg-bcc-white">
         <AgentSelector
+          agents={visibleAgents}
           activeId={agentId}
           onSelect={(id) => {
             if (streaming) return;

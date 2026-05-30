@@ -1,3 +1,28 @@
+## [v4.1.3] - 2026-05-30 - OpenClaw Bridge connect-failure fix: stable device identity, pairing bootstrap, VPS-aware CLI pills
+
+Patch release. Fixes the Operator Console → Bridge → OpenClaw pill failing to connect on VPS Docker deploys (it showed "OpenClaw Gateway unavailable" / "Not connected to OpenClaw Gateway"). Root cause was two compounding bugs plus a UI defect; all three are fixed and the connect path now reaches an `operator.admin` gateway session without manual device surgery on every redeploy.
+
+### Root cause
+
+1. **Device-identity drift (VPS-specific).** The ed25519 device identity was stored at `~/.mission-control/identity/device.json` via `os.homedir()`, which on the Hostinger VPS Docker container is NOT under the `/data` persistent volume. Every `docker compose up -d --force-recreate` wiped it, `loadOrCreateDeviceIdentity` silently minted a NEW keypair → new `deviceId` → the gateway saw an unapproved device → the `connect` handshake was rejected → `connected/authenticated` never flipped true.
+2. **Missing pairing bootstrap.** Nothing in the app ever registered or surfaced the device for approval; an operator had to manually `openclaw devices approve` on the gateway, and bug #1 destroyed that approval on the next redeploy.
+3. **Bridge pill strip not platform-aware (UI defect).** All seven pills (six Mac-desktop CLIs + OpenClaw) rendered unconditionally even on a VPS where the Mac CLIs are not installed.
+
+### Fixed
+
+- **(A) Stable device identity** — `src/lib/platform.ts` adds `deviceIdentityDir()` / `legacyDeviceIdentityDir()`; the identity now persists at `/data/.openclaw/mission-control/identity/device.json` on VPS (survives force-recreate) and `~/.mission-control/identity/device.json` on Mac, overridable via `BCC_DEVICE_IDENTITY_DIR`. `src/lib/openclaw/device-identity.ts` resolves the path at call time, performs a one-time **forward migration** of a pre-existing legacy identity so an already-paired box keeps its `deviceId`, and **throws instead of silently regenerating** when an existing file is corrupt (never orphans an approved device).
+- **(B) Reliable pairing + connect** — `instrumentation.ts` fires a non-blocking connect on boot so the gateway records this device as a **pending pairing request immediately after deploy** (opt out with `DISABLE_BRIDGE_BOOTSTRAP=1`). `OPENCLAW_GATEWAY_URL` keeps the `ws://127.0.0.1:18789` default when unset and reads the env var when set. `GET /api/openclaw/status` now returns `connected`, `device_id`, `pairing_pending`, and a `remediation` string with the exact `openclaw devices list` / `openclaw devices approve <requestId>` commands. The Bridge send route surfaces the same actionable message instead of a raw error. New runbook `docs/OPENCLAW_BRIDGE_PAIRING.md` documents the per-box deploy + pairing procedure.
+- **(C) VPS-aware CLI pills** — `BridgeAgent` gains an optional `platforms` tag; the six Mac-desktop CLIs are `['mac-mini']`-only, OpenClaw is unrestricted. `visibleBridgeAgents(platform)` + `resolveInstallPlatform()` (honoring a new `BCC_INSTALL_TYPE=vps|mac` flag, default auto-detect) compute the visible set **server-side** in `src/app/operator/bridge/page.tsx` and pass it through `BridgeChat` → `AgentSelector`. On a VPS the strip shows only OpenClaw; Mac installs are unchanged (all seven).
+
+### Changed files
+
+- `src/lib/platform.ts`, `src/lib/openclaw/device-identity.ts`, `src/lib/openclaw/client.ts`, `src/app/api/openclaw/status/route.ts`, `src/app/api/operator/bridge/send/route.ts`, `instrumentation.ts`, `src/lib/bridge/agents.ts`, `src/components/operator/AgentSelector.tsx`, `src/components/operator/BridgeChat.tsx`, `src/app/operator/bridge/page.tsx`, `ecosystem.config.cjs`, `.env.example`.
+- New: `docs/OPENCLAW_BRIDGE_PAIRING.md`, `tests/unit/bridge-platform.test.ts`, `tests/unit/device-identity.test.ts`, `npm run test:unit` script.
+
+### Risk: low
+
+- No DB schema change, no migration, no change to departments / personas / any other route. The only UI behavior change is the VPS pill filter (Mac is byte-for-byte unchanged). The device-identity path change is additive with a forward migration, so a box already paired on the legacy path keeps working.
+
 ## [v4.1.2] - 2026-05-30 - Single-department Focus View: filter by workspace_id + scoped focus rail
 
 Patch release. The single-department Focus View (`/workspace/[slug]`) could open empty for a department that actually had tasks, and clicking a department in the `/tasks/all` left rail did nothing. Both are fixed, and the Focus View left rail is scoped down to a clean focused context.
