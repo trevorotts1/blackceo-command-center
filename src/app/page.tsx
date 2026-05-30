@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -88,7 +88,8 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, []);
 
-  // PRD 3.8 + v4.0.1 P0-1: 6-card landing layout. Operator Console is the 5th card.
+  // PRD 3.8 + v4.0.1 P0-1: landing layout. Operator Console is the 5th card.
+  // F52: Conversational AI analytics is the 7th card (fills the next 3-col slot).
   const cards: EntryCard[] = [
     {
       title: 'View All Tasks',
@@ -116,6 +117,15 @@ export default function HomePage() {
       gradient: 'from-amber-400 via-orange-500 to-red-500',
       route: '/ceo-board',
       cta: 'View Performance',
+    },
+    {
+      title: 'Conversational AI',
+      description: 'Live conversation analytics',
+      detail: 'Channel volume, conversations over time, sentiment, escalations, top objections, KB hit rate, and pixel-funnel performance across every messaging surface. Unlocks persona-tuned views once your AI Workforce interview is complete.',
+      icon: <MessagesSquare className="w-7 h-7 text-white" />,
+      gradient: 'from-fuchsia-500 via-pink-500 to-rose-500',
+      route: '/conversational-ai',
+      cta: 'View Conversations',
     },
     {
       title: 'Intelligence Settings',
