@@ -1,3 +1,27 @@
+## [v4.1.0] - 2026-05-30 - Feature 52: Conversational-AI Live Analytics Dashboard
+
+Minor release adding a NEW card + route for conversational-AI analytics, distinct from the existing `/ceo-board` (tasks/agents/KPIs). Reuses the `/ceo-board` redesign component library + the `SystemPulseSection` fetch pattern. No schema changes; no modification to `/ceo-board`.
+
+### Added
+
+- **Home card (7th `EntryCard`)** in `src/app/page.tsx` — fuchsia→pink→rose, `MessagesSquare` icon, routes to `/conversational-ai`.
+- **Route** `src/app/conversational-ai/page.tsx` — Layer-1/Layer-2 unified dashboard with a 20s real-time interview-completion poll.
+- **API routes** (`force-dynamic`): `src/app/api/conversational-ai/{status,metrics,enriched}/route.ts`. All return graceful 200s; never crash, never fabricate numbers.
+- **Libraries**: `src/lib/conversational-ai/sources.ts` (defensive Round-3 JSONL/dir/markdown readers + candidate-root discovery + `ROUND3_DATA_CONTRACT`), `interview-state.ts` (3-signal Layer-2 gate, defaults NOT complete), `metrics.ts` (11 Layer-1 metric aggregators).
+- **Components** under `src/components/conversational-ai/`: ChannelVolumeChart, ConversationsTimeline, ConvAiKpiStrip, SentimentTrend, TopObjections, PixelFunnel, InterviewBanner, Layer2Section, EmptyState.
+- **Layer 1 (universal, no interview):** channel volume (SMS/Email/FB DM/FB Comments/IG DM/LinkedIn/Live Chat/All-in-One), conversations per day, sentiment trend, escalation rate, top objections, KB hit rate, discount redemptions, follow-up performance, bot/spam volume, quiet-hours impact, pixel funnel.
+- **Layer 2 (unlocks on interview completion):** business-specific KPIs, journey-template funnel (re-contextualized pixel funnel), industry benchmarks, recommended-actions panel derived from Layer-1 signals. History preserved, never reset.
+- **Scope-gated deploy** `scripts/conversational-ai/deploy-dashboard.sh` (`--precheck` verifies the F49 CF scopes — Pages:Edit + Workers Scripts:Edit + Workers Routes:Edit — and refuses to deploy if missing, without touching Cloudflare).
+- **Card README** `src/app/conversational-ai/README.md` documenting the data contract, merge logic, accessibility, deploy gating, and MVP-vs-follow-up.
+
+### Accessibility
+
+- WCAG 2.1 AA target: ≥16px body, semantic h1/h2/h3, never color-alone (icon+label on every state), ≥44px tap targets, `role="status"` empty-states, 3-clicks-max, mobile single-column.
+
+### Risk: low
+
+- Purely additive: new card, route, APIs, libs, components, script. No DB schema change, no migration, no change to `/ceo-board` or any existing route/API.
+
 ## [v4.0.3] - 2026-05-27 - Empty department template + build-state sync script
 
 Patch release: stop shipping a stale 17-row department template; sync the dashboard from the client's real Zero Human Company build-state.
