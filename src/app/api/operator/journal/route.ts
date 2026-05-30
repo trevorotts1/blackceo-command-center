@@ -26,6 +26,7 @@ import {
   upsertJournalEntry,
   writeJournalMirror,
 } from '@/lib/operator/journal';
+import { trackVaultMirror } from '@/lib/operator/module-health';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -75,7 +76,9 @@ export async function POST(req: NextRequest) {
       entry_date: parsed.entry_date,
       body: parsed.body,
     });
-    void writeJournalMirror(entry);
+    // Record the mirror outcome (path or error) to the journal health sidecar
+    // so the Operator Console dot reflects whether the write reached the vault.
+    void trackVaultMirror('journal', writeJournalMirror(entry));
     return NextResponse.json(entry);
   } catch (err) {
     return NextResponse.json(

@@ -17,6 +17,7 @@ import {
   ArrowLeft,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
+import OperatorHelpButton from './operator/OperatorHelpButton';
 
 interface OperatorNavItem {
   href: string;
@@ -113,8 +114,11 @@ export default function OperatorSidebar() {
         </ul>
       </nav>
 
-      <div className="px-5 py-4 border-t border-bcc-border-light text-[11px] text-bcc-text-muted">
-        Press <kbd className="px-1.5 py-0.5 rounded border border-bcc-border bg-bcc-bg font-mono text-[10px]">Cmd K</kbd> for the command palette.
+      <div className="px-5 py-4 border-t border-bcc-border-light flex flex-col gap-2">
+        <OperatorHelpButton variant="sidebar" label="Show walkthrough" />
+        <div className="text-[11px] text-bcc-text-muted">
+          Press <kbd className="px-1.5 py-0.5 rounded border border-bcc-border bg-bcc-bg font-mono text-[10px]">Cmd K</kbd> for the command palette.
+        </div>
       </div>
     </aside>
   );

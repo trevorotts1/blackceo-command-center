@@ -20,6 +20,7 @@ import {
   upsertJournalEntry,
   writeJournalMirror,
 } from '@/lib/operator/journal';
+import { trackVaultMirror } from '@/lib/operator/module-health';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -60,7 +61,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
   }
   try {
     const updated = upsertJournalEntry({ entry_date: existing.entry_date, body: parsed.body });
-    void writeJournalMirror(updated);
+    void trackVaultMirror('journal', writeJournalMirror(updated));
     return NextResponse.json(updated);
   } catch (err) {
     return NextResponse.json(

@@ -18,6 +18,7 @@ import { Clock, Globe, RefreshCw } from 'lucide-react';
 import WebAgentForm, {
   type WebAgentRunResponse,
 } from '@/components/operator/WebAgentForm';
+import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
 
 interface HistoryItem {
   id: string;
@@ -95,10 +96,15 @@ export default function WebAgentLandingPage() {
   return (
     <div className="space-y-6">
       <header>
-        <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
-          Operator Console
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
+              Operator Console
+            </div>
+            <h1 className="mt-2 text-page-title text-bcc-text">Web Agent</h1>
+          </div>
+          <OperatorHelpButton card="web-agent" />
         </div>
-        <h1 className="mt-2 text-page-title text-bcc-text">Web Agent</h1>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[680px]">
           Describe a task in plain English. The agent drives a headless
           browser via Claude Computer Use, returns a Markdown report, and

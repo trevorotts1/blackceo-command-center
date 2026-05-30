@@ -28,6 +28,7 @@ import { Folders, LayoutGrid, Loader2 } from 'lucide-react';
 import FileBrowser, { type FileBrowserFile } from './FileBrowser';
 import FilePreview from './FilePreview';
 import BucketsView from './BucketsView';
+import OperatorHelpButton from './OperatorHelpButton';
 
 type ViewMode = 'agent' | 'type';
 
@@ -68,10 +69,15 @@ export default function WorkspaceView() {
   return (
     <div className="space-y-6">
       <header>
-        <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
-          Operator Console / Workspace
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
+              Operator Console / Workspace
+            </div>
+            <h1 className="mt-2 text-page-title text-bcc-text">Per-agent scratch and output buckets.</h1>
+          </div>
+          <OperatorHelpButton card="workspace" />
         </div>
-        <h1 className="mt-2 text-page-title text-bcc-text">Per-agent scratch and output buckets.</h1>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[700px]">
           Anything the operator-level CLIs write lands here. Switch between agent view and the
           7 output buckets that aggregate files across every source.

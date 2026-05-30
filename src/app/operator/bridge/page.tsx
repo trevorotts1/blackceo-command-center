@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import BridgeChat from '@/components/operator/BridgeChat';
+import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
 import { detectPlatform } from '@/lib/platform';
 import { resolveInstallPlatform, visibleBridgeAgents } from '@/lib/bridge/agents';
 
@@ -36,12 +37,17 @@ export default function OperatorBridgePage() {
   return (
     <div className="space-y-5">
       <header>
-        <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
-          Operator Console / Bridge
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[12px] uppercase tracking-[0.22em] text-bcc-text-muted font-semibold">
+              Operator Console / Bridge
+            </div>
+            <h1 className="mt-2 text-page-title text-bcc-text">
+              Talk to your CLIs.
+            </h1>
+          </div>
+          <OperatorHelpButton card="bridge" />
         </div>
-        <h1 className="mt-2 text-page-title text-bcc-text">
-          Talk to your CLIs.
-        </h1>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[680px]">
           One chat surface for every operator-level agent. Pick a CLI in the
           pill strip, type or hit the mic, and every turn auto-saves to a

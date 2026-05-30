@@ -10,6 +10,8 @@
  */
 
 import StudioCanvas from '@/components/operator/StudioCanvas';
+import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
+import ModuleHealthDot from '@/components/operator/ModuleHealthDot';
 import { availableModels, type StudioKind, type StudioModelOption } from '@/lib/studio/generators';
 
 export const dynamic = 'force-dynamic';
@@ -24,7 +26,13 @@ export default async function OperatorStudioPage() {
   return (
     <div className="space-y-6">
       <header className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight text-bcc-text">Studio</h1>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <h1 className="text-2xl font-semibold tracking-tight text-bcc-text flex items-center gap-3">
+            Studio
+            <ModuleHealthDot module="studio" showLabel />
+          </h1>
+          <OperatorHelpButton card="studio" />
+        </div>
         <p className="text-sm text-bcc-text-secondary max-w-3xl">
           Generate images, videos, and audio with the providers wired into your model registry. Outputs land in
           the vault under <code className="font-mono text-[12px] text-bcc-text">studio/&lt;type&gt;/YYYY/MM/</code>.
