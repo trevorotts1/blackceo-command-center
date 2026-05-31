@@ -1,3 +1,32 @@
+## [v4.2.0] - 2026-05-31 - Ingest the client's REAL SOP library from disk (close the role/SOP wiring gap)
+
+Minor release. Closes the headline gap that left every client's Command Center showing only the 17 generic starter SOPs instead of their own built Standard Operating Procedure library. Net-new self-contained ingester + npm wiring + QC checks. Additive only — no migration, no schema change, zero personal/client data.
+
+### The gap (verified against the repo source, GitHub = source of truth)
+
+Through v4.1.9 the only writers of the `sops` table were `scripts/seed-starter-sops.ts` (17 hardcoded generic starters keyed to LEGACY dept slugs — `support`/`webdev`/`comms`/`openclaw`/`paid-ads`), `src/lib/sop-learning.ts` (runtime AI-evolved SOPs), and `POST /api/sops` (manual UI creation). **Nothing read the client's real built SOP library off disk.** Departments flow in correctly via `sync-departments-from-build-state.py`, but the hundreds-to-1,100+ DMAIC SOPs that Skill 23 builds under each role workspace (`<zhc-root>/<slug>/departments/<dept>/roles/<role>/how-to.md` + `SOP/NN-*.md`) never reached the dashboard. Skill 32 ships an `ingest-sop-library.py`, but it requires a `sops.jsonl` that NOTHING in either onboarding repo ever produces, and `run-full-install.sh` never calls it (confirmed via GitHub code search: zero references in either repo). Result: a client could build a complete SOP library and the dashboard still showed 17 generic starters.
+
+### The fix — `scripts/ingest-sop-library-from-disk.py` (self-contained, zero JSONL dependency)
+
+- Reads the client's real on-disk SOP library directly — `how-to.md` (role primary procedure) + every `SOP/NN-*.md` / `sops/*.md` under `departments/*/roles/*`, plus the alternate `sops/<dept>/<role>/*.md` tree some clients have. Skips `00-INDEX.md`/`README.md`.
+- Locates the client's ZHC company root with the SAME source-of-truth priority as `sync-departments-from-build-state.py` (build-state `companySlug` → `$COMPANY_SLUG`/`--company-slug` → most-recently-modified `~/clawd/zero-human-company/<slug>` or `~/clawd/zhc/<slug>` → the OpenClaw workspace itself).
+- Parses each DMAIC markdown doc into the `sops` table's structured shape: first `# H1` → `name`, first paragraph → `description`, `## / ###` sections → `steps[]` with their bullets as `checklist`, a "Success Criteria / Acceptance / Definition of Done" section → `success_criteria`, and derived `task_keywords`. Falls back to a numbered-list step, then to the whole doc as a single step, so EVERY SOP ingests with real content (never an empty `steps`).
+- **Normalizes legacy dept folder names to the canonical 16/17-dept IDs** (`support`→`customer-support`, `webdev`→`web-development`, `paid-ads`→`paid-advertisement`, etc.) so SOPs land on the same `department` slug the dashboard's `departments.config.ts` and `/api/sops?department=` filter use — directly avoiding the legacy-vs-canonical dept-map mismatch that has zeroed out departments elsewhere.
+- Idempotent: every SOP is keyed by a stable slug (`<dept>-<role>-<stem>`), written with `INSERT OR REPLACE`. Re-running refreshes content without duplicating. Populates the optional V2 columns (`source_role`, `source_file_url`, `layer_version`) when the dashboard's own ingester has added them. `--dry-run` reports parsed counts per department without writing.
+
+### Wiring (so it runs automatically per client)
+
+- `package.json`: new `db:seed:sops:disk` (SOP ingest) and `db:sync:client` (departments + SOPs in one shot) npm scripts, so `run-full-install.sh` / deploy / closeout can ingest the real library after every build or resume.
+- `scripts/qc-cc.sh`: new section 7 (5 checks) verifies both ingesters are present, the disk ingester compiles, and the npm wiring exists.
+
+### Verification
+
+Ran the ingester end-to-end against a synthetic ZHC tree (DMAIC headings, a numbered-list-only doc, and a `00-INDEX.md`): discovered + parsed 3 SOPs across 2 departments, wrote valid non-empty JSON `steps` for each, normalized `support`→`customer-support`, skipped the index, and proved idempotency (re-run kept the count at 3, no duplicates). `qc-cc.sh` full run: **PASS — 32 checks green, 0 warnings** (the new section 7 all green; pre-existing baseline failures unchanged).
+
+### Follow-up (separate, onboarding-repo side — NOT in this release)
+
+For the dashboard to ingest a non-empty library, `run-full-install.sh` (Skill 32, both onboarding repos) should call `db:seed:sops:disk` / `db:sync:client` in Phase 6, and the orphaned `ingest-sop-library.py` either be removed or fed by a real Skill 23 JSONL exporter. Those changes belong to `openclaw-onboarding` / `openclaw-onboarding-vps` and are tracked in `~/clawd/FLEET-ONBOARDING-LEDGER.md` (task B/D).
+
 ## [v4.1.9] - 2026-05-30 - Fix fleet-wide missing kpi_snapshots table (migration 047)
 
 Patch release. Fixes a fleet-wide latent bug: the `kpi_snapshots` table was consumed by three code paths but created by no migration, so every Command Center deployment threw `no such table: kpi_snapshots` the moment a KPI page was touched. One additive, idempotent DB migration; zero personal/client data — universal across the fleet.

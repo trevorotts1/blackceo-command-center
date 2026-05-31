@@ -144,6 +144,25 @@ check "6.4" "CEO board mounts PersonaGovernanceBoard" \
   'grep -q "PersonaGovernanceBoard" src/app/ceo-board/page.tsx'
 
 blue ""
+blue "── 7. Client library ingestion (departments + SOPs) ──"
+# The dashboard must ingest the client's REAL Zero Human Company libraries, not
+# just the 17 generic starter SOPs. Departments flow in via
+# sync-departments-from-build-state.py; the SOP LIBRARY (Skill 23 DMAIC SOPs on
+# disk) flows in via ingest-sop-library-from-disk.py. Both must exist and be
+# wired into the npm seed scripts so run-full-install.sh / deploy can call them.
+check "7.1" "sync-departments-from-build-state.py present" \
+  '[ -f scripts/sync-departments-from-build-state.py ]'
+check "7.2" "ingest-sop-library-from-disk.py present (real SOP-library ingester)" \
+  '[ -f scripts/ingest-sop-library-from-disk.py ]' \
+  "this is what puts the client's built SOP library into the dashboard"
+check "7.3" "ingest-sop-library-from-disk.py is valid Python (compiles)" \
+  'python3 -m py_compile scripts/ingest-sop-library-from-disk.py'
+check "7.4" "package.json wires db:seed:sops:disk (auto SOP ingest)" \
+  'node -p "require(\"./package.json\").scripts[\"db:seed:sops:disk\"]" 2>/dev/null | grep -q ingest-sop-library-from-disk'
+check "7.5" "package.json wires db:sync:client (departments + SOPs together)" \
+  'node -p "require(\"./package.json\").scripts[\"db:sync:client\"]" 2>/dev/null | grep -q ingest-sop-library-from-disk'
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"
