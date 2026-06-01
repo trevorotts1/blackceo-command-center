@@ -186,7 +186,10 @@ function pickBestAgent(
  * least-loaded master agent (not just "the first one found").
  */
 export function comDispatch(
-  task: Pick<Task, 'title' | 'description' | 'priority' | 'workspace_id'> & { department?: string },
+  task: Pick<Task, 'title' | 'description' | 'priority'> & {
+    workspace_id?: string | null;
+    department?: string;
+  },
   agents: AgentWithLoad[],
   departments: DepartmentConfig[],
 ): RoutingResult | null {
@@ -256,7 +259,10 @@ export function comDispatch(
  * @returns RoutingResult or null if no agent is available
  */
 export function routeTask(
-  task: Pick<Task, 'title' | 'description' | 'priority' | 'workspace_id'> & { department?: string },
+  task: Pick<Task, 'title' | 'description' | 'priority'> & {
+    workspace_id?: string | null;
+    department?: string;
+  },
 ): RoutingResult | null {
   const departments = loadDepartments();
   const agents = fetchAgentsWithLoad(task.workspace_id ?? undefined);

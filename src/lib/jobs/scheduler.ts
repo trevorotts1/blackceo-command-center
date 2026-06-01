@@ -18,6 +18,8 @@
 import * as cron from 'node-cron';
 import { refreshModels } from './refresh-models';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
+import { runExecutionCompletionReconcile } from './execution-watcher';
+import { runCeoDelegationSweep } from './ceo-delegation-sweep';
 
 export interface RegisteredJob {
   name: string;
@@ -120,6 +122,22 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void> }> = [
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
   { name: 'usage-refresh', expr: '0 */6 * * *', fn: runUsageRefresh },
   { name: 'memory-index', expr: '0 * * * *', fn: runMemoryIndexRebuild },
+
+  // --- OPTIONAL SAFETY NETS (B2 / B8) ----------------------------------------
+  // These two are NOT the primary mechanism. The primary B2 path is the instant
+  // agent-completion webhook (which now broadcasts task_updated immediately),
+  // and the primary B4/B8 path is in-process routing in createTaskCore. These
+  // crons only catch DROPPED events / pre-existing backlog. To disable, delete
+  // the entry here (or set EXECUTION_WATCHER_ENABLED=0 /
+  // CEO_DELEGATION_SWEEP_ENABLED=0). Kept low-frequency on purpose.
+  //
+  // execution-reconcile: every 2 minutes, catch in_progress tasks whose
+  // TASK_COMPLETE report never reached the webhook.
+  { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
+  // ceo-delegation: every 5 minutes, push CEO-stranded backlog tasks down to
+  // the right department (mostly relevant for tasks created before in-process
+  // routing shipped).
+  { name: 'ceo-delegation', expr: '*/5 * * * *', fn: async () => { runCeoDelegationSweep(); } },
 ];
 
 /**

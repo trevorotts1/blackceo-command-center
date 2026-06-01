@@ -1,3 +1,7 @@
+## v4.1.11 - 2026-06-01 - Command Center audit fixes (B1-B8) + edge-build
+
+- B6 SOP/role-library auto-seed on boot (instrumentation hook); B7 campaign board filter; B2 instant card auto-move via SSE + optional backstop; B4/B8 in-process routing + CEO delegation; B3 app-wide interactive walkthrough; B1 model-pill honesty (gateway rejects per-msg model override). Edge-runtime stubs for node-only instrumentation deps. Build green.
+
 ## [v4.1.10] - 2026-05-31 - Fix ZHC role/SOP library ingestion path mismatch (org-chart, persona-matrix, governing-personas)
 
 Patch release. Fixes a fleet-wide latent bug that hid a fully built AI workforce: three dashboard read routes probed the **pre-v9.6.0 flat layout** for the client's Zero-Human-Company library, but Skill 23 (`build-workforce.py`) has written the **v9.6.0+ per-company layout** for many releases. So a client whose role/SOP/persona library was fully built still saw "It will be generated after running Skill 23 (AI Workforce Blueprint)" — the library never showed up correctly.

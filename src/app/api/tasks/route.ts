@@ -17,10 +17,12 @@ export async function GET(request: NextRequest) {
     const assignedAgentId = searchParams.get('assigned_agent_id');
     const department = searchParams.get('department');
     const departmentId = searchParams.get('department_id');
+    const campaignId = searchParams.get('campaign_id');
 
     let sql = `
       SELECT
         t.*,
+        t.workspace_id as department_id,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji,
         ca.name as created_by_agent_name,
@@ -67,6 +69,13 @@ export async function GET(request: NextRequest) {
       // department_id maps to workspace_id (workspaces = departments)
       sql += ' AND t.workspace_id = ?';
       params.push(departmentId);
+    }
+    if (campaignId) {
+      // Campaign board (/campaigns/[id]) filters tasks to one campaign. The
+      // tasks.campaign_id column exists (migration 017) but was never wired as
+      // a query filter, so the board previously received EVERY task. (B7)
+      sql += ' AND t.campaign_id = ?';
+      params.push(campaignId);
     }
 
     sql += ' ORDER BY t.created_at DESC';
