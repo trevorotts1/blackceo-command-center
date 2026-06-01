@@ -21,7 +21,7 @@
  *      safer fallback for any host that does not match the VPS marker.
  */
 
-import { existsSync } from 'fs';
+import { existsSync, readdirSync, statSync } from 'fs';
 import os from 'os';
 import path from 'path';
 
@@ -134,4 +134,102 @@ export function deviceIdentityDir(): string {
  */
 export function legacyDeviceIdentityDir(): string {
   return path.join(os.homedir(), '.mission-control', 'identity');
+}
+
+/**
+ * Ordered list of base directories that may hold a client's Zero-Human-Company
+ * library (org chart, persona matrix, per-department governing-personas, role
+ * folders). Skill 23 (`build-workforce.py`) writes this library; the dashboard
+ * READS it. The two must agree on the layout or the dashboard shows "not built
+ * yet" against a fully built workforce.
+ *
+ * The single source of truth is Skill 23's path resolution. Since v9.6.0 the
+ * canonical company root is:
+ *
+ *     <vaultRoot>/zero-human-company/<company-slug>/
+ *
+ * with `ORG-CHART.md` + `persona-matrix.md`* + `departments.json` at the company
+ * root and `departments/<dept-id>/governing-personas.md` underneath. (Older
+ * pre-v9.6.0 builds wrote a flat `<vaultRoot>/departments/<dept-id>/` layout and
+ * top-level `<vaultRoot>/ORG-CHART.md`; we keep those as fallbacks so a legacy
+ * box is never regressed.)
+ *
+ * *Skill 23 currently writes `persona-matrix.md` into the per-company
+ * `departments/` subfolder, so that location is included below.
+ *
+ * Resolution precedence (highest first):
+ *   1. `OPENCLAW_COMPANY_ROOT` env var — an installer can pin the exact company
+ *      folder. Used as-is (it already points AT `<...>/zero-human-company/<slug>`).
+ *   2. Every `<root>/zero-human-company/<slug>/` discovered under each ZHC root,
+ *      most-recently-modified first (matches sync-departments-from-build-state.py).
+ *   3. Legacy flat `<root>/` (pre-v9.6.0) so old installs still resolve.
+ *
+ * ZHC roots, per platform (mirrors Skill 23 `WORKSPACE_ROOT` + VPS workspace):
+ *   - Mac Mini:   `~/clawd`
+ *   - VPS Docker: `/data/.openclaw/workspace`  (plus `~/clawd` as a safety net)
+ *
+ * `WORKSPACE_BASE_PATH` (when set) is honored as an additional explicit root.
+ *
+ * Returns absolute directory paths; callers append the file they want and probe
+ * each in order (first existing wins).
+ */
+export function zhcLibraryBaseDirs(): string[] {
+  const homedir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+
+  // ZHC roots that may contain a `zero-human-company/<slug>` tree.
+  const zhcRoots: string[] = [];
+  if (detectPlatform() === 'vps-docker') {
+    zhcRoots.push('/data/.openclaw/workspace');
+  }
+  zhcRoots.push(path.join(homedir, 'clawd'));
+  zhcRoots.push(path.join(homedir, '.openclaw', 'workspace'));
+  if (process.env.WORKSPACE_BASE_PATH && process.env.WORKSPACE_BASE_PATH.trim()) {
+    zhcRoots.unshift(
+      path.resolve(process.env.WORKSPACE_BASE_PATH.replace(/^~/, homedir))
+    );
+  }
+
+  const dirs: string[] = [];
+  const push = (d: string) => {
+    if (d && !dirs.includes(d)) dirs.push(d);
+  };
+
+  // 1. Explicit company-root override (already points at the <slug> folder).
+  const companyRoot = process.env.OPENCLAW_COMPANY_ROOT;
+  if (companyRoot && companyRoot.trim()) {
+    push(path.resolve(companyRoot.trim()));
+  }
+
+  // 2. Canonical v9.6.0+ per-company folders, most-recently-modified first.
+  type Found = { dir: string; mtime: number };
+  const found: Found[] = [];
+  for (const root of zhcRoots) {
+    for (const containerName of ['zero-human-company', 'zhc']) {
+      const container = path.join(root, containerName);
+      let entries: string[] = [];
+      try {
+        if (!existsSync(container)) continue;
+        entries = readdirSync(container);
+      } catch {
+        continue;
+      }
+      for (const slug of entries) {
+        if (slug.startsWith('.')) continue;
+        const companyDir = path.join(container, slug);
+        try {
+          const st = statSync(companyDir);
+          if (st.isDirectory()) found.push({ dir: companyDir, mtime: st.mtimeMs });
+        } catch {
+          /* skip */
+        }
+      }
+    }
+  }
+  found.sort((a, b) => b.mtime - a.mtime);
+  for (const f of found) push(f.dir);
+
+  // 3. Legacy pre-v9.6.0 flat layout: the ZHC root itself.
+  for (const root of zhcRoots) push(root);
+
+  return dirs;
 }

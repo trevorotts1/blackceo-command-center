@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { readFile } from 'fs/promises';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { existsSync } from 'fs';
+import { zhcLibraryBaseDirs } from '@/lib/platform';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -9,19 +10,17 @@ export const revalidate = 0;
 /**
  * GET /api/org-chart
  *
- * Reads ORG-CHART.md from the CEO workspace.
+ * Reads ORG-CHART.md from the client's Zero-Human-Company library.
+ * Skill 23 (build-workforce.py) writes it to the per-company root since
+ * v9.6.0 (`<root>/zero-human-company/<slug>/ORG-CHART.md`); pre-v9.6.0 builds
+ * wrote a top-level `<root>/ORG-CHART.md`. zhcLibraryBaseDirs() yields both,
+ * canonical-first, and is platform-aware (Mac `~/clawd` vs VPS
+ * `/data/.openclaw/workspace`), so a built workforce resolves on either box.
+ *
  * Returns the raw markdown content for display in the Command Center.
  */
 export async function GET() {
-  const homedir = process.env.HOME || process.env.USERPROFILE || '/root';
-  const workspaceBase = process.env.WORKSPACE_BASE_PATH
-    ? resolve(process.env.WORKSPACE_BASE_PATH.replace(/^~/, homedir))
-    : join(homedir, 'clawd');
-
-  const candidatePaths = [
-    join(homedir, 'clawd', 'ORG-CHART.md'),
-    join(workspaceBase, 'ORG-CHART.md'),
-  ];
+  const candidatePaths = zhcLibraryBaseDirs().map((base) => join(base, 'ORG-CHART.md'));
 
   let filePath: string | null = null;
   for (const candidate of candidatePaths) {

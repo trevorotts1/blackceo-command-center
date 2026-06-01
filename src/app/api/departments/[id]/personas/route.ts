@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readFile } from 'fs/promises';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { existsSync } from 'fs';
+import { zhcLibraryBaseDirs } from '@/lib/platform';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -9,10 +10,16 @@ export const revalidate = 0;
 /**
  * GET /api/departments/[id]/personas
  *
- * Reads governing-personas.md from the department workspace.
- * Searches for the file in this order:
- *   1. ~/clawd/departments/[dept-id]/governing-personas.md
- *   2. WORKSPACE_BASE_PATH/departments/[dept-id]/governing-personas.md
+ * Reads governing-personas.md for a department from the client's Zero-Human-
+ * Company library. Skill 23 (build-workforce.py) writes it to
+ * `<root>/zero-human-company/<slug>/departments/<dept-id>/governing-personas.md`
+ * since v9.6.0 (pre-v9.6.0 used the flat `<root>/departments/<dept-id>/`).
+ *
+ * The dashboard's department id can arrive in several shapes, so we probe each:
+ *   - bare canonical id (Skill 23's folder name, e.g. `customer-support`)
+ *   - `dept-`-prefixed id (the shape stored in departments.json / workspaces)
+ *   - legacy `<id>-dept` suffixed folder
+ * crossed with every ZHC base dir (canonical-first, platform-aware).
  *
  * Returns the raw markdown content and a parsed summary of persona names.
  */
@@ -38,21 +45,22 @@ export async function GET(
     );
   }
 
-  const homedir = process.env.HOME || process.env.USERPROFILE || '/root';
-  const workspaceBase = process.env.WORKSPACE_BASE_PATH
-    ? resolve(process.env.WORKSPACE_BASE_PATH.replace(/^~/, homedir))
-    : join(homedir, 'clawd');
+  // Normalize to the set of folder names Skill 23 / the dashboard might use.
+  // Skill 23's folder name is the BARE canonical id (no `dept-` prefix, no
+  // `-dept` suffix). departments.json stores `dept-<id>`; the workspaces table
+  // stores the bare id (the sync script strips `dept-`). We also keep the
+  // legacy `<id>-dept` folder shape for very old installs.
+  const bare = safeId.replace(/^dept-/, '').replace(/-dept$/, '');
+  const folderNames = Array.from(
+    new Set([bare, `dept-${bare}`, `${bare}-dept`, safeId])
+  );
 
-  // Department folder uses -dept suffix
-  const deptSlug = safeId.endsWith('-dept') ? safeId : `${safeId}-dept`;
-
-  const candidatePaths = [
-    join(homedir, 'clawd', 'departments', deptSlug, 'governing-personas.md'),
-    join(workspaceBase, 'departments', deptSlug, 'governing-personas.md'),
-    // Also check without -dept suffix for flexibility
-    join(homedir, 'clawd', 'departments', safeId, 'governing-personas.md'),
-    join(workspaceBase, 'departments', safeId, 'governing-personas.md'),
-  ];
+  const candidatePaths: string[] = [];
+  for (const base of zhcLibraryBaseDirs()) {
+    for (const folder of folderNames) {
+      candidatePaths.push(join(base, 'departments', folder, 'governing-personas.md'));
+    }
+  }
 
   let filePath: string | null = null;
   for (const candidate of candidatePaths) {
