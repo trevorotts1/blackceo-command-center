@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { X, Save, Trash2, Activity, Package, Bot, ClipboardList, Plus } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
@@ -9,6 +9,7 @@ import { DeliverablesList } from './DeliverablesList';
 import { SessionsList } from './SessionsList';
 import { PlanningTab } from './PlanningTab';
 import { AgentModal } from './AgentModal';
+import { MicDictateButton } from './MicDictateButton';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -24,6 +25,10 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [usePlanningMode, setUsePlanningMode] = useState(false);
+  // Track in-flight interim dictation text so we can replace it cleanly
+  // when the final transcript arrives, without duplicating words.
+  const titleInterimRef = useRef('');
+  const descInterimRef = useRef('');
   // Auto-switch to planning tab if task has planning session
   const [activeTab, setActiveTab] = useState<TabType>(task?.planning_session_key ? 'planning' : 'overview');
 
@@ -374,19 +379,67 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
           {/* Title */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-            <input
-              type="text"
-              value={form.title}
-              onChange={(e) => setForm({ ...form, title: e.target.value })}
-              required
-              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-              placeholder="What needs to be done?"
-            />
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={form.title}
+                onChange={(e) => setForm({ ...form, title: e.target.value })}
+                required
+                className="flex-1 bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                placeholder="What needs to be done?"
+              />
+              <MicDictateButton
+                label="Dictate title"
+                disabled={isSubmitting}
+                onTranscript={(text, isFinal) => {
+                  setForm((prev) => {
+                    // Strip the previous interim chunk (if any) from the end of
+                    // the current value, then append the new text.
+                    const base = titleInterimRef.current
+                      ? prev.title.endsWith(titleInterimRef.current)
+                        ? prev.title.slice(0, prev.title.length - titleInterimRef.current.length)
+                        : prev.title
+                      : prev.title;
+                    const separator = base && !base.endsWith(' ') ? ' ' : '';
+                    const next = base + separator + text;
+                    if (isFinal) {
+                      titleInterimRef.current = '';
+                    } else {
+                      titleInterimRef.current = text;
+                    }
+                    return { ...prev, title: next };
+                  });
+                }}
+              />
+            </div>
           </div>
 
           {/* Description */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium text-gray-700">Description</label>
+              <MicDictateButton
+                label="Dictate description"
+                disabled={isSubmitting}
+                onTranscript={(text, isFinal) => {
+                  setForm((prev) => {
+                    const base = descInterimRef.current
+                      ? prev.description.endsWith(descInterimRef.current)
+                        ? prev.description.slice(0, prev.description.length - descInterimRef.current.length)
+                        : prev.description
+                      : prev.description;
+                    const separator = base && !base.endsWith(' ') && !base.endsWith('\n') ? ' ' : '';
+                    const next = base + separator + text;
+                    if (isFinal) {
+                      descInterimRef.current = '';
+                    } else {
+                      descInterimRef.current = text;
+                    }
+                    return { ...prev, description: next };
+                  });
+                }}
+              />
+            </div>
             <textarea
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
