@@ -1,3 +1,7 @@
+## v4.1.12 - 2026-06-01 - Speech-to-text on Kanban new-task input
+
+- MicDictateButton (browser Web Speech API) wired into TaskModal title + description fields; graceful degradation on unsupported browsers; no new deps. Build green.
+
 ## v4.1.11 - 2026-06-01 - Command Center audit fixes (B1-B8) + edge-build
 
 - B6 SOP/role-library auto-seed on boot (instrumentation hook); B7 campaign board filter; B2 instant card auto-move via SSE + optional backstop; B4/B8 in-process routing + CEO delegation; B3 app-wide interactive walkthrough; B1 model-pill honesty (gateway rejects per-msg model override). Edge-runtime stubs for node-only instrumentation deps. Build green.
