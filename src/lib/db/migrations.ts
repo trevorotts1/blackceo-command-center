@@ -11,6 +11,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { seedStarterSOPs } from '../sops-seed';
 
 interface Migration {
   id: string;
@@ -1590,6 +1591,44 @@ export function runMigrations(db: Database.Database): void {
 
   // Auto-seed from departments.json if workspaces table is empty
   autoSeedFromDepartmentsJson(db);
+
+  // Auto-seed the starter SOP library (B6). Chained here — the same first-boot /
+  // DB-init path where the Skill-23 workspace auto-seed runs — so the role
+  // library (workspaces/agents) AND the SOPs load together exactly where the
+  // client runs Skill 23. Previously the SOPs loaded ONLY via the manual
+  // `npm run db:seed:sops` script, so a fresh box had an empty SOP table and the
+  // Triad Rule silently blocked every task. seedStarterSOPs is idempotent
+  // (skips existing slugs) so it is safe on every boot.
+  autoSeedStarterSOPs(db);
+}
+
+// Auto-seed starter SOPs on boot (B6). Non-fatal: a missing `sops` table or any
+// seed error never blocks app startup — it just logs.
+function autoSeedStarterSOPs(db: Database.Database) {
+  try {
+    const hasTable = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sops'")
+      .get();
+    if (!hasTable) {
+      console.log('[Auto-seed SOPs] Skipped: sops table not present yet');
+      return;
+    }
+    const result = seedStarterSOPs(db);
+    if (result.inserted > 0) {
+      console.log(
+        `[Auto-seed SOPs] Seeded starter SOP library: inserted ${result.inserted}, skipped ${result.skipped} (of ${result.total})`
+      );
+    }
+    // Loud warning if a department workspace exists but the SOP table is empty —
+    // the Triad Rule would otherwise silently block the whole board.
+    const sopCount = (db.prepare('SELECT COUNT(*) as c FROM sops WHERE deleted_at IS NULL').get() as { c: number } | undefined)?.c ?? 0;
+    const wsCount = (db.prepare('SELECT COUNT(*) as c FROM workspaces').get() as { c: number } | undefined)?.c ?? 0;
+    if (wsCount > 0 && sopCount === 0) {
+      console.warn('[Auto-seed SOPs] WARNING: workspaces exist but SOP table is EMPTY — the Triad Rule will block every task. Run `npm run db:seed:sops`.');
+    }
+  } catch (err) {
+    console.log('[Auto-seed SOPs] Skipped:', (err as Error).message);
+  }
 }
 
 /**

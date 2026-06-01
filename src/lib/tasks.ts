@@ -21,6 +21,7 @@ import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { selectPersonaForTask } from '@/lib/persona-selector';
 import { getBestSOPForTask } from '@/lib/sops';
+import { routeTask } from '@/lib/routing/department-router';
 import type { Task, TaskPriority, Agent } from '@/lib/types';
 
 export interface CreateTaskCoreInput {
@@ -107,6 +108,64 @@ export async function createTaskCore(
       now,
     ]
   );
+
+  // --- INSTANT IN-PROCESS ROUTING (B4 / B8) ---
+  // If no agent was explicitly assigned (UI quick-add, or any inbound
+  // Telegram/Discord/Slack task via /api/tasks/ingest which always lands
+  // unassigned), route by CONTENT the moment the task is created instead of
+  // dumping it unassigned in the CEO/workspace backlog.
+  //
+  // routeTask() is a synchronous in-process DB function (no HTTP hop, no
+  // gateway round-trip), so this adds no latency and supersedes the broken
+  // `/api/webhooks/task-created` HTTP-to-gateway notify (which targeted a WS
+  // URL with an HTTP shape and silently no-op'd).
+  //
+  // Safe-fallback chain (all inside comDispatch): explicit department tag →
+  // keyword score → least-loaded role-fit agent → least-loaded master/CEO
+  // agent. If routeTask returns null (no agents seeded yet), we leave the task
+  // unassigned in backlog — the correct human-review fallback, identical to the
+  // prior ingest behavior. The CEO is thus a dispatcher, not a dumping ground:
+  // a task only stays on the CEO when it genuinely scores to a master agent.
+  let resolvedAgentId: string | null = input.assigned_agent_id || null;
+  let routedDepartment: string | null = input.department || null;
+  let routedReason: string | null = null;
+  if (!resolvedAgentId) {
+    try {
+      // Pass workspace_id: null so routeTask considers agents across ALL
+      // departments, not just the workspace the task happened to land in. This
+      // is what lets a CEO/default-landed inbound task get delegated DOWN to
+      // the right department (B8) instead of staying stuck on the CEO. The
+      // winning department is stamped back onto the task below.
+      const routing = routeTask({
+        title: input.title,
+        description: input.description ?? '',
+        priority: (input.priority as TaskPriority) || 'medium',
+        workspace_id: null,
+        department: input.department ?? undefined,
+      });
+      if (routing) {
+        resolvedAgentId = routing.agentId;
+        routedDepartment = routing.department || routedDepartment;
+        routedReason = routing.reason;
+        run(
+          `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
+          [resolvedAgentId, routedDepartment, now, id]
+        );
+        // Surface the routing decision so an operator can see why a task moved
+        // (comDispatch already produces a human-readable reason string).
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), 'task_dispatched', resolvedAgentId, id, `Auto-routed: ${routedReason}`, now]
+        );
+      }
+    } catch (routeErr) {
+      // Never fail task creation on a routing error — the task simply stays
+      // unassigned in backlog for manual triage.
+      console.warn('[createTaskCore] In-process routing failed (non-fatal):', routeErr);
+    }
+  }
+  // --- END INSTANT ROUTING ---
 
   // Log event. Caller may supply an explicit message (the ingest path embeds
   // its idempotency/provenance marker here).
@@ -196,7 +255,12 @@ export async function createTaskCore(
     });
   }
 
-  // Notify the OpenClaw gateway (auto-routing) asynchronously — don't block.
+  // Notify the OpenClaw gateway asynchronously — don't block.
+  // NOTE (B4): routing now happens IN-PROCESS above via routeTask(), so this
+  // outbound notify is no longer the routing mechanism (the old
+  // /api/webhooks/task-created HTTP-to-WS-gateway call was a silent no-op). It
+  // is retained only as a best-effort "a task exists" announcement and is fully
+  // non-fatal; routing does not depend on it.
   if (task && options.notifyGateway !== false) {
     const origin =
       options.origin || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:4000';

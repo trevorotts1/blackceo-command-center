@@ -193,8 +193,23 @@ When complete, reply with:
 
 If you need help or clarification, ask the orchestrator.`;
 
-    // Send message to agent's session using chat.send
-    // Include resolved model so OpenClaw gateway can route to the correct model
+    // Send message to agent's session using chat.send.
+    //
+    // GATEWAY CONTRACT (verified against installed OpenClaw 2026.5.28 source,
+    // dist `ChatSendParamsSchema`): chat.send accepts ONLY
+    //   { sessionKey, sessionId?, message, thinking?, fastMode?, deliver?,
+    //     originating*?, attachments?, timeoutMs?, system*?, idempotencyKey }
+    // with `additionalProperties: false`. It does NOT accept `model` or
+    // `persona`; passing them makes the gateway REJECT the whole call with
+    // INVALID_REQUEST. There is also no operator-callable `sessions.create`
+    // RPC on this version that would let us set the model per session. So the
+    // CC has no supported path to override the model per dispatch — the agent
+    // runs on whatever model its own openclaw.json/agent config selects.
+    //
+    // The resolved model is therefore communicated to the agent in the task
+    // message body (Agent Model / Agent Persona above) and pinned on the task
+    // as the INTENDED model (see the 🤖 pill relabel in MissionQueue). We do
+    // NOT claim it is the model that actually ran.
     try {
       // Use sessionKey for routing to the agent's session
       // Format: agent:main:{openclaw_session_id}
@@ -203,15 +218,14 @@ If you need help or clarification, ask the orchestrator.`;
         sessionKey,
         message: taskMessage,
         idempotencyKey: `dispatch-${task.id}-${Date.now()}`,
-        // Pass resolved model to gateway — if gateway supports model override
-        // per-message, it will use this. Otherwise it's logged for traceability.
-        model: settings.model,
-        persona: settings.persona,
       });
 
       // Update task status to in_progress, and pin the resolved model_id so
       // the UI (MissionQueue 🤖 pill) and downstream auditing can show which
-      // model this task was actually dispatched against. v4.0.1 P0-7.
+      // model this task was INTENDED to run on. NOTE: this is the model the CC
+      // resolved/requested, not a gateway-confirmed runtime model — the gateway
+      // selects the agent's own configured model (see contract note above). The
+      // pill is labeled accordingly. v4.0.1 P0-7 / B1.
       run(
         'UPDATE tasks SET status = ?, model_id = ?, updated_at = ? WHERE id = ?',
         ['in_progress', settings.model || null, now, id]

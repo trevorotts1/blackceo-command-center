@@ -208,3 +208,16 @@ body {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 }
+
+/* App walkthrough (B3): highlight ring around the element a card points at.
+   Applied by AppWalkthrough.tsx via the .bcc-walkthrough-highlight class. */
+.bcc-walkthrough-highlight {
+  position: relative;
+  z-index: 61; /* above the walkthrough scrim (z-60) so it reads as spotlighted */
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 3px var(--bcc-primary, #2563EB),
+    0 0 0 8px rgba(37, 99, 235, 0.25),
+    0 8px 30px rgba(0, 0, 0, 0.25);
+  transition: box-shadow 0.2s ease;
+}

@@ -2,7 +2,29 @@ import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { createHmac } from 'crypto';
 import { queryOne, queryAll, run } from '@/lib/db';
+import { broadcast } from '@/lib/events';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
+
+/**
+ * Re-fetch a task with joined agent fields and broadcast a `task_updated` SSE
+ * event so the board advances the card instantly (B2). Without this the status
+ * write lands in the DB but no client is told, so the card never moves until a
+ * manual refresh.
+ */
+function broadcastTaskUpdate(taskId: string): void {
+  const updated = queryOne<Task>(
+    `SELECT t.*,
+        aa.name as assigned_agent_name,
+        aa.avatar_emoji as assigned_agent_emoji
+     FROM tasks t
+     LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+     WHERE t.id = ?`,
+    [taskId]
+  );
+  if (updated) {
+    broadcast({ type: 'task_updated', payload: updated });
+  }
+}
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -112,6 +134,9 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // Advance the card on the board instantly (B2).
+      broadcastTaskUpdate(task.id);
+
       return NextResponse.json({
         success: true,
         task_id: task.id,
@@ -193,6 +218,9 @@ export async function POST(request: NextRequest) {
         'UPDATE agents SET status = ?, updated_at = ? WHERE id = ?',
         ['standby', now, session.agent_id]
       );
+
+      // Advance the card on the board instantly (B2).
+      broadcastTaskUpdate(task.id);
 
       return NextResponse.json({
         success: true,

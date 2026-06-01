@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import CommandPalette from '@/components/CommandPalette';
+import AppWalkthrough from '@/components/walkthrough/AppWalkthrough';
 // DemoBanner removed by Track A1 (Wave 1 cleanup). Top header + breadcrumbs
 // handle navigation; AppShell sidebar import also retired.
 // import AppShell from '@/components/AppShell';
@@ -43,6 +44,9 @@ export default function RootLayout({
       <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-screen`}>
         {children}
         <CommandPalette />
+        {/* App-wide interactive walkthrough; mounts once and selects the deck
+            for the current route (B3). */}
+        <AppWalkthrough />
       </body>
     </html>
   );

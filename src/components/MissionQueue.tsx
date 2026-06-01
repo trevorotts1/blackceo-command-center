@@ -252,6 +252,7 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
         </div>
         <div className="flex items-center gap-2 lg:gap-3 w-full lg:w-auto justify-end">
           <button
+            data-walkthrough="new-task"
             onClick={() => setShowCreateModal(true)}
             className="flex items-center gap-1.5 lg:gap-2 px-3 lg:px-5 py-2 lg:py-2.5 rounded-xl bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 transition-all shadow-md shadow-brand-200"
           >
@@ -263,7 +264,7 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
       </header>
 
       {/* Filter Tabs */}
-      <div className="bg-white px-4 lg:px-8 py-3 lg:py-3.5 border-b border-gray-100 flex flex-col sm:flex-row items-start sm:items-center justify-between shrink-0 gap-3 sm:gap-0">
+      <div data-walkthrough="filters" className="bg-white px-4 lg:px-8 py-3 lg:py-3.5 border-b border-gray-100 flex flex-col sm:flex-row items-start sm:items-center justify-between shrink-0 gap-3 sm:gap-0">
         <div className="flex items-center gap-1 lg:gap-2 overflow-x-auto w-full sm:w-auto pb-2 sm:pb-0 -mx-4 sm:mx-0 px-4 sm:px-0">
           {filters.map((filter) => (
             <button
@@ -295,6 +296,7 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
             return (
               <div
                 key={column.id}
+                data-walkthrough={`column-${column.id}`}
                 className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
                 onDragOver={handleDragOver}
                 onDrop={(e) => handleDrop(e, column.id)}
@@ -540,6 +542,12 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
  * (falls back to raw model_id, then to a dimmed "no model" placeholder when
  * the task has not been dispatched yet).
  *
+ * IMPORTANT (B1): this shows the model the Command Center RESOLVED/INTENDED for
+ * the dispatch, NOT a gateway-confirmed runtime model. The OpenClaw gateway
+ * (verified against 2026.5.28) selects the agent's own configured model and
+ * exposes no per-dispatch model override to the operator client, so the pill is
+ * labeled "intended" to stay honest about what actually ran.
+ *
  * Click navigates to /settings/intelligence?focus={model_id} so the operator
  * can drill into pricing/capabilities. Hover shows full name, provider, and
  * cost-per-million if those fields are joined in from model_registry.
@@ -555,7 +563,7 @@ function ModelPill({ task }: { task: Task }) {
     return (
       <span
         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-400 italic"
-        title="No model resolved yet. Dispatch the task to pin a model."
+        title="No intended model resolved yet. Dispatch the task to pin the model the Command Center will request."
       >
         🤖 no model
       </span>
@@ -565,6 +573,7 @@ function ModelPill({ task }: { task: Task }) {
   const label = task.model_label || task.model_id;
 
   const tooltipParts: string[] = [];
+  tooltipParts.push('Intended model (CC-resolved; gateway runs the agent\'s configured model)');
   tooltipParts.push(task.model_label ? `${task.model_label} (${task.model_id})` : task.model_id);
   if (task.model_provider) tooltipParts.push(`Provider: ${task.model_provider}`);
   if (typeof task.model_input_cost_per_million === 'number') {
