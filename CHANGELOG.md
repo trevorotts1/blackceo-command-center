@@ -1,3 +1,29 @@
+## [v4.1.10] - 2026-05-31 - Fix ZHC role/SOP library ingestion path mismatch (org-chart, persona-matrix, governing-personas)
+
+Patch release. Fixes a fleet-wide latent bug that hid a fully built AI workforce: three dashboard read routes probed the **pre-v9.6.0 flat layout** for the client's Zero-Human-Company library, but Skill 23 (`build-workforce.py`) has written the **v9.6.0+ per-company layout** for many releases. So a client whose role/SOP/persona library was fully built still saw "It will be generated after running Skill 23 (AI Workforce Blueprint)" — the library never showed up correctly.
+
+### The bug (verified against Skill 23 source on `trevorotts1/openclaw-onboarding`)
+
+Skill 23 writes the library to the per-company root:
+- `ORG-CHART.md`            → `<root>/zero-human-company/<slug>/ORG-CHART.md`
+- `persona-matrix.md`       → `<root>/zero-human-company/<slug>/departments/persona-matrix.md`
+- `governing-personas.md`   → `<root>/zero-human-company/<slug>/departments/<dept-id>/governing-personas.md` (bare canonical dept id, e.g. `customer-support` — **no** `-dept` suffix)
+
+The three CC routes instead hardcoded the legacy flat paths:
+- `GET /api/org-chart`                     → only `<root>/ORG-CHART.md`
+- `GET /api/persona-matrix`                → only `<root>/persona-matrix.md`
+- `GET /api/departments/[id]/personas`     → only `<root>/departments/<id>-dept/governing-personas.md`
+
+Three independent mismatches: (1) the per-company `zero-human-company/<slug>/` folder was never searched; (2) `persona-matrix.md` actually lives in the per-company `departments/` subfolder; (3) the department folder uses the bare canonical id, not the legacy `<id>-dept` suffix. None of the routes were platform-aware either, so on a VPS box they ignored `/data/.openclaw/workspace`.
+
+### The fix (additive, non-destructive)
+
+- New `zhcLibraryBaseDirs()` helper in `src/lib/platform.ts` — the single source of truth for where the ZHC library lives. Returns ordered candidate base dirs: `OPENCLAW_COMPANY_ROOT` override → every `<root>/zero-human-company/<slug>/` (most-recently-modified first, matching `sync-departments-from-build-state.py`) → legacy flat `<root>/`. Platform-aware (Mac `~/clawd` vs VPS `/data/.openclaw/workspace`), honors `WORKSPACE_BASE_PATH`.
+- The three routes now resolve files against `zhcLibraryBaseDirs()`, probing canonical-first with the legacy paths retained as fallbacks — so a v9.6.0+ build resolves correctly while pre-v9.6.0 installs are never regressed. The governing-personas route normalizes the incoming dept id to all of `<bare>`, `dept-<bare>`, `<bare>-dept`.
+- 3 new unit tests (`tests/unit/zhc-library-paths.test.ts`): canonical resolution + precedence over the flat root, `OPENCLAW_COMPANY_ROOT` override, and legacy-flat fallback.
+
+No schema change, no client data touched, universal across the fleet. A client whose dashboard already redeployed will need to redeploy again to pick this up (per the per-box deploy model).
+
 ## [v4.1.9] - 2026-05-30 - Fix fleet-wide missing kpi_snapshots table (migration 047)
 
 Patch release. Fixes a fleet-wide latent bug: the `kpi_snapshots` table was consumed by three code paths but created by no migration, so every Command Center deployment threw `no such table: kpi_snapshots` the moment a KPI page was touched. One additive, idempotent DB migration; zero personal/client data — universal across the fleet.
