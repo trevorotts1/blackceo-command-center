@@ -17,10 +17,13 @@
  * source of truth.
  */
 import { randomUUID } from 'crypto';
-import fs from 'fs/promises';
-import path from 'path';
 import { queryAll, queryOne, run } from '@/lib/db';
-import { vaultRoot } from '@/lib/platform';
+import { writeClientFile, isRemoteError } from '@/lib/operator/client-fs';
+import {
+  getClientContext,
+  clientToOpenClawTarget,
+} from '@/lib/clients';
+import { getOpenClawClient } from '@/lib/openclaw/client';
 
 export interface GoalRow {
   id: string;
@@ -172,21 +175,28 @@ export function deleteGoal(id: string): boolean {
 }
 
 /**
- * Render the current DB state to markdown checklist files in the vault.
- * Writes a top-level `goals.md` with everything and per-category subfiles.
- * Best-effort: returns the list of files written (or empty on error).
+ * Render the current DB state to markdown checklist files in the SELECTED
+ * client's workspace. Writes a top-level `goals.md` with everything and
+ * per-category subfiles.
+ *
+ * PER-CLIENT (E12): like the journal mirror, the goals land in the selected
+ * client agent's OWN workspace (local fs for self, SSH tunnel for a remote
+ * client) so the agent's memory crawler picks them up. Best-effort: returns the
+ * list of files written (or empty on error / down tunnel).
  */
 export async function writeVaultMirror(): Promise<string[]> {
   const written: string[] = [];
   try {
-    const root = vaultRoot();
     const goals = listGoals();
 
     // Top-level master file.
-    const masterPath = path.join(root, 'goals.md');
-    await fs.mkdir(path.dirname(masterPath), { recursive: true });
-    await fs.writeFile(masterPath, renderMarkdown(goals, 'All goals'), 'utf8');
-    written.push(masterPath);
+    const master = await writeClientFile('vault-root', 'goals.md', renderMarkdown(goals, 'All goals'));
+    if (master && !isRemoteError(master)) {
+      written.push(master.absPath);
+    } else if (master && isRemoteError(master)) {
+      console.error('[goals] writeVaultMirror remote failed:', master.reason);
+      return written; // tunnel down — skip the subfiles too
+    }
 
     // Per-category subfiles.
     const byCategory = new Map<string, Goal[]>();
@@ -198,15 +208,118 @@ export async function writeVaultMirror(): Promise<string[]> {
     }
     for (const [category, items] of Array.from(byCategory.entries())) {
       const safe = category.toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '') || 'uncategorized';
-      const subPath = path.join(root, 'goals', `${safe}.md`);
-      await fs.mkdir(path.dirname(subPath), { recursive: true });
-      await fs.writeFile(subPath, renderMarkdown(items, `Goals: ${category}`), 'utf8');
-      written.push(subPath);
+      const sub = await writeClientFile('vault-root', `goals/${safe}.md`, renderMarkdown(items, `Goals: ${category}`));
+      if (sub && !isRemoteError(sub)) written.push(sub.absPath);
     }
   } catch (err) {
     console.error('[goals] writeVaultMirror failed:', err);
   }
   return written;
+}
+
+// ---- AI step (E12): goals → client agent dispatch context -----------------
+
+/**
+ * Build a compact, plain-text context block listing the SELECTED client's
+ * ACTIVE (incomplete) goals. Feature clusters that dispatch a turn to the
+ * client agent (Bridge, Call mode) prepend this so the agent always knows what
+ * the operator is currently driving toward — the "inject active goals into the
+ * client agent dispatch context" half of E12.
+ *
+ * Returns an empty string when there are no active goals, so callers can
+ * unconditionally prepend it.
+ */
+export function buildGoalsContext(opts: { max?: number } = {}): string {
+  const max = Math.max(1, Math.min(50, opts.max ?? 12));
+  let active: Goal[];
+  try {
+    active = listGoals({ completed: false });
+  } catch {
+    return '';
+  }
+  if (active.length === 0) return '';
+  const shown = active.slice(0, max);
+  const lines: string[] = [];
+  lines.push('## Active goals (operator context)');
+  lines.push('These are the operator\'s current open goals. Keep them in mind and');
+  lines.push('flag anything in this turn that moves one forward or blocks it.');
+  lines.push('');
+  for (const g of shown) {
+    const cat = g.category ? ` [${g.category}]` : '';
+    lines.push(`- ${g.title}${cat}`);
+  }
+  if (active.length > shown.length) {
+    lines.push(`- ...and ${active.length - shown.length} more`);
+  }
+  return lines.join('\n');
+}
+
+export interface OnTrackResult {
+  ok: boolean;
+  /** The agent's plain-text assessment, when it returned one. */
+  assessment?: string;
+  /** Number of active goals considered. */
+  activeGoals: number;
+  reason?: string;
+}
+
+/**
+ * Periodic on-track check (E12): dispatch the active-goals context to the
+ * SELECTED client's OpenClaw agent and ask for a short "are we on track?"
+ * assessment. Designed to be called from a cron / scheduled job (it resolves
+ * the client itself and never throws).
+ *
+ * Uses `getOpenClawClient(clientToOpenClawTarget(client))` so a remote client's
+ * gateway (with CF-Access headers) is targeted, not the loopback. A down
+ * gateway returns `{ ok: false, reason }` rather than throwing.
+ */
+export async function goalsOnTrackCheck(): Promise<OnTrackResult> {
+  const active = (() => {
+    try {
+      return listGoals({ completed: false });
+    } catch {
+      return [] as Goal[];
+    }
+  })();
+  if (active.length === 0) {
+    return { ok: true, activeGoals: 0, assessment: 'No active goals to check.' };
+  }
+
+  const client = getClientContext();
+  if (!client) {
+    return { ok: false, activeGoals: active.length, reason: 'no client selected' };
+  }
+
+  const context = buildGoalsContext({ max: 25 });
+  const prompt =
+    `${context}\n\n` +
+    'Briefly assess whether the operator is on track against these goals based ' +
+    'on recent activity in your workspace. Reply in 3 to 5 sentences: what is ' +
+    'progressing, what is stalled, and the single most useful next action. Do ' +
+    'not use em dashes.';
+
+  try {
+    const oc = getOpenClawClient(clientToOpenClawTarget(client));
+    if (!oc.isConnected()) {
+      await oc.connect();
+    }
+    // One-shot dispatch keyed on a stable per-client session id so the check
+    // threads into the agent's own activity log.
+    await oc.sendMessage(`goals-on-track:${client.id}`, prompt);
+    return {
+      ok: true,
+      activeGoals: active.length,
+      assessment:
+        'On-track check dispatched to the client agent. Its assessment will ' +
+        'arrive in the agent activity log.',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      activeGoals: active.length,
+      reason: err instanceof Error ? err.message : 'gateway dispatch failed',
+    };
+  }
 }
 
 function renderMarkdown(goals: Goal[], heading: string): string {

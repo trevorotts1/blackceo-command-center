@@ -1,8 +1,11 @@
 import type { Metadata } from 'next';
 import BridgeChat from '@/components/operator/BridgeChat';
 import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
+import ClientCliStatus from '@/components/operator/ClientCliStatus';
 import { detectPlatform } from '@/lib/platform';
 import { resolveInstallPlatform, visibleBridgeAgents } from '@/lib/bridge/agents';
+import { detectAllClis } from '@/lib/bridge/cli-manager';
+import { getClientContext } from '@/lib/clients';
 
 /**
  * Operator Console / Bridge sub-module page.
@@ -27,12 +30,21 @@ export const metadata: Metadata = {
 // at request time on the actual host, not baked in at build time.
 export const dynamic = 'force-dynamic';
 
-export default function OperatorBridgePage() {
+export default async function OperatorBridgePage() {
   // Compute the visible agents server-side: on a VPS install the six Mac
   // desktop CLIs are hidden, leaving OpenClaw. The list is plain, serializable
   // data so it crosses the server -> client boundary into BridgeChat cleanly.
   const platform = resolveInstallPlatform(detectPlatform);
   const agents = visibleBridgeAgents(platform);
+
+  // E16: detect the agent CLIs (Claude Code, Codex, Antigravity, Hermes,
+  // Gemini, OpenClaw) on the SELECTED client's box WITH versions. For a remote
+  // client this runs over the Cloudflare Access tunnel; failures degrade
+  // softly into a per-CLI error state rather than throwing.
+  const client = getClientContext();
+  const clientName = client?.name ?? 'this box';
+  const clientIsRemote = !!client && !client.is_self;
+  const cliStatuses = await detectAllClis(client).catch(() => []);
 
   return (
     <div className="space-y-5">
@@ -57,6 +69,12 @@ export default function OperatorBridgePage() {
       </header>
 
       <BridgeChat agents={agents} />
+
+      <ClientCliStatus
+        clientName={clientName}
+        isRemote={clientIsRemote}
+        statuses={cliStatuses}
+      />
     </div>
   );
 }

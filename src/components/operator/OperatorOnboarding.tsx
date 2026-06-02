@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * OperatorOnboarding — first-run, re-openable walkthrough overlay (Feature 1).
+ * OperatorOnboarding — element-anchored coach-mark walkthrough (E10 / B3).
  *
  * Mounts once, globally, in the Operator Console layout (mirrors how the root
  * layout mounts <CommandPalette/> once). Behavior:
@@ -15,19 +15,27 @@
  *     The sidebar footer "?" button and each sub-module page's "What is this?"
  *     help button use this event (see OperatorHelpButton.tsx).
  *
- * Overlay pattern mirrors CommandPalette.tsx: framer-motion AnimatePresence,
- * fixed inset-0 z-50 bg-black/40 backdrop-blur-sm, click-scrim-to-close, Escape
- * handler, bcc-* design tokens.
+ * Coach-mark positioning (E10/B3):
+ *   - Each onboarding card carries an optional `target` field that names a
+ *     `[data-walkthrough="<target>"]` element in the sidebar (OperatorSidebar.tsx
+ *     adds data-walkthrough to every nav link).
+ *   - When a target element exists, the popover is positioned adjacent to it
+ *     (below/above/right/left, whichever fits on screen) with a CSS arrow
+ *     pointing at the element, and the element gets a highlight ring.
+ *   - When no target element exists (element not in DOM) the popover falls back
+ *     to the centered-modal layout so the walkthrough still works everywhere.
  *
- * Accessibility (matches the v4.1.x bar / WCAG 2.1 AA):
+ * No new dependencies. Positioning uses getBoundingClientRect + React state.
+ * Framer-motion (already a dep) handles enter/exit animations.
+ *
+ * Accessibility (WCAG 2.1 AA):
  *   - role="dialog" aria-modal="true" with aria-labelledby/aria-describedby.
- *   - Focus is moved into the dialog on open and a focus trap keeps Tab/Shift+Tab
- *     inside; focus is restored to the previously-focused element on close.
- *   - Esc closes. Left/Right arrows move between cards.
- *   - All controls are ≥44px tap targets, text ≥16px, status by icon+label.
+ *   - Focus moves into dialog on open; Tab/Shift+Tab stay inside (focus trap).
+ *   - Esc closes; Left/Right arrows step through cards.
+ *   - All controls are ≥44px tap targets; text ≥14px.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ChevronLeft, ChevronRight, X, Sparkles } from 'lucide-react';
 import type { Platform } from '@/lib/platform';
@@ -40,17 +48,125 @@ interface OpenDetail {
   card?: string;
 }
 
+/** Placement of the popover relative to the anchor element. */
+type Placement = 'below' | 'above' | 'left' | 'right';
+
+interface PopoverPosition {
+  top: number;
+  left: number;
+  placement: Placement;
+}
+
+const HIGHLIGHT_CLASS = 'bcc-walkthrough-highlight';
+const POPOVER_W = 400;
+const POPOVER_MARGIN = 16;
+const ANCHOR_GAP = 14;
+
+function computePosition(
+  anchorRect: DOMRect,
+  popoverH: number,
+  vw: number,
+  vh: number,
+): PopoverPosition {
+  // Operator sidebar is on the left — prefer 'right' then 'below' so the
+  // popover opens to the right of the highlighted sidebar nav item.
+  const candidates: Placement[] = ['right', 'below', 'above', 'left'];
+
+  for (const placement of candidates) {
+    let top = 0;
+    let left = 0;
+
+    if (placement === 'below') {
+      top = anchorRect.bottom + ANCHOR_GAP;
+      left = anchorRect.left + anchorRect.width / 2 - POPOVER_W / 2;
+    } else if (placement === 'above') {
+      top = anchorRect.top - ANCHOR_GAP - popoverH;
+      left = anchorRect.left + anchorRect.width / 2 - POPOVER_W / 2;
+    } else if (placement === 'right') {
+      top = anchorRect.top + anchorRect.height / 2 - popoverH / 2;
+      left = anchorRect.right + ANCHOR_GAP;
+    } else {
+      top = anchorRect.top + anchorRect.height / 2 - popoverH / 2;
+      left = anchorRect.left - ANCHOR_GAP - POPOVER_W;
+    }
+
+    left = Math.max(POPOVER_MARGIN, Math.min(left, vw - POPOVER_W - POPOVER_MARGIN));
+    top = Math.max(POPOVER_MARGIN, Math.min(top, vh - popoverH - POPOVER_MARGIN));
+
+    const fits =
+      top + popoverH <= vh - POPOVER_MARGIN &&
+      top >= POPOVER_MARGIN &&
+      left + POPOVER_W <= vw - POPOVER_MARGIN &&
+      left >= POPOVER_MARGIN;
+
+    if (fits) return { top, left, placement };
+  }
+
+  return {
+    top: Math.max(POPOVER_MARGIN, (vh - popoverH) / 2),
+    left: Math.max(POPOVER_MARGIN, (vw - POPOVER_W) / 2),
+    placement: 'right',
+  };
+}
+
 export default function OperatorOnboarding({ platform }: { platform: Platform }) {
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(0);
+  const [hasTarget, setHasTarget] = useState(false);
+  const [popoverPos, setPopoverPos] = useState<PopoverPosition | null>(null);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
+  const highlightedEl = useRef<HTMLElement | null>(null);
+  const positionRafRef = useRef<number | null>(null);
 
   const cards = ONBOARDING_CARDS;
   const total = cards.length;
 
-  // ---- open / close ------------------------------------------------------
+  // ---- popover positioning -------------------------------------------------
+  const updatePosition = useCallback(() => {
+    const el = highlightedEl.current;
+    const dialog = dialogRef.current;
+    if (!el || !dialog) return;
+    const anchorRect = el.getBoundingClientRect();
+    const popoverH = dialog.offsetHeight || 320;
+    setPopoverPos(computePosition(anchorRect, popoverH, window.innerWidth, window.innerHeight));
+  }, []);
+
+  const schedulePositionUpdate = useCallback(() => {
+    if (positionRafRef.current !== null) cancelAnimationFrame(positionRafRef.current);
+    positionRafRef.current = requestAnimationFrame(() => {
+      updatePosition();
+      positionRafRef.current = null;
+    });
+  }, [updatePosition]);
+
+  // ---- highlight helpers ---------------------------------------------------
+  const clearHighlight = useCallback(() => {
+    if (highlightedEl.current) {
+      highlightedEl.current.classList.remove(HIGHLIGHT_CLASS);
+      highlightedEl.current = null;
+    }
+    setHasTarget(false);
+    setPopoverPos(null);
+  }, []);
+
+  const highlightTarget = useCallback(
+    (target?: string) => {
+      clearHighlight();
+      if (!target) return;
+      const el = document.querySelector<HTMLElement>(`[data-walkthrough="${target}"]`);
+      if (!el) return; // element not in DOM — fall back to centered modal
+      el.classList.add(HIGHLIGHT_CLASS);
+      highlightedEl.current = el;
+      setHasTarget(true);
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+      setTimeout(schedulePositionUpdate, 200);
+    },
+    [clearHighlight, schedulePositionUpdate],
+  );
+
+  // ---- open / close --------------------------------------------------------
   const openAt = useCallback(
     (cardId?: string) => {
       previouslyFocused.current = (document.activeElement as HTMLElement) ?? null;
@@ -62,24 +178,24 @@ export default function OperatorOnboarding({ platform }: { platform: Platform })
       }
       setOpen(true);
     },
-    [cards]
+    [cards],
   );
 
   const close = useCallback(() => {
     setOpen(false);
+    clearHighlight();
     try {
       localStorage.setItem(ONBOARDING_SEEN_KEY, '1');
     } catch {
-      // Private mode / disabled storage — non-fatal; overlay just may re-open.
+      /* private mode — non-fatal */
     }
-    // Restore focus to whatever opened the dialog.
     const el = previouslyFocused.current;
     if (el && typeof el.focus === 'function') {
       requestAnimationFrame(() => el.focus());
     }
-  }, []);
+  }, [clearHighlight]);
 
-  // ---- first-run auto-open ----------------------------------------------
+  // ---- first-run auto-open -------------------------------------------------
   useEffect(() => {
     let seen = false;
     try {
@@ -88,13 +204,12 @@ export default function OperatorOnboarding({ platform }: { platform: Platform })
       seen = false;
     }
     if (!seen) {
-      // Defer one tick so the console paints first (less jarring on first load).
       const t = setTimeout(() => openAt(), 350);
       return () => clearTimeout(t);
     }
   }, [openAt]);
 
-  // ---- re-open via window event -----------------------------------------
+  // ---- re-open via window event --------------------------------------------
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<OpenDetail>).detail;
@@ -104,10 +219,36 @@ export default function OperatorOnboarding({ platform }: { platform: Platform })
     return () => window.removeEventListener(ONBOARDING_OPEN_EVENT, handler as EventListener);
   }, [openAt]);
 
-  // ---- keyboard: Esc / arrows + focus trap ------------------------------
+  // ---- highlight the current card's target whenever index changes ----------
+  const card = cards[index];
+  useEffect(() => {
+    if (!open || !card) return;
+    highlightTarget(card.target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, index]);
+
+  // ---- reposition on scroll / resize ---------------------------------------
+  useEffect(() => {
+    if (!open || !hasTarget) return;
+    const onEvent = () => schedulePositionUpdate();
+    window.addEventListener('resize', onEvent, { passive: true });
+    window.addEventListener('scroll', onEvent, { passive: true, capture: true });
+    return () => {
+      window.removeEventListener('resize', onEvent);
+      window.removeEventListener('scroll', onEvent, { capture: true });
+    };
+  }, [open, hasTarget, schedulePositionUpdate]);
+
+  // ---- recompute after card body repaint -----------------------------------
+  useEffect(() => {
+    if (!open || !hasTarget) return;
+    const t = setTimeout(schedulePositionUpdate, 50);
+    return () => clearTimeout(t);
+  }, [open, index, hasTarget, schedulePositionUpdate]);
+
+  // ---- keyboard: Esc / arrows + focus trap ---------------------------------
   useEffect(() => {
     if (!open) return;
-
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -125,11 +266,10 @@ export default function OperatorOnboarding({ platform }: { platform: Platform })
         return;
       }
       if (e.key === 'Tab') {
-        // Focus trap: keep Tab cycling within the dialog.
         const root = dialogRef.current;
         if (!root) return;
         const focusables = root.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
         );
         if (focusables.length === 0) return;
         const first = focusables[0];
@@ -143,49 +283,98 @@ export default function OperatorOnboarding({ platform }: { platform: Platform })
         }
       }
     };
-
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, close, total]);
 
-  // ---- move initial focus into the dialog on open -----------------------
+  // ---- move initial focus into the dialog on open --------------------------
   useEffect(() => {
     if (!open) return;
     const root = dialogRef.current;
     if (!root) return;
     const focusable = root.querySelector<HTMLElement>(
-      'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])'
+      'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])',
     );
     requestAnimationFrame(() => focusable?.focus());
-  }, [open]);
+  }, [open, index]);
 
-  const card = cards[index];
+  // ---- clean up on unmount -------------------------------------------------
+  useEffect(
+    () => () => {
+      clearHighlight();
+      if (positionRafRef.current !== null) cancelAnimationFrame(positionRafRef.current);
+    },
+    [clearHighlight],
+  );
+
   const isFirst = index === 0;
   const isLast = index === total - 1;
+
+  // Arrow for the coach-mark (CSS border triangle)
+  const arrowStyle = (placement: Placement): CSSProperties => {
+    const base: CSSProperties = { position: 'absolute', width: 0, height: 0, pointerEvents: 'none' };
+    const sz = 8;
+    const fill = 'var(--bcc-white, #ffffff)';
+    const t = 'transparent';
+    if (placement === 'below') return { ...base, top: -sz * 2, left: '50%', transform: 'translateX(-50%)', borderLeft: `${sz}px solid ${t}`, borderRight: `${sz}px solid ${t}`, borderBottom: `${sz * 2}px solid ${fill}` };
+    if (placement === 'above') return { ...base, bottom: -sz * 2, left: '50%', transform: 'translateX(-50%)', borderLeft: `${sz}px solid ${t}`, borderRight: `${sz}px solid ${t}`, borderTop: `${sz * 2}px solid ${fill}` };
+    if (placement === 'right') return { ...base, left: -sz * 2, top: '50%', transform: 'translateY(-50%)', borderTop: `${sz}px solid ${t}`, borderBottom: `${sz}px solid ${t}`, borderRight: `${sz * 2}px solid ${fill}` };
+    return { ...base, right: -sz * 2, top: '50%', transform: 'translateY(-50%)', borderTop: `${sz}px solid ${t}`, borderBottom: `${sz}px solid ${t}`, borderLeft: `${sz * 2}px solid ${fill}` };
+  };
 
   return (
     <AnimatePresence>
       {open && card && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 grid place-items-center p-4 bg-black/40 backdrop-blur-sm"
-          onClick={close}
-        >
+        <>
+          {/* Scrim — dims page; highlighted element (z-61) shows through */}
           <motion.div
+            key="scrim"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm"
+            onClick={close}
+            aria-hidden="true"
+          />
+
+          {/* Coach-mark popover */}
+          <motion.div
+            key={`panel-${index}`}
             ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="operator-onboarding-title"
             aria-describedby="operator-onboarding-body"
-            initial={{ y: 16, opacity: 0, scale: 0.98 }}
-            animate={{ y: 0, opacity: 1, scale: 1 }}
-            exit={{ y: 8, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.97 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 28 }}
             onClick={(e) => e.stopPropagation()}
-            className="w-[min(560px,94vw)] max-h-[88vh] overflow-y-auto rounded-xl border border-bcc-border bg-bcc-white shadow-xl"
+            style={
+              hasTarget && popoverPos
+                ? {
+                    position: 'fixed',
+                    top: popoverPos.top,
+                    left: popoverPos.left,
+                    width: POPOVER_W,
+                    zIndex: 62,
+                  }
+                : {
+                    position: 'fixed',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    width: `min(${POPOVER_W}px, 94vw)`,
+                    zIndex: 62,
+                  }
+            }
+            className="max-h-[88vh] overflow-y-auto rounded-xl border border-bcc-border bg-bcc-white shadow-xl"
           >
+            {/* Arrow pointing at the highlighted sidebar item */}
+            {hasTarget && popoverPos && (
+              <div aria-hidden="true" style={arrowStyle(popoverPos.placement)} />
+            )}
+
             {/* Header */}
             <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-4 border-b border-bcc-border-light">
               <div className="flex items-center gap-3 min-w-0">
@@ -242,10 +431,14 @@ export default function OperatorOnboarding({ platform }: { platform: Platform })
             </div>
 
             {/* Progress dots */}
-            <div className="px-6 pb-2 flex items-center justify-center gap-1.5" aria-hidden="true">
+            <div
+              className="px-6 pb-2 flex items-center justify-center gap-1.5"
+              aria-label={`Step ${index + 1} of ${total}`}
+            >
               {cards.map((c, i) => (
                 <span
                   key={c.id}
+                  aria-hidden="true"
                   className={`h-1.5 rounded-full transition-all ${
                     i === index ? 'w-5 bg-bcc-primary' : 'w-1.5 bg-bcc-border'
                   }`}
@@ -293,7 +486,7 @@ export default function OperatorOnboarding({ platform }: { platform: Platform })
               )}
             </div>
           </motion.div>
-        </motion.div>
+        </>
       )}
     </AnimatePresence>
   );

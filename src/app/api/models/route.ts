@@ -7,8 +7,57 @@ import {
   type ModelCapability,
   type ModelStatus,
 } from '@/lib/model-registry';
+import { refreshModels } from '@/lib/jobs/refresh-models';
+import { hydrateProviderEnvForSelectedClient } from '@/lib/studio/provider-discovery';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * Debounce window for the `?refresh=1` auto-refresh (E4). Walking every
+ * provider's `fetchModels()` is rate-limit sensitive, so a burst of page loads
+ * (or a parallel settings + models fetch) must not fan out into a refresh per
+ * request. We remember the last refresh start time in module scope (the route
+ * is long-lived within a server instance) and skip if it was recent. A manual
+ * "Refresh now" button still bypasses this via POST /api/cron/refresh-models.
+ */
+const REFRESH_DEBOUNCE_MS = 6 * 60 * 60 * 1000; // 6 hours
+let lastRefreshStartedAt = 0;
+let inFlightRefresh: Promise<unknown> | null = null;
+
+/**
+ * Kick a model-registry refresh scoped to the SELECTED client, but only when
+ * the registry is empty (fresh install) or the debounce window has elapsed.
+ * Awaited only when the registry is empty so a brand-new install returns a
+ * populated catalog on the first paint; otherwise it runs in the background so
+ * the request stays fast. Never throws.
+ */
+async function maybeRefresh(registryIsEmpty: boolean): Promise<void> {
+  const now = Date.now();
+  const stale = now - lastRefreshStartedAt > REFRESH_DEBOUNCE_MS;
+  if (!registryIsEmpty && !stale) return;
+  if (inFlightRefresh) {
+    // A refresh is already running; only block on it for an empty registry.
+    if (registryIsEmpty) await inFlightRefresh.catch(() => {});
+    return;
+  }
+
+  lastRefreshStartedAt = now;
+  const run = (async () => {
+    try {
+      // Source provider keys from the SELECTED client, not the CC's own env.
+      await hydrateProviderEnvForSelectedClient();
+      await refreshModels();
+    } catch (err) {
+      console.error('[/api/models] background refresh failed:', err);
+    } finally {
+      inFlightRefresh = null;
+    }
+  })();
+  inFlightRefresh = run;
+
+  // Block ONLY on an empty registry so the catalog is non-empty on first load.
+  if (registryIsEmpty) await run.catch(() => {});
+}
 
 /**
  * GET /api/models
@@ -84,6 +133,23 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid offset' }, { status: 400 });
     }
 
+    const wantRefresh = refreshParam === '1' || refreshParam === 'true';
+
+    // E4: `?refresh=1` must ACTUALLY refresh. The previous behavior only
+    // appended the refresh LOG to the response and never re-pulled the catalog.
+    // We now trigger a debounced, selected-client-scoped refresh. A fresh
+    // (empty) registry blocks so the first paint is populated; otherwise the
+    // refresh runs in the background and this request returns the current rows.
+    if (wantRefresh) {
+      try {
+        const registryIsEmpty = listModels({ status: null, limit: 1 }).length === 0;
+        await maybeRefresh(registryIsEmpty);
+      } catch (err) {
+        // Never let a refresh failure break the catalog read.
+        console.error('[/api/models] refresh trigger failed:', err);
+      }
+    }
+
     const models = listModels({
       provider,
       family,
@@ -100,7 +166,7 @@ export async function GET(request: NextRequest) {
       generated_at: new Date().toISOString(),
     };
 
-    if (refreshParam === '1' || refreshParam === 'true') {
+    if (wantRefresh) {
       body.refresh_log = getLatestRefreshPerProvider();
     }
 

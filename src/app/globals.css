@@ -209,15 +209,18 @@ body {
   }
 }
 
-/* App walkthrough (B3): highlight ring around the element a card points at.
-   Applied by AppWalkthrough.tsx via the .bcc-walkthrough-highlight class. */
+/* App walkthrough (E10/B3): highlight ring around the element a coach-mark
+   points at. Applied by AppWalkthrough.tsx via the .bcc-walkthrough-highlight
+   class. The element is lifted above the scrim (z-61 > scrim z-60) so it
+   reads as spotlighted while the rest of the page dims. */
 .bcc-walkthrough-highlight {
   position: relative;
-  z-index: 61; /* above the walkthrough scrim (z-60) so it reads as spotlighted */
-  border-radius: 12px;
+  z-index: 61; /* above the scrim (z-60) so it reads as spotlighted */
+  border-radius: 8px;
+  outline: 3px solid var(--bcc-primary, #43A047);
+  outline-offset: 4px;
   box-shadow:
-    0 0 0 3px var(--bcc-primary, #2563EB),
-    0 0 0 8px rgba(37, 99, 235, 0.25),
-    0 8px 30px rgba(0, 0, 0, 0.25);
-  transition: box-shadow 0.2s ease;
+    0 0 0 8px rgba(67, 160, 71, 0.18),
+    0 8px 32px rgba(0, 0, 0, 0.22);
+  transition: outline-color 0.2s ease, box-shadow 0.2s ease;
 }

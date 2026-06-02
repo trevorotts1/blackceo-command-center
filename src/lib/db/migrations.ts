@@ -1529,6 +1529,84 @@ const migrations: Migration[] = [
       console.log('[Migration 047] kpi_snapshots table ready');
     }
   },
+  {
+    id: '048',
+    name: 'add_clients_tenant_table',
+    up: (db) => {
+      // SINGLE-TENANT → PER-CLIENT foundation.
+      //
+      // Root cause this fixes: the Command Center previously read its OWN host
+      // for every OpenClaw / key / memory / analytics call and had no concept
+      // of a "selected client". This table is the tenant registry: one row per
+      // managed box (the operator's own local box + every remote client Mac/VPS
+      // reached over a Cloudflare Access tunnel).
+      //
+      // Connection fields:
+      //   - gateway_url           wss://... (remote) or ws://127.0.0.1:18789 (self)
+      //   - gateway_token         OpenClaw gateway token for that box
+      //   - cf_access_client_id / cf_access_client_secret
+      //                           Cloudflare Access service-token header pair,
+      //                           sent as CF-Access-Client-Id / -Secret on the
+      //                           WS upgrade for remote clients. NULL for self.
+      //   - workspace_root        absolute FS root on that box (used by
+      //                           resolveClientPath; local for self, remote
+      //                           descriptor path for clients reached over ssh)
+      //   - ssh_target            user@host (or ssh config alias) for tunneled
+      //                           filesystem reads on remote clients.
+      //   - interview_complete    per-client AI Workforce interview flag (E3).
+      //   - is_self               1 for exactly one row — the operator's own box.
+      //
+      // NOTE: secrets (gateway_token, cf_access_client_secret) live in this
+      // local SQLite the same way provider keys are referenced elsewhere; they
+      // are never sent to the browser (the API routes strip them — see
+      // src/lib/clients.ts toPublicClient()).
+      console.log('[Migration 048] Adding clients tenant table + seeding the self row...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS clients (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          gateway_url TEXT NOT NULL DEFAULT 'ws://127.0.0.1:18789',
+          gateway_token TEXT,
+          cf_access_client_id TEXT,
+          cf_access_client_secret TEXT,
+          workspace_root TEXT,
+          ssh_target TEXT,
+          interview_complete INTEGER NOT NULL DEFAULT 0,
+          is_self INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      // At most one self row. Partial unique index keeps the invariant without
+      // blocking multiple remote (is_self=0) clients.
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_single_self ON clients(is_self) WHERE is_self = 1`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_clients_is_self ON clients(is_self)`);
+
+      // Seed the operator's own local box as the self row. Idempotent: only
+      // inserts when no self row exists yet. gateway_url/token mirror the
+      // historical loopback defaults the OpenClaw client used.
+      const existingSelf = db
+        .prepare('SELECT id FROM clients WHERE is_self = 1 LIMIT 1')
+        .get() as { id: string } | undefined;
+      if (!existingSelf) {
+        db.prepare(`
+          INSERT INTO clients
+            (id, name, gateway_url, gateway_token, workspace_root, is_self, interview_complete)
+          VALUES (?, ?, ?, ?, ?, 1, 0)
+        `).run(
+          'self',
+          'This Box (Operator)',
+          'ws://127.0.0.1:18789',
+          process.env.OPENCLAW_GATEWAY_TOKEN || null,
+          null
+        );
+        console.log('[Migration 048] Seeded self client row');
+      } else {
+        console.log('[Migration 048] Self client row already present, skipping seed');
+      }
+      console.log('[Migration 048] clients tenant table ready');
+    }
+  },
 ];
 
 /**

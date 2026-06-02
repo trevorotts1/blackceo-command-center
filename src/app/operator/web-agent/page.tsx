@@ -106,10 +106,11 @@ export default function WebAgentLandingPage() {
           <OperatorHelpButton card="web-agent" />
         </div>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[680px]">
-          Describe a task in plain English. The agent drives a headless
-          browser via Claude Computer Use, returns a Markdown report, and
-          saves it to your vault so it appears in Memory and the All Searches
-          bucket.
+          Describe a task in plain English. A cheap local Ollama model drafts a
+          plan, then the agent drives a headless browser via Claude Computer Use,
+          returns a Markdown report, and saves it into the SELECTED client&apos;s
+          workspace so it appears in that agent&apos;s Memory and the All
+          Searches bucket.
         </p>
       </header>
 
@@ -175,9 +176,10 @@ export default function WebAgentLandingPage() {
             <p className="font-semibold text-bcc-text">How it works</p>
             <ul className="mt-2 list-disc pl-5 space-y-1">
               <li>An isolated Chromium context launches per session. No cookies, no credentials.</li>
-              <li>Claude Sonnet 4.6 plans actions; Playwright executes click, type, scroll, navigate.</li>
+              <li>A cheap local Ollama model drafts a rough plan first, so the vision model burns fewer expensive turns.</li>
+              <li>Claude Computer Use plans actions; Playwright executes click, type, scroll, navigate.</li>
               <li>Every action publishes a screenshot over Server-Sent Events to the session view.</li>
-              <li>The final Markdown report mirrors to your vault under <code>web-agent/YYYY/MM/</code>.</li>
+              <li>The final Markdown report mirrors into the selected client&apos;s workspace under <code>web-agent/YYYY/MM/</code> (over the tunnel for a remote client).</li>
             </ul>
           </div>
         </div>

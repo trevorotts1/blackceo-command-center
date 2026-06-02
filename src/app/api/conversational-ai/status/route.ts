@@ -42,6 +42,7 @@ export async function GET() {
       layer: 1,
       interview: {
         complete: false,
+        known: false,
         signal: 'none',
         detail: 'Status check failed; defaulting to Layer 1.',
         checkedAt: new Date().toISOString(),

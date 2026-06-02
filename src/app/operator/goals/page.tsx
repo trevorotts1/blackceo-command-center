@@ -25,9 +25,12 @@ export default function OperatorGoalsPage() {
           <OperatorHelpButton card="goals" />
         </div>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[640px]">
-          Personal goals for the build. Mirrored to your vault as
-          <span className="font-mono"> goals.md </span>
-          and per-category subfiles so Obsidian and Memory search pick them up.
+          Goals for the SELECTED client. Mirrored into that client agent&apos;s
+          workspace as <span className="font-mono"> goals.md </span>
+          and per-category subfiles so its memory crawler and Memory search pick
+          them up. Active goals are also injected into the agent&apos;s chat
+          context, and a periodic on-track check asks the agent how the build is
+          progressing against them.
         </p>
       </header>
       <GoalsList />

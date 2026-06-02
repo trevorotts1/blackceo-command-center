@@ -8,6 +8,26 @@ import { createHash } from 'crypto';
 const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || 'ws://127.0.0.1:18789';
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
 
+/**
+ * Per-client connection target. A remote client supplies its own gateway URL +
+ * token and a Cloudflare Access service-token header pair. The CF-Access
+ * headers are sent on the WebSocket UPGRADE request — which the browser/global
+ * `WebSocket` cannot do — so a target carrying CF-Access headers forces the
+ * `ws` npm transport (see `connect()`).
+ *
+ * Shape intentionally mirrors the subset of `Client` (src/lib/clients.ts) that
+ * the gateway connection needs, so callers can pass a client record straight
+ * through `getOpenClawClient(clientToTarget(client))`.
+ */
+export interface OpenClawClientTarget {
+  /** Stable id used to cache one client instance per target (client id). */
+  id: string;
+  url: string;
+  token?: string | null;
+  cfAccessClientId?: string | null;
+  cfAccessClientSecret?: string | null;
+}
+
 // Global deduplication cache that persists across module reloads in Next.js dev
 // Use globalThis to ensure it's shared across all instances
 // Using Map for LRU (access time tracking) instead of Set
@@ -20,8 +40,23 @@ if (!(GLOBAL_EVENT_CACHE_KEY in globalThis)) {
 
 const globalProcessedEvents = (globalThis as unknown as Record<string, Map<string, number>>)[GLOBAL_EVENT_CACHE_KEY];
 
+// Minimal structural type covering both the DOM `WebSocket` and the `ws` npm
+// library's WebSocket. Both expose these members and use identical numeric
+// readyState values (CONNECTING=0, OPEN=1), so the existing
+// `WebSocket.OPEN` / `WebSocket.CONNECTING` comparisons against the global
+// remain valid for either transport.
+type SocketLike = {
+  readyState: number;
+  onopen: ((ev: unknown) => void) | null;
+  onclose: ((ev: { code: number; reason: string; wasClean: boolean }) => void) | null;
+  onerror: ((ev: unknown) => void) | null;
+  onmessage: ((ev: { data: unknown }) => void) | null;
+  send: (data: string) => void;
+  close: () => void;
+};
+
 export class OpenClawClient extends EventEmitter {
-  private ws: WebSocket | null = null;
+  private ws: SocketLike | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private messageId = 0;
   private pendingRequests = new Map<string | number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -33,7 +68,7 @@ export class OpenClawClient extends EventEmitter {
   private deviceIdentity: { deviceId: string; publicKeyPem: string; privateKeyPem: string } | null = null;
   private lastConnectError: string | null = null;
   private lastConnectErrorAtMs = 0;
-  private messageHandlers = new Set<(event: MessageEvent) => void>(); // Track all message handlers for cleanup
+  private messageHandlers = new Set<(event: { data: unknown }) => void>(); // Track all message handlers for cleanup
   private readonly MAX_PROCESSED_EVENTS = 1000; // Limit the size of the processed events cache
   private readonly CLEANUP_THRESHOLD = 100; // Number of entries to remove when limit exceeded
   private readonly CACHE_ENTRY_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for cache entries
@@ -101,9 +136,18 @@ export class OpenClawClient extends EventEmitter {
     }
   }
 
-  constructor(private url: string = GATEWAY_URL, token: string = GATEWAY_TOKEN) {
+  private cfAccessClientId: string | null;
+  private cfAccessClientSecret: string | null;
+
+  constructor(
+    private url: string = GATEWAY_URL,
+    token: string = GATEWAY_TOKEN,
+    opts: { cfAccessClientId?: string | null; cfAccessClientSecret?: string | null } = {},
+  ) {
     super();
     this.token = token;
+    this.cfAccessClientId = opts.cfAccessClientId ?? null;
+    this.cfAccessClientSecret = opts.cfAccessClientSecret ?? null;
     // Prevent Node.js from throwing on unhandled 'error' events
     this.on('error', () => {});
     // Load device identity for pairing
@@ -183,7 +227,38 @@ export class OpenClawClient extends EventEmitter {
         }
         console.log('[OpenClaw] Connecting to:', wsUrl.toString().replace(/token=[^&]+/, 'token=***'));
         console.log('[OpenClaw] Token in URL:', wsUrl.searchParams.has('token'));
-        this.ws = new WebSocket(wsUrl.toString());
+
+        // Cloudflare Access service token must be sent as HTTP headers on the
+        // WebSocket UPGRADE request. The DOM/global `WebSocket` cannot set
+        // request headers, so for a CF-Access-protected remote client we use
+        // the `ws` npm library (which accepts a headers option). The local /
+        // self loopback path has no CF-Access headers and keeps using the
+        // global WebSocket — so `ws` is only required when at least one remote
+        // client is configured.
+        const needsCfAccess = !!(this.cfAccessClientId && this.cfAccessClientSecret);
+        if (needsCfAccess) {
+          let WsCtor: new (url: string, opts: { headers: Record<string, string> }) => SocketLike;
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+            const wsModule = require('ws');
+            WsCtor = (wsModule.WebSocket || wsModule.default || wsModule) as typeof WsCtor;
+          } catch {
+            this.connecting = null;
+            this.recordConnectError(
+              "Remote client requires the 'ws' npm package for Cloudflare Access headers, but it is not installed. Run `npm install ws`.",
+            );
+            reject(new Error("The 'ws' package is required to connect to a Cloudflare Access protected client"));
+            return;
+          }
+          this.ws = new WsCtor(wsUrl.toString(), {
+            headers: {
+              'CF-Access-Client-Id': this.cfAccessClientId as string,
+              'CF-Access-Client-Secret': this.cfAccessClientSecret as string,
+            },
+          });
+        } else {
+          this.ws = new WebSocket(wsUrl.toString()) as unknown as SocketLike;
+        }
 
         const connectionTimeout = setTimeout(() => {
           if (!this.connected) {
@@ -228,10 +303,11 @@ export class OpenClawClient extends EventEmitter {
           }
         };
 
-        // Create message handler
-        const messageHandler = (event: MessageEvent) => {
+        // Create message handler. `event.data` is a string from the global
+        // WebSocket and a string|Buffer from the `ws` library — coerce both.
+        const messageHandler = (event: { data: unknown }) => {
           try {
-            const data = JSON.parse(event.data as string);
+            const data = JSON.parse(String(event.data));
 
             // Generate unique event ID using content hashing for proper deduplication
             const eventId = this.generateEventId(data);
@@ -528,12 +604,45 @@ export class OpenClawClient extends EventEmitter {
   }
 }
 
-// Singleton instance for server-side usage
-let clientInstance: OpenClawClient | null = null;
+// Per-target instance cache for server-side usage. Keyed by target id so each
+// selected client gets its OWN gateway connection (the root-cause fix: the CC
+// used to share one loopback singleton for every client). The local/self
+// loopback uses the reserved '__self__' key and preserves the historical
+// zero-argument singleton behavior for all existing callers.
+const SELF_KEY = '__self__';
+const clientInstances = new Map<string, OpenClawClient>();
 
-export function getOpenClawClient(): OpenClawClient {
-  if (!clientInstance) {
-    clientInstance = new OpenClawClient();
+/**
+ * Resolve an OpenClaw gateway client.
+ *
+ * - No argument (or a self/loopback target): returns the shared local
+ *   singleton, exactly as before — fully backward compatible.
+ * - A remote `OpenClawClientTarget`: returns (and caches) a dedicated client
+ *   that connects to THAT client's gateway URL, carrying its gateway token and
+ *   Cloudflare Access service-token headers on the WS upgrade.
+ */
+export function getOpenClawClient(target?: OpenClawClientTarget): OpenClawClient {
+  // No target, or the reserved self id → the shared local loopback singleton,
+  // constructed with the historical env-derived defaults. Fully backward
+  // compatible with every existing zero-argument caller.
+  if (!target || target.id === SELF_KEY) {
+    let inst = clientInstances.get(SELF_KEY);
+    if (!inst) {
+      inst = new OpenClawClient();
+      clientInstances.set(SELF_KEY, inst);
+    }
+    return inst;
   }
-  return clientInstance;
+
+  // Remote (or any explicitly-targeted) client → one cached instance per id.
+  const key = target.id || target.url;
+  let inst = clientInstances.get(key);
+  if (!inst) {
+    inst = new OpenClawClient(target.url, target.token ?? '', {
+      cfAccessClientId: target.cfAccessClientId ?? null,
+      cfAccessClientSecret: target.cfAccessClientSecret ?? null,
+    });
+    clientInstances.set(key, inst);
+  }
+  return inst;
 }

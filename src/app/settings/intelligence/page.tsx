@@ -36,6 +36,7 @@ import {
   IntelligenceProviderList,
   type ProviderRefreshEntry,
 } from '@/components/settings/IntelligenceProviderList';
+import { PERSONA_MATCH_NAME, PERSONA_MATCH_TAGLINE } from '@/components/settings/persona-match';
 
 /* ── Data shapes returned by /api/settings/intelligence ── */
 
@@ -235,6 +236,21 @@ export default function IntelligenceSettingsPage() {
     setSaved(false);
   };
 
+  const handleAssignModelToDept = (modelId: string, departmentId: string) => {
+    if (!data) return;
+    setPendingChanges((prev) => ({
+      ...prev,
+      [`${departmentId}:dept:model`]: { ...prev[`${departmentId}:dept:model`], model: modelId },
+    }));
+    setSaved(false);
+    // Surface the department whose model just changed so the operator can see it.
+    setExpandedDepts((prev) => {
+      const next = new Set(prev);
+      next.add(departmentId);
+      return next;
+    });
+  };
+
   const handleResetRoleModel = (deptId: string, roleId: string) => {
     setPendingChanges((prev) => {
       const key = `${deptId}:${roleId}:model`;
@@ -340,6 +356,12 @@ export default function IntelligenceSettingsPage() {
   const filteredCatalog = useMemo(
     () => applyModelFilters(catalogModels, filterState),
     [catalogModels, filterState]
+  );
+
+  // Department options offered in each card's "Assign to a department…" picker.
+  const departmentOptions = useMemo(
+    () => (data ? data.departments.map((d) => ({ id: d.id, name: d.name })) : []),
+    [data]
   );
 
   const modelDescription = useCallback(
@@ -451,7 +473,7 @@ export default function IntelligenceSettingsPage() {
                 <li className="flex items-start gap-2">
                   <span className="text-brand-400 mt-1">3.</span>
                   <span>
-                    <strong>Auto-assign persona</strong> uses 5-layer alignment (company
+                    <strong>{PERSONA_MATCH_NAME}</strong> uses 5-layer alignment (company
                     mission, goals, department objectives, task context, and agent role)
                     to pick the best persona automatically.
                   </span>
@@ -478,14 +500,15 @@ export default function IntelligenceSettingsPage() {
 
         {/* ── Model catalog browser ── */}
         <section className="space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div>
-              <h2 className="text-lg font-bold text-gray-900">Available models</h2>
-              <p className="text-xs text-gray-500 mt-0.5">
-                Browse and filter the live model catalog. Use the assignment cards below
-                to pick a model for each department.
-              </p>
-            </div>
+          <div>
+            <h2 className="text-lg font-bold text-gray-900">Available models</h2>
+            <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+              These are the models currently offered by every connected provider. Filter by
+              provider, capability, or cost band to find the right one, then act on a card
+              directly: <strong>Apply to all</strong> sets it as the default for every department,
+              or <strong>Assign to dept…</strong> sets it for just one. Fine-grained per-agent
+              overrides live in the department cards further down.
+            </p>
           </div>
 
           <ModelFilterBar
@@ -498,23 +521,29 @@ export default function IntelligenceSettingsPage() {
           {filteredCatalog.length === 0 ? (
             <div className="bg-white border border-gray-200 rounded-xl px-5 py-8 text-center text-sm text-gray-500">
               {catalogModels.length === 0
-                ? 'No models in the registry yet. Refresh the catalog to populate it.'
+                ? 'No models in the registry yet. Use "Refresh now" above to pull each provider\'s catalog.'
                 : 'No models match these filters. Try clearing one of the chips above.'}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {filteredCatalog.map((m) => (
-                <ModelCard key={m.id} model={m} />
+                <ModelCard
+                  key={m.id}
+                  model={m}
+                  onSetDefault={handleApplyModelToAll}
+                  onAssignToDept={handleAssignModelToDept}
+                  departments={departmentOptions}
+                />
               ))}
             </div>
           )}
         </section>
 
-        {/* ── Apply to All + Expand/Collapse All ── */}
+        {/* ── E7: single "Apply model to ALL departments" control ── */}
         <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-4 flex items-center gap-3 flex-wrap">
           <Wand2 className="w-4 h-4 text-brand-600 flex-shrink-0" />
           <span className="text-sm font-medium text-gray-700 whitespace-nowrap">
-            Set all departments to:
+            Apply one model to ALL departments:
           </span>
           <select
             onChange={(e) => {
@@ -522,10 +551,11 @@ export default function IntelligenceSettingsPage() {
               e.target.value = '';
             }}
             defaultValue=""
-            className="px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
+            aria-label="Apply one model to all departments"
+            className="flex-1 min-w-[220px] px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
           >
             <option value="" disabled>
-              Select a model...
+              Select a model…
             </option>
             {data.models.map((m) => (
               <option key={m.id} value={m.id}>
@@ -533,6 +563,9 @@ export default function IntelligenceSettingsPage() {
               </option>
             ))}
           </select>
+          <span className="text-xs text-gray-400 whitespace-nowrap">
+            Overrides every department default — review before saving.
+          </span>
 
           <div className="ml-auto">
             <button
@@ -621,9 +654,9 @@ export default function IntelligenceSettingsPage() {
             <div className="flex items-center gap-2">
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-100 text-violet-700 border border-violet-200">
                 <Sparkles className="w-3 h-3" />
-                Auto-assign persona
+                {PERSONA_MATCH_NAME}
               </span>
-              <span className="text-sm text-gray-500">
+              <span className="text-sm text-gray-500" title={PERSONA_MATCH_TAGLINE}>
                 5-layer alignment picks the best persona for each task
               </span>
             </div>

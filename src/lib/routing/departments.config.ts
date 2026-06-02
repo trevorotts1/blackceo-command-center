@@ -285,6 +285,24 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     ],
     priority: 7,
   },
+  {
+    id: 'security',
+    name: 'Security Team',
+    keywords: [
+      'security', 'incident', 'breach', 'access', 'credentials', 'credential', 'anomaly',
+      'monitor', 'monitoring', 'hygiene', '2fa', 'mfa', 'threat', 'vulnerability',
+      'patch', 'firewall', 'audit', 'compliance audit', 'intrusion', 'phishing',
+      'malware', 'ransomware', 'zero-day', 'pen test', 'penetration test',
+      'soc', 'siem', 'alert', 'revoke', 'rotate key', 'api key', 'secret', 'token rotation',
+      'ip block', 'acl', 'permission scope', 'least privilege', 'access control',
+    ],
+    agentRoles: [
+      'Security Monitor', 'Incident Responder', 'Credential Auditor',
+      'Security Agent', 'Security Analyst', 'Threat Analyst',
+      'Compliance Auditor', 'Access Control Specialist',
+    ],
+    priority: 9,
+  },
 ];
 
 /**

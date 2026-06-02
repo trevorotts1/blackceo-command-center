@@ -29,6 +29,13 @@ export interface MetricsResponse {
 
 export interface InterviewState {
   complete: boolean;
+  /**
+   * True when the answer is definitive (per-client DB flag or a positive
+   * signal). When false the status is UNKNOWN and the "complete your interview"
+   * banner defaults to HIDDEN (E3). Optional for backward compatibility with
+   * any cached older payload.
+   */
+  known?: boolean;
   signal: string;
   detail: string;
   checkedAt: string;

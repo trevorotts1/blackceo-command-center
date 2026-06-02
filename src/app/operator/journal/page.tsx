@@ -33,9 +33,18 @@ export default function OperatorJournalPage({ searchParams }: PageProps) {
           <OperatorHelpButton card="journal" />
         </div>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[640px]">
-          One entry per day, mirrored to
-          <span className="font-mono"> [vault]/journal/YYYY/MM/YYYY-MM-DD.md</span>.
+          One entry per day, written into the SELECTED client&apos;s workspace at
+          <span className="font-mono"> [workspace]/journal/YYYY/MM/YYYY-MM-DD.md</span>.
           Auto-saves every five seconds.
+        </p>
+        <p className="mt-2 text-[13px] text-bcc-text-muted max-w-[640px]">
+          The memory loop: the entry lands in that client agent&apos;s own
+          workspace, so the agent&apos;s OpenClaw memory crawler picks it up and
+          can recall it later. Pick a different client in the header and the
+          journal writes to that agent&apos;s memory instead. For a remote
+          client the file is delivered over the Cloudflare Access tunnel; if the
+          tunnel is down the entry is still saved here and mirrors on the next
+          successful save.
         </p>
       </header>
       <JournalEntry initialDate={initialDate} />

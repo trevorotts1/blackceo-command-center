@@ -36,9 +36,11 @@ import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { queryAll, queryOne, run } from '@/lib/db';
-import { vaultRoot, operatorScratchRoot } from '@/lib/platform';
+import { operatorScratchRoot } from '@/lib/platform';
+import { writeClientFile, isRemoteError } from '@/lib/operator/client-fs';
 import { PlaywrightDriver, type ComputerAction, type ActionResult } from './playwright-driver';
 import { getStreamBus } from './screenshot-stream';
+import { planWithOllama } from './ollama-planner';
 
 // -- Types ------------------------------------------------------------------
 
@@ -300,6 +302,20 @@ export async function runSession(sessionId: string, opts: RunOptions = {}): Prom
     appendLog(log, sessionId, 'system', 'browser context started');
     updateSession(sessionId, { action_log: log });
 
+    // E22: cheap up-front plan on a local Ollama model. Best-effort; null when
+    // Ollama is unreachable. Injected into the vision model's first prompt so it
+    // burns fewer expensive computer-use turns figuring out the approach.
+    const plan = await planWithOllama(session.task).catch(() => null);
+    if (plan) {
+      appendLog(log, sessionId, 'system', `planner (${plan.model}): ${plan.steps.length} step(s)`);
+      updateSession(sessionId, { action_log: log });
+      bus.publish(sessionId, 'log', { kind: 'system', plan: plan.steps, model: plan.model });
+    }
+    const planBlock = plan
+      ? `\n\nA cheaper planner suggested this rough plan (adapt as needed):\n` +
+        plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')
+      : '';
+
     // Seed the conversation with an initial screenshot of about:blank so the
     // model has visual context for its first move.
     const initial = await driver.dispatch({ action: 'screenshot' });
@@ -312,7 +328,7 @@ export async function runSession(sessionId: string, opts: RunOptions = {}): Prom
           {
             type: 'text',
             text:
-              `Task: ${session.task}\n\n` +
+              `Task: ${session.task}${planBlock}\n\n` +
               `You are operating a headless Chromium browser. Use the computer tool to ` +
               `navigate, click, type, and scroll. The browser starts on about:blank, so your ` +
               `first action will usually be to navigate to a starting URL. When you have ` +
@@ -579,18 +595,20 @@ async function mirrorToVault(args: {
   task: string;
   markdown: string;
 }): Promise<string | null> {
+  // E22: mirror into the SELECTED client's workspace (local fs for self, SSH
+  // tunnel for a remote client) so the result becomes part of that client
+  // agent's recallable memory. Best-effort; null on a down tunnel.
   try {
     const now = new Date();
     const yyyy = String(now.getFullYear());
     const mm = String(now.getMonth() + 1).padStart(2, '0');
     const dd = String(now.getDate()).padStart(2, '0');
     const slug = slugifyTask(args.task);
-    const dir = path.join(vaultRoot(), 'web-agent', yyyy, mm);
-    await fs.mkdir(dir, { recursive: true });
-    const file = path.join(dir, `${yyyy}-${mm}-${dd}-${slug}.md`);
+    const relPath = `web-agent/${yyyy}/${mm}/${yyyy}-${mm}-${dd}-${slug}.md`;
     const header = `<!-- web_agent_session_id: ${args.id} -->\n<!-- task: ${args.task.replace(/-->/g, '__')} -->\n`;
-    await fs.writeFile(file, header + args.markdown, 'utf8');
-    return file;
+    const result = await writeClientFile('vault-root', relPath, header + args.markdown);
+    if (!result || isRemoteError(result)) return null;
+    return result.absPath;
   } catch {
     return null;
   }

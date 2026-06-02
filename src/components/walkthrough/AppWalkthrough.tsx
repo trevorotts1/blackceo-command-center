@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * AppWalkthrough — app-wide, INTERACTIVE guided tour (B3).
+ * AppWalkthrough — app-wide, INTERACTIVE guided tour (E10 / B3).
  *
  * Generalizes the Operator-Console-only OperatorOnboarding overlay into a
  * root-mounted, per-route walkthrough. Mounted ONCE in the root layout; it
@@ -9,11 +9,19 @@
  *
  * What makes it interactive (vs the old static modal):
  *   - As each card is shown it NAVIGATES to the card's route (if different) and
- *     SCROLLS the named `[data-walkthrough="<target>"]` element into view, then
- *     paints a highlight ring + dim around it so the user sees exactly what the
- *     card describes. The old overlay just showed text in a centered box.
- *   - The dialog re-positions to a corner while a target is highlighted so it
- *     does not cover the thing it is pointing at.
+ *     finds the named `[data-walkthrough="<target>"]` element.
+ *   - The element gets a highlight ring + the page is dimmed around it.
+ *   - The popover panel is ANCHORED to the highlighted element: it reads the
+ *     element's getBoundingClientRect and positions itself above/below/left/right
+ *     based on available viewport space, with a small arrow pointing at the
+ *     element. This is a genuine coach-mark, not a corner-placed modal.
+ *   - When no target is present (intro / summary cards) the panel falls back to
+ *     the centered-modal layout so the UX stays clean for targetless cards.
+ *   - Position is recalculated on scroll and resize so it stays attached.
+ *
+ * No new dependencies added. Positioning is done with vanilla DOM
+ * getBoundingClientRect + React state. Framer-motion (already in deps) handles
+ * enter/exit. Arrow is a CSS border-trick div injected inline.
  *
  * Behavior carried over from OperatorOnboarding:
  *   - First-run auto-open per deck (localStorage `bcc-<deckId>-walkthrough-seen`).
@@ -21,7 +29,7 @@
  *   - Esc / arrows / focus trap / WCAG AA controls.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ChevronLeft, ChevronRight, X, Sparkles } from 'lucide-react';
@@ -40,6 +48,73 @@ interface OpenDetail {
 
 const HIGHLIGHT_CLASS = 'bcc-walkthrough-highlight';
 
+/** Placement of the popover relative to the anchor element. */
+type Placement = 'below' | 'above' | 'left' | 'right';
+
+interface PopoverPosition {
+  top: number;
+  left: number;
+  placement: Placement;
+}
+
+const POPOVER_W = 420; // px — kept narrow so it never obscures the anchor
+const POPOVER_MARGIN = 16; // min gap between popover edge and viewport edge
+const ANCHOR_GAP = 14; // gap between anchor rect and popover box (+ arrow height)
+
+/**
+ * Compute where to place the popover so it stays on-screen and doesn't
+ * overlap the anchor element. Preference order: below → above → right → left.
+ */
+function computePosition(
+  anchorRect: DOMRect,
+  popoverH: number,
+  vw: number,
+  vh: number,
+): PopoverPosition {
+  const candidates: Placement[] = ['below', 'above', 'right', 'left'];
+
+  for (const placement of candidates) {
+    let top = 0;
+    let left = 0;
+
+    if (placement === 'below') {
+      top = anchorRect.bottom + ANCHOR_GAP;
+      left = anchorRect.left + anchorRect.width / 2 - POPOVER_W / 2;
+    } else if (placement === 'above') {
+      top = anchorRect.top - ANCHOR_GAP - popoverH;
+      left = anchorRect.left + anchorRect.width / 2 - POPOVER_W / 2;
+    } else if (placement === 'right') {
+      top = anchorRect.top + anchorRect.height / 2 - popoverH / 2;
+      left = anchorRect.right + ANCHOR_GAP;
+    } else {
+      // left
+      top = anchorRect.top + anchorRect.height / 2 - popoverH / 2;
+      left = anchorRect.left - ANCHOR_GAP - POPOVER_W;
+    }
+
+    // Clamp horizontally
+    left = Math.max(POPOVER_MARGIN, Math.min(left, vw - POPOVER_W - POPOVER_MARGIN));
+    // Clamp vertically
+    top = Math.max(POPOVER_MARGIN, Math.min(top, vh - popoverH - POPOVER_MARGIN));
+
+    // Check it doesn't overlap the anchor rect (rough check)
+    const fits =
+      top + popoverH <= vh - POPOVER_MARGIN &&
+      top >= POPOVER_MARGIN &&
+      left + POPOVER_W <= vw - POPOVER_MARGIN &&
+      left >= POPOVER_MARGIN;
+
+    if (fits) return { top, left, placement };
+  }
+
+  // Fallback: center on screen
+  return {
+    top: Math.max(POPOVER_MARGIN, (vh - popoverH) / 2),
+    left: Math.max(POPOVER_MARGIN, (vw - POPOVER_W) / 2),
+    placement: 'below',
+  };
+}
+
 export default function AppWalkthrough() {
   const pathname = usePathname() || '/';
   const router = useRouter();
@@ -50,43 +125,72 @@ export default function AppWalkthrough() {
   const [deck, setDeck] = useState<WalkthroughDeck | undefined>(routeDeck);
   const [index, setIndex] = useState(0);
   const [hasTarget, setHasTarget] = useState(false);
+  const [popoverPos, setPopoverPos] = useState<PopoverPosition | null>(null);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const highlightedEl = useRef<HTMLElement | null>(null);
+  const positionRafRef = useRef<number | null>(null);
 
   const cards = deck?.cards ?? [];
   const total = cards.length;
 
-  // ---- highlight helpers -------------------------------------------------
+  // ---- popover positioning -------------------------------------------------
+  const updatePosition = useCallback(() => {
+    const el = highlightedEl.current;
+    const dialog = dialogRef.current;
+    if (!el || !dialog) return;
+
+    const anchorRect = el.getBoundingClientRect();
+    const popoverH = dialog.offsetHeight || 340;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    setPopoverPos(computePosition(anchorRect, popoverH, vw, vh));
+  }, []);
+
+  const schedulePositionUpdate = useCallback(() => {
+    if (positionRafRef.current !== null) cancelAnimationFrame(positionRafRef.current);
+    positionRafRef.current = requestAnimationFrame(() => {
+      updatePosition();
+      positionRafRef.current = null;
+    });
+  }, [updatePosition]);
+
+  // ---- highlight helpers ---------------------------------------------------
   const clearHighlight = useCallback(() => {
     if (highlightedEl.current) {
       highlightedEl.current.classList.remove(HIGHLIGHT_CLASS);
       highlightedEl.current = null;
     }
     setHasTarget(false);
+    setPopoverPos(null);
   }, []);
 
-  const highlightTarget = useCallback((target?: string) => {
-    clearHighlight();
-    if (!target) return;
-    // Element may not exist yet right after navigation — retry briefly.
-    let tries = 0;
-    const tryHighlight = () => {
-      const el = document.querySelector<HTMLElement>(`[data-walkthrough="${target}"]`);
-      if (el) {
-        el.classList.add(HIGHLIGHT_CLASS);
-        highlightedEl.current = el;
-        setHasTarget(true);
-        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-        return;
-      }
-      if (tries++ < 12) setTimeout(tryHighlight, 120);
-    };
-    tryHighlight();
-  }, [clearHighlight]);
+  const highlightTarget = useCallback(
+    (target?: string) => {
+      clearHighlight();
+      if (!target) return;
 
-  // ---- open / close ------------------------------------------------------
+      let tries = 0;
+      const tryHighlight = () => {
+        const el = document.querySelector<HTMLElement>(`[data-walkthrough="${target}"]`);
+        if (el) {
+          el.classList.add(HIGHLIGHT_CLASS);
+          highlightedEl.current = el;
+          setHasTarget(true);
+          el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+          // Wait for scroll to settle, then compute position.
+          setTimeout(schedulePositionUpdate, 350);
+          return;
+        }
+        if (tries++ < 12) setTimeout(tryHighlight, 120);
+      };
+      tryHighlight();
+    },
+    [clearHighlight, schedulePositionUpdate],
+  );
+
+  // ---- open / close --------------------------------------------------------
   const openDeck = useCallback(
     (targetDeck: WalkthroughDeck | undefined, cardId?: string) => {
       if (!targetDeck || targetDeck.cards.length === 0) return;
@@ -96,7 +200,7 @@ export default function AppWalkthrough() {
       setIndex(i >= 0 ? i : 0);
       setOpen(true);
     },
-    []
+    [],
   );
 
   const close = useCallback(() => {
@@ -115,7 +219,7 @@ export default function AppWalkthrough() {
     }
   }, [clearHighlight, deck]);
 
-  // ---- first-run auto-open (per route deck) ------------------------------
+  // ---- first-run auto-open (per route deck) --------------------------------
   useEffect(() => {
     if (!routeDeck) return;
     let seen = false;
@@ -130,7 +234,7 @@ export default function AppWalkthrough() {
     }
   }, [routeDeck, openDeck]);
 
-  // ---- re-open via window event ------------------------------------------
+  // ---- re-open via window event --------------------------------------------
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<OpenDetail>).detail || {};
@@ -141,14 +245,13 @@ export default function AppWalkthrough() {
     return () => window.removeEventListener(WALKTHROUGH_OPEN_EVENT, handler as EventListener);
   }, [routeDeck, openDeck]);
 
-  // ---- drive interactivity: navigate + highlight on each card ------------
+  // ---- drive interactivity: navigate + highlight on each card --------------
   const card = cards[index];
   useEffect(() => {
     if (!open || !card) return;
     const targetRoute = card.route;
     if (targetRoute && pathname !== targetRoute) {
       router.push(targetRoute);
-      // Give the route a moment to mount before scrolling to the anchor.
       const t = setTimeout(() => highlightTarget(card.target), 300);
       return () => clearTimeout(t);
     }
@@ -156,7 +259,27 @@ export default function AppWalkthrough() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, index, card?.route, card?.target]);
 
-  // ---- keyboard: Esc / arrows + focus trap -------------------------------
+  // ---- reposition on scroll / resize ---------------------------------------
+  useEffect(() => {
+    if (!open || !hasTarget) return;
+    const onEvent = () => schedulePositionUpdate();
+    window.addEventListener('resize', onEvent, { passive: true });
+    window.addEventListener('scroll', onEvent, { passive: true, capture: true });
+    return () => {
+      window.removeEventListener('resize', onEvent);
+      window.removeEventListener('scroll', onEvent, { capture: true });
+    };
+  }, [open, hasTarget, schedulePositionUpdate]);
+
+  // ---- recompute after dialog height changes (e.g. card body length) -------
+  useEffect(() => {
+    if (!open || !hasTarget) return;
+    // Wait for the popover to paint at its new content height, then reposition.
+    const t = setTimeout(schedulePositionUpdate, 50);
+    return () => clearTimeout(t);
+  }, [open, index, hasTarget, schedulePositionUpdate]);
+
+  // ---- keyboard: Esc / arrows + focus trap ---------------------------------
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -179,7 +302,7 @@ export default function AppWalkthrough() {
         const root = dialogRef.current;
         if (!root) return;
         const focusables = root.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
         );
         if (focusables.length === 0) return;
         const first = focusables[0];
@@ -197,54 +320,144 @@ export default function AppWalkthrough() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, close, total]);
 
-  // ---- move focus into dialog on open ------------------------------------
+  // ---- move focus into dialog on open --------------------------------------
   useEffect(() => {
     if (!open) return;
     const root = dialogRef.current;
     if (!root) return;
     const focusable = root.querySelector<HTMLElement>(
-      'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])'
+      'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])',
     );
     requestAnimationFrame(() => focusable?.focus());
   }, [open, index]);
 
-  // ---- clean up highlight on unmount -------------------------------------
-  useEffect(() => () => clearHighlight(), [clearHighlight]);
+  // ---- clean up highlight + pending RAF on unmount -------------------------
+  useEffect(
+    () => () => {
+      clearHighlight();
+      if (positionRafRef.current !== null) cancelAnimationFrame(positionRafRef.current);
+    },
+    [clearHighlight],
+  );
 
   const isFirst = index === 0;
   const isLast = index === total - 1;
 
+  // Arrow style for the coach-mark pointer
+  const arrowStyle = (placement: Placement): CSSProperties => {
+    const base: CSSProperties = {
+      position: 'absolute',
+      width: 0,
+      height: 0,
+      pointerEvents: 'none',
+    };
+    const arrowSize = 8; // px, half-width of triangle
+    const borderColor = 'var(--bcc-white, #ffffff)';
+    const borderTransparent = 'transparent';
+
+    if (placement === 'below') {
+      // Arrow points UP (out of the top of the popover)
+      return {
+        ...base,
+        top: -arrowSize * 2,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        borderLeft: `${arrowSize}px solid ${borderTransparent}`,
+        borderRight: `${arrowSize}px solid ${borderTransparent}`,
+        borderBottom: `${arrowSize * 2}px solid ${borderColor}`,
+      };
+    }
+    if (placement === 'above') {
+      // Arrow points DOWN (out of the bottom of the popover)
+      return {
+        ...base,
+        bottom: -arrowSize * 2,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        borderLeft: `${arrowSize}px solid ${borderTransparent}`,
+        borderRight: `${arrowSize}px solid ${borderTransparent}`,
+        borderTop: `${arrowSize * 2}px solid ${borderColor}`,
+      };
+    }
+    if (placement === 'right') {
+      // Arrow points LEFT (out of the left side of the popover)
+      return {
+        ...base,
+        left: -arrowSize * 2,
+        top: '50%',
+        transform: 'translateY(-50%)',
+        borderTop: `${arrowSize}px solid ${borderTransparent}`,
+        borderBottom: `${arrowSize}px solid ${borderTransparent}`,
+        borderRight: `${arrowSize * 2}px solid ${borderColor}`,
+      };
+    }
+    // left — Arrow points RIGHT (out of the right side of the popover)
+    return {
+      ...base,
+      right: -arrowSize * 2,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      borderTop: `${arrowSize}px solid ${borderTransparent}`,
+      borderBottom: `${arrowSize}px solid ${borderTransparent}`,
+      borderLeft: `${arrowSize * 2}px solid ${borderColor}`,
+    };
+  };
+
+  // ---- render --------------------------------------------------------------
   return (
     <AnimatePresence>
       {open && card && deck && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          // When pointing at a target, dim the page but DON'T block clicks on
-          // the highlighted area visually covering it; keep the scrim light.
-          className={`fixed inset-0 z-[60] p-4 ${
-            hasTarget
-              ? 'bg-black/30 flex items-end justify-end'
-              : 'grid place-items-center bg-black/40 backdrop-blur-sm'
-          }`}
-          onClick={close}
-        >
+        <>
+          {/* Scrim — dims page; does NOT block clicks on the highlighted element
+              because the element's z-index (61) sits above the scrim (z-60). */}
           <motion.div
+            key="scrim"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black/40"
+            onClick={close}
+            aria-hidden="true"
+          />
+
+          {/* Popover panel — positioned absolutely when anchored, centered when not */}
+          <motion.div
+            key={`panel-${index}`}
             ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="app-walkthrough-title"
             aria-describedby="app-walkthrough-body"
-            initial={{ y: 16, opacity: 0, scale: 0.98 }}
-            animate={{ y: 0, opacity: 1, scale: 1 }}
-            exit={{ y: 8, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.97 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 28 }}
             onClick={(e) => e.stopPropagation()}
-            className={`${
-              hasTarget ? 'm-2' : ''
-            } w-[min(460px,94vw)] max-h-[88vh] overflow-y-auto rounded-xl border border-bcc-border bg-bcc-white shadow-xl`}
+            style={
+              hasTarget && popoverPos
+                ? {
+                    position: 'fixed',
+                    top: popoverPos.top,
+                    left: popoverPos.left,
+                    width: POPOVER_W,
+                    zIndex: 62,
+                  }
+                : {
+                    position: 'fixed',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    width: `min(${POPOVER_W}px, 94vw)`,
+                    zIndex: 62,
+                  }
+            }
+            className="max-h-[88vh] overflow-y-auto rounded-xl border border-bcc-border bg-bcc-white shadow-xl"
           >
+            {/* Arrow pointing at the anchor element */}
+            {hasTarget && popoverPos && (
+              <div aria-hidden="true" style={arrowStyle(popoverPos.placement)} />
+            )}
+
             {/* Header */}
             <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-4 border-b border-bcc-border-light">
               <div className="flex items-center gap-3 min-w-0">
@@ -290,10 +503,14 @@ export default function AppWalkthrough() {
             </div>
 
             {/* Progress dots */}
-            <div className="px-6 pb-2 flex items-center justify-center gap-1.5" aria-hidden="true">
+            <div
+              className="px-6 pb-2 flex items-center justify-center gap-1.5"
+              aria-label={`Step ${index + 1} of ${total}`}
+            >
               {cards.map((c, i) => (
                 <span
                   key={c.id}
+                  aria-hidden="true"
                   className={`h-1.5 rounded-full transition-all ${
                     i === index ? 'w-5 bg-bcc-primary' : 'w-1.5 bg-bcc-border'
                   }`}
@@ -341,7 +558,7 @@ export default function AppWalkthrough() {
               )}
             </div>
           </motion.div>
-        </motion.div>
+        </>
       )}
     </AnimatePresence>
   );
