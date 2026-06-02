@@ -1654,6 +1654,56 @@ const migrations: Migration[] = [
       console.log('[Migration 049] client branding columns ready');
     }
   },
+  {
+    id: '050',
+    name: 'add_sops_role_and_source',
+    up: (db) => {
+      // ROLE-LIBRARY BRIDGE.
+      //
+      // The Command Center `sops` table was department-keyed only (the 23
+      // starter SOPs in sops-seed.ts each carry a `department` but no role),
+      // while the Skill-23 on-disk library lives at
+      //   departments/<dept>/<NN-role>/how-to.md
+      // i.e. it IS role-resolved. Those two SOP layers shared no key, so the
+      // rich per-role how-to.md docs the agents actually run never appeared on
+      // the CC SOP board (audit gap SOP-1 / SOP-2).
+      //
+      // This adds the two columns the importer (/api/sops/import-role-library)
+      // needs to mirror the on-disk library into the DB without colliding with
+      // the department-keyed starter SOPs:
+      //   - role     the role-folder slug a SOP belongs to (NULL for the
+      //              department-level starter SOPs). Lets multiple role-specific
+      //              SOPs coexist in one department.
+      //   - source   provenance: 'role-library' for imported on-disk how-to.md
+      //              docs, NULL for hand-authored / starter / learning-loop
+      //              SOPs. The importer ONLY ever upserts/replaces rows where
+      //              source='role-library', so user-authored SOPs are never
+      //              touched or deleted.
+      //
+      // Additive + idempotent: NULL defaults preserve every existing row's
+      // behavior (department matching in scoreSOPForTask is unchanged).
+      console.log('[Migration 050] Adding role + source columns to sops...');
+
+      const cols = (db.prepare(`PRAGMA table_info(sops)`).all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      if (!cols.includes('role')) {
+        db.exec(`ALTER TABLE sops ADD COLUMN role TEXT`);
+        console.log('[Migration 050] Added sops.role');
+      } else {
+        console.log('[Migration 050] sops.role already present, skipping');
+      }
+      if (!cols.includes('source')) {
+        db.exec(`ALTER TABLE sops ADD COLUMN source TEXT`);
+        console.log('[Migration 050] Added sops.source');
+      } else {
+        console.log('[Migration 050] sops.source already present, skipping');
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_role ON sops(role)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_source ON sops(source)`);
+      console.log('[Migration 050] sops role/source columns ready');
+    }
+  },
 ];
 
 /**

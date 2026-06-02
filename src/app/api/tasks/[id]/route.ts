@@ -6,6 +6,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
 import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/types';
 import { checkTriad } from '@/lib/sops';
+import { proposeDraftFromTask } from '@/lib/sop-learning';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -129,12 +130,35 @@ export async function PATCH(
         };
         const { missing } = checkTriad(merged);
         if (missing.length > 0) {
+          // Auto-draft: when the ONLY/also-missing piece is the SOP, turn the
+          // block into a pre-filled DRAFT proposal the dept head can approve,
+          // instead of just bouncing a 400 with nothing to act on. Best-effort
+          // and idempotent (one pending draft per task) — a failure here must
+          // never change the gate's behavior, so we swallow and still 400.
+          let sop_draft_proposal_id: string | null = null;
+          if (missing.includes('sop_id')) {
+            try {
+              const draft = proposeDraftFromTask({
+                task_id: id,
+                title: validatedData.title !== undefined ? validatedData.title : existing.title,
+                description: merged.description,
+                department: (existing as Task).department || (existing as Task).workspace_id || null,
+                persona_id: merged.persona_id,
+              });
+              sop_draft_proposal_id = draft.proposal_id;
+            } catch (err) {
+              console.warn('[tasks PATCH] Triad auto-draft skipped:', (err as Error).message);
+            }
+          }
           return NextResponse.json(
             {
               error: 'Triad incomplete',
               missing,
               task_id: id,
-              message: `Cannot leave backlog. Missing: ${missing.join(', ')}. The Triad Rule requires a description, a SOP, and a persona before a task can start.`,
+              sop_draft_proposal_id,
+              message: `Cannot leave backlog. Missing: ${missing.join(', ')}. The Triad Rule requires a description, a SOP, and a persona before a task can start.${
+                sop_draft_proposal_id ? ' A draft SOP was prepared for review at /sops/proposals.' : ''
+              }`,
             },
             { status: 400 }
           );

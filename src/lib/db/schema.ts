@@ -357,6 +357,14 @@ CREATE TABLE IF NOT EXISTS sops (
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+-- NOTE: the role + source columns and their indexes (idx_sops_role,
+-- idx_sops_source) are intentionally NOT declared in this base CREATE TABLE.
+-- They are added by migration 050 (add_sops_role_and_source) for BOTH fresh and
+-- existing databases. If they lived here, db.exec(schema) on every getDb() call
+-- would run CREATE INDEX ... ON sops(role) against a pre-existing legacy sops
+-- table (CREATE TABLE IF NOT EXISTS is a no-op on it), throwing
+-- "no such column: role" before migration 050 could add the column -- crashing
+-- the upgrade path for every database created before v4.3.0.
 CREATE INDEX IF NOT EXISTS idx_sops_department ON sops(department);
 CREATE INDEX IF NOT EXISTS idx_sops_slug ON sops(slug);
 CREATE INDEX IF NOT EXISTS idx_sops_deleted ON sops(deleted_at);

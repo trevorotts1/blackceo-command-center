@@ -2,8 +2,10 @@
 const nextConfig = {
   experimental: {
     serverComponentsExternalPackages: ['better-sqlite3'],
-    // Required in Next 14.2 to load the project-root `instrumentation.ts` file
-    // that registers in-process cron jobs on app boot (v4.0.1 P0-6).
+    // Required in Next 14.2 to load `src/instrumentation.ts` (this project uses
+    // a src/ dir, so Next loads the src-level file, not a root one) which runs
+    // boot-time wiring: DB init, provider-env hydration, Studio registry seed,
+    // in-process cron registration, and Bridge pairing bootstrap (v4.0.1 P0-6).
     instrumentationHook: true,
   },
   webpack: (config, { nextRuntime }) => {
