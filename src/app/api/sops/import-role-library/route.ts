@@ -22,17 +22,28 @@ export const revalidate = 0;
  * `Authorization: Bearer ...`. Unset → runs unauthenticated (dev mode). Same
  * convention as /api/cron/sop-learning.
  */
-async function handler(req: NextRequest) {
+/**
+ * Shared-secret gate. When CRON_SECRET is set, both POST and GET require either
+ * `?token=<secret>` or `Authorization: Bearer <secret>`. Unset → unauthenticated
+ * (dev mode), same convention as /api/cron/sop-learning. Returns a 401
+ * NextResponse to short-circuit, or null when the request is authorized.
+ */
+function checkAuth(req: NextRequest): NextResponse | null {
   const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const url = new URL(req.url);
-    const tokenParam = url.searchParams.get('token');
-    const auth = req.headers.get('authorization') || '';
-    const tokenHeader = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-    if (tokenParam !== secret && tokenHeader !== secret) {
-      return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
-    }
+  if (!secret) return null;
+  const url = new URL(req.url);
+  const tokenParam = url.searchParams.get('token');
+  const auth = req.headers.get('authorization') || '';
+  const tokenHeader = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (tokenParam !== secret && tokenHeader !== secret) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
+  return null;
+}
+
+async function handler(req: NextRequest) {
+  const denied = checkAuth(req);
+  if (denied) return denied;
 
   try {
     const body = await req.json().catch(() => ({} as Record<string, unknown>));
@@ -57,8 +68,14 @@ export async function POST(req: NextRequest) {
  *
  * Returns the resolved departments path that POST would scan (no writes). Lets
  * an operator confirm WHERE the importer will read before triggering it.
+ *
+ * Gated by the same CRON_SECRET as POST: it discloses a resolved filesystem
+ * path, so when a secret is configured this read must be authenticated too.
  */
 export async function GET(req: NextRequest) {
+  const denied = checkAuth(req);
+  if (denied) return denied;
+
   const url = new URL(req.url);
   const departmentsPath = url.searchParams.get('departments_path') || undefined;
   return NextResponse.json({

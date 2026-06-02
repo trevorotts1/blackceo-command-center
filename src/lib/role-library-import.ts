@@ -169,10 +169,20 @@ function extractTitle(markdown: string, fallback: string): string {
 export function extractStepsFromHowTo(markdown: string, roleName: string): SOPStep[] {
   const lines = markdown.split('\n');
 
-  // Find a Section-9 / SOPs anchor.
+  // Find a Section-9 / SOPs anchor. The "9" alternatives are deliberately
+  // tight: a heading is only treated as the SOP section anchor when the 9 is a
+  // genuine SECTION NUMBER — i.e. "9" followed by a section delimiter (".", ":",
+  // ")", "-") and/or an SOP-ish word — never a heading that merely *starts* with
+  // "9 " (e.g. "## 9 things to know"), which would silently hijack the parse and
+  // drop the real first step. Recognized forms:
+  //   "Section 9", "Section 9: SOPs"
+  //   "9. ...", "9: ...", "9) ...", "9 - SOPs", "9 SOP(s)", "9 Standard Operating..."
+  //   "SOP" / "SOPs" / "Standard Operating Procedure(s)" headings
+  const SOP_SECTION_ANCHOR =
+    /^#{1,3}\s+(section\s*9\b|9\s*[.:)]|9\s+[-–—]\s|9\s+(sops?\b|standard\s+operating)|sops?\b|standard\s+operating\s+procedures?\b)/i;
   let sopSectionStart = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (/^#{1,3}\s+(section\s*9\b|9\.\s|9\s+|sops?\b)/i.test(lines[i])) {
+    if (SOP_SECTION_ANCHOR.test(lines[i])) {
       sopSectionStart = i;
       break;
     }
