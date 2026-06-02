@@ -46,18 +46,56 @@ import {
   fccProxyEnv,
   type BridgeAgent,
 } from '@/lib/bridge/agents';
+import { MANAGED_CLIS } from '@/lib/bridge/cli-manager';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { bridgeOpenClawTarget, withClientContext } from '@/lib/bridge/dispatch';
+
+/**
+ * Install hint per Bridge agent id, sourced from the MANAGED_CLIS registry so
+ * the "not installed on this box" error stays in sync with the install/update
+ * commands E16 already documents. `fcc` reuses the `claude` binary, so it maps
+ * to the same hint. Agents with no scripted installer (antigravity, hermes)
+ * simply have no entry and the error omits a command.
+ */
+const INSTALL_HINTS: Record<string, string | undefined> = (() => {
+  const byId = new Map(MANAGED_CLIS.map((c) => [c.id, c.install ?? undefined]));
+  return {
+    claude: byId.get('claude'),
+    fcc: byId.get('claude'),
+    codex: byId.get('codex'),
+    gemini: byId.get('gemini'),
+    antigravity: byId.get('antigravity'),
+    hermes: byId.get('hermes'),
+  };
+})();
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const requestSchema = z.object({
-  agent_id: z.string().min(1).max(64),
-  session_id: z.string().min(1).max(128).optional(),
-  content: z.string().min(1).max(64_000),
-  title: z.string().max(200).optional(),
+/** Max decoded attachment size accepted by the route (mirrors the composer). */
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MiB
+/** Base64 inflates ~4/3; cap the encoded string a little above the byte ceiling. */
+const MAX_ATTACHMENT_B64 = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 1024;
+
+const attachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  content_type: z.string().max(255).optional(),
+  data_base64: z.string().min(1).max(MAX_ATTACHMENT_B64),
 });
+
+const requestSchema = z
+  .object({
+    agent_id: z.string().min(1).max(64),
+    session_id: z.string().min(1).max(128).optional(),
+    // Allow empty content when an attachment carries the turn ("here's a file").
+    content: z.string().max(64_000),
+    title: z.string().max(200).optional(),
+    attachment: attachmentSchema.optional(),
+  })
+  .refine((b) => b.content.trim().length > 0 || !!b.attachment, {
+    message: 'content or attachment is required',
+    path: ['content'],
+  });
 
 interface SessionRow {
   id: string;
@@ -122,6 +160,43 @@ function persistMessage(args: {
 }
 
 /**
+ * Sanitize a user-supplied filename to a safe basename. Strips any path
+ * components and characters that could escape the scratch dir or confuse a
+ * shell, then collapses to a bounded, predictable name. Never returns an empty
+ * string (falls back to `attachment`).
+ */
+function safeAttachmentName(raw: string): string {
+  const base = path.basename(raw).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^\.+/, '');
+  const trimmed = base.slice(0, 200);
+  return trimmed.length > 0 ? trimmed : 'attachment';
+}
+
+/**
+ * Persist an uploaded attachment into the session's scratch directory — the
+ * exact cwd the CLI runs in (and the dir the Workspace sub-module previews).
+ * Returns the absolute path written, or null on failure (best-effort; a failed
+ * attachment must never abort the turn). Collisions are avoided with a short
+ * uuid prefix on the `attachments/` subdir.
+ */
+function persistAttachment(
+  scratchDir: string,
+  attachment: { filename: string; data_base64: string },
+): { absPath: string; relPath: string } | null {
+  try {
+    const name = safeAttachmentName(attachment.filename);
+    const bytes = Buffer.from(attachment.data_base64, 'base64');
+    if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) return null;
+    const subdir = path.join(scratchDir, 'attachments', randomUUID().slice(0, 8));
+    fs.mkdirSync(subdir, { recursive: true });
+    const absPath = path.join(subdir, name);
+    fs.writeFileSync(absPath, bytes);
+    return { absPath, relPath: path.relative(scratchDir, absPath) };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build the env passed to a spawned CLI. The Next.js dev server's own
  * process.env can be missing SHELL or have a stripped PATH, which causes
  * agents to crash when they shell out. Force a baseline PATH that covers
@@ -162,14 +237,25 @@ function buildArgv(agent: BridgeAgent, prompt: string): string[] {
   switch (agent.id) {
     case 'claude':
     case 'fcc':
-      // claude --print "..." --output-format=stream-json
-      return ['--print', prompt, '--output-format', 'stream-json'];
+      // claude --print "..." --output-format stream-json --verbose
+      // Claude Code REQUIRES --verbose whenever --print is combined with
+      // --output-format=stream-json (verified on a live box: without it the CLI
+      // exits with "When using --print, --output-format=stream-json requires
+      // --verbose"). --verbose only affects the stream-json envelope, not the
+      // assistant text we extract in parseDelta.
+      return ['--print', prompt, '--output-format', 'stream-json', '--verbose'];
     case 'codex':
       // codex exec --json "..."
       return ['exec', '--json', prompt];
     case 'gemini':
-      // gemini --prompt "..." --json
-      return ['--prompt', prompt, '--json'];
+      // gemini --prompt "..." --output-format json
+      // Verified on a live box (gemini --help): non-interactive mode is -p/--prompt
+      // and the structured-output flag is -o/--output-format with choices
+      // text|json|stream-json. There is NO bare `--json` flag — passing `json`
+      // positionally produced "Unknown argument: json". `--output-format json`
+      // emits a SINGLE JSON object { response, stats, error? } (NOT NDJSON), so
+      // gemini is parsed as a single-shot agent below, not a streaming one.
+      return ['--prompt', prompt, '--output-format', 'json'];
     case 'antigravity':
       // agy task "..."
       return ['task', prompt];
@@ -182,10 +268,39 @@ function buildArgv(agent: BridgeAgent, prompt: string): string[] {
 }
 
 /**
+ * Reduce a single-shot agent's complete stdout to the text the user should
+ * see. Gemini's `--output-format json` returns ONE JSON object on close
+ * ({ response, stats, error? }), so we extract `.response` (or surface
+ * `.error.message`). Other single-shot agents (antigravity, hermes) emit
+ * plain text, which we return unchanged. Never throws.
+ */
+function finalizeReply(agent: BridgeAgent, raw: string): string {
+  const text = raw.trim();
+  if (agent.id === 'gemini') {
+    try {
+      const obj = JSON.parse(text) as Record<string, unknown>;
+      if (obj && typeof obj === 'object') {
+        if (typeof obj.response === 'string') return obj.response;
+        const err = obj.error as Record<string, unknown> | undefined;
+        if (err && typeof err.message === 'string') {
+          return `Gemini error: ${err.message}`;
+        }
+      }
+    } catch {
+      // Not JSON (e.g. an early CLI usage/auth error printed as plain text):
+      // fall through and return the raw text so the operator still sees it.
+    }
+    return text;
+  }
+  return text;
+}
+
+/**
  * Parse one NDJSON line from a streaming CLI and return the delta text
- * the user should see. Claude and FCC use the Anthropic-style envelope;
- * Codex and Gemini have their own shapes. Unknown shapes are ignored
- * silently; the final assistant message reconstructed from all deltas.
+ * the user should see. Claude and FCC use the Anthropic-style stream-json
+ * envelope; Codex emits its own NDJSON shape. (Gemini is NOT streamed — see
+ * finalizeReply.) Unknown shapes are ignored silently; the final assistant
+ * message is reconstructed from all deltas.
  */
 function parseDelta(agent: BridgeAgent, line: string): string | null {
   const trimmed = line.trim();
@@ -222,23 +337,8 @@ function parseDelta(agent: BridgeAgent, line: string): string | null {
     return null;
   }
 
-  if (agent.id === 'gemini') {
-    // { type: 'message', role: 'assistant', content: '...', delta: bool }
-    if (
-      o.type === 'message' &&
-      o.role === 'assistant' &&
-      typeof o.content === 'string'
-    ) {
-      return o.content;
-    }
-    if (o.type === 'result' && typeof o.text === 'string') {
-      return o.text;
-    }
-    return null;
-  }
-
-  // antigravity / hermes do not stream NDJSON; their full text arrives on
-  // close as raw stdout.
+  // antigravity / hermes / gemini do not stream NDJSON; their full output
+  // arrives on close as raw stdout and is reduced by finalizeReply.
   return null;
 }
 
@@ -318,16 +418,34 @@ async function runCli(args: {
       stderrText += chunk.toString('utf8');
     });
 
-    child.on('error', (err) => {
-      const msg = `${agent.label} crashed: ${err.message}`;
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      // A missing binary surfaces here (not as a synchronous spawn throw) with
+      // code ENOENT, e.g. `spawn codex ENOENT`. Turn that raw crash into a
+      // clean, actionable "not installed on this box" message, with the
+      // documented install command when one exists for this CLI.
+      let msg: string;
+      if (err.code === 'ENOENT') {
+        const install = INSTALL_HINTS[agent.id];
+        msg = install
+          ? `${agent.label} CLI is not installed on this box. Install it with: ${install}`
+          : `${agent.label} CLI is not installed on this box.`;
+      } else {
+        msg = `${agent.label} crashed: ${err.message}`;
+      }
       controller.enqueue(sseEvent('error', { message: msg }));
       resolve({ reply, aborted: true, errorText: msg });
     });
 
     child.on('close', (code) => {
-      // For non-streaming agents, push the whole reply now.
-      if (!agent.streams && reply) {
-        controller.enqueue(sseEvent('delta', { text: reply }));
+      // For non-streaming agents the full stdout has accumulated in `reply`.
+      // Reduce it to the user-facing text (e.g. Gemini's JSON → `.response`)
+      // and push it as the single delta. Streaming agents already emitted
+      // their deltas line-by-line above.
+      if (!agent.streams) {
+        reply = finalizeReply(agent, reply);
+        if (reply) {
+          controller.enqueue(sseEvent('delta', { text: reply }));
+        }
       }
       if (code !== 0 && !reply) {
         const msg = stderrText.trim() || `${agent.label} exited with code ${code}`;
@@ -369,8 +487,11 @@ async function runGateway(args: {
     // Establish the operator.admin session before dispatching. This makes the
     // connect/pairing failure surface here (with an actionable message) rather
     // than only as the generic "Not connected" thrown by call().
+    // connectWithAutoPair() self-heals a pairing-pending failure on the local/
+    // self gateway by auto-approving this device via the openclaw CLI, then
+    // retrying — so the operator never has to approve manually.
     if (!client.isConnected()) {
-      await client.connect();
+      await client.connectWithAutoPair();
     }
     // E12: prepend the operator's active goals so the client agent always has
     // them in context for this turn (no-op when there are no active goals).
@@ -426,10 +547,32 @@ export async function POST(req: NextRequest) {
     title: body.title,
   });
 
+  // Persist the optional attachment into the session's scratch dir BEFORE the
+  // turn so we can hand the agent a concrete path it can read. Best-effort: a
+  // failed write degrades to a turn without the file reference, never a 500.
+  let attachmentRef: { absPath: string; relPath: string } | null = null;
+  if (body.attachment && session.scratch_dir) {
+    attachmentRef = persistAttachment(session.scratch_dir, {
+      filename: body.attachment.filename,
+      data_base64: body.attachment.data_base64,
+    });
+  }
+
+  // The prompt the agent actually receives: the user's text plus, when an
+  // attachment landed, a line pointing the CLI/agent at the file on disk so it
+  // can open/read it from its own working directory.
+  const attachmentNote = attachmentRef
+    ? `\n\n[Attached file: ${body.attachment!.filename} — saved to ${attachmentRef.absPath} (relative to this session's working directory: ${attachmentRef.relPath}). Read it from there if the request refers to it.]`
+    : '';
+  const turnPrompt = `${body.content}${attachmentNote}`;
+
+  // The persisted user message keeps a human-readable note of the attachment.
   persistMessage({
     sessionId: session.id,
     role: 'user',
-    content: body.content,
+    content: body.attachment
+      ? `${body.content}${body.content ? '\n\n' : ''}📎 ${body.attachment.filename}${attachmentRef ? '' : ' (upload failed)'}`
+      : body.content,
   });
 
   const stream = new ReadableStream<Uint8Array>({
@@ -445,8 +588,8 @@ export async function POST(req: NextRequest) {
       const started = Date.now();
       const result =
         agent.transport === 'gateway'
-          ? await runGateway({ prompt: body.content, session, controller })
-          : await runCli({ agent, prompt: body.content, session, controller });
+          ? await runGateway({ prompt: turnPrompt, session, controller })
+          : await runCli({ agent, prompt: turnPrompt, session, controller });
 
       const elapsedMs = Date.now() - started;
       const metadata = {

@@ -1,6 +1,7 @@
 // OpenClaw Gateway WebSocket Client
 
 import { EventEmitter } from 'events';
+import { execFile } from 'child_process';
 import type { OpenClawMessage, OpenClawSessionInfo } from '../types';
 import { loadOrCreateDeviceIdentity, signDevicePayload, buildDeviceAuthPayload, publicKeyRawBase64Url } from './device-identity';
 import { createHash } from 'crypto';
@@ -68,6 +69,14 @@ export class OpenClawClient extends EventEmitter {
   private deviceIdentity: { deviceId: string; publicKeyPem: string; privateKeyPem: string } | null = null;
   private lastConnectError: string | null = null;
   private lastConnectErrorAtMs = 0;
+  /** True once an auto-approve attempt is in flight or has been made for the
+   *  current pairing cycle, so we never loop approve→retry→approve forever. */
+  private autoApproveInFlight = false;
+  private autoApproveAttempted = false;
+  /** One-time human-readable "pairing… approved automatically" status, surfaced
+   *  to the status route in place of the raw red error after a successful
+   *  self-heal. Cleared on the next successful connect. */
+  private pairingAutoApprovedNote: string | null = null;
   private messageHandlers = new Set<(event: { data: unknown }) => void>(); // Track all message handlers for cleanup
   private readonly MAX_PROCESSED_EVENTS = 1000; // Limit the size of the processed events cache
   private readonly CLEANUP_THRESHOLD = 100; // Number of entries to remove when limit exceeded
@@ -370,8 +379,14 @@ export class OpenClawClient extends EventEmitter {
                 id: requestId,
                 method: 'connect',
                 params: {
+                  // The gateway "rejects ranges that do not include its current
+                  // protocol". OpenClaw's current PROTOCOL_VERSION is 4
+                  // (MIN_CLIENT_PROTOCOL_VERSION = 4), so a hardcoded [3,3] range
+                  // was the root cause of "Authentication failed: protocol
+                  // mismatch". Advertise [3,4] so we satisfy a v4 gateway while
+                  // staying tolerant of an older v3 one.
                   minProtocol: 3,
-                  maxProtocol: 3,
+                  maxProtocol: 4,
                   client: {
                     id: clientId,
                     version: '1.0.1',
@@ -433,6 +448,183 @@ export class OpenClawClient extends EventEmitter {
     });
 
     return this.connecting;
+  }
+
+  /**
+   * True when this client targets the LOCAL/self gateway over loopback with no
+   * Cloudflare-Access headers. Only in that case can we run the gateway-host
+   * `openclaw devices approve` CLI to self-heal pairing — a remote client's
+   * gateway lives on another box where we cannot invoke its CLI.
+   */
+  private isLocalSelfGateway(): boolean {
+    if (this.cfAccessClientId || this.cfAccessClientSecret) return false;
+    try {
+      const host = new URL(this.url).hostname;
+      return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Connect, and if the gateway rejects our device (pairing pending) AND this is
+   * the local/self gateway, auto-approve THIS device via the documented CLI
+   * (`openclaw devices list --json` → match our deviceId → `openclaw devices
+   * approve <requestId>`), then retry the connection ONCE. The operator never
+   * has to approve manually for the self box.
+   *
+   * For a remote client (no local CLI / token for that box) this is a no-op
+   * beyond the normal connect; the caller keeps the clear actionable message.
+   *
+   * Returns true on a (re)connected socket; throws the original connect error
+   * when auto-approve is not possible or did not help.
+   */
+  async connectWithAutoPair(): Promise<void> {
+    try {
+      await this.connect();
+      this.autoApproveAttempted = false; // healthy connect resets the cycle
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const pairingPending = /pairing|Authentication failed|device/i.test(message);
+      // Only self-heal a pairing failure on the local box, and only once per
+      // cycle to avoid an approve→retry→approve loop.
+      if (
+        !pairingPending ||
+        !this.isLocalSelfGateway() ||
+        this.autoApproveAttempted ||
+        this.autoApproveInFlight
+      ) {
+        throw err;
+      }
+      this.autoApproveInFlight = true;
+      this.autoApproveAttempted = true;
+      try {
+        const approved = await this.autoApproveLocalDevice();
+        if (!approved) throw err; // could not approve — surface the original error
+        // Approved: retry the handshake once. A fresh connect re-runs the
+        // challenge/response with the now-trusted device.
+        await this.connect();
+        this.pairingAutoApprovedNote =
+          `Device ${this.deviceIdentity?.deviceId ?? 'unknown'} was not approved; the Command Center approved it automatically and reconnected.`;
+        this.lastConnectError = null;
+        this.lastConnectErrorAtMs = 0;
+      } finally {
+        this.autoApproveInFlight = false;
+      }
+    }
+  }
+
+  /**
+   * Run the documented OpenClaw CLI on the LOCAL gateway host to approve THIS
+   * device. Returns true when an approve command was run for a request whose
+   * device id matches our own deviceId.
+   *
+   * Steps (per docs/cli/devices.md):
+   *   1. `openclaw devices list --json` → find the pending request for our
+   *      deviceId, read its requestId.
+   *   2. `openclaw devices approve <requestId> [--token <token>]`.
+   *
+   * The JSON shape is not strictly documented, so parsing is defensive: we scan
+   * the structure for any object that carries our deviceId AND a request-id-like
+   * field. Never throws — returns false on any failure.
+   */
+  private async autoApproveLocalDevice(): Promise<boolean> {
+    const deviceId = this.deviceIdentity?.deviceId;
+    if (!deviceId) return false;
+    try {
+      const listOut = await this.runOpenClawCli(['devices', 'list', '--json']);
+      if (listOut === null) return false;
+      const requestId = this.findPendingRequestId(listOut, deviceId);
+      if (!requestId) {
+        console.warn('[OpenClaw] auto-pair: no pending request found for device', deviceId);
+        return false;
+      }
+      // Approve by exact requestId. Pass the token when we hold one; the local
+      // loopback pairing fallback covers the no-token case (see docs/cli/devices.md).
+      const approveArgs = ['devices', 'approve', requestId];
+      if (this.token) approveArgs.push('--token', this.token);
+      const approveOut = await this.runOpenClawCli(approveArgs);
+      if (approveOut === null) return false;
+      console.log('[OpenClaw] auto-pair: approved device', deviceId, 'request', requestId);
+      return true;
+    } catch (e) {
+      console.warn('[OpenClaw] auto-pair failed:', e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  }
+
+  /**
+   * Find the pending pairing requestId whose device id matches `deviceId` in the
+   * `openclaw devices list --json` output. Defensive against unknown nesting:
+   * walks the parsed JSON and matches any object that exposes our deviceId on a
+   * device-id-like field plus a request-id-like field.
+   */
+  private findPendingRequestId(jsonText: string, deviceId: string): string | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      return null;
+    }
+    const deviceKeys = ['deviceId', 'device_id', 'device'];
+    const requestKeys = ['requestId', 'request_id', 'id'];
+    let found: string | null = null;
+    const visit = (node: unknown) => {
+      if (found) return;
+      if (Array.isArray(node)) {
+        for (const item of node) visit(item);
+        return;
+      }
+      if (node && typeof node === 'object') {
+        const obj = node as Record<string, unknown>;
+        const matchesDevice = deviceKeys.some((k) => {
+          const v = obj[k];
+          return typeof v === 'string' && v === deviceId;
+        });
+        if (matchesDevice) {
+          for (const rk of requestKeys) {
+            const v = obj[rk];
+            // Don't mistake the deviceId field itself for the requestId.
+            if (typeof v === 'string' && v && v !== deviceId) {
+              found = v;
+              return;
+            }
+          }
+        }
+        for (const v of Object.values(obj)) visit(v);
+      }
+    };
+    visit(parsed);
+    return found;
+  }
+
+  /**
+   * Invoke the `openclaw` CLI and return stdout, or null on failure. Bounded
+   * runtime + buffer so a hung CLI cannot wedge a request. Never throws.
+   */
+  private runOpenClawCli(args: string[]): Promise<string | null> {
+    const bin = process.env.OPENCLAW_CLI_BIN || 'openclaw';
+    return new Promise((resolve) => {
+      execFile(
+        bin,
+        args,
+        { timeout: 15_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+        (err, stdout) => {
+          if (err) {
+            resolve(null);
+            return;
+          }
+          resolve(stdout?.toString() ?? '');
+        },
+      );
+    });
+  }
+
+  /** The one-time "approved automatically" note, or null. Read by the status
+   *  route to render a clean state instead of the raw pairing error. */
+  getPairingAutoApprovedNote(): string | null {
+    return this.pairingAutoApprovedNote;
   }
 
   private handleMessage(data: OpenClawMessage & { type?: string; ok?: boolean; payload?: unknown }): void {
