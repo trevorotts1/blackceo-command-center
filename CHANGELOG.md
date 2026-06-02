@@ -28,6 +28,44 @@ The 23 department-level starter SOPs (`sops-seed.ts`, DB) and the per-role on-di
 - Migration **050** adds nullable `role` + `source` columns (+ indexes) to `sops`; `schema.ts` carries them for fresh installs. Additive — NULL defaults preserve existing department matching.
 - Two-layer model + the sync documented in `docs/SOP-LAYERS.md`.
 
+## [v4.2.2] - 2026-06-02 - OpenClaw Bridge: fix CLI spawn bugs + Enter-to-send + attachments + auto-pair
+
+Bridge was broken across every CLI at the repo level (hit every client):
+
+- **Claude Code**: add `--verbose` (required alongside `--print --output-format stream-json`).
+- **Gemini**: `--json` → `--output-format json`, and parse the single JSON object's `.response`.
+- **Codex**: an `ENOENT` (not installed) no longer crashes — returns a clean "not installed" message with an install hint.
+- **OpenClaw**: protocol range `3` → `[3, 4]` (the gateway is v4); auto-approve a pairing-pending device via the gateway token, then retry the connect.
+- **UX**: Enter sends (Shift+Enter inserts a newline); paperclip attachment upload writes to a scratch dir and is referenced in the dispatch.
+
+Touches `src/lib/openclaw/client.ts`, `src/app/api/operator/bridge/send/route.ts`, `src/lib/bridge/agents.ts`, `src/components/operator/{BridgeChat,MessageInput}.tsx`, `src/app/api/openclaw/status/route.ts`. Merged via PR #34.
+
+## [v4.2.1] - 2026-06-01 - White-label branding (D1-D3) + flagged operator fixes
+
+- **Branding (migration 049)**: per-client `brand_color` / `logo_url`; the interview now asks for brand colors (hex or color-name → hex); the Command Center is themed from the client's primary + complementary palette; the client logo is uploaded to their own GHL media library and swapped in for the BlackCEO logo.
+- **Flagged fixes**: bridge/send dispatches to the *selected* client's gateway and injects goals (E21/E12); client-FS base64 framing (marker-collision fix); a PDF is no longer read as utf8.
+
+New `src/lib/branding.ts`, `src/lib/colors.ts`, `src/components/BrandTheme.tsx`; updates to `Header.tsx`, `useCompanyBrand.ts`, `CompanySettingsForm.tsx`, `client-fs.ts`. Merged via PR #33.
+
+## [v4.2.0] - 2026-06-01 - Per-client tenant foundation + E1-E27 walkthrough fixes
+
+Foundation (root-cause fix): a `clients` tenant table (migration 048), a per-target OpenClaw WS client with CF-Access headers, `resolveClientPath()` for per-client workspace reads, a client-picker, a single status pill (E24), and a per-client interview flag (E3).
+
+Feature clusters (all QC ≥ 8.5):
+
+- **intelligence** (E4-E9, E14): real refresh, add-key-to-env, model-card purpose, apply-to-all-depts, PersonaMatch placeholder, per-client provider keys over the tunnel.
+- **operator** (E11, E12, E13, E16, E18, E20, E21, E22): journal / goals / memory / bridge / workspace / notebooks / call-mode / web-agent all re-pointed at the selected client over the CF tunnel.
+- **kanban** (E23, E25, E26): real per-client live feed; settings-gear → intelligence; honest performance-board data source.
+- **convai** (E1, E2, E3): connection-state indicator, plain-English persona copy, interview banner respects the per-client flag.
+- **walkthrough** (E10, B3): element-anchored coach-marks app-wide.
+- **security** (E27): Security Team department + roles wired into the dept registry.
+
+New routes under `src/app/api/clients/*`, new `src/lib/clients.ts`, `src/lib/bridge/{cli-manager,dispatch}.ts`, `src/app/api/events/client-feed/route.ts`. Migration 048. Merged via PR #32.
+
+## [v4.1.13] - 2026-06-01 - Expand starter SOP library 17 → 23
+
+Adds the Security Team SOP (`security-incident-response`) per requirement, plus 5 high-value ZHC departments that previously had no starter SOP: **hr-people**, **finance-accounting**, **operations**, **data-analytics**, **executive-assistant**. Each matches the `SeedSOP` schema and auto-seeds idempotently on first boot via the same path as the existing 17 (`src/lib/sops-seed.ts`). Merged via PR #31.
+
 ## v4.1.12 - 2026-06-01 - Speech-to-text on Kanban new-task input
 
 - MicDictateButton (browser Web Speech API) wired into TaskModal title + description fields; graceful degradation on unsupported browsers; no new deps. Build green.
