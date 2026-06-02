@@ -347,6 +347,415 @@ export const STARTER_SOPS: SeedSOP[] = [
     success_criteria: 'Campaign hits target ROAS and scales without breaking it',
     persona_hints: ['godin-purple-cow', 'priestley-key-person-influence', 'bly-copywriters-handbook'],
   },
+
+  // 18. Security
+  {
+    slug: 'security-incident-response',
+    name: 'Security Incident Response + Hygiene',
+    description: 'Detect, log, contain, and recover from a security anomaly while enforcing ongoing credential hygiene.',
+    department: 'security',
+    task_keywords: 'security,incident,breach,access,credentials,anomaly,monitor,hygiene,2fa,threat',
+    steps: [
+      {
+        name: 'Detect + log the anomaly',
+        checklist: [
+          'Unusual login geo or time',
+          'Unexpected API key usage',
+          'Failed auth spike',
+          'New device / new IP on privileged account',
+          'Log entry with timestamp, source IP, affected system, and severity (P1–P3)',
+        ],
+        success_criteria: 'Every anomaly has a written log entry before any action is taken',
+        persona_hint: 'threat-intel-first',
+      },
+      {
+        name: 'Classify severity',
+        checklist: [
+          'P1: active breach / data exfiltration in progress',
+          'P2: unauthorized access confirmed, no confirmed exfil',
+          'P3: suspicious signal, no confirmed access',
+          'Assign owner for the incident',
+        ],
+        success_criteria: 'Severity set, owner named, within 5 min of detection',
+        persona_hint: 'nist-incident-classification',
+      },
+      {
+        name: 'Contain',
+        checklist: [
+          'Revoke or rotate the compromised credential immediately',
+          'Suspend affected session tokens',
+          'Block source IP if external threat',
+          'Isolate affected service if breach is active',
+          'Notify Trevor / client owner via secure channel',
+        ],
+        success_criteria: 'Threat vector is closed before investigation continues',
+        persona_hint: 'contain-before-investigate',
+      },
+      {
+        name: 'Investigate + root-cause',
+        checklist: [
+          'Audit logs pulled for ±24h window',
+          'Access scope of compromise determined',
+          'Lateral movement checked (other creds, other services)',
+          'Root cause identified: phishing / leaked .env / weak password / misconfigured ACL',
+        ],
+        success_criteria: 'Root cause documented with evidence, not assumptions',
+        persona_hint: 'five-whys',
+      },
+      {
+        name: 'Recover + harden',
+        checklist: [
+          'All affected credentials rotated',
+          '2FA enforced on re-entry',
+          'Affected service fully restored and smoke-tested',
+          'Incident report written (timeline, impact, fix, prevention)',
+          'Preventive control added (e.g., alert rule, env-secret audit, permission scope reduction)',
+        ],
+        success_criteria: 'Service restored, same attack vector is mechanically blocked going forward',
+        persona_hint: 'defense-in-depth',
+      },
+    ],
+    success_criteria: 'Incident contained within 15 min of detection, root cause documented, and recurrence prevented by a new control',
+    persona_hints: ['schneier-secrets-lies', 'anderson-security-engineering', 'nist-cybersecurity-framework'],
+  },
+
+  // 19. HR / People
+  {
+    slug: 'hr-people-onboarding',
+    name: 'Team Member Onboarding',
+    description: 'Bring a new employee, contractor, or VA fully online — access, context, and culture — in the first 5 days.',
+    department: 'hr-people',
+    task_keywords: 'hr,onboarding,hire,contractor,va,access,people,culture,role',
+    steps: [
+      {
+        name: 'Pre-day-1 provisioning',
+        checklist: [
+          'Accounts created: email, Slack/Telegram, CRM, project management',
+          'Permissions scoped to role only (least privilege)',
+          'Equipment or access link sent 48h before start',
+          'Welcome message drafted and scheduled',
+        ],
+        success_criteria: 'New member can log in on day 1 without waiting on IT',
+        persona_hint: 'system-ready-before-human',
+      },
+      {
+        name: 'Day-1 orientation',
+        checklist: [
+          'Company mission + values — in their own words (not PowerPoint)',
+          'Their role\'s success definition for first 30 days',
+          'Who to ask for what',
+          'Communication norms (response SLA, async vs sync)',
+        ],
+        success_criteria: 'Member can describe what "winning" looks like in their role',
+        persona_hint: 'sinek-start-with-why',
+      },
+      {
+        name: 'Week-1 ramp tasks',
+        checklist: [
+          '3–5 low-stakes tasks to build context',
+          'Shadow one full client/customer interaction',
+          'Review SOPs for their department',
+          'Ask: "What was unclear?" — record answers for SOP improvement',
+        ],
+        success_criteria: 'Member completes at least 3 real tasks by end of week 1',
+        persona_hint: 'action-over-orientation',
+      },
+      {
+        name: '30-day check-in',
+        checklist: [
+          'Are they hitting the 30-day success definition?',
+          'What\'s blocking them?',
+          'Do they have what they need?',
+          'Adjust role scope if spec was wrong',
+        ],
+        success_criteria: '30-day fit decision is data-driven, not gut-feel',
+        persona_hint: 'grove-high-output-management',
+      },
+      {
+        name: 'Offboarding trigger readiness',
+        checklist: [
+          'All credentials documented in password manager (never in their head only)',
+          'Access revocation checklist exists and is tested',
+          'Knowledge capture protocol in place',
+        ],
+        success_criteria: 'If this person left tomorrow, nothing is lost and nothing stays accessible',
+        persona_hint: 'bus-factor-zero',
+      },
+    ],
+    success_criteria: 'Member is independently productive by day 30 and offboarding takes < 1 hour',
+    persona_hints: ['grove-high-output-management', 'horowitz-hard-thing', 'sinek-start-with-why'],
+  },
+
+  // 20. Finance / Accounting
+  {
+    slug: 'finance-month-end-close',
+    name: 'Month-End Close + Cash Flow Review',
+    description: 'Close the books, reconcile accounts, and produce a clear cash position at the end of every month.',
+    department: 'finance-accounting',
+    task_keywords: 'finance,accounting,month-end,close,cash-flow,reconcile,p&l,balance-sheet,bookkeeping',
+    steps: [
+      {
+        name: 'Collect all transactions',
+        checklist: [
+          'Bank feeds synced or CSV imported',
+          'Credit card statements pulled',
+          'Stripe / payment processor exports pulled',
+          'Expenses submitted by all team members',
+        ],
+        success_criteria: 'No transaction older than 30 days is uncategorized',
+        persona_hint: 'complete-before-classify',
+      },
+      {
+        name: 'Categorize + reconcile',
+        checklist: [
+          'Each transaction matched to a chart-of-accounts category',
+          'Bank balance in software matches bank statement balance',
+          'Outstanding checks and deposits noted',
+          'Duplicate transactions flagged and removed',
+        ],
+        success_criteria: 'Reconciliation difference is $0 or variance explained',
+        persona_hint: 'trust-but-verify',
+      },
+      {
+        name: 'AP / AR sweep',
+        checklist: [
+          'Invoices sent for all delivered work',
+          'Overdue AR > 30 days — follow-up triggered',
+          'Vendor bills confirmed and scheduled for payment',
+          'No surprise payables outstanding',
+        ],
+        success_criteria: 'AR aging and AP schedule both accurate to the day',
+        persona_hint: 'cash-is-king',
+      },
+      {
+        name: 'Produce P&L + cash position',
+        checklist: [
+          'Revenue vs prior month',
+          'Top 5 expense categories vs budget',
+          'Net operating income',
+          'Current cash balance and days of runway',
+        ],
+        success_criteria: 'CEO can make a spend decision from this one page',
+        persona_hint: 'metrics-drive-decisions',
+      },
+      {
+        name: 'Flag and act on anomalies',
+        checklist: [
+          'Any expense > 20% above prior month — explained',
+          'Revenue miss > 10% — root cause noted',
+          'Runway drop > 15% — escalate to CEO',
+          'Upcoming large outflows on the calendar',
+        ],
+        success_criteria: 'No financial surprise lands in the CEO\'s lap at the next board meeting',
+        persona_hint: 'no-surprises-doctrine',
+      },
+    ],
+    success_criteria: 'Books closed by day 5 of following month, cash position accurate, and one-page summary in CEO\'s inbox',
+    persona_hints: ['ramsey-total-money-makeover', 'grove-high-output-management', 'horowitz-hard-thing'],
+  },
+
+  // 21. Operations
+  {
+    slug: 'operations-weekly-ops-review',
+    name: 'Weekly Operations Review',
+    description: 'Audit SOPs, tool stack, vendor status, and open project intake every week to keep operations from drifting.',
+    department: 'operations',
+    task_keywords: 'operations,ops,process,workflow,vendor,project,intake,sop,systems,tools',
+    steps: [
+      {
+        name: 'Open project intake',
+        checklist: [
+          'New requests captured in one place (not inboxes)',
+          'Each request triaged: scope, owner, deadline, priority',
+          'Requests with no owner flagged for CEO decision',
+        ],
+        success_criteria: 'Nothing is floating in someone\'s DMs that should be a tracked project',
+        persona_hint: 'gtd-capture-everything',
+      },
+      {
+        name: 'In-flight project health',
+        checklist: [
+          'Each project has a status: on-track / at-risk / blocked',
+          'Blocked items have a named unblocking action and deadline',
+          'Projects with no update in > 7 days flagged',
+        ],
+        success_criteria: 'Any project can be explained in 10 seconds',
+        persona_hint: 'clarity-over-detail',
+      },
+      {
+        name: 'Tool stack audit',
+        checklist: [
+          'Active subscriptions match tools actually in use',
+          'Any duplicate tools (two project managers, two CRMs)',
+          'Any new shadow IT introduced this week',
+          'Upcoming renewals in next 30 days',
+        ],
+        success_criteria: 'No zombie subscriptions; every tool has a named owner',
+        persona_hint: 'one-tool-per-function',
+      },
+      {
+        name: 'Vendor + contractor check-in',
+        checklist: [
+          'Deliverables on track',
+          'Invoices pending vs received',
+          'SLA compliance check',
+          'Renewal / offboarding decisions due',
+        ],
+        success_criteria: 'No vendor goes silent for > 14 days without a follow-up action',
+        persona_hint: 'vendor-accountability',
+      },
+      {
+        name: 'SOP health pass',
+        checklist: [
+          'Any SOP broken by a tool change this week',
+          'Any repeated mistake that needs a new SOP',
+          'One SOP improved or created this week (continuous improvement)',
+        ],
+        success_criteria: 'SOPs reflect how work is actually done, not how it was done 6 months ago',
+        persona_hint: 'living-documentation',
+      },
+    ],
+    success_criteria: 'Operations are frictionless: no project surprise, no zombie tool, no untracked vendor',
+    persona_hints: ['grove-high-output-management', 'allen-getting-things-done', 'collins-good-to-great'],
+  },
+
+  // 22. Data Analytics
+  {
+    slug: 'data-analytics-weekly-dashboard',
+    name: 'Weekly Analytics Dashboard + Insight Report',
+    description: 'Pull, validate, and narrate the weekly data story so every department acts on facts, not vibes.',
+    department: 'data-analytics',
+    task_keywords: 'data,analytics,dashboard,metrics,kpi,report,insights,funnel,attribution,bi',
+    steps: [
+      {
+        name: 'Pull fresh data from all sources',
+        checklist: [
+          'CRM (pipeline, close rate, velocity)',
+          'Marketing (impressions, CPL, CAC)',
+          'Product (DAU/WAU, churn, feature adoption)',
+          'Finance (revenue, MRR, burn)',
+          'Support (ticket volume, CSAT, resolution time)',
+        ],
+        success_criteria: 'Single source of truth — no department uses a different number for the same metric',
+        persona_hint: 'single-source-of-truth',
+      },
+      {
+        name: 'Validate data quality',
+        checklist: [
+          'Spot-check 3 numbers against raw source',
+          'Flag missing segments or broken tracking',
+          'Confirm date ranges are consistent across sources',
+          'Note any tracking gaps or anomalies before publishing',
+        ],
+        success_criteria: 'Published number is auditable back to raw data within 5 min',
+        persona_hint: 'garbage-in-garbage-out',
+      },
+      {
+        name: 'Identify week-over-week signals',
+        checklist: [
+          'Metrics up > 10%: confirm driver',
+          'Metrics down > 10%: root-cause hypothesis',
+          'New pattern not seen in prior 4 weeks',
+          'Leading vs lagging indicator split',
+        ],
+        success_criteria: 'At least one genuine insight — not just "revenue was $X"',
+        persona_hint: 'signal-vs-noise',
+      },
+      {
+        name: 'Build the narrative',
+        checklist: [
+          'Start with the most important metric',
+          'One paragraph per department max',
+          'Each paragraph ends with a recommended action',
+          'Flag one metric to watch next week',
+        ],
+        success_criteria: 'Reader knows what to do differently this week after reading',
+        persona_hint: 'data-tells-a-story',
+      },
+      {
+        name: 'Distribute + act',
+        checklist: [
+          'Report in CEO\'s inbox by Monday 9am',
+          'Department owners tagged on their section',
+          'Recommended actions tracked to completion next week',
+          'Disagreements with the data surfaced, not buried',
+        ],
+        success_criteria: 'Every recommended action is assigned to a person with a deadline',
+        persona_hint: 'accountability-not-reporting',
+      },
+    ],
+    success_criteria: 'Decisions made this week can be traced to a specific metric; no gut-feel calls that data could have answered',
+    persona_hints: ['kahneman-thinking-fast-slow', 'taleb-fooled-by-randomness', 'grove-high-output-management'],
+  },
+
+  // 23. Executive Assistant
+  {
+    slug: 'executive-assistant-weekly-ops',
+    name: 'Executive Assistant Weekly Ops Cycle',
+    description: 'Keep the CEO\'s calendar, inbox, and action-item list at zero overhead every week.',
+    department: 'executive-assistant',
+    task_keywords: 'executive,assistant,ea,calendar,inbox,scheduling,meeting-prep,action-items,admin,leverage',
+    steps: [
+      {
+        name: 'Monday morning calendar audit',
+        checklist: [
+          'All meetings this week have agendas or pre-reads',
+          'No back-to-back meetings > 2h without a buffer',
+          'High-energy work blocked as deep-work (no meetings)',
+          'Travel / logistics confirmed for any off-site',
+        ],
+        success_criteria: 'CEO\'s week is structurally sound before Monday 9am',
+        persona_hint: 'protect-the-calendar',
+      },
+      {
+        name: 'Inbox triage (daily)',
+        checklist: [
+          'Emails sorted: needs-reply, FYI, junk, delegate',
+          'Anything > 48h old without reply flagged to CEO',
+          'Meeting requests vetted against CEO\'s priorities',
+          'Newsletters / digests routed to a reading folder, not inbox',
+        ],
+        success_criteria: 'CEO spends < 20 min/day on email; everything else is handled',
+        persona_hint: 'inbox-zero-as-default',
+      },
+      {
+        name: 'Meeting prep packets',
+        checklist: [
+          'Sent 24h before every external meeting',
+          'Attendee context: who they are, what they want, what the CEO wants',
+          'Agenda with time-boxes',
+          'Supporting docs linked',
+          'CEO\'s goal for the meeting in one sentence',
+        ],
+        success_criteria: 'CEO never walks into a meeting cold',
+        persona_hint: 'preparation-is-leverage',
+      },
+      {
+        name: 'Action-item capture + follow-up',
+        checklist: [
+          'Every meeting ends with written action items (owner + deadline)',
+          'Items sent to owners within 1h of meeting close',
+          'Follow-up pings sent 24h before deadline',
+          'Completed items logged, not just deleted',
+        ],
+        success_criteria: 'Nothing slips through. If it was said, it was written. If it was written, it was followed up.',
+        persona_hint: 'close-the-loop',
+      },
+      {
+        name: 'Friday wrap + next-week preview',
+        checklist: [
+          'Open action items: status update requested from owners',
+          'Next-week priorities confirmed with CEO',
+          'Any scheduling changes finalized',
+          'Weekly brief note to CEO: done / outstanding / watching',
+        ],
+        success_criteria: 'CEO walks into Monday knowing exactly what is happening — no Sunday anxiety',
+        persona_hint: 'end-of-week-clarity',
+      },
+    ],
+    success_criteria: 'CEO operates at strategic altitude: < 30 min/day on admin, zero missed commitments, every meeting purposeful',
+    persona_hints: ['grove-high-output-management', 'allen-getting-things-done', 'horowitz-hard-thing'],
+  },
 ];
 
 export interface SeedResult {
