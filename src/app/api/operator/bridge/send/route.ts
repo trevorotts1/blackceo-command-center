@@ -47,6 +47,7 @@ import {
   type BridgeAgent,
 } from '@/lib/bridge/agents';
 import { getOpenClawClient } from '@/lib/openclaw/client';
+import { bridgeOpenClawTarget, withClientContext } from '@/lib/bridge/dispatch';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -358,26 +359,34 @@ async function runGateway(args: {
   // streaming bridge for gateway events lands as a dedicated subscription
   // we emit a single delta carrying the reply (or a friendly placeholder
   // when the gateway has not yet acknowledged).
+  // E21: target the SELECTED client's gateway (token + CF-Access headers),
+  // NOT the loopback singleton, so the dispatch lands on the real per-client
+  // box and its reply streams from there. Resolve the target ONCE so the catch
+  // block reports the same client's device id.
+  const target = bridgeOpenClawTarget();
   try {
-    const client = getOpenClawClient();
+    const client = getOpenClawClient(target);
     // Establish the operator.admin session before dispatching. This makes the
     // connect/pairing failure surface here (with an actionable message) rather
     // than only as the generic "Not connected" thrown by call().
     if (!client.isConnected()) {
       await client.connect();
     }
+    // E12: prepend the operator's active goals so the client agent always has
+    // them in context for this turn (no-op when there are no active goals).
+    const dispatchPrompt = withClientContext(args.prompt);
     // The OpenClaw client expects a sessionId that the gateway minted via
     // sessions.create. We map the operator chat session 1:1 onto a gateway
     // session here. If the mapping has not been built yet a friendly
     // message is returned and the operator can wire it up later from the
     // System Status panel.
-    await client.sendMessage(args.session.id, args.prompt);
+    await client.sendMessage(args.session.id, dispatchPrompt);
     const ack = 'Message dispatched to OpenClaw Gateway. The reply will arrive in the activity log when the agent completes the task.';
     args.controller.enqueue(sseEvent('delta', { text: ack }));
     return { reply: ack, aborted: false, errorText: null };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
-    const deviceId = getOpenClawClient().getDeviceId();
+    const deviceId = getOpenClawClient(target).getDeviceId();
     // A rejected handshake = the device is not approved on the gateway yet.
     const pairingPending = /pairing|Authentication failed|device/i.test(raw);
     const msg = pairingPending

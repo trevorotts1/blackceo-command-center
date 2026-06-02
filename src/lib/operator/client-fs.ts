@@ -214,6 +214,7 @@ export async function readClientDir(
       id: 'self', name: 'self', gateway_url: '', gateway_token: null,
       cf_access_client_id: null, cf_access_client_secret: null,
       workspace_root: null, ssh_target: null, interview_complete: false,
+      brand_color: null, logo_url: null,
       is_self: true, created_at: null, updated_at: null,
     };
     return { client: stub, root: { remote: false, path: '' }, files: [], error: null };
@@ -304,7 +305,12 @@ async function readRemoteDir(
         .map((e) => `-iname "*${e.replace(/"/g, '')}"`)
         .join(' -o ') + ' \\)'
     : '';
-  // Marker-delimited stream: per file print a header line then the body.
+  // Marker-delimited stream: per file print a header line then the BASE64 of
+  // the (size-capped) body, then a footer. base64 output is restricted to
+  // [A-Za-z0-9+/=] plus newlines, so a file body can NEVER reproduce the
+  // plaintext `__BCC_FILE__`/`__BCC_END__` marker lines — eliminating the
+  // collision the old raw-body framing had when a file literally contained a
+  // marker string. The WRITE path already base64-frames; this mirrors it.
   // head -c bounds each file; we cap the file count with a head on find.
   const root = shellQuote(remoteRoot);
   const cmd =
@@ -312,8 +318,8 @@ async function readRemoteDir(
     `find ${root} -type f ${extClause} 2>/dev/null | head -n ${opts.maxFiles} | ` +
     `while IFS= read -r f; do ` +
     `echo "__BCC_FILE__ $f"; ` +
-    `head -c ${opts.maxBytes} "$f" 2>/dev/null; ` +
-    `echo; echo "__BCC_END__"; done`;
+    `head -c ${opts.maxBytes} "$f" 2>/dev/null | base64; ` +
+    `echo "__BCC_END__"; done`;
 
   const res = await runSsh(client, cmd);
   if (!res.ok) {
@@ -341,15 +347,17 @@ function parseRemoteStream(stdout: string, remoteRoot: string): ClientFile[] {
     const line = lines[i];
     if (line.startsWith('__BCC_FILE__ ')) {
       const absPath = line.slice('__BCC_FILE__ '.length);
-      const bodyLines: string[] = [];
+      // The body is base64 between the header and the footer. Because base64
+      // output cannot contain the marker strings, the footer is unambiguous
+      // even when the original file held literal `__BCC_FILE__`/`__BCC_END__`.
+      const b64Lines: string[] = [];
       i += 1;
       while (i < lines.length && lines[i] !== '__BCC_END__') {
-        bodyLines.push(lines[i]);
+        b64Lines.push(lines[i]);
         i += 1;
       }
-      // Drop the trailing newline we injected before __BCC_END__.
-      if (bodyLines.length > 0 && bodyLines[bodyLines.length - 1] === '') bodyLines.pop();
-      const contents = bodyLines.join('\n');
+      const b64 = b64Lines.join('');
+      const contents = Buffer.from(b64, 'base64').toString('utf8');
       files.push({
         relPath: absPath.startsWith(remoteRoot)
           ? absPath.slice(remoteRoot.length).replace(/^\/+/, '')
@@ -395,12 +403,19 @@ export async function readClientFile(
   }
 
   const abs = path.posix.join(resolved.path, relativePath);
-  const res = await runSsh(client, `cat ${shellQuote(abs)} 2>/dev/null || echo "__BCC_MISSING__"`);
+  // base64 the body so arbitrary file content (including the literal sentinel
+  // string) survives the shell intact and cannot be mistaken for the missing
+  // marker. A missing/unreadable file emits ONLY the sentinel (no base64).
+  const res = await runSsh(
+    client,
+    `if [ -f ${shellQuote(abs)} ]; then base64 ${shellQuote(abs)}; else echo "__BCC_MISSING__"; fi`,
+  );
   if (!res.ok) {
     return { failed: true, reason: res.reason || 'remote read failed', notConfigured: !client.ssh_target };
   }
-  if (res.stdout.includes('__BCC_MISSING__')) return null;
-  return { relPath: relativePath, absPath: abs, contents: res.stdout, mtime: null, size: Buffer.byteLength(res.stdout, 'utf8') };
+  if (res.stdout.trim() === '__BCC_MISSING__') return null;
+  const contents = Buffer.from(res.stdout, 'base64').toString('utf8');
+  return { relPath: relativePath, absPath: abs, contents, mtime: null, size: Buffer.byteLength(contents, 'utf8') };
 }
 
 /**

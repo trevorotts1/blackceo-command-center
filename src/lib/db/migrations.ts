@@ -1607,6 +1607,53 @@ const migrations: Migration[] = [
       console.log('[Migration 048] clients tenant table ready');
     }
   },
+  {
+    id: '049',
+    name: 'add_client_branding_columns',
+    up: (db) => {
+      // PER-CLIENT BRANDING (D1–D3).
+      //
+      // Adds two nullable columns to the clients tenant table so each managed
+      // box carries its OWN brand identity instead of inheriting the hardcoded
+      // BlackCEO green / logo:
+      //
+      //   - brand_color   the client's PRIMARY brand color as a #RRGGBB hex.
+      //                   Collected in the AI Workforce interview (D1): the
+      //                   client gives a hex if they know it, otherwise a color
+      //                   NAME which is resolved to hex automatically (see
+      //                   src/lib/branding.ts resolveBrandColor). NULL → the UI
+      //                   falls back to BlackCEO green (#43A047). The full
+      //                   complementary/analogous palette is DERIVED from this
+      //                   single primary at render time (D2) — we store only the
+      //                   primary so re-theming logic stays in one place.
+      //   - logo_url      a public URL to the client's logo (D3). When set, the
+      //                   Header swaps the BlackCEO logo for the client's. The
+      //                   logo-upload route mirrors this into the client's
+      //                   GoHighLevel media library and writes back the hosted
+      //                   storage.googleapis.com/msgsndr URL it returns.
+      //
+      // Additive + idempotent: NULL defaults preserve the v4.2.0 look for every
+      // existing row (self + remote) until a brand is set. Never edits 048.
+      console.log('[Migration 049] Adding brand_color + logo_url columns to clients...');
+
+      const cols = (db.prepare(`PRAGMA table_info(clients)`).all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      if (!cols.includes('brand_color')) {
+        db.exec(`ALTER TABLE clients ADD COLUMN brand_color TEXT`);
+        console.log('[Migration 049] Added clients.brand_color');
+      } else {
+        console.log('[Migration 049] clients.brand_color already present, skipping');
+      }
+      if (!cols.includes('logo_url')) {
+        db.exec(`ALTER TABLE clients ADD COLUMN logo_url TEXT`);
+        console.log('[Migration 049] Added clients.logo_url');
+      } else {
+        console.log('[Migration 049] clients.logo_url already present, skipping');
+      }
+      console.log('[Migration 049] client branding columns ready');
+    }
+  },
 ];
 
 /**

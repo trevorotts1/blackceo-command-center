@@ -96,6 +96,90 @@ export function complementary(hex: string): string {
   return hslToHex(h + 180, s, l);
 }
 
+/** Rotate the hue by `deg` degrees, keeping saturation + lightness. */
+export function rotateHue(hex: string, deg: number): string {
+  const { h, s, l } = hexToHsl(hex);
+  return hslToHex(h + deg, s, l);
+}
+
+/**
+ * Full Tailwind-style 50→950 brand scale derived from ONE primary color (D2).
+ * Anchors the supplied primary at the 600 step (matches the historical BlackCEO
+ * #43A047 = brand-600) and walks lightness up/down for the lighter/darker steps,
+ * so a client's primary slots in exactly where the hardcoded green used to live.
+ */
+export interface BrandScale {
+  50: string;
+  100: string;
+  200: string;
+  300: string;
+  400: string;
+  500: string;
+  600: string;
+  700: string;
+  800: string;
+  900: string;
+  950: string;
+}
+
+export function brandScaleFromPrimary(primary: string): BrandScale {
+  const { h, s } = hexToHsl(primary);
+  // Target lightness per step (tuned to mirror the original green scale spread).
+  const L: Record<keyof BrandScale, number> = {
+    50: 95,
+    100: 88,
+    200: 78,
+    300: 66,
+    400: 56,
+    500: 48,
+    600: 42,
+    700: 35,
+    800: 28,
+    900: 20,
+    950: 12,
+  };
+  const at = (l: number) => hslToHex(h, s, l);
+  return {
+    50: at(L[50]),
+    100: at(L[100]),
+    200: at(L[200]),
+    300: at(L[300]),
+    400: at(L[400]),
+    500: at(L[500]),
+    600: at(L[600]),
+    700: at(L[700]),
+    800: at(L[800]),
+    900: at(L[900]),
+    950: at(L[950]),
+  };
+}
+
+/**
+ * Auto-derived palette from a SINGLE primary brand color (D2). Produces the
+ * complementary + analogous accents the UI needs without requiring a second
+ * color from the client. `secondary` is the analogous (+30°) shade used for
+ * gradients; `accent` is the true complement (+180°).
+ */
+export interface DerivedPalette extends BrandPalette {
+  scale: BrandScale;
+}
+
+export function derivePaletteFromPrimary(primary: string): DerivedPalette {
+  const secondary = rotateHue(primary, 30); // analogous
+  const accent = complementary(primary); // +180°
+  return {
+    primaryColor: primary,
+    secondaryColor: secondary,
+    primaryLight: lighten(primary),
+    primaryDark: darken(primary),
+    secondaryLight: lighten(secondary),
+    secondaryDark: darken(secondary),
+    accent,
+    accentLight: lighten(accent),
+    scale: brandScaleFromPrimary(primary),
+  };
+}
+
 export interface BrandPalette {
   primaryColor: string | null;
   secondaryColor: string | null;

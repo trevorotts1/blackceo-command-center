@@ -15,9 +15,29 @@
   --bcc-text-secondary: #6B7280;
   --bcc-text-muted: #9CA3AF;
   
+  /* Brand primary — BlackCEO green by default. <BrandTheme/> (D2) overrides
+     these on :root from the selected client's brand color at runtime, and also
+     remaps the Tailwind brand-* utilities onto the --brand-* scale below. */
   --bcc-primary: #43A047;
   --bcc-primary-hover: #388E3C;
-  
+  --bcc-primary-light: #E8F5E9;
+  --bcc-secondary: #43A047;
+  --bcc-accent: #A04743;
+
+  /* Derived brand scale (50→950). Default values mirror the original BlackCEO
+     green scale; BrandTheme replaces them per client. */
+  --brand-50: #E8F5E9;
+  --brand-100: #C8E6C9;
+  --brand-200: #A5D6A7;
+  --brand-300: #81C784;
+  --brand-400: #66BB6A;
+  --brand-500: #4CAF50;
+  --brand-600: #43A047;
+  --brand-700: #388E3C;
+  --brand-800: #2E7D32;
+  --brand-900: #1B5E20;
+  --brand-950: #0D3B13;
+
   /* Column colors */
   --bcc-backlog: #6B7280;
   --bcc-progress: #10B981;
