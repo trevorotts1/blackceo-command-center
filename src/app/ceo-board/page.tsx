@@ -203,10 +203,13 @@ export default function CEOPerformanceBoardPage() {
             <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
             <span className="text-sm font-medium text-emerald-600">Live</span>
           </div>
+          {/* E25: route to /settings/intelligence (same destination as the main
+               Intelligence settings card and the model pill in the kanban). */}
           <button
-            disabled
-            title="Settings coming soon"
-            className="flex items-center justify-center w-10 h-10 rounded-full text-gray-300 cursor-not-allowed transition-colors"
+            onClick={() => router.push('/settings/intelligence')}
+            title="Intelligence settings"
+            aria-label="Open Intelligence settings"
+            className="flex items-center justify-center w-10 h-10 rounded-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
           >
             <Settings className="h-5 w-5" />
           </button>

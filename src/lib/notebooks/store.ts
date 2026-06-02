@@ -14,6 +14,12 @@
 
 import { randomUUID } from 'crypto';
 import { queryAll, queryOne, run, transaction } from '../db';
+import {
+  readClientDir,
+  readClientFile,
+  isRemoteError,
+  type RemoteError,
+} from '@/lib/operator/client-fs';
 
 export type NotebookBackend = 'notebooklm' | 'gemini-local';
 
@@ -261,4 +267,70 @@ export function listNotebookSources(notebookId: string): NotebookSourceRow[] {
        FROM notebook_sources WHERE notebook_id = ? ORDER BY created_at ASC`,
     [notebookId]
   );
+}
+
+// ---- Per-client workspace integration (E20) -------------------------------
+
+export interface WorkspaceSourceFile {
+  /** Path relative to the client's vault root (use as the source `path`). */
+  relPath: string;
+  /** Absolute path on the box the client lives on. */
+  absPath: string;
+  size: number | null;
+}
+
+export interface ListWorkspaceSourcesResult {
+  files: WorkspaceSourceFile[];
+  /** Set when a remote client's workspace could not be read. */
+  error: RemoteError | null;
+  /** True when the listing came from a remote client over the tunnel. */
+  remote: boolean;
+}
+
+/**
+ * List candidate document files in the SELECTED client's workspace that can be
+ * attached as notebook sources (E20). Reads from the client agent's OWN
+ * workspace — local fs for the operator's box, the Cloudflare Access SSH tunnel
+ * for a remote client. Never throws; returns a soft error on remote failure.
+ */
+export async function listClientWorkspaceSources(): Promise<ListWorkspaceSourcesResult> {
+  const result = await readClientDir('vault-root', {
+    extensions: ['.md', '.markdown', '.txt', '.pdf'],
+    maxFiles: 1000,
+  });
+  const remote = result.root.remote;
+  if (result.error && isRemoteError(result.error)) {
+    return { files: [], error: result.error, remote };
+  }
+  return {
+    files: result.files.map((f) => ({ relPath: f.relPath, absPath: f.absPath, size: f.size })),
+    error: null,
+    remote,
+  };
+}
+
+/**
+ * Read the content of a notebook source that points at a file in the SELECTED
+ * client's workspace (E20). `text`/`markdown` sources whose `path` is workspace
+ * relative are resolved against the client's vault root over the right
+ * transport. Inline-text sources (path already holds the blob) are returned
+ * as-is. Returns null when the source has no readable file content, or a
+ * RemoteError on a failed remote read.
+ */
+export async function readNotebookSourceContent(
+  source: Pick<NotebookSourceRow, 'source_type' | 'path' | 'url'>
+): Promise<string | RemoteError | null> {
+  // URL sources and remote_id sources have no local content to read here.
+  if (!source.path) return null;
+  // Heuristic: an inline blob (newlines / very long) is the content itself.
+  const looksInline =
+    (source.source_type === 'text' || source.source_type === 'markdown') &&
+    (source.path.includes('\n') || source.path.length > 512);
+  if (looksInline) return source.path;
+
+  // Otherwise treat `path` as workspace-relative and read it for the client.
+  const file = await readClientFile('vault-root', source.path);
+  if (!file) return null;
+  if (isRemoteError(file)) return file;
+  return file.contents;
 }

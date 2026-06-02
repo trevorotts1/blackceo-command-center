@@ -11,10 +11,8 @@
  * The DB row is the source of truth. Mirror writes are best effort.
  */
 import { randomUUID } from 'crypto';
-import fs from 'fs/promises';
-import path from 'path';
 import { queryAll, queryOne, run } from '@/lib/db';
-import { vaultRoot } from '@/lib/platform';
+import { writeClientFile, isRemoteError } from '@/lib/operator/client-fs';
 
 export interface JournalEntryRow {
   id: string;
@@ -164,18 +162,34 @@ export function deleteJournalEntry(id: string): boolean {
 }
 
 /**
- * Mirror one entry to `<vault>/journal/YYYY/MM/YYYY-MM-DD.md`.
- * Best-effort: logs and swallows errors so the API call still succeeds.
+ * Mirror one entry into the SELECTED CLIENT's vault at
+ * `<vault>/journal/YYYY/MM/YYYY-MM-DD.md`.
+ *
+ * PER-CLIENT (E11): the mirror lands inside the client agent's OWN workspace —
+ * for the operator's own box that is the local vault (`fs`); for a remote client
+ * it is written over the Cloudflare Access SSH tunnel into the client agent's
+ * `~/clawd/journal/...`. This is the whole point: the client agent's OpenClaw
+ * memory crawler watches its own workspace, so a journal entry the operator
+ * writes here becomes part of THAT agent's recallable memory — not the command
+ * center's. (See `<vault>/journal` in the agent's memory-search roots.)
+ *
+ * Best-effort: logs and returns null on any failure (down tunnel, missing
+ * ssh_target, write error) so the API call still succeeds. Returns the absolute
+ * path written (on whichever box the client lives on) on success.
  */
 export async function writeJournalMirror(entry: JournalEntry): Promise<string | null> {
   try {
     const [year, month] = entry.entry_date.split('-');
-    const dir = path.join(vaultRoot(), 'journal', year, month);
-    const file = path.join(dir, `${entry.entry_date}.md`);
-    await fs.mkdir(dir, { recursive: true });
+    const relPath = `journal/${year}/${month}/${entry.entry_date}.md`;
     const md = renderEntry(entry);
-    await fs.writeFile(file, md, 'utf8');
-    return file;
+    const result = await writeClientFile('vault-root', relPath, md);
+    if (!result || isRemoteError(result)) {
+      if (result && isRemoteError(result)) {
+        console.error('[journal] writeJournalMirror remote failed:', result.reason);
+      }
+      return null;
+    }
+    return result.absPath;
   } catch (err) {
     console.error('[journal] writeJournalMirror failed:', err);
     return null;

@@ -28,6 +28,13 @@ export interface OnboardingCard {
   accent: string;
   /** Wave 1 placeholder modules ("Soon"). */
   soon?: boolean;
+  /**
+   * Optional `[data-walkthrough]` attribute value of the DOM element to anchor
+   * this card's coach-mark popover to. When present, OperatorOnboarding will
+   * highlight and point at this element (E10/B3 element-anchored coach-marks).
+   * Matches the data-walkthrough attrs added to OperatorSidebar nav links.
+   */
+  target?: string;
 }
 
 export const ONBOARDING_CARDS: OnboardingCard[] = [
@@ -37,6 +44,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'Your home base.',
     body: 'This is the front door to the Operator Console. Every tool below has a tile here. Pick one to dive in, or press Cmd+K (Ctrl+K on Windows) to jump straight to any of them.',
     accent: '#43A047',
+    target: 'console',
   },
   {
     id: 'bridge',
@@ -44,6 +52,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'Talk to your AI command-line tools and OpenClaw.',
     body: 'A chat window straight to your AI helpers — Claude, Codex, Antigravity, Hermes, Gemini, FCC, and your OpenClaw agent. Type a request and the tool does the work. On a cloud (VPS) box you will only see the OpenClaw button; the desktop tools live on the Mac Mini.',
     accent: '#3B82F6',
+    target: 'bridge',
   },
   {
     id: 'workspace',
@@ -51,6 +60,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'See the files your tools create.',
     body: 'When a tool writes a file, it lands here in its own folder. Click any file to preview it right in the page — no digging through folders on your computer.',
     accent: '#8B5CF6',
+    target: 'workspace',
   },
   {
     id: 'studio',
@@ -58,6 +68,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'Make images, video, and audio.',
     body: 'Describe what you want and Studio generates a picture, a short video, or a voice clip for you. Finished pieces are saved into your vault automatically so you never lose them.',
     accent: '#EC4899',
+    target: 'studio',
   },
   {
     id: 'notebook',
@@ -65,6 +76,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'Ask questions about your own documents.',
     body: 'Drop in sources on a topic and ask questions — the answers come only from what you put in, not the open internet. Great for keeping a subject organized and grounded.',
     accent: '#F59E0B',
+    target: 'notebook',
   },
   {
     id: 'goals',
@@ -72,6 +84,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'A simple checklist that saves to your vault.',
     body: 'Write down what you are working toward. Each goal is also written to a plain text file (goals.md) in your vault, so it shows up in Memory search and in Obsidian on a Mac.',
     accent: '#FBBF24',
+    target: 'goals',
   },
   {
     id: 'journal',
@@ -79,6 +92,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'One short entry per day.',
     body: 'Jot down how the day went, by typing or by voice. Each day becomes its own dated file in your vault, so your whole history is searchable later.',
     accent: '#A3E635',
+    target: 'journal',
   },
   {
     id: 'memory',
@@ -86,6 +100,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'Search everything you and your AI have written.',
     body: 'Everything you write in the Console — goals, journal entries, notes, research — flows into your vault, and Memory lets you search all of it from one box. Think of it as the search bar for your whole AI brain.',
     accent: '#22D3EE',
+    target: 'memory',
   },
   {
     id: 'research',
@@ -93,6 +108,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     summary: 'Live web and X search, saved for later.',
     body: 'Ask a question and get a fresh answer pulled from the live web and X (Twitter), with sources listed. Every result is saved into your vault so you can find it again in Memory.',
     accent: '#06B6D4',
+    target: 'research',
   },
   {
     id: 'call',
@@ -101,6 +117,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     body: 'Soon you will be able to just talk to your AI tools out loud, like a phone call, instead of typing.',
     accent: '#10B981',
     soon: true,
+    target: 'call',
   },
   {
     id: 'web-agent',
@@ -109,6 +126,7 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
     body: 'Soon the AI will be able to click around websites and fill in forms for you, all on its own.',
     accent: '#6366F1',
     soon: true,
+    target: 'web-agent',
   },
 ];
 

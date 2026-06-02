@@ -53,6 +53,7 @@ interface PerformancePayload {
     reason: string;
   }>;
   persona_coverage: { covered: number; total: number; ratio: number };
+  generated_at: string;
 }
 
 interface CEODashboardProps {
@@ -67,12 +68,19 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
   const [error, setError] = useState<string | null>(null);
   const [performance, setPerformance] = useState<PerformancePayload | null>(null);
   const [perfLoading, setPerfLoading] = useState(true);
+  // E26: track where KPI data is coming from so we can label it honestly.
+  const [perfError, setPerfError] = useState<string | null>(null);
 
-  // Load aggregate performance metrics (powers the trend / bottleneck / persona-coverage cards).
+  // E26: Load aggregate performance metrics from the local Command Center DB.
+  // Source: /api/performance reads the local SQLite task history — this reflects
+  // tasks created and completed inside THIS Command Center, not directly off the
+  // OpenClaw gateway. The generated_at timestamp in the response shows when the
+  // snapshot was computed.
   useEffect(() => {
     async function loadPerformance() {
       try {
         setPerfLoading(true);
+        setPerfError(null);
         const res = await fetch('/api/performance');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as PerformancePayload;
@@ -80,6 +88,9 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
       } catch (err) {
         console.error('Failed to load performance metrics:', err);
         setPerformance(null);
+        setPerfError(
+          err instanceof Error ? err.message : 'Failed to load performance metrics',
+        );
       } finally {
         setPerfLoading(false);
       }
@@ -336,7 +347,52 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
         </section>
 
         {/* ─── Performance Review: Trends, Bottlenecks, Persona Coverage ─── */}
-        {!perfLoading && performance && (
+
+        {/* E26: loading skeleton */}
+        {perfLoading && (
+          <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
+            <div className="h-6 w-48 bg-gray-200 rounded animate-pulse mb-4" />
+            <div className="h-64 bg-gray-100 rounded-2xl animate-pulse" />
+          </section>
+        )}
+
+        {/* E26: honest error state when the performance API fails */}
+        {!perfLoading && perfError && (
+          <section className="rounded-3xl border border-red-200 bg-red-50 p-6 shadow-sm sm:p-8">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-red-500 shrink-0" />
+              <div>
+                <h2 className="text-lg font-bold text-red-900">Performance metrics unavailable</h2>
+                <p className="mt-1 text-sm text-red-700">
+                  Could not load data from the Command Center database.
+                </p>
+                <p className="mt-1 text-xs text-red-600 font-mono">{perfError}</p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* E26: empty state when there are no tasks in the DB yet */}
+        {!perfLoading && !perfError && performance && performance.counts.total === 0 && (
+          <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
+            <div className="flex items-start gap-3">
+              <TrendingUp className="mt-0.5 h-5 w-5 text-gray-400 shrink-0" />
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">No task data yet</h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Performance metrics are computed from tasks in the Command Center
+                  database. Create tasks and complete them to see trends,
+                  bottleneck analysis, and persona coverage.
+                </p>
+                <p className="mt-2 text-xs text-gray-400">
+                  Source: Command Center task DB — computed live, no cached or synthetic numbers.
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {!perfLoading && !perfError && performance && performance.counts.total > 0 && (
           <>
             <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
               <div className="mb-6 flex items-center justify-between gap-4">
@@ -347,6 +403,10 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
                     <strong>7d</strong> {performance.trends.last_7d.completed}/{performance.trends.last_7d.created} ·{' '}
                     <strong>30d</strong> {performance.trends.last_30d.completed}/{performance.trends.last_30d.created} ·{' '}
                     <strong>90d</strong> {performance.trends.last_90d.completed}/{performance.trends.last_90d.created}.
+                  </p>
+                  {/* E26: explicit data-source label */}
+                  <p className="mt-1 text-xs text-gray-400">
+                    Source: Command Center task DB &middot; snapshot at {new Date(performance.generated_at).toLocaleTimeString()}
                   </p>
                 </div>
                 <div className="hidden rounded-xl bg-indigo-50 p-2 sm:flex">
@@ -418,9 +478,10 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
                 </div>
               </div>
 
+              {/* E26: honest empty state for bottlenecks */}
               {performance.bottlenecks.length === 0 ? (
                 <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-5 text-sm font-medium text-emerald-800">
-                  No bottlenecks detected. Every department is moving.
+                  No bottlenecks detected — no department has more than 40% of its tasks blocked.
                 </div>
               ) : (
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">

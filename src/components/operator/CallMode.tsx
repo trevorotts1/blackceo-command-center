@@ -190,20 +190,79 @@ export default function CallMode({ agentId, agentLabel, onClose, onUserUtterance
     return () => window.removeEventListener('keydown', onKey);
   }, [endCall]);
 
+  // Track the per-agent Bridge session so a multi-turn call threads into one
+  // conversation (and, for the OpenClaw agent, one gateway session for the
+  // selected client).
+  const callSessionRef = useRef<string | null>(null);
+
   const sendUtterance = useCallback(
     async (utterance: string): Promise<string> => {
       if (onUserUtterance) return onUserUtterance(utterance, transcriptRef.current);
+      // E21: stream the REAL reply from the Bridge send route. That route
+      // dispatches CLI agents (spawn) or the OpenClaw agent
+      // (getOpenClawClient(target)) against the SELECTED client, and emits the
+      // reply as Server-Sent `delta` events. We accumulate the deltas into the
+      // spoken reply. This replaces the old call-turn placeholder endpoint.
       try {
-        const res = await fetch('/api/operator/bridge/call-turn', {
+        const res = await fetch('/api/operator/bridge/send', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ agentId, message: utterance, history: transcriptRef.current }),
+          body: JSON.stringify({
+            agent_id: agentId || 'openclaw',
+            session_id: callSessionRef.current ?? undefined,
+            content: utterance,
+            title: 'Voice call',
+          }),
         });
-        if (!res.ok) throw new Error(`bridge call-turn ${res.status}`);
-        const data = (await res.json()) as { reply?: string };
-        return data.reply || 'I heard you, but I do not have a reply ready yet.';
+        if (!res.ok || !res.body) throw new Error(`bridge send ${res.status}`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let reply = '';
+        let errMsg: string | null = null;
+
+        const handleEvent = (block: string) => {
+          const lines = block.split('\n');
+          let event = 'message';
+          let dataRaw = '';
+          for (const line of lines) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataRaw += line.slice(5).trim();
+          }
+          if (!dataRaw) return;
+          let data: Record<string, unknown> = {};
+          try {
+            data = JSON.parse(dataRaw);
+          } catch {
+            return;
+          }
+          if (event === 'session' && typeof data.session_id === 'string') {
+            callSessionRef.current = data.session_id;
+          } else if (event === 'delta' && typeof data.text === 'string') {
+            reply += data.text;
+          } else if (event === 'error' && typeof data.message === 'string') {
+            errMsg = data.message;
+          }
+        };
+
+        // Read the SSE stream to completion.
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split('\n\n');
+          buf = parts.pop() ?? '';
+          for (const part of parts) if (part.trim()) handleEvent(part);
+        }
+        if (buf.trim()) handleEvent(buf);
+
+        if (reply.trim()) return reply.trim();
+        if (errMsg) return errMsg;
+        return 'I heard you, but the agent did not return a reply.';
       } catch {
-        return 'The Bridge agent endpoint is not wired in yet. End the call or keep going.';
+        return 'I could not reach the agent for this turn. Check the connection in the header, then keep going or end the call.';
       }
     },
     [agentId, onUserUtterance],

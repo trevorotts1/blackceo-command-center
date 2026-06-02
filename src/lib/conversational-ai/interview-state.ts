@@ -23,12 +23,38 @@ import fs from 'fs';
 import path from 'path';
 import { loadCompanyConfig } from '@/lib/company-config';
 import { candidateWorkspaceRoots, resolveLogFile } from './sources';
+import { getClientContext } from '@/lib/clients';
+
+/**
+ * The per-client interview flag (E3). Returns the selected client's DB-backed
+ * `interview_complete` boolean, or null when it cannot be read (no clients
+ * table yet / outside a request scope). null = unknown → caller defaults the
+ * banner to HIDDEN. Never throws.
+ */
+function clientFlagSignal(): boolean | null {
+  try {
+    const client = getClientContext();
+    if (!client) return null;
+    return client.interview_complete;
+  } catch {
+    return null;
+  }
+}
 
 export interface InterviewState {
   /** True only when we have positive evidence the interview is complete. */
   complete: boolean;
+  /**
+   * True when we have a DEFINITIVE answer either way (the per-client DB flag,
+   * or a positive filesystem signal). False means "unknown" — no per-client
+   * flag and no positive evidence. Callers should treat unknown as: do NOT
+   * nag the operator (E3: the "complete your interview" banner defaults to
+   * HIDDEN when status is unknown).
+   */
+  known: boolean;
   /** Which signal proved completion (for transparency in the UI/debug). */
   signal:
+    | 'client-flag'
     | 'company-config-kpis'
     | 'interview-answers-file'
     | 'build-state-complete'
@@ -104,9 +130,36 @@ function readBuildComplete(file: string): boolean {
 export function getInterviewState(): InterviewState {
   const checkedAt = new Date().toISOString();
 
+  // 1. Per-client DB flag (E3) is the authoritative, client-scoped answer.
+  //    A definitive true OR false here is `known` — we trust the tenant record
+  //    over any host-wide filesystem heuristic.
+  const clientFlag = clientFlagSignal();
+  if (clientFlag === true) {
+    return {
+      complete: true,
+      known: true,
+      signal: 'client-flag',
+      detail: 'Selected client is marked interview_complete in the tenant record.',
+      checkedAt,
+    };
+  }
+  if (clientFlag === false) {
+    return {
+      complete: false,
+      known: true,
+      signal: 'client-flag',
+      detail:
+        'Selected client is not yet marked interview_complete. Complete the AI Workforce interview to unlock persona-tuned Layer-2 views.',
+      checkedAt,
+    };
+  }
+
+  // 2. clientFlag is null (unknown) — fall back to the host-wide filesystem
+  //    signals. Any positive signal is `known: true`.
   if (configSignal()) {
     return {
       complete: true,
+      known: true,
       signal: 'company-config-kpis',
       detail: 'company-config.json has interview-derived KPIs and a specific industry.',
       checkedAt,
@@ -115,6 +168,7 @@ export function getInterviewState(): InterviewState {
   if (interviewFileSignal()) {
     return {
       complete: true,
+      known: true,
       signal: 'interview-answers-file',
       detail: 'workforce-interview-answers.md present in the OpenClaw workspace.',
       checkedAt,
@@ -123,14 +177,18 @@ export function getInterviewState(): InterviewState {
   if (buildStateSignal()) {
     return {
       complete: true,
+      known: true,
       signal: 'build-state-complete',
       detail: 'AI Workforce build reported complete; interview precedes the build.',
       checkedAt,
     };
   }
 
+  // 3. No flag, no signal → UNKNOWN. complete stays false but known is false,
+  //    so the banner defaults to HIDDEN (E3) rather than nagging.
   return {
     complete: false,
+    known: false,
     signal: 'none',
     detail:
       'No interview evidence found yet. Showing universal Layer-1 analytics; complete the AI Workforce interview to unlock persona-tuned Layer-2 views.',

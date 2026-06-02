@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { refreshModels } from '@/lib/jobs/refresh-models';
+import { hydrateProviderEnvForSelectedClient } from '@/lib/studio/provider-discovery';
 
 export const dynamic = 'force-dynamic';
 // Refresh can take a while when iterating every provider; raise the function
@@ -33,6 +34,15 @@ export async function POST(req: NextRequest) {
 
   try {
     const startedAt = new Date().toISOString();
+    // E4: source provider keys from the SELECTED client (local files for self,
+    // remote openclaw.json/.env over the SSH tunnel for a remote client) so the
+    // refresh pulls THAT tenant's catalog — not the Command Center's own env.
+    // Best-effort: a hydration failure must not block the refresh.
+    try {
+      await hydrateProviderEnvForSelectedClient();
+    } catch (err) {
+      console.warn('[refresh-models] client key hydration failed (continuing):', err);
+    }
     const outcomes = await refreshModels();
     const successful = outcomes.filter((o) => o.success).length;
     const failed = outcomes.length - successful;

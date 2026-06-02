@@ -48,7 +48,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { openclawConfigPath } from '@/lib/platform';
+import { openclawConfigPath, resolveClientPath } from '@/lib/platform';
+import { getClientContext, type Client } from '@/lib/clients';
+import { runClientSsh } from '@/lib/operator/client-fs';
 import type { ModelCapability, ModelRegistryUpsertInput } from '@/lib/model-registry-types';
 
 /** Studio's three media capabilities, in tab order. */
@@ -265,6 +267,38 @@ export function extractOpenclawEnv(json: unknown): Record<string, string> {
 }
 
 /**
+ * Pull provider API keys out of an `openclaw.json` `models.providers` map.
+ *
+ * OpenClaw stores per-provider credentials at
+ * `models.providers[<slug>].apiKey` (and some installs use `api_key`). We map
+ * the provider slug back to the conventional `<SLUG>_API_KEY` env-var name so a
+ * key configured ONLY inside openclaw.json (never exported to a `.env`) still
+ * lights up the provider. Never throws.
+ */
+export function extractOpenclawProviderKeys(json: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!json || typeof json !== 'object') return out;
+  const models = (json as Record<string, unknown>).models;
+  if (!models || typeof models !== 'object') return out;
+  const providers = (models as Record<string, unknown>).providers;
+  if (!providers || typeof providers !== 'object') return out;
+
+  for (const [slug, raw] of Object.entries(providers as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const entry = raw as Record<string, unknown>;
+    const key =
+      (typeof entry.apiKey === 'string' && entry.apiKey) ||
+      (typeof entry.api_key === 'string' && entry.api_key) ||
+      '';
+    if (!key) continue;
+    // Convention mirrors apiKeyFor() in the refresh job: SLUG -> SLUG_API_KEY.
+    const envName = slug.toUpperCase().replace(/-/g, '_') + '_API_KEY';
+    out[envName] = key;
+  }
+  return out;
+}
+
+/**
  * Candidate OpenClaw secret-file locations to probe for keys NOT already in
  * `process.env`. Order = precedence (first hit wins per key). An explicit
  * `OPENCLAW_PROJECT_DIR` (the host `/docker/<proj>` dir) is honored first.
@@ -319,7 +353,8 @@ export function hydrateProviderEnvFromOpenClaw(): string[] {
       } catch {
         json = null;
       }
-      const envVars = extractOpenclawEnv(json);
+      // env / env.vars first, then per-provider apiKey entries.
+      const envVars = { ...extractOpenclawProviderKeys(json), ...extractOpenclawEnv(json) };
       for (const key of missing()) {
         if (envVars[key]) {
           process.env[key] = envVars[key];
@@ -330,6 +365,330 @@ export function hydrateProviderEnvFromOpenClaw(): string[] {
   }
 
   return hydrated;
+}
+
+// ---------------------------------------------------------------------------
+// PER-CLIENT env hydration (E4 / E14).
+//
+// The functions above resolve keys from the LOCAL box only. For the selected
+// client we must source keys from THAT client's OpenClaw env, not the Command
+// Center's own process.env:
+//   - self / local client  → the same local files as above.
+//   - remote client (VPS or Mac reached over the CF Access SSH tunnel) → read
+//     the remote `openclaw.json` + `.env` over SSH and merge those keys.
+//
+// We hydrate `process.env` so the (out-of-scope, untouched) weekly refresh job
+// in `jobs/refresh-models.ts` — which keys off `<SLUG>_API_KEY` env vars —
+// transparently uses the selected client's credentials. The hydration is
+// best-effort and NEVER throws.
+// ---------------------------------------------------------------------------
+
+/** Minimal POSIX single-quote escaping for an absolute path. */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Run a command over the client's SSH tunnel and return stdout, or null on any
+ * failure. Delegates to the Foundation's `runClientSsh` (src/lib/operator/
+ * client-fs.ts) so the transport is the SAME documented Cloudflare-Access
+ * pattern every other feature cluster uses: `cloudflared` ProxyCommand at its
+ * absolute path + the per-client CF-Access service token injected as env. We do
+ * NOT re-implement SSH here — a bare `ssh <target>` cannot reach a fleet box.
+ */
+async function remoteRead(client: Client, remotePath: string): Promise<string | null> {
+  // `||true` so a missing file is an empty success, not an ssh error.
+  const res = await runClientSsh(client, `cat ${shellQuote(remotePath)} 2>/dev/null || true`).catch(
+    () => ({ ok: false, stdout: '' }),
+  );
+  if (!res.ok) return null;
+  return res.stdout ?? null;
+}
+
+/**
+ * Read a remote file, distinguishing three outcomes so a WRITE never clobbers a
+ * real config when SSH merely failed:
+ *   - { ok: true, content }              file read (content may be '')
+ *   - { ok: true, content: null }        SSH succeeded but file does not exist
+ *   - { ok: false }                      SSH/transport failure — do NOT proceed
+ * Implemented with an explicit existence check so the result is unambiguous.
+ * Uses the Foundation tunnel transport via `runClientSsh`.
+ */
+async function remoteReadStrict(
+  client: Client,
+  remotePath: string,
+): Promise<{ ok: boolean; content: string | null }> {
+  const q = shellQuote(remotePath);
+  // Print a sentinel when the file is absent; otherwise stream its bytes.
+  const res = await runClientSsh(
+    client,
+    `if [ -f ${q} ]; then cat ${q}; else printf '__BCC_NO_FILE__'; fi`,
+  ).catch(() => ({ ok: false, stdout: '' }));
+  if (!res.ok) return { ok: false, content: null };
+  const text = res.stdout ?? '';
+  if (text === '__BCC_NO_FILE__') return { ok: true, content: null };
+  return { ok: true, content: text };
+}
+
+/**
+ * Resolve provider API keys for a specific client WITHOUT mutating process.env.
+ * Returns a map of `<SLUG>_API_KEY` -> value gathered from that client's
+ * OpenClaw env. For self this reads local files; for a remote client it reads
+ * the remote openclaw.json + .env over the SSH tunnel. Never throws.
+ */
+export async function resolveClientProviderKeys(client: Client): Promise<Record<string, string>> {
+  const wanted = new Set(allKnownEnvVars());
+  const out: Record<string, string> = {};
+
+  const merge = (src: Record<string, string>) => {
+    for (const [k, v] of Object.entries(src)) {
+      if (wanted.has(k) && v && !out[k]) out[k] = v;
+    }
+  };
+
+  if (client.is_self) {
+    // Local: reuse the file probes, then openclaw.json (env + provider keys).
+    for (const file of candidateEnvFiles()) {
+      const content = safeReadFile(file);
+      if (content) merge(parseDotEnv(content));
+    }
+    const cfg = safeReadFile(openclawConfigPath());
+    if (cfg) {
+      let json: unknown = null;
+      try {
+        json = JSON.parse(cfg);
+      } catch {
+        json = null;
+      }
+      merge(extractOpenclawProviderKeys(json));
+      merge(extractOpenclawEnv(json));
+    }
+    return out;
+  }
+
+  // Remote client: read over the CF-Access tunnel. No ssh_target → give up.
+  if (!client.ssh_target || !client.ssh_target.trim()) return out;
+
+  const configDescriptor = resolveClientPath(client, 'openclaw-config');
+  const remoteConfigPath = configDescriptor.path;
+  // Probe the remote openclaw.json (provider keys + env) and the common .env.
+  const remoteEnvCandidates = [
+    remoteConfigPath.replace(/openclaw\.json$/, '.env'),
+    '~/.openclaw/.env',
+    '~/.openclaw/secrets/.env',
+  ];
+
+  const cfgContent = await remoteRead(client, remoteConfigPath).catch(() => null);
+  if (cfgContent) {
+    let json: unknown = null;
+    try {
+      json = JSON.parse(cfgContent);
+    } catch {
+      json = null;
+    }
+    merge(extractOpenclawProviderKeys(json));
+    merge(extractOpenclawEnv(json));
+  }
+
+  for (const envPath of remoteEnvCandidates) {
+    if (Array.from(wanted).every((k) => out[k])) break;
+    const content = await remoteRead(client, envPath).catch(() => null);
+    if (content) merge(parseDotEnv(content));
+  }
+
+  return out;
+}
+
+/**
+ * Hydrate `process.env` with the SELECTED client's provider keys so the
+ * downstream refresh job (which reads `<SLUG>_API_KEY`) talks to the right box.
+ *
+ * IMPORTANT: keys are sourced from the client and OVERWRITE the Command
+ * Center's own values for the duration of the request, because a remote
+ * client's catalog must be refreshed with THAT client's credentials — not the
+ * operator's. Returns the list of env-var names hydrated. Never throws.
+ *
+ * Pass an explicit client to scope to a specific tenant; defaults to the
+ * currently selected client via `getClientContext()`.
+ */
+export async function hydrateProviderEnvForSelectedClient(
+  client?: Client | null,
+): Promise<string[]> {
+  let target = client ?? null;
+  if (!target) {
+    try {
+      target = getClientContext();
+    } catch {
+      target = null;
+    }
+  }
+  if (!target) return [];
+
+  // Self client: keep the existing non-destructive local hydration (process.env
+  // is already the operator's own box, so nothing to override).
+  if (target.is_self) {
+    try {
+      return hydrateProviderEnvFromOpenClaw();
+    } catch {
+      return [];
+    }
+  }
+
+  let keys: Record<string, string> = {};
+  try {
+    keys = await resolveClientProviderKeys(target);
+  } catch {
+    keys = {};
+  }
+  const hydrated: string[] = [];
+  for (const [k, v] of Object.entries(keys)) {
+    if (v) {
+      process.env[k] = v;
+      hydrated.push(k);
+    }
+  }
+  return hydrated;
+}
+
+// ---------------------------------------------------------------------------
+// PER-CLIENT key WRITE (E5).
+//
+// On a refresh failure caused by a missing key, the operator can supply one via
+// POST /api/clients/[id]/keys. We persist it into the client's OpenClaw env so
+// the next refresh succeeds:
+//   - self / local client → merge into the local openclaw.json `env.vars`
+//     (read by OpenClaw on next boot; also hydrated into our refresh job).
+//   - remote client       → write into the remote openclaw.json `env.vars`
+//     over the SSH tunnel (the cross-platform target OpenClaw reads on both Mac
+//     and VPS; on a Hostinger VPS the host `/docker/<proj>/.env` is the other
+//     option, but its path is not stored per-client, so env.vars is the
+//     reliable, schema-stable destination).
+//
+// The env-var NAME is normalized to the conventional `<SLUG>_API_KEY` so it
+// matches both the refresh job's `apiKeyFor()` and our discovery candidates.
+// ---------------------------------------------------------------------------
+
+export interface KeyWriteResult {
+  ok: boolean;
+  /** The env-var name that was written (normalized). */
+  envVar: string;
+  /** 'local-openclaw-json' | 'remote-openclaw-json' */
+  target: string;
+  error?: string;
+}
+
+/** Normalize a provider slug OR an explicit env-var name to `<SLUG>_API_KEY`. */
+export function normalizeKeyEnvVar(providerOrEnv: string): string {
+  const raw = providerOrEnv.trim();
+  // Already an env-var name (UPPER_SNAKE ending in _KEY / _TOKEN / _SECRET).
+  if (/^[A-Z][A-Z0-9_]*$/.test(raw) && /(KEY|TOKEN|SECRET)$/.test(raw)) {
+    return raw;
+  }
+  return raw.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '_API_KEY';
+}
+
+/** Deep-merge a single env var into an openclaw.json string, returning new JSON text. */
+function mergeKeyIntoOpenclawJson(jsonText: string | null, envVar: string, value: string): string {
+  let root: Record<string, unknown> = {};
+  if (jsonText) {
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        root = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Corrupt/unreadable config — start from an empty object rather than
+      // clobbering blindly is risky, so we throw to let the caller surface it.
+      throw new Error('existing openclaw.json is not valid JSON; refusing to overwrite');
+    }
+  }
+  const env = (root.env && typeof root.env === 'object' && !Array.isArray(root.env)
+    ? (root.env as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const vars = (env.vars && typeof env.vars === 'object' && !Array.isArray(env.vars)
+    ? (env.vars as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  vars[envVar] = value;
+  env.vars = vars;
+  root.env = env;
+  return JSON.stringify(root, null, 2) + '\n';
+}
+
+/**
+ * Write a provider API key into the given client's OpenClaw env. Returns a
+ * structured result; never throws for an expected failure (bad ssh, etc.) —
+ * those come back as `{ ok: false, error }`.
+ */
+export async function writeClientProviderKey(
+  client: Client,
+  providerOrEnv: string,
+  value: string,
+): Promise<KeyWriteResult> {
+  const envVar = normalizeKeyEnvVar(providerOrEnv);
+  if (!value || !value.trim()) {
+    return { ok: false, envVar, target: '', error: 'empty key value' };
+  }
+
+  if (client.is_self) {
+    try {
+      const configPath = openclawConfigPath();
+      const existing = safeReadFile(configPath);
+      const next = mergeKeyIntoOpenclawJson(existing, envVar, value.trim());
+      fs.writeFileSync(configPath, next, { mode: 0o600 });
+      // Make it live for THIS process immediately so an inline re-refresh works.
+      process.env[envVar] = value.trim();
+      return { ok: true, envVar, target: 'local-openclaw-json' };
+    } catch (err) {
+      return { ok: false, envVar, target: 'local-openclaw-json', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  if (!client.ssh_target || !client.ssh_target.trim()) {
+    return { ok: false, envVar, target: 'remote-openclaw-json', error: 'client has no ssh_target' };
+  }
+
+  const remotePath = resolveClientPath(client, 'openclaw-config').path;
+  // Read the remote config, merge locally, write it back over the tunnel. Use
+  // the strict reader so an SSH failure aborts instead of clobbering a real
+  // config. All transport goes through the Foundation's `runClientSsh`.
+  const read = await remoteReadStrict(client, remotePath).catch(() => ({ ok: false, content: null }));
+  if (!read.ok) {
+    return {
+      ok: false,
+      envVar,
+      target: 'remote-openclaw-json',
+      error: 'could not read remote openclaw.json over SSH (refusing to overwrite)',
+    };
+  }
+  let next: string;
+  try {
+    next = mergeKeyIntoOpenclawJson(read.content, envVar, value.trim());
+  } catch (err) {
+    return { ok: false, envVar, target: 'remote-openclaw-json', error: err instanceof Error ? err.message : String(err) };
+  }
+  const wrote = await remoteWriteFile(client, remotePath, next).catch(() => false);
+  if (!wrote) {
+    return { ok: false, envVar, target: 'remote-openclaw-json', error: 'failed to write remote openclaw.json over SSH' };
+  }
+  return { ok: true, envVar, target: 'remote-openclaw-json' };
+}
+
+/**
+ * Write `content` to `remotePath` on the client box over the CF-Access tunnel.
+ * The payload is base64-encoded and decoded on the remote side (matching the
+ * Foundation's `writeClientFile` in client-fs.ts) so arbitrary JSON survives the
+ * shell intact; the bytes travel only over the encrypted tunnel to the client's
+ * own box. Returns true on a clean exit. Never throws.
+ */
+async function remoteWriteFile(client: Client, remotePath: string, content: string): Promise<boolean> {
+  const dir = path.posix.dirname(remotePath);
+  const b64 = Buffer.from(content, 'utf8').toString('base64');
+  const cmd =
+    `mkdir -p ${shellQuote(dir)} && ` +
+    `printf '%s' ${shellQuote(b64)} | base64 -d > ${shellQuote(remotePath)} && ` +
+    `chmod 600 ${shellQuote(remotePath)}`;
+  const res = await runClientSsh(client, cmd).catch(() => ({ ok: false }));
+  return res.ok === true;
 }
 
 // ---------------------------------------------------------------------------

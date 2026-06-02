@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown, Terminal } from 'lucide-react';
+import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown, Terminal, Check, Building2 } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -49,6 +49,93 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const [personaOptions, setPersonaOptions] = useState<{value: string; label: string}[]>([{ value: 'auto', label: 'Auto-assign' }]);
   const aiPanelRef = useRef<HTMLDivElement>(null);
   const aiButtonRef = useRef<HTMLButtonElement>(null);
+
+  // --- Client (tenant) picker state ---
+  interface PublicClient {
+    id: string;
+    name: string;
+    is_self: boolean;
+  }
+  const [clients, setClients] = useState<PublicClient[]>([]);
+  const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [clientMenuOpen, setClientMenuOpen] = useState(false);
+  const [switchingClient, setSwitchingClient] = useState(false);
+  const clientMenuRef = useRef<HTMLDivElement>(null);
+  const clientButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Load the client roster + which one is currently selected.
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/clients', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const list: PublicClient[] = Array.isArray(data.clients) ? data.clients : [];
+        setClients(list);
+        // Resolve which client is selected by asking the select endpoint to
+        // echo the cookie-derived selection (no-op select with no body returns
+        // 400, so instead derive from the list: server defaults to self when
+        // no cookie). We mirror that here for the initial label.
+        setSelectedClientId((prev) => prev ?? list.find((c) => c.is_self)?.id ?? list[0]?.id ?? null);
+      } catch (err) {
+        console.error('Failed to load clients:', err);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Close the client menu on outside click.
+  useEffect(() => {
+    if (!clientMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        clientMenuRef.current &&
+        !clientMenuRef.current.contains(target) &&
+        clientButtonRef.current &&
+        !clientButtonRef.current.contains(target)
+      ) {
+        setClientMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [clientMenuOpen]);
+
+  const selectClient = useCallback(async (id: string) => {
+    if (id === selectedClientId) {
+      setClientMenuOpen(false);
+      return;
+    }
+    setSwitchingClient(true);
+    try {
+      const res = await fetch('/api/clients/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      if (res.ok) {
+        setSelectedClientId(id);
+        setClientMenuOpen(false);
+        // Selecting a client changes every downstream data source (OpenClaw,
+        // keys, memory, analytics). A full refresh re-reads them against the
+        // newly selected box.
+        router.refresh();
+        window.location.reload();
+      }
+    } catch (err) {
+      console.error('Failed to switch client:', err);
+    } finally {
+      setSwitchingClient(false);
+    }
+  }, [selectedClientId, router]);
+
+  const selectedClient = clients.find((c) => c.id === selectedClientId) ?? null;
 
   // Load current intelligence settings when panel opens
   useEffect(() => {
@@ -249,23 +336,97 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
             <span className="inline-block w-20 h-4 bg-gray-100 rounded animate-pulse" aria-hidden />
           )}
         </span>
-        {/* System status pill (PRD 3.12). Replaces the legacy single LIVE/OFFLINE
-         *  indicator. Reflects the worst-case component status across probes. */}
+        {/* System status pill (PRD 3.12). Reflects the worst-case component
+         *  status across probes. */}
         <SystemStatusPill />
-        <div
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
-            isOnline
-              ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
-              : 'bg-red-50 border border-red-200 text-red-700'
-          }`}
-        >
-          <span
-            className={`w-2 h-2 rounded-full ${
-              isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
-            }`}
-          />
-          {isOnline ? 'ONLINE' : 'OFFLINE'}
-        </div>
+
+        {/* E24 fix: ONE unambiguous connection status pill for the SELECTED
+         *  client (replaces the two adjacent bright ONLINE/OFFLINE buttons that
+         *  could both look "lit"). A single dot+label with no competing
+         *  affordance. For the operator's own box we drive it from the live
+         *  store; remote-client live status is wired by the connection feature
+         *  cluster — until then we show the neutral connected/offline state. */}
+        {(() => {
+          // Selected client's connection state. The live store flag (isOnline)
+          // is the only connection signal available in this foundation; the
+          // connection feature cluster swaps in a per-client probe later. We
+          // reference selectedClient so the pill is explicitly scoped to it.
+          void selectedClient;
+          const online = isOnline;
+          return (
+            <div
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border ${
+                online
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                  : 'bg-gray-50 border-gray-200 text-gray-600'
+              }`}
+              role="status"
+              aria-label={`Connection status: ${online ? 'Online' : 'Offline'}`}
+              title={online ? 'Connected to the selected client gateway' : 'Not connected to the selected client gateway'}
+            >
+              <span className={`w-2 h-2 rounded-full ${online ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`} />
+              <span>{online ? 'Online' : 'Offline'}</span>
+            </div>
+          );
+        })()}
+
+        {/* Client (tenant) picker — selects which managed box the whole
+         *  dashboard reads. Hidden when only the operator's own box exists. */}
+        {clients.length > 1 && (
+          <div className="relative">
+            <button
+              ref={clientButtonRef}
+              onClick={() => setClientMenuOpen((p) => !p)}
+              disabled={switchingClient}
+              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors disabled:opacity-60"
+              title="Switch client"
+              aria-haspopup="listbox"
+              aria-expanded={clientMenuOpen}
+            >
+              <Building2 className="w-4 h-4 text-gray-500" />
+              <span className="max-w-[10rem] truncate">
+                {selectedClient ? selectedClient.name : 'Select client'}
+              </span>
+              <ChevronDown className={`w-3 h-3 transition-transform ${clientMenuOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            {clientMenuOpen && (
+              <div
+                ref={clientMenuRef}
+                role="listbox"
+                className="absolute right-0 top-full mt-2 w-64 bg-white border border-gray-200 rounded-xl shadow-lg z-50 py-2 max-h-80 overflow-auto"
+              >
+                <div className="px-3 pb-2 mb-1 border-b border-gray-100 text-xs font-semibold uppercase tracking-wide text-gray-400">
+                  Clients
+                </div>
+                {clients.map((c) => {
+                  const active = c.id === selectedClientId;
+                  return (
+                    <button
+                      key={c.id}
+                      role="option"
+                      aria-selected={active}
+                      onClick={() => selectClient(c.id)}
+                      className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left transition-colors ${
+                        active ? 'bg-brand-50 text-brand-700' : 'text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="truncate">{c.name}</span>
+                        {c.is_self && (
+                          <span className="shrink-0 text-[10px] uppercase tracking-wide text-gray-400 border border-gray-200 rounded px-1 py-0.5">
+                            This box
+                          </span>
+                        )}
+                      </span>
+                      {active && <Check className="w-4 h-4 shrink-0" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* AI Settings - only visible in department view */}
         {workspace && (

@@ -1,11 +1,60 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronRight, Clock, MessagesSquare, X } from 'lucide-react';
+import { ChevronRight, Clock, MessagesSquare, WifiOff, X } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useMissionControl } from '@/lib/store';
 import type { Event } from '@/lib/types';
 import { formatDistanceToNow } from 'date-fns';
+
+interface ClientFeedResponse {
+  events: Event[];
+  client: { id: string; name: string; is_self: boolean; gateway_url: string } | null;
+  source: 'local_db' | 'gateway_sessions' | 'gateway_unreachable';
+  gateway_error?: string;
+}
+
+/** E23: Poll the client-aware feed endpoint every 30 s. Returns the raw response
+ *  payload so the caller can display both events AND source metadata.
+ *
+ *  Always fetches the latest 50 events (full refresh, no incremental `since`
+ *  parameter) so that setEvents() replaces the store with the complete current
+ *  window rather than a delta that would wipe history. */
+function useClientFeed() {
+  const { setEvents } = useMissionControl();
+  const [feedMeta, setFeedMeta] = useState<Pick<ClientFeedResponse, 'client' | 'source' | 'gateway_error'> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/events/client-feed?limit=50', { cache: 'no-store' });
+        if (!res.ok || cancelled) return;
+        const data: ClientFeedResponse = await res.json();
+        if (cancelled) return;
+
+        setFeedMeta({ client: data.client, source: data.source, gateway_error: data.gateway_error });
+
+        // Full refresh: replace the store with the latest window from DB / gateway.
+        // setEvents always replaces, so we call it unconditionally to clear stale
+        // remote-gateway data if the source changes between polls.
+        setEvents(data.events);
+      } catch {
+        // Network failure: leave existing events visible, don't update meta.
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [setEvents]);
+
+  return feedMeta;
+}
 
 type FeedFilter = 'all' | 'tasks' | 'agents';
 
@@ -26,6 +75,8 @@ const MOBILE_BREAKPOINT = 1024; // matches Tailwind `lg`
 
 export function LiveFeed() {
   const { events } = useMissionControl();
+  // E23: poll the selected client's event feed and surface source metadata.
+  const feedMeta = useClientFeed();
   const [filter, setFilter] = useState<FeedFilter>('all');
 
   // Default = HIDDEN so the Kanban board uses the full width. The user's
@@ -169,6 +220,13 @@ export function LiveFeed() {
   );
 
   // ===== The rail contents (header + tabs + events) — unchanged behavior =====
+  const isGatewayUnreachable = feedMeta?.source === 'gateway_unreachable';
+  const clientLabel = feedMeta?.client
+    ? feedMeta.client.is_self
+      ? 'This box'
+      : feedMeta.client.name
+    : null;
+
   const railBody = (
     <>
       {/* Header */}
@@ -176,10 +234,25 @@ export function LiveFeed() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="relative flex h-2 w-2" aria-hidden="true">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-brand-500" />
+              {isGatewayUnreachable ? (
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-gray-400" />
+              ) : (
+                <>
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400 opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-brand-500" />
+                </>
+              )}
             </span>
             <span className="text-sm font-semibold text-gray-900">Live Feed</span>
+            {/* E23: source label — shows which client's data is displayed */}
+            {clientLabel && (
+              <span
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 truncate max-w-[8rem]"
+                title={feedMeta?.client?.gateway_url ?? undefined}
+              >
+                {clientLabel}
+              </span>
+            )}
           </div>
           <button
             type="button"
@@ -210,11 +283,27 @@ export function LiveFeed() {
         </div>
       </div>
 
+      {/* E23: gateway-unreachable banner */}
+      {isGatewayUnreachable && (
+        <div className="mx-2 mt-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700" role="alert">
+          <WifiOff className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>
+            {feedMeta?.client?.name
+              ? `Cannot reach ${feedMeta.client.name}’s gateway.`
+              : "Cannot reach the selected client’s gateway."}{" "}
+            Events shown are from the last successful poll.
+            {feedMeta?.gateway_error ? ` (${feedMeta.gateway_error})` : ""}
+          </span>
+        </div>
+      )}
+
       {/* Events List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
         {filteredEvents.length === 0 ? (
           <div className="text-center py-8 text-gray-400 text-sm" role="status">
-            No events yet
+            {isGatewayUnreachable
+              ? 'No events — gateway unreachable'
+              : 'No events yet'}
           </div>
         ) : (
           filteredEvents.map((event) => <EventItem key={event.id} event={event} />)

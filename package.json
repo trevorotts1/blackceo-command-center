@@ -1,6 +1,6 @@
 {
   "name": "mission-control",
-  "version": "4.1.13",
+  "version": "4.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p ${PORT:-4000}",
@@ -37,6 +37,7 @@
     "remark-gfm": "^4.0.1",
     "source-map-js": "^1.2.1",
     "uuid": "^11.0.4",
+    "ws": "^8.18.0",
     "zod": "^4.3.6",
     "zustand": "^5.0.3"
   },
@@ -47,6 +48,7 @@
     "@types/react": "^18.2.79",
     "@types/react-dom": "^18.2.25",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.5.13",
     "autoprefixer": "^10.4.20",
     "eslint": "^8.57.0",
     "eslint-config-next": "14.2.21",

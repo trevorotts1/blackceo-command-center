@@ -27,9 +27,16 @@ export default function OperatorMemoryPage({ searchParams }: PageProps) {
           <OperatorHelpButton card="memory" />
         </div>
         <p className="mt-2 text-body text-bcc-text-secondary max-w-[680px]">
-          Search every place you have written anything: the operator vault,
-          per-agent scratch directories, journal entries, agent chats, goals,
-          research results, tasks, and persona blueprints.
+          Search the SELECTED client agent&apos;s memory: its workspace
+          (including its <span className="font-mono">MEMORY.md</span>,
+          <span className="font-mono"> memory/</span> logs, and
+          <span className="font-mono"> dreaming/</span> summaries), its scratch
+          directories, plus journal entries, agent chats, goals, research
+          results, tasks, and persona blueprints. Switch clients in the header
+          to search a different agent&apos;s memory. A remote client&apos;s
+          workspace is read over the Cloudflare Access tunnel; if it is
+          unreachable the search still returns everything else and shows a
+          notice.
         </p>
       </header>
       <MemorySearch initialQuery={initialQuery} />

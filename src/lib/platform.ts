@@ -24,6 +24,7 @@
 import { existsSync, readdirSync, statSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import type { Client } from './clients';
 
 export type Platform = 'mac-mini' | 'vps-docker';
 
@@ -232,4 +233,102 @@ export function zhcLibraryBaseDirs(): string[] {
   for (const root of zhcRoots) push(root);
 
   return dirs;
+}
+
+// ============================================================================
+// PER-CLIENT path resolution (SINGLE-TENANT → PER-CLIENT foundation).
+//
+// The existing helpers above (openclawConfigPath / vaultRoot /
+// operatorScratchRoot / zhcLibraryBaseDirs) resolve LOCAL paths for the box the
+// Command Center runs on. They remain the correct answer for the operator's own
+// box (is_self).
+//
+// For a REMOTE client the filesystem lives on a different machine, reached over
+// the Cloudflare Access SSH tunnel. We do NOT do SSH I/O here — that belongs to
+// the feature clusters. Instead `resolveClientPath` returns either a LOCAL
+// absolute path (self) or a REMOTE DESCRIPTOR ({ remote: true, sshTarget, path })
+// that a feature cluster wires up to a tunneled read.
+// ============================================================================
+
+/** The kinds of root a feature cluster may need to read for a client. */
+export type ClientPathKind =
+  | 'openclaw-config'
+  | 'vault-root'
+  | 'scratch-root';
+
+/** A path on the local box — read it directly with `fs`. */
+export interface LocalClientPath {
+  remote: false;
+  path: string;
+}
+
+/**
+ * A path on a remote client's box. The feature cluster reads it over the
+ * Cloudflare Access SSH tunnel using `sshTarget` (user@host or ssh alias).
+ * `path` is the absolute path ON THE REMOTE BOX.
+ */
+export interface RemoteClientPath {
+  remote: true;
+  sshTarget: string | null;
+  path: string;
+}
+
+export type ResolvedClientPath = LocalClientPath | RemoteClientPath;
+
+/**
+ * The default absolute root for a given kind, computed for a remote client.
+ * Remote clients may pin an explicit `workspace_root`; otherwise we assume the
+ * canonical Mac-mini layout under the SSH user's home (the common remote-client
+ * shape in this fleet). `~` is left literal so the remote shell expands it.
+ */
+function remoteDefaultPath(kind: ClientPathKind, workspaceRoot: string | null): string {
+  // An explicit workspace_root anchors vault/scratch; openclaw-config is keyed
+  // off the OpenClaw home, not the vault, so it is computed independently.
+  switch (kind) {
+    case 'openclaw-config':
+      return '~/.openclaw/openclaw.json';
+    case 'vault-root':
+      return workspaceRoot && workspaceRoot.trim() ? workspaceRoot : '~/clawd';
+    case 'scratch-root':
+      return workspaceRoot && workspaceRoot.trim()
+        ? path.posix.join(workspaceRoot, 'scratch')
+        : '~/clawd/scratch';
+  }
+}
+
+/**
+ * Resolve a root path for a specific client + kind.
+ *
+ * - `client.is_self === true`  → a LOCAL path using the existing platform
+ *   helpers (fully backward compatible — same paths the app uses today).
+ * - remote client → a REMOTE DESCRIPTOR carrying the ssh target and the path on
+ *   the remote box. Callers MUST check `remote` and route remote reads over the
+ *   tunnel; they must NOT pass a remote `path` to local `fs`.
+ *
+ * Never throws.
+ */
+export function resolveClientPath(client: Client, kind: ClientPathKind): ResolvedClientPath {
+  if (client.is_self) {
+    let localPath: string;
+    switch (kind) {
+      case 'openclaw-config':
+        localPath = openclawConfigPath();
+        break;
+      case 'vault-root':
+        localPath = client.workspace_root && client.workspace_root.trim()
+          ? client.workspace_root
+          : vaultRoot();
+        break;
+      case 'scratch-root':
+        localPath = operatorScratchRoot();
+        break;
+    }
+    return { remote: false, path: localPath };
+  }
+
+  return {
+    remote: true,
+    sshTarget: client.ssh_target,
+    path: remoteDefaultPath(kind, client.workspace_root),
+  };
 }

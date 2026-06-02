@@ -14,6 +14,8 @@ import { PixelFunnel } from '@/components/conversational-ai/PixelFunnel';
 import { InterviewBanner } from '@/components/conversational-ai/InterviewBanner';
 import { Layer2Section } from '@/components/conversational-ai/Layer2Section';
 import { EmptyState } from '@/components/conversational-ai/EmptyState';
+import { ConnectionStatusBar } from '@/components/conversational-ai/ConnectionStatusBar';
+import type { ClientWiringInfo } from '@/components/conversational-ai/ConnectionStatusBar';
 import type { MetricsResponse, StatusResponse, EnrichedResponse } from '@/components/conversational-ai/types';
 
 const STATUS_POLL_MS = 20_000; // poll for interview completion every 20s
@@ -31,6 +33,8 @@ export default function ConversationalAiPage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [enriched, setEnriched] = useState<EnrichedResponse | null>(null);
+  // E1: selected client for the connection-wiring description
+  const [selectedClient, setSelectedClient] = useState<ClientWiringInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const prevComplete = useRef<boolean | null>(null);
 
@@ -49,6 +53,21 @@ export default function ConversationalAiPage() {
       if (res.ok) setEnriched(await res.json());
     } catch {
       /* graceful */
+    }
+  }, []);
+
+  // E1: fetch the currently selected client for the connection-wiring description.
+  // GET /api/clients/select echoes back whichever client the cookie identifies
+  // (server-resolved, defaults to self). This is the only way to get the right
+  // label in a client component since the selectedClientId cookie is httpOnly.
+  const loadSelectedClient = useCallback(async () => {
+    try {
+      const res = await fetch('/api/clients/select', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json() as { ok: boolean; selected: ClientWiringInfo | null };
+      if (data.selected) setSelectedClient(data.selected);
+    } catch {
+      /* graceful: no client info shown, connection pill still works */
     }
   }, []);
 
@@ -74,14 +93,14 @@ export default function ConversationalAiPage() {
     }
   }, [loadEnriched]);
 
-  // Initial load
+  // Initial load — E1: load selected-client info in parallel with other fetches
   useEffect(() => {
     (async () => {
       setLoading(true);
-      await Promise.all([loadStatus(), loadMetrics()]);
+      await Promise.all([loadStatus(), loadMetrics(), loadSelectedClient()]);
       setLoading(false);
     })();
-  }, [loadStatus, loadMetrics]);
+  }, [loadStatus, loadMetrics, loadSelectedClient]);
 
   // Poll status so Layer 2 appears in real time when the interview completes.
   useEffect(() => {
@@ -112,6 +131,14 @@ export default function ConversationalAiPage() {
           </div>
         </div>
 
+        {/* E1 — Connection-state indicator. Rendered unconditionally (even while
+         *  loading) so the operator always sees which gateway this page talks to
+         *  and whether it is connected. Uses `null` status while loading so the
+         *  bar shows the "Checking connection…" state. */}
+        <div className="mb-6">
+          <ConnectionStatusBar status={status} selectedClient={selectedClient} />
+        </div>
+
         {loading ? (
           <div className="space-y-6">
             <div className="h-[120px] rounded-2xl bg-gray-200 animate-pulse" />
@@ -122,8 +149,11 @@ export default function ConversationalAiPage() {
           </div>
         ) : (
           <motion.div className="space-y-6" variants={pageVariants} initial="hidden" animate="visible">
-            {/* Layer-2 gate banner — shown only while interview incomplete */}
-            {status && !status.interview.complete && (
+            {/* Layer-2 gate banner — shown only while interview incomplete AND
+             *  the status is KNOWN. E3: when status is unknown (no per-client
+             *  flag, no positive signal) the banner defaults to HIDDEN so an
+             *  already-onboarded client is never nagged. */}
+            {status && !status.interview.complete && status.interview.known !== false && (
               <motion.div variants={sectionVariants}>
                 <InterviewBanner />
               </motion.div>

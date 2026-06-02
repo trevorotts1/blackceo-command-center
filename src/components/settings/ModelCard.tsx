@@ -1,6 +1,7 @@
 'use client';
 
-import { Cpu, Check } from 'lucide-react';
+import type { SyntheticEvent } from 'react';
+import { Cpu, Check, Star, Layers } from 'lucide-react';
 import { CapabilityBadge } from './CapabilityBadge';
 
 /**
@@ -8,9 +9,11 @@ import { CapabilityBadge } from './CapabilityBadge';
  * browser. Used inside the "Available Models" panel so operators can scan
  * capability mix and cost band before assigning a model to a department.
  *
- * This component is intentionally read-only. Per PRD line 750 the persona
- * system is not touched here; persona-to-model assignment continues to
- * happen in the existing department picker below.
+ * E6: each card now carries an explanatory header (rendered by the page above
+ * the grid) and a per-card primary action. When `onSetDefault` / `onAssignToDept`
+ * are supplied the card surfaces "Apply to all" and "Assign to a department…"
+ * controls so the operator can act on a model directly from the catalog instead
+ * of scrolling to the assignment cards. With no handlers it stays read-only.
  */
 
 /**
@@ -37,10 +40,27 @@ export interface ModelCardData {
   status?: string;
 }
 
+export interface ModelCardDeptOption {
+  id: string;
+  name: string;
+}
+
 interface ModelCardProps {
   model: ModelCardData;
   selected?: boolean;
   onSelect?: (id: string) => void;
+  /**
+   * E6 primary action — apply this model as the default for ALL departments.
+   * When provided, the card renders an "Apply to all" button.
+   */
+  onSetDefault?: (id: string) => void;
+  /**
+   * E6 secondary action — assign this model to one specific department. When
+   * provided alongside `departments`, the card renders a department picker.
+   */
+  onAssignToDept?: (modelId: string, departmentId: string) => void;
+  /** Departments offered in the per-card "Assign to a department…" picker. */
+  departments?: ModelCardDeptOption[];
 }
 
 /**
@@ -84,14 +104,25 @@ function formatCost(value: number | undefined): string {
   return `$${value.toFixed(1)}`;
 }
 
-export function ModelCard({ model, selected = false, onSelect }: ModelCardProps) {
+export function ModelCard({
+  model,
+  selected = false,
+  onSelect,
+  onSetDefault,
+  onAssignToDept,
+  departments,
+}: ModelCardProps) {
   const band = getCostBand(model);
   const bandStyle = COST_BAND_STYLE[band];
   const isClickable = Boolean(onSelect);
+  const hasActions = Boolean(onSetDefault || (onAssignToDept && departments && departments.length > 0));
+  const deprecated = model.status === 'deprecated' || model.status === 'unavailable';
 
   const handleClick = () => {
     if (onSelect) onSelect(model.id);
   };
+
+  const stop = (e: SyntheticEvent) => e.stopPropagation();
 
   return (
     <div
@@ -170,6 +201,53 @@ export function ModelCard({ model, selected = false, onSelect }: ModelCardProps)
           Out: <span className="font-mono text-gray-700">{formatCost(model.cost_per_million_output)}</span>
         </span>
       </div>
+
+      {/* E6: per-card primary actions */}
+      {hasActions && (
+        <div className="mt-3 pt-2.5 border-t border-gray-100 flex items-center gap-2 flex-wrap">
+          {onSetDefault && (
+            <button
+              type="button"
+              onClick={(e) => {
+                stop(e);
+                if (!deprecated) onSetDefault(model.id);
+              }}
+              disabled={deprecated}
+              title={deprecated ? 'This model is deprecated and cannot be assigned' : 'Apply this model to every department'}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Star className="w-3 h-3" />
+              Apply to all
+            </button>
+          )}
+          {onAssignToDept && departments && departments.length > 0 && (
+            <div className="inline-flex items-center gap-1 text-[11px] text-gray-500" onClick={stop}>
+              <Layers className="w-3 h-3 text-gray-400" />
+              <select
+                defaultValue=""
+                disabled={deprecated}
+                onClick={stop}
+                onChange={(e) => {
+                  const deptId = e.target.value;
+                  e.target.value = '';
+                  if (deptId && !deprecated) onAssignToDept(model.id, deptId);
+                }}
+                className="bg-white border border-gray-200 rounded-md px-1.5 py-1 text-[11px] text-gray-700 focus:ring-2 focus:ring-brand-400 focus:border-transparent focus:outline-none disabled:opacity-40"
+                aria-label={`Assign ${model.label} to a department`}
+              >
+                <option value="" disabled>
+                  Assign to dept…
+                </option>
+                {departments.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

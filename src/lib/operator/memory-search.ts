@@ -4,9 +4,20 @@
  *
  * Track B6 (Operator Console Memory sub-module, PRD Section 4.7).
  *
+ * PER-CLIENT (E13): the filesystem sources (vault + scratch) are now read for
+ * the SELECTED client via `readClientDir`, not the command center's own host.
+ * For the operator's own box that is the local vault/scratch (unchanged); for a
+ * remote client it is the client agent's OWN workspace, read over the
+ * Cloudflare Access tunnel. The vault walk deliberately INCLUDES the agent's
+ * memory artefacts that live there — `MEMORY.md`, the `memory/` logs, and the
+ * `dreaming/` summaries — so a search here surfaces exactly what the client
+ * agent itself can recall. DB sources (journal/chat/goals/research/tasks/
+ * personas) stay command-center-local. Remote-read failures are reported in
+ * `errors` and the search still returns its DB hits (never throws).
+ *
  * Sources searched (read-only — this module never writes):
- *   1. Vault markdown files          (recursive walk of vaultRoot())
- *   2. Per-agent scratch directories (recursive walk of operatorScratchRoot())
+ *   1. Vault markdown files          (selected client's vault: MEMORY.md, memory/, dreaming/, notes)
+ *   2. Per-agent scratch directories (selected client's scratch root)
  *   3. operator_journal_entries      (DB, migration 037)
  *   4. operator_chat_messages        (DB, migration 037)
  *   5. operator_goals                (DB, migration 037)
@@ -21,10 +32,9 @@
  * backing index. The interface is intentionally identical to what an FTS5
  * rewrite would expose.
  */
-import fs from 'fs/promises';
 import path from 'path';
 import { queryAll } from '@/lib/db';
-import { vaultRoot, operatorScratchRoot } from '@/lib/platform';
+import { readClientDir, isRemoteError, type ClientFile } from '@/lib/operator/client-fs';
 
 export type MemorySourceType =
   | 'vault'
@@ -117,11 +127,12 @@ export async function searchMemory(opts: MemorySearchOptions): Promise<MemorySea
   const terms = tokenize(rawQuery);
   const lowerQ = rawQuery.toLowerCase();
 
-  // Filesystem sources run in parallel with DB sources.
+  // Filesystem sources run in parallel with DB sources. They are read for the
+  // SELECTED client (local fs for self, SSH tunnel for a remote client).
   const fsJobs: Promise<MemorySearchHit[]>[] = [];
   if (requested.has('vault')) {
     fsJobs.push(
-      searchFilesystem('vault', vaultRoot(), terms, errors).catch((err) => {
+      searchClientFs('vault', 'vault-root', terms, errors).catch((err) => {
         errors.push({ source: 'vault', message: errorMessage(err) });
         return [];
       })
@@ -129,7 +140,7 @@ export async function searchMemory(opts: MemorySearchOptions): Promise<MemorySea
   }
   if (requested.has('scratch')) {
     fsJobs.push(
-      searchFilesystem('scratch', operatorScratchRoot(), terms, errors).catch((err) => {
+      searchClientFs('scratch', 'scratch-root', terms, errors).catch((err) => {
         errors.push({ source: 'scratch', message: errorMessage(err) });
         return [];
       })
@@ -303,101 +314,80 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// ---- Filesystem sources ---------------------------------------------------
+// ---- Filesystem sources (per-client) --------------------------------------
 
-async function searchFilesystem(
+/**
+ * Search the SELECTED client's vault or scratch tree. Delegates the local /
+ * remote branch to `readClientDir` so the same lexical scorer runs against the
+ * operator's own box (local fs) or a remote client's workspace (SSH tunnel).
+ *
+ * Note: `readClientDir` already skips the heavy dirs (node_modules, .git, …)
+ * and dotfiles are NOT skipped at the file level, so the agent's `MEMORY.md`
+ * and files under `memory/` / `dreaming/` are included (their parent dirs are
+ * plain names, not dot-dirs). The `.health.json` sidecars use a `.json` ext
+ * that is in TEXT_EXTS but score to ~0 for normal queries.
+ */
+async function searchClientFs(
   source: 'vault' | 'scratch',
-  root: string,
+  kind: 'vault-root' | 'scratch-root',
   terms: string[],
-  _errors: Array<{ source: MemorySourceType; message: string }>
+  errors: Array<{ source: MemorySourceType; message: string }>
 ): Promise<MemorySearchHit[]> {
-  const hits: MemorySearchHit[] = [];
-  let scanned = 0;
   const phrase = terms.length > 0 ? terms.join(' ') : '';
-  // The phrase passed to scoreText is the actual user phrase, not joined
-  // tokens; but for FS walking we re-use the lower-case full phrase the
-  // caller already produced. We rebuild it from terms for consistency.
-  await walkDir(root, async (filePath) => {
-    if (scanned >= MAX_FILES_PER_ROOT) return false;
-    scanned += 1;
-    const ext = path.extname(filePath).toLowerCase();
-    if (!TEXT_EXTS.has(ext)) return true;
-    try {
-      const stat = await fs.stat(filePath);
-      if (!stat.isFile()) return true;
-      const sz = stat.size;
-      const buf = await fs.readFile(filePath, { encoding: 'utf8' });
-      const body = sz > MAX_FILE_BYTES ? buf.slice(0, MAX_FILE_BYTES) : buf;
-      const title = path.relative(root, filePath);
-      const score = scoreText(title, body, phrase, terms);
-      if (score <= 0) return true;
-      hits.push({
-        id: `${source}:${filePath}`,
-        source,
-        title,
-        excerpt: makeExcerpt(body, phrase, terms),
-        score,
-        updated_at: stat.mtime.toISOString(),
-        path: filePath,
-        href: `/operator/workspace?path=${encodeURIComponent(filePath)}`,
-        meta: { size: sz, truncated: sz > MAX_FILE_BYTES },
-      });
-    } catch {
-      // Ignore unreadable files; the broader scan continues.
-    }
-    return true;
+  const result = await readClientDir(kind, {
+    extensions: TEXT_EXTS,
+    maxFiles: MAX_FILES_PER_ROOT,
+    maxFileBytes: MAX_FILE_BYTES,
   });
+
+  if (result.error && isRemoteError(result.error)) {
+    // Surface the remote failure so the UI can show a soft-degraded banner,
+    // but do not throw — DB hits still return.
+    errors.push({
+      source,
+      message: result.error.notConfigured
+        ? `${source}: this client has no SSH target configured, so its workspace cannot be read remotely`
+        : `${source}: remote workspace read failed (${result.error.reason})`,
+    });
+    return [];
+  }
+
+  const hits: MemorySearchHit[] = [];
+  for (const file of result.files) {
+    const hit = scoreClientFile(source, file, phrase, terms);
+    if (hit) hits.push(hit);
+  }
   return hits;
 }
 
-/**
- * Best-effort recursive walker. Returns early if `visit` returns false. Skips
- * common heavy directories (node_modules, .git, .next, dist, build) so we
- * don't melt the search when the scratch root happens to be a code repo.
- */
-async function walkDir(root: string, visit: (filePath: string) => Promise<boolean>): Promise<void> {
-  const SKIP = new Set([
-    'node_modules',
-    '.git',
-    '.next',
-    '.turbo',
-    'dist',
-    'build',
-    '.venv',
-    '__pycache__',
-  ]);
-  let dirEntries: import('fs').Dirent[] = [];
-  try {
-    dirEntries = (await fs.readdir(root, { withFileTypes: true })) as unknown as import('fs').Dirent[];
-  } catch {
-    return;
-  }
-  const stack: string[] = [root];
-  let cont = true;
-  // Iterative DFS so we never blow the call stack on huge trees.
-  // We re-read root's entries above to short-circuit a missing root cheaply.
-  if (dirEntries.length === 0) return;
-  while (stack.length > 0 && cont) {
-    const current = stack.pop()!;
-    let entries: import('fs').Dirent[];
-    try {
-      entries = (await fs.readdir(current, { withFileTypes: true })) as unknown as import('fs').Dirent[];
-    } catch {
-      continue;
-    }
-    for (const ent of entries) {
-      const full = path.join(current, ent.name);
-      if (ent.isDirectory()) {
-        if (SKIP.has(ent.name) || ent.name.startsWith('.')) continue;
-        stack.push(full);
-        continue;
-      }
-      if (ent.isFile()) {
-        cont = await visit(full);
-        if (!cont) break;
-      }
-    }
-  }
+function scoreClientFile(
+  source: 'vault' | 'scratch',
+  file: ClientFile,
+  phrase: string,
+  terms: string[]
+): MemorySearchHit | null {
+  const ext = path.extname(file.relPath).toLowerCase();
+  if (!TEXT_EXTS.has(ext)) return null;
+  const title = file.relPath;
+  const score = scoreText(title, file.contents, phrase, terms);
+  if (score <= 0) return null;
+  // Small boost for the agent's canonical memory artefacts so they float up.
+  const lower = file.relPath.toLowerCase();
+  const memoryBoost =
+    lower.endsWith('memory.md') || lower.includes('/memory/') || lower.includes('/dreaming/')
+      ? 6
+      : 0;
+  return {
+    id: `${source}:${file.absPath}`,
+    source,
+    title,
+    excerpt: makeExcerpt(file.contents, phrase, terms),
+    score: score + memoryBoost,
+    updated_at: file.mtime ?? new Date(0).toISOString(),
+    path: file.absPath,
+    href: `/operator/workspace?path=${encodeURIComponent(file.absPath)}`,
+    meta: { size: file.size, memory_artifact: memoryBoost > 0 },
+  };
 }
 
 // ---- DB sources -----------------------------------------------------------

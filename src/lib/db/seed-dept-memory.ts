@@ -167,6 +167,17 @@ const DEPT_SEEDS: DeptSeed[] = [
     ],
   },
   {
+    id: 'security',
+    name: 'Security Team',
+    memories: [
+      { memory_type: 'goal', content: 'Goal: Zero critical security vulnerabilities left unpatched for more than 24 hours in any production system', importance: 5 },
+      { memory_type: 'constraint', content: 'Constraint: All credential rotations must be logged with timestamp, scope, and operator — no silent rotations', importance: 5 },
+      { memory_type: 'constraint', content: 'Constraint: Every security incident must have a written log entry before any remediation action is taken', importance: 5 },
+      { memory_type: 'context', content: 'Context: Fleet infrastructure spans Cloudflare Tunnel-connected Mac minis and Hostinger Docker VPSes — both surfaces must be covered in any threat sweep', importance: 4 },
+      { memory_type: 'lesson', content: 'Lesson: Contain first, investigate second — revoking the compromised credential before root-cause analysis prevents lateral movement while the breach window is still open', importance: 4 },
+    ],
+  },
+  {
     id: 'ceo',
     name: 'CEO / COM',
     memories: [
