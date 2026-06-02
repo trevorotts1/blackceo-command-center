@@ -1,3 +1,33 @@
+## [v4.3.0] - 2026-06-02 - SOP wiring: nightly auto-writer, Triad auto-draft, role-library bridge
+
+Wires three previously-disconnected pieces of the Hybrid SOP system so the auto-SOP-writer, the Triad Rule, and the on-disk role library actually feed the Command Center SOP board. All three changes are additive; the SOP/Triad subsystem itself was already merged and enforced on main.
+
+### 1. Auto-SOP-writer now runs nightly (was never scheduled)
+
+`detectPatternsAndPropose()` (the learning-loop pattern detector that drafts candidate SOPs from recurring un-SOP'd tasks) was only reachable by an external cron pinging `/api/cron/sop-learning` — so on any box without external cron set up, the proposals queue never populated on its own.
+
+- New in-process `sop-learning` job in `src/lib/jobs/scheduler.ts`, registered alongside the existing weekly `model-refresh` job via the same node-cron mechanism + `instrumentation.ts` boot hook. Runs nightly at **02:00** server local time.
+- Idempotent on two levels: the process-wide `__BC_CRON_REGISTERED__` guard prevents double-scheduling, and `detectPatternsAndPropose()` already dedupes against existing pending proposals so re-runs never create duplicates.
+- Logged per run (`[cron] sop-learning: scanned N … M new proposal(s)`). Opt out per box with `DISABLE_SOP_LEARNING_CRON=1`.
+
+### 2. Triad block now auto-drafts the missing SOP
+
+When the Triad Rule blocked a task from leaving backlog for having no SOP, the API returned a bare HTTP 400 with nothing for the dept head to act on.
+
+- New `proposeDraftFromTask()` in `src/lib/sop-learning.ts` creates a **DRAFT SOP proposal** (the same `sop_proposals` model the learning loop and auto-research use) pre-filled from the task title/description + department + intended persona, marked `[TRIAD-BLOCK DRAFT — needs-review]`. Reuses the existing `draftStepsFromTask` heuristic.
+- `PATCH /api/tasks/[id]` fires it (best-effort, never throws into the request) when `sop_id` is the missing piece, and returns the new `sop_draft_proposal_id` in the 400 body so the operator can jump straight to `/sops/proposals`.
+- Idempotent: one pending Triad-block draft per task — a repeatedly-blocked task does not spawn a pile of drafts. Surfaces in the existing `/sops/proposals` "pending" review queue; approving it authors a real SOP via the existing `approveProposal` path.
+
+### 3. Role-library bridge — on-disk how-to.md → CC SOP board
+
+The 23 department-level starter SOPs (`sops-seed.ts`, DB) and the per-role on-disk `how-to.md` files (Skill-23 `departments/<dept>/<NN-role>/how-to.md`) shared no key, so the agents' real operating procedures never appeared on the CC SOP board.
+
+- New `src/lib/role-library-import.ts` walks a departments tree, parses each role's `how-to.md` (title, Section-9 SOP headings → steps, keywords), and **upserts** into `sops` tagged `department` + `role` + `source='role-library'`.
+- New `POST /api/sops/import-role-library` route + `npm run db:import:role-library` script (`scripts/import-role-library.ts`). Path is configurable (body `departments_path`, `ROLE_LIBRARY_PATH` env, or `<workspace>/departments`). `GET` reports the resolved path without writing.
+- Stable key `role-library:<dept>/<role>` → idempotent, **never duplicates**. Only ever writes/replaces rows where `source='role-library'`; **never touches user-authored / starter / learning-loop SOPs** (those have `source IS NULL`). Optional `prune_missing` soft-deletes only role-library rows gone from disk.
+- Migration **050** adds nullable `role` + `source` columns (+ indexes) to `sops`; `schema.ts` carries them for fresh installs. Additive — NULL defaults preserve existing department matching.
+- Two-layer model + the sync documented in `docs/SOP-LAYERS.md`.
+
 ## v4.1.12 - 2026-06-01 - Speech-to-text on Kanban new-task input
 
 - MicDictateButton (browser Web Speech API) wired into TaskModal title + description fields; graceful degradation on unsupported browsers; no new deps. Build green.

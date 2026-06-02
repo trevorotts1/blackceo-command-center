@@ -23,6 +23,8 @@ export interface SOP {
   description?: string | null;
   version: number;
   department?: string | null;
+  role?: string | null; // role-folder slug (NULL for department-level SOPs); migration 050
+  source?: string | null; // 'role-library' for on-disk imports, NULL otherwise; migration 050
   task_keywords?: string | null;
   steps: string; // JSON-serialized SOPStep[]
   success_criteria?: string | null;

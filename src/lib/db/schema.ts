@@ -349,6 +349,8 @@ CREATE TABLE IF NOT EXISTS sops (
   description TEXT,
   version INTEGER NOT NULL DEFAULT 1,
   department TEXT,
+  role TEXT,
+  source TEXT,
   task_keywords TEXT,
   steps TEXT NOT NULL,
   success_criteria TEXT,
@@ -358,6 +360,8 @@ CREATE TABLE IF NOT EXISTS sops (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_sops_department ON sops(department);
+CREATE INDEX IF NOT EXISTS idx_sops_role ON sops(role);
+CREATE INDEX IF NOT EXISTS idx_sops_source ON sops(source);
 CREATE INDEX IF NOT EXISTS idx_sops_slug ON sops(slug);
 CREATE INDEX IF NOT EXISTS idx_sops_deleted ON sops(deleted_at);
 `;

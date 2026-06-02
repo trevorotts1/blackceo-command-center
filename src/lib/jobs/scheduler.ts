@@ -20,6 +20,7 @@ import { refreshModels } from './refresh-models';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
 import { runExecutionCompletionReconcile } from './execution-watcher';
 import { runCeoDelegationSweep } from './ceo-delegation-sweep';
+import { detectPatternsAndPropose } from '@/lib/sop-learning';
 
 export interface RegisteredJob {
   name: string;
@@ -118,10 +119,44 @@ async function runMemoryIndexRebuild(): Promise<void> {
   console.log('[cron] memory-index: heartbeat (rebuild routine not yet wired)');
 }
 
+/**
+ * Job: nightly SOP learning loop (the auto-SOP-writer). Clusters recent
+ * un-SOP'd completed tasks and writes candidate `sop_proposals` for owner
+ * review on /sops/proposals.
+ *
+ * Before this job existed, `detectPatternsAndPropose()` was only reachable by
+ * something externally pinging /api/cron/sop-learning (or manually running
+ * scripts/sop-learning-job.ts) — so on a box with no external cron the
+ * proposals queue never populated on its own. This mirrors the in-process
+ * model-refresh job so the loop runs every night with zero external setup.
+ *
+ * Idempotent on two levels: registration is guarded by the process-wide
+ * REGISTRY_KEY (so we never double-schedule), and detectPatternsAndPropose
+ * itself dedupes against existing pending proposals (sop-learning.ts:290-303),
+ * so re-running it never creates duplicate drafts. Opt out per box with
+ * DISABLE_SOP_LEARNING_CRON=1.
+ */
+async function runSopLearning(): Promise<void> {
+  if (process.env.DISABLE_SOP_LEARNING_CRON === '1' || process.env.DISABLE_SOP_LEARNING_CRON === 'true') {
+    console.log('[cron] sop-learning: DISABLE_SOP_LEARNING_CRON set, skipping');
+    return;
+  }
+  const result = detectPatternsAndPropose();
+  console.log(
+    `[cron] sop-learning: scanned ${result.scanned_tasks} completed tasks, ` +
+      `${result.clusters_found} candidate clusters, ${result.proposals_created} new proposal(s)` +
+      (result.proposal_ids.length > 0 ? ` [${result.proposal_ids.join(', ')}]` : '')
+  );
+}
+
 const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void> }> = [
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
   { name: 'usage-refresh', expr: '0 */6 * * *', fn: runUsageRefresh },
   { name: 'memory-index', expr: '0 * * * *', fn: runMemoryIndexRebuild },
+  // sop-learning: nightly at 02:00 server local time — the auto-SOP-writer.
+  // Mirrors the model-refresh wiring above so the proposals queue populates
+  // without any external cron. Disable with DISABLE_SOP_LEARNING_CRON=1.
+  { name: 'sop-learning', expr: '0 2 * * *', fn: runSopLearning },
 
   // --- OPTIONAL SAFETY NETS (B2 / B8) ----------------------------------------
   // These two are NOT the primary mechanism. The primary B2 path is the instant

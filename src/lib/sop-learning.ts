@@ -342,6 +342,114 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// ---------- 3b. Triad-block → on-demand draft proposal ----------
+
+export interface TriadDraftInput {
+  task_id: string;
+  title: string;
+  description?: string | null;
+  department?: string | null;
+  persona_id?: string | null;
+}
+
+export interface TriadDraftResult {
+  created: boolean;
+  proposal_id: string | null;
+  reason?: string;
+}
+
+/**
+ * Marker prefix written into a draft proposal's `evidence_summary` when it was
+ * born from a Triad block (a task was blocked from leaving backlog because it
+ * had no SOP). Lets the proposals UI / queries identify these and lets THIS
+ * function dedupe so a repeatedly-blocked task does not spawn a pile of drafts.
+ */
+const TRIAD_DRAFT_MARKER = '[TRIAD-BLOCK DRAFT — needs-review]';
+
+/**
+ * Create a DRAFT SOP proposal from a task that the Triad Rule just blocked for
+ * having no SOP. The draft is pre-filled from the task title/description (+ the
+ * task's department and intended persona) and inserted as a normal `pending`
+ * proposal so it shows up in the existing /sops/proposals review queue, where
+ * the dept head approves it into a real SOP (approveProposal) and then attaches
+ * it to the task.
+ *
+ * Idempotent: if a pending Triad-block draft already exists for this exact
+ * task_id we return {created:false} instead of inserting a duplicate. Never
+ * throws into the request path — callers treat a failure as best-effort.
+ */
+export function proposeDraftFromTask(input: TriadDraftInput): TriadDraftResult {
+  const title = (input.title || '').trim();
+  if (!title) {
+    return { created: false, proposal_id: null, reason: 'task has no title to seed a draft from' };
+  }
+
+  // Dedupe: one pending Triad-block draft per task. based_on_task_ids carries
+  // the originating task id; the marker scopes the LIKE to triad drafts only.
+  const existing = queryOne<{ id: string }>(
+    `SELECT id FROM sop_proposals
+       WHERE status = 'pending'
+         AND evidence_summary LIKE ?
+         AND based_on_task_ids LIKE ?
+       LIMIT 1`,
+    [`${TRIAD_DRAFT_MARKER}%`, `%${input.task_id}%`]
+  );
+  if (existing) {
+    return { created: false, proposal_id: existing.id, reason: 'a pending Triad-block draft already exists for this task' };
+  }
+
+  const department = input.department || null;
+  const combined = `${title} ${input.description || ''}`;
+  const keywords = topKeywords(combined, 5);
+
+  // Reuse the same heuristic step-drafter the nightly loop uses, fed by this
+  // single task as the exemplar.
+  const exemplar: CompletedTaskLite = {
+    id: input.task_id,
+    title,
+    description: input.description ?? null,
+    workspace_id: department,
+    department,
+    sop_id: null,
+    completed_at: null,
+  };
+  const steps = draftStepsFromTask(exemplar, keywords);
+
+  const proposedName = `${title.slice(0, 60)} SOP`;
+  const personaLine = isValidTriadPersona(input.persona_id)
+    ? `Intended persona: ${input.persona_id}`
+    : 'No persona set on the task yet — assign one when approving.';
+  const evidence = [
+    TRIAD_DRAFT_MARKER,
+    `Task "${title}" was blocked from leaving backlog by the Triad Rule because it has no SOP.`,
+    `Department: ${department || 'unassigned'}`,
+    personaLine,
+    `This is a pre-filled DRAFT seeded from the task title/description. Review the steps, edit as needed, then approve to author the SOP and unblock the task.`,
+    input.description ? `\nTask description:\n${input.description.slice(0, 1500)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const id = uuidv4();
+  run(
+    `INSERT INTO sop_proposals (id, proposed_name, proposed_department, draft_steps, based_on_task_ids, evidence_summary, status)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+    [id, proposedName, department, JSON.stringify(steps), JSON.stringify([input.task_id]), evidence]
+  );
+  return { created: true, proposal_id: id };
+}
+
+/**
+ * Local persona validity check mirroring sops.ts isValidPersonaId without
+ * importing the route-layer module into the learning helpers. Used only to
+ * decide how to word the draft's evidence line.
+ */
+function isValidTriadPersona(personaId: string | null | undefined): boolean {
+  if (!personaId) return false;
+  const v = personaId.toLowerCase().trim();
+  return !['schemaversion', 'schema_version', 'null', 'none', 'undefined', ''].includes(v);
+}
+
 // ---------- Approval (creates the actual SOP row) ----------
 
 export interface ApproveProposalResult {
