@@ -39,7 +39,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Trash2 } from 'lucide-react';
 import AgentSelector from './AgentSelector';
-import MessageInput from './MessageInput';
+import MessageInput, { type PendingAttachment } from './MessageInput';
 import {
   BRIDGE_AGENTS,
   getBridgeAgent,
@@ -214,12 +214,17 @@ export default function BridgeChat({ agents, initialAgentId }: Props) {
   }, [streaming]);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, attachment: PendingAttachment | null = null) => {
       if (streaming) return;
+      // Show the attachment inline on the user's bubble so the operator can see
+      // what they sent even before the agent acknowledges the file.
+      const displayContent = attachment
+        ? `${text}${text ? '\n\n' : ''}📎 ${attachment.filename}`
+        : text;
       const userMsg: Message = {
         id: `u-${Date.now()}`,
         role: 'user',
-        content: text,
+        content: displayContent,
         created_at: new Date().toISOString(),
       };
       setMessages((m) => [...m, userMsg]);
@@ -243,6 +248,13 @@ export default function BridgeChat({ agents, initialAgentId }: Props) {
             agent_id: agentId,
             session_id: sessionId ?? undefined,
             content: text,
+            attachment: attachment
+              ? {
+                  filename: attachment.filename,
+                  content_type: attachment.contentType,
+                  data_base64: attachment.base64,
+                }
+              : undefined,
           }),
           signal: ctrl.signal,
         });

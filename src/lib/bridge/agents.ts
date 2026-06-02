@@ -118,12 +118,16 @@ export const BRIDGE_AGENTS: readonly BridgeAgent[] = [
     id: 'gemini',
     label: 'Gemini',
     accent: '#F59E0B',
-    description: "Google's Gemini CLI. Streams NDJSON, 4 to 10s.",
+    description: "Google's Gemini CLI. Single-shot JSON (--output-format json), 4 to 10s.",
     transport: 'cli',
     bin: 'gemini',
     envBin: 'BCC_GEMINI_BIN',
-    streams: true,
-    expectedLatency: 'streams in 4 to 10s',
+    // Gemini's `--output-format json` returns ONE JSON object on close
+    // ({ response, stats, error? }) rather than a stream of NDJSON events, so
+    // it is handled as a single-shot agent: the full stdout is parsed once in
+    // the close handler (see finalizeReply in the send route), not delta'd.
+    streams: false,
+    expectedLatency: 'replies in 4 to 10s',
     platforms: ['mac-mini'],
   },
   {

@@ -26,7 +26,10 @@ export async function GET() {
 
     if (!client.isConnected()) {
       try {
-        await client.connect();
+        // Self-heal a pairing-pending failure on the local gateway by
+        // auto-approving this device, then retrying — instead of returning the
+        // raw red "pairing pending" error on first load.
+        await client.connectWithAutoPair();
       } catch {
         const last = client.getLastConnectError();
         const message = last?.message ?? 'Failed to connect to the backend gateway';
@@ -51,6 +54,10 @@ export async function GET() {
       }
     }
 
+    // If we self-healed a pairing failure on this connect, surface a clean
+    // one-time note instead of any prior red error.
+    const autoApprovedNote = client.getPairingAutoApprovedNote();
+
     // Connected: verify by listing sessions.
     try {
       const sessions = await client.listSessions();
@@ -60,6 +67,7 @@ export async function GET() {
         sessions,
         device_id: deviceId,
         gateway_url: gatewayUrl,
+        ...(autoApprovedNote ? { pairing_auto_approved: autoApprovedNote } : {}),
       });
     } catch {
       return NextResponse.json({
@@ -67,6 +75,7 @@ export async function GET() {
         error: 'Connected but failed to list sessions',
         device_id: deviceId,
         gateway_url: gatewayUrl,
+        ...(autoApprovedNote ? { pairing_auto_approved: autoApprovedNote } : {}),
       });
     }
   } catch (error) {
