@@ -294,8 +294,13 @@ export interface ListWorkspaceSourcesResult {
  * for a remote client. Never throws; returns a soft error on remote failure.
  */
 export async function listClientWorkspaceSources(): Promise<ListWorkspaceSourcesResult> {
+  // NOTE: `.pdf` is intentionally NOT in this list. `readClientDir` reads every
+  // matched file as UTF-8 text; a PDF read that way is garbled binary. PDFs are
+  // attached as `pdf` sources (their bytes are extracted/uploaded by the
+  // NotebookLM adapter, not read here), so they must not flow through the text
+  // read path. Only text-shaped documents are listed as workspace sources.
   const result = await readClientDir('vault-root', {
-    extensions: ['.md', '.markdown', '.txt', '.pdf'],
+    extensions: ['.md', '.markdown', '.txt'],
     maxFiles: 1000,
   });
   const remote = result.root.remote;
@@ -322,6 +327,11 @@ export async function readNotebookSourceContent(
 ): Promise<string | RemoteError | null> {
   // URL sources and remote_id sources have no local content to read here.
   if (!source.path) return null;
+  // PDFs are binary: never read the bytes as UTF-8 text (that yields garbled
+  // output). A PDF needs out-of-band extraction/upload, so it has no inline
+  // text content to return here. Skip both `pdf`-typed sources and any path
+  // with a .pdf extension.
+  if (source.source_type === 'pdf' || /\.pdf$/i.test(source.path)) return null;
   // Heuristic: an inline blob (newlines / very long) is the content itself.
   const looksInline =
     (source.source_type === 'text' || source.source_type === 'markdown') &&

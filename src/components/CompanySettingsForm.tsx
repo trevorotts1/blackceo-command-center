@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Building2, Save, Check, Loader2 } from 'lucide-react';
 import { Breadcrumb } from '@/components/Breadcrumb';
+import { resolveBrandColor } from '@/lib/branding';
+import { derivePaletteFromPrimary } from '@/lib/colors';
 
 export interface CompanySettingsInitial {
   companyName: string;
@@ -33,7 +35,13 @@ export default function CompanySettingsForm({ initial }: Props) {
   const [commandCenterName, setCommandCenterName] = useState(initial.commandCenterName);
   const [industry, setIndustry] = useState(initial.industry);
   const [logoUrl, setLogoUrl] = useState(initial.logoUrl);
-  const [brandPrimaryColor, setBrandPrimaryColor] = useState(initial.brandPrimaryColor);
+  // D1: the brand color answer can be a hex OR a color name. We keep the raw
+  // text the operator typed, and resolve it to a hex (name → hex automatically).
+  const [brandColorInput, setBrandColorInput] = useState(initial.brandPrimaryColor);
+  const resolution = resolveBrandColor(brandColorInput);
+  const brandPrimaryColor = resolution.hex ?? '';
+  // Live palette preview (D2): complementary/analogous shades from the primary.
+  const previewPalette = resolution.hex ? derivePaletteFromPrimary(resolution.hex) : null;
 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -44,7 +52,7 @@ export default function CompanySettingsForm({ initial }: Props) {
     commandCenterName !== initial.commandCenterName ||
     industry !== initial.industry ||
     logoUrl !== initial.logoUrl ||
-    brandPrimaryColor !== initial.brandPrimaryColor;
+    brandColorInput !== initial.brandPrimaryColor;
 
   const handleSave = async () => {
     setSaving(true);
@@ -58,6 +66,7 @@ export default function CompanySettingsForm({ initial }: Props) {
           commandCenterName,
           industry,
           logoUrl,
+          // Always persist the RESOLVED hex (name → hex) to company config.
           brandPrimaryColor,
         }),
       });
@@ -65,6 +74,34 @@ export default function CompanySettingsForm({ initial }: Props) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body?.error || `Save failed (${res.status})`);
       }
+
+      // D1/D2/D3: also persist brand_color + logo_url on the SELECTED client
+      // tenant record so <BrandTheme/> re-themes and the Header swaps the logo.
+      try {
+        const sel = await fetch('/api/clients', { cache: 'no-store' });
+        if (sel.ok) {
+          const data = await sel.json();
+          const selectedId: string | null =
+            (typeof data.selected_id === 'string' ? data.selected_id : null) ??
+            (Array.isArray(data.clients)
+              ? data.clients.find((c: { id: string; is_self: boolean }) => c.is_self)?.id ?? null
+              : null);
+          if (selectedId) {
+            await fetch(`/api/clients/${selectedId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                brand_color: brandPrimaryColor || null,
+                ...(logoUrl ? { logo_url: logoUrl } : {}),
+              }),
+            });
+          }
+        }
+      } catch (e) {
+        // Non-fatal: company config already saved.
+        console.warn('Could not persist brand to client record:', e);
+      }
+
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
       // Refresh the server component so the next visit reads the new values.
@@ -197,20 +234,65 @@ export default function CompanySettingsForm({ initial }: Props) {
                 Brand primary color
               </label>
               <div className="flex items-center gap-2">
+                {/* Color picker reflects the RESOLVED hex (or BlackCEO green). */}
                 <input
                   type="color"
-                  value={brandPrimaryColor || '#43A047'}
-                  onChange={(e) => setBrandPrimaryColor(e.target.value)}
+                  value={resolution.hex || '#43A047'}
+                  onChange={(e) => setBrandColorInput(e.target.value)}
                   className="h-10 w-12 border border-gray-300 rounded-lg cursor-pointer"
+                  aria-label="Pick brand color"
                 />
+                {/* D1: accepts a hex code OR a color name. */}
                 <input
                   type="text"
-                  value={brandPrimaryColor}
-                  onChange={(e) => setBrandPrimaryColor(e.target.value)}
-                  placeholder="#43A047"
+                  value={brandColorInput}
+                  onChange={(e) => setBrandColorInput(e.target.value)}
+                  placeholder="#43A047 or a color name (e.g. navy, forest green)"
                   className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono text-sm"
                 />
               </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Know your hex code? Enter it (e.g. <span className="font-mono">#1E3A8A</span>).
+                Don&apos;t? Just type the color name — &ldquo;navy&rdquo;, &ldquo;forest
+                green&rdquo;, &ldquo;coral&rdquo; — and we&apos;ll convert it automatically.
+              </p>
+              {brandColorInput && resolution.source === 'name' && resolution.hex && (
+                <p className="text-xs text-emerald-600 mt-1">
+                  Resolved &ldquo;{brandColorInput}&rdquo; →{' '}
+                  <span className="font-mono">{resolution.hex}</span>
+                </p>
+              )}
+              {brandColorInput && resolution.source === 'unknown' && (
+                <p className="text-xs text-amber-600 mt-1">
+                  We didn&apos;t recognize that color. Enter a hex code (e.g. #1E3A8A) or a
+                  common color name. The default BlackCEO green will be used until then.
+                </p>
+              )}
+              {previewPalette && (
+                <div className="mt-3">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+                    Auto-derived palette
+                  </p>
+                  <div className="flex items-center gap-1">
+                    {[
+                      previewPalette.primaryColor,
+                      previewPalette.primaryDark,
+                      previewPalette.secondaryColor,
+                      previewPalette.accent,
+                      previewPalette.primaryLight,
+                    ]
+                      .filter(Boolean)
+                      .map((c, i) => (
+                        <span
+                          key={i}
+                          className="h-7 w-7 rounded-md border border-gray-200"
+                          style={{ backgroundColor: c as string }}
+                          title={c as string}
+                        />
+                      ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

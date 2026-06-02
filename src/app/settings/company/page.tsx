@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import CompanySettingsForm, { type CompanySettingsInitial } from '@/components/CompanySettingsForm';
+import { getClientContext } from '@/lib/clients';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -26,6 +27,18 @@ export default function CompanySettingsPage() {
 
   const branding = (raw.branding ?? {}) as Record<string, unknown>;
 
+  // D1/D3: the selected client tenant record is the source of truth for brand
+  // color + logo when set; fall back to company-config.json.
+  let clientBrandColor: string | null = null;
+  let clientLogoUrl: string | null = null;
+  try {
+    const client = getClientContext();
+    clientBrandColor = client?.brand_color ?? null;
+    clientLogoUrl = client?.logo_url ?? null;
+  } catch {
+    // ignore — no clients table yet / outside request scope
+  }
+
   const initial: CompanySettingsInitial = {
     companyName: typeof raw.companyName === 'string' ? raw.companyName : '',
     commandCenterName:
@@ -34,10 +47,12 @@ export default function CompanySettingsPage() {
         : 'Zero Human Company Command Center',
     industry: typeof raw.industry === 'string' ? raw.industry : '',
     logoUrl:
+      clientLogoUrl ||
       (typeof raw.logoUrl === 'string' && raw.logoUrl) ||
       (typeof branding.logoUrl === 'string' && branding.logoUrl) ||
       '',
     brandPrimaryColor:
+      clientBrandColor ||
       (typeof raw.brandPrimaryColor === 'string' && raw.brandPrimaryColor) ||
       (typeof branding.primaryColor === 'string' && branding.primaryColor) ||
       '',

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { listClients, createClient, toPublicClient, getSelectedClientId } from '@/lib/clients';
+import { resolveBrandColor } from '@/lib/branding';
 
 // Runtime route — reads/writes the clients tenant table.
 export const dynamic = 'force-dynamic';
@@ -45,6 +46,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // D1: brand_color may be a hex OR a color name — resolve name → hex.
+    let brandColor: string | null = null;
+    if (typeof body.brand_color === 'string' && body.brand_color.trim()) {
+      const resolved = resolveBrandColor(body.brand_color);
+      if (!resolved.hex) {
+        return NextResponse.json(
+          {
+            error:
+              'brand_color must be a hex code (e.g. #1E3A8A) or a recognized color name (e.g. navy, forest green).',
+          },
+          { status: 400 },
+        );
+      }
+      brandColor = resolved.hex;
+    }
+
     const client = createClient({
       name,
       gateway_url: gatewayUrl || undefined,
@@ -54,6 +71,8 @@ export async function POST(req: NextRequest) {
       workspace_root: typeof body.workspace_root === 'string' ? body.workspace_root : null,
       ssh_target: typeof body.ssh_target === 'string' ? body.ssh_target : null,
       interview_complete: body.interview_complete === true,
+      brand_color: brandColor,
+      logo_url: typeof body.logo_url === 'string' && body.logo_url.trim() ? body.logo_url.trim() : null,
     });
 
     return NextResponse.json({ client: toPublicClient(client) }, { status: 201 });

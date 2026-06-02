@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClient, updateClient, toPublicClient } from '@/lib/clients';
+import { resolveBrandColor, uploadLogoToGhlMediaLibrary } from '@/lib/branding';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 120;
 
 /** GET /api/clients/[id] — one client (secrets stripped). */
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
@@ -39,6 +41,45 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       }
     }
 
+    // D1: brand_color accepts a hex OR a color name — resolve name → hex.
+    // `null`/'' explicitly clears it (→ BlackCEO green fallback).
+    let brandColorPatch: string | null | undefined;
+    if (body.brand_color !== undefined) {
+      if (body.brand_color === null || body.brand_color === '') {
+        brandColorPatch = null;
+      } else if (typeof body.brand_color === 'string') {
+        const resolved = resolveBrandColor(body.brand_color);
+        if (!resolved.hex) {
+          return NextResponse.json(
+            {
+              error:
+                'brand_color must be a hex code (e.g. #1E3A8A) or a recognized color name (e.g. navy, forest green).',
+            },
+            { status: 400 },
+          );
+        }
+        brandColorPatch = resolved.hex;
+      }
+    }
+
+    // D3: logo_url — when provided, mirror into the client's GHL media library
+    // (skipped automatically when it is already a GHL-hosted URL) and store the
+    // resulting hosted URL. Best-effort: keep the source URL if GHL is not set.
+    let logoUrlPatch: string | null | undefined;
+    if (body.logo_url !== undefined) {
+      if (body.logo_url === null || body.logo_url === '') {
+        logoUrlPatch = null;
+      } else if (typeof body.logo_url === 'string') {
+        logoUrlPatch = body.logo_url;
+        try {
+          const ghl = await uploadLogoToGhlMediaLibrary(body.logo_url);
+          if (ghl.ok && ghl.url) logoUrlPatch = ghl.url;
+        } catch (e) {
+          console.warn('[PATCH /api/clients/[id]] GHL logo upload failed:', e);
+        }
+      }
+    }
+
     const updated = updateClient(params.id, {
       name: typeof body.name === 'string' ? body.name : undefined,
       gateway_url: typeof body.gateway_url === 'string' ? body.gateway_url : undefined,
@@ -48,6 +89,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       workspace_root: body.workspace_root !== undefined ? body.workspace_root : undefined,
       ssh_target: body.ssh_target !== undefined ? body.ssh_target : undefined,
       interview_complete: body.interview_complete !== undefined ? body.interview_complete === true : undefined,
+      brand_color: brandColorPatch,
+      logo_url: logoUrlPatch,
     });
 
     if (!updated) {

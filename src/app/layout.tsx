@@ -3,6 +3,7 @@ import './globals.css';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import CommandPalette from '@/components/CommandPalette';
 import AppWalkthrough from '@/components/walkthrough/AppWalkthrough';
+import BrandTheme from '@/components/BrandTheme';
 // DemoBanner removed by Track A1 (Wave 1 cleanup). Top header + breadcrumbs
 // handle navigation; AppShell sidebar import also retired.
 // import AppShell from '@/components/AppShell';
@@ -42,6 +43,10 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
       <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-screen`}>
+        {/* D2: per-client brand theme — re-themes brand-* utilities + --bcc-*
+            variables from the selected client's primary color (BlackCEO green
+            fallback). Mounted first so its :root vars are in the cascade. */}
+        <BrandTheme />
         {children}
         <CommandPalette />
         {/* App-wide interactive walkthrough; mounts once and selects the deck

@@ -37,7 +37,12 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   // hydration so a fresh Date() does not cause React #418/#423 mismatch.
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
   const [activeSubAgents, setActiveSubAgents] = useState(0);
-  const logoUrl = useLogoUrl();
+  // Baseline logo (logo-config.json → NEXT_PUBLIC_LOGO_URL → BlackCEO fallback).
+  const baselineLogoUrl = useLogoUrl();
+  // D3: per-client logo. When the selected client has a logo_url it takes
+  // priority over the baseline; otherwise we fall back to the BlackCEO logo.
+  const [clientLogoUrl, setClientLogoUrl] = useState<string | null>(null);
+  const logoUrl = clientLogoUrl || baselineLogoUrl;
 
   // --- AI Settings panel state ---
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
@@ -55,6 +60,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
     id: string;
     name: string;
     is_self: boolean;
+    logo_url?: string | null;
   }
   const [clients, setClients] = useState<PublicClient[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
@@ -74,11 +80,18 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
         if (cancelled) return;
         const list: PublicClient[] = Array.isArray(data.clients) ? data.clients : [];
         setClients(list);
-        // Resolve which client is selected by asking the select endpoint to
-        // echo the cookie-derived selection (no-op select with no body returns
-        // 400, so instead derive from the list: server defaults to self when
-        // no cookie). We mirror that here for the initial label.
-        setSelectedClientId((prev) => prev ?? list.find((c) => c.is_self)?.id ?? list[0]?.id ?? null);
+        // Resolve which client is selected. The API echoes the cookie-derived
+        // selection in `selected_id`; fall back to self / first.
+        const resolvedId: string | null =
+          (typeof data.selected_id === 'string' ? data.selected_id : null) ??
+          list.find((c) => c.is_self)?.id ??
+          list[0]?.id ??
+          null;
+        setSelectedClientId((prev) => prev ?? resolvedId);
+        // D3: pick up the selected client's logo (if any) so the Header swaps
+        // the BlackCEO logo for the client's brand logo.
+        const selected = list.find((c) => c.id === resolvedId) ?? null;
+        setClientLogoUrl(selected?.logo_url ?? null);
       } catch (err) {
         console.error('Failed to load clients:', err);
       }
