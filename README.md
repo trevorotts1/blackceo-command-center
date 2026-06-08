@@ -88,7 +88,7 @@ See PRD v2.1 (`onboarding ant farm PRD v2.1.md` in user's local Downloads) for t
 
 AI Agent Management Dashboard - A universal template for any organization.
 
-**Current Version: v8.0.0** — April 13, 2026
+**Current Version: v4.3.0** — 2026-06-02
 
 ## Overview
 
