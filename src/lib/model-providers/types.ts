@@ -170,6 +170,24 @@ export interface ChatCompletionResponse {
 }
 
 /**
+ * How a provider authenticates.
+ *
+ *   - `api_key`        Standard API key (the default). The refresh job looks up
+ *                      `envCandidates` (or falls back to `<SLUG>_API_KEY`) and
+ *                      fails the run with a "key not set" error when none are
+ *                      present.
+ *   - `local_endpoint` No API key exists — the provider authenticates via a
+ *                      local daemon endpoint (for example, `ollama-local`). The
+ *                      refresh job skips the key check and calls `fetchModels`
+ *                      with an empty string; the connector decides whether the
+ *                      daemon is reachable. The UI should show "local endpoint —
+ *                      no key required" rather than "key not set".
+ *   - `oauth`          OAuth / token flow. Treated like `api_key` for key
+ *                      detection purposes (a token must be present in env).
+ */
+export type ProviderAuthType = 'api_key' | 'local_endpoint' | 'oauth';
+
+/**
  * The connector contract. `fetchModels` is required. `fetchUsage` and
  * `chatCompletion` are optional, present only on providers that support
  * them.
@@ -179,6 +197,25 @@ export interface ModelProvider {
   readonly slug: string;
   /** Display name for UI surfaces. */
   readonly displayName: string;
+  /**
+   * Authentication type. Defaults to `'api_key'` when omitted.
+   *
+   * Connectors that need no API key (local_endpoint) declare this so the
+   * refresh job and the UI handle them correctly instead of reporting
+   * "API key not set".
+   */
+  readonly authType?: ProviderAuthType;
+  /**
+   * Ordered list of env-var names this provider's API key may live under.
+   * The refresh job checks them left-to-right and uses the first present
+   * value. If omitted, the job falls back to `<SLUG>_API_KEY` (upper-snake
+   * with hyphens → underscores).
+   *
+   * Specifying multiple candidates lets the refresh job find a key stored
+   * under any historically-used name (for example, `OLLAMA_CLOUD_API_KEY`
+   * AND `OLLAMA_API_KEY` both map to the same connector).
+   */
+  readonly envCandidates?: readonly string[];
   /** Returns the current model catalog for this provider. */
   fetchModels(apiKey: string): Promise<ProviderModel[]>;
   /** Returns usage / quota snapshot. Optional. */

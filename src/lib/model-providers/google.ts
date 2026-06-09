@@ -207,6 +207,9 @@ export async function chatCompletion(
 export const googleProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // GEMINI_API_KEY is the canonical name (matches the connector); GOOGLE_API_KEY
+  // is an older/alternate spelling used by some client installs and the probes.
+  envCandidates: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
   fetchModels,
   chatCompletion,
 };

@@ -217,6 +217,10 @@ export async function getResult(
 export const falProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // Fal.ai uses FAL_KEY as primary, but clients/installs may use FAL_API_KEY
+  // or FAL_AI_API_KEY. Accept all spellings so the refresh job finds the key
+  // regardless of how the operator named it.
+  envCandidates: ['FAL_KEY', 'FAL_API_KEY', 'FAL_AI_API_KEY'],
   fetchModels,
 };
 

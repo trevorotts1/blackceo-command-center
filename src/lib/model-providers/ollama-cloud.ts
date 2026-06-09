@@ -224,10 +224,17 @@ export async function chatCompletion(
 /**
  * Default export conforming to ModelProvider. The provider-registry index
  * (owned by Track C2) imports this and indexes by `slug`.
+ *
+ * envCandidates lists both `OLLAMA_CLOUD_API_KEY` (the canonical name the
+ * connector documents) and `OLLAMA_API_KEY` (the name the model-provider
+ * probe and some client .env files historically used). The refresh job checks
+ * them in order so a client whose key is stored under either name is correctly
+ * detected without requiring a rename.
  */
 const ollamaCloudProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  envCandidates: ['OLLAMA_CLOUD_API_KEY', 'OLLAMA_API_KEY'],
   fetchModels,
   fetchUsage,
   chatCompletion,

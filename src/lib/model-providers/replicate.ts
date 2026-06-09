@@ -211,6 +211,9 @@ export async function cancelPrediction(
 export const replicateProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // REPLICATE_API_TOKEN is canonical; REPLICATE_API_KEY is an alternate
+  // spelling the refresh job's default slug→key convention would generate.
+  envCandidates: ['REPLICATE_API_TOKEN', 'REPLICATE_API_KEY'],
   fetchModels,
 };
 
