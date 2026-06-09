@@ -229,6 +229,110 @@ body {
   }
 }
 
+/* ── Kanban board horizontal scroll container ───────────────────────────────
+   Always-visible, draggable horizontal scrollbar with themed colours.
+   On macOS/iOS the default "overlay" scrollbar auto-hides; these rules force
+   a persistent, styled track+thumb so users immediately see they can scroll.
+
+   Applied to the outer <div> in MissionQueue.tsx via the .kanban-scroll class.
+   The ::webkit rules cover Chrome/Safari/Edge-Chromium; the standard
+   scrollbar-width/color property covers Firefox.
+
+   Thumb colour is intentionally brand-adjacent (brand-300 / brand-400) so it
+   reads as interactive and matches the column header pills.          ─────── */
+.kanban-scroll {
+  /* Firefox: always-visible, medium-width bar */
+  scrollbar-width: thin;
+  scrollbar-color: var(--brand-400, #66BB6A) var(--brand-50, #E8F5E9);
+}
+
+.kanban-scroll::-webkit-scrollbar {
+  height: 10px;   /* horizontal bar height — large enough to grab comfortably */
+  width: 10px;    /* vertical (column-inner) bar width */
+}
+
+.kanban-scroll::-webkit-scrollbar-track {
+  background: var(--brand-50, #E8F5E9);
+  border-radius: 10px;
+  margin: 0 12px;  /* don't bleed to container edges */
+}
+
+.kanban-scroll::-webkit-scrollbar-thumb {
+  background: var(--brand-400, #66BB6A);
+  border-radius: 10px;
+  border: 2px solid var(--brand-50, #E8F5E9); /* inner padding effect */
+  min-width: 40px; /* thumb never shrinks to ungrabbable width */
+}
+
+.kanban-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--brand-600, #43A047);
+}
+
+.kanban-scroll::-webkit-scrollbar-thumb:active {
+  background: var(--brand-700, #388E3C);
+}
+
+/* Corner piece where vertical+horizontal bars meet */
+.kanban-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── Kanban scroll affordance — edge fade overlays ──────────────────────────
+   Left/right pseudo-element gradients are rendered by sibling <div>s in JSX
+   (pseudo-elements can't react to JS scroll state).
+   These classes are applied conditionally when there is more content in
+   that direction.                                                    ─────── */
+.kanban-fade-left,
+.kanban-fade-right {
+  position: absolute;
+  top: 0;
+  bottom: 18px;     /* stop above the scrollbar track */
+  width: 64px;
+  pointer-events: none;
+  z-index: 10;
+  transition: opacity 0.25s ease;
+}
+
+.kanban-fade-left {
+  left: 0;
+  background: linear-gradient(to right, rgba(248,249,251,0.92) 0%, transparent 100%);
+}
+
+.kanban-fade-right {
+  right: 0;
+  background: linear-gradient(to left, rgba(248,249,251,0.92) 0%, transparent 100%);
+}
+
+/* Scroll hint buttons (chevrons) sit inside the fades */
+.kanban-scroll-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 11;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: white;
+  border: 1.5px solid var(--brand-200, #A5D6A7);
+  color: var(--brand-700, #388E3C);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+  pointer-events: all;
+}
+
+.kanban-scroll-btn:hover {
+  background: var(--brand-50, #E8F5E9);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.14);
+}
+
+.kanban-scroll-btn:active {
+  background: var(--brand-100, #C8E6C9);
+}
+
 /* App walkthrough (E10/B3): highlight ring around the element a coach-mark
    points at. Applied by AppWalkthrough.tsx via the .bcc-walkthrough-highlight
    class. The element is lifted above the scrim (z-61 > scrim z-60) so it
