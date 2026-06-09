@@ -23,13 +23,17 @@ import { buildThemeVars, BLACKCEO_GREEN } from '@/lib/branding';
  */
 export default function BrandTheme() {
   let primary: string | null = null;
+  let secondary: string | null = null;
   try {
-    primary = getClientContext()?.brand_color ?? null;
+    const ctx = getClientContext();
+    primary = ctx?.brand_color ?? null;
+    secondary = ctx?.brand_secondary_color ?? null;
   } catch {
     primary = null;
+    secondary = null;
   }
 
-  const vars = buildThemeVars(primary ?? BLACKCEO_GREEN);
+  const vars = buildThemeVars(primary ?? BLACKCEO_GREEN, secondary);
 
   const rootVars = Object.entries(vars)
     .map(([k, v]) => `${k}: ${v};`)
@@ -40,7 +44,9 @@ export default function BrandTheme() {
   const overrides = steps
     .map((n) => {
       const v = `var(--brand-${n})`;
+      const sv = `var(--brand-secondary-${n})`;
       return [
+        // Primary brand utilities
         `.bg-brand-${n}{background-color:${v} !important;}`,
         `.text-brand-${n}{color:${v} !important;}`,
         `.border-brand-${n}{border-color:${v} !important;}`,
@@ -53,6 +59,15 @@ export default function BrandTheme() {
         `.hover\\:border-brand-${n}:hover{border-color:${v} !important;}`,
         `.focus\\:ring-brand-${n}:focus{--tw-ring-color:${v} !important;}`,
         `.focus\\:border-brand-${n}:focus{border-color:${v} !important;}`,
+        // Secondary brand utilities (brand-secondary-*)
+        `.bg-brand-secondary-${n}{background-color:${sv} !important;}`,
+        `.text-brand-secondary-${n}{color:${sv} !important;}`,
+        `.border-brand-secondary-${n}{border-color:${sv} !important;}`,
+        `.ring-brand-secondary-${n}{--tw-ring-color:${sv} !important;}`,
+        `.from-brand-secondary-${n}{--tw-gradient-from:${sv} !important;--tw-gradient-to:rgb(255 255 255 / 0) !important;--tw-gradient-stops:var(--tw-gradient-from),var(--tw-gradient-to) !important;}`,
+        `.to-brand-secondary-${n}{--tw-gradient-to:${sv} !important;}`,
+        `.hover\\:bg-brand-secondary-${n}:hover{background-color:${sv} !important;}`,
+        `.hover\\:text-brand-secondary-${n}:hover{color:${sv} !important;}`,
       ].join('');
     })
     .join('');

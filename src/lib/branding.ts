@@ -154,20 +154,40 @@ export function resolveBrandColor(input: string): BrandColorResolution {
 
 /**
  * Build the CSS custom-property map that re-themes the Command Center from a
- * single primary color. Drives both the `--bcc-primary*` variables (used in
- * globals.css) and a `--brand-50..950` scale that the runtime overrides map the
- * Tailwind `brand-*` utilities onto. Pass `null` to get the BlackCEO defaults.
+ * primary color and an optional explicit secondary. Drives both the `--bcc-*`
+ * variables (used in globals.css) and the `--brand-50..950` + `--brand-secondary-*`
+ * scales that the runtime overrides map the Tailwind `brand-*` utilities onto.
+ * Pass `null` to get the BlackCEO defaults.
+ *
+ * @param primary   Hex string for the primary brand color (or null → BlackCEO green).
+ * @param secondary Hex string for the secondary brand color (or null → auto-derived analogous +30°).
  */
-export function buildThemeVars(primary: string | null): Record<string, string> {
+export function buildThemeVars(
+  primary: string | null,
+  secondary?: string | null,
+): Record<string, string> {
   const base = primary && normalizeHex(primary) ? normalizeHex(primary)! : BLACKCEO_GREEN;
   const palette = derivePaletteFromPrimary(base);
   const s: BrandScale = palette.scale;
+
+  // Secondary: use the explicit value when provided; fall back to auto-derived analogous.
+  const secondaryBase =
+    secondary && normalizeHex(secondary)
+      ? normalizeHex(secondary)!
+      : palette.secondaryColor!;
+
+  const secPalette = derivePaletteFromPrimary(secondaryBase);
+  const ss: BrandScale = secPalette.scale;
+
   return {
     '--bcc-primary': palette.primaryColor!,
     '--bcc-primary-hover': palette.primaryDark!,
     '--bcc-primary-light': s[50],
-    '--bcc-secondary': palette.secondaryColor!,
+    '--bcc-secondary': secondaryBase,
+    '--bcc-secondary-hover': secPalette.primaryDark!,
+    '--bcc-secondary-light': ss[50],
     '--bcc-accent': palette.accent!,
+    // Primary scale (drives brand-* Tailwind utilities)
     '--brand-50': s[50],
     '--brand-100': s[100],
     '--brand-200': s[200],
@@ -179,6 +199,18 @@ export function buildThemeVars(primary: string | null): Record<string, string> {
     '--brand-800': s[800],
     '--brand-900': s[900],
     '--brand-950': s[950],
+    // Secondary scale (drives brand-secondary-* CSS variables)
+    '--brand-secondary-50': ss[50],
+    '--brand-secondary-100': ss[100],
+    '--brand-secondary-200': ss[200],
+    '--brand-secondary-300': ss[300],
+    '--brand-secondary-400': ss[400],
+    '--brand-secondary-500': ss[500],
+    '--brand-secondary-600': ss[600],
+    '--brand-secondary-700': ss[700],
+    '--brand-secondary-800': ss[800],
+    '--brand-secondary-900': ss[900],
+    '--brand-secondary-950': ss[950],
   };
 }
 

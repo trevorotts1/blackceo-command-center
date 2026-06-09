@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const updates: Record<string, unknown> = {};
-    const allowedStrings = ['companyName', 'commandCenterName', 'industry', 'logoUrl', 'brandPrimaryColor'];
+    const allowedStrings = ['companyName', 'commandCenterName', 'industry', 'logoUrl', 'brandPrimaryColor', 'brandSecondaryColor'];
     for (const key of allowedStrings) {
       if (typeof body?.[key] === 'string') {
         updates[key] = body[key];

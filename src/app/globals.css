@@ -22,7 +22,23 @@
   --bcc-primary-hover: #388E3C;
   --bcc-primary-light: #E8F5E9;
   --bcc-secondary: #43A047;
+  --bcc-secondary-hover: #388E3C;
+  --bcc-secondary-light: #E8F5E9;
   --bcc-accent: #A04743;
+
+  /* Secondary brand scale (50→950). Default mirrors primary (BlackCEO green);
+     BrandTheme replaces these per client when a secondary color is set (v4.13.0). */
+  --brand-secondary-50: #E8F5E9;
+  --brand-secondary-100: #C8E6C9;
+  --brand-secondary-200: #A5D6A7;
+  --brand-secondary-300: #81C784;
+  --brand-secondary-400: #66BB6A;
+  --brand-secondary-500: #4CAF50;
+  --brand-secondary-600: #43A047;
+  --brand-secondary-700: #388E3C;
+  --brand-secondary-800: #2E7D32;
+  --brand-secondary-900: #1B5E20;
+  --brand-secondary-950: #0D3B13;
 
   /* Derived brand scale (50→950). Default values mirror the original BlackCEO
      green scale; BrandTheme replaces them per client. */

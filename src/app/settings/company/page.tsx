@@ -30,10 +30,12 @@ export default function CompanySettingsPage() {
   // D1/D3: the selected client tenant record is the source of truth for brand
   // color + logo when set; fall back to company-config.json.
   let clientBrandColor: string | null = null;
+  let clientBrandSecondaryColor: string | null = null;
   let clientLogoUrl: string | null = null;
   try {
     const client = getClientContext();
     clientBrandColor = client?.brand_color ?? null;
+    clientBrandSecondaryColor = client?.brand_secondary_color ?? null;
     clientLogoUrl = client?.logo_url ?? null;
   } catch {
     // ignore — no clients table yet / outside request scope
@@ -55,6 +57,11 @@ export default function CompanySettingsPage() {
       clientBrandColor ||
       (typeof raw.brandPrimaryColor === 'string' && raw.brandPrimaryColor) ||
       (typeof branding.primaryColor === 'string' && branding.primaryColor) ||
+      '',
+    brandSecondaryColor:
+      clientBrandSecondaryColor ||
+      (typeof raw.brandSecondaryColor === 'string' && raw.brandSecondaryColor) ||
+      (typeof branding.secondaryColor === 'string' && branding.secondaryColor) ||
       '',
   };
 

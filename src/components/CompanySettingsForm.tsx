@@ -13,6 +13,8 @@ export interface CompanySettingsInitial {
   industry: string;
   logoUrl: string;
   brandPrimaryColor: string;
+  /** Secondary brand color (v4.13.0). Persisted separately from primary. */
+  brandSecondaryColor: string;
 }
 
 interface Props {
@@ -29,6 +31,11 @@ interface Props {
  * POSTs to /api/company/config which writes back to disk and invalidates
  * the in-process config cache.
  */
+/** Derive the default product name from a company name. */
+function deriveProductName(company: string): string {
+  return company.trim() ? `${company.trim()} Command Center` : '';
+}
+
 export default function CompanySettingsForm({ initial }: Props) {
   const router = useRouter();
   const [companyName, setCompanyName] = useState(initial.companyName);
@@ -40,8 +47,34 @@ export default function CompanySettingsForm({ initial }: Props) {
   const [brandColorInput, setBrandColorInput] = useState(initial.brandPrimaryColor);
   const resolution = resolveBrandColor(brandColorInput);
   const brandPrimaryColor = resolution.hex ?? '';
+  // Secondary color (v4.13.0): same name-or-hex logic as primary.
+  const [brandSecondaryInput, setBrandSecondaryInput] = useState(initial.brandSecondaryColor);
+  const secondaryResolution = resolveBrandColor(brandSecondaryInput);
+  const brandSecondaryColor = secondaryResolution.hex ?? '';
   // Live palette preview (D2): complementary/analogous shades from the primary.
   const previewPalette = resolution.hex ? derivePaletteFromPrimary(resolution.hex) : null;
+
+  // Track whether the product name has been manually edited away from its
+  // derived value so we don't overwrite a deliberate customization.
+  const [productNameEdited, setProductNameEdited] = useState(
+    initial.commandCenterName !== '' &&
+    initial.commandCenterName !== deriveProductName(initial.companyName) &&
+    initial.commandCenterName !== 'Zero Human Company Command Center'
+  );
+
+  /** Auto-populate product name when company name changes (unless manually edited). */
+  const handleCompanyNameChange = (v: string) => {
+    setCompanyName(v);
+    if (!productNameEdited) {
+      setCommandCenterName(v.trim() ? deriveProductName(v) : 'Zero Human Company Command Center');
+    }
+  };
+
+  const handleProductNameChange = (v: string) => {
+    setCommandCenterName(v);
+    // Once the operator types their own value, stop auto-deriving.
+    setProductNameEdited(true);
+  };
 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -52,7 +85,8 @@ export default function CompanySettingsForm({ initial }: Props) {
     commandCenterName !== initial.commandCenterName ||
     industry !== initial.industry ||
     logoUrl !== initial.logoUrl ||
-    brandColorInput !== initial.brandPrimaryColor;
+    brandColorInput !== initial.brandPrimaryColor ||
+    brandSecondaryInput !== initial.brandSecondaryColor;
 
   const handleSave = async () => {
     setSaving(true);
@@ -68,6 +102,7 @@ export default function CompanySettingsForm({ initial }: Props) {
           logoUrl,
           // Always persist the RESOLVED hex (name → hex) to company config.
           brandPrimaryColor,
+          brandSecondaryColor,
         }),
       });
       if (!res.ok) {
@@ -92,6 +127,7 @@ export default function CompanySettingsForm({ initial }: Props) {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 brand_color: brandPrimaryColor || null,
+                brand_secondary_color: brandSecondaryColor || null,
                 ...(logoUrl ? { logo_url: logoUrl } : {}),
               }),
             });
@@ -181,7 +217,7 @@ export default function CompanySettingsForm({ initial }: Props) {
               <input
                 type="text"
                 value={companyName}
-                onChange={(e) => setCompanyName(e.target.value)}
+                onChange={(e) => handleCompanyNameChange(e.target.value)}
                 placeholder="e.g. Acme Industries"
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
@@ -194,12 +230,13 @@ export default function CompanySettingsForm({ initial }: Props) {
               <input
                 type="text"
                 value={commandCenterName}
-                onChange={(e) => setCommandCenterName(e.target.value)}
+                onChange={(e) => handleProductNameChange(e.target.value)}
                 placeholder="Zero Human Company Command Center"
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
               <p className="text-xs text-gray-500 mt-1">
-                Shown in the header and browser tab title.
+                Shown in the header and browser tab title. Auto-populated from
+                the company name (e.g. &ldquo;Acme Industries Command Center&rdquo;).
               </p>
             </div>
 
@@ -291,6 +328,56 @@ export default function CompanySettingsForm({ initial }: Props) {
                         />
                       ))}
                   </div>
+                </div>
+              )}
+            </div>
+
+            {/* v4.13.0: Brand secondary color */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Brand secondary color
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="color"
+                  value={secondaryResolution.hex || (resolution.hex ? resolution.hex : '#388E3C')}
+                  onChange={(e) => setBrandSecondaryInput(e.target.value)}
+                  className="h-10 w-12 border border-gray-300 rounded-lg cursor-pointer"
+                  aria-label="Pick brand secondary color"
+                />
+                <input
+                  type="text"
+                  value={brandSecondaryInput}
+                  onChange={(e) => setBrandSecondaryInput(e.target.value)}
+                  placeholder="#388E3C or a color name (e.g. navy, coral)"
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono text-sm"
+                />
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Used for accents, gradients, and secondary UI elements. Leave
+                blank to auto-derive from the primary color.
+              </p>
+              {brandSecondaryInput && secondaryResolution.source === 'name' && secondaryResolution.hex && (
+                <p className="text-xs text-emerald-600 mt-1">
+                  Resolved &ldquo;{brandSecondaryInput}&rdquo; →{' '}
+                  <span className="font-mono">{secondaryResolution.hex}</span>
+                </p>
+              )}
+              {brandSecondaryInput && secondaryResolution.source === 'unknown' && (
+                <p className="text-xs text-amber-600 mt-1">
+                  We didn&apos;t recognize that color. Enter a hex code or a common
+                  color name. The auto-derived analogous shade will be used until then.
+                </p>
+              )}
+              {brandSecondaryInput && secondaryResolution.hex && (
+                <div className="mt-3 flex items-center gap-2">
+                  <span
+                    className="h-7 w-7 rounded-md border border-gray-200"
+                    style={{ backgroundColor: secondaryResolution.hex }}
+                    title={secondaryResolution.hex}
+                  />
+                  <span className="text-xs text-gray-500 font-mono">{secondaryResolution.hex}</span>
+                  <span className="text-xs text-gray-400">secondary</span>
                 </div>
               )}
             </div>

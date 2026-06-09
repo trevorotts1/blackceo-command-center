@@ -35,6 +35,8 @@ export interface Client {
   interview_complete: boolean;
   /** Primary brand color as #RRGGBB (D1). NULL → BlackCEO green fallback. */
   brand_color: string | null;
+  /** Secondary brand color as #RRGGBB (v4.13.0). NULL → auto-derived analogous. */
+  brand_secondary_color: string | null;
   /** Public logo URL (D3). NULL → BlackCEO logo fallback. */
   logo_url: string | null;
   is_self: boolean;
@@ -52,6 +54,8 @@ export interface PublicClient {
   interview_complete: boolean;
   /** Primary brand color as #RRGGBB (D1). Safe to send to the browser. */
   brand_color: string | null;
+  /** Secondary brand color as #RRGGBB (v4.13.0). Safe to send to the browser. */
+  brand_secondary_color: string | null;
   /** Public logo URL (D3). Safe to send to the browser. */
   logo_url: string | null;
   is_self: boolean;
@@ -74,6 +78,7 @@ interface ClientRow {
   ssh_target: string | null;
   interview_complete: number;
   brand_color: string | null;
+  brand_secondary_color: string | null;
   logo_url: string | null;
   is_self: number;
   created_at: string | null;
@@ -92,6 +97,7 @@ function rowToClient(row: ClientRow): Client {
     ssh_target: row.ssh_target,
     interview_complete: row.interview_complete === 1,
     brand_color: row.brand_color ?? null,
+    brand_secondary_color: row.brand_secondary_color ?? null,
     logo_url: row.logo_url ?? null,
     is_self: row.is_self === 1,
     created_at: row.created_at,
@@ -100,7 +106,7 @@ function rowToClient(row: ClientRow): Client {
 }
 
 const SELECT_COLS =
-  'id, name, gateway_url, gateway_token, cf_access_client_id, cf_access_client_secret, workspace_root, ssh_target, interview_complete, brand_color, logo_url, is_self, created_at, updated_at';
+  'id, name, gateway_url, gateway_token, cf_access_client_id, cf_access_client_secret, workspace_root, ssh_target, interview_complete, brand_color, brand_secondary_color, logo_url, is_self, created_at, updated_at';
 
 /** Strip secrets for a browser-safe response. */
 export function toPublicClient(client: Client): PublicClient {
@@ -112,6 +118,7 @@ export function toPublicClient(client: Client): PublicClient {
     ssh_target: client.ssh_target,
     interview_complete: client.interview_complete,
     brand_color: client.brand_color,
+    brand_secondary_color: client.brand_secondary_color,
     logo_url: client.logo_url,
     is_self: client.is_self,
     has_gateway_token: !!client.gateway_token,
@@ -188,6 +195,8 @@ export interface CreateClientInput {
   interview_complete?: boolean;
   /** Primary brand color #RRGGBB (D1). */
   brand_color?: string | null;
+  /** Secondary brand color #RRGGBB (v4.13.0). */
+  brand_secondary_color?: string | null;
   /** Public logo URL (D3). */
   logo_url?: string | null;
 }
@@ -200,8 +209,8 @@ export function createClient(input: CreateClientInput): Client {
       INSERT INTO clients
         (id, name, gateway_url, gateway_token, cf_access_client_id,
          cf_access_client_secret, workspace_root, ssh_target,
-         interview_complete, brand_color, logo_url, is_self)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+         interview_complete, brand_color, brand_secondary_color, logo_url, is_self)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `)
     .run(
       id,
@@ -214,6 +223,7 @@ export function createClient(input: CreateClientInput): Client {
       input.ssh_target ?? null,
       input.interview_complete ? 1 : 0,
       input.brand_color ?? null,
+      input.brand_secondary_color ?? null,
       input.logo_url ?? null
     );
   const created = getClient(id);
@@ -244,6 +254,7 @@ export function updateClient(id: string, patch: UpdateClientInput): Client | nul
   if (patch.ssh_target !== undefined) assign('ssh_target', patch.ssh_target);
   if (patch.interview_complete !== undefined) assign('interview_complete', patch.interview_complete ? 1 : 0);
   if (patch.brand_color !== undefined) assign('brand_color', patch.brand_color);
+  if (patch.brand_secondary_color !== undefined) assign('brand_secondary_color', patch.brand_secondary_color);
   if (patch.logo_url !== undefined) assign('logo_url', patch.logo_url);
 
   if (sets.length === 0) return existing;

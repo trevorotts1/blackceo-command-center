@@ -214,7 +214,7 @@ export async function readClientDir(
       id: 'self', name: 'self', gateway_url: '', gateway_token: null,
       cf_access_client_id: null, cf_access_client_secret: null,
       workspace_root: null, ssh_target: null, interview_complete: false,
-      brand_color: null, logo_url: null,
+      brand_color: null, brand_secondary_color: null, logo_url: null,
       is_self: true, created_at: null, updated_at: null,
     };
     return { client: stub, root: { remote: false, path: '' }, files: [], error: null };

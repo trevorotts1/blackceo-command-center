@@ -2170,6 +2170,27 @@ const migrations: Migration[] = [
     },
   },
 
+  // ── Migration 062 — Add clients.brand_secondary_color (v4.13.0) ────────────
+  {
+    id: '062',
+    name: 'add_clients_brand_secondary_color',
+    // Adds clients.brand_secondary_color TEXT column used by the company
+    // settings form (v4.13.0) to persist the operator-chosen secondary brand
+    // color. When set, BrandTheme emits it as --bcc-secondary / --brand-secondary-*
+    // CSS variables so the secondary accent cascades app-wide independently of
+    // the auto-derived analogous shade. Additive + idempotent.
+    up: (db) => {
+      console.log('[Migration 062] Adding clients.brand_secondary_color...');
+      const cols = (db.prepare('PRAGMA table_info(clients)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('brand_secondary_color')) {
+        db.exec(`ALTER TABLE clients ADD COLUMN brand_secondary_color TEXT`);
+        console.log('[Migration 062] clients.brand_secondary_color added');
+      } else {
+        console.log('[Migration 062] clients.brand_secondary_color already present, skipping');
+      }
+    },
+  },
+
   // ── Migration 060 — Per-department QC Specialist agents ────────────────────
   {
     id: '060',
