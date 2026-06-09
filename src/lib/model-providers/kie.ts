@@ -205,6 +205,9 @@ export async function getJob(apiKey: string, jobId: string): Promise<KieJobRespo
 export const kieProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // KIE_API_KEY is canonical; KIEAI_API_KEY is the historical probe spelling
+  // used by some installs. Both are accepted so no key is missed.
+  envCandidates: ['KIE_API_KEY', 'KIEAI_API_KEY', 'KIE_AI_API_KEY'],
   fetchModels,
 };
 

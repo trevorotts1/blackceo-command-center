@@ -190,10 +190,15 @@ export async function chatCompletion(
 /**
  * Default export conforming to ModelProvider. The provider-registry index
  * imports this and indexes it by `slug`.
+ *
+ * authType is `local_endpoint` — no API key exists or is required. The
+ * refresh job and the UI use this to show "local endpoint — no key required"
+ * instead of the misleading "API key not set" badge.
  */
 const ollamaLocalProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  authType: 'local_endpoint',
   fetchModels,
   chatCompletion,
 };

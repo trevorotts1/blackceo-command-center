@@ -23,6 +23,7 @@ import { getDb } from '@/lib/db';
 import type { Database as BetterDatabase } from 'better-sqlite3';
 import type { ModelProvider, ProviderModel } from '@/lib/model-providers/types';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
+import { resolveProviderApiKey } from '@/lib/provider-key-detection';
 
 export interface RefreshOutcome {
   provider: string;
@@ -35,15 +36,10 @@ export interface RefreshOutcome {
   run_at: string;
 }
 
-/**
- * Read the per-provider API key from env. Centralizing this here makes it
- * easy for Track C4 to swap in a per-deployment secret store later.
- */
-function apiKeyFor(slug: string): string | undefined {
-  // Convention: SLUG_API_KEY in uppercase, hyphens -> underscores.
-  const envKey = slug.toUpperCase().replace(/-/g, '_') + '_API_KEY';
-  return process.env[envKey];
-}
+// `apiKeyFor` is superseded by `resolveProviderApiKey` from
+// @/lib/provider-key-detection, which checks all env stores and respects the
+// connector's `envCandidates` list. The old single-env-var lookup is removed
+// to fix the "Ollama Cloud / OpenRouter show as not set" class of bugs.
 
 /**
  * Upsert a single model. Treats `model_id` as the conflict key.
@@ -168,20 +164,32 @@ export function logRefreshOutcome(outcome: RefreshOutcome): void {
  */
 export async function refreshOneProvider(provider: ModelProvider): Promise<RefreshOutcome> {
   const startedIso = new Date().toISOString();
-  const apiKey = apiKeyFor(provider.slug);
 
-  if (!apiKey) {
+  // Resolve the API key using the multi-store, multi-alias detection helper.
+  // local_endpoint providers (e.g. ollama-local) skip key detection entirely —
+  // they authenticate via a local daemon and fetchModels is called with ''.
+  const keyResult = resolveProviderApiKey(provider);
+
+  let apiKey: string;
+  if ('localEndpoint' in keyResult) {
+    // Local endpoint — no key check. Pass empty string; the connector's
+    // reachability probe decides whether the daemon is up.
+    apiKey = '';
+  } else if (!keyResult.found) {
+    const checked = keyResult.checked.join(', ');
     const outcome: RefreshOutcome = {
       provider: provider.slug,
       success: false,
       models_added: 0,
       models_updated: 0,
       models_deprecated: 0,
-      error_message: `API key not set in env (expected ${provider.slug.toUpperCase().replace(/-/g, '_')}_API_KEY)`,
+      error_message: `API key not set (checked: ${checked})`,
       run_at: startedIso,
     };
     logRefreshOutcome(outcome);
     return outcome;
+  } else {
+    apiKey = keyResult.value;
   }
 
   try {

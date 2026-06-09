@@ -1,20 +1,23 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { RefreshCcw, Loader2, CheckCircle2, AlertCircle, Clock, KeyRound, X } from 'lucide-react';
+import { RefreshCcw, Loader2, CheckCircle2, AlertCircle, Clock, KeyRound, X, Server, Puzzle } from 'lucide-react';
 
 /**
- * IntelligenceProviderList - provider freshness panel for the Intelligence
- * Settings page. Renders one row per provider with its last refresh outcome
- * (timestamp + success/failure + model add/update counts) and a manual
- * "Refresh now" button that calls the cron endpoint.
+ * IntelligenceProviderList - provider freshness + key status panel for the
+ * Intelligence Settings page.
+ *
+ * Renders two sections:
+ *   1. AI Model Providers — one row per provider with:
+ *        - last refresh outcome (timestamp + success/failure + model counts)
+ *        - live key-detection status sourced from /api/models/provider-status
+ *          (scans ALL env stores, not just process.env)
+ *        - local-endpoint badge for providers like ollama-local (no key needed)
+ *        - inline "Add API key" action on failure (E5)
+ *   2. Integrations — non-model services (Notion, etc.) with their key status.
  *
  * Per PRD Section 5.4 the page must surface a "last refreshed" timestamp
  * and a manual refresh trigger. This component owns both.
- *
- * E5: when a provider's last refresh FAILED (most commonly a missing API key),
- * the row offers an inline "Add API key" action that writes the key into the
- * SELECTED client's OpenClaw env (POST /api/clients/[id]/keys) and re-refreshes.
  */
 
 export interface ProviderRefreshEntry {
@@ -25,6 +28,34 @@ export interface ProviderRefreshEntry {
   models_updated: number;
   models_deprecated: number;
   error_message: string | null;
+}
+
+interface ProviderStatusEntry {
+  slug: string;
+  displayName: string;
+  authType: string;
+  configured: boolean;
+  foundEnvVar: string | null;
+  foundInStore: 'process.env' | 'env_file' | 'openclaw_json' | null;
+  localEndpointUrl?: string;
+  envCandidates: string[];
+}
+
+interface IntegrationStatusEntry {
+  slug: string;
+  displayName: string;
+  section: string;
+  description: string;
+  configured: boolean;
+  foundEnvVar: string | null;
+  foundInStore: 'process.env' | 'env_file' | 'openclaw_json' | null;
+  envCandidates: string[];
+}
+
+interface ProviderStatusResponse {
+  providers: ProviderStatusEntry[];
+  integrations: IntegrationStatusEntry[];
+  generated_at: string;
 }
 
 interface IntelligenceProviderListProps {
@@ -54,6 +85,15 @@ function looksLikeMissingKey(message: string | null): boolean {
   return /api key|unauthorized|401|403|not set|missing|invalid.*key|forbidden/i.test(message);
 }
 
+/** Human-readable label for a key source. */
+function sourceLabel(source: ProviderStatusEntry['foundInStore']): string {
+  if (!source) return '';
+  if (source === 'process.env') return 'container env';
+  if (source === 'env_file') return '.env file';
+  if (source === 'openclaw_json') return 'openclaw.json';
+  return source;
+}
+
 interface SelectedClient {
   id: string;
   name: string;
@@ -76,6 +116,9 @@ export function IntelligenceProviderList({
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyNotice, setKeyNotice] = useState<string | null>(null);
+
+  // Live key-detection status from /api/models/provider-status (multi-store).
+  const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,10 +145,36 @@ export function IntelligenceProviderList({
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/models/provider-status', { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = (await res.json()) as ProviderStatusResponse;
+        if (cancelled) return;
+        setProviderStatus(json);
+      } catch {
+        /* ignore — status panel degrades gracefully */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const logByProvider = new Map<string, ProviderRefreshEntry>();
   for (const entry of refreshLog) {
     if (!logByProvider.has(entry.provider)) {
       logByProvider.set(entry.provider, entry);
+    }
+  }
+
+  // Build a lookup from the live provider-status API response.
+  const statusBySlug = new Map<string, ProviderStatusEntry>();
+  if (providerStatus) {
+    for (const s of providerStatus.providers) {
+      statusBySlug.set(s.slug, s);
     }
   }
 
@@ -114,6 +183,9 @@ export function IntelligenceProviderList({
   const knownProviders = new Set<string>([
     ...providers,
     ...refreshLog.map((r) => r.provider),
+    // Also include providers from the status response (catches local-endpoint
+    // providers like ollama-local that never appear in the refresh log).
+    ...(providerStatus?.providers.map((p) => p.slug) ?? []),
   ]);
   const sortedProviders = Array.from(knownProviders).sort();
 
@@ -131,6 +203,12 @@ export function IntelligenceProviderList({
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         throw new Error(body || `Refresh failed (${res.status})`);
+      }
+      // Re-fetch provider status after refresh.
+      const statusRes = await fetch('/api/models/provider-status', { cache: 'no-store' });
+      if (statusRes.ok) {
+        const json = (await statusRes.json()) as ProviderStatusResponse;
+        setProviderStatus(json);
       }
       if (onRefreshComplete) onRefreshComplete();
     } catch (err) {
@@ -168,6 +246,8 @@ export function IntelligenceProviderList({
       setSavingKey(false);
     }
   };
+
+  const integrations = providerStatus?.integrations ?? [];
 
   return (
     <section className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
@@ -212,6 +292,7 @@ export function IntelligenceProviderList({
         </div>
       )}
 
+      {/* ── AI model providers ── */}
       {sortedProviders.length === 0 ? (
         <div className="px-5 py-6 text-sm text-gray-500 italic text-center">
           No providers configured yet. Add a provider API key below to start syncing model
@@ -221,14 +302,30 @@ export function IntelligenceProviderList({
         <ul className="divide-y divide-gray-100">
           {sortedProviders.map((p) => {
             const entry = logByProvider.get(p);
+            const status = statusBySlug.get(p);
+            const isLocalEndpoint = status?.authType === 'local_endpoint';
             const failed = entry?.success === false;
             const missingKey = failed && looksLikeMissingKey(entry?.error_message ?? null);
             const formOpen = keyForm?.provider === p;
+
             return (
               <li key={p} className="px-5 py-3">
                 <div className="flex items-center gap-3">
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-gray-900">{p}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-gray-900">
+                        {status?.displayName ?? p}
+                      </span>
+                      {isLocalEndpoint && (
+                        <span
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200"
+                          title={`Local daemon endpoint${status?.localEndpointUrl ? ` — ${status.localEndpointUrl}` : ''}`}
+                        >
+                          <Server className="w-2.5 h-2.5" />
+                          local
+                        </span>
+                      )}
+                    </div>
                     {entry ? (
                       <div className="text-xs text-gray-500 mt-0.5">
                         {formatRelative(entry.run_at)}
@@ -255,10 +352,35 @@ export function IntelligenceProviderList({
                         {entry.error_message}
                       </div>
                     )}
+                    {/* Live key detection status (multi-store) */}
+                    {status && !isLocalEndpoint && (
+                      <div className="text-xs text-gray-400 mt-0.5">
+                        {status.configured ? (
+                          <span className="text-emerald-600">
+                            Key: <code className="font-mono">{status.foundEnvVar}</code>
+                            {status.foundInStore && status.foundInStore !== 'process.env' && (
+                              <> · found in <span className="italic">{sourceLabel(status.foundInStore)}</span></>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-amber-600">
+                            No key detected
+                            {status.envCandidates.length > 0 && (
+                              <> · checked: <code className="font-mono">{status.envCandidates.join(', ')}</code></>
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {status && isLocalEndpoint && status.localEndpointUrl && (
+                      <div className="text-xs text-gray-400 mt-0.5">
+                        Endpoint: <code className="font-mono">{status.localEndpointUrl}</code>
+                      </div>
+                    )}
                   </div>
 
-                  {/* E5: missing-key recovery action. */}
-                  {failed && client && (
+                  {/* E5: missing-key recovery action — only for api_key providers. */}
+                  {failed && client && !isLocalEndpoint && (
                     <button
                       type="button"
                       onClick={() => {
@@ -273,7 +395,13 @@ export function IntelligenceProviderList({
                     </button>
                   )}
 
-                  {failed ? (
+                  {/* Status badge */}
+                  {isLocalEndpoint ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                      <Server className="w-3 h-3" />
+                      Local
+                    </span>
+                  ) : failed ? (
                     <span
                       className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-red-50 text-red-700 border border-red-200"
                       title={entry?.error_message ?? 'Refresh failed'}
@@ -294,7 +422,7 @@ export function IntelligenceProviderList({
                 </div>
 
                 {/* Inline add-key form. */}
-                {formOpen && (
+                {formOpen && !isLocalEndpoint && (
                   <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-xs font-semibold text-amber-900">
@@ -340,6 +468,54 @@ export function IntelligenceProviderList({
             );
           })}
         </ul>
+      )}
+
+      {/* ── Integrations section (Notion, etc.) ── */}
+      {integrations.length > 0 && (
+        <>
+          <div className="px-5 py-2.5 border-t border-gray-100 bg-gray-50/70">
+            <div className="flex items-center gap-2">
+              <Puzzle className="w-3.5 h-3.5 text-gray-400" />
+              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                Integrations
+              </span>
+            </div>
+          </div>
+          <ul className="divide-y divide-gray-100">
+            {integrations.map((integ) => (
+              <li key={integ.slug} className="px-5 py-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-gray-900">{integ.displayName}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">{integ.description}</div>
+                    {integ.configured ? (
+                      <div className="text-xs text-emerald-600 mt-0.5">
+                        Key: <code className="font-mono">{integ.foundEnvVar}</code>
+                        {integ.foundInStore && integ.foundInStore !== 'process.env' && (
+                          <> · found in <span className="italic">{sourceLabel(integ.foundInStore)}</span></>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-amber-600 mt-0.5">
+                        No key detected · checked: <code className="font-mono">{integ.envCandidates.join(', ')}</code>
+                      </div>
+                    )}
+                  </div>
+                  {integ.configured ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      <CheckCircle2 className="w-3 h-3" />
+                      Configured
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-gray-50 text-gray-500 border border-gray-200">
+                      Not set
+                    </span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </section>
   );
