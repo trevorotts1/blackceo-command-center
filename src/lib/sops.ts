@@ -8,6 +8,7 @@
 
 import { queryAll, queryOne } from '@/lib/db';
 import type { Task } from '@/lib/types';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 export interface SOPStep {
   name: string;
@@ -97,22 +98,32 @@ export function parseAndValidateSteps(stepsRaw: unknown): SOPStep[] {
 /**
  * Score a SOP against a task. Higher = better match.
  *
- *  - Department exact match: +0.5
+ *  - Department exact match (canonical): +0.5
+ *  - Role match (sop.role === agentRoleSlug): +0.5 (Tier 2 item 7)
  *  - Each keyword overlap with task title/description: +0.1 (cap 0.5)
  *
- * Range: 0 to ~1.0
+ * Range: 0 to ~1.5
  */
 export function scoreSOPForTask(
-  sop: Pick<SOP, 'department' | 'task_keywords'>,
-  task: Pick<Task, 'title' | 'description'> & { department?: string | null; workspace_id?: string | null }
+  sop: Pick<SOP, 'department' | 'task_keywords' | 'role'>,
+  task: Pick<Task, 'title' | 'description'> & {
+    department?: string | null;
+    workspace_id?: string | null;
+    /** Optional: the assigned agent's role slug. When supplied, sop.role matching adds +0.5. */
+    agentRoleSlug?: string | null;
+  }
 ): { score: number; reasons: string[] } {
   let score = 0;
   const reasons: string[] = [];
 
-  const taskDept = (task.department || task.workspace_id || '').toLowerCase();
-  if (sop.department && taskDept && sop.department.toLowerCase() === taskDept) {
+  // Use canonical slug normalization so "dept-marketing", "billing", "ceo-com"
+  // etc. all match the canonical SOP department slug.
+  const taskDeptRaw = task.department || task.workspace_id || '';
+  const taskDeptCanon = canonicalDeptSlug(taskDeptRaw);
+  const sopDeptCanon = canonicalDeptSlug(sop.department ?? '');
+  if (sopDeptCanon && taskDeptCanon && sopDeptCanon === taskDeptCanon) {
     score += 0.5;
-    reasons.push(`department match (${sop.department})`);
+    reasons.push(`department match (${sopDeptCanon})`);
   }
 
   if (sop.task_keywords) {
@@ -126,6 +137,18 @@ export function scoreSOPForTask(
       const kwScore = Math.min(0.5, hits.length * 0.1);
       score += kwScore;
       reasons.push(`keywords: ${hits.join(', ')}`);
+    }
+  }
+
+  // Tier 2 item 7: role-weighted SOP scoring.
+  // When the SOP carries a role slug and it matches the assigned agent's role,
+  // boost by +0.5 so specialist how-to wins over generic department SOPs.
+  if (sop.role && task.agentRoleSlug) {
+    const sopRoleNorm = sop.role.trim().toLowerCase();
+    const agentRoleNorm = task.agentRoleSlug.trim().toLowerCase();
+    if (sopRoleNorm && agentRoleNorm && (sopRoleNorm === agentRoleNorm || agentRoleNorm.includes(sopRoleNorm) || sopRoleNorm.includes(agentRoleNorm))) {
+      score += 0.5;
+      reasons.push(`role match (${sop.role})`);
     }
   }
 

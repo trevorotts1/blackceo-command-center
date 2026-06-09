@@ -1704,6 +1704,313 @@ const migrations: Migration[] = [
       console.log('[Migration 050] sops role/source columns ready');
     }
   },
+  // ============================================================
+  // v4.1.0 — Command Center routing + SOP pipeline fixes
+  // ============================================================
+
+  {
+    id: '051',
+    name: 'canonical_department_slug_migration',
+    // IDEMPOTENT + REVERSIBLE.
+    // Three incompatible slug schemes existed across the codebase:
+    //   1. Router DEFAULT_DEPARTMENTS ids  (marketing, web-development, ceo-com)
+    //   2. Live workspace slugs from seed  (dept-marketing, dept-webdev, dept-ceo)
+    //   3. ZHC canonical bare slugs        (marketing, app-development, billing-finance)
+    //
+    // This migration rewrites workspaces.slug (and workspaces.id) to the
+    // canonical scheme, preserving the original value in workspaces.original_slug
+    // so it can be reverted if needed.  It also updates:
+    //   - agents.workspace_id references
+    //   - tasks.workspace_id references
+    //   - tasks.department
+    //   - persona_assignment.department_id
+    //
+    // Safe to re-run: all writes are guarded by "WHERE original_slug IS NULL"
+    // or by comparing the canonical value to what's already stored.
+    //
+    // NOTE: SQLite FKs are OFF for the reshape because we are updating PK/FK
+    // pairs in concert.  We turn them back on and verify afterward.
+    useOuterTransaction: false,
+    up: (db) => {
+      console.log('[Migration 051] Canonical department slug migration...');
+
+      // Add original_slug preservation column to workspaces if missing
+      const wsCols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map(c => c.name);
+      if (!wsCols.includes('original_slug')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN original_slug TEXT`);
+        console.log('[Migration 051] Added workspaces.original_slug');
+      }
+
+      // Inline canonical mapping (mirrors canonical-slug.ts without import)
+      const canonicalize = (slug: string | null | undefined): string => {
+        if (!slug) return '';
+        let s = slug.trim().toLowerCase();
+        if (s.startsWith('dept-')) s = s.slice(5);
+        const map: Record<string, string> = {
+          'ceo': 'master-orchestrator',
+          'ceo-com': 'master-orchestrator',
+          'com': 'master-orchestrator',
+          'central-operations': 'master-orchestrator',
+          'billing': 'billing-finance',
+          'webdev': 'web-development',
+          'web-dev': 'web-development',
+          'web': 'web-development',
+          'appdev': 'app-development',
+          'app-dev': 'app-development',
+          'mobile': 'app-development',
+          'video-production': 'video',
+          'audio-production': 'audio',
+          'legal-compliance': 'legal',
+          'compliance': 'legal',
+          'support': 'customer-support',
+          'customer-service': 'customer-support',
+          'social': 'social-media',
+          'paid-ads': 'paid-advertisement',
+          'paid-advertising': 'paid-advertisement',
+          'openclaw': 'openclaw-maintenance',
+        };
+        return map[s] ?? s;
+      };
+
+      // Turn off FK enforcement so we can update PK + FKs together
+      const fkRow = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+      const fkWasOn = fkRow?.foreign_keys === 1;
+      db.exec('PRAGMA foreign_keys = OFF');
+
+      try {
+        const reshapeTx = db.transaction(() => {
+          const workspaces = db.prepare('SELECT id, slug, original_slug FROM workspaces').all() as { id: string; slug: string; original_slug: string | null }[];
+
+          for (const ws of workspaces) {
+            const oldSlug = ws.slug || ws.id;
+            const newSlug = canonicalize(oldSlug);
+            const oldId = ws.id;
+            const newId = canonicalize(oldId);
+
+            // Nothing to do if already canonical
+            if (oldSlug === newSlug && oldId === newId) continue;
+
+            // Preserve original (idempotent: only write once)
+            if (!ws.original_slug) {
+              db.prepare('UPDATE workspaces SET original_slug = ? WHERE id = ?').run(oldSlug, oldId);
+            }
+
+            // Update workspace id when it differs (the workspace id = slug by convention)
+            if (newId !== oldId) {
+              // Update FK references first
+              db.prepare('UPDATE agents SET workspace_id = ? WHERE workspace_id = ?').run(newId, oldId);
+              db.prepare('UPDATE tasks SET workspace_id = ? WHERE workspace_id = ?').run(newId, oldId);
+              // Update the workspace row id itself
+              db.prepare('UPDATE workspaces SET id = ? WHERE id = ?').run(newId, oldId);
+            }
+
+            // Update slug
+            if (newSlug !== oldSlug) {
+              const targetId = (newId !== oldId) ? newId : oldId;
+              db.prepare('UPDATE workspaces SET slug = ? WHERE id = ?').run(newSlug, targetId);
+            }
+          }
+
+          // Canonicalize tasks.department
+          const taskDepts = db.prepare('SELECT DISTINCT department FROM tasks WHERE department IS NOT NULL').all() as { department: string }[];
+          for (const { department } of taskDepts) {
+            const canon = canonicalize(department);
+            if (canon !== department) {
+              db.prepare('UPDATE tasks SET department = ? WHERE department = ?').run(canon, department);
+            }
+          }
+
+          // Canonicalize sops.department
+          const sopDepts = db.prepare('SELECT DISTINCT department FROM sops WHERE department IS NOT NULL').all() as { department: string }[];
+          for (const { department } of sopDepts) {
+            const canon = canonicalize(department);
+            if (canon !== department) {
+              db.prepare('UPDATE sops SET department = ? WHERE department = ?').run(canon, department);
+            }
+          }
+
+          // Canonicalize persona_assignment.department_id
+          const hasPa = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='persona_assignment'").get();
+          if (hasPa) {
+            const paDepts = db.prepare('SELECT DISTINCT department_id FROM persona_assignment WHERE department_id IS NOT NULL').all() as { department_id: string }[];
+            for (const { department_id } of paDepts) {
+              const canon = canonicalize(department_id);
+              if (canon !== department_id) {
+                db.prepare('UPDATE persona_assignment SET department_id = ? WHERE department_id = ?').run(canon, department_id);
+              }
+            }
+          }
+        });
+        reshapeTx();
+
+        // Verify FK integrity after reshape
+        const violations = db.prepare('PRAGMA foreign_key_check').all() as unknown[];
+        if (violations.length > 0) {
+          console.error(`[Migration 051] foreign_key_check found ${violations.length} violation(s) after canonical slug reshape`);
+        } else {
+          console.log('[Migration 051] Canonical slug reshape complete — FK check passed');
+        }
+      } finally {
+        if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
+  },
+
+  {
+    id: '052',
+    name: 'backfill_is_master_master_orchestrator',
+    // Idempotent. Sets is_master=1 for the agent(s) in the master-orchestrator
+    // / CEO workspace.  Previously createDepartmentInDbDirect hard-coded is_master=0
+    // for ALL agents, which broke the comDispatch master-fallback (masters list
+    // was empty so fallback returned null).
+    up: (db) => {
+      console.log('[Migration 052] Backfilling is_master=1 for master-orchestrator agents...');
+      const result = db.prepare(`
+        UPDATE agents
+        SET is_master = 1
+        WHERE is_master = 0
+          AND workspace_id IN (
+            SELECT id FROM workspaces
+            WHERE lower(id) IN ('master-orchestrator', 'ceo', 'ceo-com')
+               OR lower(slug) IN ('master-orchestrator', 'ceo', 'ceo-com')
+          )
+      `).run();
+      console.log(`[Migration 052] Set is_master=1 on ${result.changes} agent(s)`);
+    }
+  },
+
+  {
+    id: '053',
+    name: 'backfill_sop_id_on_backlog_tasks',
+    // Idempotent. Assigns the best-scoring SOP to existing backlog tasks where
+    // sop_id IS NULL, so the Triad gate stops permanently blocking.
+    // Uses a simple keyword+department match (same logic as getBestSOPForTask).
+    up: (db) => {
+      console.log('[Migration 053] Backfilling sop_id on backlog tasks with sop_id IS NULL...');
+
+      const hasSOPs = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sops'").get();
+      if (!hasSOPs) {
+        console.log('[Migration 053] sops table not present yet, skipping');
+        return;
+      }
+      const sopCount = (db.prepare('SELECT COUNT(*) as c FROM sops WHERE deleted_at IS NULL').get() as { c: number }).c;
+      if (sopCount === 0) {
+        console.log('[Migration 053] sops table is empty, skipping backfill');
+        return;
+      }
+
+      const tasks = db.prepare(
+        "SELECT id, title, description, department, workspace_id FROM tasks WHERE sop_id IS NULL AND status = 'backlog'"
+      ).all() as { id: string; title: string; description: string | null; department: string | null; workspace_id: string | null }[];
+
+      const sops = db.prepare(
+        'SELECT id, department, task_keywords FROM sops WHERE deleted_at IS NULL'
+      ).all() as { id: string; department: string | null; task_keywords: string | null }[];
+
+      const canonicalize = (slug: string | null | undefined): string => {
+        if (!slug) return '';
+        let s = slug.trim().toLowerCase();
+        if (s.startsWith('dept-')) s = s.slice(5);
+        const map: Record<string, string> = {
+          'ceo': 'master-orchestrator', 'ceo-com': 'master-orchestrator',
+          'billing': 'billing-finance', 'webdev': 'web-development',
+          'appdev': 'app-development', 'video-production': 'video',
+          'audio-production': 'audio', 'legal-compliance': 'legal',
+          'support': 'customer-support', 'social': 'social-media',
+          'paid-ads': 'paid-advertisement', 'openclaw': 'openclaw-maintenance',
+        };
+        return map[s] ?? s;
+      };
+
+      let assigned = 0;
+      const updateStmt = db.prepare('UPDATE tasks SET sop_id = ? WHERE id = ?');
+
+      for (const task of tasks) {
+        const taskDeptCanon = canonicalize(task.department || task.workspace_id || '');
+        const haystack = `${task.title || ''} ${task.description || ''}`.toLowerCase();
+
+        let best: { id: string; score: number } | null = null;
+        for (const sop of sops) {
+          let score = 0;
+          const sopDeptCanon = canonicalize(sop.department || '');
+          if (sopDeptCanon && taskDeptCanon && sopDeptCanon === taskDeptCanon) score += 0.5;
+          if (sop.task_keywords) {
+            const kws = sop.task_keywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+            const hits = kws.filter(k => haystack.includes(k));
+            score += Math.min(0.5, hits.length * 0.1);
+          }
+          if (score >= 0.5 && (!best || score > best.score)) {
+            best = { id: sop.id, score };
+          }
+        }
+        if (best) {
+          updateStmt.run(best.id, task.id);
+          assigned++;
+        }
+      }
+
+      console.log(`[Migration 053] Backfilled sop_id on ${assigned} of ${tasks.length} backlog tasks`);
+    }
+  },
+
+  // ── TIER 2: persona column + dispatch_rules table ──────────────────────────
+  {
+    id: '054',
+    name: 'add_persona_column_and_dispatch_rules',
+    // Tier 2 item 8.
+    // Adds agents.persona TEXT column and dispatch_rules table.
+    // Both are additive + idempotent.
+    up: (db) => {
+      console.log('[Migration 054] Adding agents.persona + dispatch_rules table...');
+
+      // agents.persona
+      const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(c => c.name);
+      if (!agentCols.includes('persona')) {
+        db.exec(`ALTER TABLE agents ADD COLUMN persona TEXT`);
+        console.log('[Migration 054] Added agents.persona');
+      }
+
+      // dispatch_rules
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dispatch_rules (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+          department_slug TEXT NOT NULL,
+          task_keywords TEXT,
+          sop_id TEXT REFERENCES sops(id) ON DELETE SET NULL,
+          agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          priority INTEGER DEFAULT 5,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        )
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatch_rules_dept ON dispatch_rules(department_slug)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatch_rules_sop ON dispatch_rules(sop_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatch_rules_agent ON dispatch_rules(agent_id)`);
+
+      // Seed from existing SOPs: one dispatch rule per SOP row that has
+      // both task_keywords and a department.
+      const sops = db.prepare(
+        'SELECT id, department, task_keywords FROM sops WHERE task_keywords IS NOT NULL AND department IS NOT NULL AND deleted_at IS NULL'
+      ).all() as { id: string; department: string; task_keywords: string }[];
+
+      const insert = db.prepare(`
+        INSERT OR IGNORE INTO dispatch_rules (id, department_slug, task_keywords, sop_id)
+        VALUES (lower(hex(randomblob(8))), ?, ?, ?)
+      `);
+      // Only seed if rules table is empty to avoid duplicates on re-run
+      const existingCount = (db.prepare('SELECT COUNT(*) as c FROM dispatch_rules').get() as { c: number }).c;
+      if (existingCount === 0) {
+        for (const sop of sops) {
+          insert.run(sop.department, sop.task_keywords, sop.id);
+        }
+        console.log(`[Migration 054] Seeded ${sops.length} dispatch_rules from SOPs`);
+      } else {
+        console.log('[Migration 054] dispatch_rules already populated, skipping seed');
+      }
+
+      console.log('[Migration 054] agents.persona + dispatch_rules ready');
+    }
+  },
 ];
 
 /**
