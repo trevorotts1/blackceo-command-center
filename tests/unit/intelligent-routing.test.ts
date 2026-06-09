@@ -70,10 +70,11 @@ function makeCustomDept(
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: DEFAULT_DEPARTMENTS has exactly 24 entries (QC gate 2.5)
+// Test 1: DEFAULT_DEPARTMENTS has exactly 25 entries (QC gate 2.5)
+// +1 for general-task (mandatory catch-all, feat/general-task-routing)
 // ---------------------------------------------------------------------------
-test('DEFAULT_DEPARTMENTS has exactly 24 canonical departments', () => {
-  assert.equal(DEFAULT_DEPARTMENTS.length, 24);
+test('DEFAULT_DEPARTMENTS has exactly 25 canonical departments', () => {
+  assert.equal(DEFAULT_DEPARTMENTS.length, 25);
 });
 
 // ---------------------------------------------------------------------------
@@ -338,4 +339,140 @@ test('standard "Social Media" dept still routes a social media task', async () =
 
   assert.ok(result !== null);
   assert.equal(result.department, 'Social Media');
+});
+
+// ---------------------------------------------------------------------------
+// Test 9: general-task is in DEFAULT_DEPARTMENTS with correct routing config
+// ---------------------------------------------------------------------------
+test('general-task entry exists in DEFAULT_DEPARTMENTS with priority 1 and empty keywords', () => {
+  const gt = DEFAULT_DEPARTMENTS.find((d) => d.id === 'general-task');
+  assert.ok(gt !== undefined, 'general-task must be in DEFAULT_DEPARTMENTS');
+  assert.equal(gt!.priority, 1, 'general-task priority must be 1 (lowest, never wins on merit)');
+  assert.deepEqual(gt!.keywords, [], 'general-task must have empty keywords (never wins keyword routing)');
+});
+
+// ---------------------------------------------------------------------------
+// Test 10: general-task NEVER wins via keyword routing (score always 0)
+//
+// Even if a task has zero other matches, general-task must not win keyword
+// scoring because it has empty keywords. This confirms the design invariant:
+// "General Task is never selected on merit."
+// ---------------------------------------------------------------------------
+test('general-task never wins keyword ranking (empty keywords → always score 0)', () => {
+  // Import rankDepartments via the module's internals — test via comDispatch
+  // with keyword-mode only (no embedding key set).
+  const gt = DEFAULT_DEPARTMENTS.find((d) => d.id === 'general-task')!;
+  const salesDept = DEFAULT_DEPARTMENTS.find((d) => d.id === 'sales')!;
+
+  // keyword scoring: text has sales keywords but not general-task keywords.
+  // general-task has zero keywords so it can never match.
+  const gtAgent = makeAgent({ id: 'gt-agent', name: 'GT Agent', role: 'Head of General Task', workspace_id: 'general-task' });
+  const salesAgent = makeAgent({ id: 'sales-agent', name: 'Sales Agent', role: 'Sales Agent', workspace_id: 'sales' });
+
+  // Run as keyword-only (no embedding key in test env)
+  return comDispatch(
+    { title: 'Close the deal with prospects', description: 'sales pipeline follow up', priority: 'medium' },
+    [gtAgent, salesAgent],
+    [gt, salesDept],
+  ).then((result) => {
+    assert.ok(result !== null, 'Should route somewhere');
+    assert.notEqual(result!.department, 'General Task', 'general-task must NOT win on a sales task — it never wins on merit');
+    assert.equal(result!.department, 'Sales', 'Sales dept should win when keywords match');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 11: low-confidence task → routes to general-task
+//
+// Simulates the MIN_ROUTING_CONFIDENCE floor by using a mocked semantic path.
+// In keyword-only mode (no embedding key), we verify that when NO department
+// has keyword hits at all, the task routes to general-task (not CEO master).
+// ---------------------------------------------------------------------------
+test('zero-keyword-hit task in keyword-only mode routes to general-task, not CEO master', async () => {
+  // Departments with specific keywords that won't match the task
+  const marketingDept = makeCustomDept(
+    'marketing',
+    'Marketing',
+    'Campaigns, brand, email, SEO.',
+    ['marketing', 'campaign', 'brand', 'seo', 'email'],
+  );
+  const salesDept = makeCustomDept(
+    'sales',
+    'Sales',
+    'Pipeline, prospects, deals.',
+    ['sales', 'pipeline', 'deal', 'close', 'prospect'],
+  );
+  const generalTaskDept: DepartmentConfig = {
+    id: 'general-task',
+    name: 'General Task',
+    purpose: 'Catch-all for low-confidence tasks.',
+    keywords: [], // never wins keyword scoring
+    agentRoles: ['Head of General Task', 'Generalist Operator'],
+    priority: 1,
+  };
+
+  const masterAgent = makeAgent({ id: 'master', name: 'CEO', role: 'CEO', is_master: true });
+  const gtAgent = makeAgent({ id: 'gt-agent', name: 'GT Agent', role: 'Head of General Task', workspace_id: 'general-task' });
+  const salesAgent = makeAgent({ id: 'sales-agent', name: 'Sales Agent', role: 'Sales', workspace_id: 'sales' });
+
+  // Task that matches NO keywords in any specific dept
+  const result = await comDispatch(
+    {
+      title: 'Review the quarterly philosophical treatise',
+      description: 'Meditate on the nature of existence and organizational purpose',
+      priority: 'low',
+    },
+    [masterAgent, gtAgent, salesAgent],
+    [marketingDept, salesDept, generalTaskDept],
+  );
+
+  assert.ok(result !== null, 'Should route somewhere');
+  assert.equal(
+    result!.department,
+    'General Task',
+    `Expected "General Task" catch-all for zero-keyword-hit task but got "${result!.department}". CEO master should only be last resort when General Task has no agent.`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 12: high-confidence task (many keyword hits) → routes to specific dept
+//
+// Regression guard: the General Task catch-all must NOT intercept tasks that
+// clearly belong to a specific department (keyword mode).
+// ---------------------------------------------------------------------------
+test('high-confidence keyword match routes to specific department, not general-task', async () => {
+  const webDevDept = makeCustomDept(
+    'web-development',
+    'Web Development',
+    'Website development, React, Next.js, frontend/backend.',
+    ['web', 'website', 'react', 'nextjs', 'frontend', 'backend', 'html', 'css', 'javascript'],
+  );
+  const generalTaskDept: DepartmentConfig = {
+    id: 'general-task',
+    name: 'General Task',
+    purpose: 'Catch-all for low-confidence tasks.',
+    keywords: [],
+    agentRoles: ['Head of General Task'],
+    priority: 1,
+  };
+
+  const webAgent = makeAgent({ id: 'web-agent', name: 'Dev', role: 'Web Developer', workspace_id: 'web-development' });
+  const gtAgent = makeAgent({ id: 'gt-agent', name: 'GT Agent', role: 'Head of General Task', workspace_id: 'general-task' });
+
+  const result = await comDispatch(
+    {
+      title: 'Build a React frontend dashboard',
+      description: 'Create a Next.js website with CSS styling and HTML components',
+      priority: 'high',
+    },
+    [gtAgent, webAgent],
+    [generalTaskDept, webDevDept],
+  );
+
+  assert.ok(result !== null, 'Should route');
+  assert.equal(
+    result!.department,
+    'Web Development',
+    `Expected "Web Development" but got "${result!.department}" — high-confidence tasks must not fall to General Task`,
+  );
 });

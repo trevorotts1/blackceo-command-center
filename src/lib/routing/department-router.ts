@@ -44,6 +44,34 @@ import {
  */
 const TIEBREAK_MARGIN = 0.04;
 
+/**
+ * Minimum routing confidence for semantic classification.
+ *
+ * When the best semantic similarity falls BELOW this floor (i.e. the task
+ * text doesn't clearly match any department), comDispatch() routes to the
+ * General Task catch-all instead of force-fitting to the wrong department.
+ *
+ * Tuneable via env: MIN_ROUTING_CONFIDENCE=0.45 (lower → fewer GT fallbacks,
+ * more force-fits; higher → more GT fallbacks, fewer force-fits).
+ * Document every General Task fallback in the logs (similarity + floor) so
+ * this value can be calibrated from real data.
+ *
+ * Default: 0.55. Rationale: cosine similarity below 0.55 on
+ * text-embedding-ada-002 / gemini-embedding-001 is typically noise-level
+ * for domain-specific department text.
+ */
+const MIN_ROUTING_CONFIDENCE: number = (() => {
+  const env = process.env.MIN_ROUTING_CONFIDENCE;
+  if (env) {
+    const parsed = parseFloat(env);
+    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) return parsed;
+    console.warn(
+      `[DepartmentRouter] Invalid MIN_ROUTING_CONFIDENCE="${env}" — must be 0–1. Using default 0.55.`,
+    );
+  }
+  return 0.55;
+})();
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -379,57 +407,112 @@ export async function comDispatch(
   }
 
   // ── Step 2: Semantic (embedding) classification ───────────────────────────
-  // Primary path when OPENAI_API_KEY is configured. Works for ANY dept name
-  // because it classifies by MEANING against the dept's purpose string.
+  // Primary path when OPENAI_API_KEY / GOOGLE_API_KEY is configured. Works for
+  // ANY dept name because it classifies by MEANING against the dept's purpose.
   const semanticRanked = await semanticRankDepartments(taskText, departments);
 
   if (semanticRanked && semanticRanked.length > 0) {
-    let bestDept: DepartmentConfig;
+    // Raw top result before tiebreak — we need its similarity for the floor check.
+    const rawTopSimilarity = semanticRanked[0].similarity;
 
-    // LLM tiebreak when top-2 are ambiguously close
-    if (
-      semanticRanked.length >= 2 &&
-      semanticRanked[0].similarity - semanticRanked[1].similarity < TIEBREAK_MARGIN
-    ) {
-      bestDept = await llmTiebreak(taskText, semanticRanked);
+    // ── Confidence floor check ──────────────────────────────────────────────
+    // If the best semantic match is below MIN_ROUTING_CONFIDENCE, the task
+    // doesn't clearly belong to any specific department. Route to General Task
+    // (Step 3.5) instead of force-fitting. Log with the similarity + floor
+    // values so the operator can tune MIN_ROUTING_CONFIDENCE from real data.
+    if (rawTopSimilarity < MIN_ROUTING_CONFIDENCE) {
       console.log(
-        `[DepartmentRouter] Semantic scores within tiebreak margin (${semanticRanked[0].similarity.toFixed(3)} vs ${semanticRanked[1].similarity.toFixed(3)}) — LLM tiebreak selected "${bestDept.name}"`,
+        `[DepartmentRouter] Low routing confidence (sim ${rawTopSimilarity.toFixed(3)} < floor ${MIN_ROUTING_CONFIDENCE}) — routing to General Task instead of force-fitting to "${semanticRanked[0].department.name}"`,
       );
+      // Fall through to Step 3.5 below (after keyword block) by NOT returning here.
+      // We skip the semantic result entirely.
     } else {
-      bestDept = semanticRanked[0].department;
-    }
+      let bestDept: DepartmentConfig;
 
-    const agent = pickBestAgent(agents, bestDept);
-    if (agent) {
-      const similarity = semanticRanked.find((s) => s.department === bestDept)?.similarity ?? 0;
-      return {
-        agentId: agent.id,
-        agentName: agent.name,
-        department: bestDept.name,
-        score: similarity * urgencyMultiplier(priority) * (bestDept.priority / 10),
-        reason: `Semantic routing matched "${bestDept.name}" (similarity: ${similarity.toFixed(3)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
-      };
+      // LLM tiebreak when top-2 are ambiguously close (only when above floor)
+      if (
+        semanticRanked.length >= 2 &&
+        rawTopSimilarity - semanticRanked[1].similarity < TIEBREAK_MARGIN
+      ) {
+        bestDept = await llmTiebreak(taskText, semanticRanked);
+        console.log(
+          `[DepartmentRouter] Semantic scores within tiebreak margin (${rawTopSimilarity.toFixed(3)} vs ${semanticRanked[1].similarity.toFixed(3)}) — LLM tiebreak selected "${bestDept.name}"`,
+        );
+      } else {
+        bestDept = semanticRanked[0].department;
+      }
+
+      const agent = pickBestAgent(agents, bestDept);
+      if (agent) {
+        const similarity = semanticRanked.find((s) => s.department === bestDept)?.similarity ?? 0;
+        return {
+          agentId: agent.id,
+          agentName: agent.name,
+          department: bestDept.name,
+          score: similarity * urgencyMultiplier(priority) * (bestDept.priority / 10),
+          reason: `Semantic routing matched "${bestDept.name}" (similarity: ${similarity.toFixed(3)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
+        };
+      }
     }
   }
 
   // ── Step 3: Keyword scoring fallback ─────────────────────────────────────
   // Used when no embedding key is configured (zero configuration required).
+  // General Task has empty keywords + priority=1 → always scores 0 → filtered
+  // out here by the `score > 0` guard. It is NEVER reached by keyword scoring.
   const ranked = rankDepartments(title, description, priority, departments);
 
-  for (const { department, score } of ranked) {
-    const agent = pickBestAgent(agents, department);
+  if (ranked.length > 0) {
+    for (const { department, score } of ranked) {
+      const agent = pickBestAgent(agents, department);
+      if (agent) {
+        return {
+          agentId: agent.id,
+          agentName: agent.name,
+          department: department.name,
+          score,
+          reason: `Keyword scoring matched department "${department.name}" (score: ${score.toFixed(2)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
+        };
+      }
+    }
+  } else if (!semanticRanked) {
+    // Keyword-only mode (no embedding key) AND zero keyword hits → General Task.
+    // This is the keyword-mode equivalent of the confidence floor: when no dept
+    // matches at all, don't fall through to the CEO master; catch it here.
+    console.log(
+      `[DepartmentRouter] Keyword-only mode: zero keyword hits — routing to General Task catch-all`,
+    );
+    // Falls through to Step 3.5 below.
+  }
+
+  // ── Step 3.5: General Task catch-all ──────────────────────────────────────
+  // Reached when:
+  //   a) Semantic similarity < MIN_ROUTING_CONFIDENCE (low-confidence catch), OR
+  //   b) Keyword-only mode and zero keyword hits.
+  // General Task is priority-1 / empty-keywords so it NEVER wins in steps 2–3
+  // on merit. This is the ONLY path that routes to it.
+  const generalTaskDept = departments.find(
+    (d) => canonicalDeptSlug(d.id) === 'general-task' || d.id === 'general-task',
+  );
+  if (generalTaskDept) {
+    const agent = pickBestAgent(agents, generalTaskDept);
     if (agent) {
+      const sim = semanticRanked?.[0]?.similarity;
+      const reason = sim !== undefined
+        ? `Routing confidence below floor (sim ${sim.toFixed(3)} < ${MIN_ROUTING_CONFIDENCE}). Routed to General Task to avoid force-fitting to wrong department.`
+        : `No keyword hits in keyword-only mode. Routed to General Task catch-all.`;
       return {
         agentId: agent.id,
         agentName: agent.name,
-        department: department.name,
-        score,
-        reason: `Keyword scoring matched department "${department.name}" (score: ${score.toFixed(2)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
+        department: generalTaskDept.name,
+        score: sim ?? 0,
+        reason,
       };
     }
   }
 
   // ── Step 4: CEO / COM router fallback ─────────────────────────────────────
+  // Degenerate case: General Task dept has no agent (misconfigured install).
   // The master agent is the ROUTER of last resort — it will re-dispatch, NOT
   // execute the task itself. This preserves the invariant that the CEO never
   // does department work.
@@ -443,7 +526,7 @@ export async function comDispatch(
       agentName: masters[0].name,
       department: 'CEO / COM',
       score: 0,
-      reason: `No department match found. Routed to CEO / COM master agent for re-dispatch (load: ${masters[0].active_tasks} tasks). CEO will route, not execute.`,
+      reason: `No department match found and General Task dept has no agent. Routed to CEO / COM master agent for re-dispatch (load: ${masters[0].active_tasks} tasks). CEO will route, not execute.`,
     };
   }
 

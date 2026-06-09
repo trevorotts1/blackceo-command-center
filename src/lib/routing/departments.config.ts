@@ -846,6 +846,31 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     agentRoles: ['Personal Assistant', 'Executive Assistant', 'Administrative Agent'],
     priority: 5,
   },
+  // ── General Task — mandatory catch-all ────────────────────────────────────
+  // ROUTING RULE: General Task NEVER wins on merit. priority=1 + empty keywords
+  // means rankDepartments() scores it 0 (filtered out by `score > 0` guard) and
+  // semanticRankDepartments() will naturally rank it last for most real task text
+  // because its purpose is intentionally vague. It is reached ONLY via the
+  // explicit MIN_ROUTING_CONFIDENCE floor in comDispatch() (Step 3.5).
+  //
+  // Design intent: a catch-all that prevents tasks being force-fit into the
+  // wrong dept when routing confidence is low. The recurrence detector
+  // (general-task-recurrence.ts) watches patterns in tasks that land here and
+  // recommends standing up a dedicated dept when >3/month recur.
+  {
+    id: 'general-task',
+    name: 'General Task',
+    purpose:
+      'Catch-all department for tasks that do not confidently match any dedicated department. Triages, executes one-off work, or re-routes once classified. Monitors recurring patterns and recommends new dedicated departments.',
+    keywords: [], // intentionally empty — never wins keyword routing
+    agentRoles: [
+      'Head of General Task',
+      'Generalist Operator',
+      'Triage Classifier',
+      'General Task Specialist',
+    ],
+    priority: 1, // intentionally lowest — only reached via confidence-floor fallback
+  },
   {
     id: 'security',
     name: 'Security Team',

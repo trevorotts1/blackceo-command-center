@@ -26,6 +26,7 @@ import {
   WEEKLY_DONE_CLEAR_CRON_EXPR,
   WEEKLY_DONE_CLEAR_CRON_TIMEZONE,
 } from './weekly-done-clear';
+import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 
 export interface RegisteredJob {
   name: string;
@@ -193,6 +194,32 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
         result.skippedReason
           ? `[cron] weekly-done-clear: skipped — ${result.skippedReason}`
           : `[cron] weekly-done-clear: archived ${result.archivedCount} done task(s)`,
+      );
+    },
+  },
+
+  // general-task-recurrence: Sunday 04:30 — cluster tasks that landed in the
+  // General Task catch-all dept over the past 30 days. Any cluster ≥4 tasks
+  // (>3/month) upserts a 'try' recommendation to stand up a dedicated dept.
+  // Idempotent on cluster-signature hash; suppresses dismissed clusters.
+  // Disable with DISABLE_GENERAL_TASK_RECURRENCE=1.
+  {
+    name: 'general-task-recurrence',
+    expr: '30 4 * * 0',
+    fn: async () => {
+      if (
+        process.env.DISABLE_GENERAL_TASK_RECURRENCE === '1' ||
+        process.env.DISABLE_GENERAL_TASK_RECURRENCE === 'true'
+      ) {
+        console.log('[cron] general-task-recurrence: DISABLE_GENERAL_TASK_RECURRENCE set, skipping');
+        return;
+      }
+      const result = runGeneralTaskRecurrenceDetection();
+      console.log(
+        `[cron] general-task-recurrence: scanned ${result.scanned_tasks} tasks, ` +
+          `${result.clusters_found} clusters, ` +
+          `${result.recommendations_upserted} recommendation(s) upserted ` +
+          `(${result.recommendations_created} new)`,
       );
     },
   },
