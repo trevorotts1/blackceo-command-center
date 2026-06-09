@@ -159,5 +159,20 @@ for c in node python3 npm claude codex gemini agy uv hermes fcc-server pm2 ffmpe
   fi
 done
 
+#
+# Command Center repair (durability gate)
+# Rebuild better-sqlite3, run migrations, seed SOPs, verify routing.
+# This is the permanent fix so tasks move on the Kanban without manual surgery.
+#
+CC_DIR="$ECOSYSTEM_DIR"
+if [ -f "$CC_DIR/scripts/repair-command-center.sh" ]; then
+  echo
+  echo "Running repair-command-center.sh (durability gate) ..."
+  cd "$CC_DIR" && bash scripts/repair-command-center.sh --skip-probe || true
+else
+  echo
+  echo "repair-command-center.sh not found at $CC_DIR/scripts/ — run it manually after cloning the repo"
+fi
+
 echo
 echo "VPS Docker bootstrap: OK"

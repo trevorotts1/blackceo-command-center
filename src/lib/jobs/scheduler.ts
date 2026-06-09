@@ -172,7 +172,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void> }> = [
   // ceo-delegation: every 5 minutes, push CEO-stranded backlog tasks down to
   // the right department (mostly relevant for tasks created before in-process
   // routing shipped).
-  { name: 'ceo-delegation', expr: '*/5 * * * *', fn: async () => { runCeoDelegationSweep(); } },
+  { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
 ];
 
 /**
