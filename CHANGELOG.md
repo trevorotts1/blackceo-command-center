@@ -1,3 +1,24 @@
+## [v4.5.0] - 2026-06-09 - Lean Kanban board confirmation + QC-agent auto-approval
+
+Documents and cements the lean Kanban model; builds the QC-agent auto-scorer that was not previously wired.
+
+### Lean Kanban board (UI/column-mapping change only)
+
+- The board already had the correct lean columns: Backlog → To-Do → In Progress → Review/QC → Blocked → Done.
+- `inbox`/`planning`/`assigned`/`pending_dispatch` statuses fold into the To-Do column; `testing` folds into Review/QC. No separate `inbox`, `planning`, `testing`, or `pending_dispatch` board columns — these are internal pipeline states only.
+- `Blocked` is a side-state (not a stage in the flow). `TaskStatus` enum keeps all underlying values — this is intentionally a display mapping, not a schema migration.
+- Updated COLUMNS comment in `MissionQueue.tsx` to document the lean model, the Triad gate, and the QC-agent auto-scorer gate.
+- Added `general-task` to the emoji/name lookup tables in `MissionQueue.tsx`.
+
+### QC-agent auto-approval (NEW — was not previously wired)
+
+- New `src/lib/qc-scorer.ts`: when a task enters `review` status, fires the QC scorer against the assigned SOP's `success_criteria`.
+- Scoring path: OPENAI_API_KEY → gpt-4o-mini (configurable via `QC_SCORER_MODEL`), then GOOGLE_API_KEY → Gemini flash, then heuristic fallback (no key required — conservative 6–8 range, never auto-passes).
+- Pass (≥8.5): auto-moves task to `done`, writes `task_completed` event.
+- Fail (<8.5): returns task to `in_progress`, appends gap notes to description, writes `task_status_changed` event.
+- Always writes a `qc_review` event for the audit trail. Disable with `DISABLE_QC_AUTO_SCORER=1`.
+- Wired in `src/app/api/tasks/[id]/route.ts` PATCH handler: fires fire-and-forget after response when `status` transitions to `review`.
+
 ## [v4.4.0] - 2026-06-09 - General Task routing floor + recurrence detector
 
 Adds the General Task catch-all department and a routing confidence floor to prevent force-fitting tasks into the wrong department.

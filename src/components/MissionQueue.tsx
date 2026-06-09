@@ -15,14 +15,24 @@ interface MissionQueueProps {
   departmentFilter?: string | null;
 }
 
-// Six-column board (per Eval v2.0 brief, Tier 3):
-// Backlog = raw inbox / unstarted ideas
-// To-Do   = groomed & prioritized, ready for an agent to pick up
-// Drag flow: Backlog → To-Do → In Progress → Review → (Blocked) → Done.
+// ── Lean Kanban board model (Trevor-approved) ──────────────────────────────
 //
-// "todo" maps to legacy statuses {inbox, planning, assigned, pending_dispatch}
-// which are all forms of "groomed but not started yet." A bare 'backlog' status
-// stays in the Backlog column. The mapping happens in getTasksByStatus below.
+// Columns:  Backlog → To-Do → In Progress → Review / QC → Done
+// Side-state: Blocked (not a stage in the flow — a transient exception)
+//
+// Internal pipeline statuses that are NOT separate board columns:
+//   assigned, pending_dispatch  → bucket into To-Do (routed-not-started)
+//   inbox, planning             → bucket into To-Do (groomed-but-not-started)
+//   testing                     → bucket into Review/QC (dev/web-dev sub-state)
+//
+// Gate rules:
+//   Backlog → To-Do: Triad Rule (description + SOP + persona required)
+//   Review / QC:     QC-agent auto-scorer fires on entry (src/lib/qc-scorer.ts)
+//                    ≥8.5 → auto-approve to Done; <8.5 → kick back to In Progress
+//
+// TaskStatus enum still has all underlying statuses (inbox, planning, assigned,
+// pending_dispatch, testing) — they're just not visible as separate board columns.
+// This is intentionally a UI/column-mapping change, not a schema change.
 const COLUMNS: { id: TaskStatus | 'todo'; label: string; gradient: string }[] = [
   { id: 'backlog',     label: 'Backlog',     gradient: 'column-pill-backlog' },
   { id: 'todo',        label: 'To-Do',       gradient: 'column-pill-backlog' },
@@ -50,6 +60,7 @@ const departmentEmojis: Record<string, string> = {
   'openclaw-maintenance': '🦾', 'openclaw': '🦾',
   'social-media': '📱', 'social': '📱',
   'paid-advertisement': '🎯', 'paid-ads': '🎯',
+  'general-task': '🗂️', 'general': '🗂️',
 };
 
 const departmentNames: Record<string, string> = {
@@ -70,6 +81,7 @@ const departmentNames: Record<string, string> = {
   'openclaw-maintenance': 'OpenClaw Maintenance',
   'social-media': 'Social Media',
   'paid-advertisement': 'Paid Advertisement',
+  'general-task': 'General Task',
 };
 
 export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProps) {
