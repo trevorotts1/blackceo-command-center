@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, run } from '@/lib/db';
 import { parseAndValidateSteps, type SOP } from '@/lib/sops';
 import { enqueueAutoReplace, countImpactedTasks } from '@/lib/sop-auto-replace';
+import { storeEmbeddingForSOP } from '@/lib/sop-embeddings';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -115,6 +116,13 @@ export async function PATCH(
 
     run(`UPDATE sops SET ${updates.join(', ')} WHERE id = ?`, values);
     const sop = queryOne<SOP>('SELECT * FROM sops WHERE id = ?', [existing.id]);
+
+    // Recompute embedding fire-and-forget. storeEmbeddingForSOP swallows errors
+    // so a missing key or transient API failure never breaks the update path.
+    if (sop) {
+      storeEmbeddingForSOP(sop).catch(() => {/* already logged inside */});
+    }
+
     return NextResponse.json(sop);
   } catch (error) {
     console.error('[PATCH /api/sops/[id]] Failed:', error);

@@ -40,7 +40,8 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'node:fs';
 import path from 'node:path';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
-import type { SOPStep } from '@/lib/sops';
+import type { SOPStep, SOP } from '@/lib/sops';
+import { storeEmbeddingForSOP } from '@/lib/sop-embeddings';
 
 export const ROLE_LIBRARY_SOURCE = 'role-library';
 
@@ -382,19 +383,28 @@ export interface ImportOptions {
  * Import (upsert) every role how-to.md under the departments tree into `sops`.
  * Returns a per-row summary. Wrapped in a single transaction so a partial
  * failure rolls back cleanly.
+ *
+ * After the transaction, asynchronously queues embedding computation for all
+ * inserted/updated rows (fire-and-forget; errors are swallowed per the
+ * storeEmbeddingForSOP contract — a missing key never breaks imports).
  */
 export function importRoleLibrary(opts: ImportOptions = {}): ImportResult {
   const departmentsPath = resolveDepartmentsPath(opts.departmentsPath);
   const howtos = discoverRoleHowTos(departmentsPath);
 
-  return transaction((): ImportResult => {
+  const result = transaction((): ImportResult & { _insertedOrUpdatedSlugs: string[] } => {
     const items: ImportedSOPSummary[] = [];
     const seenSlugs = new Set<string>();
+    const insertedOrUpdatedSlugs: string[] = [];
 
     for (const howto of howtos) {
       const parsed = parseRoleHowTo(howto);
       seenSlugs.add(parsed.slug);
-      items.push(upsertRoleSOP(parsed));
+      const summary = upsertRoleSOP(parsed);
+      items.push(summary);
+      if (summary.action === 'inserted' || summary.action === 'updated') {
+        insertedOrUpdatedSlugs.push(parsed.slug);
+      }
     }
 
     let pruned = 0;
@@ -420,6 +430,22 @@ export function importRoleLibrary(opts: ImportOptions = {}): ImportResult {
       skipped: items.filter((i) => i.action === 'skipped').length,
       pruned,
       items,
+      _insertedOrUpdatedSlugs: insertedOrUpdatedSlugs,
     };
   });
+
+  // Fire-and-forget embedding for all rows that were written this run.
+  // The transaction is done; reads here are safe. Errors are swallowed.
+  if (result._insertedOrUpdatedSlugs.length > 0) {
+    for (const slug of result._insertedOrUpdatedSlugs) {
+      const sop = queryOne<SOP>(`SELECT * FROM sops WHERE slug = ? AND deleted_at IS NULL`, [slug]);
+      if (sop) {
+        storeEmbeddingForSOP(sop).catch(() => {/* logged inside */});
+      }
+    }
+  }
+
+  // Strip internal field before returning
+  const { _insertedOrUpdatedSlugs: _dropped, ...publicResult } = result;
+  return publicResult;
 }

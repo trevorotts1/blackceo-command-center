@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { parseAndValidateSteps, type SOP } from '@/lib/sops';
+import { storeEmbeddingForSOP } from '@/lib/sop-embeddings';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -55,6 +56,7 @@ export async function GET(request: NextRequest) {
  *
  * Body: { name, slug, description?, department?, task_keywords?, steps[], success_criteria?, persona_hints?[] }
  * Always creates with version=1.
+ * After a successful INSERT, asynchronously computes + stores an embedding (no-op if key absent).
  */
 export async function POST(request: NextRequest) {
   try {
@@ -114,6 +116,13 @@ export async function POST(request: NextRequest) {
     );
 
     const sop = queryOne<SOP>('SELECT * FROM sops WHERE id = ?', [id]);
+
+    // Compute + store embedding fire-and-forget. storeEmbeddingForSOP swallows
+    // errors so a missing key or transient API failure never breaks the create path.
+    if (sop) {
+      storeEmbeddingForSOP(sop).catch(() => {/* already logged inside */});
+    }
+
     return NextResponse.json(sop, { status: 201 });
   } catch (error) {
     console.error('[POST /api/sops] Failed:', error);

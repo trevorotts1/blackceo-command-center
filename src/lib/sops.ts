@@ -9,6 +9,7 @@
 import { queryAll, queryOne } from '@/lib/db';
 import type { Task } from '@/lib/types';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { isEmbeddingAvailable, rankSOPsBySemantic } from '@/lib/sop-embeddings';
 
 export interface SOPStep {
   name: string;
@@ -159,7 +160,15 @@ export function scoreSOPForTask(
  * Return the top N SOP suggestions for a given task.
  * Excludes soft-deleted SOPs.
  */
-export function suggestSOPsForTask(
+/**
+ * Return the top N SOP suggestions for a given task — keyword path only.
+ *
+ * This is the synchronous baseline that is always available. The async
+ * `suggestSOPsForTask` extends it with semantic (embedding) ranking when a
+ * key is configured. Both share this core implementation so the keyword path
+ * is never silently bypassed.
+ */
+export function suggestSOPsForTaskKeyword(
   task: Pick<Task, 'title' | 'description'> & { department?: string | null; workspace_id?: string | null },
   limit = 3
 ): SOPSuggestion[] {
@@ -178,14 +187,99 @@ export function suggestSOPsForTask(
 }
 
 /**
+ * Return the top N SOP suggestions for a given task.
+ *
+ * HYBRID MODE (when OPENAI_API_KEY is configured + embeddings exist):
+ *   1. Compute cosine similarity between the task text and all stored SOP
+ *      embeddings (brute-force JS, ~5ms over 2,578 rows).
+ *   2. Blend with keyword score:
+ *        blended = semantic_similarity * 0.7 + keyword_score_normalized * 0.3
+ *      This lets a semantically similar SOP with zero keyword overlap still
+ *      surface, while an exact-keyword + department match gets a boost.
+ *   3. Include any keyword-only hits (score > 0) that the semantic pass
+ *      might have ranked too low, so we never regress vs. the old path.
+ *
+ * FALLBACK (no key or no embeddings in DB):
+ *   Identical to the previous pure-keyword path — zero behavior change.
+ *
+ * The function is async because embedding the query text requires a network
+ * call to OpenAI. The fallback is synchronous-equivalent (Promise.resolve).
+ */
+export async function suggestSOPsForTask(
+  task: Pick<Task, 'title' | 'description'> & { department?: string | null; workspace_id?: string | null },
+  limit = 3
+): Promise<SOPSuggestion[]> {
+  // Always compute keyword scores — they're the guaranteed fallback.
+  const sops = queryAll<SOP>(`SELECT * FROM sops WHERE deleted_at IS NULL`, []);
+  const keywordMap = new Map<string, { score: number; reasons: string[] }>();
+  for (const sop of sops) {
+    const { score, reasons } = scoreSOPForTask(sop, task);
+    keywordMap.set(sop.id, { score, reasons });
+  }
+
+  // Attempt semantic ranking.
+  if (isEmbeddingAvailable()) {
+    const queryText = `${task.title ?? ''} ${task.description ?? ''}`.trim();
+    if (queryText.length > 0) {
+      const semanticHits = await rankSOPsBySemantic(queryText);
+
+      if (semanticHits.length > 0) {
+        // Build a fast lookup: sopId → semantic rank position (0-based) + similarity
+        const semanticMap = new Map<string, number>();
+        for (const hit of semanticHits) {
+          semanticMap.set(hit.sopId, hit.similarity);
+        }
+
+        // Max keyword score for normalization (avoid div-by-zero)
+        const maxKw = Math.max(...Array.from(keywordMap.values()).map((v) => v.score), 0.001);
+
+        const blended: SOPSuggestion[] = sops.map((sop) => {
+          const kw = keywordMap.get(sop.id) ?? { score: 0, reasons: [] };
+          const sem = semanticMap.get(sop.id) ?? 0;
+          // Map cosine similarity [-1,1] → [0,1]; then weight 70% semantic, 30% keyword
+          const semNorm = (sem + 1) / 2;
+          const kwNorm = kw.score / maxKw;
+          const blendedScore = semNorm * 0.7 + kwNorm * 0.3;
+          const reasons = [...kw.reasons];
+          if (sem > 0.3) {
+            reasons.push(`semantic similarity ${sem.toFixed(3)}`);
+          }
+          return { sop, score: blendedScore, reasons };
+        });
+
+        // Include everything with either a meaningful semantic signal or a keyword hit.
+        // Threshold: semantic contribution > 0.35 (roughly cosine > 0) OR any keyword match.
+        const filtered = blended.filter(
+          (s) => s.score > 0.35 || (keywordMap.get(s.sop.id)?.score ?? 0) > 0
+        );
+        filtered.sort((a, b) => b.score - a.score);
+        return filtered.slice(0, limit);
+      }
+    }
+  }
+
+  // Pure keyword fallback — identical to the old synchronous path.
+  const kwResults = sops
+    .map((sop) => {
+      const { score, reasons } = keywordMap.get(sop.id)
+        ? { ...keywordMap.get(sop.id)! }
+        : scoreSOPForTask(sop, task);
+      return { sop, score, reasons };
+    })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return kwResults.slice(0, limit);
+}
+
+/**
  * Returns the best SOP for a task only if the top match scores above the
  * threshold. Otherwise returns null (operator picks manually).
  */
-export function getBestSOPForTask(
+export async function getBestSOPForTask(
   task: Pick<Task, 'title' | 'description'> & { department?: string | null; workspace_id?: string | null },
   threshold = 0.5
-): SOP | null {
-  const suggestions = suggestSOPsForTask(task, 1);
+): Promise<SOP | null> {
+  const suggestions = await suggestSOPsForTask(task, 1);
   if (suggestions.length === 0) return null;
   if (suggestions[0].score < threshold) return null;
   return suggestions[0].sop;

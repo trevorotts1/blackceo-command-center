@@ -2058,22 +2058,6 @@ const migrations: Migration[] = [
   // column.  On fresh databases schema.ts builds the tasks table WITHOUT sop_id;
   // on existing databases the column was absent unless someone ran the manual
   // ALTER by hand.
-  //
-  // This migration is the authoritative owner of tasks.sop_id.  It is safe on:
-  //   (a) Fresh databases  — schema.ts CREATE TABLE IF NOT EXISTS is a no-op on
-  //       tables that already exist, so after runMigrations() adds the column
-  //       via this migration, the table has it.  On a brand-new box where the
-  //       tasks table was just created by schema.ts (without sop_id), this
-  //       migration adds it.
-  //   (b) Existing databases missing sop_id — the PRAGMA table_info guard below
-  //       detects the gap and runs the ALTER TABLE.
-  //   (c) Re-runs / boxes where sop_id was hand-patched — the guard skips the
-  //       ALTER without error.
-  //
-  // NOTE: migration 053 (backfill_sop_id_on_backlog_tasks) runs BEFORE this one
-  // in numeric order.  Migration 053 was patched to detect the missing column
-  // and no-op safely, deferring the backfill; the Triad gate re-evaluates sop_id
-  // on each task dispatch anyway, so no backfill data is lost.
   {
     id: '056',
     name: 'add_tasks_sop_id',
@@ -2097,6 +2081,33 @@ const migrations: Migration[] = [
         db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_sop_id ON tasks(sop_id)`);
         console.log('[Migration 056] tasks.sop_id already present — ensured index, nothing else to do');
       }
+    }
+  },
+  {
+    id: '057',
+    name: 'add_sop_embeddings_table',
+    // Semantic SOP search (feat/semantic-sop-search).
+    // Stores OpenAI text-embedding-3-small (1536-dim) vectors for every SOP.
+    // Separate table keeps sops clean and allows re-embedding without touching
+    // SOP rows. The embedding column is a raw IEEE 754 BLOB (Float32 × 1536
+    // = 6,144 bytes per row). Cosine similarity is computed in JS at query
+    // time — 2,578 rows × 6KB ≈ 15MB RAM, well within budget.
+    // Idempotent: CREATE TABLE IF NOT EXISTS + index IF NOT EXISTS.
+    up: (db) => {
+      console.log('[Migration 057] Creating sop_embeddings table...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sop_embeddings (
+          sop_id         TEXT PRIMARY KEY REFERENCES sops(id) ON DELETE CASCADE,
+          embedding      BLOB NOT NULL,
+          embedding_model TEXT NOT NULL DEFAULT 'text-embedding-3-small',
+          embedding_dims  INTEGER NOT NULL DEFAULT 1536,
+          embedded_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_embeddings_embedded_at ON sop_embeddings(embedded_at)`);
+
+      console.log('[Migration 057] sop_embeddings table ready');
     }
   },
 ];
