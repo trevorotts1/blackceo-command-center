@@ -1,3 +1,14 @@
+## [v4.3.1] - 2026-06-09 - Bulletproof task-ingest deduplication — title+window + idempotency_key
+
+Fixes the "duck-duplication" bug where two identical task requests (same title, same description, short time window) created two separate tasks.
+
+### Changes
+
+- **Layer 1 dedup in `createTaskCore`** (`src/lib/tasks.ts`): before inserting a new task, checks (a) an explicit `idempotency_key` match against existing `task_created` events, and (b) a 5-minute title+description+workspace window dedup. Returns `{ task, deduped: true }` for a match — no new row written.
+- **Ingest route** (`src/app/api/tasks/ingest/route.ts`): removed the old Layer-0 dedup query (now redundant) and wires through to `createTaskCore`'s richer result; returns `{ deduped: true, task_id, ... }` on a hit with HTTP 200 (callers can distinguish from the 201 create).
+- **UI create route** (`src/app/api/tasks/route.ts`): passes `skipWindowDedup: true` so intentional manual double-creates from the operator board are still honoured; explicit `idempotency_key` is still respected.
+- **241 new unit tests** (`tests/unit/task-ingest-dedup.test.ts`) covering idempotency-key match, window dedup, skipWindowDedup bypass, and edge cases.
+
 ## [v4.3.0] - 2026-06-02 - SOP wiring: nightly auto-writer, Triad auto-draft, role-library bridge
 
 Wires three previously-disconnected pieces of the Hybrid SOP system so the auto-SOP-writer, the Triad Rule, and the on-disk role library actually feed the Command Center SOP board. All three changes are additive; the SOP/Triad subsystem itself was already merged and enforced on main.

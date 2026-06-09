@@ -120,7 +120,9 @@ export async function POST(request: NextRequest) {
 
     // Delegate to the shared task-creation core so the UI create path and the
     // universal ingest endpoint (POST /api/tasks/ingest) can never drift.
-    const task = await createTaskCore(
+    // UI creates use skipWindowDedup:true — if an operator manually creates the
+    // same task twice we respect their intent rather than silently deduping it.
+    const result = await createTaskCore(
       {
         title: validatedData.title,
         description: validatedData.description,
@@ -133,11 +135,18 @@ export async function POST(request: NextRequest) {
         department: validatedData.department,
         due_date: validatedData.due_date,
         sop_id: validatedData.sop_id ?? null,
+        // UI creates are intentional — skip the window dedup but still honour
+        // any explicit idempotency_key the operator supplies.
+        skipWindowDedup: true,
       },
       { origin: request.headers.get('origin') }
     );
 
-    return NextResponse.json(task, { status: 201 });
+    if (!result) {
+      return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });
+    }
+
+    return NextResponse.json(result.task, { status: 201 });
   } catch (error) {
     console.error('Failed to create task:', error);
     return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });

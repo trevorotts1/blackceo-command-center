@@ -3,6 +3,7 @@ import { createHmac } from 'crypto';
 import { queryOne } from '@/lib/db';
 import { createTaskCore } from '@/lib/tasks';
 import type { TaskPriority } from '@/lib/types';
+// queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -156,23 +157,10 @@ export async function POST(request: NextRequest) {
         : undefined;
 
     // Deterministic dedupe key: idempotency_key wins, else source_ref.
+    // NOTE: The actual idempotency check now lives in createTaskCore (Layer 1).
+    // We pass the key through so createTaskCore embeds it in the event message
+    // AND checks it before inserting.
     const dedupeKey = idempotencyKey || sourceRef;
-
-    // Idempotency check — embed `[ingest:<key>]` in the task_created event
-    // message and match on it. A retry returns the existing task (200), never a
-    // duplicate.
-    if (dedupeKey) {
-      const existing = queryOne<{ task_id: string }>(
-        "SELECT task_id FROM events WHERE type = 'task_created' AND message LIKE ? AND task_id IS NOT NULL ORDER BY created_at ASC LIMIT 1",
-        [`%[ingest:${dedupeKey}]%`]
-      );
-      if (existing?.task_id) {
-        return NextResponse.json(
-          { ok: true, deduped: true, task_id: existing.task_id },
-          { status: 200 }
-        );
-      }
-    }
 
     const { workspaceId, resolvedBy } = resolveWorkspaceId(departmentSlug, persona);
 
@@ -193,7 +181,7 @@ export async function POST(request: NextRequest) {
     if (dedupeKey) eventMessageParts.push(`[ingest:${dedupeKey}]`);
     const eventMessage = eventMessageParts.join(' ');
 
-    const task = await createTaskCore(
+    const result = await createTaskCore(
       {
         title,
         description: finalDescription,
@@ -205,12 +193,32 @@ export async function POST(request: NextRequest) {
         workspace_id: workspaceId,
         department: departmentSlug ?? null,
         eventMessage,
+        // Pass idempotency key through so createTaskCore embeds it in the
+        // task_created event AND checks it before writing a new row.
+        idempotency_key: dedupeKey ?? null,
       },
       { origin: request.headers.get('origin') }
     );
 
-    if (!task) {
+    if (!result) {
       return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });
+    }
+
+    const { task, deduped } = result;
+
+    // Deduped tasks are returned as 200 (not 201) so callers can distinguish.
+    if (deduped) {
+      return NextResponse.json(
+        {
+          ok: true,
+          deduped: true,
+          task_id: task.id,
+          workspace_id: task.workspace_id ?? workspaceId,
+          resolved_by: resolvedBy,
+          status: task.status,
+        },
+        { status: 200 }
+      );
     }
 
     return NextResponse.json(

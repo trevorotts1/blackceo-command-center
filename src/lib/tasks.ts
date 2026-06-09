@@ -14,16 +14,119 @@
  * FK columns into `agents` and are validated as `.uuid()` by CreateTaskSchema.
  * An external OpenClaw payload cannot carry a Command Center agent UUID, so the
  * ingest endpoint MUST leave both NULL — never pass a raw external id here.
+ *
+ * DEDUPLICATION (two layers):
+ *
+ * Layer 1 — Idempotency key: callers that supply an `idempotency_key` in
+ * CreateTaskCoreInput get an event-marker check (`[ingest:<key>]` embedded in
+ * the task_created event message). A second call with the same key returns the
+ * existing task immediately.
+ *
+ * Layer 2 — Title+workspace window: before any insert, we check for a
+ * NON-archived task with the same normalised title (lowercase, trimmed,
+ * punctuation-collapsed) AND the same workspace/department, created within the
+ * last DEDUP_WINDOW_SEC seconds (default 120, env-overridable). A match returns
+ * the existing task with deduped:true so the caller surfaces it correctly.
+ * This layer fires for BOTH the ingest path and the normal UI create path.
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { queryOne, run } from '@/lib/db';
+import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { selectPersonaForTask } from '@/lib/persona-selector';
 import { getBestSOPForTask } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import type { Task, TaskPriority, Agent } from '@/lib/types';
+
+// ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
+
+/**
+ * Default dedup window in seconds. Override via DEDUP_WINDOW_SEC env var.
+ * Two identical tasks created within this window are considered duplicates.
+ */
+export const DEFAULT_DEDUP_WINDOW_SEC = 120;
+
+/**
+ * Collapse a task title to a normalised comparison key.
+ * Rules: lowercase, trim, collapse all whitespace to single space, strip
+ * all non-alphanumeric non-space chars so minor punctuation differences
+ * (em-dashes, commas, periods) don't create false negatives.
+ */
+export function normalizeTitle(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s]/g, ' ') // collapse punctuation to spaces
+    .replace(/\s+/g, ' ')          // collapse runs of whitespace
+    .trim();
+}
+
+export interface DedupeResult {
+  task: Task;
+  deduped: true;
+}
+
+/**
+ * Check whether a non-archived task with the same normalised title and same
+ * workspace already exists within the configured dedup window.
+ *
+ * Returns the matching Task if found, null otherwise.
+ *
+ * SQLite has no native normalisation function so we pull candidate rows by
+ * workspace + recency window and filter in JS. The candidate set is tiny
+ * (tasks created in the last N seconds) so this is fast and schema-free.
+ */
+export function findDuplicateByTitleWindow(
+  title: string,
+  workspaceId: string | null | undefined,
+  dedupWindowSec?: number,
+): Task | null {
+  const windowSec =
+    dedupWindowSec ??
+    (process.env.DEDUP_WINDOW_SEC ? parseInt(process.env.DEDUP_WINDOW_SEC, 10) : DEFAULT_DEDUP_WINDOW_SEC);
+  const cutoff = new Date(Date.now() - windowSec * 1000).toISOString();
+  const normalised = normalizeTitle(title);
+
+  const JOIN_CLAUSE = `
+    SELECT t.*,
+        aa.name             as assigned_agent_name,
+        aa.avatar_emoji     as assigned_agent_emoji,
+        ca.name             as created_by_agent_name,
+        ca.avatar_emoji     as created_by_agent_emoji
+    FROM tasks t
+    LEFT JOIN agents aa ON t.assigned_agent_id  = aa.id
+    LEFT JOIN agents ca ON t.created_by_agent_id = ca.id`;
+
+  let candidates: Task[];
+  if (workspaceId) {
+    candidates = queryAll<Task>(
+      `${JOIN_CLAUSE}
+       WHERE t.status != 'archived'
+         AND t.workspace_id = ?
+         AND t.created_at >= ?
+       ORDER BY t.created_at ASC`,
+      [workspaceId, cutoff],
+    );
+  } else {
+    // Match tasks with NULL workspace_id
+    candidates = queryAll<Task>(
+      `${JOIN_CLAUSE}
+       WHERE t.status != 'archived'
+         AND t.workspace_id IS NULL
+         AND t.created_at >= ?
+       ORDER BY t.created_at ASC`,
+      [cutoff],
+    );
+  }
+
+  for (const c of candidates) {
+    if (normalizeTitle(c.title) === normalised) {
+      return c;
+    }
+  }
+  return null;
+}
 
 export interface CreateTaskCoreInput {
   title: string;
@@ -43,6 +146,23 @@ export interface CreateTaskCoreInput {
    * a retry/backfill can dedupe without a schema change.
    */
   eventMessage?: string;
+  /**
+   * Caller-supplied idempotency key. When provided, createTaskCore checks for
+   * a prior `task_created` event carrying `[ingest:<key>]` and returns that
+   * task with deduped:true instead of inserting a duplicate.
+   */
+  idempotency_key?: string | null;
+  /**
+   * When true, skip the title+workspace window dedup check. Use only for
+   * explicit operator UI creates where the user intentionally wants two tasks
+   * with the same title (e.g. recurring tasks). Default: false.
+   */
+  skipWindowDedup?: boolean;
+}
+
+export interface CreateTaskCoreResult {
+  task: Task;
+  deduped: boolean;
 }
 
 export interface CreateTaskCoreOptions {
@@ -59,13 +179,55 @@ export interface CreateTaskCoreOptions {
 
 /**
  * Insert a task, log the creation event, run persona selection (non-fatal),
- * broadcast over SSE, and (optionally) notify the OpenClaw gateway. Returns the
- * fully-joined task row.
+ * broadcast over SSE, and (optionally) notify the OpenClaw gateway.
+ *
+ * Returns { task, deduped } — `deduped:true` when a matching task already
+ * existed (either via idempotency_key or the title+workspace window check) and
+ * no new row was written.
  */
 export async function createTaskCore(
   input: CreateTaskCoreInput,
   options: CreateTaskCoreOptions = {}
-): Promise<Task | undefined> {
+): Promise<CreateTaskCoreResult | undefined> {
+  // ── DEDUP LAYER 1: idempotency_key ────────────────────────────────────────
+  // Check for a prior task_created event carrying the [ingest:<key>] marker.
+  if (input.idempotency_key) {
+    const existing = queryOne<{ task_id: string }>(
+      "SELECT task_id FROM events WHERE type = 'task_created' AND message LIKE ? AND task_id IS NOT NULL ORDER BY created_at ASC LIMIT 1",
+      [`%[ingest:${input.idempotency_key}]%`],
+    );
+    if (existing?.task_id) {
+      const priorTask = queryOne<Task>(
+        `SELECT t.*,
+            aa.name  as assigned_agent_name,
+            aa.avatar_emoji as assigned_agent_emoji,
+            ca.name  as created_by_agent_name,
+            ca.avatar_emoji as created_by_agent_emoji
+         FROM tasks t
+         LEFT JOIN agents aa ON t.assigned_agent_id  = aa.id
+         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+         WHERE t.id = ?`,
+        [existing.task_id],
+      );
+      if (priorTask) {
+        return { task: priorTask, deduped: true };
+      }
+    }
+  }
+
+  // ── DEDUP LAYER 2: title + workspace window ────────────────────────────────
+  // Applies to BOTH ingest and UI create paths unless the caller explicitly
+  // opts out (skipWindowDedup:true for deliberate repeated creates).
+  if (!input.skipWindowDedup) {
+    const duplicate = findDuplicateByTitleWindow(
+      input.title,
+      input.workspace_id,
+    );
+    if (duplicate) {
+      return { task: duplicate, deduped: true };
+    }
+  }
+
   const id = uuidv4();
   const now = new Date().toISOString();
 
@@ -312,5 +474,6 @@ export async function createTaskCore(
     })();
   }
 
-  return task;
+  if (!task) return undefined;
+  return { task, deduped: false };
 }
