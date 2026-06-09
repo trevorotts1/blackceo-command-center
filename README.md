@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.7.0 (2026-06-09)** wires per-department QC Specialist agents: migration 060 adds `agents.role_type`, seeds one QC Specialist per workspace, and the QC scorer + review→done gate now resolve the task's own dept QC agent instead of any global master. See `CHANGELOG.md` for the full entry.
+>
 > **v4.6.0 (2026-06-09)** fixes a fleet-wide board ordering bug: the canonical CEO dept slug `master-orchestrator` now correctly pins to the top of every board, and General Tasks pins to the bottom. See `CHANGELOG.md` for the full entry.
 >
 > **v4.1.7 (2026-05-30)** adds two universal Operator Console UX features. **(1) An onboarding walkthrough** — a first-run, re-openable overlay that explains each sub-module (Console, Bridge, Workspace, Studio, Notebook, Goals, Journal, Memory, Research, Call Mode, Web Agent) in plain English. It auto-opens once (persists `bcc-operator-onboarding-seen`), re-opens from a sidebar/home "Show walkthrough" control and a per-page "What is this?" button, and the **Memory card explains the vault**: everything you write flows to the vault and is searchable in Memory — on a **Mac Mini** you can also browse it in Obsidian, on a **VPS** there is no Obsidian so the Memory page IS your window into the brain. Fully accessible (focus trap, Esc, arrow-key nav, aria, ≥44px targets, ≥16px text, icon+label). **(2) Per-module vault-write health dots** — a small status dot per persisting module (Goals/Journal/Notebook/Studio/Research): green = last write reached the vault, amber = saved-but-vault-unconfirmed, red = error, grey = unknown (never fabricated green). Backed by a read-only `GET /api/operator/health` that reuses `vaultRoot()` and never throws. See `CHANGELOG.md` for the full v4.1.7 entry.
@@ -90,7 +92,7 @@ See PRD v2.1 (`onboarding PRD v2.1.md` in user's local Downloads) for the comple
 
 AI Agent Management Dashboard - A universal template for any organization.
 
-**Current Version: v4.3.0** — 2026-06-02
+**Current Version: v4.7.0** — 2026-06-09
 
 ## Overview
 

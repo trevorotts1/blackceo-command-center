@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE INDEX IF NOT EXISTS idx_workspaces_company ON workspaces(company_id);
 
 -- Agents table
+-- NOTE: agents.role_type TEXT column is added by migration 060.
+-- It is intentionally NOT declared here to avoid a conflict with migration 034's
+-- table-rebuild path (migration 034 uses colList from PRAGMA table_info at
+-- run-time to INSERT rows into agents_new; if schema.ts added role_type before
+-- migration 034 ran, agents_new would lack it and the INSERT would fail on fresh DBs).
+-- Fresh DBs run schema.ts (without role_type) → migration 034 rebuilds cleanly
+-- → migration 060 adds role_type. Existing DBs skip schema.ts entirely for this
+-- table (CREATE TABLE IF NOT EXISTS is a no-op) and migration 060 does ALTER ADD.
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

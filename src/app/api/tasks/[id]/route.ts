@@ -74,18 +74,80 @@ export async function PATCH(
     const values: unknown[] = [];
     const now = new Date().toISOString();
 
-    // Workflow enforcement for agent-initiated approvals
-    // If an agent is trying to move review→done, they must be a master agent
-    // User-initiated moves (no agent ID) are allowed
+    // Workflow enforcement for agent-initiated approvals (review → done gate).
+    //
+    // The approving authority is the ITEM'S OWN DEPARTMENT QC agent
+    // (role_type='qc', workspace_id matches the task's workspace). This
+    // implements the per-department QC model: the Marketing QC Specialist
+    // gates marketing tasks, the Sales QC Specialist gates sales tasks, etc.
+    //
+    // Fallback hierarchy (in order):
+    //   1. Task's dept QC agent (role_type='qc' in the task's workspace)
+    //   2. Any master agent in the task's workspace (dept head approval)
+    //   3. Any global master agent (last resort, keeps legacy behavior)
+    //
+    // User-initiated moves (no updated_by_agent_id) are always allowed so
+    // human operators are never blocked.
     if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
-      const updatingAgent = queryOne<Agent>(
-        'SELECT is_master FROM agents WHERE id = ?',
+      const updatingAgent = queryOne<Agent & { role_type?: string }>(
+        'SELECT id, is_master, role_type, workspace_id FROM agents WHERE id = ?',
         [validatedData.updated_by_agent_id]
       );
 
-      if (!updatingAgent || !updatingAgent.is_master) {
+      if (!updatingAgent) {
         return NextResponse.json(
-          { error: 'Forbidden: only the master agent can approve tasks' },
+          { error: 'Forbidden: updating agent not found' },
+          { status: 403 }
+        );
+      }
+
+      // Check if the updating agent is the dept's QC specialist (primary path)
+      const isQCSpecialist = updatingAgent.role_type === 'qc';
+
+      // Check if the updating agent is a master agent in this workspace (dept head)
+      const isMasterInWorkspace = updatingAgent.is_master &&
+        (updatingAgent.workspace_id === existing.workspace_id ||
+         updatingAgent.workspace_id === existing.department);
+
+      // Check if the updating agent is a global master (legacy fallback)
+      const isGlobalMaster = updatingAgent.is_master;
+
+      // Verify the QC agent actually belongs to this task's department
+      // (prevents a Marketing QC agent from approving Sales tasks)
+      let isAuthorizedQC = false;
+      if (isQCSpecialist) {
+        isAuthorizedQC =
+          updatingAgent.workspace_id === existing.workspace_id ||
+          updatingAgent.workspace_id === existing.department;
+      }
+
+      // Also check: is there a dept QC agent registered? If so, only that agent
+      // (or a master) can approve. If no QC agent is registered yet (fresh
+      // install before migration 060), fall back to master-agent check only.
+      let hasDeptQCAgent = false;
+      try {
+        // Guard: role_type column must exist
+        const colCheck = queryOne<{ role_type: string }>(
+          "SELECT role_type FROM agents WHERE workspace_id = ? AND role_type = 'qc' LIMIT 1",
+          [existing.workspace_id ?? 'default']
+        );
+        hasDeptQCAgent = !!colCheck;
+      } catch {
+        // Pre-migration-060 DB: no role_type column → hasDeptQCAgent stays false
+      }
+
+      const approved = hasDeptQCAgent
+        ? isAuthorizedQC || isMasterInWorkspace || isGlobalMaster
+        : isGlobalMaster; // Pre-QC-migration fallback: any master can approve
+
+      if (!approved) {
+        return NextResponse.json(
+          {
+            error: 'Forbidden: only the department QC Specialist (or a master agent) can approve tasks from review',
+            hint: hasDeptQCAgent
+              ? `The QC agent for this task's department must approve it. Use the auto-QC scorer (runQCOnReview) or assign the approval to the dept QC agent.`
+              : 'No QC agent seeded yet for this department. Run migration 060 or seed a role_type=qc agent.'
+          },
           { status: 403 }
         );
       }

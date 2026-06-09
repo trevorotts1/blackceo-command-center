@@ -1,3 +1,22 @@
+## [v4.7.0] - 2026-06-09 - Per-department QC Specialist gates review→done
+
+Each department now has its own dedicated QC Specialist agent (`role_type=qc`). The QC scorer and the review→done gate use the task's own department QC agent for scoring and approval authority, with a global-master fallback for pre-migration installs.
+
+### New
+
+- **`agents.role_type` column** — migration 060 (`add_role_type_and_seed_qc_agents`) adds the column via `ALTER TABLE ADD COLUMN` (idempotent) and seeds one `QC Specialist` agent per existing workspace (`role_type='qc'`, `specialist_type='permanent'`).
+- **`resolveQCAgent(task)`** — `src/lib/qc-scorer.ts` resolves the task's department QC agent by `workspace_id` (falling back to `canonicalDeptSlug` lookup); gracefully returns `null` when the column doesn't exist yet (pre-060 installs).
+- **Per-dept scorer identity** — `buildQCPrompt` now opens with `"You are <AgentName>, the QC Specialist for the <dept> department."` when a QC agent is resolved; `runQCOnReview` event log carries `[scorer:<name>]` or `[scorer:global-heuristic]`.
+- **`review→done` gate** (`src/app/api/tasks/[id]/route.ts`) — approval authority shifts from "any `is_master` agent" to the task's dept QC agent; falls back to global master when no QC agent exists for the workspace (safe on existing installs).
+- **Unit tests** — 8 new tests in `tests/unit/per-dept-qc-specialist.test.ts` covering column existence, seeding, resolution, and gate authorization.
+
+### Migration SQL (060)
+
+```sql
+ALTER TABLE agents ADD COLUMN role_type TEXT;
+INSERT OR IGNORE INTO agents (id, name, role, ..., role_type) VALUES ('qc-agent-<ws_id>', '<ws_name> QC Specialist', 'QC Specialist', ..., 'qc');
+```
+
 ## [v4.6.0] - 2026-06-09 - Board ordering: CEO pinned first, General Tasks pinned last (fleet-wide fix)
 
 Fixes a fleet-wide bug where the canonical CEO department slug `master-orchestrator` was never hoisted to the top of the board (the old hoist only matched legacy slugs `ceo`/`dept-ceo`). Also pins General Tasks to the bottom. Both guarantees are enforced at two independent layers (DB sort_order + UI).
