@@ -2011,6 +2011,27 @@ const migrations: Migration[] = [
       console.log('[Migration 054] agents.persona + dispatch_rules ready');
     }
   },
+  {
+    id: '055',
+    name: 'add_workspace_purpose_for_intelligent_routing',
+    // Ensures workspaces.description exists and is available for intelligent routing.
+    // Idempotent: uses PRAGMA table_info guard before every ALTER TABLE.
+    up: (db) => {
+      console.log('[Migration 055] Ensuring workspaces.description column for intelligent routing...');
+
+      const wsCols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      if (!wsCols.includes('description')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN description TEXT`);
+        console.log('[Migration 055] Added workspaces.description');
+      } else {
+        console.log('[Migration 055] workspaces.description already present — skipping');
+      }
+
+      console.log('[Migration 055] Workspace purpose columns ready for intelligent routing');
+    },
+  },
 ];
 
 /**

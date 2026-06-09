@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
       department: task.department,
     };
 
-    const result = routeTask(routingInput);
+    const result = await routeTask(routingInput);
 
     if (!result) {
       return NextResponse.json(
@@ -125,7 +125,7 @@ export async function GET(request: NextRequest) {
 
     const effectiveWorkspaceId = workspaceId || task.workspace_id || 'default';
 
-    const result = routeTask({
+    const result = await routeTask({
       title: task.title,
       description: task.description || '',
       priority: task.priority,

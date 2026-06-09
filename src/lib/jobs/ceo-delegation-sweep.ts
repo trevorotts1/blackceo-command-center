@@ -37,7 +37,7 @@ interface CeoTaskRow {
   department: string | null;
 }
 
-export function runCeoDelegationSweep(): void {
+export async function runCeoDelegationSweep(): Promise<void> {
   if (process.env.CEO_DELEGATION_SWEEP_ENABLED === '0') return;
 
   // CEO workspace is keyed by slug 'ceo' / id 'dept-ceo' (see migrations).
@@ -63,7 +63,7 @@ export function runCeoDelegationSweep(): void {
     try {
       // Route across ALL departments (workspace_id: null) so the task can be
       // delegated DOWN out of the CEO workspace.
-      const routing = routeTask({
+      const routing = await routeTask({
         title: task.title,
         description: task.description || '',
         priority: task.priority,
