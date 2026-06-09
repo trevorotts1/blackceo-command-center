@@ -33,6 +33,7 @@
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { getMissionControlUrl } from '@/lib/config';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -40,6 +41,13 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 /** Minimum score (inclusive) to auto-approve. Matches the ≥8.5 gate. */
 export const QC_PASS_THRESHOLD = 8.5;
+
+/**
+ * Maximum number of times a task can be re-routed after QC failure before the
+ * loop is capped and the task is set to `blocked` for human review.
+ * Override with QC_MAX_REROUTES env var. Default: 3.
+ */
+export const QC_MAX_REROUTES = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
 
 /** Disable the whole QC-agent auto-scorer by setting this env to "1". */
 const DISABLE_QC_SCORER =
@@ -344,6 +352,8 @@ interface TaskRowForQC {
   workspace_id: string | null;
   assigned_agent_id: string | null;
   status: string;
+  /** Incremented each time a QC-fail re-route is attempted. Capped at QC_MAX_REROUTES. */
+  qc_reroute_attempts: number | null;
 }
 
 interface SOPRowForQC {
@@ -432,7 +442,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
   try {
     const task = queryOne<TaskRowForQC>(
-      'SELECT id, title, description, sop_id, department, workspace_id, assigned_agent_id, status FROM tasks WHERE id = ?',
+      'SELECT id, title, description, sop_id, department, workspace_id, assigned_agent_id, status, qc_reroute_attempts FROM tasks WHERE id = ?',
       [taskId],
     );
 
@@ -506,18 +516,84 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       );
       console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
     } else {
-      // FAIL: return to backlog (not in_progress) with gap notes so ceo-delegation-sweep
-      // or auto-route can re-dispatch to the right department.
+      // FAIL: return to backlog with gap notes, then re-dispatch — unless the
+      // infinite-loop cap has been reached.
+
+      // ── Infinite-loop guard ──────────────────────────────────────────────
+      // Increment the per-task attempt counter. If it exceeds QC_MAX_REROUTES,
+      // block the task and notify the CEO instead of re-dispatching.
+      const prevAttempts = task.qc_reroute_attempts ?? 0;
+      const newAttempts = prevAttempts + 1;
+
+      if (newAttempts > QC_MAX_REROUTES) {
+        // Cap reached → set task to `blocked` and stop the loop.
+        const blockedNote = `[QC-BLOCKED] Task failed QC ${newAttempts} time(s) (cap: ${QC_MAX_REROUTES}). Needs human review. Last score: ${result.score.toFixed(1)}/10. ${result.reason}`;
+
+        run(
+          `UPDATE tasks SET status = 'blocked',
+             description = CASE
+               WHEN description IS NULL OR description = '' THEN ?
+               ELSE description || char(10) || char(10) || ?
+             END,
+             qc_reroute_attempts = ?,
+             updated_at = ?
+           WHERE id = ? AND status = 'review'`,
+          [blockedNote, blockedNote, newAttempts, now, taskId],
+        );
+
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'task_status_changed', taskId,
+            `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Human review required.`,
+            now],
+        );
+
+        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): BLOCKED after ${newAttempts} QC-fail re-routes — CEO notified`);
+
+        // Notify CEO via event so the Live Feed surfaces the block.
+        let ceoAgentIdBlocked: string | null = null;
+        try {
+          const row = queryOne<{ id: string }>(
+            `SELECT id FROM agents WHERE is_master = 1
+             AND (workspace_id = 'master-orchestrator' OR workspace_id = 'ceo')
+             LIMIT 1`,
+            [],
+          );
+          ceoAgentIdBlocked = row?.id ?? null;
+        } catch { /* no CEO agent — still visible via task event */ }
+
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            'qc_review',
+            ceoAgentIdBlocked,
+            taskId,
+            `[QC-BLOCKED] "${task.title}" failed QC ${newAttempts} time(s) and has been blocked. Score: ${result.score.toFixed(1)}/10. Needs human attention.`,
+            now,
+          ],
+        );
+
+        return result;
+      }
+      // ── End of loop guard ────────────────────────────────────────────────
+
       const kickbackNote = result.gaps.length > 0
-        ? `[QC-FAIL] Score ${result.score.toFixed(1)}/10. Rework needed: ${result.gaps.join('; ')}`
-        : `[QC-FAIL] Score ${result.score.toFixed(1)}/10. ${result.reason}`;
+        ? `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Rework needed: ${result.gaps.join('; ')}`
+        : `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
 
       run(
-        `UPDATE tasks SET status = 'backlog', description = CASE
-           WHEN description IS NULL OR description = '' THEN ?
-           ELSE description || char(10) || char(10) || ?
-         END, updated_at = ? WHERE id = ? AND status = 'review'`,
-        [kickbackNote, kickbackNote, now, taskId],
+        `UPDATE tasks SET status = 'backlog',
+           description = CASE
+             WHEN description IS NULL OR description = '' THEN ?
+             ELSE description || char(10) || char(10) || ?
+           END,
+           qc_reroute_attempts = ?,
+           updated_at = ?
+         WHERE id = ? AND status = 'review'`,
+        [kickbackNote, kickbackNote, newAttempts, now, taskId],
       );
 
       // Write task_status_changed event — visible on the board timeline.
@@ -525,7 +601,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         `INSERT INTO events (id, type, task_id, message, created_at)
          VALUES (?, ?, ?, ?, ?)`,
         [uuidv4(), 'task_status_changed', taskId,
-          `[QC-AUTO] Task "${task.title}" returned to Backlog — score ${result.score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD}. ${result.reason}`,
+          `[QC-AUTO] Task "${task.title}" returned to Backlog — score ${result.score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD} (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`,
           now],
       );
 
@@ -556,21 +632,33 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           'qc_review',
           ceoAgentId,
           taskId,
-          `[QC-REROUTE] "${task.title}" FAILED QC → re-route to ${ceoDept} with fixes: ${gapsSummary}`,
+          `[QC-REROUTE] "${task.title}" FAILED QC → re-route to ${ceoDept} with fixes: ${gapsSummary} (attempt ${newAttempts}/${QC_MAX_REROUTES})`,
           now,
         ],
       );
 
-      // Trigger auto-route fire-and-forget so the task gets re-dispatched
-      // immediately rather than waiting for the next ceo-delegation-sweep tick.
-      const baseUrl = process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+      // ── Fix: use getMissionControlUrl() (port 4000) not NEXTAUTH_URL (port 3000) ──
+      // This was the root cause of "fetch failed" — NEXTAUTH_URL defaults to
+      // port 3000 but the app runs on port 4000.
+      const baseUrl = getMissionControlUrl();
       fetch(`${baseUrl}/api/webhooks/auto-route`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId }),
+        body: JSON.stringify({ taskId, workspaceId: task.workspace_id }),
+      }).then(async (resp) => {
+        if (resp.ok) {
+          // Auto-route succeeded: move the task to in_progress so it leaves backlog.
+          run(
+            `UPDATE tasks SET status = 'in_progress', updated_at = ? WHERE id = ? AND status = 'backlog'`,
+            [new Date().toISOString(), taskId],
+          );
+          console.log(`[QCScorer] Auto-route succeeded for task "${task.title}" (${taskId}) → in_progress`);
+        } else {
+          console.warn(`[QCScorer] Auto-route returned ${resp.status} for task ${taskId} — stays in backlog for ceo-delegation-sweep`);
+        }
       }).catch(err => console.warn('[QCScorer] Auto-route trigger failed (non-fatal):', (err as Error).message));
 
-      console.log(`[QCScorer] Task "${task.title}" (${taskId}): FAIL ${result.score.toFixed(1)}/10 → backlog (re-route triggered)`);
+      console.log(`[QCScorer] Task "${task.title}" (${taskId}): FAIL ${result.score.toFixed(1)}/10 → backlog (re-route triggered, attempt ${newAttempts}/${QC_MAX_REROUTES})`);
     }
 
     return result;

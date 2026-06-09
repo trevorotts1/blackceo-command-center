@@ -66,17 +66,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Assign the agent to the task
+    // Assign the agent and advance the task out of backlog → in_progress so
+    // the re-dispatched task is visible to the specialist and leaves the backlog.
+    // Only move from backlog; tasks already in_progress/review/done are left alone.
     const now = new Date().toISOString();
     run(
       `UPDATE tasks
-       SET assigned_agent_id = ?, updated_at = ?
+       SET assigned_agent_id = ?,
+           status = CASE WHEN status = 'backlog' THEN 'in_progress' ELSE status END,
+           updated_at = ?
        WHERE id = ?`,
       [result.agentId, now, taskId],
     );
 
     console.log(
-      `[AutoRoute] Task "${task.title}" (${taskId}) assigned to ${result.agentName} via ${result.department}`,
+      `[AutoRoute] Task "${task.title}" (${taskId}) assigned to ${result.agentName} via ${result.department} → in_progress`,
     );
 
     return NextResponse.json({

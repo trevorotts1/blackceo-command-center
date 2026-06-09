@@ -2147,6 +2147,29 @@ const migrations: Migration[] = [
     },
   },
 
+  // ── Migration 061 — Add tasks.qc_reroute_attempts for QC loop guard ────────
+  {
+    id: '061',
+    name: 'add_tasks_qc_reroute_attempts',
+    // Adds tasks.qc_reroute_attempts INTEGER column used by the QC scorer
+    // (v4.12.0) to track how many times a task has been returned to backlog
+    // after failing QC. When the count reaches QC_MAX_REROUTES (default 3),
+    // the scorer stops re-dispatching, sets the task to `blocked`, and writes
+    // a CEO-addressed event to surface the loop for human review.
+    // Additive + idempotent: safe against any existing DB.
+    up: (db) => {
+      console.log('[Migration 061] Adding tasks.qc_reroute_attempts for QC loop guard...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('qc_reroute_attempts')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN qc_reroute_attempts INTEGER DEFAULT 0`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_qc_reroute ON tasks(qc_reroute_attempts) WHERE qc_reroute_attempts > 0`);
+        console.log('[Migration 061] tasks.qc_reroute_attempts + index added');
+      } else {
+        console.log('[Migration 061] tasks.qc_reroute_attempts already present, skipping');
+      }
+    },
+  },
+
   // ── Migration 060 — Per-department QC Specialist agents ────────────────────
   {
     id: '060',

@@ -14,6 +14,12 @@
  * on the CEO for genuine human/exec decisions — that's the safe fallback, so
  * the CEO is a dispatcher, not a dumping ground.
  *
+ * QC-fail re-dispatch (v4.12.0):
+ * Also sweeps backlog tasks that have been kicked back by the QC scorer
+ * (they have a `department` set and a `[QC-FAIL]` marker in description).
+ * These tasks know their target department, so routeTask is run with the
+ * original department hint to re-assign the right specialist.
+ *
  * LOW-FREQUENCY and trivially disabled: remove the one JOBS entry in
  * scheduler.ts or set CEO_DELEGATION_SWEEP_ENABLED=0.
  */
@@ -35,34 +41,65 @@ interface CeoTaskRow {
   priority: Task['priority'];
   workspace_id: string;
   department: string | null;
+  /** Non-null when task was kicked back by QC scorer (has [QC-FAIL] marker). */
+  qc_reroute_attempts: number | null;
 }
 
 export async function runCeoDelegationSweep(): Promise<void> {
   if (process.env.CEO_DELEGATION_SWEEP_ENABLED === '0') return;
 
-  // CEO workspace is keyed by slug 'ceo' / id 'dept-ceo' (see migrations).
+  // ── 1. CEO-workspace stranded tasks (original behavior) ─────────────────
   const ceoWorkspaceIds = (queryAll<{ id: string }>(
     `SELECT id FROM workspaces WHERE LOWER(slug) IN ('ceo','dept-ceo') OR id = 'dept-ceo' OR id = 'ceo'`
   )).map((w) => w.id);
 
-  if (ceoWorkspaceIds.length === 0) return;
+  const ceoTasks: CeoTaskRow[] = [];
+  if (ceoWorkspaceIds.length > 0) {
+    const placeholders = ceoWorkspaceIds.map(() => '?').join(',');
+    const rows = queryAll<CeoTaskRow>(
+      `SELECT id, title, description, priority, workspace_id, department, qc_reroute_attempts
+       FROM tasks
+       WHERE workspace_id IN (${placeholders})
+         AND status = 'backlog'
+         AND assigned_agent_id IS NULL`,
+      ceoWorkspaceIds,
+    );
+    ceoTasks.push(...rows);
+  }
 
-  const placeholders = ceoWorkspaceIds.map(() => '?').join(',');
-  const tasks = queryAll<CeoTaskRow>(
-    `SELECT id, title, description, priority, workspace_id, department
+  // ── 2. QC-fail backlog tasks from ANY department (v4.12.0 addition) ──────
+  // These tasks were kicked back by the QC scorer: they have qc_reroute_attempts > 0
+  // and description containing '[QC-FAIL]'. They know their target department but
+  // the immediate auto-route POST may have failed (port 3000 bug, now fixed).
+  // This sweep is the reliable safety net for any that slipped through.
+  const qcFailTasks = queryAll<CeoTaskRow>(
+    `SELECT id, title, description, priority, workspace_id, department, qc_reroute_attempts
      FROM tasks
-     WHERE workspace_id IN (${placeholders})
-       AND status IN ('backlog')
-       AND (assigned_agent_id IS NULL)`,
-    ceoWorkspaceIds
+     WHERE status = 'backlog'
+       AND qc_reroute_attempts > 0
+       AND archived_at IS NULL`,
+    [],
   );
 
-  if (tasks.length === 0) return;
+  // Merge: de-duplicate by id (a CEO-workspace QC-fail task would appear in both).
+  const seenIds = new Set<string>();
+  const allTasks: CeoTaskRow[] = [];
+  for (const t of [...ceoTasks, ...qcFailTasks]) {
+    if (!seenIds.has(t.id)) {
+      seenIds.add(t.id);
+      allTasks.push(t);
+    }
+  }
 
-  for (const task of tasks) {
+  if (allTasks.length === 0) return;
+
+  for (const task of allTasks) {
     try {
+      const isQcFail = (task.qc_reroute_attempts ?? 0) > 0;
+
       // Route across ALL departments (workspace_id: null) so the task can be
-      // delegated DOWN out of the CEO workspace.
+      // delegated DOWN. For QC-fail tasks, pass the known department hint so
+      // the router re-selects the right specialist.
       const routing = await routeTask({
         title: task.title,
         description: task.description || '',
@@ -71,27 +108,42 @@ export async function runCeoDelegationSweep(): Promise<void> {
         department: task.department || undefined,
       });
 
-      // Only re-home on a confident, non-CEO match.
-      if (!routing) continue;
+      if (!routing) {
+        if (isQcFail) {
+          console.warn(`[ceo-delegation] QC-fail re-dispatch: no route found for "${task.title}" (${task.id}) — stays in backlog`);
+        }
+        continue;
+      }
       if (routing.score < CONFIDENCE_THRESHOLD) continue;
-      if (/ceo|com/i.test(routing.department)) continue; // still a CEO/COM decision
+      if (!isQcFail && /ceo|com/i.test(routing.department)) continue; // CEO/COM — leave for human
 
       const now = new Date().toISOString();
       run(
-        `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
-        [routing.agentId, routing.department, now, task.id]
+        `UPDATE tasks SET assigned_agent_id = ?, department = ?, status = 'in_progress', updated_at = ? WHERE id = ?`,
+        [routing.agentId, routing.department, now, task.id],
       );
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [uuidv4(), 'task_dispatched', routing.agentId, task.id, `CEO delegation: ${routing.reason}`, now]
+        [
+          uuidv4(),
+          'task_dispatched',
+          routing.agentId,
+          task.id,
+          isQcFail
+            ? `QC-fail re-dispatch (attempt ${task.qc_reroute_attempts}): ${routing.reason}`
+            : `CEO delegation: ${routing.reason}`,
+          now,
+        ],
       );
       const updated = queryOne<Task>(
         `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji
          FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = ?`,
-        [task.id]
+        [task.id],
       );
       if (updated) broadcast({ type: 'task_updated', payload: updated });
-      console.log(`[ceo-delegation] Re-homed task ${task.id} ("${task.title}") → ${routing.agentName} (${routing.department})`);
+      console.log(
+        `[ceo-delegation] ${isQcFail ? 'QC-fail re-dispatch' : 'Re-homed'} task ${task.id} ("${task.title}") → ${routing.agentName} (${routing.department})`,
+      );
     } catch (err) {
       console.warn(`[ceo-delegation] Sweep failed for task ${task.id}:`, (err as Error).message);
     }
