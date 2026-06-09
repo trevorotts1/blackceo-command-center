@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   planning_dispatch_error TEXT,
   sop_id TEXT,
   completed_at TEXT,
+  archived_at TEXT,
+  -- QC loop guard (migration 061): counts how many times this task has been
+  -- returned to backlog by the QC scorer. Capped at QC_MAX_REROUTES (default 3)
+  -- before the task is set to blocked status and the CEO is notified.
+  qc_reroute_attempts INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

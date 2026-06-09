@@ -87,6 +87,10 @@ export interface Task {
   // Soft-archive timestamp set by the weekly Done-clear job (migration 055).
   // IS NOT NULL = task has been archived; NULL = live on the board.
   archived_at?: string | null;
+  // QC loop guard (migration 061): number of times the QC scorer has returned
+  // this task to backlog after a FAIL. Capped at QC_MAX_REROUTES (default 3)
+  // before the task is set to `blocked` for human review.
+  qc_reroute_attempts?: number | null;
   // Joined fields (populated by the tasks API GET; not stored on the row)
   model_label?: string | null;
   model_provider?: string | null;

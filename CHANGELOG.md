@@ -1,3 +1,29 @@
+## [v4.12.0] - 2026-06-09 - QC loop closed: port fix, re-dispatch to in_progress, infinite-loop guard
+
+Two bugs caused QC-failed tasks to strand in backlog and never be redone automatically.
+
+### Fixed
+
+- **`src/lib/qc-scorer.ts` — FAIL-branch base URL (port 3000 → 4000)**: The re-route POST was built as `NEXTAUTH_URL || NEXT_PUBLIC_APP_URL || 'http://localhost:3000'`. The app runs on **port 4000**, so this POST always failed with "fetch failed" when `NEXTAUTH_URL` was unset. Fixed: now uses `getMissionControlUrl()` from `src/lib/config.ts`, which returns `MISSION_CONTROL_URL || 'http://localhost:4000'` (server-side). Import added at top of file.
+- **`src/app/api/webhooks/auto-route/route.ts` — status advance**: The POST handler only set `assigned_agent_id` but left `status = 'backlog'`. A task assigned but still in backlog was invisible to the specialist and never appeared in their queue. Fixed: the UPDATE now also sets `status = 'in_progress'` when the current status is `'backlog'` (CASE WHEN guard — tasks already in_progress/review/done are untouched).
+- **`src/lib/qc-scorer.ts` — FAIL branch now persists `qc_reroute_attempts`**: The UPDATE that sets `status = 'backlog'` also increments `qc_reroute_attempts` so the loop guard can track repeat failures.
+
+### Added
+
+- **`src/lib/qc-scorer.ts` — Infinite-loop guard (`qc_reroute_attempts` + `QC_MAX_REROUTES`)**: Each QC-fail re-route increments `tasks.qc_reroute_attempts`. When the counter exceeds `QC_MAX_REROUTES` (default **3**, overridable via env), the scorer stops re-dispatching and instead: sets the task to **`blocked`**, appends a `[QC-BLOCKED]` note to description, writes a `task_status_changed` event, and writes a CEO-addressed `qc_review` event with `[QC-BLOCKED]` so the Live Feed surfaces it for human attention. The kickback note now also shows `(attempt N/cap)` for visibility.
+- **`src/lib/jobs/ceo-delegation-sweep.ts` — QC-fail backlog sweep**: Extended `runCeoDelegationSweep()` to also sweep backlog tasks with `qc_reroute_attempts > 0` from **any** department (not just CEO-workspace tasks). These tasks know their target department; the sweep re-routes them via `routeTask()` with the department hint and advances status to `in_progress`. This is the reliable safety net for tasks the immediate auto-route POST may have missed (race condition or transient failure).
+- **`src/lib/db/migrations.ts` — Migration 061** (`add_tasks_qc_reroute_attempts`): Adds `tasks.qc_reroute_attempts INTEGER DEFAULT 0` column + partial index `WHERE qc_reroute_attempts > 0`. Additive + idempotent.
+- **`src/lib/db/schema.ts`** — `qc_reroute_attempts` added to the tasks table definition for fresh installs.
+- **`src/lib/types.ts`** — `qc_reroute_attempts?: number | null` added to the `Task` interface.
+- **`tests/unit/qc-loop-close.test.ts`** — 8 unit tests: URL returns port 4000; `MISSION_CONTROL_URL` env respected; migration 061 column exists; `qc_reroute_attempts` increments on fail; task blocked after cap; `QC-BLOCKED` event written at cap (no `QC-REROUTE`); sub-cap stays in backlog; ceo-delegation-sweep query includes qc-fail tasks.
+
+### Notes
+
+- `QC_MAX_REROUTES` env (integer, default `3`): set lower (e.g. `1`) in test environments; set higher for complex departments with legitimate multi-round rework.
+- The `ceo-delegation-sweep` runs every 5 minutes (unchanged) and now handles both CEO-stranded tasks and QC-fail re-dispatch as a unified safety net.
+
+---
+
 ## [v4.11.0] - 2026-06-09 - QC scorer wired to all review-entry paths; FAIL→backlog+CEO-reroute; Live Feed surfaces qc_review
 
 The per-department QC scorer (`runQCOnReview`) was only reachable via the manual PATCH route. Tasks reaching `review` via the agent-completion webhook or execution-watcher reconcile never triggered scoring, so `qc_review` events were never written and items rotted in the Review/QC column.
