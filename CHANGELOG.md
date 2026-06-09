@@ -1,3 +1,48 @@
+## [v4.9.0] - 2026-06-09 - Key-save hardening: 507 disk-full, atomic write, Ollama alias, smoke-test, ws-fix
+
+Hardens the Intelligence Settings key-save path against the disk-full failure
+mode diagnosed in the field (ENOSPC → opaque 502). Adds UX improvements for
+the Ollama Cloud provider and fixes `ws://` scheme errors flooding server logs.
+
+### Fixed
+
+- **B1 — 507 on disk-full**: `POST /api/clients/[id]/keys` now returns HTTP 507
+  Insufficient Storage (with an actionable message) when the write hits ENOSPC /
+  "no space left on device", instead of an opaque 502. `isDiskFullError()` helper
+  exported from `provider-discovery.ts` detects ENOSPC / "no space" / "disk full"
+  variants.
+- **B2 — atomic write**: `writeClientProviderKey` (self path) now writes to a
+  `.bcc-tmp-<pid>` temp file in the same directory, then `fs.renameSync`s over
+  the target — never partially overwriting the 57 KB `openclaw.json`. A
+  `statfsSync` disk-space preflight (Node ≥ 18.15) refuses the write when free
+  space < 2× file size with a clear operator message.
+- **C1 — Ollama slug alias**: `extractOpenclawProviderKeys` now maps the OpenClaw
+  `ollama` provider slug to BOTH `OLLAMA_API_KEY` (conventional derivation) AND
+  `OLLAMA_CLOUD_API_KEY` (canonical name the UI checks), so the provider lights
+  up regardless of which env-var name the detection layer queries first.
+- **C2 — UI freshness**: `IntelligenceProviderList` now re-fetches
+  `/api/models/provider-status` after the client resolves (not only on mount),
+  so the detection side-effect that hydrates `process.env` on first read is
+  always reflected. When `status.configured` is true the row shows "Configured
+  (key: ENVVAR)" and the "Add API key" button is suppressed.
+- **D — Smoke-test on save**: `types.ts` adds optional `verifyKey?(apiKey)` to
+  `ModelProvider`. Ollama Cloud implements it (GET `/v1/models`, 7 s timeout).
+  The key-save route runs it after a successful write and returns
+  `smokeTest:{ok,status,message}` in the JSON. The UI surfaces green "Key saved
+  and verified" or amber "Key saved but verification failed: <msg>".
+- **ws:// scheme bug**: `POST /api/webhooks/task-created` normalises
+  `OPENCLAW_GATEWAY_URL` from `ws://` → `http://` / `wss://` → `https://`
+  before passing to `fetch()`, eliminating "unknown scheme" log floods.
+
+### New
+
+- `isDiskFullError(msg: string): boolean` in `provider-discovery.ts`
+- `SmokeTestResult` interface and `verifyKey?` method in `model-providers/types.ts`
+- `verifyKey` implementation in `ollama-cloud.ts`
+- `tests/unit/provider-key-hardening.test.ts` — 8 unit tests covering all items above
+
+---
+
 ## [v4.8.0] - 2026-06-09 - Kanban board: always-visible scrollbar + scroll affordance
 
 Users could not tell that Review/QC, Blocked, and Done columns existed off-screen to the right. Replaced the invisible auto-hiding browser scrollbar with an always-visible, draggable styled scrollbar and added left/right scroll affordances.

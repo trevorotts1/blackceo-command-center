@@ -3,8 +3,11 @@ import { getClient } from '@/lib/clients';
 import {
   writeClientProviderKey,
   hydrateProviderEnvForSelectedClient,
+  isDiskFullError,
+  normalizeKeyEnvVar,
 } from '@/lib/studio/provider-discovery';
 import { refreshModels } from '@/lib/jobs/refresh-models';
+import { getProvider } from '@/lib/model-providers';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -47,10 +50,39 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
     const write = await writeClientProviderKey(client, provider, value);
     if (!write.ok) {
+      // B1 — distinguish disk-full from generic failure.
+      const diskFull = write.diskFull || isDiskFullError(write.error ?? '');
+      if (diskFull) {
+        return NextResponse.json(
+          {
+            error: 'Save failed: the box is out of disk space — free space and retry',
+            message: write.error,
+            env_var: write.envVar,
+          },
+          { status: 507 },
+        );
+      }
       return NextResponse.json(
         { error: 'Failed to save key', message: write.error, env_var: write.envVar },
         { status: 502 },
       );
+    }
+
+    // D — smoke-test: after a successful write, run the connector's verifyKey
+    // (if implemented) to give the operator instant feedback. The key is
+    // ALREADY saved; this result is advisory and never blocks the response.
+    let smokeTest: { ok: boolean; status?: number; message?: string } | null = null;
+    try {
+      const envVar = normalizeKeyEnvVar(provider);
+      // Derive the provider slug from the env-var name to look up the connector.
+      // normalizeKeyEnvVar returns e.g. "OLLAMA_CLOUD_API_KEY"; strip "_API_KEY".
+      const slugFromEnv = envVar.replace(/_API_KEY$/, '').toLowerCase().replace(/_/g, '-');
+      const connector = getProvider(slugFromEnv) ?? getProvider(provider.toLowerCase());
+      if (connector?.verifyKey) {
+        smokeTest = await connector.verifyKey(value.trim());
+      }
+    } catch {
+      // smoke-test failures are non-fatal
     }
 
     let refreshOutcomes: unknown = null;
@@ -69,6 +101,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
           target: write.target,
           refreshed: false,
           refresh_error: err instanceof Error ? err.message : String(err),
+          smokeTest,
         });
       }
     }
@@ -79,6 +112,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       target: write.target,
       refreshed: doRefresh,
       outcomes: refreshOutcomes,
+      smokeTest,
     });
   } catch (err) {
     console.error('[POST /api/clients/[id]/keys] failed:', err);
