@@ -1,3 +1,31 @@
+## [v4.4.0] - 2026-06-09 - General Task routing floor + recurrence detector
+
+Adds the General Task catch-all department and a routing confidence floor to prevent force-fitting tasks into the wrong department.
+
+### General Task department (design section B)
+
+- New mandatory canonical department `general-task` added to `CANONICAL_SLUGS` + `DEFAULT_DEPARTMENTS` (priority 1, empty keywords — never wins on merit).
+- Routing aliases: `general`, `misc`, `catch-all`, `catchall`, `unclassified`.
+- `DEFAULT_DEPARTMENTS` count is now 25 (was 24). `qc-cc.sh` check 2.5 updated accordingly.
+
+### MIN_ROUTING_CONFIDENCE floor in comDispatch()
+
+- New env-overridable constant `MIN_ROUTING_CONFIDENCE` (default 0.55) in `department-router.ts`.
+- When the best semantic similarity is below the floor, routes to General Task (Step 3.5) instead of force-fitting to the wrong department. CEO master fallback is now Step 4 (degenerate only).
+- Keyword-only mode: zero keyword hits now routes to General Task instead of CEO master.
+- Every General Task fallback logs `sim / floor` values for tuning.
+
+### General Task recurrence detector
+
+- New `src/lib/jobs/general-task-recurrence.ts`: weekly job (Sunday 04:30) that clusters general-task tasks over 30 days. Any cluster ≥4 upserts a `recommendations` row (`category='try'`). Idempotent on SHA-256 cluster hash; suppresses dismissed. Zero new schema (reuses existing `recommendations` table).
+- Registered in `scheduler.ts`. Disable with `DISABLE_GENERAL_TASK_RECURRENCE=1`.
+
+### Tests
+
+- 4 new unit tests: general-task config validation, never-wins-keyword, zero-keyword-hit → GT, high-confidence → specific dept.
+- `intelligent-routing.test.ts` count assertion updated 24 → 25.
+- qc-cc.sh check 2.5 updated 24 → 25. All 27/27 checks green.
+
 ## [v4.3.1] - 2026-06-09 - Bulletproof task-ingest deduplication — title+window + idempotency_key
 
 Fixes the "duck-duplication" bug where two identical task requests (same title, same description, short time window) created two separate tasks.

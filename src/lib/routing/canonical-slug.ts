@@ -11,12 +11,13 @@
  * where a slug from user input, a DB column, or the workspace auto-seed meets
  * routing or SOP-match logic.
  *
- * Canonical set (ZHC 23-department model):
+ * Canonical set (ZHC 24-department model, +1 mandatory catch-all):
  *   master-orchestrator, marketing, sales, billing-finance, customer-support,
  *   web-development, app-development, graphics, video, audio, research,
  *   communications, crm, openclaw-maintenance, legal, social-media,
  *   paid-advertisement, presentations, client-coaches, course-creator,
- *   podcast, community-management, personal-assistant
+ *   podcast, community-management, personal-assistant, security,
+ *   general-task (catch-all, mandatory on every client)
  */
 
 /** The authoritative ZHC canonical department slug set. */
@@ -44,6 +45,10 @@ export const CANONICAL_SLUGS = new Set([
   'podcast',
   'community-management',
   'personal-assistant',
+  // General Task — mandatory catch-all dept. Every client gets one.
+  // Reached only via the confidence-floor fallback in comDispatch(); never
+  // wins keyword / semantic routing on merit (priority 1, empty keywords).
+  'general-task',
 ]);
 
 /**
@@ -94,6 +99,13 @@ const ALIAS_MAP: Record<string, string> = {
 
   // openclaw-maintenance variants
   'openclaw':          'openclaw-maintenance',
+
+  // general-task aliases
+  'general':           'general-task',
+  'misc':              'general-task',
+  'catch-all':         'general-task',
+  'catchall':          'general-task',
+  'unclassified':      'general-task',
 
   // legacy department slugs that have no canonical equivalent yet —
   // normalize to lowercase but leave as-is so downstream code can still
