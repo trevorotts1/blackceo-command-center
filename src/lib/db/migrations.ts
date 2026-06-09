@@ -1460,27 +1460,27 @@ const migrations: Migration[] = [
     id: '046',
     name: 'pin_ceo_department_first',
     up: (db) => {
-      // Durable "CEO is department #1" guarantee. Migration 014 pinned CEO=1 at
-      // column-add time, but only ran once and only when the row already
-      // existed; an auto-seeded or later-created CEO row could land elsewhere.
-      // This idempotent re-pin sets the CEO workspace to sort_order = 0 (below
-      // 014's CEO=1) so it sorts above everything regardless of prior data.
+      // Durable "CEO / master-orchestrator is department #1" guarantee.
+      // Migration 014 pinned CEO=1 at column-add time but only matched the
+      // legacy slug 'ceo'; the canonical post-051 slug is 'master-orchestrator',
+      // so those rows landed at the default sort_order (1000).
       //
-      // Keys on slug='ceo' (the stable ordering key) OR a case-insensitive
-      // name match (POST /api/workspaces auto-generates slug from name, so a
-      // CEO row created through the API carries slug 'ceo' anyway; the name
-      // fallback covers rows seeded before this convention). Safe to re-run.
-      console.log('[Migration 046] Pinning CEO department to sort_order = 0...');
+      // This re-pin sets ALL CEO/master-orchestrator rows to sort_order = 0
+      // so the board always shows them first regardless of prior data or
+      // slug migration state. Matches slug 'master-orchestrator', 'ceo',
+      // 'dept-ceo' and the name variants 'ceo' / 'master orchestrator'.
+      // Safe to re-run (idempotent — already-0 rows are no-op).
+      console.log('[Migration 046] Pinning CEO / master-orchestrator department to sort_order = 0...');
       try {
         const result = db
           .prepare(
             `UPDATE workspaces
                 SET sort_order = 0
-              WHERE lower(slug) = 'ceo'
-                 OR lower(name) = 'ceo'`
+              WHERE lower(slug) IN ('master-orchestrator', 'ceo', 'dept-ceo')
+                 OR lower(name) IN ('ceo', 'master orchestrator')`
           )
           .run();
-        console.log(`[Migration 046] Re-pinned ${result.changes} CEO workspace row(s) to sort_order = 0`);
+        console.log(`[Migration 046] Re-pinned ${result.changes} CEO/master-orchestrator workspace row(s) to sort_order = 0`);
       } catch (e) {
         // Universal-template installs may have no CEO row yet — non-fatal.
         console.log('[Migration 046] Skipped:', (e as Error).message);
@@ -2114,6 +2114,38 @@ const migrations: Migration[] = [
       }
     },
   },
+
+  // ── Migration 059 — Pin General Task department to the BOTTOM of the board ─
+  {
+    id: '059',
+    name: 'pin_general_task_department_last',
+    up: (db) => {
+      // Board layout guarantee (CC layout, not agent behavior):
+      //   CEO / master-orchestrator → FIRST  (migration 046 owns sort_order = 0)
+      //   General Tasks (general-task) → LAST
+      //   All other depts → between
+      //
+      // We set general-task to sort_order = 99999 so it sorts below everything
+      // regardless of how many operational departments are added. Matches slug
+      // 'general-task' and name variants 'general tasks' / 'general task'.
+      // Idempotent: already-99999 rows are a no-op. Non-fatal when no row yet.
+      console.log('[Migration 059] Pinning general-task department to sort_order = 99999...');
+      try {
+        const result = db
+          .prepare(
+            `UPDATE workspaces
+                SET sort_order = 99999
+              WHERE lower(slug) = 'general-task'
+                 OR lower(name) IN ('general tasks', 'general task')`
+          )
+          .run();
+        console.log(`[Migration 059] Pinned ${result.changes} general-task workspace row(s) to sort_order = 99999`);
+      } catch (e) {
+        // Non-fatal — row may not exist yet on a fresh install.
+        console.log('[Migration 059] Skipped:', (e as Error).message);
+      }
+    },
+  },
 ];
 
 /**
@@ -2273,14 +2305,16 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
     console.log('[Auto-seed] Created company:', companyName);
 
     for (const dept of depts) {
-      // CEO must seed at sort_order = 0 so it sorts above everything; without
-      // this an auto-seeded CEO would inherit the schema default (1000) and
-      // land last (then get re-pinned only on the next boot by migration 046).
-      // The CEO key is the slug 'ceo' or id 'dept-ceo' (display name is free
-      // text — e.g. the client's main-agent persona — so we never match on it).
+      // Board layout guarantee — two anchor rows on every seed:
+      //   CEO / master-orchestrator → sort_order = 0   (always FIRST)
+      //   General Tasks             → sort_order = 99999 (always LAST)
+      // All other depts default to 1000 and will sort alphabetically between.
+      // Display names are free text (the client's persona name), so we match
+      // only on slugs / well-known id variants.
       const slugLower = String(dept.slug || dept.id || '').toLowerCase();
-      const isCeo = slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
-      const sortOrder = isCeo ? 0 : 1000;
+      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
+      const isGeneralTask = slugLower === 'general-task';
+      const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
       db.prepare(
         'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(

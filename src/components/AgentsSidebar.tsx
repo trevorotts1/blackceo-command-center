@@ -152,20 +152,49 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
             }
           )
         );
-        // Hard UI guarantee: hoist the CEO department to the front of the rail
-        // so it shows first even if a drag-reorder demoted it or its
-        // sort_order was clobbered. This is the UI half of the two
-        // independent guarantees (DB migration 046 sets sort_order = 0; this
-        // hoist re-pins on every load). `id` holds the slug (`ws.slug || ws.id`)
-        // with a case-insensitive name fallback.
-        const ceoIdx = enriched.findIndex(
-          (d) =>
-            (d.id || '').toLowerCase() === 'ceo' ||
-            (d.id || '').toLowerCase() === 'dept-ceo' ||
-            (d.name || '').toLowerCase() === 'ceo'
-        );
-        if (ceoIdx > 0) enriched.unshift(enriched.splice(ceoIdx, 1)[0]);
-        if (!cancelled) setDepartments(enriched);
+        // Hard UI guarantee: hoist the CEO / master-orchestrator department to
+        // the FRONT of the rail so it always renders first, regardless of
+        // stored sort_order or drag-reorder history.  The canonical CEO slug is
+        // `master-orchestrator`; legacy slugs `ceo` / `dept-ceo` and name
+        // variants `ceo` / `master orchestrator` are also matched (fleet-wide
+        // fix — previous code only matched `ceo` / `dept-ceo`, so every
+        // canonical `master-orchestrator` workspace never hoisted).
+        //
+        // Additionally, PIN `general-task` ("General Tasks") to the BOTTOM so
+        // the board always reads: CEO first … operational depts … General Tasks.
+        //
+        // Implementation:
+        //   1. Extract the CEO item (may be absent on fresh/unseeded installs).
+        //   2. Extract the General Tasks item (may be absent).
+        //   3. Sandwich remaining depts between them.
+        const isCeoItem = (d: Department): boolean => {
+          const slug = (d.id || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          return (
+            slug === 'master-orchestrator' ||
+            slug === 'ceo' ||
+            slug === 'dept-ceo' ||
+            name === 'master orchestrator' ||
+            name === 'ceo'
+          );
+        };
+        const isGeneralTaskItem = (d: Department): boolean => {
+          const slug = (d.id || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          return slug === 'general-task' || name === 'general tasks' || name === 'general task';
+        };
+
+        const ceoItem = enriched.find(isCeoItem);
+        const generalTaskItem = enriched.find(isGeneralTaskItem);
+        const middle = enriched.filter((d) => !isCeoItem(d) && !isGeneralTaskItem(d));
+
+        const ordered = [
+          ...(ceoItem ? [ceoItem] : []),
+          ...middle,
+          ...(generalTaskItem ? [generalTaskItem] : []),
+        ];
+
+        if (!cancelled) setDepartments(ordered);
       } catch {
         // Fall back silently to empty list.
       }
