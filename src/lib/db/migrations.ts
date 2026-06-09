@@ -2011,6 +2011,24 @@ const migrations: Migration[] = [
       console.log('[Migration 054] agents.persona + dispatch_rules ready');
     }
   },
+  {
+    id: '055',
+    name: 'add_task_archived_at',
+    // Adds tasks.archived_at TEXT column for the weekly Done-clear job.
+    // archived_at IS NOT NULL = task has been soft-archived; IS NULL = live.
+    // Additive + idempotent: safe to run against any existing DB.
+    up: (db) => {
+      console.log('[Migration 055] Adding tasks.archived_at for weekly Done-clear...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('archived_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN archived_at TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at)`);
+        console.log('[Migration 055] tasks.archived_at + index added');
+      } else {
+        console.log('[Migration 055] tasks.archived_at already present, skipping');
+      }
+    },
+  },
 ];
 
 /**

@@ -124,15 +124,47 @@ function readBuildComplete(file: string): boolean {
 }
 
 /**
+ * Auto-upgrade helper: when filesystem signals confirm completion but the DB
+ * row still shows interview_complete=0, backfill the flag so subsequent calls
+ * take the fast path. Called only when clientFlag === false AND a positive
+ * filesystem signal fires. Never throws.
+ */
+function tryBackfillClientFlag(clientId: string | null): void {
+  if (!clientId) return;
+  try {
+    // Import at call-time to avoid a module-level circular dep.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { setInterviewComplete } = require('@/lib/clients') as typeof import('@/lib/clients');
+    setInterviewComplete(clientId, true);
+  } catch {
+    // Non-fatal: the UI will re-check on the next status poll.
+  }
+}
+
+/**
  * Resolve interview-completion state. Defaults to NOT complete unless a
  * positive signal is found. Never throws.
+ *
+ * Priority order:
+ *   1. Per-client DB flag (E3) — truest source; true → done, false → check FS
+ *   2. Filesystem signals (company-config, interview-answers-file, build-state)
+ *      — when any fires AND the DB flag is false, we auto-backfill the DB flag
+ *      so subsequent calls take the fast path without re-scanning the FS.
+ *   3. No signal → UNKNOWN; banner hidden (E3) so a completed client is never
+ *      nagged due to a missing DB flag.
+ *
+ * The key change from the pre-fix behaviour: `clientFlag === false` no longer
+ * short-circuits before the filesystem check. A client whose interview IS
+ * complete (evidenced by filesystem artifacts) but whose DB row still has
+ * interview_complete=0 (common for clients onboarded before migration 048
+ * seeded the self row, or for clients imported without the flag) will now
+ * correctly be detected as complete. The DB flag is backfilled automatically
+ * so the false-gating disappears on the next status poll.
  */
 export function getInterviewState(): InterviewState {
   const checkedAt = new Date().toISOString();
 
-  // 1. Per-client DB flag (E3) is the authoritative, client-scoped answer.
-  //    A definitive true OR false here is `known` — we trust the tenant record
-  //    over any host-wide filesystem heuristic.
+  // 1. Per-client DB flag (E3).
   const clientFlag = clientFlagSignal();
   if (clientFlag === true) {
     return {
@@ -143,20 +175,23 @@ export function getInterviewState(): InterviewState {
       checkedAt,
     };
   }
-  if (clientFlag === false) {
-    return {
-      complete: false,
-      known: true,
-      signal: 'client-flag',
-      detail:
-        'Selected client is not yet marked interview_complete. Complete the AI Workforce interview to unlock persona-tuned Layer-2 views.',
-      checkedAt,
-    };
+
+  // Capture the client id for potential backfill below regardless of whether
+  // clientFlag is false or null.
+  let selectedClientId: string | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getSelectedClientId } = require('@/lib/clients') as typeof import('@/lib/clients');
+    selectedClientId = getSelectedClientId();
+  } catch {
+    // non-fatal
   }
 
-  // 2. clientFlag is null (unknown) — fall back to the host-wide filesystem
-  //    signals. Any positive signal is `known: true`.
+  // 2. Filesystem signals. These run regardless of whether clientFlag is false
+  //    (DB says not complete) or null (no client row yet). A positive filesystem
+  //    signal is authoritative: the interview DID happen; the DB flag is stale.
   if (configSignal()) {
+    if (clientFlag === false) tryBackfillClientFlag(selectedClientId);
     return {
       complete: true,
       known: true,
@@ -166,6 +201,7 @@ export function getInterviewState(): InterviewState {
     };
   }
   if (interviewFileSignal()) {
+    if (clientFlag === false) tryBackfillClientFlag(selectedClientId);
     return {
       complete: true,
       known: true,
@@ -175,6 +211,7 @@ export function getInterviewState(): InterviewState {
     };
   }
   if (buildStateSignal()) {
+    if (clientFlag === false) tryBackfillClientFlag(selectedClientId);
     return {
       complete: true,
       known: true,
@@ -184,8 +221,21 @@ export function getInterviewState(): InterviewState {
     };
   }
 
-  // 3. No flag, no signal → UNKNOWN. complete stays false but known is false,
-  //    so the banner defaults to HIDDEN (E3) rather than nagging.
+  // 3. DB says definitively false AND no filesystem evidence → known incomplete.
+  if (clientFlag === false) {
+    return {
+      complete: false,
+      known: true,
+      signal: 'client-flag',
+      detail:
+        'Selected client is not yet marked interview_complete, and no filesystem completion evidence found. Complete the AI Workforce interview to unlock persona-tuned Layer-2 views.',
+      checkedAt,
+    };
+  }
+
+  // 4. No DB flag, no filesystem signal → UNKNOWN. complete=false but known=false,
+  //    so the banner defaults to HIDDEN (E3) rather than nagging an already-
+  //    onboarded client.
   return {
     complete: false,
     known: false,
