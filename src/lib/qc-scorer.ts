@@ -7,12 +7,18 @@
  * Gate: ≥8.5 → auto-approve (mark done); <8.5 → kick back to in_progress with
  * specific gap notes as a task event.
  *
+ * Per-department QC: the scorer resolves the ITEM'S OWN department QC agent
+ * (role_type='qc', workspace_id = task's workspace) and uses that agent's
+ * model (if set) and identity in the scoring prompt and event log. This ensures
+ * that the Marketing QC Specialist scores marketing tasks, the Sales QC
+ * Specialist scores sales tasks, etc. — as defined by the onboarding role
+ * library (one QC specialist per department).
+ *
  * Scoring paths:
  *   1. LLM-backed (primary): uses OPENAI_API_KEY / GOOGLE_API_KEY to call the
  *      configured model and score the work against success_criteria.
- *      Model selection: TIEBREAK_MODEL env → gpt-4o-mini (OpenAI) or gemini-
- *      flash (Google). Follows the Trevor policy of QC on a DIFFERENT model
- *      than the worker when possible.
+ *      Model selection: dept QC agent's model field → QC_SCORER_MODEL env →
+ *      TIEBREAK_MODEL env → gpt-4o-mini (OpenAI) or gemini-flash (Google).
  *   2. Heuristic fallback (no API key / LLM error): structural checks on the
  *      deliverable meta (description non-empty, SOP assigned, persona assigned,
  *      title non-trivial). Returns a conservative score in [6.0, 8.0].
@@ -24,8 +30,9 @@
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
-import { queryOne, run } from '@/lib/db';
+import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,6 +58,10 @@ export interface QCScorerInput {
   sopName: string | null;
   sopSteps: string | null; // JSON stringified steps array from sops table
   departmentSlug: string | null;
+  /** Per-department QC agent resolved for this task (null = use global scorer) */
+  qcAgentId?: string | null;
+  qcAgentName?: string | null;
+  qcAgentModel?: string | null;
 }
 
 export interface QCResult {
@@ -111,6 +122,8 @@ function heuristicScore(input: QCScorerInput): QCResult {
 /**
  * Build the QC scoring prompt.
  * Returns a structured prompt that asks the model to rate 1–10 and list gaps.
+ * When a per-department QC agent is available, its identity is used as the
+ * QC persona so the model scores from that specialist's perspective.
  */
 function buildQCPrompt(input: QCScorerInput): string {
   const sopSection = input.sopSuccessCriteria
@@ -119,7 +132,11 @@ function buildQCPrompt(input: QCScorerInput): string {
     ? `**SOP Steps (no explicit success_criteria defined):**\n${input.sopSteps}`
     : '**No SOP success criteria available — score based on task description completeness only.**';
 
-  return `You are a QC agent scoring a completed task for the ${input.departmentSlug ?? 'General'} department.
+  const agentIdentity = input.qcAgentName
+    ? `You are ${input.qcAgentName}, the QC Specialist for the ${input.departmentSlug ?? 'General'} department.`
+    : `You are a QC agent scoring a completed task for the ${input.departmentSlug ?? 'General'} department.`;
+
+  return `${agentIdentity}
 
 **Task Title:** ${input.taskTitle}
 **Task Description / Deliverable Notes:**
@@ -154,13 +171,15 @@ If score <8.5, "gaps" must list specific, actionable rework items.`;
 /**
  * Call the LLM API to score the task.
  * Returns null on any error (caller falls back to heuristic).
+ * @param modelOverride - Per-dept QC agent's model field (beats env vars)
  */
 async function llmScoreViaOpenAI(
   prompt: string,
   apiKey: string,
+  modelOverride?: string | null,
 ): Promise<QCResult | null> {
   try {
-    const model = process.env.QC_SCORER_MODEL || process.env.TIEBREAK_MODEL || 'gpt-4o-mini';
+    const model = modelOverride || process.env.QC_SCORER_MODEL || process.env.TIEBREAK_MODEL || 'gpt-4o-mini';
     const resp = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -209,13 +228,15 @@ async function llmScoreViaOpenAI(
 /**
  * Call the Google Gemini API to score the task.
  * Returns null on any error.
+ * @param modelOverride - Per-dept QC agent's model field (beats env vars)
  */
 async function llmScoreViaGoogle(
   prompt: string,
   apiKey: string,
+  modelOverride?: string | null,
 ): Promise<QCResult | null> {
   try {
-    const model = process.env.QC_SCORER_MODEL || 'gemini-2.0-flash';
+    const model = modelOverride || process.env.QC_SCORER_MODEL || 'gemini-2.0-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const resp = await fetch(url, {
       method: 'POST',
@@ -284,10 +305,16 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
 
   const prompt = buildQCPrompt(input);
 
+  // Model selection: per-dept QC agent's model field beats env vars.
+  // Only use the agent's model when it looks like an OpenAI model id
+  // (starts with 'gpt-' or 'o1' etc.) for the OpenAI path; otherwise
+  // let the env-var defaults handle provider routing.
+  const agentModel = input.qcAgentModel || null;
+
   // Try LLM paths
   const openAiKey = process.env.OPENAI_API_KEY;
   if (openAiKey) {
-    const result = await llmScoreViaOpenAI(prompt, openAiKey);
+    const result = await llmScoreViaOpenAI(prompt, openAiKey, agentModel);
     if (result) return result;
   }
 
@@ -296,7 +323,7 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
     process.env.GEMINI_API_KEY;
   if (googleKey) {
-    const result = await llmScoreViaGoogle(prompt, googleKey);
+    const result = await llmScoreViaGoogle(prompt, googleKey, agentModel);
     if (result) return result;
   }
 
@@ -327,11 +354,68 @@ interface SOPRowForQC {
   department: string | null;
 }
 
+interface QCAgentRow {
+  id: string;
+  name: string;
+  model: string | null;
+}
+
+/**
+ * Resolve the per-department QC agent for a given task.
+ *
+ * Lookup order (name-agnostic — works for master-orchestrator, general-task,
+ * and all 23 operational depts):
+ *   1. agents WHERE workspace_id = task.workspace_id AND role_type = 'qc'
+ *   2. agents WHERE workspace_id = canonicalSlug(task.department) AND role_type = 'qc'
+ *   3. null (heuristic fallback — no QC agent seeded yet)
+ *
+ * Returns null when role_type column doesn't exist yet (pre-migration-060
+ * database) so the heuristic fallback stays active with zero breakage.
+ */
+function resolveQCAgent(task: TaskRowForQC): QCAgentRow | null {
+  try {
+    // Check if role_type column exists (guard for pre-migration-060 DBs)
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(agents)', []);
+    const hasRoleType = cols.some((c) => c.name === 'role_type');
+    if (!hasRoleType) return null;
+
+    // 1. Direct workspace_id match
+    if (task.workspace_id) {
+      const agent = queryOne<QCAgentRow>(
+        "SELECT id, name, model FROM agents WHERE workspace_id = ? AND role_type = 'qc' LIMIT 1",
+        [task.workspace_id],
+      );
+      if (agent) return agent;
+    }
+
+    // 2. Canonical slug match via task.department
+    if (task.department) {
+      const canonical = canonicalDeptSlug(task.department);
+      // Try workspace id = canonical slug (post-migration-051 layout)
+      const agent = queryOne<QCAgentRow>(
+        "SELECT id, name, model FROM agents WHERE lower(workspace_id) = ? AND role_type = 'qc' LIMIT 1",
+        [canonical],
+      );
+      if (agent) return agent;
+    }
+
+    return null;
+  } catch {
+    // Any error (missing table, missing column) → no QC agent, use heuristic
+    return null;
+  }
+}
+
 /**
  * Run QC scoring for a task that just entered `review` status.
  *
+ * Per-department: resolves the task's OWN department QC agent (role_type='qc')
+ * and uses that agent's persona and model for the scoring LLM call + event.
+ * Falls back to heuristic when no QC agent is found or no API key is set.
+ *
  * Side effects:
- *   - Writes a `qc_review` event to the events table (always)
+ *   - Writes a `qc_review` event to the events table (always), including the
+ *     QC agent's name when resolved (audit trail shows WHICH specialist scored)
  *   - If PASS: moves task to `done` (writes another `task_completed` event)
  *   - If FAIL: moves task back to `in_progress` with gap notes
  *
@@ -363,6 +447,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       return null;
     }
 
+    // Resolve per-department QC agent (name-agnostic, canonical-slug-safe)
+    const qcAgent = resolveQCAgent(task);
+    if (qcAgent) {
+      console.log(`[QCScorer] Resolved QC agent: "${qcAgent.name}" (id: ${qcAgent.id}) for task "${task.title}"`);
+    } else {
+      console.log(`[QCScorer] No dept QC agent found for task "${task.title}" — using global heuristic fallback`);
+    }
+
     // Fetch SOP if assigned
     let sopRow: SOPRowForQC | null = null;
     if (task.sop_id) {
@@ -380,15 +472,20 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       sopName: sopRow?.name ?? null,
       sopSteps: sopRow?.steps ?? null,
       departmentSlug: task.department ?? task.workspace_id ?? null,
+      // Per-dept QC agent fields (null when no agent resolved)
+      qcAgentId: qcAgent?.id ?? null,
+      qcAgentName: qcAgent?.name ?? null,
+      qcAgentModel: qcAgent?.model ?? null,
     };
 
     const result = await scoreTaskForQC(input);
     const now = new Date().toISOString();
 
-    // Write QC event (always — pass or fail — so operators can see the audit trail)
+    // Write QC event — include QC agent identity so audit trail shows who scored
+    const scoredBy = qcAgent ? ` [scorer:${qcAgent.name}]` : ' [scorer:global-heuristic]';
     const gapNote = result.gaps.length > 0 ? ` Gaps: ${result.gaps.join('; ')}` : '';
     const eventMessage =
-      `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | ${result.pass ? 'PASS → moved to Done' : 'FAIL → returned to In Progress'} | ${result.reason}${gapNote} [path:${result.scoringPath}]`;
+      `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | ${result.pass ? 'PASS → moved to Done' : 'FAIL → returned to In Progress'} | ${result.reason}${gapNote} [path:${result.scoringPath}]${scoredBy}`;
 
     run(
       `INSERT INTO events (id, type, task_id, message, created_at)

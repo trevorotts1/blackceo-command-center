@@ -2146,6 +2146,62 @@ const migrations: Migration[] = [
       }
     },
   },
+
+  // ── Migration 060 — Per-department QC Specialist agents ────────────────────
+  {
+    id: '060',
+    name: 'add_role_type_and_seed_qc_agents',
+    up: (db) => {
+      // PR-B: Per-department QC Specialist gates move-to-DONE.
+      //
+      // Schema change: add agents.role_type TEXT column.
+      //   NULL   = standard agent (default)
+      //   'qc'   = the department's QC Specialist
+      //
+      // Seeding: for each workspace that doesn't already have a QC Specialist,
+      // insert one. The QC agent is associated with the workspace's id as
+      // workspace_id, marked is_master=0, specialist_type='permanent',
+      // role_type='qc'. Name: "<workspace.name> QC Specialist".
+      //
+      // Idempotent: column add is guarded by PRAGMA table_info check; agent seed
+      // is INSERT OR IGNORE keyed on the deterministic id 'qc-agent-<workspace.id>'.
+      console.log('[Migration 060] Adding agents.role_type column + seeding per-dept QC Specialist agents...');
+
+      // 1. Add role_type column to agents (idempotent)
+      const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(c => c.name);
+      if (!agentCols.includes('role_type')) {
+        db.exec(`ALTER TABLE agents ADD COLUMN role_type TEXT`);
+        console.log('[Migration 060] Added agents.role_type column');
+      } else {
+        console.log('[Migration 060] agents.role_type already present, skipping column add');
+      }
+
+      // 2. Seed one QC Specialist per workspace (idempotent via INSERT OR IGNORE)
+      //    Only seed if workspaces exist; deferred on truly empty installs.
+      const workspaces = db.prepare('SELECT id, name FROM workspaces').all() as { id: string; name: string }[];
+      if (workspaces.length === 0) {
+        console.log('[Migration 060] No workspaces yet — QC agent seeding deferred to next boot');
+        return;
+      }
+
+      const insertQC = db.prepare(`
+        INSERT OR IGNORE INTO agents
+          (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+           specialist_type, role_type, created_at, updated_at)
+        VALUES (?, ?, 'QC Specialist', ?, '🔍', 'standby', 0, ?, 'permanent', 'qc', datetime('now'), datetime('now'))
+      `);
+
+      let seeded = 0;
+      for (const ws of workspaces) {
+        const agentId = `qc-agent-${ws.id}`;
+        const agentName = `${ws.name} QC Specialist`;
+        const description = `Quality control specialist for the ${ws.name} department. Reviews completed tasks against SOP success criteria and decides whether work moves to Done or back to In Progress.`;
+        insertQC.run(agentId, agentName, description, ws.id);
+        seeded++;
+      }
+      console.log(`[Migration 060] Seeded/verified ${seeded} QC Specialist agent(s) across ${workspaces.length} workspace(s)`);
+    },
+  },
 ];
 
 /**
