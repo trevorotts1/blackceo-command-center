@@ -137,8 +137,9 @@ export async function createTaskCore(
   // unassigned), route by CONTENT the moment the task is created instead of
   // dumping it unassigned in the CEO/workspace backlog.
   //
-  // routeTask() is a synchronous in-process DB function (no HTTP hop, no
-  // gateway round-trip), so this adds no latency and supersedes the broken
+  // routeTask() is an async in-process function — it adds minimal latency only
+  // when OPENAI_API_KEY is configured (embedding call). Falls back to sync
+  // keyword scoring when no key is set. Supersedes the broken
   // `/api/webhooks/task-created` HTTP-to-gateway notify (which targeted a WS
   // URL with an HTTP shape and silently no-op'd).
   //
@@ -158,7 +159,7 @@ export async function createTaskCore(
       // is what lets a CEO/default-landed inbound task get delegated DOWN to
       // the right department (B8) instead of staying stuck on the CEO. The
       // winning department is stamped back onto the task below.
-      const routing = routeTask({
+      const routing = await routeTask({
         title: input.title,
         description: input.description ?? '',
         priority: (input.priority as TaskPriority) || 'medium',
