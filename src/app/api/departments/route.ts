@@ -116,14 +116,21 @@ function createDepartmentInDbDirect(args: {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(wsId, args.name, args.slug, args.description, args.icon, nextOrder);
 
+    // is_master=1 for the master-orchestrator / CEO department head; 0 for all others.
+    // This ensures the master-fallback in comDispatch actually resolves.
+    const isMasterOrchestrator =
+      args.slug === 'master-orchestrator' ||
+      args.slug === 'ceo' ||
+      args.slug === 'ceo-com';
     db.prepare(`
       INSERT INTO agents (id, workspace_id, name, role, description, specialist_type, status, avatar_emoji, is_master)
-      VALUES (?, ?, ?, ?, ?, 'permanent', 'standby', ?, 0)
+      VALUES (?, ?, ?, ?, ?, 'permanent', 'standby', ?, ?)
     `).run(
       headAgentId, wsId, args.headName,
       `${args.name} Department Head`,
       `Heads the ${args.name} department in your AI workforce.`,
       args.icon,
+      isMasterOrchestrator ? 1 : 0,
     );
 
     db.prepare(`

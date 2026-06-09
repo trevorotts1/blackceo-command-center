@@ -5,6 +5,7 @@ import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -143,6 +144,38 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     console.log(`[Dispatch] Task ${task.id} → Agent "${agent.name}" | model=${settings.model} (${settings.modelSource}) | persona=${settings.persona} (${settings.personaSource}) | specialist=${specialistType}`);
     // --- END INTELLIGENCE RESOLUTION ---
 
+    // --- SOP PULL (RC-1) ---
+    // JOIN sops on task.sop_id and embed name + steps + success_criteria so the
+    // specialist has actionable instructions, not just raw task metadata.
+    let sopBlock = '';
+    if (task.sop_id) {
+      const sop = queryOne<SOP>(
+        `SELECT id, name, steps, success_criteria, department, role FROM sops WHERE id = ? AND deleted_at IS NULL`,
+        [task.sop_id]
+      );
+      if (sop) {
+        let parsedSteps: SOPStep[] = [];
+        try {
+          parsedSteps = typeof sop.steps === 'string' ? JSON.parse(sop.steps) : (sop.steps as unknown as SOPStep[]);
+        } catch {
+          parsedSteps = [];
+        }
+        const stepLines = parsedSteps.map((s, i) => {
+          const checklistLines = s.checklist?.length
+            ? '\n' + s.checklist.map((c) => `     - ${c}`).join('\n')
+            : '';
+          const criteria = s.success_criteria ? `\n     ✓ ${s.success_criteria}` : '';
+          return `  ${i + 1}. **${s.name}**${checklistLines}${criteria}`;
+        });
+        sopBlock = `
+**SOP: ${sop.name}** (id: ${sop.id})
+${sop.success_criteria ? `**Success Criteria:** ${sop.success_criteria}\n` : ''}**Steps:**
+${stepLines.join('\n')}
+`;
+      }
+    }
+    // --- END SOP PULL ---
+
     // Build task message for agent
     const priorityEmoji = {
       low: '🔵',
@@ -164,7 +197,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 **Priority:** ${task.priority.toUpperCase()}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
-**Agent Model:** ${settings.model}
+${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
 **Agent Persona:** ${settings.persona === 'auto' ? 'AUTO-SELECT. Run the 5-Layer Persona Matching Protocol before starting:' : settings.persona}
 ${settings.persona === 'auto' ? `
 1. **Layer 1 (Company Mission):** Does this persona align with the company's stated mission?

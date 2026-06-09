@@ -22,6 +22,7 @@
 import { queryAll } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
+import { canonicalDeptSlug } from './canonical-slug';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -155,15 +156,19 @@ function pickBestAgent(
 ): AgentWithLoad | undefined {
   const available = agents.filter((a) => a.status !== 'offline');
 
-  // Score each agent: role match (1 or 0) minus load penalty
+  // Score each agent: role match (1 or 0) minus load penalty.
+  // Also prefer agents whose workspace_id canonicalizes to the same dept slug.
   type AgentScore = { agent: AgentWithLoad; score: number };
+  const deptCanon = canonicalDeptSlug(department.id);
   const scored: AgentScore[] = available.map((agent) => {
     const roleMatch = department.agentRoles.some(
       (r) => agent.role.toLowerCase().includes(r.toLowerCase()),
     )
       ? 1
       : 0;
-    const score = roleMatch - loadPenalty(agent.active_tasks);
+    const workspaceMatch =
+      agent.workspace_id && canonicalDeptSlug(agent.workspace_id) === deptCanon ? 0.2 : 0;
+    const score = roleMatch + workspaceMatch - loadPenalty(agent.active_tasks);
     return { agent, score };
   });
 
@@ -197,9 +202,14 @@ export function comDispatch(
   const description = task.description || '';
   const priority = (task.priority as TaskPriority) || 'medium';
 
-  // Step 1: Try explicit department tag
+  // Step 1: Try explicit department tag (canonical-slug-normalized match)
   if (task.department) {
-    const dept = departments.find((d) => d.id === task.department || d.name === task.department);
+    const taskDeptCanon = canonicalDeptSlug(task.department);
+    const dept = departments.find(
+      (d) =>
+        canonicalDeptSlug(d.id) === taskDeptCanon ||
+        d.name.toLowerCase() === task.department!.toLowerCase()
+    );
     if (dept) {
       const agent = pickBestAgent(agents, dept);
       if (agent) {

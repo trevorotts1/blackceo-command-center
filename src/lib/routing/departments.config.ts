@@ -18,6 +18,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { canonicalDeptSlug } from './canonical-slug';
 
 export interface DepartmentConfig {
   /** Unique slug for this department (used in task.department field) */
@@ -42,7 +43,7 @@ export interface DepartmentConfig {
  */
 export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
   {
-    id: 'ceo-com',
+    id: 'master-orchestrator',
     name: 'CEO / COM',
     keywords: [
       'ceo', 'com', 'central operations', 'chief', 'executive', 'strategy', 'vision',
@@ -84,8 +85,8 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     priority: 8,
   },
   {
-    id: 'billing',
-    name: 'Billing',
+    id: 'billing-finance',
+    name: 'Billing / Finance',
     keywords: [
       'billing', 'invoice', 'payment', 'charge', 'subscription', 'pricing', 'bill',
       'transaction', 'refund', 'credit', 'debit', 'fee', 'cost', 'revenue recognition',
@@ -143,7 +144,7 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     priority: 9,
   },
   {
-    id: 'legal-compliance',
+    id: 'legal',
     name: 'Legal / Compliance',
     keywords: [
       'legal', 'law', 'compliance', 'contract', 'agreement', 'terms', 'policy',
@@ -230,7 +231,7 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     priority: 6,
   },
   {
-    id: 'video-production',
+    id: 'video',
     name: 'Video Production',
     keywords: [
       'video', 'film', 'movie', 'footage', 'edit', 'editing', 'premiere', 'final cut',
@@ -244,7 +245,7 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     priority: 6,
   },
   {
-    id: 'audio-production',
+    id: 'audio',
     name: 'Audio Production',
     keywords: [
       'audio', 'sound', 'music', 'podcast', 'voiceover', 'voice over', 'narration',
@@ -284,6 +285,67 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
       'Media Relations', 'Spokesperson', 'Communications Agent',
     ],
     priority: 7,
+  },
+  // ── ZHC extended canonical departments ─────────────────────────────────────
+  {
+    id: 'presentations',
+    name: 'Presentations',
+    keywords: [
+      'presentation', 'slide', 'deck', 'pitch deck', 'powerpoint', 'keynote',
+      'google slides', 'slide show', 'pitch', 'boardroom', 'investor deck',
+    ],
+    agentRoles: ['Presentation Specialist', 'Deck Designer', 'Pitch Analyst'],
+    priority: 5,
+  },
+  {
+    id: 'client-coaches',
+    name: 'Client Coaches',
+    keywords: [
+      'coaching', 'coach', 'client onboarding', 'client success', 'client journey',
+      'accountability', 'check-in', 'progress review', 'client retention',
+    ],
+    agentRoles: ['Client Coach', 'Success Coach', 'Onboarding Specialist'],
+    priority: 6,
+  },
+  {
+    id: 'course-creator',
+    name: 'Course Creator',
+    keywords: [
+      'course', 'curriculum', 'lesson', 'module', 'training', 'lms', 'kajabi',
+      'teachable', 'thinkific', 'e-learning', 'online course', 'education',
+    ],
+    agentRoles: ['Course Creator', 'Curriculum Designer', 'Instructional Designer'],
+    priority: 5,
+  },
+  {
+    id: 'podcast',
+    name: 'Podcast',
+    keywords: [
+      'podcast', 'episode', 'interview', 'show notes', 'transcript', 'audio content',
+      'rss', 'spotify podcast', 'apple podcast', 'distribution', 'episode script',
+    ],
+    agentRoles: ['Podcast Producer', 'Podcast Editor', 'Show Notes Writer'],
+    priority: 5,
+  },
+  {
+    id: 'community-management',
+    name: 'Community Management',
+    keywords: [
+      'community', 'discord', 'slack community', 'group', 'tribe', 'member',
+      'engagement', 'moderation', 'onboarding member', 'community event', 'forum',
+    ],
+    agentRoles: ['Community Manager', 'Community Builder', 'Moderator'],
+    priority: 6,
+  },
+  {
+    id: 'personal-assistant',
+    name: 'Personal Assistant',
+    keywords: [
+      'personal', 'schedule', 'calendar', 'reminder', 'book appointment', 'travel',
+      'inbox management', 'errands', 'personal tasks', 'assistant', 'administrative',
+    ],
+    agentRoles: ['Personal Assistant', 'Executive Assistant', 'Administrative Agent'],
+    priority: 5,
   },
   {
     id: 'security',
@@ -344,19 +406,34 @@ export function loadDepartments(): DepartmentConfig[] {
     }
   }
 
-  // Filter to only departments that exist as workspaces in the database
+  // Filter to only departments that exist as workspaces in the database.
+  // Apply canonicalDeptSlug to BOTH sides of the join so that workspace slugs
+  // like "dept-marketing", "dept-webdev", "billing", "ceo" all match the
+  // canonical department ids ("marketing", "web-development", "billing-finance",
+  // "master-orchestrator") reliably — this was the root cause of the 4→0 filter
+  // regression that left only a handful of departments visible.
   try {
     // Dynamic import to avoid circular dependency at module load time
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getDb } = require('../db');
     const db = getDb();
-    const workspaces = db.prepare('SELECT slug FROM workspaces').all() as { slug: string }[];
-    const workspaceSlugs = new Set(workspaces.map((w) => w.slug));
+    const workspaces = db.prepare('SELECT id, slug FROM workspaces').all() as { id: string; slug: string }[];
+    // Build a set of canonical slugs that are present in the DB (keyed by both
+    // the workspace id AND slug so legacy + seed rows both match).
+    const canonicalInDb = new Set<string>();
+    for (const ws of workspaces) {
+      canonicalInDb.add(canonicalDeptSlug(ws.id));
+      canonicalInDb.add(canonicalDeptSlug(ws.slug));
+    }
+    // Remove the empty-string fallback that canonicalDeptSlug returns for nulls
+    canonicalInDb.delete('');
 
-    if (workspaceSlugs.size > 0) {
-      const filtered = allDepartments.filter((dept) => workspaceSlugs.has(dept.id));
+    if (canonicalInDb.size > 0) {
+      const filtered = allDepartments.filter((dept) =>
+        canonicalInDb.has(canonicalDeptSlug(dept.id))
+      );
       if (filtered.length > 0) {
-        console.log(`[DepartmentConfig] Filtered to ${filtered.length} departments matching workspaces in DB`);
+        console.log(`[DepartmentConfig] Filtered to ${filtered.length} departments matching workspaces in DB (canonical-join)`);
         return filtered;
       }
     }

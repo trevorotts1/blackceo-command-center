@@ -22,6 +22,7 @@ import { broadcast } from '@/lib/events';
 import { selectPersonaForTask } from '@/lib/persona-selector';
 import { getBestSOPForTask } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import type { Task, TaskPriority, Agent } from '@/lib/types';
 
 export interface CreateTaskCoreInput {
@@ -68,7 +69,28 @@ export async function createTaskCore(
   const id = uuidv4();
   const now = new Date().toISOString();
 
-  const workspaceId = input.workspace_id || 'default';
+  // Derive workspace_id from the canonical department slug when not explicitly
+  // supplied, instead of falling back to 'default' (which has no row in the
+  // workspaces table and causes a FK crash).  The canonical department slug IS
+  // the workspace id by convention (seed-workspaces + add-department.sh both
+  // use the slug as the workspace primary key).  If neither is available, we
+  // leave workspace_id NULL rather than inserting a nonexistent 'default' row.
+  let workspaceId: string | null = input.workspace_id || null;
+  if (!workspaceId && input.department) {
+    const canon = canonicalDeptSlug(input.department);
+    if (canon) {
+      // Verify the workspace exists before stamping it
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getDb } = require('@/lib/db');
+        const db = getDb();
+        const ws = db.prepare('SELECT id FROM workspaces WHERE id = ? OR slug = ?').get(canon, canon) as { id: string } | undefined;
+        if (ws) workspaceId = ws.id;
+      } catch {
+        // non-fatal — leave workspaceId null
+      }
+    }
+  }
   const status = input.status || 'backlog';
 
   // Auto-suggest SOP if none provided. Scored by department + keyword overlap;
@@ -99,9 +121,9 @@ export async function createTaskCore(
       input.priority || 'medium',
       input.assigned_agent_id || null,
       input.created_by_agent_id || null,
-      workspaceId,
-      input.business_id || 'default',
-      input.department || null,
+      workspaceId,   // NULL when no valid workspace found — avoids FK crash on 'default'
+      input.business_id || null,
+      input.department ? canonicalDeptSlug(input.department) : null,
       input.due_date || null,
       sopId,
       now,
