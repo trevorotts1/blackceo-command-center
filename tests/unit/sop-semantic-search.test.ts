@@ -282,10 +282,23 @@ test('suggestSOPsForTask: semantic query with ZERO keyword overlap surfaces the 
 });
 
 // ---------- 5. Keyword fallback ----------
+// NOTE: Clear ALL embedding provider keys so that no provider (OpenAI or Google)
+// is active during these fallback tests. This prevents false activation if the
+// test runner environment happens to have a Google key set (e.g. GEMINI_API_KEY).
 
-test('suggestSOPsForTask: falls back to keyword path when OPENAI_API_KEY absent', async () => {
-  const savedKey = process.env.OPENAI_API_KEY;
+test('suggestSOPsForTask: falls back to keyword path when no embedding key present', async () => {
+  const savedKeys = {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
+    GOOGLE_AI_STUDIO_API_KEY: process.env.GOOGLE_AI_STUDIO_API_KEY,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    SOP_EMBEDDING_PROVIDER: process.env.SOP_EMBEDDING_PROVIDER,
+  };
   delete process.env.OPENAI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
+  delete process.env.GOOGLE_AI_STUDIO_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.SOP_EMBEDDING_PROVIDER;
 
   const ts = Date.now();
   const sopId = `kw-fb-${ts}`;
@@ -302,14 +315,28 @@ test('suggestSOPsForTask: falls back to keyword path when OPENAI_API_KEY absent'
   );
 
   const found = results.some((r) => r.sop.id === sopId);
-  assert.ok(found, 'keyword fallback must find the SOP when OPENAI_API_KEY is absent');
+  assert.ok(found, 'keyword fallback must find the SOP when no embedding key is present');
 
-  if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+  // Restore
+  for (const [k, v] of Object.entries(savedKeys)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 test('suggestSOPsForTask: keyword fallback has zero false positives on nonsense query', async () => {
-  const savedKey = process.env.OPENAI_API_KEY;
+  const savedKeys = {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
+    GOOGLE_AI_STUDIO_API_KEY: process.env.GOOGLE_AI_STUDIO_API_KEY,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    SOP_EMBEDDING_PROVIDER: process.env.SOP_EMBEDDING_PROVIDER,
+  };
   delete process.env.OPENAI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
+  delete process.env.GOOGLE_AI_STUDIO_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.SOP_EMBEDDING_PROVIDER;
 
   const results = await suggestSOPsForTask(
     { title: 'xyzzy quux frobnicator blargh', description: undefined },
@@ -317,5 +344,9 @@ test('suggestSOPsForTask: keyword fallback has zero false positives on nonsense 
   );
   assert.strictEqual(results.length, 0, 'keyword fallback must return 0 results for a nonsense query');
 
-  if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+  // Restore
+  for (const [k, v] of Object.entries(savedKeys)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
