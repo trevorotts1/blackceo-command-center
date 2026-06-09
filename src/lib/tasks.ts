@@ -98,7 +98,7 @@ export async function createTaskCore(
   let sopId: string | null = input.sop_id ?? null;
   if (!sopId) {
     try {
-      const best = getBestSOPForTask({
+      const best = await getBestSOPForTask({
         title: input.title,
         description: input.description ?? undefined,
         department: input.department ?? undefined,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { suggestSOPsForTask } from '@/lib/sops';
+import { isEmbeddingAvailable } from '@/lib/sop-embeddings';
 
 // Runtime route — opt out of static prerender (uses request data / DB).
 export const dynamic = 'force-dynamic';
@@ -7,8 +8,12 @@ export const dynamic = 'force-dynamic';
 /**
  * GET /api/sops/suggest?department=X&task_title=Y&task_description=Z
  *
- * Returns top 3 SOPs by match score (department exact match + keyword overlap).
- * Used by the new-task dialog so operators see "suggested SOP" before saving.
+ * Returns top 3 SOPs by match score. When OPENAI_API_KEY is configured and
+ * SOP embeddings exist in the DB this uses semantic (cosine) ranking blended
+ * with keyword scoring. Without a key it falls back to the pure keyword path.
+ *
+ * Response includes `semantic_enabled: true/false` so callers can tell which
+ * mode is active.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -24,7 +29,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const suggestions = suggestSOPsForTask(
+    const suggestions = await suggestSOPsForTask(
       {
         title: taskTitle,
         description: taskDescription,
@@ -34,6 +39,7 @@ export async function GET(request: NextRequest) {
     );
 
     return NextResponse.json({
+      semantic_enabled: isEmbeddingAvailable(),
       suggestions: suggestions.map((s) => ({
         sop: s.sop,
         score: Number(s.score.toFixed(3)),

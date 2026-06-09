@@ -2011,6 +2011,33 @@ const migrations: Migration[] = [
       console.log('[Migration 054] agents.persona + dispatch_rules ready');
     }
   },
+  {
+    id: '055',
+    name: 'add_sop_embeddings_table',
+    // Semantic SOP search (feat/semantic-sop-search).
+    // Stores OpenAI text-embedding-3-small (1536-dim) vectors for every SOP.
+    // Separate table keeps sops clean and allows re-embedding without touching
+    // SOP rows. The embedding column is a raw IEEE 754 BLOB (Float32 × 1536
+    // = 6,144 bytes per row). Cosine similarity is computed in JS at query
+    // time — 2,578 rows × 6KB ≈ 15MB RAM, well within budget.
+    // Idempotent: CREATE TABLE IF NOT EXISTS + index IF NOT EXISTS.
+    up: (db) => {
+      console.log('[Migration 055] Creating sop_embeddings table...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sop_embeddings (
+          sop_id         TEXT PRIMARY KEY REFERENCES sops(id) ON DELETE CASCADE,
+          embedding      BLOB NOT NULL,
+          embedding_model TEXT NOT NULL DEFAULT 'text-embedding-3-small',
+          embedding_dims  INTEGER NOT NULL DEFAULT 1536,
+          embedded_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_embeddings_embedded_at ON sop_embeddings(embedded_at)`);
+
+      console.log('[Migration 055] sop_embeddings table ready');
+    }
+  },
 ];
 
 /**
