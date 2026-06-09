@@ -98,10 +98,17 @@ function resolveWorkspaceId(
     if (byName) return { workspaceId: byName.id, resolvedBy: `persona:${persona}` };
   }
 
-  // 3. CEO catch-all. Match the stable slug 'ceo'/'dept-ceo' (display name is
-  //    free text — the client's main-agent persona — so we don't match name).
+  // 3. CEO catch-all. Match all canonical CEO/master-orchestrator slugs.
+  //    The canonical slug is `master-orchestrator` (migration 051 rewrites
+  //    legacy `ceo` / `dept-ceo` slugs on first boot), so we include all
+  //    three to work on both migrated and legacy databases.  Display name
+  //    is free text (the client's main-agent persona), so we match only
+  //    'ceo' and 'master orchestrator' as name fallbacks.
   const ceo = queryOne<{ id: string }>(
-    "SELECT id FROM workspaces WHERE lower(slug) IN ('ceo', 'dept-ceo') OR lower(name) = 'ceo' ORDER BY sort_order ASC LIMIT 1",
+    `SELECT id FROM workspaces
+      WHERE lower(slug) IN ('master-orchestrator', 'ceo', 'dept-ceo')
+         OR lower(name) IN ('ceo', 'master orchestrator')
+      ORDER BY sort_order ASC LIMIT 1`,
     []
   );
   if (ceo) return { workspaceId: ceo.id, resolvedBy: 'ceo-fallback' };

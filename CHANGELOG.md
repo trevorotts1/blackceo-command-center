@@ -1,3 +1,13 @@
+## [v4.6.0] - 2026-06-09 - Board ordering: CEO pinned first, General Tasks pinned last (fleet-wide fix)
+
+Fixes a fleet-wide bug where the canonical CEO department slug `master-orchestrator` was never hoisted to the top of the board (the old hoist only matched legacy slugs `ceo`/`dept-ceo`). Also pins General Tasks to the bottom. Both guarantees are enforced at two independent layers (DB sort_order + UI).
+
+### Fixes
+
+- **AgentsSidebar.tsx** — `isCeoItem()` now matches slugs `master-orchestrator`, `ceo`, `dept-ceo` and names `ceo`, `master orchestrator`. `isGeneralTaskItem()` pins the catch-all dept to the bottom. Board renders: CEO first … operational depts … General Tasks.
+- **tasks/ingest/route.ts** — CEO catch-all query now includes `master-orchestrator` in the slug IN-list and `master orchestrator` in the name IN-list so unrouted tasks land on the CEO workspace on canonical installs.
+- **migrations.ts** — Migration 046 re-pin query extended to match `master-orchestrator` slug (was only `ceo` / `dept-ceo`). New idempotent **migration 059** `pin_general_task_department_last` sets `general-task` workspaces to `sort_order = 99999`. `autoSeedFromDepartmentsJson` now seeds CEO at `sort_order = 0` and general-task at `sort_order = 99999`.
+
 ## [v4.5.0] - 2026-06-09 - Lean Kanban board confirmation + QC-agent auto-approval
 
 Documents and cements the lean Kanban model; builds the QC-agent auto-scorer that was not previously wired.
