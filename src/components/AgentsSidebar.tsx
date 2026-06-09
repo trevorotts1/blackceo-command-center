@@ -50,7 +50,8 @@ interface Department {
   workspaceId: string;
   emoji: string;
   name: string;
-  headTitle: string;
+  /** Name of the department's head agent, or null if none is assigned. */
+  headName: string | null;
   status: DepartmentStatus;
   agentStatus: AgentStatus;
 }
@@ -115,7 +116,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
 
         const enriched = await Promise.all(
           workspaces.map(
-            async (ws: { id: string; name: string; icon?: string; slug: string }) => {
+            async (ws: { id: string; name: string; icon?: string; slug: string; head_agent_name?: string | null }) => {
               let agentStatus: AgentStatus = 'standby';
               try {
                 const ar = await fetch(
@@ -145,7 +146,12 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
                 workspaceId: ws.id,
                 emoji: ws.icon || '📁',
                 name: ws.name,
-                headTitle: ws.name,
+                // Use the department's assigned head agent name. The /api/workspaces
+                // response already includes head_agent_name via a LEFT JOIN on
+                // workspaces.head_agent_id → agents.name (migration 028). Store null
+                // if unset — the render layer shows "—" rather than repeating the
+                // department name.
+                headName: ws.head_agent_name || null,
                 status: deptStatus,
                 agentStatus,
               } as Department;
@@ -490,7 +496,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
                   <div className={`text-sm truncate ${
                     isSelected ? 'text-brand-600' : 'text-gray-500'
                   }`}>
-                    {dept.headTitle}
+                    {dept.headName ?? '—'}
                   </div>
                 </div>
 
