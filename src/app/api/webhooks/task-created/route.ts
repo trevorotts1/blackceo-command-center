@@ -38,8 +38,14 @@ export async function POST(request: NextRequest) {
 
     // Forward to OpenClaw gateway
     try {
-      const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || 'http://127.0.0.1:18789';
-      
+      // OPENCLAW_GATEWAY_URL may be a ws:// or wss:// URL (for the WebSocket
+      // client). fetch() requires http:// / https://, so convert the scheme
+      // here. The gateway's HTTP hooks port is the same as its WS port.
+      const rawGatewayUrl = process.env.OPENCLAW_GATEWAY_URL || 'http://127.0.0.1:18789';
+      const gatewayUrl = rawGatewayUrl
+        .replace(/^wss:\/\//, 'https://')
+        .replace(/^ws:\/\//, 'http://');
+
       const response = await fetch(`${gatewayUrl}/message`, {
         method: 'POST',
         headers: {

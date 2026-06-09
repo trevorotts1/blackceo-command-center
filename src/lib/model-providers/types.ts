@@ -188,6 +188,22 @@ export interface ChatCompletionResponse {
 export type ProviderAuthType = 'api_key' | 'local_endpoint' | 'oauth';
 
 /**
+ * Result of an optional post-save smoke-test.
+ *
+ * `ok: true`  — the key was verified with a live API call.
+ * `ok: false` — the call failed or timed out; the key is STILL saved
+ *               (write-only contract). `message` contains a human-readable
+ *               reason (e.g. "401 Unauthorized" or "timeout after 7s").
+ */
+export interface SmokeTestResult {
+  ok: boolean;
+  /** HTTP status from the provider, when available. */
+  status?: number;
+  /** Human-readable description (never echoes the key). */
+  message?: string;
+}
+
+/**
  * The connector contract. `fetchModels` is required. `fetchUsage` and
  * `chatCompletion` are optional, present only on providers that support
  * them.
@@ -222,4 +238,13 @@ export interface ModelProvider {
   fetchUsage?(apiKey: string): Promise<UsageSnapshot>;
   /** Proxy a chat completion through the provider. Optional. */
   chatCompletion?(apiKey: string, request: ChatCompletionRequest): Promise<ChatCompletionResponse>;
+  /**
+   * Optional post-save smoke-test. After the operator saves a new key via
+   * POST /api/clients/[id]/keys, the route calls this (if present) to
+   * verify the key is valid before returning. The key is ALWAYS saved first
+   * (write-only contract) — this result is advisory, never blocks the save.
+   *
+   * Implementations must complete within 8 seconds (use AbortController).
+   */
+  verifyKey?(apiKey: string): Promise<SmokeTestResult>;
 }

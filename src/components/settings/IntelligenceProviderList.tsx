@@ -116,9 +116,21 @@ export function IntelligenceProviderList({
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyNotice, setKeyNotice] = useState<string | null>(null);
+  const [keyNoticeOk, setKeyNoticeOk] = useState(true);
 
   // Live key-detection status from /api/models/provider-status (multi-store).
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse | null>(null);
+
+  const fetchProviderStatus = async () => {
+    try {
+      const res = await fetch('/api/models/provider-status', { cache: 'no-store' });
+      if (!res.ok) return;
+      const json = (await res.json()) as ProviderStatusResponse;
+      setProviderStatus(json);
+    } catch {
+      /* ignore — status panel degrades gracefully */
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -136,6 +148,11 @@ export function IntelligenceProviderList({
           json.clients[0] ??
           null;
         setClient(selected);
+        // C2 — re-fetch provider status after client resolves so the detection
+        // side-effect (which hydrates process.env on first read) is reflected.
+        if (!cancelled) {
+          await fetchProviderStatus();
+        }
       } catch {
         /* ignore — add-key affordance simply won't show */
       }
@@ -143,25 +160,13 @@ export function IntelligenceProviderList({
     return () => {
       cancelled = true;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/models/provider-status', { cache: 'no-store' });
-        if (!res.ok) return;
-        const json = (await res.json()) as ProviderStatusResponse;
-        if (cancelled) return;
-        setProviderStatus(json);
-      } catch {
-        /* ignore — status panel degrades gracefully */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // Provider status is initially fetched by the client-load effect above
+  // (C2 freshness fix). This separate effect is intentionally removed to avoid
+  // a stale first-read where process.env has not yet been hydrated.
+  // Subsequent refreshes happen in handleRefresh() and handleSaveKey().
 
   const logByProvider = new Map<string, ProviderRefreshEntry>();
   for (const entry of refreshLog) {
@@ -229,16 +234,39 @@ export function IntelligenceProviderList({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider: keyForm.provider, value: keyForm.value, refresh: true }),
       });
-      const json = await res.json().catch(() => ({}));
+      const json = await res.json().catch(() => ({})) as {
+        env_var?: string;
+        refreshed?: boolean;
+        refresh_error?: string;
+        smokeTest?: { ok: boolean; status?: number; message?: string } | null;
+        error?: string;
+        message?: string;
+      };
       if (!res.ok) {
         throw new Error(json.message || json.error || `Save failed (${res.status})`);
       }
-      if (json.refreshed === false && json.refresh_error) {
-        setKeyNotice(`Key saved (${json.env_var}). Catalog refresh failed — try "Refresh now".`);
+      // D — surface smoke-test outcome.
+      const st = json.smokeTest;
+      let notice: string;
+      let noticeOk = true;
+      if (st !== null && st !== undefined) {
+        if (st.ok) {
+          notice = `Key saved and verified (${json.env_var ?? ''}).`;
+        } else {
+          notice = `Key saved (${json.env_var ?? ''}) but verification failed: ${st.message ?? `HTTP ${st.status}`}.`;
+          noticeOk = false;
+        }
+      } else if (json.refreshed === false && json.refresh_error) {
+        notice = `Key saved (${json.env_var ?? ''}). Catalog refresh failed — try "Refresh now".`;
+        noticeOk = false;
       } else {
-        setKeyNotice(`Key saved (${json.env_var}) and catalog refreshed.`);
+        notice = `Key saved (${json.env_var ?? ''}) and catalog refreshed.`;
       }
+      setKeyNotice(notice);
+      setKeyNoticeOk(noticeOk);
       setKeyForm(null);
+      // C2 — re-fetch provider status so the "Configured" badge reflects the new key.
+      await fetchProviderStatus();
       if (onRefreshComplete) onRefreshComplete();
     } catch (err) {
       setKeyError(err instanceof Error ? err.message : 'Failed to save key');
@@ -287,7 +315,7 @@ export function IntelligenceProviderList({
         </div>
       )}
       {keyNotice && (
-        <div className="px-5 py-2 bg-emerald-50 border-b border-emerald-100 text-xs text-emerald-700">
+        <div className={`px-5 py-2 border-b text-xs ${keyNoticeOk ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-amber-50 border-amber-100 text-amber-700'}`}>
           {keyNotice}
         </div>
       )}
@@ -352,15 +380,19 @@ export function IntelligenceProviderList({
                         {entry.error_message}
                       </div>
                     )}
-                    {/* Live key detection status (multi-store) */}
+                    {/* C2 — Live key detection status (multi-store). When
+                        configured, show "Configured (key: ENVVAR)" and
+                        suppress the re-entry prompt. */}
                     {status && !isLocalEndpoint && (
                       <div className="text-xs text-gray-400 mt-0.5">
                         {status.configured ? (
                           <span className="text-emerald-600">
-                            Key: <code className="font-mono">{status.foundEnvVar}</code>
+                            Configured (key:{' '}
+                            <code className="font-mono">{status.foundEnvVar}</code>
                             {status.foundInStore && status.foundInStore !== 'process.env' && (
                               <> · found in <span className="italic">{sourceLabel(status.foundInStore)}</span></>
                             )}
+                            )
                           </span>
                         ) : (
                           <span className="text-amber-600">
@@ -379,8 +411,9 @@ export function IntelligenceProviderList({
                     )}
                   </div>
 
-                  {/* E5: missing-key recovery action — only for api_key providers. */}
-                  {failed && client && !isLocalEndpoint && (
+                  {/* E5: missing-key recovery action — only for api_key providers
+                      when the key is not already detected (C2 suppresses when configured). */}
+                  {failed && client && !isLocalEndpoint && !status?.configured && (
                     <button
                       type="button"
                       onClick={() => {

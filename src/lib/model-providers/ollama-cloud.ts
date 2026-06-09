@@ -26,6 +26,7 @@ import type {
   ModelCapability,
   ModelProvider,
   ProviderModel,
+  SmokeTestResult,
   UsageSnapshot,
 } from './types';
 
@@ -222,6 +223,45 @@ export async function chatCompletion(
 }
 
 /**
+ * Smoke-test a new Ollama Cloud API key by hitting GET /v1/models with a
+ * short (7 s) timeout. Returns {ok:true} on HTTP 2xx, {ok:false,status,message}
+ * on any error without ever echoing the key. Called by the key-save route after
+ * a successful write; the key is ALWAYS saved regardless of this result.
+ */
+export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {
+  const TIMEOUT_MS = 7_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(MODELS_ENDPOINT, {
+      method: 'GET',
+      headers: authHeaders(apiKey),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      return { ok: true, status: res.status };
+    }
+    // Parse a short error body for the message, never echo the key.
+    const body = await res.text().catch(() => '');
+    const snippet = body.slice(0, 120).replace(/\s+/g, ' ').trim();
+    return {
+      ok: false,
+      status: res.status,
+      message: `${res.status} ${res.statusText}${snippet ? ` — ${snippet}` : ''}`,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = msg.includes('abort') || msg.toLowerCase().includes('timeout');
+    return {
+      ok: false,
+      message: isTimeout ? `timeout after ${TIMEOUT_MS / 1000}s` : msg,
+    };
+  }
+}
+
+/**
  * Default export conforming to ModelProvider. The provider-registry index
  * (owned by Track C2) imports this and indexes by `slug`.
  *
@@ -238,6 +278,7 @@ const ollamaCloudProvider: ModelProvider = {
   fetchModels,
   fetchUsage,
   chatCompletion,
+  verifyKey,
 };
 
 export default ollamaCloudProvider;

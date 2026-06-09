@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.9.0 (2026-06-09)** hardens the Intelligence key-save path: HTTP 507 on disk-full (ENOSPC), atomic write (temp + rename), Ollama Cloud slug alias (maps `ollama` → both OLLAMA_API_KEY + OLLAMA_CLOUD_API_KEY), smoke-test on save (verifyKey), UI freshness re-fetch, and ws:// scheme bug fix in the task webhook. See `CHANGELOG.md` for the full entry.
+>
 > **v4.8.0 (2026-06-09)** adds an always-visible, draggable horizontal scrollbar and left/right scroll affordances (fade gradients + chevron buttons) to the Kanban Task Board so users immediately see that Review/QC, Blocked, and Done columns exist off-screen to the right. See `CHANGELOG.md` for the full entry.
 >
 > **v4.7.0 (2026-06-09)** wires per-department QC Specialist agents: migration 060 adds `agents.role_type`, seeds one QC Specialist per workspace, and the QC scorer + review→done gate now resolve the task's own dept QC agent instead of any global master. See `CHANGELOG.md` for the full entry.

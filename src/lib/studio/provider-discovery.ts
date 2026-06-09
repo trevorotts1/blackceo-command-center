@@ -294,6 +294,15 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
     // Convention mirrors apiKeyFor() in the refresh job: SLUG -> SLUG_API_KEY.
     const envName = slug.toUpperCase().replace(/-/g, '_') + '_API_KEY';
     out[envName] = key;
+    // C1 — Ollama slug alias: the openclaw config stores the key under the
+    // slug `ollama`; the connector and discovery table expect BOTH
+    // `OLLAMA_API_KEY` (conventional slug derivation above) AND
+    // `OLLAMA_CLOUD_API_KEY` (the canonical name the UI surfaces). Populate
+    // both so the Ollama Cloud provider lights up regardless of which name
+    // the detection layer checks first.
+    if (slug === 'ollama') {
+      out['OLLAMA_CLOUD_API_KEY'] = key;
+    }
   }
   return out;
 }
@@ -575,6 +584,21 @@ export interface KeyWriteResult {
   /** 'local-openclaw-json' | 'remote-openclaw-json' */
   target: string;
   error?: string;
+  /**
+   * When the write failed due to ENOSPC / disk-full, this is true so the
+   * API route can return HTTP 507 Insufficient Storage instead of a generic
+   * 502. The error message is also made actionable for the operator.
+   */
+  diskFull?: boolean;
+}
+
+/**
+ * Return true when the error message indicates an ENOSPC / disk-full
+ * condition on the client box (covers Linux ENOSPC, macOS "no space",
+ * Docker thin-provisioned writes, and variants from SSH stderr).
+ */
+export function isDiskFullError(msg: string): boolean {
+  return /ENOSPC|no space left|disk.*full|out of.*space|not enough space/i.test(msg);
 }
 
 /** Normalize a provider slug OR an explicit env-var name to `<SLUG>_API_KEY`. */
@@ -632,14 +656,53 @@ export async function writeClientProviderKey(
   if (client.is_self) {
     try {
       const configPath = openclawConfigPath();
+      const configDir = path.dirname(configPath);
       const existing = safeReadFile(configPath);
       const next = mergeKeyIntoOpenclawJson(existing, envVar, value.trim());
-      fs.writeFileSync(configPath, next, { mode: 0o600 });
+      const nextBytes = Buffer.byteLength(next, 'utf8');
+
+      // B2 — disk preflight: refuse if free bytes < 2 × file size.
+      // statfsSync is available in Node ≥ 19.6 / v18.15 (same LTS as Next 14).
+      // We gate on its existence so old Node versions degrade gracefully.
+      try {
+        const stat = (fs as unknown as { statfsSync?: (p: string) => { bfree: number; bsize: number } }).statfsSync;
+        if (typeof stat === 'function') {
+          const vfs = stat(configDir);
+          const freeBytes = vfs.bfree * vfs.bsize;
+          if (freeBytes < nextBytes * 2) {
+            const freeMB = (freeBytes / (1024 * 1024)).toFixed(1);
+            const needMB = ((nextBytes * 2) / (1024 * 1024)).toFixed(2);
+            const msg = `disk preflight failed: only ${freeMB} MB free, need at least ${needMB} MB — free space and retry`;
+            return { ok: false, envVar, target: 'local-openclaw-json', error: msg, diskFull: true };
+          }
+        }
+      } catch {
+        // statfsSync unavailable or failed — proceed without preflight
+      }
+
+      // B2 — atomic write via temp file + rename to never partially overwrite.
+      const tmpPath = configPath + '.bcc-tmp-' + process.pid;
+      try {
+        fs.writeFileSync(tmpPath, next, { mode: 0o600 });
+        fs.renameSync(tmpPath, configPath);
+      } catch (writeErr) {
+        // Clean up temp file on failure; ignore cleanup error.
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        throw writeErr;
+      }
+
       // Make it live for THIS process immediately so an inline re-refresh works.
       process.env[envVar] = value.trim();
       return { ok: true, envVar, target: 'local-openclaw-json' };
     } catch (err) {
-      return { ok: false, envVar, target: 'local-openclaw-json', error: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        envVar,
+        target: 'local-openclaw-json',
+        error: msg,
+        diskFull: isDiskFullError(msg),
+      };
     }
   }
 
