@@ -1,3 +1,24 @@
+## [v4.10.0] - 2026-06-09 - Department sidebar: subtitle shows head agent name instead of repeating dept name
+
+Each department card in the left sidebar was displaying the department name twice — once as the bold title and again as the grey subtitle. The subtitle now shows the name of the department's assigned head agent (resolved from `workspaces.head_agent_id` → `agents.name` via the existing migration 028 JOIN). If no head agent is assigned, the subtitle renders "—" rather than repeating the name.
+
+### Changed
+
+- **`src/components/AgentsSidebar.tsx`** — sidebar department card rendering:
+  - `Department.headTitle: string` renamed to `Department.headName: string | null`.
+  - Workspace fetch type annotation extended with `head_agent_name?: string | null` (already returned by `/api/workspaces` via LEFT JOIN since migration 028).
+  - `headName` populated from `ws.head_agent_name || null` instead of `ws.name`.
+  - Subtitle render: `{dept.headName ?? '—'}` — shows the agent name when present, "—" when absent; never falls back to the department name.
+  - Focus-mode rail subtitle unchanged ("In focus" string — unrelated to the bug).
+
+### Behaviour notes
+
+- All departments with a head agent set in the DB now show that agent's name as the subtitle.
+- CEO / Master Orchestrator and any brand-new dept without an assigned head agent show "—".
+- IDLE/ACTIVE badges, hoist order (CEO first, General Tasks last), and minimized emoji-only mode are all unaffected.
+
+---
+
 ## [v4.9.0] - 2026-06-09 - Key-save hardening: 507 disk-full, atomic write, Ollama alias, smoke-test, ws-fix
 
 Hardens the Intelligence Settings key-save path against the disk-full failure

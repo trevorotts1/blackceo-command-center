@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.10.0 (2026-06-09)** fixes the department sidebar: each department's subtitle now shows the **name of the department's head agent** instead of repeating the department name. Resolved from `workspaces.head_agent_id` → `agents.name` (migration 028 JOIN); departments without a head agent show "—". See `CHANGELOG.md` for the full v4.10.0 entry.
+>
 > **v4.9.0 (2026-06-09)** hardens the Intelligence key-save path: HTTP 507 on disk-full (ENOSPC), atomic write (temp + rename), Ollama Cloud slug alias (maps `ollama` → both OLLAMA_API_KEY + OLLAMA_CLOUD_API_KEY), smoke-test on save (verifyKey), UI freshness re-fetch, and ws:// scheme bug fix in the task webhook. See `CHANGELOG.md` for the full entry.
 >
 > **v4.8.0 (2026-06-09)** adds an always-visible, draggable horizontal scrollbar and left/right scroll affordances (fade gradients + chevron buttons) to the Kanban Task Board so users immediately see that Review/QC, Blocked, and Done columns exist off-screen to the right. See `CHANGELOG.md` for the full entry.
