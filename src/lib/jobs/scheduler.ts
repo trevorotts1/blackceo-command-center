@@ -179,6 +179,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // routing shipped).
   { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
 
+
   // weekly-done-clear: Sunday 07:00 America/New_York — soft-archive all done
   // tasks (sets archived_at, never hard-deletes). Idempotent: a second run in
   // the same week is a no-op. Disable with DISABLE_WEEKLY_DONE_CLEAR=1.

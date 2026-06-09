@@ -2052,6 +2052,7 @@ const migrations: Migration[] = [
     },
   },
 
+
   // ── Migration 056 — Add tasks.sop_id (column-creation fix) ─────────────────
   {
     id: '056',
