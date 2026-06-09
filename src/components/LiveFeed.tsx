@@ -193,7 +193,7 @@ export function LiveFeed() {
   const filteredEvents = events.filter((event) => {
     if (filter === 'all') return true;
     if (filter === 'tasks')
-      return ['task_created', 'task_assigned', 'task_status_changed', 'task_completed'].includes(
+      return ['task_created', 'task_assigned', 'task_status_changed', 'task_completed', 'qc_review'].includes(
         event.type
       );
     if (filter === 'agents')
@@ -405,6 +405,8 @@ function EventItem({ event }: { event: Event }) {
         return 'bg-cyan-500';
       case 'agent_status_changed':
         return 'bg-orange-500';
+      case 'qc_review':
+        return 'bg-purple-500';
       case 'system':
         return 'bg-gray-500';
       default:

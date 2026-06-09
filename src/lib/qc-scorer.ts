@@ -485,7 +485,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     const scoredBy = qcAgent ? ` [scorer:${qcAgent.name}]` : ' [scorer:global-heuristic]';
     const gapNote = result.gaps.length > 0 ? ` Gaps: ${result.gaps.join('; ')}` : '';
     const eventMessage =
-      `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | ${result.pass ? 'PASS → moved to Done' : 'FAIL → returned to In Progress'} | ${result.reason}${gapNote} [path:${result.scoringPath}]${scoredBy}`;
+      `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | ${result.pass ? 'PASS → moved to Done' : 'FAIL → returned to Backlog for re-route'} | ${result.reason}${gapNote} [path:${result.scoringPath}]${scoredBy}`;
 
     run(
       `INSERT INTO events (id, type, task_id, message, created_at)
@@ -506,24 +506,71 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       );
       console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
     } else {
-      // Kick back: return to in_progress with gap note
+      // FAIL: return to backlog (not in_progress) with gap notes so ceo-delegation-sweep
+      // or auto-route can re-dispatch to the right department.
       const kickbackNote = result.gaps.length > 0
         ? `[QC-FAIL] Score ${result.score.toFixed(1)}/10. Rework needed: ${result.gaps.join('; ')}`
         : `[QC-FAIL] Score ${result.score.toFixed(1)}/10. ${result.reason}`;
 
       run(
-        `UPDATE tasks SET status = 'in_progress', description = CASE
+        `UPDATE tasks SET status = 'backlog', description = CASE
            WHEN description IS NULL OR description = '' THEN ?
            ELSE description || char(10) || char(10) || ?
          END, updated_at = ? WHERE id = ? AND status = 'review'`,
         [kickbackNote, kickbackNote, now, taskId],
       );
+
+      // Write task_status_changed event — visible on the board timeline.
       run(
         `INSERT INTO events (id, type, task_id, message, created_at)
          VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), 'task_status_changed', taskId, `[QC-AUTO] Task "${task.title}" returned to In Progress — score ${result.score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD}. ${result.reason}`, now],
+        [uuidv4(), 'task_status_changed', taskId,
+          `[QC-AUTO] Task "${task.title}" returned to Backlog — score ${result.score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD}. ${result.reason}`,
+          now],
       );
-      console.log(`[QCScorer] Task "${task.title}" (${taskId}): FAIL ${result.score.toFixed(1)}/10 → in_progress`);
+
+      // Write CEO-addressed reroute event so the master-orchestrator knows to
+      // re-assign / re-route the task back to the correct department.
+      const ceoDept = task.department ?? task.workspace_id ?? 'unknown';
+      const gapsSummary = result.gaps.length > 0 ? result.gaps.join('; ') : result.reason;
+
+      // Resolve master-orchestrator/CEO agent for the event author field.
+      let ceoAgentId: string | null = null;
+      try {
+        const ceoRow = queryOne<{ id: string }>(
+          `SELECT id FROM agents WHERE is_master = 1
+           AND (workspace_id = 'master-orchestrator' OR workspace_id = 'ceo')
+           LIMIT 1`,
+          [],
+        );
+        ceoAgentId = ceoRow?.id ?? null;
+      } catch {
+        // No CEO agent found — write event without agent_id (still visible)
+      }
+
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          'qc_review',
+          ceoAgentId,
+          taskId,
+          `[QC-REROUTE] "${task.title}" FAILED QC → re-route to ${ceoDept} with fixes: ${gapsSummary}`,
+          now,
+        ],
+      );
+
+      // Trigger auto-route fire-and-forget so the task gets re-dispatched
+      // immediately rather than waiting for the next ceo-delegation-sweep tick.
+      const baseUrl = process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+      fetch(`${baseUrl}/api/webhooks/auto-route`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId }),
+      }).catch(err => console.warn('[QCScorer] Auto-route trigger failed (non-fatal):', (err as Error).message));
+
+      console.log(`[QCScorer] Task "${task.title}" (${taskId}): FAIL ${result.score.toFixed(1)}/10 → backlog (re-route triggered)`);
     }
 
     return result;

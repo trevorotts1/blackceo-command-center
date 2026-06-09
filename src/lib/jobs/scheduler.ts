@@ -27,6 +27,7 @@ import {
   WEEKLY_DONE_CLEAR_CRON_TIMEZONE,
 } from './weekly-done-clear';
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
+import { runQCReviewSweep } from './qc-review-sweep';
 
 export interface RegisteredJob {
   name: string;
@@ -175,6 +176,22 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // execution-reconcile: every 2 minutes, catch in_progress tasks whose
   // TASK_COMPLETE report never reached the webhook.
   { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
+  // qc-review-sweep: every 2 minutes, score any review-column task that has
+  // not received a qc_review event in the last 10 minutes. Catches tasks that
+  // arrived in review before the scorer was wired to the completion paths.
+  // Disable with DISABLE_QC_REVIEW_SWEEP=1.
+  {
+    name: 'qc-review-sweep',
+    expr: '*/2 * * * *',
+    fn: async () => {
+      const result = await runQCReviewSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] qc-review-sweep: skipped — ${result.skippedReason}`);
+      } else if (result.scanned > 0) {
+        console.log(`[cron] qc-review-sweep: scanned ${result.scanned} task(s), scored ${result.scored}`);
+      }
+    },
+  },
   // ceo-delegation: every 5 minutes, push CEO-stranded backlog tasks down to
   // the right department (mostly relevant for tasks created before in-process
   // routing shipped).

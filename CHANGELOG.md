@@ -1,3 +1,22 @@
+## [v4.11.0] - 2026-06-09 - QC scorer wired to all review-entry paths; FAIL→backlog+CEO-reroute; Live Feed surfaces qc_review
+
+The per-department QC scorer (`runQCOnReview`) was only reachable via the manual PATCH route. Tasks reaching `review` via the agent-completion webhook or execution-watcher reconcile never triggered scoring, so `qc_review` events were never written and items rotted in the Review/QC column.
+
+### Fixed
+
+- **`src/app/api/webhooks/agent-completion/route.ts`** — imported `runQCOnReview`; both the `task_id` path and the `session_id` path now fire `runQCOnReview()` as a fire-and-forget call (inside the transition guard — only when the task actually moves into `review`).
+- **`src/lib/jobs/execution-watcher.ts`** — imported `runQCOnReview`; `advanceToReview()` caller now also fires `runQCOnReview()` fire-and-forget after advancing to review.
+- **`src/lib/qc-scorer.ts`** — FAIL branch changed: task now moves to **`backlog`** (not `in_progress`) so the ceo-delegation-sweep and auto-route webhook can re-dispatch it to the correct department. A CEO-addressed `qc_review` event with `[QC-REROUTE]` is written and a fire-and-forget POST to `/api/webhooks/auto-route` is triggered.
+- **`src/components/LiveFeed.tsx`** — `qc_review` added to the Tasks filter list and `getEventDot()` switch (`bg-purple-500`).
+
+### Added
+
+- **`src/lib/jobs/qc-review-sweep.ts`** — new `runQCReviewSweep()` job: selects `review` tasks with no `qc_review` event in the last 10 minutes and calls `runQCOnReview()` for each. Disable with `DISABLE_QC_REVIEW_SWEEP=1`.
+- **`src/lib/jobs/scheduler.ts`** — `qc-review-sweep` registered at `*/2 * * * *` (same frequency as `execution-reconcile`).
+- **`tests/unit/qc-review-wiring.test.ts`** — 8 new unit tests covering: QC fires from agent-completion path, sweep scores a stuck review task, FAIL→backlog+CEO reroute event, task_status_changed event mentions Backlog, recent-event guard skips already-scored tasks, DISABLE guard, and qc_review event queryability.
+
+---
+
 ## [v4.10.0] - 2026-06-09 - Department sidebar: subtitle shows head agent name instead of repeating dept name
 
 Each department card in the left sidebar was displaying the department name twice — once as the bold title and again as the grey subtitle. The subtitle now shows the name of the department's assigned head agent (resolved from `workspaces.head_agent_id` → `agents.name` via the existing migration 028 JOIN). If no head agent is assigned, the subtitle renders "—" rather than repeating the name.

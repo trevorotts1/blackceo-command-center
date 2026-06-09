@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHmac } from 'crypto';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
+import { runQCOnReview } from '@/lib/qc-scorer';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
 /**
@@ -105,7 +106,8 @@ export async function POST(request: NextRequest) {
 
       // Only move to review if not already in review or done
       // (Don't overwrite user's approval)
-      if (task.status !== 'review' && task.status !== 'done') {
+      const movedToReview = task.status !== 'review' && task.status !== 'done';
+      if (movedToReview) {
         run(
           'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
           ['review', now, task.id]
@@ -136,6 +138,11 @@ export async function POST(request: NextRequest) {
 
       // Advance the card on the board instantly (B2).
       broadcastTaskUpdate(task.id);
+
+      // Fire QC scorer when this call actually moved the task into review.
+      if (movedToReview) {
+        runQCOnReview(task.id).catch(err => console.error('[agent-completion] QC error:', err));
+      }
 
       return NextResponse.json({
         success: true,
@@ -192,7 +199,8 @@ export async function POST(request: NextRequest) {
 
       // Only move to review if not already in review or done
       // (Don't overwrite user's approval)
-      if (task.status !== 'review' && task.status !== 'done') {
+      const movedToReviewSession = task.status !== 'review' && task.status !== 'done';
+      if (movedToReviewSession) {
         run(
           'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
           ['review', now, task.id]
@@ -221,6 +229,11 @@ export async function POST(request: NextRequest) {
 
       // Advance the card on the board instantly (B2).
       broadcastTaskUpdate(task.id);
+
+      // Fire QC scorer when this call actually moved the task into review.
+      if (movedToReviewSession) {
+        runQCOnReview(task.id).catch(err => console.error('[agent-completion] QC error:', err));
+      }
 
       return NextResponse.json({
         success: true,
