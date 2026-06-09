@@ -1,3 +1,26 @@
+## [v4.13.0] - 2026-06-09 - Company Settings: brand secondary color, auto-derived product name, full CSS-variable theming
+
+Extends the Company Settings page (`/settings/company`) so operators can make the dashboard their own:
+
+### Added
+
+- **Brand secondary color field** (`CompanySettingsForm`, v4.13.0): new color picker + hex input for `brandSecondaryColor`. Accepts hex or color name ("coral", "navy") with the same `resolveBrandColor()` D1 resolution as the primary. Persisted to `company-config.json` (via `/api/company/config`) and to `clients.brand_secondary_color` (via `/api/clients/[id]` PATCH).
+- **`clients.brand_secondary_color` column** — Migration 062 adds `TEXT` column to the `clients` table; additive + idempotent, safe against any existing DB.
+- **`buildThemeVars(primary, secondary?)` secondary parameter** (`src/lib/branding.ts`): when an explicit secondary is supplied it drives `--bcc-secondary`, `--bcc-secondary-hover`, `--bcc-secondary-light`, and the new `--brand-secondary-50..950` CSS-variable scale. When omitted/null the auto-derived analogous (+30°) shade is used as before.
+- **`--brand-secondary-*` CSS-variable scale** (`globals.css`): default 50→950 scale (mirrors BlackCEO green) that `BrandTheme` replaces per client. Also adds `--bcc-secondary-hover` and `--bcc-secondary-light` to `:root`.
+- **Secondary utility overrides in `BrandTheme`** (`src/components/BrandTheme.tsx`): emits `bg-brand-secondary-N`, `text-brand-secondary-N`, `border-brand-secondary-N`, gradient classes, and hover variants for all 11 scale steps — same build-safe `<style>` block pattern as the primary overrides.
+- **`tests/unit/company-settings-brand.test.ts`** — 8 unit tests: product-name derive, `buildThemeVars` secondary output, null fallback to analogous, migration 062 column, API `allowedStrings` gate, `SELECT_COLS` coverage, `BrandTheme` source check.
+
+### Changed
+
+- **Company name → Product name auto-derive** (`CompanySettingsForm`): typing in the Company Name field now auto-populates Product Name as `"<Company Name> Command Center"` (e.g. "Wake-Up Rise-Up Live-Up Command Center"). Product Name stays fully editable; once the operator manually edits it the auto-populate stops. Hint text updated to document the behaviour.
+- **`BrandTheme`** now reads `client.brand_secondary_color` from the selected tenant and passes it as the second argument to `buildThemeVars`, so the secondary scale cascades app-wide from the root `<style>` block — no per-component edits required.
+- **`/api/clients/[id]` PATCH** now accepts and validates `brand_secondary_color` (hex or color-name resolution, same as `brand_color`).
+- **`/api/company/config` POST** `allowedStrings` extended with `'brandSecondaryColor'`.
+- **`src/lib/clients.ts`** — `Client`, `PublicClient`, `ClientRow` interfaces, `SELECT_COLS`, `createClient`, and `updateClient` all updated for `brand_secondary_color`.
+
+---
+
 ## [v4.12.0] - 2026-06-09 - QC loop closed: port fix, re-dispatch to in_progress, infinite-loop guard
 
 Two bugs caused QC-failed tasks to strand in backlog and never be redone automatically.

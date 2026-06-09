@@ -62,6 +62,27 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       }
     }
 
+    // v4.13.0: brand_secondary_color — same resolution as brand_color.
+    // `null`/'' clears it (→ auto-derived analogous fallback in BrandTheme).
+    let brandSecondaryColorPatch: string | null | undefined;
+    if (body.brand_secondary_color !== undefined) {
+      if (body.brand_secondary_color === null || body.brand_secondary_color === '') {
+        brandSecondaryColorPatch = null;
+      } else if (typeof body.brand_secondary_color === 'string') {
+        const resolved = resolveBrandColor(body.brand_secondary_color);
+        if (!resolved.hex) {
+          return NextResponse.json(
+            {
+              error:
+                'brand_secondary_color must be a hex code (e.g. #1E3A8A) or a recognized color name (e.g. navy, forest green).',
+            },
+            { status: 400 },
+          );
+        }
+        brandSecondaryColorPatch = resolved.hex;
+      }
+    }
+
     // D3: logo_url — when provided, mirror into the client's GHL media library
     // (skipped automatically when it is already a GHL-hosted URL) and store the
     // resulting hosted URL. Best-effort: keep the source URL if GHL is not set.
@@ -90,6 +111,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       ssh_target: body.ssh_target !== undefined ? body.ssh_target : undefined,
       interview_complete: body.interview_complete !== undefined ? body.interview_complete === true : undefined,
       brand_color: brandColorPatch,
+      brand_secondary_color: brandSecondaryColorPatch,
       logo_url: logoUrlPatch,
     });
 
