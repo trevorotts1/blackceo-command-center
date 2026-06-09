@@ -7,6 +7,7 @@ import { UpdateTaskSchema } from '@/lib/validation';
 import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/types';
 import { checkTriad } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
+import { runQCOnReview } from '@/lib/qc-scorer';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -253,6 +254,25 @@ export async function PATCH(
       broadcast({
         type: 'task_updated',
         payload: task,
+      });
+    }
+
+    // ── QC-Agent auto-scorer ────────────────────────────────────────────────
+    // When a task transitions INTO `review`, fire the QC auto-scorer (fire and
+    // forget — never blocks the HTTP response). The scorer:
+    //   1. Fetches the task's assigned SOP + success_criteria.
+    //   2. Uses the configured LLM (OPENAI/GOOGLE key) or a heuristic fallback.
+    //   3. Score ≥8.5 → moves task to `done` + writes task_completed event.
+    //      Score <8.5 → returns to `in_progress` + appends gap notes.
+    //   4. Always writes a `qc_review` event for the audit trail.
+    //
+    // Disable with DISABLE_QC_AUTO_SCORER=1 (env).
+    const transitionedToReview =
+      validatedData.status === 'review' && existing.status !== 'review';
+    if (transitionedToReview) {
+      // Fire-and-forget: don't await — QC runs asynchronously after response.
+      runQCOnReview(id).catch((err) => {
+        console.error('[tasks PATCH] QC auto-scorer fire-and-forget error:', err);
       });
     }
 
