@@ -66,8 +66,11 @@ blue "── 2. Department canonical set (N18) ──"
 # departments.json is validated only for SHAPE: it must be a valid JSON array
 # (empty = unseeded template, populated = a client's regenerated set), and any
 # entries it does contain must carry the required schema fields.
-# Count updated to 18: v4.2.0 (commit 431ad61) added Security Team (E27),
-# bringing the canonical roster to 18 departments. The QC gate must match.
+# Count updated to 24: the routing fix (fix/command-center-routing-sop-persona)
+# aligned DEFAULT_DEPARTMENTS to the full ZHC canonical set — added the 6 ZHC
+# departments the router was previously blind to (presentations, client-coaches,
+# course-creator, podcast, community-management, personal-assistant), giving
+# the ZHC canonical 23 + Security (E27) = 24. The QC gate must match.
 check "2.1" "config/departments.json is a valid JSON array (empty template or client-regenerated)" \
   '[ "$(jq -r "type" config/departments.json)" = "array" ]' \
   "must be [] (shipped template) or a populated array; run scripts/sync-departments-from-build-state.py"
@@ -78,8 +81,8 @@ check "2.3" "departments.config.ts includes Social Media (canonical source of tr
   "grep -q \"id: 'social-media'\" src/lib/routing/departments.config.ts"
 check "2.4" "departments.config.ts includes Paid Advertisement" \
   "grep -q \"id: 'paid-advertisement'\" src/lib/routing/departments.config.ts"
-check "2.5" "departments.config.ts defines exactly 18 canonical departments" \
-  "[ \"\$(grep -cE \"id: '[a-z-]+'\" src/lib/routing/departments.config.ts)\" = \"18\" ]"
+check "2.5" "departments.config.ts defines exactly 24 canonical departments" \
+  "[ \"\$(grep -cE \"id: '[a-z-]+'\" src/lib/routing/departments.config.ts)\" = \"24\" ]"
 check "2.6" "departments.config.ts has CRM and OpenClaw Maintenance" \
   "grep -q \"id: 'crm'\" src/lib/routing/departments.config.ts && grep -q \"id: 'openclaw-maintenance'\" src/lib/routing/departments.config.ts"
 check "2.7" "departments.config.ts does NOT include Operations / Creative / HR / IT" \
