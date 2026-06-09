@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.11.0 (2026-06-09)** wires the QC scorer to every path that transitions a task into `review`: agent-completion webhook, execution-watcher reconcile, and a new `qc-review-sweep` cron (every 2 min) that catches tasks already stuck in Review/QC. FAIL branch now moves tasks to **backlog** (not in_progress) and writes a CEO reroute event so the master-orchestrator can re-dispatch. `qc_review` events surface in the Live Feed rail with a purple dot. See `CHANGELOG.md` for the full v4.11.0 entry.
+>
 > **v4.10.0 (2026-06-09)** fixes the department sidebar: each department's subtitle now shows the **name of the department's head agent** instead of repeating the department name. Resolved from `workspaces.head_agent_id` → `agents.name` (migration 028 JOIN); departments without a head agent show "—". See `CHANGELOG.md` for the full v4.10.0 entry.
 >
 > **v4.9.0 (2026-06-09)** hardens the Intelligence key-save path: HTTP 507 on disk-full (ENOSPC), atomic write (temp + rename), Ollama Cloud slug alias (maps `ollama` → both OLLAMA_API_KEY + OLLAMA_CLOUD_API_KEY), smoke-test on save (verifyKey), UI freshness re-fetch, and ws:// scheme bug fix in the task webhook. See `CHANGELOG.md` for the full entry.

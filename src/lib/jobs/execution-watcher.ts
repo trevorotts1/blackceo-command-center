@@ -28,6 +28,7 @@
 import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
+import { runQCOnReview } from '@/lib/qc-scorer';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 
@@ -108,6 +109,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
       if (match) {
         console.log(`[execution-watcher] Reconcile detected TASK_COMPLETE for task ${task.id} ("${task.title}")`);
         advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match);
+        runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
       }
     } catch (err) {
       console.warn(`[execution-watcher] Reconcile failed for task ${task.id}:`, (err as Error).message);
