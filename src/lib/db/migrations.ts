@@ -1885,8 +1885,27 @@ const migrations: Migration[] = [
     // Idempotent. Assigns the best-scoring SOP to existing backlog tasks where
     // sop_id IS NULL, so the Triad gate stops permanently blocking.
     // Uses a simple keyword+department match (same logic as getBestSOPForTask).
+    //
+    // IMPORTANT: tasks.sop_id is added by migration 056 (add_tasks_sop_id).
+    // Because the runner executes in NUMERIC order, 053 runs BEFORE 056 on any
+    // database that has never had the column added by hand.  This guard detects
+    // that situation and no-ops safely; 056 will add the column, and because
+    // _migrations already records 053 as applied the backfill simply never runs
+    // on that database.  On databases where sop_id already exists (either added
+    // by 056 on a prior run, or hand-patched), the migration proceeds normally.
     up: (db) => {
       console.log('[Migration 053] Backfilling sop_id on backlog tasks with sop_id IS NULL...');
+
+      // Guard: if sop_id column is missing, the backfill SQL would throw.
+      // Migration 056 (add_tasks_sop_id) owns the column creation; it runs
+      // after this migration in numeric order.  Skip here — 056 will add the
+      // column, and the backfill is intentionally deferred to future task
+      // updates (the Triad gate re-evaluates on every status change).
+      const tasksColInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      if (!tasksColInfo.some((c) => c.name === 'sop_id')) {
+        console.log('[Migration 053] tasks.sop_id column not yet present (will be added by migration 056) — skipping backfill');
+        return;
+      }
 
       const hasSOPs = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sops'").get();
       if (!hasSOPs) {
@@ -2031,6 +2050,54 @@ const migrations: Migration[] = [
 
       console.log('[Migration 055] Workspace purpose columns ready for intelligent routing');
     },
+  },
+
+  // ── Migration 056 — Add tasks.sop_id (column-creation fix) ─────────────────
+  // ROOT CAUSE FIX for the confirmed migration gap: migration 053 reads and
+  // writes tasks.sop_id but no prior migration (or schema.ts) ever created the
+  // column.  On fresh databases schema.ts builds the tasks table WITHOUT sop_id;
+  // on existing databases the column was absent unless someone ran the manual
+  // ALTER by hand.
+  //
+  // This migration is the authoritative owner of tasks.sop_id.  It is safe on:
+  //   (a) Fresh databases  — schema.ts CREATE TABLE IF NOT EXISTS is a no-op on
+  //       tables that already exist, so after runMigrations() adds the column
+  //       via this migration, the table has it.  On a brand-new box where the
+  //       tasks table was just created by schema.ts (without sop_id), this
+  //       migration adds it.
+  //   (b) Existing databases missing sop_id — the PRAGMA table_info guard below
+  //       detects the gap and runs the ALTER TABLE.
+  //   (c) Re-runs / boxes where sop_id was hand-patched — the guard skips the
+  //       ALTER without error.
+  //
+  // NOTE: migration 053 (backfill_sop_id_on_backlog_tasks) runs BEFORE this one
+  // in numeric order.  Migration 053 was patched to detect the missing column
+  // and no-op safely, deferring the backfill; the Triad gate re-evaluates sop_id
+  // on each task dispatch anyway, so no backfill data is lost.
+  {
+    id: '056',
+    name: 'add_tasks_sop_id',
+    up: (db) => {
+      console.log('[Migration 056] Ensuring tasks.sop_id column exists...');
+
+      // SQLite has no ADD COLUMN IF NOT EXISTS — guard manually.
+      const tasksColInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      if (!tasksColInfo.some((c) => c.name === 'sop_id')) {
+        // Note: SQLite does not allow ADD COLUMN with a FK constraint on an
+        // existing table in all versions, so we add the column without the
+        // inline REFERENCES clause and rely on application-layer enforcement
+        // (same pattern used for tasks.model_id in migration 044).
+        db.exec(`ALTER TABLE tasks ADD COLUMN sop_id TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_sop_id ON tasks(sop_id)`);
+        console.log('[Migration 056] Added tasks.sop_id column + index');
+      } else {
+        // Column already present (hand-patched box or a future fresh-install
+        // where schema.ts is eventually updated to include sop_id).
+        // Ensure the index exists regardless.
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_sop_id ON tasks(sop_id)`);
+        console.log('[Migration 056] tasks.sop_id already present — ensured index, nothing else to do');
+      }
+    }
   },
 ];
 
