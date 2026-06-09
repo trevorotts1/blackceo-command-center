@@ -1,3 +1,31 @@
+## [v4.8.0] - 2026-06-09 - Kanban board: always-visible scrollbar + scroll affordance
+
+Users could not tell that Review/QC, Blocked, and Done columns existed off-screen to the right. Replaced the invisible auto-hiding browser scrollbar with an always-visible, draggable styled scrollbar and added left/right scroll affordances.
+
+### Changed
+
+- **`src/components/MissionQueue.tsx`** — Kanban columns container refactored:
+  - Outer `div` is now `position:relative overflow-hidden`, anchoring overlay affordances.
+  - Inner scroll container gains `ref={scrollRef}` + `kanban-scroll` CSS class.
+  - `canScrollLeft` / `canScrollRight` state derived from `scrollLeft`, `clientWidth`, `scrollWidth` via a `ResizeObserver` + scroll event listener.
+  - Left/right fade gradient overlays (`.kanban-fade-left` / `.kanban-fade-right`) rendered conditionally; `pointer-events:none` so they never block card drag-and-drop.
+  - Chevron buttons (`.kanban-scroll-btn`) sit centred within each fade zone, scrolling 320 px (≈ one column width) per click. Hidden on mobile (`.hidden.lg:block`).
+  - Region `aria-label` + `tabIndex=0` added for keyboard accessibility.
+  - Added `ChevronLeft`, `ChevronRight` from lucide-react; added `useRef`, `useEffect`, `useCallback` imports.
+
+- **`src/app/globals.css`** — new `.kanban-scroll` class:
+  - `scrollbar-width: thin` + `scrollbar-color` (Firefox).
+  - `::-webkit-scrollbar` height 10 px, themed track (`--brand-50`) + thumb (`--brand-400`) with hover/active states (Chrome/Safari/Edge).
+  - `.kanban-fade-left` / `.kanban-fade-right` overlay gradient rules.
+  - `.kanban-scroll-btn` button rules (circle, white background, brand border, hover/active tints).
+
+### Behaviour notes
+
+- On macOS the default scrollbar is "overlay" (auto-hides); the new rules force it always visible and themed so users immediately see the board is scrollable.
+- Card drag-and-drop (`draggable` / `onDragStart` / `onDrop`) is unaffected — the overlay divs are `pointer-events:none`.
+- Keyboard scroll: the scroll region is `tabIndex=0`; arrow keys and Page Left/Right work natively on the focused container.
+- Chevrons hide automatically at each edge (no scroll possible in that direction).
+
 ## [v4.7.0] - 2026-06-09 - Per-department QC Specialist gates review→done
 
 Each department now has its own dedicated QC Specialist agent (`role_type=qc`). The QC scorer and the review→done gate use the task's own department QC agent for scoring and approval authority, with a global-master fallback for pre-migration installs.

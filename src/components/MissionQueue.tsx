@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { Plus, GripVertical, Eye, AlertTriangle } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
@@ -91,6 +91,35 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
+
+  // ── Horizontal scroll affordance state ────────────────────────────────────
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const updateScrollState = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 8);
+    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    updateScrollState();
+    el.addEventListener('scroll', updateScrollState, { passive: true });
+    const ro = new ResizeObserver(updateScrollState);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener('scroll', updateScrollState);
+      ro.disconnect();
+    };
+  }, [updateScrollState]);
+
+  const scrollBy = (delta: number) => {
+    scrollRef.current?.scrollBy({ left: delta, behavior: 'smooth' });
+  };
 
   // Focus View (single department) scopes by the workspace_id FK — the ONLY
   // relationship the schema enforces (tasks.workspace_id REFERENCES
@@ -300,48 +329,95 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
         </div>
       </div>
 
-      {/* Kanban Columns */}
-      <div className="flex-1 overflow-x-auto overflow-y-auto lg:overflow-y-hidden p-4 lg:p-8">
-        <div className="flex flex-col lg:flex-row gap-6 h-full min-w-0 lg:min-w-max pb-4">
-          {COLUMNS.map((column) => {
-            const columnTasks = getTasksByStatus(column.id);
-            return (
-              <div
-                key={column.id}
-                data-walkthrough={`column-${column.id}`}
-                className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
-                onDragOver={handleDragOver}
-                onDrop={(e) => handleDrop(e, column.id)}
-              >
-                {/* Column Header */}
-                <div className="flex items-center justify-between shrink-0">
-                  <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
-                    <span className="text-badge font-bold bg-white/20 px-2 py-0.5 rounded-full">
-                      {columnTasks.length}
-                    </span>
-                    <span className="text-sm font-bold">{column.label}</span>
-                  </div>
-                  <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
-                    <Plus className="w-4 h-4" />
-                  </button>
-                </div>
+      {/* Kanban Columns — scroll wrapper with always-visible scrollbar + affordances */}
+      {/*
+        Layout:
+          • outer div: flex-1, relative, overflow-hidden — anchors the fade/button overlays
+          • scrollRef div: kanban-scroll class (always-visible scrollbar), actual scroll container
+          • left/right fade + chevron overlays: shown when scroll is possible in that direction
+        The fade overlays use pointer-events:none so they never block card drag+drop.
+        Chevron buttons have pointer-events:all and sit centred within each fade zone.
+      */}
+      <div className="flex-1 relative overflow-hidden">
+        {/* Left scroll affordance — fade + chevron */}
+        {canScrollLeft && (
+          <div className="kanban-fade-left hidden lg:block" aria-hidden="true">
+            <button
+              className="kanban-scroll-btn"
+              style={{ left: 16 }}
+              onClick={() => scrollBy(-320)}
+              tabIndex={0}
+              aria-label="Scroll board left"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+          </div>
+        )}
 
-                {/* Tasks */}
-                <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
-                  {columnTasks.map((task) => (
-                    <TaskCard
-                      key={task.id}
-                      task={task}
-                      onDragStart={handleDragStart}
-                      onClick={() => setEditingTask(task)}
-                      isDragging={draggedTask?.id === task.id}
-                      isCompleted={column.id === 'done'}
-                    />
-                  ))}
+        {/* Right scroll affordance — fade + chevron */}
+        {canScrollRight && (
+          <div className="kanban-fade-right hidden lg:block" aria-hidden="true">
+            <button
+              className="kanban-scroll-btn"
+              style={{ right: 16 }}
+              onClick={() => scrollBy(320)}
+              tabIndex={0}
+              aria-label="Scroll board right"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {/* Actual scrollable column strip */}
+        <div
+          ref={scrollRef}
+          className="kanban-scroll overflow-x-auto overflow-y-auto lg:overflow-y-hidden h-full p-4 lg:p-8"
+          role="region"
+          aria-label="Task board columns — scroll left or right to see more"
+          tabIndex={0}
+        >
+          <div className="flex flex-col lg:flex-row gap-6 h-full min-w-0 lg:min-w-max pb-4">
+            {COLUMNS.map((column) => {
+              const columnTasks = getTasksByStatus(column.id);
+              return (
+                <div
+                  key={column.id}
+                  data-walkthrough={`column-${column.id}`}
+                  className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                  onDragOver={handleDragOver}
+                  onDrop={(e) => handleDrop(e, column.id)}
+                >
+                  {/* Column Header */}
+                  <div className="flex items-center justify-between shrink-0">
+                    <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
+                      <span className="text-badge font-bold bg-white/20 px-2 py-0.5 rounded-full">
+                        {columnTasks.length}
+                      </span>
+                      <span className="text-sm font-bold">{column.label}</span>
+                    </div>
+                    <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Tasks */}
+                  <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
+                    {columnTasks.map((task) => (
+                      <TaskCard
+                        key={task.id}
+                        task={task}
+                        onDragStart={handleDragStart}
+                        onClick={() => setEditingTask(task)}
+                        isDragging={draggedTask?.id === task.id}
+                        isCompleted={column.id === 'done'}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       </div>
 

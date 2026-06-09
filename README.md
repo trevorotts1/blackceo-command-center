@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.8.0 (2026-06-09)** adds an always-visible, draggable horizontal scrollbar and left/right scroll affordances (fade gradients + chevron buttons) to the Kanban Task Board so users immediately see that Review/QC, Blocked, and Done columns exist off-screen to the right. See `CHANGELOG.md` for the full entry.
+>
 > **v4.7.0 (2026-06-09)** wires per-department QC Specialist agents: migration 060 adds `agents.role_type`, seeds one QC Specialist per workspace, and the QC scorer + review→done gate now resolve the task's own dept QC agent instead of any global master. See `CHANGELOG.md` for the full entry.
 >
 > **v4.6.0 (2026-06-09)** fixes a fleet-wide board ordering bug: the canonical CEO dept slug `master-orchestrator` now correctly pins to the top of every board, and General Tasks pins to the bottom. See `CHANGELOG.md` for the full entry.
