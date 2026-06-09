@@ -1,36 +1,53 @@
 /**
- * SOP / Task Embedding Utilities — Superset Module
+ * SOP / Task Embedding Utilities — Provider-Flexible Module
  *
  * This module serves TWO consumers:
  *
  * 1. department-router.ts (intelligent routing):
- *    - getEmbeddingApiKey()     — key or null
+ *    - getEmbeddingApiKey()     — key or null (first available across providers)
  *    - fetchEmbeddings(texts[]) — batch embed up to 100 texts → EmbeddingResult[]
  *    - cosineSimilarity(a, b)   — pure math util (accepts any ArrayLike<number>)
  *    - EmbeddingVector          — type alias for number[]
  *
  * 2. sops.ts / SOP routes / backfill script (semantic SOP search + storage):
- *    - isEmbeddingAvailable()   — boolean, true when OPENAI_API_KEY present
+ *    - isEmbeddingAvailable()   — boolean, true when any embedding provider key present
+ *    - resolveEmbeddingProvider() — picks provider (openai | google | none)
  *    - buildSOPEmbedText(sop)   — build canonical embed text for a SOP
- *    - fetchEmbedding(text)     — single text → Float32Array (1536 dims)
+ *    - fetchEmbedding(text)     — single text → Float32Array (1536 or 3072 dims)
  *    - float32ToBuffer(arr)     — serialize for SQLite BLOB storage
  *    - bufferToFloat32(buf)     — deserialize from SQLite BLOB
  *    - storeEmbeddingForSOP(sop) — compute + persist embedding (fire-and-forget)
  *    - rankSOPsBySemantic(query) — bulk cosine ranking over sop_embeddings table
  *    - getStoredEmbedding(id)   — retrieve stored embedding for a SOP
- *    - EMBEDDING_MODEL          — model name constant
- *    - EMBEDDING_DIMS           — dimension count constant
+ *    - EMBEDDING_MODEL          — active model name (reflects resolved provider)
+ *    - EMBEDDING_DIMS           — active dimension count (reflects resolved provider)
  *
- * Key design decisions:
- *   - Provider: OpenAI text-embedding-3-small (1536 dims). Cheap, fast, reliable.
- *   - The key is ALWAYS the client's own OPENAI_API_KEY — never a shared key.
- *   - DB storage in sop_embeddings table (migration 057, separate from sops).
- *   - Cosine similarity in JS (brute-force ~5ms over 2,578 rows; no native ext).
- *   - Graceful no-op on missing key — callers fall back to keyword search.
- *   - Never crashes write paths: storeEmbeddingForSOP swallows all errors.
+ * PROVIDER RESOLUTION ORDER (configurable via SOP_EMBEDDING_PROVIDER env):
+ *   1. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim)
+ *   2. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-001, 3072-dim)
+ *   3. SOP_EMBEDDING_PROVIDER absent → auto-detect:
+ *        OPENAI_API_KEY present  → openai
+ *        ELSE Google key present → google
+ *        ELSE                   → none (keyword fallback)
  *
- * ENV REQUIREMENT:
- *   OPENAI_API_KEY in the Next.js server process env (NOT NEXT_PUBLIC_).
+ * GOOGLE EMBEDDING API (smoke-tested live):
+ *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=<KEY>
+ *   Body: { "content": { "parts": [{ "text": "<text>" }] } }
+ *   Response: { "embedding": { "values": [...3072 floats...] } }
+ *   Free-tier quota: rate-limited → batching uses sequential calls with pacing +
+ *     retry-with-backoff on 429 + graceful exit on sustained 429.
+ *
+ * DIMENSION CONSISTENCY GUARD:
+ *   Each row in sop_embeddings stores embedding_model + embedding_dims.
+ *   rankSOPsBySemantic() reads the active model from the DB and skips rows
+ *   whose dims != active provider dims (prevents cross-provider cosine comparisons).
+ *
+ * ENV REQUIREMENTS:
+ *   OPENAI_API_KEY            — enables OpenAI embeddings (text-embedding-3-small, 1536-dim)
+ *   GOOGLE_API_KEY            — enables Google embeddings (gemini-embedding-001, 3072-dim)
+ *   GOOGLE_AI_STUDIO_API_KEY  — alternate Google key name
+ *   GEMINI_API_KEY            — alternate Google key name
+ *   SOP_EMBEDDING_PROVIDER    — optional override: "openai" | "google"
  *   When absent: all semantic paths degrade gracefully to keyword-only.
  */
 
@@ -38,14 +55,39 @@ import { queryAll, queryOne, run, getDb } from '@/lib/db';
 import type { SOP } from '@/lib/sops';
 
 // ---------------------------------------------------------------------------
-// Constants
+// Provider types + constants
 // ---------------------------------------------------------------------------
 
-export const EMBEDDING_MODEL = 'text-embedding-3-small';
-export const EMBEDDING_DIMS = 1536;
+export type EmbeddingProviderName = 'openai' | 'google' | 'none';
+
+export interface EmbeddingProvider {
+  name: EmbeddingProviderName;
+  apiKey: string | null;
+  model: string;
+  dims: number;
+}
+
+/** OpenAI provider constants */
+const OPENAI_MODEL = 'text-embedding-3-small';
+const OPENAI_DIMS = 1536;
+
+/** Google Gemini provider constants */
+const GOOGLE_MODEL = 'gemini-embedding-001';
+const GOOGLE_DIMS = 3072;
+const GOOGLE_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** Maximum batch size for OpenAI /v1/embeddings. */
 const BATCH_LIMIT = 100;
+
+/**
+ * Google free-tier quota pacing:
+ *   - GOOGLE_EMBED_DELAY_MS  between sequential calls (default 250ms)
+ *   - GOOGLE_EMBED_MAX_RETRIES  on 429 before giving up on a call
+ *   - GOOGLE_EMBED_BACKOFF_MS  initial backoff on 429 (doubles each retry)
+ */
+const GOOGLE_EMBED_DELAY_MS = 250;
+const GOOGLE_EMBED_MAX_RETRIES = 3;
+const GOOGLE_EMBED_BACKOFF_MS = 1000;
 
 // ---------------------------------------------------------------------------
 // Types (used by department-router.ts)
@@ -59,30 +101,131 @@ export interface EmbeddingResult {
 }
 
 // ---------------------------------------------------------------------------
-// Key / availability helpers
+// Provider resolution
 // ---------------------------------------------------------------------------
 
 /**
- * Return the configured OPENAI_API_KEY or null.
- * Used by department-router.ts to decide whether to run semantic routing.
- * The check is cheap — no I/O, one env-var read per call.
+ * Resolve which embedding provider to use.
+ *
+ * Priority:
+ *   1. SOP_EMBEDDING_PROVIDER env override (forces openai or google)
+ *   2. Auto-detect: OPENAI_API_KEY → openai
+ *   3. Auto-detect: Google key (any of GOOGLE_API_KEY / GOOGLE_AI_STUDIO_API_KEY
+ *      / GEMINI_API_KEY) → google
+ *   4. No key → none (keyword fallback, no error)
+ *
+ * This function is cheap (env reads only, no I/O). Safe to call per-request.
  */
-export function getEmbeddingApiKey(): string | null {
-  const key = process.env.OPENAI_API_KEY;
-  if (key && key.trim().length > 10) return key.trim();
+export function resolveEmbeddingProvider(): EmbeddingProvider {
+  const override = process.env.SOP_EMBEDDING_PROVIDER?.toLowerCase().trim();
+
+  // ── Forced override ────────────────────────────────────────────────────────
+  if (override === 'openai') {
+    const key = process.env.OPENAI_API_KEY?.trim() || null;
+    return { name: 'openai', apiKey: key, model: OPENAI_MODEL, dims: OPENAI_DIMS };
+  }
+  if (override === 'google') {
+    const key = resolveGoogleKey();
+    return { name: 'google', apiKey: key, model: GOOGLE_MODEL, dims: GOOGLE_DIMS };
+  }
+
+  // ── Auto-detect ────────────────────────────────────────────────────────────
+  // 1. OpenAI takes precedence when its key is present (existing clients
+  //    already have OpenAI indexes; don't switch them silently).
+  const openaiKey = process.env.OPENAI_API_KEY?.trim();
+  if (openaiKey && openaiKey.length > 10) {
+    return { name: 'openai', apiKey: openaiKey, model: OPENAI_MODEL, dims: OPENAI_DIMS };
+  }
+
+  // 2. Google key present (Google-only clients: Sheila, Corey, Kofi)
+  const googleKey = resolveGoogleKey();
+  if (googleKey) {
+    return { name: 'google', apiKey: googleKey, model: GOOGLE_MODEL, dims: GOOGLE_DIMS };
+  }
+
+  // 3. No key → keyword-only fallback
+  return { name: 'none', apiKey: null, model: '', dims: 0 };
+}
+
+/**
+ * Return the first present Google API key, or null.
+ * Checks GOOGLE_API_KEY, GOOGLE_AI_STUDIO_API_KEY, GEMINI_API_KEY in that order.
+ * Each key must be non-trivially long (> 10 chars) to count as set.
+ */
+export function resolveGoogleKey(): string | null {
+  const candidates = [
+    process.env.GOOGLE_API_KEY,
+    process.env.GOOGLE_AI_STUDIO_API_KEY,
+    process.env.GEMINI_API_KEY,
+  ];
+  for (const k of candidates) {
+    if (k && k.trim().length > 10) return k.trim();
+  }
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Legacy key / availability helpers (preserved for department-router.ts + sops.ts)
+// ---------------------------------------------------------------------------
+
 /**
- * True when OPENAI_API_KEY is set and non-trivially long.
+ * Return the first available embedding API key or null.
+ * Used by department-router.ts to decide whether to run semantic routing.
+ *
+ * Returns the OpenAI key if present, otherwise the first Google key.
+ * The check is cheap — no I/O, env-var reads only.
+ */
+export function getEmbeddingApiKey(): string | null {
+  const provider = resolveEmbeddingProvider();
+  return provider.name !== 'none' ? provider.apiKey : null;
+}
+
+/**
+ * True when any embedding provider key is set and non-trivially long.
  * Used by sops.ts / SOP routes to decide whether semantic search is active.
  */
 export function isEmbeddingAvailable(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY?.trim());
+  const provider = resolveEmbeddingProvider();
+  return provider.name !== 'none' && Boolean(provider.apiKey);
 }
 
 // ---------------------------------------------------------------------------
-// SOP embed-text construction (PR #39 — semantic SOP search)
+// Convenience constants (reflect resolved provider — for callers that need a
+// single value, e.g. the backfill script's display output).
+// These are DYNAMIC properties of the resolved provider, not hardcoded.
+// ---------------------------------------------------------------------------
+
+/**
+ * The active embedding model name. Reflects resolveEmbeddingProvider().
+ * Exported as a runtime value (not a const) because it depends on env.
+ *
+ * NOTE: Callers that store per-row model info should use
+ * resolveEmbeddingProvider().model directly rather than this export.
+ * This is kept for backfill script compatibility.
+ */
+export const EMBEDDING_MODEL: string = (() => {
+  try {
+    return resolveEmbeddingProvider().model || OPENAI_MODEL;
+  } catch {
+    return OPENAI_MODEL;
+  }
+})();
+
+/**
+ * The active embedding dimension count. Reflects resolveEmbeddingProvider().
+ * See note on EMBEDDING_MODEL above.
+ */
+export const EMBEDDING_DIMS: number = (() => {
+  try {
+    const p = resolveEmbeddingProvider();
+    return p.dims > 0 ? p.dims : OPENAI_DIMS;
+  } catch {
+    return OPENAI_DIMS;
+  }
+})();
+
+// ---------------------------------------------------------------------------
+// SOP embed-text construction
 // ---------------------------------------------------------------------------
 
 /**
@@ -125,13 +268,8 @@ export function buildSOPEmbedText(sop: Pick<SOP, 'name' | 'task_keywords' | 'ste
 /**
  * Fetch a SINGLE text embedding from OpenAI.
  * Returns Float32Array (1536 dims). Throws on error.
- *
- * Used by: storeEmbeddingForSOP, rankSOPsBySemantic, backfill script.
  */
-export async function fetchEmbedding(text: string): Promise<Float32Array> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
-
+async function fetchEmbeddingOpenAI(text: string, apiKey: string): Promise<Float32Array> {
   const resp = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: {
@@ -139,7 +277,7 @@ export async function fetchEmbedding(text: string): Promise<Float32Array> {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: EMBEDDING_MODEL,
+      model: OPENAI_MODEL,
       input: text,
       encoding_format: 'float',
     }),
@@ -156,21 +294,16 @@ export async function fetchEmbedding(text: string): Promise<Float32Array> {
 }
 
 /**
- * Fetch embeddings for an ARRAY of texts in one batched API call.
+ * Fetch embeddings for an ARRAY of texts in one batched OpenAI API call.
  * Returns EmbeddingResult[] in the SAME ORDER as `texts`.
  * Throws on error so callers can fall back to keyword scoring.
- *
- * Used by: department-router.ts (semantic routing).
  */
-export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[]> {
-  const apiKey = getEmbeddingApiKey();
-  if (!apiKey) throw new Error('No embedding API key configured');
+async function fetchEmbeddingsOpenAI(texts: string[], apiKey: string): Promise<EmbeddingResult[]> {
   if (texts.length === 0) return [];
   if (texts.length > BATCH_LIMIT) {
     throw new Error(`fetchEmbeddings: batch limit is ${BATCH_LIMIT}, got ${texts.length}`);
   }
 
-  // Truncate individual texts to avoid token-limit errors on very long inputs.
   const truncated = texts.map((t) => (t.length > 8_000 ? t.slice(0, 8_000) : t));
 
   const response = await fetch('https://api.openai.com/v1/embeddings', {
@@ -180,10 +313,9 @@ export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: EMBEDDING_MODEL,
+      model: OPENAI_MODEL,
       input: truncated,
     }),
-    // 10-second timeout so a slow API call never blocks task creation
     signal: AbortSignal.timeout(10_000),
   });
 
@@ -200,10 +332,156 @@ export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[
     throw new Error('Unexpected OpenAI embeddings response shape');
   }
 
-  // Sort by index so caller gets same-order results regardless of API return order.
   return json.data
     .map((d) => ({ index: d.index, embedding: d.embedding }))
     .sort((a, b) => a.index - b.index);
+}
+
+// ---------------------------------------------------------------------------
+// Google Gemini embedContent API calls
+// ---------------------------------------------------------------------------
+
+/**
+ * Sleep for ms milliseconds. Used for quota pacing.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch a SINGLE text embedding from Google Gemini (gemini-embedding-001).
+ *
+ * API shape (verified):
+ *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=<KEY>
+ *   Body: { "content": { "parts": [{ "text": "<text>" }] } }
+ *   Response: { "embedding": { "values": [...3072 floats...] } }
+ *
+ * Retries on 429 (quota) with exponential backoff. After max retries, throws
+ * with a "quota exceeded" message so the caller can fall back to keyword search.
+ */
+async function fetchEmbeddingGoogle(text: string, apiKey: string): Promise<Float32Array> {
+  const url = `${GOOGLE_API_BASE}/${GOOGLE_MODEL}:embedContent?key=${encodeURIComponent(apiKey)}`;
+  const body = JSON.stringify({ content: { parts: [{ text: text }] } });
+
+  let backoffMs = GOOGLE_EMBED_BACKOFF_MS;
+  for (let attempt = 0; attempt <= GOOGLE_EMBED_MAX_RETRIES; attempt++) {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (resp.status === 429) {
+      if (attempt >= GOOGLE_EMBED_MAX_RETRIES) {
+        throw new Error(
+          `Google embeddings quota exceeded (429) after ${GOOGLE_EMBED_MAX_RETRIES} retries — ` +
+          `falling back to keyword search. Re-run the backfill later.`
+        );
+      }
+      console.warn(
+        `[sop-embeddings] Google 429 on attempt ${attempt + 1}/${GOOGLE_EMBED_MAX_RETRIES + 1} — ` +
+        `backing off ${backoffMs}ms`
+      );
+      await sleep(backoffMs);
+      backoffMs *= 2;
+      continue;
+    }
+
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      throw new Error(`Google embeddings API error ${resp.status}: ${errBody.slice(0, 200)}`);
+    }
+
+    const json = (await resp.json()) as { embedding?: { values?: number[] } };
+    const values = json?.embedding?.values;
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error('Unexpected Google embedContent response shape');
+    }
+    return new Float32Array(values);
+  }
+
+  // Should not reach here, but TypeScript requires it.
+  throw new Error('Google embedding: unexpected loop exit');
+}
+
+/**
+ * Fetch embeddings for an ARRAY of texts using Google Gemini.
+ *
+ * Google's embedContent API is ONE-TEXT-PER-CALL (no batch endpoint).
+ * We process sequentially with pacing (GOOGLE_EMBED_DELAY_MS between calls)
+ * to respect the free-tier quota. On sustained 429, we stop and return partial
+ * results so the caller can fall back to keyword scoring for remaining items.
+ *
+ * Returns EmbeddingResult[] in the SAME ORDER as `texts`.
+ * If a 429 quota error is hit, throws after the first occurrence so the batch
+ * caller (fetchEmbeddings) can fall back cleanly.
+ */
+async function fetchEmbeddingsGoogle(texts: string[], apiKey: string): Promise<EmbeddingResult[]> {
+  if (texts.length === 0) return [];
+
+  const results: EmbeddingResult[] = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    const text = texts[i].length > 8_000 ? texts[i].slice(0, 8_000) : texts[i];
+    const vec = await fetchEmbeddingGoogle(text, apiKey);
+    results.push({ index: i, embedding: Array.from(vec) });
+
+    // Pace sequential calls to stay within free-tier quota limits.
+    // Skip delay after the last item.
+    if (i < texts.length - 1) {
+      await sleep(GOOGLE_EMBED_DELAY_MS);
+    }
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Public API: fetchEmbedding / fetchEmbeddings (provider-agnostic)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch a SINGLE text embedding using the resolved provider.
+ * Returns Float32Array (1536 dims for OpenAI, 3072 dims for Google).
+ * Throws on error or when no provider is configured.
+ *
+ * Used by: storeEmbeddingForSOP, rankSOPsBySemantic, backfill script.
+ */
+export async function fetchEmbedding(text: string): Promise<Float32Array> {
+  const provider = resolveEmbeddingProvider();
+  if (provider.name === 'none' || !provider.apiKey) {
+    throw new Error('No embedding provider configured (no OPENAI_API_KEY or Google key found)');
+  }
+  if (provider.name === 'google') {
+    return fetchEmbeddingGoogle(text, provider.apiKey);
+  }
+  // Default: openai
+  return fetchEmbeddingOpenAI(text, provider.apiKey);
+}
+
+/**
+ * Fetch embeddings for an ARRAY of texts.
+ * Returns EmbeddingResult[] in the SAME ORDER as `texts`.
+ * Throws on error so callers can fall back to keyword scoring.
+ *
+ * OpenAI: one batched API call (up to BATCH_LIMIT texts).
+ * Google: sequential calls with pacing (free-tier quota compliance).
+ *
+ * Used by: department-router.ts (semantic routing).
+ */
+export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[]> {
+  const provider = resolveEmbeddingProvider();
+  if (provider.name === 'none' || !provider.apiKey) {
+    throw new Error('No embedding API key configured');
+  }
+  if (texts.length === 0) return [];
+
+  if (provider.name === 'google') {
+    return fetchEmbeddingsGoogle(texts, provider.apiKey);
+  }
+  // Default: openai
+  return fetchEmbeddingsOpenAI(texts, provider.apiKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +509,7 @@ export function bufferToFloat32(buf: Buffer | null | undefined): Float32Array | 
  * Returns 0 for zero-length, mismatched-length, or zero-magnitude vectors.
  *
  * Accepts both Float32Array (semantic SOP search) and number[] (routing).
+ * Dimension-agnostic: works for both 1536-dim (OpenAI) and 3072-dim (Google).
  */
 export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (a.length === 0 || b.length === 0 || a.length !== b.length) return 0;
@@ -275,10 +554,16 @@ export function getStoredEmbedding(sopId: string): Float32Array | null {
  * Compute + persist the embedding for one SOP.
  * Safe to call fire-and-forget — errors are logged but never re-thrown so the
  * caller's write path (SOP create / update / import) never fails.
+ *
+ * Stores the model name + dims used so the query path can detect provider
+ * mismatches (prevents comparing 1536-dim vs 3072-dim vectors).
  */
 export async function storeEmbeddingForSOP(sop: SOP): Promise<void> {
   if (!isEmbeddingAvailable()) return;
   try {
+    const provider = resolveEmbeddingProvider();
+    if (provider.name === 'none' || !provider.apiKey) return;
+
     const text = buildSOPEmbedText(sop);
     const embedding = await fetchEmbedding(text);
     const blob = float32ToBuffer(embedding);
@@ -291,7 +576,7 @@ export async function storeEmbeddingForSOP(sop: SOP): Promise<void> {
          embedding_model = excluded.embedding_model,
          embedding_dims = excluded.embedding_dims,
          embedded_at = excluded.embedded_at`,
-      [sop.id, blob, EMBEDDING_MODEL, EMBEDDING_DIMS, now]
+      [sop.id, blob, provider.model, provider.dims, now]
     );
   } catch (err) {
     console.warn('[sop-embeddings] storeEmbeddingForSOP failed (non-fatal):', (err as Error).message);
@@ -312,8 +597,21 @@ export interface SemanticHit {
  * Fetches all embeddings from DB in one shot (~15MB RAM for 2,578 rows).
  * Returns sorted descending by similarity.
  *
- * Returns an empty array if the sop_embeddings table is missing or empty,
- * or if OPENAI_API_KEY is not configured.
+ * DIMENSION CONSISTENCY GUARD:
+ *   The active provider's model + dims are determined first. Rows stored with
+ *   a DIFFERENT model (i.e. different dims) are SKIPPED — we never compare
+ *   a 1536-dim OpenAI vector against a 3072-dim Google vector. This prevents
+ *   nonsensical cosine comparisons when a client switches providers.
+ *
+ *   If no rows match the active provider's model, returns an empty array so
+ *   the caller falls back to keyword search. The operator must re-run the
+ *   backfill with the new provider key to rebuild embeddings in the new space.
+ *
+ * Returns an empty array if:
+ *   - sop_embeddings table is missing (migration 057 not yet run)
+ *   - No embedding provider is configured
+ *   - No rows match the active provider's model
+ *   - API error during query embedding
  */
 export async function rankSOPsBySemantic(queryText: string): Promise<SemanticHit[]> {
   if (!isEmbeddingAvailable()) return [];
@@ -325,11 +623,28 @@ export async function rankSOPsBySemantic(queryText: string): Promise<SemanticHit
     .get();
   if (!tableExists) return [];
 
-  const rows = queryAll<{ sop_id: string; embedding: Buffer | null }>(
-    'SELECT sop_id, embedding FROM sop_embeddings WHERE embedding IS NOT NULL',
+  // Determine active provider model for the dimension consistency guard.
+  const activeProvider = resolveEmbeddingProvider();
+  if (activeProvider.name === 'none') return [];
+
+  const rows = queryAll<{ sop_id: string; embedding: Buffer | null; embedding_dims: number }>(
+    'SELECT sop_id, embedding, embedding_dims FROM sop_embeddings WHERE embedding IS NOT NULL',
     []
   );
   if (rows.length === 0) return [];
+
+  // Guard: skip rows whose stored dims don't match the active provider's dims.
+  // This is the cross-provider mismatch check — 1536-dim vs 3072-dim vectors
+  // must never be compared.
+  const matchingRows = rows.filter((r) => r.embedding_dims === activeProvider.dims);
+  if (matchingRows.length === 0) {
+    console.warn(
+      `[sop-embeddings] rankSOPsBySemantic: no stored embeddings match active provider dims (${activeProvider.dims}). ` +
+      `Stored rows have dims: ${Array.from(new Set(rows.map((r) => r.embedding_dims))).join(', ')}. ` +
+      `Run the backfill script with the current provider key to rebuild embeddings.`
+    );
+    return [];
+  }
 
   let queryVec: Float32Array;
   try {
@@ -340,7 +655,7 @@ export async function rankSOPsBySemantic(queryText: string): Promise<SemanticHit
   }
 
   const hits: SemanticHit[] = [];
-  for (const row of rows) {
+  for (const row of matchingRows) {
     const vec = bufferToFloat32(row.embedding);
     if (!vec) continue;
     hits.push({ sopId: row.sop_id, similarity: cosineSimilarity(queryVec, vec) });
