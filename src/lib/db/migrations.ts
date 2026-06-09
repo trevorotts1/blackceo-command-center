@@ -2053,31 +2053,18 @@ const migrations: Migration[] = [
   },
 
   // ── Migration 056 — Add tasks.sop_id (column-creation fix) ─────────────────
-  // ROOT CAUSE FIX for the confirmed migration gap: migration 053 reads and
-  // writes tasks.sop_id but no prior migration (or schema.ts) ever created the
-  // column.  On fresh databases schema.ts builds the tasks table WITHOUT sop_id;
-  // on existing databases the column was absent unless someone ran the manual
-  // ALTER by hand.
   {
     id: '056',
     name: 'add_tasks_sop_id',
     up: (db) => {
       console.log('[Migration 056] Ensuring tasks.sop_id column exists...');
 
-      // SQLite has no ADD COLUMN IF NOT EXISTS — guard manually.
       const tasksColInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
       if (!tasksColInfo.some((c) => c.name === 'sop_id')) {
-        // Note: SQLite does not allow ADD COLUMN with a FK constraint on an
-        // existing table in all versions, so we add the column without the
-        // inline REFERENCES clause and rely on application-layer enforcement
-        // (same pattern used for tasks.model_id in migration 044).
         db.exec(`ALTER TABLE tasks ADD COLUMN sop_id TEXT`);
         db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_sop_id ON tasks(sop_id)`);
         console.log('[Migration 056] Added tasks.sop_id column + index');
       } else {
-        // Column already present (hand-patched box or a future fresh-install
-        // where schema.ts is eventually updated to include sop_id).
-        // Ensure the index exists regardless.
         db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_sop_id ON tasks(sop_id)`);
         console.log('[Migration 056] tasks.sop_id already present — ensured index, nothing else to do');
       }
@@ -2088,10 +2075,6 @@ const migrations: Migration[] = [
     name: 'add_sop_embeddings_table',
     // Semantic SOP search (feat/semantic-sop-search).
     // Stores OpenAI text-embedding-3-small (1536-dim) vectors for every SOP.
-    // Separate table keeps sops clean and allows re-embedding without touching
-    // SOP rows. The embedding column is a raw IEEE 754 BLOB (Float32 × 1536
-    // = 6,144 bytes per row). Cosine similarity is computed in JS at query
-    // time — 2,578 rows × 6KB ≈ 15MB RAM, well within budget.
     // Idempotent: CREATE TABLE IF NOT EXISTS + index IF NOT EXISTS.
     up: (db) => {
       console.log('[Migration 057] Creating sop_embeddings table...');
@@ -2109,6 +2092,26 @@ const migrations: Migration[] = [
 
       console.log('[Migration 057] sop_embeddings table ready');
     }
+  },
+  {
+    id: '058',
+    name: 'add_task_archived_at',
+    // Adds tasks.archived_at TEXT column for the weekly Done-clear job.
+    // archived_at IS NOT NULL = task has been soft-archived; IS NULL = live.
+    // Additive + idempotent: safe to run against any existing DB.
+    // Renumbered from 055 (fix/board-and-analytics PR #45) to avoid collision
+    // with 055 add_workspace_purpose_for_intelligent_routing.
+    up: (db) => {
+      console.log('[Migration 058] Adding tasks.archived_at for weekly Done-clear...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('archived_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN archived_at TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at)`);
+        console.log('[Migration 058] tasks.archived_at + index added');
+      } else {
+        console.log('[Migration 058] tasks.archived_at already present, skipping');
+      }
+    },
   },
 ];
 

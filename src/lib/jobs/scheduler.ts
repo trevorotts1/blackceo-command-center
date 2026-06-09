@@ -21,6 +21,11 @@ import { ALL_PROVIDERS } from '@/lib/model-providers';
 import { runExecutionCompletionReconcile } from './execution-watcher';
 import { runCeoDelegationSweep } from './ceo-delegation-sweep';
 import { detectPatternsAndPropose } from '@/lib/sop-learning';
+import {
+  runWeeklyDoneClear,
+  WEEKLY_DONE_CLEAR_CRON_EXPR,
+  WEEKLY_DONE_CLEAR_CRON_TIMEZONE,
+} from './weekly-done-clear';
 
 export interface RegisteredJob {
   name: string;
@@ -149,7 +154,7 @@ async function runSopLearning(): Promise<void> {
   );
 }
 
-const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void> }> = [
+const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezone?: string }> = [
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
   { name: 'usage-refresh', expr: '0 */6 * * *', fn: runUsageRefresh },
   { name: 'memory-index', expr: '0 * * * *', fn: runMemoryIndexRebuild },
@@ -173,6 +178,23 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void> }> = [
   // the right department (mostly relevant for tasks created before in-process
   // routing shipped).
   { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
+
+  // weekly-done-clear: Sunday 07:00 America/New_York — soft-archive all done
+  // tasks (sets archived_at, never hard-deletes). Idempotent: a second run in
+  // the same week is a no-op. Disable with DISABLE_WEEKLY_DONE_CLEAR=1.
+  {
+    name: 'weekly-done-clear',
+    expr: WEEKLY_DONE_CLEAR_CRON_EXPR,
+    timezone: WEEKLY_DONE_CLEAR_CRON_TIMEZONE,
+    fn: async () => {
+      const result = await runWeeklyDoneClear();
+      console.log(
+        result.skippedReason
+          ? `[cron] weekly-done-clear: skipped — ${result.skippedReason}`
+          : `[cron] weekly-done-clear: archived ${result.archivedCount} done task(s)`,
+      );
+    },
+  },
 ];
 
 /**
@@ -188,7 +210,9 @@ export function registerCronJobs(): RegisteredJob[] {
       console.error(`[cron] invalid expression for ${job.name}: ${job.expr}`);
       continue;
     }
-    cron.schedule(job.expr, wrap(job.name, job.fn), { name: job.name });
+    const scheduleOptions: { name: string; timezone?: string } = { name: job.name };
+    if (job.timezone) scheduleOptions.timezone = job.timezone;
+    cron.schedule(job.expr, wrap(job.name, job.fn), scheduleOptions);
   }
 
   markRegistered();

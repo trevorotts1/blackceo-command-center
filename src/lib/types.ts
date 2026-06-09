@@ -84,6 +84,9 @@ export interface Task {
   // Resolved model pinned at dispatch (v4.0.1 P0-7, migration 044).
   // References model_registry(model_id) at the application layer.
   model_id?: string | null;
+  // Soft-archive timestamp set by the weekly Done-clear job (migration 055).
+  // IS NOT NULL = task has been archived; NULL = live on the board.
+  archived_at?: string | null;
   // Joined fields (populated by the tasks API GET; not stored on the row)
   model_label?: string | null;
   model_provider?: string | null;
