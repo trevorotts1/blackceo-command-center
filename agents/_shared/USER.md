@@ -29,7 +29,7 @@ and what they value.
   pushback. Estimate in hours; don't pad with testing/tuning buffer unless
   asked.
 - **No-bullshit on naming:** Settled name decisions stay settled (OpenClaw,
-  not Clawdbot; no Ant Farm; etc.).
+  not Clawdbot; OpenClaw is the system.).
 
 ## Communication Style
 

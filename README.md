@@ -81,7 +81,7 @@ Persona is the strongest control over agent behavior. Every generated SOUL.md an
 Master Orchestrator (CEO) gets the special variant: persona is INPUT, but company mission and owner values WIN on conflict.
 
 ### Documentation
-See PRD v2.1 (`onboarding ant farm PRD v2.1.md` in user's local Downloads) for the complete specification. Executes in order: v1.1 (foundation) → v2.0 (intelligence) → v2.1 (zero-human-company spec).
+See PRD v2.1 (`onboarding PRD v2.1.md` in user's local Downloads) for the complete specification. Executes in order: v1.1 (foundation) → v2.0 (intelligence) → v2.1 (zero-human-company spec).
 <!-- END v2.1 SECTION -->
 
 

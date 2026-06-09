@@ -913,7 +913,7 @@ All migrations are idempotent (re-runnable safely) — they check for existing c
 - Existing `gemini-index.sqlite` should be re-indexed at section level when v2.0 Chapter 13 ships (separate work item)
 
 ### Documentation
-- PRD v2.1 saved at user's local Downloads: `onboarding ant farm PRD v2.1.md`
+- PRD v2.1 saved at user's local Downloads: `onboarding PRD v2.1.md`
 - Supersedes PRD v1.1 (foundation) and v2.0 (intelligence layer)
 - Execution order remains: v1.1 → v2.0 → v2.1
 
