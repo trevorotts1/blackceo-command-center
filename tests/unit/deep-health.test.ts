@@ -4,8 +4,9 @@
  * Every applicable row in docs/B1-truth-table.md becomes one or more test
  * cases here.  A new edge case is a new row + new test, by design.
  *
- * We test the check functions directly (not the HTTP layer) for speed and
- * determinism.  The fixtures use in-memory SQLite and temp-dir .next trees.
+ * We test the check functions from src/lib/health/deep-checks.ts directly
+ * (not the HTTP layer) for speed and determinism.  The fixtures use
+ * in-memory SQLite mocks and temp-dir .next trees.
  *
  * Truth-table rows NOT covered here (handled by cc-health-check.sh):
  *   Rows 14-19 (pm2 topology) — shell-only, tested by the probe fixture test
@@ -26,7 +27,7 @@ function makeNextBuild(dir: string, opts: {
   withBuildId?: boolean;
   withManifest?: boolean;
   withStaticDir?: boolean;
-  missingAsset?: string;   // asset path to omit from disk
+  missingAsset?: string;   // relative path under .next/ to omit e.g. 'static/chunks/main-abc123.js'
 } = {}): void {
   const {
     withBuildId = true,
@@ -43,19 +44,21 @@ function makeNextBuild(dir: string, opts: {
   }
 
   if (withStaticDir) {
-    const chunk = '/_next/static/chunks/main-abc123.js';
-    const diskPath = path.join(dir, chunk.replace(/^\/_next\//, '.next/'));
+    // Use RELATIVE path form that real build-manifest.json uses (no /_next/ prefix)
+    const relPath = 'static/chunks/main-abc123.js';
+    const diskPath = path.join(nextDir, relPath);
     fs.mkdirSync(path.dirname(diskPath), { recursive: true });
 
-    if (missingAsset !== chunk) {
+    if (missingAsset !== relPath) {
       fs.writeFileSync(diskPath, '// placeholder js');
     }
 
     if (withManifest) {
+      // Real build-manifest.json format: relative paths (no /_next/ prefix)
       const manifest = {
         pages: {
-          '/': [chunk],
-          '/_app': [chunk],
+          '/': [relPath],
+          '/_app': [relPath],
         },
         polyfillFiles: [],
         lowPriorityFiles: [],
@@ -75,19 +78,12 @@ function writeCompanyConfig(dir: string, content: Record<string, unknown>): void
   fs.writeFileSync(path.join(configDir, 'company-config.json'), JSON.stringify(content));
 }
 
-// ── module-under-test loading with cwd patching ───────────────────────────────
-// We import the check functions by re-exporting them for testing.
-// Since the route is a Next.js route handler, we extract the pure check
-// functions into a testable module pattern via a barrel export.
-// For this test we dynamically require the functions after patching process.cwd().
+// ── module loading ────────────────────────────────────────────────────────────
 
 let tmpDir: string;
-let origCwd: string;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deep-health-test-'));
-  origCwd = process.cwd();
-  // Patch process.cwd() so the checks look in our tmpDir
   vi.spyOn(process, 'cwd').mockReturnValue(tmpDir);
 });
 
@@ -96,21 +92,9 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-// ── import check functions ────────────────────────────────────────────────────
-// We use a dynamic import + vi.resetModules() pattern so each test gets a
-// fresh module with the mocked cwd.
-
 async function loadChecks() {
   vi.resetModules();
-  // Re-export the internals from the route for testing purposes.
-  // The route exports them under __test__ when NODE_ENV === 'test'.
-  const mod = await import('../../src/app/api/health/deep/route.js') as Record<string, unknown>;
-  return mod.__test__ as {
-    checkAssetManifest: () => { pass: boolean; detail: string; [k: string]: unknown };
-    checkCompanyBranding: () => { pass: boolean; indeterminate?: boolean; detail: string; config_exists: boolean; [k: string]: unknown };
-    checkDatabasePath: () => { pass: boolean; detail: string; [k: string]: unknown };
-    checkMigrations: () => { pass: boolean; detail: string; [k: string]: unknown };
-  };
+  return await import('../../src/lib/health/deep-checks.js') as typeof import('../../src/lib/health/deep-checks');
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -125,11 +109,14 @@ describe('asset_manifest', () => {
     const result = checkAssetManifest();
     expect(result.pass).toBe(true);
     expect(result.detail).toMatch(/OK/);
+    // referenced_count > 0 confirms the filter actually found paths
+    expect((result as { referenced_count?: number }).referenced_count).toBeGreaterThan(0);
   });
 
   // Row 12: manifest exists but references an asset missing from disk → FAIL
+  // FIXED: uses relative path form matching real build-manifest.json format
   it('row 12: stale manifest — referenced asset missing from disk → pass=false', async () => {
-    makeNextBuild(tmpDir, { missingAsset: '/_next/static/chunks/main-abc123.js' });
+    makeNextBuild(tmpDir, { missingAsset: 'static/chunks/main-abc123.js' });
     const { checkAssetManifest } = await loadChecks();
     const result = checkAssetManifest();
     expect(result.pass).toBe(false);
@@ -139,17 +126,14 @@ describe('asset_manifest', () => {
   // Row 13: old but complete build — age alone does NOT fail
   it('row 13: old but complete build (all assets present) → pass=true', async () => {
     makeNextBuild(tmpDir);
-    // Touch the BUILD_ID with a very old mtime
     const buildIdPath = path.join(tmpDir, '.next', 'BUILD_ID');
     const epoch = new Date(0);
     fs.utimesSync(buildIdPath, epoch, epoch);
     const { checkAssetManifest } = await loadChecks();
     const result = checkAssetManifest();
-    // Manifest age alone must not FAIL (row 13 spec)
     expect(result.pass).toBe(true);
   });
 
-  // Extra: missing BUILD_ID → FAIL
   it('missing BUILD_ID file → pass=false', async () => {
     makeNextBuild(tmpDir, { withBuildId: false });
     const { checkAssetManifest } = await loadChecks();
@@ -158,7 +142,6 @@ describe('asset_manifest', () => {
     expect(result.detail).toMatch(/BUILD_ID missing/i);
   });
 
-  // Extra: missing static directory → FAIL
   it('static dir absent → pass=false', async () => {
     makeNextBuild(tmpDir, { withStaticDir: false });
     const { checkAssetManifest } = await loadChecks();
@@ -172,19 +155,31 @@ describe('asset_manifest', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('company_branding — config file rules', () => {
-  // Row 1: config absent entirely → UNKNOWN (fresh install, not broken)
-  // (combined with row 6 for the no-DB-row path)
+  // Row 1+6: config absent + no DB row → UNKNOWN
+  // FIXED: mock getDb so real migration 064 does not insert 'Default' row
   it('row 1+6: config absent + no DB row → indeterminate=true (UNKNOWN, not FAIL)', async () => {
-    // No config file, no DB setup
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return undefined;
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: [], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
-    // Must NOT be a definitive fail — fresh install is acceptable
     expect(result.indeterminate).toBe(true);
   });
 
-  // Row 2: config present but companyName is empty object / all keys absent → FAIL
+  // Row 2: config present but companyName absent → FAIL
   it('row 2: config present but companyName absent (empty object) → pass=false', async () => {
-    writeCompanyConfig(tmpDir, {}); // no companyName key
+    writeCompanyConfig(tmpDir, {});
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
     expect(result.pass).toBe(false);
@@ -192,8 +187,6 @@ describe('company_branding — config file rules', () => {
     expect(result.detail).toMatch(/partial-config rule/i);
   });
 
-  // Partial-config rule (B.1 spec lines 19-22):
-  // config PRESENT + companyName empty/null/whitespace → FAIL (NOT the "file absent" UNKNOWN branch)
   it('partial-config rule: config present, companyName empty string → pass=false', async () => {
     writeCompanyConfig(tmpDir, { companyName: '' });
     const { checkCompanyBranding } = await loadChecks();
@@ -220,29 +213,39 @@ describe('company_branding — config file rules', () => {
     expect(result.indeterminate).not.toBe(true);
   });
 
-  // Row 3: config present with all required keys populated → PASS (happy path)
-  it('row 3: config present with valid companyName → contributes to pass', async () => {
+  // Row 3: config present with valid companyName + matching DB name → PASS
+  it('row 3: config present with valid companyName → passes', async () => {
     writeCompanyConfig(tmpDir, { companyName: 'Acme Corp' });
-    // DB check will fail without a DB, but config check passes; the DB part
-    // is tested in the DB rows. We test the config-level pass here.
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Acme Corp' };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
-    // If DB has no row with this config, it may still pass (config-only onboarded via API)
-    // The config portion itself must not reject a valid name
     expect(result.detail).not.toMatch(/partial-config rule/i);
+    expect(result.pass).toBe(true);
   });
 });
 
 describe('company_branding — DB branding checks', () => {
   // Row 4: DB company row = "Default" → FAIL
   it('row 4: DB company name is "Default" → pass=false', async () => {
-    // Mock getDb to return a DB with a Default row
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
           get: () => {
-            if (sql.includes("sqlite_master")) return { name: 'companies' };
-            if (sql.includes("SELECT name FROM companies")) return { name: 'Default' };
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Default' };
             return undefined;
           },
           all: () => [],
@@ -257,14 +260,14 @@ describe('company_branding — DB branding checks', () => {
     expect(result.detail).toMatch(/placeholder/i);
   });
 
-  // Row 5: DB company row branded (real client name) → PASS
+  // Row 5: DB company row branded → PASS
   it('row 5: DB company name is real brand name → pass=true', async () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
           get: () => {
-            if (sql.includes("sqlite_master")) return { name: 'companies' };
-            if (sql.includes("SELECT name FROM companies")) return { name: 'Karen Vaughn Enterprises' };
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Karen Vaughn Enterprises' };
             return undefined;
           },
           all: () => [],
@@ -278,14 +281,14 @@ describe('company_branding — DB branding checks', () => {
     expect(result.pass).toBe(true);
   });
 
-  // Row 6: DB row absent entirely (fresh install) → UNKNOWN (not FAIL)
-  it('row 6: no DB company row (fresh install) + no config → indeterminate=true, not FAIL', async () => {
+  // Row 6: DB row absent + no config → UNKNOWN
+  it('row 6: no DB company row (fresh install) + no config → indeterminate=true', async () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
           get: () => {
-            if (sql.includes("sqlite_master")) return { name: 'companies' };
-            if (sql.includes("SELECT name FROM companies")) return undefined; // no row
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return undefined;
             return undefined;
           },
           all: () => [],
@@ -297,19 +300,17 @@ describe('company_branding — DB branding checks', () => {
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
     expect(result.indeterminate).toBe(true);
-    // Must NOT be a definitive fail
-    expect(result.pass).toBe(false); // pass=false but indeterminate=true → UNKNOWN
+    expect(result.pass).toBe(false);
   });
 
-  // Row 7: DB row present but name column is empty string → FAIL
-  it('row 7: DB company name is empty string → pass=false', async () => {
+  // Row 7: DB name empty (WHERE clause excludes it) → treated as fresh install
+  it('row 7: DB company name empty (excluded by WHERE) → indeterminate=true', async () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
           get: () => {
-            if (sql.includes("sqlite_master")) return { name: 'companies' };
-            // The query filters out empty names, so this returns undefined
-            if (sql.includes("SELECT name FROM companies")) return undefined;
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return undefined;
             return undefined;
           },
           all: () => [],
@@ -318,15 +319,13 @@ describe('company_branding — DB branding checks', () => {
       getMigrationStatus: () => ({ applied: [], pending: [] }),
       DB_PATH: '/tmp/test.db',
     }));
-    // Without config and with empty DB row, should be UNKNOWN (fresh install pattern)
-    // Empty-name rows are excluded by the SQL WHERE clause, so DB behaves as empty
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
-    expect(result.indeterminate).toBe(true); // treated as fresh install
+    expect(result.indeterminate).toBe(true);
   });
 
-  // Row 28: DB locked (SQLITE_BUSY) → UNKNOWN, never FAIL
-  it('row 28: DB locked (SQLITE_BUSY) → indeterminate=true, not definitive FAIL', async () => {
+  // Row 28: DB locked → UNKNOWN
+  it('row 28: DB locked (SQLITE_BUSY) → indeterminate=true', async () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: () => ({
@@ -351,41 +350,48 @@ describe('company_branding — DB branding checks', () => {
 describe('database_path', () => {
   // Row 20: DATABASE_PATH set and absolute → PASS
   it('row 20: DATABASE_PATH set to absolute writable path → pass=true', async () => {
+    const saved = process.env.DATABASE_PATH;
     process.env.DATABASE_PATH = path.join(tmpDir, 'mission-control.db');
     const { checkDatabasePath } = await loadChecks();
     const result = checkDatabasePath();
     expect(result.pass).toBe(true);
-    delete process.env.DATABASE_PATH;
+    if (saved !== undefined) process.env.DATABASE_PATH = saved;
+    else delete process.env.DATABASE_PATH;
   });
 
-  // Row 21: DATABASE_PATH unset → PASS (default path is valid, not misconfigured)
-  it('row 21: DATABASE_PATH unset → pass=true (default path valid, per spec)', async () => {
+  // Row 21: DATABASE_PATH unset → PASS
+  it('row 21: DATABASE_PATH unset → pass=true (default path valid)', async () => {
+    const saved = process.env.DATABASE_PATH;
     delete process.env.DATABASE_PATH;
     const { checkDatabasePath } = await loadChecks();
     const result = checkDatabasePath();
-    // Truth table row 21: "Default path is valid; unset ≠ misconfigured"
     expect(result.pass).toBe(true);
     expect(result.detail).toMatch(/default/i);
+    if (saved !== undefined) process.env.DATABASE_PATH = saved;
   });
 
-  // Row 22: DATABASE_PATH set but directory does not exist → FAIL
+  // Row 22: DATABASE_PATH dir does not exist → FAIL
   it('row 22: DATABASE_PATH dir does not exist → pass=false', async () => {
+    const saved = process.env.DATABASE_PATH;
     process.env.DATABASE_PATH = '/nonexistent/deep/path/mission-control.db';
     const { checkDatabasePath } = await loadChecks();
     const result = checkDatabasePath();
     expect(result.pass).toBe(false);
     expect(result.detail).toMatch(/does not exist/i);
-    delete process.env.DATABASE_PATH;
+    if (saved !== undefined) process.env.DATABASE_PATH = saved;
+    else delete process.env.DATABASE_PATH;
   });
 
-  // Extra: relative DATABASE_PATH → FAIL (ambiguous under pm2)
-  it('relative DATABASE_PATH → pass=false (ambiguous under pm2)', async () => {
+  // Extra: relative DATABASE_PATH → FAIL
+  it('relative DATABASE_PATH → pass=false', async () => {
+    const saved = process.env.DATABASE_PATH;
     process.env.DATABASE_PATH = 'relative/path/mission-control.db';
     const { checkDatabasePath } = await loadChecks();
     const result = checkDatabasePath();
     expect(result.pass).toBe(false);
     expect(result.detail).toMatch(/not an absolute path/i);
-    delete process.env.DATABASE_PATH;
+    if (saved !== undefined) process.env.DATABASE_PATH = saved;
+    else delete process.env.DATABASE_PATH;
   });
 });
 
@@ -394,7 +400,7 @@ describe('database_path', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('migrations', () => {
-  // Row 29: migrations current → PASS
+  // Row 29: all migrations applied → PASS
   it('row 29: all migrations applied → pass=true', async () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({}),
@@ -421,7 +427,7 @@ describe('migrations', () => {
     expect((result as { pending_count?: number }).pending_count).toBe(2);
   });
 
-  // Row 28 edge (migrations): DB locked → indeterminate, not definitive fail
+  // Row 28 (migrations): DB locked → indeterminate
   it('row 28 (migrations): DB locked → indeterminate=true', async () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({}),
@@ -439,36 +445,27 @@ describe('migrations', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('disk_headroom', () => {
-  // These tests mock the disk-reading logic at the module level.
   // Row 23: >= 500 MB free → PASS
+  // FIXED: mock _readDiskFreeBytes directly so statfsSync's real syscall is bypassed
   it('row 23: >= 500 MB free → pass=true', async () => {
-    // Temporarily provide a large freemem value
-    vi.spyOn(os, 'freemem').mockReturnValue(10 * 1024 ** 3); // 10 GB
-    const { checkDiskHeadroom } = await loadChecks() as unknown as {
-      checkDiskHeadroom: () => Promise<{ pass: boolean; detail: string }>;
-    };
-    const result = await checkDiskHeadroom();
+    const checks = await loadChecks();
+    checks.diskReader.readFreeBytes = () => 10 * 1024 ** 3; // 10 GB
+    const result = await checks.checkDiskHeadroom();
     expect(result.pass).toBe(true);
-    vi.restoreAllMocks();
-    vi.spyOn(process, 'cwd').mockReturnValue(tmpDir); // restore cwd mock
   });
 
   // Row 24: < 500 MB free → FAIL
   it('row 24: < 500 MB free → pass=false', async () => {
-    vi.spyOn(os, 'freemem').mockReturnValue(100 * 1024 * 1024); // 100 MB
-    const { checkDiskHeadroom } = await loadChecks() as unknown as {
-      checkDiskHeadroom: () => Promise<{ pass: boolean; detail: string }>;
-    };
-    const result = await checkDiskHeadroom();
+    const checks = await loadChecks();
+    checks.diskReader.readFreeBytes = () => 100 * 1024 * 1024; // 100 MB
+    const result = await checks.checkDiskHeadroom();
     expect(result.pass).toBe(false);
     expect(result.detail).toMatch(/below/i);
-    vi.restoreAllMocks();
-    vi.spyOn(process, 'cwd').mockReturnValue(tmpDir);
   });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// OVERALL ENDPOINT SHAPE (integration-level smoke test)
+// OVERALL ENDPOINT SHAPE
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('GET /api/health/deep — response shape', () => {
@@ -478,8 +475,8 @@ describe('GET /api/health/deep — response shape', () => {
       getDb: () => ({
         prepare: (sql: string) => ({
           get: () => {
-            if (sql.includes("sqlite_master")) return { name: 'companies' };
-            if (sql.includes("SELECT name FROM companies")) return { name: 'Test Corp' };
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Test Corp' };
             return undefined;
           },
           all: () => [],
@@ -489,14 +486,15 @@ describe('GET /api/health/deep — response shape', () => {
       DB_PATH: path.join(tmpDir, 'test.db'),
     }));
 
+    // Inject disk mock before loading route
+    const checks = await loadChecks();
+    checks.diskReader.readFreeBytes = () => 20 * 1024 ** 3;
+
+    vi.resetModules();
     const mod = await import('../../src/app/api/health/deep/route.js') as {
       GET?: () => Promise<Response>;
     };
-
-    if (!mod.GET) {
-      // If GET is not exported (route handler form), skip this test
-      return;
-    }
+    if (!mod.GET) return;
 
     const response = await mod.GET();
     const body = await response.json() as Record<string, unknown>;
@@ -512,7 +510,6 @@ describe('GET /api/health/deep — response shape', () => {
   });
 
   it('indeterminate=true when any check is UNKNOWN — overall pass stays false', async () => {
-    // DB locked → branding check returns indeterminate
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: () => ({
@@ -525,6 +522,10 @@ describe('GET /api/health/deep — response shape', () => {
     }));
     makeNextBuild(tmpDir);
 
+    const checks = await loadChecks();
+    checks.diskReader.readFreeBytes = () => 20 * 1024 ** 3;
+
+    vi.resetModules();
     const mod = await import('../../src/app/api/health/deep/route.js') as {
       GET?: () => Promise<Response>;
     };
@@ -532,9 +533,7 @@ describe('GET /api/health/deep — response shape', () => {
 
     const response = await mod.GET();
     const body = await response.json() as Record<string, unknown>;
-    // Indeterminate must bubble up
     expect(body.indeterminate).toBe(true);
-    // pass must be false (UNKNOWN is not the same as passing)
     expect(body.pass).toBe(false);
   });
 });
