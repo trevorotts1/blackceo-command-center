@@ -70,6 +70,43 @@ from a clean install.
 
 **Independent weighted score: 9.35/10 — PASS**
 
+### Maintenance (same v4.22.0 — chore(retrotag): create missing annotated tags v4.16.0..v4.19.0; require-tag CI guard (PRD 2.2)
+
+The Wave-1 CC build chain (PRD items 1.3-CC through 1.6) advanced the version
+file v4.15 → v4.19 across four commits but created no annotated tags for any of
+those versions. Tags v4.16.0, v4.17.0, v4.18.0, and v4.19.0 were absent while
+v4.20.0, v4.21.0, and v4.22.0 already existed, leaving a gap in the v4.15–v4.22
+series and violating the PRD 2.2 one-command-release invariant.
+
+**Retro-tags applied (annotated, history NOT rewritten):**
+
+| Tag      | Commit SHA | Description                                                    |
+|----------|------------|----------------------------------------------------------------|
+| v4.16.0  | 9ed2dec    | chore(version): bump to v4.16.0 (PRD 1.3-CC DASHBOARD_DB_PATH) |
+| v4.17.0  | 6998698    | chore(version): bump to v4.17.0 — align 5 locations (PRD 1.4) |
+| v4.18.0  | c7726a1    | fix(persona): workspace slug to selector (PRD 1.5)             |
+| v4.19.0  | 95debf8    | feat(persona): async execFile + task_updated SSE (PRD 1.6)     |
+
+**Guard added to prevent recurrence:**
+- `scripts/bump-version.sh`: new `--check-tag` mode verifies the current version
+  file has an annotated git tag. The `--tag` flag now warns when omitted. Tag
+  creation path confirms type=tag (annotated), not a lightweight tag.
+- `.github/workflows/version-consistency.yml`: new step "Verify annotated tag
+  exists for current version" — fetches all tags (`fetch-depth: 0` on checkout),
+  checks exact-match annotated tag for the value in `/version`, exits 1 with an
+  actionable `FIX:` message when absent. CI will now reject any push to main
+  where the version file changed without a corresponding annotated tag.
+
+**Verify:**
+```
+git tag -l "v4.*" | sort -V
+# contiguous v4.15.0 .. v4.22.0 with no gaps
+git cat-file -t v4.16.0 v4.17.0 v4.18.0 v4.19.0
+# tag tag tag tag  (all annotated)
+cat version
+# v4.22.0  (version file == newest tag)
+```
+
 ---
 
 ## [v4.21.0] - 2026-06-10 - fix(qc): heuristic mode skips reroute loop — human review only (PRD 2.4)

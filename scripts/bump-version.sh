@@ -10,8 +10,13 @@
 #
 # Usage:
 #   ./scripts/bump-version.sh v3.1.0          # update all + verify
-#   ./scripts/bump-version.sh v3.1.0 --tag    # also create git tag
+#   ./scripts/bump-version.sh v3.1.0 --tag    # update all + create annotated git tag (REQUIRED for version-file changes)
 #   ./scripts/bump-version.sh --check         # report drift, exit 1 if any
+#   ./scripts/bump-version.sh --check-tag     # verify version file matches a git tag (used by CI)
+#
+# INVARIANT: every version-file change MUST have a matching annotated git tag.
+# CI (version-consistency.yml) will reject any push where the version file changed
+# without a corresponding annotated tag. Use --tag to satisfy this invariant.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,12 +58,54 @@ check_drift() {
   [ "$n_root" = "$n_pkg" ] && [ "$n_root" = "$n_lock" ] && [ "$n_root" = "$n_lock_pkg" ] && [ "$n_root" = "$n_cl" ]
 }
 
+check_tag() {
+  # Verify that the current version in the version file has a corresponding annotated git tag.
+  # Returns 0 (success) if the tag exists, 1 otherwise.
+  read_current
+  local v="$V_ROOT"
+  if git rev-parse --git-dir > /dev/null 2>&1; then
+    # git tag -l with exact match; deref=annotated check via cat-file
+    if git tag -l "$v" | grep -qx "$v"; then
+      # Confirm it is an annotated tag (tag object), not a lightweight tag (commit object)
+      local tag_type
+      tag_type=$(git cat-file -t "$v" 2>/dev/null || echo "missing")
+      if [ "$tag_type" = "tag" ]; then
+        return 0
+      else
+        echo "WARNING: tag $v exists but is a LIGHTWEIGHT tag, not an annotated tag." >&2
+        echo "  Re-create it as an annotated tag: git tag -d $v && git tag -a $v -m 'Release $v'" >&2
+        return 1
+      fi
+    else
+      return 1
+    fi
+  else
+    echo "WARNING: not inside a git repo — tag check skipped." >&2
+    return 0
+  fi
+}
+
 if [ "${1:-}" = "--check" ]; then
   print_state
   if check_drift; then
     echo ""; echo "✅ All 5 version locations agree."; exit 0
   else
     echo ""; echo "❌ DRIFT DETECTED — at least one location disagrees with /version."; exit 1
+  fi
+fi
+
+if [ "${1:-}" = "--check-tag" ]; then
+  read_current
+  echo "Checking git tag for version: $V_ROOT"
+  if check_tag; then
+    echo "✅ Annotated tag $V_ROOT exists and points at a tag object."
+    exit 0
+  else
+    echo "❌ NO ANNOTATED TAG for $V_ROOT"
+    echo "   Every version-file change requires a matching annotated git tag."
+    echo "   Run: git tag -a $V_ROOT -m 'Release $V_ROOT' <commit-sha>"
+    echo "   Or:  ./scripts/bump-version.sh $V_ROOT --tag"
+    exit 1
   fi
 fi
 
@@ -114,7 +161,20 @@ echo "✅ All 5 locations agree at $TARGET"
 if [ "${2:-}" = "--tag" ]; then
   cd "$REPO_ROOT"
   if git rev-parse --git-dir > /dev/null 2>&1; then
-    git tag | grep -qx "$TARGET" || git tag -a "$TARGET" -m "Release $TARGET"
-    echo "Tagged $TARGET"
+    if git tag -l "$TARGET" | grep -qx "$TARGET"; then
+      echo "Tag $TARGET already exists — skipping."
+    else
+      git tag -a "$TARGET" -m "Release $TARGET"
+      echo "Created annotated tag $TARGET"
+    fi
+    echo ""
+    echo "Remember to push the tag: git push origin $TARGET"
   fi
+else
+  echo ""
+  echo "NOTE: version bumped but NO TAG created."
+  echo "  A matching annotated tag is REQUIRED for every version-file change."
+  echo "  CI will reject a push where the version file changed without a tag."
+  echo "  Create the tag now: git tag -a $TARGET -m 'Release $TARGET'"
+  echo "  Or re-run with --tag flag: ./scripts/bump-version.sh $TARGET --tag"
 fi

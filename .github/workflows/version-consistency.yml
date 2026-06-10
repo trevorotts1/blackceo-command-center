@@ -12,6 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fetch full history and all tags so the tag-existence check works
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -56,3 +59,39 @@ jobs:
             exit 1
           fi
           echo "✅ All 5 version locations agree at $V_ROOT"
+
+      - name: Verify annotated tag exists for current version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fetch all tags from origin (checkout@v4 with fetch-depth:0 already did this,
+          # but an explicit fetch ensures tags are up-to-date on PRs from forks)
+          git fetch --tags --quiet 2>/dev/null || true
+
+          V_ROOT=$(head -1 version | tr -d '[:space:]')
+          echo "Checking for annotated tag: $V_ROOT"
+
+          # Check tag exists
+          if ! git tag -l "$V_ROOT" | grep -qx "$V_ROOT"; then
+            echo "❌ NO TAG for $V_ROOT"
+            echo "   Every version-file change requires a matching annotated git tag."
+            echo "   The Wave-1 CC chain introduced versions v4.16–v4.19 with no tags,"
+            echo "   which is what this guard prevents going forward."
+            echo ""
+            echo "FIX: create and push an annotated tag at the version-bump commit:"
+            echo "   git tag -a $V_ROOT -m 'Release $V_ROOT' <sha-of-version-bump-commit>"
+            echo "   git push origin $V_ROOT"
+            echo "   Or use: ./scripts/bump-version.sh $V_ROOT --tag  (after bumping files)"
+            exit 1
+          fi
+
+          # Confirm it is an annotated tag object, not a lightweight tag
+          TAG_TYPE=$(git cat-file -t "$V_ROOT" 2>/dev/null || echo "missing")
+          if [ "$TAG_TYPE" != "tag" ]; then
+            echo "❌ Tag $V_ROOT exists but is a LIGHTWEIGHT tag (type: $TAG_TYPE), not an annotated tag."
+            echo "   Re-create as annotated: git tag -d $V_ROOT && git tag -a $V_ROOT -m 'Release $V_ROOT' <sha>"
+            echo "   git push origin :refs/tags/$V_ROOT && git push origin $V_ROOT"
+            exit 1
+          fi
+
+          echo "✅ Annotated tag $V_ROOT exists (type: $TAG_TYPE)"
