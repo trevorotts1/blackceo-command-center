@@ -24,11 +24,14 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { CANONICAL_SLUGS, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { ROLE_LIBRARY_SOURCE } from '@/lib/role-library-import';
+// ROLE_LIBRARY_SOURCE is the sentinel value for on-disk role-library SOPs.
+// Defined inline to avoid pulling role-library-import.ts (with node: imports)
+// into the webpack scheduler → task-dispatcher build path.
+const ROLE_LIBRARY_SOURCE = 'role-library' as const;
 import { scoreSOPForTask } from '@/lib/sops';
 import type { SOP } from '@/lib/sops';
 import type { Task } from '@/lib/types';

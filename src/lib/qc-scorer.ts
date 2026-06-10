@@ -35,6 +35,7 @@
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
+import { readFileSync } from 'fs';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -323,7 +324,7 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
   const qcFixturePath = process.env.QC_FIXTURE_JSON_PATH;
   if (qcFixturePath) {
     try {
-      const raw = require('fs').readFileSync(qcFixturePath, 'utf8');
+      const raw = readFileSync(qcFixturePath, 'utf8');
       const fixture = JSON.parse(raw) as { score: number; pass: boolean; reason: string; gaps: string[] };
       const score = typeof fixture.score === 'number' ? Math.max(1, Math.min(10, fixture.score)) : 9;
       return {

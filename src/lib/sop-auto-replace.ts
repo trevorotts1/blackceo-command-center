@@ -17,9 +17,9 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { execFileSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
+import { execFileSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import { parseAndValidateSteps, type SOP, type SOPStep } from '@/lib/sops';
 import { tavilySearch, type TavilyResult } from '@/lib/tavily';
