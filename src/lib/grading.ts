@@ -112,6 +112,8 @@ export interface DepartmentGrade {
   score: number | null;
   grade: Grade | null;
   sufficientData: boolean;
+  /** PRD 2.14 LSS diagnostic metrics — optional for backward-compat */
+  lss?: LssDepartmentMetrics;
 }
 
 export interface WorstTrendingEntry {
@@ -123,6 +125,54 @@ export interface WorstTrendingEntry {
   delta: number;
 }
 
+// ---------------------------------------------------------------------------
+// LSS (Lean Six Sigma) types — PRD 2.14
+// Defect/rework/waste are REPORTED alongside grades, NOT graded inputs.
+// They do NOT affect DEFAULT_INPUT_WEIGHTS or the weighted score formula.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-department LSS diagnostic metrics.
+ * All fields use the same null-for-insufficient-data discipline as InputScore.
+ */
+export interface LssDepartmentMetrics {
+  /** Complement of qcPassRate: % of LLM-graded tasks that did NOT pass.
+   *  Computed from the same single query as qcPassRate — never disagrees.
+   *  score: null when < MIN_QC_RESULTS LLM rows exist. */
+  defectRate: {
+    score: number | null;
+    sampleSize: number;
+    detail: string;
+  };
+  /** % of tasks that were re-graded at least once (attempt > 1 in task_qc_results).
+   *  score: null when < MIN_QC_RESULTS distinct tasks with LLM results. */
+  reworkRate: {
+    score: number | null;
+    sampleSize: number;
+    detail: string;
+  };
+  /** Count of tasks that hit the QC reroute cap and were blocked.
+   *  Always an integer (0 = none — not null; a real zero is honest data). */
+  staleLoopsKilled: number;
+}
+
+/**
+ * Company-level LSS aggregate.
+ * defectRate/reworkRate are task-count-weighted aggregates from real depts.
+ * staleLoopsKilled is a plain sum.
+ * tokensPerTask is null (with explanatory detail) unless task_activities.metadata
+ * carries token counts — the bridge does not currently emit them.
+ */
+export interface LssCompanyMetrics {
+  defectRate: number | null;
+  reworkRate: number | null;
+  staleLoopsKilled: number;
+  /** null when no per-task token data exists in task_activities.metadata */
+  tokensPerTask: number | null;
+  /** Explains why tokensPerTask is null, or the computation method when present */
+  tokensPerTaskDetail: string;
+}
+
 export interface CompanyHealth {
   /** 0-100 task-count-weighted avg; null if no dept has sufficient data */
   score: number | null;
@@ -131,6 +181,8 @@ export interface CompanyHealth {
   /** Up to 3 departments trending downward, each tagged with their weakest input */
   worstTrending: WorstTrendingEntry[];
   generatedAt: string;
+  /** PRD 2.14 LSS metrics — optional so existing callers stay backward-compatible */
+  lss?: LssCompanyMetrics;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +414,200 @@ function computeKpiAttainment(
 }
 
 // ---------------------------------------------------------------------------
+// PRD 2.14 — LSS metric computations
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute defect rate for a department.
+ *
+ * A "defect" = an LLM-graded QC result that did NOT pass the 8.5 gate.
+ * Uses the EXACT same query as computeQcPassRate (same row, same filter)
+ * so defectRate = 100 - qcPassRate arithmetically, but we compute it from
+ * a single query to guarantee they never disagree.
+ *
+ * Insufficient data floor: MIN_QC_RESULTS (same as qcPassRate).
+ * score === null when total < 3 — never 0 as a fake grade.
+ */
+function computeDefectRate(
+  db: Database.Database,
+  workspaceId: string,
+  windowDays: number,
+): LssDepartmentMetrics['defectRate'] {
+  const row = db.prepare(
+    `SELECT
+       COUNT(*) AS total,
+       SUM(passed) AS passes
+     FROM task_qc_results
+     WHERE workspace_id = ?
+       AND scoring_path = 'llm'
+       AND julianday('now') - julianday(scored_at) <= ?`
+  ).get(workspaceId, windowDays) as { total: number; passes: number } | undefined;
+
+  const total = row?.total ?? 0;
+
+  if (total < GRADING_THRESHOLDS.MIN_QC_RESULTS) {
+    return {
+      score: null,
+      sampleSize: total,
+      detail: `Awaiting QC scoring (${total} LLM-graded results, need ${GRADING_THRESHOLDS.MIN_QC_RESULTS}+)`,
+    };
+  }
+
+  const passes = row?.passes ?? 0;
+  // defectRate = complement of qcPassRate over the same denominator
+  const score = Math.round(((total - passes) / total) * 100);
+  return {
+    score,
+    sampleSize: total,
+    detail: `${total - passes}/${total} LLM-graded tasks failed QC gate — ${score}% defect rate`,
+  };
+}
+
+/**
+ * Compute rework rate for a department.
+ *
+ * A task "required rework" if it was sent back at least once:
+ * task_qc_results.attempt > 1 (set to qc_reroute_attempts+1 in qc-scorer.ts:650).
+ *
+ * numerator  = DISTINCT task_id where MAX(attempt) > 1 (was reworked)
+ * denominator = DISTINCT task_id with any llm-graded result
+ * Both scoped to workspace + window on scored_at.
+ *
+ * Tasks blocked at the 3-attempt cap count as rework (attempt reached 3+).
+ * Insufficient data floor: MIN_QC_RESULTS on denominator → null, not 0.
+ */
+function computeReworkRate(
+  db: Database.Database,
+  workspaceId: string,
+  windowDays: number,
+): LssDepartmentMetrics['reworkRate'] {
+  const row = db.prepare(
+    `SELECT
+       COUNT(DISTINCT task_id) AS total_tasks,
+       SUM(CASE WHEN max_attempt > 1 THEN 1 ELSE 0 END) AS reworked_tasks
+     FROM (
+       SELECT task_id, MAX(attempt) AS max_attempt
+       FROM task_qc_results
+       WHERE workspace_id = ?
+         AND scoring_path = 'llm'
+         AND julianday('now') - julianday(scored_at) <= ?
+       GROUP BY task_id
+     ) task_attempts`
+  ).get(workspaceId, windowDays) as { total_tasks: number; reworked_tasks: number } | undefined;
+
+  const totalTasks = row?.total_tasks ?? 0;
+
+  if (totalTasks < GRADING_THRESHOLDS.MIN_QC_RESULTS) {
+    return {
+      score: null,
+      sampleSize: totalTasks,
+      detail: `Insufficient QC history for rework signal (${totalTasks} tasks, need ${GRADING_THRESHOLDS.MIN_QC_RESULTS}+)`,
+    };
+  }
+
+  const reworkedTasks = row?.reworked_tasks ?? 0;
+  const score = Math.round((reworkedTasks / totalTasks) * 100);
+  return {
+    score,
+    sampleSize: totalTasks,
+    detail: `${reworkedTasks}/${totalTasks} tasks required rework (re-graded) — ${score}% rework rate`,
+  };
+}
+
+/**
+ * Count tasks that hit the QC reroute cap and were blocked in the window.
+ * Source: tasks WHERE status='blocked' AND qc_reroute_attempts >= QC_MAX_REROUTES,
+ * windowed on updated_at (blocked tasks never get completed_at — trg_tasks_completed_at
+ * only fires on status='done').
+ *
+ * Always returns an integer — never null (0 = none, which is truthful).
+ */
+function computeStaleLoopsKilled(
+  db: Database.Database,
+  workspaceId: string,
+  windowDays: number,
+): number {
+  // QC_MAX_REROUTES default is 3 (from env QC_MAX_REROUTES or default 3)
+  // We use 3 as the hard-coded floor here — matches qc-scorer.ts default.
+  const QC_MAX_REROUTES_FLOOR = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+
+  const row = db.prepare(
+    `SELECT COUNT(*) AS cnt
+     FROM tasks
+     WHERE workspace_id = ?
+       AND status = 'blocked'
+       AND qc_reroute_attempts >= ?
+       AND julianday('now') - julianday(updated_at) <= ?`
+  ).get(workspaceId, QC_MAX_REROUTES_FLOOR, windowDays) as { cnt: number } | undefined;
+
+  return row?.cnt ?? 0;
+}
+
+/**
+ * Probe task_activities.metadata for per-task token counts.
+ * Returns { value: number, detail } when token metadata exists;
+ * returns { value: null, detail } with an explanatory message when it doesn't.
+ *
+ * HONEST: We do NOT invent a number from provider_usage (account-aggregate).
+ * The null state is the correct output when the bridge doesn't emit token counts.
+ */
+function computeTokensPerTask(
+  db: Database.Database,
+  workspaceId: string,
+  windowDays: number,
+): { value: number | null; detail: string } {
+  // Check if task_activities table exists (pre-migration guard)
+  const tableCheck = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='task_activities'`
+  ).get() as { name: string } | undefined;
+
+  if (!tableCheck) {
+    return {
+      value: null,
+      detail: 'No per-task token data captured (task_activities table missing)',
+    };
+  }
+
+  // Look for rows in task_activities for completed tasks in this workspace where
+  // metadata JSON contains a 'tokens' or 'total_tokens' key.
+  const rows = db.prepare(
+    `SELECT ta.metadata
+     FROM task_activities ta
+     JOIN tasks t ON t.id = ta.task_id
+     WHERE t.workspace_id = ?
+       AND t.status = 'done'
+       AND ta.metadata IS NOT NULL
+       AND julianday('now') - julianday(ta.created_at) <= ?`
+  ).all(workspaceId, windowDays) as Array<{ metadata: string }>;
+
+  const tokenCounts: number[] = [];
+  for (const row of rows) {
+    try {
+      const meta = JSON.parse(row.metadata);
+      const tokens = meta?.tokens ?? meta?.total_tokens ?? null;
+      if (typeof tokens === 'number' && tokens > 0) {
+        tokenCounts.push(tokens);
+      }
+    } catch {
+      // non-JSON metadata — skip
+    }
+  }
+
+  if (tokenCounts.length === 0) {
+    return {
+      value: null,
+      detail: 'No per-task token data captured (bridge does not emit token counts)',
+    };
+  }
+
+  const avg = Math.round(tokenCounts.reduce((s, n) => s + n, 0) / tokenCounts.length);
+  return {
+    value: avg,
+    detail: `Avg ${avg} tokens/completed-task (${tokenCounts.length} tasks with token metadata)`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Department grade computation
 // ---------------------------------------------------------------------------
 
@@ -399,6 +645,13 @@ export function computeDepartmentGrade(
     score = Math.round((weightedSum / totalWeight) * 100) / 100;
   }
 
+  // PRD 2.14: LSS diagnostic metrics (reported alongside grade, NOT graded)
+  const lss: LssDepartmentMetrics = {
+    defectRate: computeDefectRate(db, ws.id, windowDays),
+    reworkRate: computeReworkRate(db, ws.id, windowDays),
+    staleLoopsKilled: computeStaleLoopsKilled(db, ws.id, windowDays),
+  };
+
   return {
     workspaceId: ws.id,
     slug: ws.slug,
@@ -407,6 +660,7 @@ export function computeDepartmentGrade(
     score,
     grade: score !== null ? scoreToGrade(score) : null,
     sufficientData,
+    lss,
   };
 }
 
@@ -469,12 +723,86 @@ export function computeCompanyHealth(
     weights,
   );
 
+  // PRD 2.14: Company-level LSS aggregate
+  const companyLss = computeCompanyLss(db, departments, realWorkspaces, windowDays);
+
   return {
     score: companyScore,
     grade: companyScore !== null ? scoreToGrade(companyScore) : null,
     departments,
     worstTrending,
     generatedAt: new Date().toISOString(),
+    lss: companyLss,
+  };
+}
+
+/**
+ * Aggregate per-dept LSS metrics to the company level.
+ * defectRate/reworkRate: task-count-weighted average across depts with data.
+ * staleLoopsKilled: plain sum.
+ * tokensPerTask: averaged across all real depts from task_activities.metadata.
+ */
+function computeCompanyLss(
+  db: Database.Database,
+  departments: DepartmentGrade[],
+  workspaces: WorkspaceRow[],
+  windowDays: number,
+): LssCompanyMetrics {
+  // Aggregate stale loops (always available)
+  const totalStaleLoops = departments.reduce(
+    (sum, d) => sum + (d.lss?.staleLoopsKilled ?? 0),
+    0,
+  );
+
+  // Task-count-weighted defect rate and rework rate
+  let totalDefectWeight = 0;
+  let weightedDefectSum = 0;
+  let totalReworkWeight = 0;
+  let weightedReworkSum = 0;
+
+  for (const dept of departments) {
+    if (!dept.lss) continue;
+    const { defectRate, reworkRate } = dept.lss;
+
+    if (defectRate.score !== null && defectRate.sampleSize > 0) {
+      totalDefectWeight += defectRate.sampleSize;
+      weightedDefectSum += defectRate.score * defectRate.sampleSize;
+    }
+    if (reworkRate.score !== null && reworkRate.sampleSize > 0) {
+      totalReworkWeight += reworkRate.sampleSize;
+      weightedReworkSum += reworkRate.score * reworkRate.sampleSize;
+    }
+  }
+
+  const companyDefectRate = totalDefectWeight > 0
+    ? Math.round(weightedDefectSum / totalDefectWeight)
+    : null;
+  const companyReworkRate = totalReworkWeight > 0
+    ? Math.round(weightedReworkSum / totalReworkWeight)
+    : null;
+
+  // Company-level tokensPerTask: aggregate token metadata across all real workspaces
+  const allTokenCounts: number[] = [];
+  for (const ws of workspaces) {
+    const probe = computeTokensPerTask(db, ws.id, windowDays);
+    if (probe.value !== null) {
+      allTokenCounts.push(probe.value);
+    }
+  }
+
+  const tokensPerTask = allTokenCounts.length > 0
+    ? Math.round(allTokenCounts.reduce((s, n) => s + n, 0) / allTokenCounts.length)
+    : null;
+  const tokensPerTaskDetail = tokensPerTask !== null
+    ? `Avg ${tokensPerTask} tokens/completed-task (${allTokenCounts.length} dept(s) with token metadata)`
+    : 'No per-task token data captured (bridge does not emit token counts)';
+
+  return {
+    defectRate: companyDefectRate,
+    reworkRate: companyReworkRate,
+    staleLoopsKilled: totalStaleLoops,
+    tokensPerTask,
+    tokensPerTaskDetail,
   };
 }
 

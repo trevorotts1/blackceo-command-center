@@ -1,3 +1,52 @@
+## [v4.30.0] - 2026-06-10 - feat(prd-2.14): Lean Six Sigma alignment — defect rate, rework rate, waste metric, monthly control review
+
+### PRD 2.14 — Lean Six Sigma Alignment
+
+**What changed:**
+
+- **`src/lib/grading.ts`** (EXTENDED — additive, PRD 2.10 grade formula unchanged):
+  New LSS types: `LssDepartmentMetrics` (defectRate, reworkRate, staleLoopsKilled) and
+  `LssCompanyMetrics` (same + tokensPerTask with honest null when bridge lacks per-task data).
+  New functions: `computeDefectRate`, `computeReworkRate`, `computeStaleLoopsKilled`,
+  `computeTokensPerTask`, `computeCompanyLss`. Both `DepartmentGrade` and `CompanyHealth`
+  now carry an optional `lss` field. Grade formula (four inputs, DEFAULT_INPUT_WEIGHTS)
+  is UNCHANGED — defect/rework are reported diagnostics, not graded inputs.
+
+- **`src/lib/db/migrations.ts`** (migration 069): `lss_control_reviews` table with
+  `period_start/end`, company/dept metrics, `waste_summary` JSON, `department_breakdown`
+  JSON, and `narrative` markdown. Additive + idempotent (`CREATE TABLE IF NOT EXISTS`).
+
+- **`src/lib/db/schema.ts`**: `lss_control_reviews` dual-declared for fresh installs
+  (same discipline as `task_qc_results`).
+
+- **`src/lib/jobs/lss-control-review.ts`** (NEW): Monthly control review job. Runs 1st
+  of month 08:00 ET. Writes `lss_control_reviews` row + `[LSS-CONTROL-REVIEW]` event in
+  Live Feed + `recommendations` row on grade drop. Idempotent per calendar month.
+  `DISABLE_LSS_CONTROL_REVIEW=1` opt-out.
+
+- **`src/lib/jobs/scheduler.ts`**: `lss-control-review` registered in `JOBS` array
+  (mirrors `weekly-done-clear` pattern).
+
+- **`src/components/ceo-board/redesign/DepartmentGradeCards.tsx`**: Extended with LSS
+  diagnostic rows (Defect rate, Rework rate, Stale loops killed) in `DepartmentCard`,
+  rendered in muted secondary treatment with insufficient-data discipline (null → "no data").
+
+- **`docs/LEAN-SIX-SIGMA-MAP.md`** (NEW): DMAIC map of all five stages to concrete repo
+  mechanisms + explicit gap list (implemented / waived-with-reason).
+
+- **`tests/unit/prd-2.14-lss-metrics.test.ts`** (NEW): 11 offline fixture tests (T1–T10)
+  covering defect rate complement invariant, heuristic exclusion, rework rate, stale loop
+  window filtering, insufficient-data null discipline, tokensPerTask honesty, grade
+  isolation, company roll-up, monthly review idempotency, and migration 069 idempotency.
+
+**Waste metric honesty (no-lies decision):** `provider_usage` is account-aggregate and
+cannot attribute tokens to a department or task. `tokensPerTask` returns `null` with an
+explanatory detail string until the OpenClaw bridge emits per-task token counts into
+`task_activities.metadata`. The probe activates automatically when metadata is present.
+`staleLoopsKilled` (count of QC-blocked tasks) is the active waste proxy.
+
+**Regression:** 2.10 grading tests pass unchanged (278 pass, 7 pre-existing failures).
+
 ## [v4.29.0] - 2026-06-10 - feat(prd-2.10): Rebuild Performance Board on ONE grading module (grading.ts)
 
 **QC Score: 9.2/10 — PASS**

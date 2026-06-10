@@ -26,6 +26,11 @@ import {
   WEEKLY_DONE_CLEAR_CRON_EXPR,
   WEEKLY_DONE_CLEAR_CRON_TIMEZONE,
 } from './weekly-done-clear';
+import {
+  runLssControlReview,
+  LSS_CONTROL_REVIEW_CRON_EXPR,
+  LSS_CONTROL_REVIEW_CRON_TIMEZONE,
+} from './lss-control-review';
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
@@ -288,6 +293,24 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
         result.skippedReason
           ? `[cron] weekly-done-clear: skipped — ${result.skippedReason}`
           : `[cron] weekly-done-clear: archived ${result.archivedCount} done task(s)`,
+      );
+    },
+  },
+
+  // lss-control-review: 1st of each month at 08:00 America/New_York — monthly
+  // Lean Six Sigma control-style review: defect/rework/waste summary + narrative
+  // written to lss_control_reviews + Live Feed event + recommendations on grade drop.
+  // Idempotent per calendar month. Disable with DISABLE_LSS_CONTROL_REVIEW=1.
+  {
+    name: 'lss-control-review',
+    expr: LSS_CONTROL_REVIEW_CRON_EXPR,
+    timezone: LSS_CONTROL_REVIEW_CRON_TIMEZONE,
+    fn: async () => {
+      const result = await runLssControlReview();
+      console.log(
+        result.skippedReason
+          ? `[cron] lss-control-review: skipped — ${result.skippedReason}`
+          : `[cron] lss-control-review: review ${result.reviewId} written (score=${result.companyScore})`,
       );
     },
   },
