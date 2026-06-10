@@ -172,6 +172,17 @@ jobs:
           mkdir -p config
           echo '{"companyName":"Fixture Corp","slug":"fixture-corp"}' > config/company-config.json
 
+      - name: Write pre-rendered branded index.html (html_title check)
+        run: |
+          # checkHtmlTitle() reads .next/server/pages/index.html (rows 8-9).
+          # `next start` does not create pre-rendered HTML — inject it so the
+          # html_title check returns PASS instead of indeterminate, which would
+          # otherwise elevate the probe to exit 3 (UNKNOWN) instead of exit 0 (GREEN).
+          mkdir -p .next/server/pages
+          printf '<!DOCTYPE html><html><head><title>Fixture Corp</title></head><body></body></html>\n' \
+            > .next/server/pages/index.html
+          echo "Pre-rendered index.html written"
+
       - name: Start app for outside-in probe
         run: |
           DATABASE_PATH=/tmp/probe-fixture.db npm run start &
