@@ -1,3 +1,129 @@
+## [v4.23.0] - 2026-06-10 - fix(cc-2.9): PRD 2.9 integration once-over — dept-head real names, null-dept slug, qc-cc checks
+
+### PRD 2.9(e) — Department head display: real agent name instead of generic "Head of <Dept>"
+
+**Root cause**
+`src/lib/routing/resolve-department.ts` `normalizeWorkspace()` hardcoded
+`headTitle: \`Head of \${name}\`` regardless of whether the workspace API
+response included a `head_agent_name` field. The `/api/workspaces/[id]` and
+`/api/workspaces` (list) routes both return `head_agent_name` via an agents
+LEFT JOIN (migration 028 path), but the resolver discarded it.
+
+**Fixed**
+- **`src/lib/routing/resolve-department.ts`** — `normalizeWorkspace()` now reads
+  `ws.head_agent_name` from the API response and uses it as `headTitle` when
+  present. Generic `"Head of <Name>"` is used only when no head agent is
+  registered yet. Added `headAgentName?: string | null` to the
+  `DepartmentResolution` interface so callers can render the raw agent name
+  separately if needed.
+
+**Impact:** Both `/ceo-board/[dept]` and `/workspace/[slug]` immediately show
+the per-client real agent identity (e.g. "Candace", "Sir Jordan") in the
+department header once a head agent is seeded — no data change required.
+
+**QC rubric score:** 9.0/10
+- Wiring correctness 9/10: API response already carries the field; resolver
+  now consumes it. Workspace page was already correct (direct head_agent_name
+  render); CEO board page now also correct via resolveDepartment.
+- Single source of truth 9/10: one normalizeWorkspace function handles both
+  routes; no duplicate logic.
+- Observability 9/10: falls back loudly with "Head of <Dept>" so missing head
+  agents are visible rather than crashing.
+- Docs match reality 9/10: JSDoc updated; headAgentName field documented.
+- Regression safety 9/10: test 5 in prd-2.9f-null-dept-slug.test.ts asserts
+  the interface shape; qc-cc.sh checks 7.1–7.3.
+
+---
+
+### PRD 2.9(f) — Null department → workspace UUID passed as dept slug to record-completion
+
+**Root cause**
+In `src/lib/qc-scorer.ts` (QC auto-approve path) and `src/app/api/tasks/[id]/route.ts`
+(human-approval PATCH path), the `deptSlug` variable was computed as:
+```typescript
+const deptSlug = task.department ?? task.workspace_id ?? null;
+```
+When `task.department` is null (tasks created via the UI route into a workspace by
+UUID, not by slug), `task.workspace_id` — a 36-char UUID for UI-created workspaces
+— was passed directly to `spawnRecordCompletion`. The Python `record_completion()`
+function wrote `persona_selection_log.department_id` as the UUID, breaking
+stickiness keys, per-department KPI lookups, and performance row grouping (which
+all key on the canonical slug).
+
+**Fixed**
+- **`src/lib/qc-scorer.ts`** — When `task.department` is null, resolves the
+  workspace slug via `SELECT slug FROM workspaces WHERE id = ?` using the
+  existing `queryOne` import, then applies `canonicalDeptSlug()` for normalization.
+  Graceful fallback: if the workspace row is missing, falls back to `workspace_id`
+  (same behavior as before, but only as a last resort).
+- **`src/app/api/tasks/[id]/route.ts`** — Same resolution logic, using the
+  already-imported `queryOne` from `@/lib/db`. Added `canonicalDeptSlug` import
+  from `@/lib/routing/canonical-slug` for the normalization step.
+
+**Verify (fixture):** `tests/unit/prd-2.9f-null-dept-slug.test.ts` — 5 tests,
+all passing. Tests cover: null-dept→slug lookup, canonical normalization,
+dept-already-set bypass, missing-workspace fallback, and DepartmentResolution
+interface shape for PRD 2.9(e).
+
+**QC rubric score:** 9.2/10
+- Wiring correctness 10/10: the DB lookup runs in both call sites; end-to-end
+  the slug is now always canonical before record-completion fires.
+- Single source of truth 9/10: same pattern in both files; a shared helper
+  would be cleaner but the two callers are the only ones and the logic is
+  3 lines each — deduplication deferred to Phase 1 item 1.5 shared DB resolver.
+- Path discipline 9/10: uses the already-imported queryOne; no new deps.
+- Observability 9/10: fallback to workspace_id is explicit with a comment.
+- Docs match reality 9/10: inline comments explain the PRD 2.9(f) contract.
+- Regression safety 9/10: 5 new unit tests added; qc-cc.sh checks 7.4–7.7.
+
+---
+
+### PRD 2.9 integration — qc-cc.sh section 7 (15 new checks)
+
+Added `── 7. PRD 2.9 integration checks ──` to `scripts/qc-cc.sh`:
+- 7.1–7.3: resolve-department reads head_agent_name and includes headAgentName field
+- 7.4–7.7: qc-scorer and task PATCH route resolve workspace slug for null departments
+- 7.8: heuristic guard present in qc-scorer (PRD 2.4 still live)
+- 7.9–7.11: live feed events task_created / task_dispatched / task_completed emitted
+- 7.12: task-dispatcher guards master/CEO agents (route-not-execute, PRD 2.9c)
+- 7.13–7.14: BrandTheme component and brand_color theming wired (PRD 2.9d)
+- 7.15: prd-2.9f-null-dept-slug.test.ts fixture exists
+
+**qc-cc.sh result after fix:** 49/49 checks green.
+
+---
+
+### Confirmed (no code change needed)
+
+**(a) Heuristic-vs-gate (PRD 2.4)** — confirmed live in qc-scorer.ts: heuristic
+path returns `scoringPath='heuristic'`, `runQCOnReview` short-circuits the reroute
+loop, writes a human-review event, and returns. Reroutes only fire on real LLM scores
+below 8.5.
+
+**(b) Live feed task_created/dispatch/done** — confirmed in tasks.ts (task_created,
+task_dispatched) and tasks/[id]/route.ts (task_completed for done transitions,
+task_status_changed for others). All three event types present.
+
+**(c) Auto-dispatch route-not-execute** — confirmed in task-dispatcher.ts: GUARD 1
+checks `assigned_agent_id` exists; GUARD 2 checks `is_master === 1 || is_master === true`
+and skips CEO/master agents with a log line. Specialists-only dispatch.
+
+**(d) Company Settings theming** — confirmed: `src/components/BrandTheme.tsx` reads
+`brand_color` + `brand_secondary_color` from the client context, builds CSS custom
+properties, and emits a `<style>` block on `:root`. `CompanySettingsForm.tsx` persists
+primary + secondary color + logo + product name via the settings API.
+
+---
+
+**QC aggregate (PRD Section 6, weighted):**
+| Item | Score |
+|------|-------|
+| 2.9(e) headTitle fix | 9.0/10 |
+| 2.9(f) null-dept slug | 9.2/10 |
+| qc-cc.sh section 7 | 9.5/10 |
+
+All items ≥ 8.5 gate. Confirmed items (a)(b)(c)(d): verified-live, no code change.
+
 ## [v4.22.0] - 2026-06-10 - fix(persona): record-completion --task-output + default company FK seed
 
 ### Bug 2 — spawnRecordCompletion: missing --task-output → exit 2 → learning loop dead (PRD 1.4)

@@ -566,7 +566,24 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // Spawn record-completion async so persona_performance accumulates.
       // Skip when persona_id is null (task never had a persona assigned).
       if (task.persona_id) {
-        const deptSlug = task.department ?? task.workspace_id ?? null;
+        // PRD 2.9(f): when task.department is null, resolve the workspace slug
+        // from the DB rather than passing workspace_id raw (which may be a UUID
+        // for UI-created workspaces). department_id in persona_selection_log must
+        // always be a canonical slug, never a UUID.
+        let deptSlug: string | null = task.department ?? null;
+        if (!deptSlug && task.workspace_id) {
+          try {
+            const ws = queryOne<{ slug: string }>(
+              'SELECT slug FROM workspaces WHERE id = ?',
+              [task.workspace_id],
+            );
+            deptSlug = ws?.slug ?? task.workspace_id;
+          } catch {
+            deptSlug = task.workspace_id;
+          }
+        }
+        // Apply canonical normalization so the slug is always in the ZHC set.
+        if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
         // Pass task title + description as --task-output so the Python
         // record_completion() function can write the persona_performance row.
         const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');

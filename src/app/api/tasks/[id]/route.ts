@@ -9,6 +9,7 @@ import { checkTriad } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -328,9 +329,25 @@ export async function PATCH(
     const transitionedToDone =
       validatedData.status === 'done' && existing.status !== 'done';
     if (transitionedToDone && task?.persona_id) {
-      const deptSlug = (task as Task & { department?: string | null }).department
-        ?? task.workspace_id
-        ?? null;
+      // PRD 2.9(f): when task.department is null, resolve the workspace slug
+      // from the DB rather than falling back to workspace_id raw (which is a
+      // UUID for UI-created workspaces). department_id must always be a
+      // canonical slug, never a UUID, so persona_selection_log keys are stable.
+      const taskDept = (task as Task & { department?: string | null }).department ?? null;
+      let deptSlug: string | null = taskDept;
+      if (!deptSlug && task.workspace_id) {
+        try {
+          const ws = queryOne<{ slug: string }>(
+            'SELECT slug FROM workspaces WHERE id = ?',
+            [task.workspace_id],
+          );
+          deptSlug = ws?.slug ?? task.workspace_id;
+        } catch {
+          deptSlug = task.workspace_id;
+        }
+      }
+      // Apply canonical normalization so the slug is always in the ZHC set.
+      if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
       // Pass task title + description as --task-output so the Python
       // record_completion() function can write the persona_performance row.
       const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');
