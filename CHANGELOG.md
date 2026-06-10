@@ -1,3 +1,54 @@
+## [v4.25.0] - 2026-06-10 - fix(prd-3.4): SENTINEL_IDS guard — loud warning with installed skill version
+
+### PRD 3.4 — SENTINEL_IDS: keep guard, add loud warning with skill version
+
+**What was wrong (PRD Section 4, item 3.4):**
+`src/lib/tasks.ts` silently filtered persona ids like `"schemaVersion"` and
+`"domainTags"` that an old, buggy `list_available_personas()` emitted. The
+underlying bug was fixed in `persona-selector-v2.py` (lines 604-611), but
+stale installs that hadn't updated their skills kept producing these sentinel
+ids — and the guard swallowed them with no signal, making stale boxes
+impossible to identify.
+
+**Fix:**
+1. **`src/lib/tasks.ts`** — Added module-level exported `SENTINEL_IDS` constant
+   (removed the inline `const` from the async persona block). Added exported
+   `getInstalledSkillVersion()` helper that reads the skill version from
+   `ONBOARDING_VERSION` env var → `/data/.onboarding-version` (VPS) →
+   `~/.onboarding-version` (Mac) → `"unknown"`. When a sentinel id appears,
+   a `console.warn` now fires with the full message including: the sentinel id,
+   the installed skill version, the task id, and instructions to update the
+   onboarding skills. The guard still filters (task is not updated with the
+   sentinel as persona_id). Added `fs`, `os`, `path` imports.
+2. **`src/lib/persona-selector.ts`** — Added `PERSONA_FIXTURE_JSON` env-var
+   escape hatch: when set, `selectPersonaForTask` returns a fixture JSON
+   instead of spawning Python. Test/CI only; never set in production. This
+   enables unit tests to exercise the sentinel warning path without a live
+   Python install.
+3. **`tests/unit/prd-3.4-sentinel-ids-loud-warning.test.ts`** — 9 new tests
+   covering: exported `SENTINEL_IDS` set membership, `getInstalledSkillVersion`
+   env/file/unknown fallback paths, sentinel id fires loud warn + version + task
+   id + guard still filters, real persona id writes to DB without warn,
+   source-level assertions (no inline set in async block, function exported).
+
+**QC Score (self-assessed, Section 6 rubric):**
+- Wiring correctness 30% → 9/10: Warn fires when sentinel appears (verified by
+  Test 5), version read from env/file/fallback (Tests 2-4), guard still filters
+  (Test 5 DB check), real persona persisted (Test 6).
+- Single source of truth 20% → 10/10: SENTINEL_IDS moved to module-level export;
+  no inline copy in the async block (Test 7 source-level assertion).
+- Path discipline 15% → 9/10: Version file paths derived from `os.homedir()` and
+  platform-aware VPS `/data` prefix; no literal tildes.
+- Observability 15% → 10/10: Loud `console.warn` with sentinel id + skill version
+  + task id + actionable message. Previously: silent filter.
+- Docs match reality 10% → 9/10: CHANGELOG updated; source JSDoc explains the
+  PRD 3.4 rationale in the guard comment and `getInstalledSkillVersion` JSDoc.
+- Regression safety 10% → 10/10: 9 new passing tests; existing 236-pass / 7-fail
+  (pre-existing) baseline unchanged.
+**Weighted total: 9.55/10 PASS** (gate: 8.5)
+
+---
+
 ## [v4.24.0] - 2026-06-10 - chore(prd-3.1): move build-note docs to docs/archive/
 
 ### PRD 3.1 — Repo root cleanup: archive point-in-time build notes

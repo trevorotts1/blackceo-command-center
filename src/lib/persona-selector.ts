@@ -90,6 +90,26 @@ export async function selectPersonaForTask(
   taskDescription: string,
   departmentId: string | null
 ): Promise<PersonaSelectionResult | null> {
+  // Test/CI escape hatch: PERSONA_FIXTURE_JSON env var returns a fixture
+  // instead of spawning Python.  This allows unit tests to exercise the
+  // sentinel warning path (PRD 3.4) without needing real Python scripts.
+  // Never set this in production.
+  if (process.env.PERSONA_FIXTURE_JSON) {
+    try {
+      const fixture = JSON.parse(process.env.PERSONA_FIXTURE_JSON) as Partial<PersonaSelectionResult>;
+      return {
+        persona_id: fixture.persona_id ?? null,
+        persona_name: fixture.persona_name || 'Fixture Persona',
+        persona_version: fixture.persona_version,
+        score: typeof fixture.score === 'number' ? fixture.score : 0,
+        interaction_mode: (fixture.interaction_mode as PersonaInteractionMode) || 'leadership',
+        no_persona_required: fixture.no_persona_required,
+      };
+    } catch {
+      // Malformed fixture — fall through to real selector.
+    }
+  }
+
   try {
     const scriptPath = resolveScriptPath();
     const dept = departmentId || "general";
