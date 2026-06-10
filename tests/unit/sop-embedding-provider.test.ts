@@ -1,9 +1,9 @@
 /**
- * Unit tests — SOP embedding provider resolution + dims-mismatch guard
+ * Unit tests — SOP embedding provider resolution + model-drift guard (PRD 1.8c)
  *
  * Tests:
  *   1. resolveEmbeddingProvider() — openai-present → openai
- *   2. resolveEmbeddingProvider() — google-only (no OPENAI key) → google
+ *   2. resolveEmbeddingProvider() — google-only (no OPENAI key) → google (gemini-embedding-2)
  *      Tests all 3 Google key names: GOOGLE_API_KEY, GOOGLE_AI_STUDIO_API_KEY,
  *      GEMINI_API_KEY
  *   3. resolveEmbeddingProvider() — no keys → none (keyword fallback)
@@ -13,8 +13,15 @@
  *      even when Google key is also set
  *   6. isEmbeddingAvailable() returns true only when a key is present
  *   7. getEmbeddingApiKey() returns the resolved key or null
- *   8. Dims-mismatch guard: rankSOPsBySemantic skips rows with mismatched dims
+ *   8. Model-mismatch guard: rankSOPsBySemantic skips rows with mismatched model
+ *      (PRD 1.8c: dims match alone is not enough — model slug must also match)
  *   9. EMBEDDING_MODEL / EMBEDDING_DIMS constants are set to sensible defaults
+ *  10. resolveGoogleKey priority order
+ *  11. cosineSimilarity: 3072-dim correct + mismatched-dim safe
+ *  12. PINNED_GOOGLE_MODEL / PINNED_GOOGLE_DIMS constants are gemini-embedding-2 @3072
+ *  13. countStaleGoogleEmbeddings detects retired gemini-embedding-001 rows
+ *  14. rankSOPsBySemantic: model-drift guard returns [] when stored model = gemini-embedding-001
+ *      but active model = gemini-embedding-2 (even at same 3072-dim)
  *
  * Runs via the Node built-in test runner under tsx (`npm run test:unit`).
  * No network calls are made — provider resolution is pure env-var logic.
@@ -93,8 +100,11 @@ import {
   cosineSimilarity,
   float32ToBuffer,
   bufferToFloat32,
+  countStaleGoogleEmbeddings,
   EMBEDDING_MODEL,
   EMBEDDING_DIMS,
+  PINNED_GOOGLE_MODEL,
+  PINNED_GOOGLE_DIMS,
 } from '../../src/lib/sop-embeddings';
 
 // ---------------------------------------------------------------------------
@@ -120,7 +130,7 @@ test('resolveEmbeddingProvider: GOOGLE_API_KEY only (no OpenAI) → google', () 
   withEnv({ GOOGLE_API_KEY: 'AIza-test-google-key-long-enough' }, () => {
     const provider = resolveEmbeddingProvider();
     assert.equal(provider.name, 'google', 'Should resolve to google when only GOOGLE_API_KEY is set');
-    assert.equal(provider.model, 'gemini-embedding-001');
+    assert.equal(provider.model, PINNED_GOOGLE_MODEL);
     assert.equal(provider.dims, 3072);
     assert.equal(provider.apiKey, 'AIza-test-google-key-long-enough');
   });
@@ -168,7 +178,7 @@ test('resolveEmbeddingProvider: SOP_EMBEDDING_PROVIDER=google overrides openai p
   }, () => {
     const provider = resolveEmbeddingProvider();
     assert.equal(provider.name, 'google', 'SOP_EMBEDDING_PROVIDER=google must override auto-detection');
-    assert.equal(provider.model, 'gemini-embedding-001');
+    assert.equal(provider.model, PINNED_GOOGLE_MODEL);
     assert.equal(provider.dims, 3072);
   });
 });
@@ -237,16 +247,16 @@ test('getEmbeddingApiKey: returns null when no keys set', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. Dims-mismatch guard: rankSOPsBySemantic skips rows with mismatched dims
+// 8. Model-mismatch guard: rankSOPsBySemantic skips rows with mismatched model
 //
-// This test verifies the core dimension-consistency contract:
-//   - Insert rows with 1536-dim embeddings (OpenAI-sized)
-//   - Configure a Google provider (expects 3072-dim)
+// This test verifies the core model-consistency contract (PRD 1.8c):
+//   - Insert rows with 1536-dim embeddings (OpenAI model)
+//   - Configure a Google provider (gemini-embedding-2, expects 3072-dim)
 //   - rankSOPsBySemantic must return [] (not throw, not compare)
 //   - Then: configure OpenAI provider (1536-dim), query must find those rows
 // ---------------------------------------------------------------------------
 
-test('rankSOPsBySemantic: skips rows whose dims != active provider dims (no cross-provider comparison)', async () => {
+test('rankSOPsBySemantic: skips rows whose model != active provider model (no cross-model comparison)', async () => {
   // This test uses a real (throwaway) SQLite DB spun up in the test process.
   const db = await import('../../src/lib/db');
   db.getDb(); // run migrations
@@ -395,6 +405,142 @@ test('cosineSimilarity: mismatched dims (1536 vs 3072) returns 0 safely', () => 
   a[0] = 1;
   b[0] = 1;
   assert.equal(cosineSimilarity(a, b), 0, 'Mismatched 1536 vs 3072 dims must return 0 (safe)');
+});
+
+// ---------------------------------------------------------------------------
+// 12. PINNED_GOOGLE_MODEL / PINNED_GOOGLE_DIMS — gemini-embedding-2 @3072 (PRD 1.8c)
+// ---------------------------------------------------------------------------
+
+test('PINNED_GOOGLE_MODEL is gemini-embedding-2 (not the retired -001)', () => {
+  assert.equal(PINNED_GOOGLE_MODEL, 'gemini-embedding-2',
+    'PINNED_GOOGLE_MODEL must be gemini-embedding-2 — gemini-embedding-001 retired 2026-07-14');
+  assert.notEqual(PINNED_GOOGLE_MODEL, 'gemini-embedding-001',
+    'PINNED_GOOGLE_MODEL must NOT be the retired gemini-embedding-001');
+});
+
+test('PINNED_GOOGLE_DIMS is 3072', () => {
+  assert.equal(PINNED_GOOGLE_DIMS, 3072,
+    'PINNED_GOOGLE_DIMS must be 3072 (output_dimensionality passed to Google API)');
+});
+
+test('resolveEmbeddingProvider: google path uses PINNED_GOOGLE_MODEL', () => {
+  withEnv({ GOOGLE_API_KEY: 'AIza-pinned-model-test-long-enough' }, () => {
+    const provider = resolveEmbeddingProvider();
+    assert.equal(provider.model, PINNED_GOOGLE_MODEL,
+      'Google provider must use PINNED_GOOGLE_MODEL (gemini-embedding-2), not gemini-embedding-001');
+    assert.equal(provider.dims, PINNED_GOOGLE_DIMS,
+      'Google provider dims must equal PINNED_GOOGLE_DIMS (3072)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. countStaleGoogleEmbeddings: detects retired gemini-embedding-001 rows
+// ---------------------------------------------------------------------------
+
+test('countStaleGoogleEmbeddings: returns stale count for gemini-embedding-001 rows', async () => {
+  const db = await import('../../src/lib/db');
+  db.getDb(); // run migrations
+
+  const { run } = db;
+  const ts2 = Date.now();
+  const sopStaleId = `stale-sop-${ts2}`;
+  const sopFreshId = `fresh-sop-${ts2}`;
+  const now2 = new Date().toISOString();
+
+  // Insert two SOPs
+  for (const [id, name, slug] of [
+    [sopStaleId, 'Stale Embed SOP', `stale-sop-slug-${ts2}`],
+    [sopFreshId, 'Fresh Embed SOP', `fresh-sop-slug-${ts2}`],
+  ] as [string, string, string][]) {
+    run(
+      `INSERT OR IGNORE INTO sops (id, name, slug, description, version, department, task_keywords, steps, created_at, updated_at)
+       VALUES (?, ?, ?, NULL, 1, 'test-dept', 'test', ?, ?, ?)`,
+      [id, name, slug, JSON.stringify([{ name: 'step1' }]), now2, now2]
+    );
+  }
+
+  const staleVec = float32ToBuffer(new Float32Array(3072).fill(0.1));
+  const freshVec = float32ToBuffer(new Float32Array(3072).fill(0.2));
+
+  // Insert one row with the RETIRED model slug
+  run(
+    `INSERT OR REPLACE INTO sop_embeddings (sop_id, embedding, embedding_model, embedding_dims, embedded_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [sopStaleId, staleVec, 'gemini-embedding-001', 3072, now2]
+  );
+
+  // Insert one row with the PINNED model slug
+  run(
+    `INSERT OR REPLACE INTO sop_embeddings (sop_id, embedding, embedding_model, embedding_dims, embedded_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [sopFreshId, freshVec, PINNED_GOOGLE_MODEL, 3072, now2]
+  );
+
+  const result = countStaleGoogleEmbeddings();
+
+  assert.ok(result.stale >= 1,
+    `countStaleGoogleEmbeddings should find at least 1 stale row (gemini-embedding-001), got ${result.stale}`);
+  assert.equal(result.retiredModel, 'gemini-embedding-001',
+    'retiredModel must be gemini-embedding-001');
+  assert.equal(result.pinnedModel, PINNED_GOOGLE_MODEL,
+    'pinnedModel must be the PINNED_GOOGLE_MODEL constant');
+});
+
+// ---------------------------------------------------------------------------
+// 14. rankSOPsBySemantic: model-drift guard — 001 rows must NOT be compared
+//     against gemini-embedding-2 query even when dims match (3072 == 3072)
+// ---------------------------------------------------------------------------
+
+test('rankSOPsBySemantic: model-drift guard rejects gemini-embedding-001 rows when active model is gemini-embedding-2', async () => {
+  const db2 = await import('../../src/lib/db');
+  db2.getDb();
+
+  const { run: run2 } = db2;
+  const { rankSOPsBySemantic: rank } = await import('../../src/lib/sop-embeddings');
+
+  const ts3 = Date.now();
+  const sopDriftId = `drift-test-sop-${ts3}`;
+  const now3 = new Date().toISOString();
+
+  // Insert SOP
+  run2(
+    `INSERT OR IGNORE INTO sops (id, name, slug, description, version, department, task_keywords, steps, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, 1, 'test-dept', 'test', ?, ?, ?)`,
+    [sopDriftId, 'Model Drift Test SOP', `drift-sop-${ts3}`, JSON.stringify([{ name: 's1' }]), now3, now3]
+  );
+
+  // Insert embedding at 3072-dim but with the RETIRED model slug
+  const driftVec = float32ToBuffer(new Float32Array(3072).fill(0.5));
+  run2(
+    `INSERT OR REPLACE INTO sop_embeddings (sop_id, embedding, embedding_model, embedding_dims, embedded_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [sopDriftId, driftVec, 'gemini-embedding-001', 3072, now3]
+  );
+
+  // Stub fetch to simulate gemini-embedding-2 returning a 3072-dim query vector
+  const origFetch = global.fetch;
+  global.fetch = async (): Promise<Response> => {
+    const values = new Array(3072).fill(0);
+    values[0] = 1;
+    return new Response(JSON.stringify({ embedding: { values } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    await withEnvAsync({ GOOGLE_API_KEY: 'AIza-drift-guard-test-long-enough' }, async () => {
+      const hits = await rank('model drift guard query');
+      // Active model = gemini-embedding-2; stored model = gemini-embedding-001.
+      // Even though both are 3072-dim, the model-drift guard MUST refuse to compare them.
+      const found = hits.some((h) => h.sopId === sopDriftId);
+      assert.equal(found, false,
+        'MODEL-DRIFT GUARD: gemini-embedding-001 rows must NOT be returned when active model is gemini-embedding-2, ' +
+        'even though both are 3072-dim. Different model = different vector space.');
+    });
+  } finally {
+    global.fetch = origFetch;
+  }
 });
 
 // ---------------------------------------------------------------------------

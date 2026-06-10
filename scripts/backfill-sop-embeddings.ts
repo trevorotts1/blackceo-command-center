@@ -3,17 +3,24 @@
  * scripts/backfill-sop-embeddings.ts
  *
  * One-time (resumable) backfill: embed every SOP in the DB that does not yet
- * have an embedding in the sop_embeddings table.
+ * have an embedding in the sop_embeddings table, OR that was embedded with a
+ * stale / retired model.
+ *
+ * PRD 1.8c — Google model migration: gemini-embedding-001 HARD SHUTDOWN 2026-07-14.
+ * This script migrates all stored SOP vectors to gemini-embedding-2 @3072-dim.
+ * Running with a Google key automatically detects stale gemini-embedding-001 rows
+ * and re-embeds them with gemini-embedding-2. The --check-stale flag prints a
+ * count of stale rows without running the embed.
  *
  * PROVIDER SELECTION (auto-detected, same logic as sop-embeddings.ts):
  *   OpenAI (text-embedding-3-small, 1536-dim)  — requires OPENAI_API_KEY
- *   Google (gemini-embedding-001, 3072-dim)     — requires GOOGLE_API_KEY /
+ *   Google (gemini-embedding-2, 3072-dim)       — requires GOOGLE_API_KEY /
  *                                                  GOOGLE_AI_STUDIO_API_KEY /
  *                                                  GEMINI_API_KEY
  *   SOP_EMBEDDING_PROVIDER=openai|google        — force a specific provider
  *
  * Google-only clients (Sheila, Corey, Kofi) need NO OPENAI_API_KEY.
- * Set any Google key and the script uses gemini-embedding-001 automatically.
+ * Set any Google key and the script uses gemini-embedding-2 automatically.
  *
  * QUOTA / PACING (Google free tier):
  *   Google embedContent is one-call-per-text. The script defaults to batch-size=5
@@ -26,6 +33,7 @@
  * USAGE
  *   chmod +x scripts/backfill-sop-embeddings.ts
  *   tsx scripts/backfill-sop-embeddings.ts [--dry-run] [--batch-size=N] [--force]
+ *   tsx scripts/backfill-sop-embeddings.ts --check-stale   # count stale rows, exit
  *
  *   Or via env override:
  *   DATABASE_PATH=/abs/path/to/db tsx scripts/backfill-sop-embeddings.ts
@@ -42,18 +50,22 @@
  *                      For Google, this controls how many per outer loop iteration;
  *                      the actual API is still 1 call per text.
  *   --force            Re-embed SOPs that already have an embedding (full refresh).
+ *   --check-stale      Print count of stale gemini-embedding-001 rows + exit. No embeds.
  *
  * RESUMABILITY
  *   The script skips SOPs that already have a row in sop_embeddings with the SAME
- *   provider model (unless --force). Rows from a different provider/model are treated
- *   as unembedded for the active provider. Re-running after a partial failure or
- *   interruption will only embed the remaining rows.
+ *   provider model (unless --force). Rows from a different or retired model are
+ *   treated as unembedded for the active provider. Re-running after a partial failure
+ *   or interruption will only embed the remaining rows.
  *
  * DEPLOY NOTE
- *   Run this once per client after the initial deploy (or after switching providers).
- *   Typical OpenAI 2,578-row run:  ~3 minutes (batch 10, 1s pause)  ~$0.003 total.
+ *   Run this once per client at Wave-5 deploy (operator-gated, with the client's
+ *   own key). For gemini-embedding-001 → gemini-embedding-2 migration:
+ *     SOP_EMBEDDING_PROVIDER=google GOOGLE_API_KEY=<client-key> tsx scripts/backfill-sop-embeddings.ts
+ *   This re-embeds every stale gemini-embedding-001 row with gemini-embedding-2.
  *   Typical Google 2,578-row run: ~30–45 minutes (sequential + quota pacing).
  *   Google free-tier limit: ~1,500 embeds/min in normal conditions; slowdown expected.
+ *   Typical OpenAI 2,578-row run:  ~3 minutes (batch 10, 1s pause)  ~$0.003 total.
  */
 
 import process from 'node:process';
@@ -63,6 +75,7 @@ import type { SOP } from '../src/lib/sops';
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const forceReEmbed = args.includes('--force');
+const checkStale = args.includes('--check-stale');
 const batchSizeArg = args.find((a) => a.startsWith('--batch-size='));
 
 async function main(): Promise<void> {
@@ -76,7 +89,27 @@ async function main(): Promise<void> {
     buildSOPEmbedText,
     fetchEmbedding,
     float32ToBuffer,
+    countStaleGoogleEmbeddings,
+    PINNED_GOOGLE_MODEL,
   } = emb;
+
+  // ----- --check-stale: report stale gemini-embedding-001 rows and exit -----
+  if (checkStale) {
+    const { stale, total, pinnedModel, retiredModel } = countStaleGoogleEmbeddings();
+    console.log('[backfill-sop-embeddings] --check-stale report:');
+    console.log(`  Total SOP embeddings in DB : ${total}`);
+    console.log(`  Stale rows (${retiredModel}): ${stale}`);
+    console.log(`  Pinned model (target)      : ${pinnedModel}`);
+    if (stale > 0) {
+      console.log('');
+      console.log(`  ⚠️  ACTION REQUIRED: ${stale} row(s) must be re-embedded with ${pinnedModel}`);
+      console.log(`  Run: SOP_EMBEDDING_PROVIDER=google GOOGLE_API_KEY=<key> tsx scripts/backfill-sop-embeddings.ts`);
+      process.exit(1); // non-zero so CI / health checks can detect this state
+    } else {
+      console.log('  ✓ No stale embeddings detected. All rows use the pinned model.');
+      process.exit(0);
+    }
+  }
 
   // ----- resolve provider -----
   const provider = resolveEmbeddingProvider();
@@ -85,11 +118,22 @@ async function main(): Promise<void> {
     console.error('[backfill-sop-embeddings] ERROR: No embedding provider is configured.');
     console.error('  Set one of the following in your shell or .env.local:');
     console.error('    OPENAI_API_KEY             → uses OpenAI text-embedding-3-small (1536-dim)');
-    console.error('    GOOGLE_API_KEY             → uses Google gemini-embedding-001 (3072-dim)');
+    console.error(`    GOOGLE_API_KEY             → uses Google ${PINNED_GOOGLE_MODEL} (3072-dim)`);
     console.error('    GOOGLE_AI_STUDIO_API_KEY   → same, alternate key name');
     console.error('    GEMINI_API_KEY             → same, alternate key name');
     console.error('  Or force a specific provider: SOP_EMBEDDING_PROVIDER=openai|google');
     process.exit(1);
+  }
+
+  // ----- model-drift report: warn loudly if there are stale Google rows -----
+  if (provider.name === 'google') {
+    const { stale, retiredModel } = countStaleGoogleEmbeddings();
+    if (stale > 0) {
+      console.log(
+        `[backfill-sop-embeddings] ⚠️  MODEL-DRIFT: ${stale} row(s) stored as "${retiredModel}" ` +
+        `(hard shutdown 2026-07-14) will be re-embedded with "${provider.model}".`
+      );
+    }
   }
 
   const isGoogle = provider.name === 'google';
@@ -100,7 +144,8 @@ async function main(): Promise<void> {
   console.log(`[backfill-sop-embeddings] Provider: ${provider.name} (${provider.model}, ${provider.dims}-dim)`);
   if (isGoogle) {
     console.log(
-      '[backfill-sop-embeddings] NOTE: Google free-tier pacing active — sequential calls with delays. ' +
+      `[backfill-sop-embeddings] NOTE: using pinned model ${PINNED_GOOGLE_MODEL} (output_dimensionality=3072). ` +
+      'Google free-tier pacing active — sequential calls with delays. ' +
       'A full 2,578-SOP run may take 30–45 min. The script is resumable; ^C and re-run anytime.'
     );
   }

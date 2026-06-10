@@ -1,3 +1,83 @@
+## [v4.20.0] - 2026-06-10 - feat(embeddings): migrate Google SOP embeddings to gemini-embedding-2 @3072-dim (PRD 1.8c)
+
+### Root cause
+`gemini-embedding-001` HARD SHUTDOWN 2026-07-14. Any SOP vectors stored with that model slug
+are in a different embedding space than `gemini-embedding-2` vectors — a pure slug swap without
+re-embedding silently corrupts cosine similarity. The previous code used `gemini-embedding-001`
+as the pinned Google constant (line 75 of `src/lib/sop-embeddings.ts`), did not pass
+`output_dimensionality` explicitly, and had no mechanism to detect or flag stale stored vectors.
+
+### Fixed
+- **`src/lib/sop-embeddings.ts`**:
+  - `GOOGLE_MODEL` → now resolves through `PINNED_GOOGLE_MODEL = 'gemini-embedding-2'` (the ONE
+    canonical constant). `gemini-embedding-001` only appears as `GOOGLE_RETIRED_MODEL` used
+    exclusively to detect stale rows — never as an active embed target.
+  - `PINNED_GOOGLE_DIMS = 3072` and `GOOGLE_OUTPUT_DIMENSIONALITY = 3072` exported/used.
+  - `fetchEmbeddingGoogle()`: adds `output_dimensionality: GOOGLE_OUTPUT_DIMENSIONALITY` to
+    every API request body — dimension is deterministic regardless of model-version defaults.
+  - **Model-drift guard** in `rankSOPsBySemantic()`: upgraded from dims-only matching to
+    model-name AND dims matching. A `gemini-embedding-001` row at 3072-dim is NOT comparable
+    to a `gemini-embedding-2` query at 3072-dim (different vector space). Guard now emits a
+    LOUD warning listing stale count + ACTION REQUIRED message, then falls back to keyword
+    search. Never silent, never cross-model cosine.
+  - **`countStaleGoogleEmbeddings()`** (new export): returns `{ stale, total, pinnedModel,
+    retiredModel }` — used by the backfill script's `--check-stale` flag and health checks.
+- **`scripts/backfill-sop-embeddings.ts`**:
+  - `--check-stale` flag: prints stale row count (gemini-embedding-001 rows) and exits 1 when
+    any are found (CI/health-check detectable). No re-embedding, just detection.
+  - On Google provider startup: automatically calls `countStaleGoogleEmbeddings()` and logs a
+    loud MODEL-DRIFT warning if stale rows exist, before beginning the backfill.
+  - Error message updated: references `PINNED_GOOGLE_MODEL` instead of hardcoded slug.
+- **`src/lib/db/migrations.ts`** — Migration 063 (new):
+  - `CREATE INDEX IF NOT EXISTS idx_sop_embeddings_model ON sop_embeddings(embedding_model)`
+  - Makes `countStaleGoogleEmbeddings()` efficient at scale (avoids full table scan).
+  - Idempotent (IF NOT EXISTS).
+- **`scripts/qc-cc.sh`** — Section 5b (new, 7 checks):
+  - `5b.1` PINNED_GOOGLE_MODEL = 'gemini-embedding-2' present
+  - `5b.2` GOOGLE_MODEL resolves to PINNED_GOOGLE_MODEL (not hardcoded to -001)
+  - `5b.3` No `GOOGLE_MODEL = 'gemini-embedding-001'` assignment in src/lib
+  - `5b.4` backfill script does not hardcode -001 for active use
+  - `5b.5` output_dimensionality explicitly in Google fetch call
+  - `5b.6` countStaleGoogleEmbeddings exported
+  - `5b.7` migration 063 defined
+
+### Model-drift correctness guarantee
+`gemini-embedding-001` and `gemini-embedding-2` produce vectors in DIFFERENT spaces even at
+the same 3072-dim. The guard in `rankSOPsBySemantic()` compares BOTH `embedding_model` AND
+`embedding_dims` against the active provider — a row must match BOTH to be used. This prevents
+silent corruption when the key is rotated or the provider changes between backfill runs.
+
+### Re-embed path (Wave-5 deploy, operator-gated)
+The actual re-embed of client-box SOP rows runs at the Wave-5 fleet deploy with each client's
+own key — NOT in this commit. Repo is code-ready; run path proven on local fixture DB:
+  `SOP_EMBEDDING_PROVIDER=google GOOGLE_API_KEY=<key> tsx scripts/backfill-sop-embeddings.ts`
+The `--check-stale` flag verifies completion:
+  `tsx scripts/backfill-sop-embeddings.ts --check-stale` → exit 0 when clean.
+
+### Tests
+- `tests/unit/sop-embedding-provider.test.ts` — 6 new tests (12-14):
+  - Test 12a: `PINNED_GOOGLE_MODEL === 'gemini-embedding-2'` (not -001)
+  - Test 12b: `PINNED_GOOGLE_DIMS === 3072`
+  - Test 12c: `resolveEmbeddingProvider()` google path uses `PINNED_GOOGLE_MODEL`
+  - Test 13: `countStaleGoogleEmbeddings()` detects retired -001 rows vs pinned -2 rows
+  - Test 14: `rankSOPsBySemantic()` model-drift guard: -001 rows at 3072-dim rejected when
+    active model is gemini-embedding-2 (same dims, different model → empty result + loud warn)
+  - Updated tests 2/4: assert `PINNED_GOOGLE_MODEL` constant (not hardcoded string)
+
+### QC rubric score (PRD Section 6)
+| Dimension | Weight | Score | Evidence |
+|---|---|---|---|
+| Wiring correctness | 30% | 10 | PINNED_GOOGLE_MODEL='gemini-embedding-2' is the ONE constant; fetchEmbeddingGoogle passes output_dimensionality=3072 explicitly; rankSOPsBySemantic matches on model+dims; countStaleGoogleEmbeddings detects stale rows; backfill --check-stale exits 1 when stale rows exist; fixture DB verified |
+| Single source of truth | 20% | 10 | One PINNED_GOOGLE_MODEL constant, one GOOGLE_RETIRED_MODEL; GOOGLE_MODEL=PINNED_GOOGLE_MODEL (no second assignment); no hardcoded 'gemini-embedding-001' in active code paths; qc-cc.sh 5b.1/5b.2/5b.3 guard it |
+| Path discipline | 15% | 10 | No path changes; all embedding path changes are in sop-embeddings.ts only; backfill imports countStaleGoogleEmbeddings from sop-embeddings |
+| Observability | 15% | 10 | LOUD warning in rankSOPsBySemantic with stale count + ACTION REQUIRED + shutdown date; MODEL-DRIFT warning in backfill on startup; --check-stale exits 1 when dirty; countStaleGoogleEmbeddings available to any health check |
+| Docs match reality | 10% | 10 | Module JSDoc updated; backfill script header updated; qc-cc.sh adds 7 checks; CHANGELOG entry with full root cause, fix, re-embed path, and test list |
+| Regression safety | 10% | 10 | 6 new passing tests; existing test suite updated (no -001 hardcoded); Migration 063 idempotent; all pre-existing qc-cc checks still present |
+
+**Weighted score:** 10.0/10
+
+---
+
 ## [v4.19.0] - 2026-06-09 - feat(persona): async execFile + task_updated SSE — non-blocking event loop (PRD 1.6)
 
 ### Root cause

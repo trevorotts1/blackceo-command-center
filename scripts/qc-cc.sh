@@ -142,6 +142,30 @@ check "5.2" "no 'anthropic/' provider id in src/lib" \
   "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep ."
 
 blue ""
+blue "── 5b. Embedding model hygiene (PRD 1.8c) ──"
+# gemini-embedding-001 is retired 2026-07-14. It must not appear as an active
+# model constant in src/lib/ or scripts/. Allowed only in:
+#   - GOOGLE_RETIRED_MODEL  (the literal that identifies stale rows — intentional)
+#   - comments / docs       (explaining the migration)
+#   - test files            (testing the drift-detection logic)
+# The check below flags any occurrence in active lib + scripts code that is NOT
+# the GOOGLE_RETIRED_MODEL guard, a comment, or a test file.
+check "5b.1" "PINNED_GOOGLE_MODEL constant is gemini-embedding-2 (not retired gemini-embedding-001)" \
+  "grep -q \"PINNED_GOOGLE_MODEL = 'gemini-embedding-2'\" src/lib/sop-embeddings.ts"
+check "5b.2" "GOOGLE_MODEL resolves to PINNED_GOOGLE_MODEL (no direct -001 assignment)" \
+  "grep -q 'const GOOGLE_MODEL = PINNED_GOOGLE_MODEL' src/lib/sop-embeddings.ts"
+check "5b.3" "no active assignment of GOOGLE_MODEL = 'gemini-embedding-001' in src/lib" \
+  "! grep -rn \"GOOGLE_MODEL = 'gemini-embedding-001'\" src/lib/ --include='*.ts' | grep ."
+check "5b.4" "backfill script references PINNED_GOOGLE_MODEL (not hardcoded -001 for active use)" \
+  "! grep -n \"'gemini-embedding-001'\" scripts/backfill-sop-embeddings.ts | grep -v 'RETIRED\|retired\|stale\|deprecated\|shutdown\|#'"
+check "5b.5" "output_dimensionality=3072 passed explicitly in Google fetch call" \
+  "grep -q 'output_dimensionality: GOOGLE_OUTPUT_DIMENSIONALITY' src/lib/sop-embeddings.ts"
+check "5b.6" "countStaleGoogleEmbeddings exported from sop-embeddings.ts" \
+  "grep -q 'export function countStaleGoogleEmbeddings' src/lib/sop-embeddings.ts"
+check "5b.7" "migration 063 (model-drift index) defined in migrations.ts" \
+  "grep -q \"id: '063'\" src/lib/db/migrations.ts"
+
+blue ""
 blue "── 6. Persona infrastructure ──"
 check "6.1" "/api/persona-matrix route exists" \
   '[ -f src/app/api/persona-matrix/route.ts ]'

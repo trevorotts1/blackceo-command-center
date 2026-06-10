@@ -2246,6 +2246,30 @@ const migrations: Migration[] = [
       console.log(`[Migration 060] Seeded/verified ${seeded} QC Specialist agent(s) across ${workspaces.length} workspace(s)`);
     },
   },
+
+  // ── Migration 063 — SOP embeddings model-drift index (PRD 1.8c) ─────────────
+  {
+    id: '063',
+    name: 'sop_embeddings_model_drift_index',
+    // Adds an index on sop_embeddings.embedding_model to make stale-row detection
+    // (countStaleGoogleEmbeddings) efficient at scale.
+    //
+    // Background: gemini-embedding-001 is retired 2026-07-14. Any rows carrying
+    // that model slug are stale and must be re-embedded with gemini-embedding-2.
+    // countStaleGoogleEmbeddings() runs a WHERE embedding_model = ? query; without
+    // an index this is a full table scan over potentially 2,578+ rows on every
+    // semantic search request.
+    //
+    // Idempotent: CREATE INDEX IF NOT EXISTS.
+    up: (db) => {
+      console.log('[Migration 063] Adding idx_sop_embeddings_model for model-drift detection...');
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_sop_embeddings_model
+           ON sop_embeddings(embedding_model)`
+      );
+      console.log('[Migration 063] idx_sop_embeddings_model ready');
+    },
+  },
 ];
 
 /**

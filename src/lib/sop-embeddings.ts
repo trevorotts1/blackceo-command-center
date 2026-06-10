@@ -19,32 +19,43 @@
  *    - storeEmbeddingForSOP(sop) — compute + persist embedding (fire-and-forget)
  *    - rankSOPsBySemantic(query) — bulk cosine ranking over sop_embeddings table
  *    - getStoredEmbedding(id)   — retrieve stored embedding for a SOP
+ *    - countStaleGoogleEmbeddings() — count rows computed with a retired Google model
  *    - EMBEDDING_MODEL          — active model name (reflects resolved provider)
  *    - EMBEDDING_DIMS           — active dimension count (reflects resolved provider)
+ *    - PINNED_GOOGLE_MODEL      — the ONE canonical Google embedding model (gemini-embedding-2)
+ *    - PINNED_GOOGLE_DIMS       — the canonical output dim (3072)
  *
  * PROVIDER RESOLUTION ORDER (configurable via SOP_EMBEDDING_PROVIDER env):
  *   1. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim)
- *   2. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-001, 3072-dim)
+ *   2. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-2 @3072-dim)
  *   3. SOP_EMBEDDING_PROVIDER absent → auto-detect:
  *        OPENAI_API_KEY present  → openai
- *        ELSE Google key present → google
+ *        ELSE Google key present → google (gemini-embedding-2)
  *        ELSE                   → none (keyword fallback)
  *
- * GOOGLE EMBEDDING API (smoke-tested live):
- *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=<KEY>
- *   Body: { "content": { "parts": [{ "text": "<text>" }] } }
+ * PINNED GOOGLE MODEL — gemini-embedding-2 (GA as of 2025; output_dimensionality=3072):
+ *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=<KEY>
+ *   Body: { "content": { "parts": [{ "text": "<text>" }] },
+ *           "output_dimensionality": 3072 }
  *   Response: { "embedding": { "values": [...3072 floats...] } }
- *   Free-tier quota: rate-limited → batching uses sequential calls with pacing +
- *     retry-with-backoff on 429 + graceful exit on sustained 429.
+ *   ⚠️  HARD SHUTDOWN: gemini-embedding-001 retires 2026-07-14. Any stored vectors
+ *   computed with that model are STALE and must be re-embedded with gemini-embedding-2
+ *   before the shutdown. Use countStaleGoogleEmbeddings() to detect them; run the
+ *   backfill script with a Google key to recompute. The PRD 1.8c migration guard in
+ *   rankSOPsBySemantic() refuses to cross-compare retired-model vectors against
+ *   gemini-embedding-2 query vectors (different model → different vector space, even
+ *   at the same dimensionality; silent corrupt similarity must not happen).
  *
  * DIMENSION CONSISTENCY GUARD:
  *   Each row in sop_embeddings stores embedding_model + embedding_dims.
- *   rankSOPsBySemantic() reads the active model from the DB and skips rows
- *   whose dims != active provider dims (prevents cross-provider cosine comparisons).
+ *   rankSOPsBySemantic() reads the active model (both name AND dims) and skips rows
+ *   whose model != active provider model (prevents cross-model cosine comparisons).
+ *   When no rows match the active model, falls back to keyword mode with a LOUD
+ *   warning — never silently returns garbage cosine scores.
  *
  * ENV REQUIREMENTS:
  *   OPENAI_API_KEY            — enables OpenAI embeddings (text-embedding-3-small, 1536-dim)
- *   GOOGLE_API_KEY            — enables Google embeddings (gemini-embedding-001, 3072-dim)
+ *   GOOGLE_API_KEY            — enables Google embeddings (gemini-embedding-2, 3072-dim)
  *   GOOGLE_AI_STUDIO_API_KEY  — alternate Google key name
  *   GEMINI_API_KEY            — alternate Google key name
  *   SOP_EMBEDDING_PROVIDER    — optional override: "openai" | "google"
@@ -71,9 +82,27 @@ export interface EmbeddingProvider {
 const OPENAI_MODEL = 'text-embedding-3-small';
 const OPENAI_DIMS = 1536;
 
-/** Google Gemini provider constants */
-const GOOGLE_MODEL = 'gemini-embedding-001';
-const GOOGLE_DIMS = 3072;
+/**
+ * Google Gemini — PINNED to GA model gemini-embedding-2 (PRD 1.8c).
+ *
+ * Rationale: gemini-embedding-001 HARD SHUTDOWN 2026-07-14. This is the ONE
+ * canonical constant for Google embeddings in this codebase. Any stored row
+ * with embedding_model != GOOGLE_MODEL is stale and must be re-embedded.
+ *
+ * output_dimensionality=3072 is passed explicitly on every API call so the
+ * dimension is deterministic regardless of model defaults.
+ */
+export const PINNED_GOOGLE_MODEL = 'gemini-embedding-2';
+export const PINNED_GOOGLE_DIMS = 3072;
+
+/** @internal — use PINNED_GOOGLE_MODEL / PINNED_GOOGLE_DIMS externally */
+const GOOGLE_MODEL = PINNED_GOOGLE_MODEL;
+const GOOGLE_DIMS = PINNED_GOOGLE_DIMS;
+const GOOGLE_OUTPUT_DIMENSIONALITY = 3072; // passed to API explicitly
+
+/** The retired model slug — used ONLY to detect stale rows in the DB. */
+const GOOGLE_RETIRED_MODEL = 'gemini-embedding-001';
+
 const GOOGLE_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** Maximum batch size for OpenAI /v1/embeddings. */
@@ -349,19 +378,26 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Fetch a SINGLE text embedding from Google Gemini (gemini-embedding-001).
+ * Fetch a SINGLE text embedding from Google Gemini (gemini-embedding-2).
  *
- * API shape (verified):
- *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=<KEY>
- *   Body: { "content": { "parts": [{ "text": "<text>" }] } }
+ * API shape (PRD 1.8c — GA model, output_dimensionality explicit):
+ *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=<KEY>
+ *   Body: { "content": { "parts": [{ "text": "<text>" }] },
+ *           "output_dimensionality": 3072 }
  *   Response: { "embedding": { "values": [...3072 floats...] } }
+ *
+ * output_dimensionality is always passed explicitly so the dimension is
+ * deterministic and does not depend on model-version defaults.
  *
  * Retries on 429 (quota) with exponential backoff. After max retries, throws
  * with a "quota exceeded" message so the caller can fall back to keyword search.
  */
 async function fetchEmbeddingGoogle(text: string, apiKey: string): Promise<Float32Array> {
   const url = `${GOOGLE_API_BASE}/${GOOGLE_MODEL}:embedContent?key=${encodeURIComponent(apiKey)}`;
-  const body = JSON.stringify({ content: { parts: [{ text: text }] } });
+  const body = JSON.stringify({
+    content: { parts: [{ text: text }] },
+    output_dimensionality: GOOGLE_OUTPUT_DIMENSIONALITY,
+  });
 
   let backoffMs = GOOGLE_EMBED_BACKOFF_MS;
   for (let attempt = 0; attempt <= GOOGLE_EMBED_MAX_RETRIES; attempt++) {
@@ -406,7 +442,7 @@ async function fetchEmbeddingGoogle(text: string, apiKey: string): Promise<Float
 }
 
 /**
- * Fetch embeddings for an ARRAY of texts using Google Gemini.
+ * Fetch embeddings for an ARRAY of texts using Google Gemini (gemini-embedding-2).
  *
  * Google's embedContent API is ONE-TEXT-PER-CALL (no batch endpoint).
  * We process sequentially with pacing (GOOGLE_EMBED_DELAY_MS between calls)
@@ -540,6 +576,48 @@ export interface SOPEmbeddingRow {
   embedded_at: string;
 }
 
+/**
+ * Count SOP embeddings stored with a model other than the currently pinned
+ * Google model (gemini-embedding-2). Used by the backfill script and health checks
+ * to detect rows that need re-embedding before the 2026-07-14 shutdown.
+ *
+ * Returns an object with:
+ *   stale: number of rows with embedding_model == GOOGLE_RETIRED_MODEL
+ *   total: total rows in sop_embeddings
+ *   pinnedModel: the currently pinned Google model name
+ *   retiredModel: the retired model name (gemini-embedding-001)
+ */
+export function countStaleGoogleEmbeddings(): {
+  stale: number;
+  total: number;
+  pinnedModel: string;
+  retiredModel: string;
+} {
+  const db = getDb();
+  const tableExists = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sop_embeddings'")
+    .get();
+  if (!tableExists) {
+    return { stale: 0, total: 0, pinnedModel: GOOGLE_MODEL, retiredModel: GOOGLE_RETIRED_MODEL };
+  }
+
+  const totalRow = queryOne<{ cnt: number }>(
+    'SELECT COUNT(*) as cnt FROM sop_embeddings',
+    []
+  );
+  const staleRow = queryOne<{ cnt: number }>(
+    'SELECT COUNT(*) as cnt FROM sop_embeddings WHERE embedding_model = ?',
+    [GOOGLE_RETIRED_MODEL]
+  );
+
+  return {
+    stale: staleRow?.cnt ?? 0,
+    total: totalRow?.cnt ?? 0,
+    pinnedModel: GOOGLE_MODEL,
+    retiredModel: GOOGLE_RETIRED_MODEL,
+  };
+}
+
 /** Fetch the stored embedding for a SOP, or null if not embedded yet. */
 export function getStoredEmbedding(sopId: string): Float32Array | null {
   const row = queryOne<SOPEmbeddingRow>(
@@ -627,22 +705,45 @@ export async function rankSOPsBySemantic(queryText: string): Promise<SemanticHit
   const activeProvider = resolveEmbeddingProvider();
   if (activeProvider.name === 'none') return [];
 
-  const rows = queryAll<{ sop_id: string; embedding: Buffer | null; embedding_dims: number }>(
-    'SELECT sop_id, embedding, embedding_dims FROM sop_embeddings WHERE embedding IS NOT NULL',
+  const rows = queryAll<{ sop_id: string; embedding: Buffer | null; embedding_dims: number; embedding_model: string }>(
+    'SELECT sop_id, embedding, embedding_dims, embedding_model FROM sop_embeddings WHERE embedding IS NOT NULL',
     []
   );
   if (rows.length === 0) return [];
 
-  // Guard: skip rows whose stored dims don't match the active provider's dims.
-  // This is the cross-provider mismatch check — 1536-dim vs 3072-dim vectors
-  // must never be compared.
-  const matchingRows = rows.filter((r) => r.embedding_dims === activeProvider.dims);
+  // ── Model-drift guard (PRD 1.8c) ───────────────────────────────────────────
+  // Match on BOTH model name AND dims. gemini-embedding-001 and gemini-embedding-2
+  // produce vectors in DIFFERENT spaces even at the same 3072-dim — a pure slug
+  // change without re-embedding silently corrupts similarity scores. We refuse to
+  // cross-compare them. Only rows stored with the EXACT active model are used.
+  const matchingRows = rows.filter(
+    (r) => r.embedding_model === activeProvider.model && r.embedding_dims === activeProvider.dims
+  );
+
   if (matchingRows.length === 0) {
-    console.warn(
-      `[sop-embeddings] rankSOPsBySemantic: no stored embeddings match active provider dims (${activeProvider.dims}). ` +
-      `Stored rows have dims: ${Array.from(new Set(rows.map((r) => r.embedding_dims))).join(', ')}. ` +
-      `Run the backfill script with the current provider key to rebuild embeddings.`
-    );
+    // Check how many rows exist for the retired Google model specifically.
+    const retiredRows = rows.filter((r) => r.embedding_model === GOOGLE_RETIRED_MODEL);
+
+    if (retiredRows.length > 0) {
+      // Stale rows from the retired gemini-embedding-001 model detected.
+      // LOUD warning — operator must re-run the backfill with a Google key.
+      console.warn(
+        `[sop-embeddings] ⚠️  MODEL-DRIFT DETECTED: ${retiredRows.length} SOP embedding(s) were computed ` +
+        `with retired model "${GOOGLE_RETIRED_MODEL}" (hard shutdown 2026-07-14). ` +
+        `Active model is "${activeProvider.model}". These vectors are in a DIFFERENT space — ` +
+        `cross-model cosine comparison is DISABLED. Falling back to keyword search. ` +
+        `ACTION REQUIRED: re-run the backfill script with a Google key (GOOGLE_API_KEY / ` +
+        `GEMINI_API_KEY) to re-embed all ${retiredRows.length} stale rows with ${activeProvider.model}.`
+      );
+    } else {
+      const distinctModels = Array.from(new Set(rows.map((r) => r.embedding_model))).join(', ');
+      console.warn(
+        `[sop-embeddings] rankSOPsBySemantic: no stored embeddings match active model "${activeProvider.model}" ` +
+        `(dims=${activeProvider.dims}). Stored models: [${distinctModels || 'none'}]. ` +
+        `Falling back to keyword search. Run the backfill script with the current provider key ` +
+        `to build embeddings for model ${activeProvider.model}.`
+      );
+    }
     return [];
   }
 
