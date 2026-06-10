@@ -255,7 +255,7 @@ async function llmScoreViaGoogle(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, maxOutputTokens: 1024 },
+        generationConfig: { temperature: 0, maxOutputTokens: 4096 }, // gemini-2.5-flash uses ~1000 thinking tokens; need headroom
       }),
     });
 
