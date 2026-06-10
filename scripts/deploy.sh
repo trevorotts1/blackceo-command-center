@@ -27,8 +27,11 @@ run_health_check() {
   local context="$1"
   local attempt=0
   while true; do
-    bash "$HEALTH_SCRIPT" --json-only
-    local code=$?
+    # Capture exit code with `|| code=$?` pattern — prevents set -e (line 10) from
+    # aborting the script before we can inspect the code. `bash ... ; local code=$?`
+    # would be aborted by set -e on non-zero exit before the assignment runs.
+    local code=0
+    bash "$HEALTH_SCRIPT" --json-only || code=$?
     if [[ "$code" -eq 0 ]]; then
       echo "[health] GREEN — ${context}"
       return 0
@@ -103,8 +106,8 @@ pm2 restart "$PM2_NAME"
 echo "[6/6] Health check..."
 sleep 5   # give pm2 a moment to start serving
 
-run_health_check "post-deploy"
-HEALTH_CODE=$?
+HEALTH_CODE=0
+run_health_check "post-deploy" || HEALTH_CODE=$?
 
 if [[ "$HEALTH_CODE" -eq 0 ]]; then
   echo "=== Deploy Complete — GREEN ==="

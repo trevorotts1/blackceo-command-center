@@ -9,10 +9,10 @@
  * in-memory SQLite mocks and temp-dir .next trees.
  *
  * Truth-table rows NOT covered here (handled by cc-health-check.sh):
- *   Rows 14-19 (pm2 topology) — shell-only, tested by the probe fixture test
- *   Rows 25-27 (CF tunnel)    — external service, tested via probe fixture
+ *   Rows 14-19 (pm2 topology)   — shell-only, tested by the probe fixture test
+ *   Rows 25-27, 33 (CF tunnel)  — public-URL probe in cc-health-check.sh
  *
- * Rows covered: 1-13, 20-24, 28-30 (applicable to the TypeScript endpoint).
+ * Rows covered: 1-13, 20-24, 28-32 (applicable to the TypeScript endpoint).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -332,14 +332,19 @@ describe('company_branding — DB branding checks', () => {
     expect(result.pass).toBe(false);
   });
 
-  // Row 7: DB name empty (WHERE clause excludes it) → treated as fresh install
-  it('row 7: DB company name empty (excluded by WHERE) → indeterminate=true', async () => {
+  // Row 7: DB companies row with empty-string name → FAIL
+  // SPEC: "Empty string is as bad as absent."
+  // FIX: the old SQL `WHERE name != ''` EXCLUDED the empty row (returning undefined →
+  // dbRowAbsent=true → UNKNOWN).  The new query selects ALL rows; empty-string name
+  // is detected in application code and correctly returns FAIL.
+  it('row 7: DB company name is empty string → pass=false, NOT indeterminate', async () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
           get: () => {
             if (sql.includes('sqlite_master')) return { name: 'companies' };
-            if (sql.includes('SELECT name FROM companies')) return undefined;
+            // Return a row with an empty-string name — the fixed query returns this
+            if (sql.includes('SELECT name FROM companies')) return { name: '' };
             return undefined;
           },
           all: () => [],
@@ -350,7 +355,34 @@ describe('company_branding — DB branding checks', () => {
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
-    expect(result.indeterminate).toBe(true);
+    // spec=FAIL, impl must NOT return indeterminate
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/empty|placeholder/i);
+  });
+
+  // Row 7 sub-case: empty string with config present → FAIL (not partial-config rule,
+  // but DB-branding FAIL because empty string name is returned from DB)
+  it('row 7b: DB empty-string name with valid config → pass=false (DB name FAIL)', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Acme Corp' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: '' };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: [], pending: [] }),
+      DB_PATH: '/tmp/test.db',
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
   });
 
   // Row 28: DB locked → UNKNOWN
@@ -490,6 +522,125 @@ describe('disk_headroom', () => {
     const result = await checks.checkDiskHeadroom();
     expect(result.pass).toBe(false);
     expect(result.detail).toMatch(/below/i);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// HTML TITLE CHECKS (truth-table rows 8-9)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('html_title', () => {
+  function writeServerHtml(dir: string, title: string): void {
+    const serverDir = path.join(dir, '.next', 'server', 'pages');
+    fs.mkdirSync(serverDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(serverDir, 'index.html'),
+      `<!DOCTYPE html><html><head><title>${title}</title></head><body></body></html>`
+    );
+  }
+
+  // Row 8: HTML title contains client brand name → PASS
+  it('row 8: branded HTML title → pass=true', async () => {
+    writeServerHtml(tmpDir, 'Karen Vaughn Enterprises');
+    const { checkHtmlTitle } = await loadChecks();
+    const result = checkHtmlTitle();
+    expect(result.pass).toBe(true);
+    expect((result as { title?: string }).title).toBe('Karen Vaughn Enterprises');
+    expect(result.detail).toMatch(/row 8.*PASS|PASS.*row 8/i);
+  });
+
+  // Row 9: HTML title is "Command Center" → FAIL
+  it('row 9: generic placeholder title "Command Center" → pass=false', async () => {
+    writeServerHtml(tmpDir, 'Command Center');
+    const { checkHtmlTitle } = await loadChecks();
+    const result = checkHtmlTitle();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/placeholder|unbranded|row 9/i);
+  });
+
+  it('row 9 variant: generic title "BlackCEO Command Center" → pass=false', async () => {
+    writeServerHtml(tmpDir, 'BlackCEO Command Center');
+    const { checkHtmlTitle } = await loadChecks();
+    const result = checkHtmlTitle();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+  });
+
+  it('row 9 variant: empty title → pass=false', async () => {
+    writeServerHtml(tmpDir, '');
+    const { checkHtmlTitle } = await loadChecks();
+    const result = checkHtmlTitle();
+    expect(result.pass).toBe(false);
+  });
+
+  // No pre-rendered HTML → indeterminate (not FAIL; live server may have branded title)
+  it('no pre-rendered HTML → indeterminate=true (not FAIL)', async () => {
+    const { checkHtmlTitle } = await loadChecks();
+    const result = checkHtmlTitle();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// NEXT_PUBLIC_APP_URL CHECKS (truth-table rows 31-32)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('next_public_app_url', () => {
+  beforeEach(() => {
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.CC_PUBLIC_URL;
+  });
+  afterEach(() => {
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.CC_PUBLIC_URL;
+  });
+
+  // Row 31: NEXT_PUBLIC_APP_URL set and consistent → PASS
+  it('row 31: NEXT_PUBLIC_APP_URL set to valid absolute URL → pass=true', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://karen.zerohumanworkforce.com';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(true);
+    expect(result.detail).toMatch(/row 31.*PASS|PASS.*row 31/i);
+  });
+
+  // Row 31 variant: unset → PASS (relative URLs OK for localhost)
+  it('row 31 variant: NEXT_PUBLIC_APP_URL unset → pass=true (relative URLs acceptable)', async () => {
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(true);
+  });
+
+  // Row 32: NEXT_PUBLIC_APP_URL set to localhost but CC_PUBLIC_URL is a real domain → FAIL
+  it('row 32: NEXT_PUBLIC_APP_URL=localhost but CC_PUBLIC_URL is remote domain → pass=false', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'http://localhost:4000';
+    process.env.CC_PUBLIC_URL = 'https://karen.zerohumanworkforce.com';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/mismatch|row 32|localhost/i);
+  });
+
+  // Row 32 variant: invalid URL → FAIL
+  it('row 32 variant: NEXT_PUBLIC_APP_URL is not a valid URL → pass=false', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'not-a-url';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/not a valid|row 32/i);
+  });
+
+  // Row 31 happy path: localhost both sides (consistent)
+  it('row 31 variant: NEXT_PUBLIC_APP_URL=localhost + CC_PUBLIC_URL=localhost → pass=true', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'http://localhost:4000';
+    process.env.CC_PUBLIC_URL = 'http://localhost:4000';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(true);
   });
 });
 
