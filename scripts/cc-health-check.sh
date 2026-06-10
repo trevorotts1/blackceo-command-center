@@ -889,9 +889,18 @@ else
       # this case.  This guard must fire BEFORE any DB comparison so that a healthy DB
       # never masks a broken config file.
       if [[ -z "$CONFIG_COMPANY_NAME" ]]; then
-        _mark "company_name" "false" \
-          "config file present but companyName is empty — misconfigured box (spec line 20: NOT green unconditionally)" \
-          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
+        # Distinguish two distinct empty-name cases:
+        #   (i)  python3 absent — cannot parse config; python3 is the missing dependency
+        #   (ii) python3 present — config exists but companyName is genuinely empty/null/whitespace
+        if ! command -v python3 &>/dev/null; then
+          _mark "company_name" "false" \
+            "config file present but python3 is not available — cannot parse companyName (install python3 to verify branding)" \
+            "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
+        else
+          _mark "company_name" "false" \
+            "config file present but companyName is empty — misconfigured box (spec line 20: NOT green unconditionally)" \
+            "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
+        fi
       elif [[ -z "$COMPANY_DB_NAME" ]]; then
         _mark "company_name" "false" \
           "Configured box has no company row in DB — branding not seeded (run B.3 seed)" \

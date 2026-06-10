@@ -729,9 +729,24 @@ export async function writeClientProviderKey(
   } catch (err) {
     return { ok: false, envVar, target: 'remote-openclaw-json', error: err instanceof Error ? err.message : String(err) };
   }
-  const wrote = await remoteWriteFile(client, remotePath, next).catch(() => false);
-  if (!wrote) {
-    return { ok: false, envVar, target: 'remote-openclaw-json', error: 'failed to write remote openclaw.json over SSH' };
+  const wrote = await remoteWriteFile(client, remotePath, next).catch(
+    () => ({ ok: false, stderr: '' }),
+  );
+  if (!wrote.ok) {
+    // Inspect SSH stderr for ENOSPC / disk-full indicators so the API route can
+    // return HTTP 507 rather than a generic 502. The isDiskFullError docstring
+    // explicitly promises coverage of "variants from SSH stderr" — this is the
+    // remote-path implementation of that contract.
+    const diskFull = isDiskFullError(wrote.stderr);
+    return {
+      ok: false,
+      envVar,
+      target: 'remote-openclaw-json',
+      error: wrote.stderr
+        ? `failed to write remote openclaw.json over SSH: ${wrote.stderr}`
+        : 'failed to write remote openclaw.json over SSH',
+      diskFull,
+    };
   }
   return { ok: true, envVar, target: 'remote-openclaw-json' };
 }
@@ -741,17 +756,27 @@ export async function writeClientProviderKey(
  * The payload is base64-encoded and decoded on the remote side (matching the
  * Foundation's `writeClientFile` in client-fs.ts) so arbitrary JSON survives the
  * shell intact; the bytes travel only over the encrypted tunnel to the client's
- * own box. Returns true on a clean exit. Never throws.
+ * own box.
+ *
+ * Returns `{ ok, stderr }`. Callers must inspect `stderr` with `isDiskFullError`
+ * to detect ENOSPC on the remote box — the docstring at `isDiskFullError` explicitly
+ * promises coverage of "variants from SSH stderr" (spec requirement). Never throws.
  */
-async function remoteWriteFile(client: Client, remotePath: string, content: string): Promise<boolean> {
+async function remoteWriteFile(
+  client: Client,
+  remotePath: string,
+  content: string,
+): Promise<{ ok: boolean; stderr: string }> {
   const dir = path.posix.dirname(remotePath);
   const b64 = Buffer.from(content, 'utf8').toString('base64');
   const cmd =
     `mkdir -p ${shellQuote(dir)} && ` +
     `printf '%s' ${shellQuote(b64)} | base64 -d > ${shellQuote(remotePath)} && ` +
     `chmod 600 ${shellQuote(remotePath)}`;
-  const res = await runClientSsh(client, cmd).catch(() => ({ ok: false }));
-  return res.ok === true;
+  const res = await runClientSsh(client, cmd).catch(
+    (): { ok: boolean; stderr: string } => ({ ok: false, stderr: '' }),
+  );
+  return { ok: res.ok === true, stderr: res.stderr ?? '' };
 }
 
 // ---------------------------------------------------------------------------
