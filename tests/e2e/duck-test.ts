@@ -564,17 +564,18 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     assert.ok(task.assigned_agent_id, `assigned_agent_id must be non-null; got: ${JSON.stringify(task)}`);
     // model_id may be null until dispatch fires; we verify it via DB row after dispatch
     console.log(`[duck-e2e] Agent assigned: ${task.assigned_agent_id}, model_id: ${task.model_id ?? '(pending dispatch)'}`);
-  });
 
-  // ── Triad seed: satisfy sop_id + persona_id before status transitions ────
-  // The Triad Rule (description + valid sop_id + valid persona_id) gates every
-  // status change out of backlog. The description is already set by ingest;
-  // we write sop_id + persona_id directly to the DB here (same path the
-  // operator UI uses, without going through an HTTP round-trip that would
-  // itself be subject to the gate). This is test-harness bookkeeping, not
-  // part of the duck pipeline logic under test.
-  await seedTriadForTask(taskId);
-  console.log(`[duck-e2e] Triad seed complete (sop_id=sop-duck-e2e, persona_id=duck-e2e-persona)`);
+    // ── Triad seed: satisfy sop_id + persona_id before status transitions ──
+    // The Triad Rule (description + valid sop_id + valid persona_id) gates every
+    // status change out of backlog. The description is already set by ingest;
+    // we write sop_id + persona_id directly to the DB here (same path the
+    // operator UI uses, without going through an HTTP round-trip that would
+    // itself be subject to the gate). This is test-harness bookkeeping, not
+    // part of the duck pipeline logic under test.
+    // Placed inside step c so taskId is definitely assigned (TS strict flow).
+    await seedTriadForTask(taskId);
+    console.log(`[duck-e2e] Triad seed complete (sop_id=sop-duck-e2e, persona_id=duck-e2e-persona)`);
+  });
 
   // ── d. Auto-dispatch fired (dispatch activity/status transition) ─────────
   // Evidence of auto-dispatch: the `task_dispatched` event is written in the
