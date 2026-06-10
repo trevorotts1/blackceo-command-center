@@ -19,7 +19,7 @@ yourself honestly.
 | **4**   | 1.0    | All 18 canonical departments present in `src/lib/routing/departments.config.ts` (the source of truth — no Operations/Creative/HR/IT drift); `config/departments.json` is a valid array (ships empty `[]` per v4.0.3 and is regenerated per-client) with schema-valid entries |
 | **5**   | 1.5    | All 23 agents have the 7 ZHC files (4 unique + 3 symlinks). `find agents -type l | wc -l` reports 69 |
 | **6**   | 1.0    | `agents/_shared/{AGENTS,TOOLS,USER}.md` exist and are real files (symlink targets) |
-| **7**   | 1.5    | All migrations 001-021 present in `src/lib/db/migrations.ts` (no numbered gaps) |
+| **7**   | 1.5    | No unintended numbered gaps between migrations 001–069 in `src/lib/db/migrations.ts`. Run: `grep -oE "id: '[0-9]+'" src/lib/db/migrations.ts \| sed "s/id: '//;s/'//" \| sort -n \| awk 'NR==1{prev=$1;next}{if($1!=prev+1){print "GAP "prev" → "$1}prev=$1}'`. **Known intentional gap: 022, 023, 024 were never assigned** (020 performs the da_challenges reconciliation inline per REDO #2; those slots remain permanently unoccupied). Any NEW gap beyond these three is a bug. |
 | **8**   | 0.5    | No hardcoded Anthropic model id as an inference target in non-orchestrator business logic. Exempt: the orchestrator layer, `model-providers/anthropic.ts` (emits Claude family *labels* for the UI), and `web-agent/runner.ts` (built on the Anthropic Messages-API tool-use protocol; model id is env-overridable via `WEB_AGENT_MODEL`) |
 | **9**   | 0.5    | `npm run build` exits zero |
 | **10**  | 0.5    | `qc-cc.sh` exits zero |

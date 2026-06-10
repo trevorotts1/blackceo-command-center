@@ -2,8 +2,78 @@
 # cc-health-check.sh — THE single definition of "green" for a deployed
 # BlackCEO Command Center instance.
 #
-# PRD Addendum B, item B.1 (P0) — REDO #9 fixes applied
+# PRD Addendum B, item B.1 (P0) — REDO #10 fixes applied
 #
+# REDO #10 fixes (REDO #2 adversarial-round fixes, applied on top of REDO #9):
+#
+# [WRONG VERDICT — Row 28 — SQLite BUSY → UNKNOWN, not FAIL]:
+#   DB locked during heavy write or migration: the script was marking
+#   company_name.pass=false (exit 1 = FAIL). Truth table Row 28 mandates UNKNOWN.
+#   Additionally the truth table requires a DISTINCT indeterminate exit code so
+#   callers can distinguish 'known bad' from 'cannot tell'.
+#   Fix: add exit code 3 for UNKNOWN/indeterminate states. company_name BUSY path
+#   now exits 3. Callers (deploy.sh auto-rollback gate) MUST NOT treat exit 3 as
+#   a definitive failure — it signals a transient infrastructure condition.
+#   CHANGELOG: exit 0=green, exit 1=not-green, exit 2=usage error, exit 3=UNKNOWN.
+#
+# [WRONG VERDICT — Row 21 — DATABASE_PATH unset → PASS]:
+#   A box where DATABASE_PATH was never set in pm2 env (uses src/lib/db/index.ts
+#   default process.cwd()/mission-control.db). The script was setting pm2_topology
+#   pass=false ('DATABASE_PATH not explicitly set'). Truth table Row 21 mandates PASS:
+#   'Default path is valid; unset is not misconfigured'.
+#   Fix: demote the DATABASE_PATH-unset condition to a warning detail field on a
+#   PASSING check, not a FAILING one. pm2_topology.pass remains true in all other
+#   conditions. The JSON output gains 'database_path_warn' when unset.
+#
+# [WRONG VERDICT — Row 6 — fresh install, no company row → UNKNOWN, not FAIL]:
+#   Fresh install, never onboarded, companies table is empty. Script was marking
+#   company_name.pass=false ('Unconfigured box has no company row') => exit 1 (FAIL).
+#   Truth table Row 6 mandates UNKNOWN: 'Fresh install is not a broken install;
+#   B.1 must not block bootstrapping'.
+#   Fix: when COMPANY_CONFIG_EXISTS_BOOL=false AND DB has no company row AND the
+#   table itself exists (fresh install), mark company_name UNKNOWN (exit 3).
+#   If the DB is absent entirely, that remains FAIL (different condition).
+#
+# [WRONG VERDICT — Row 10 — server unreachable during B.2 deploy restart → UNKNOWN]:
+#   curl times out to 127.0.0.1:PORT, _http_check returns 'fail:000', http_root.pass=false
+#   => exit 1. Truth table Row 10 mandates UNKNOWN: 'Server may be starting; B.2 deploy
+#   calls B.1 before pm2 is fully up'. exit 1 causes B.2's auto-rollback gate to fire
+#   on a valid deployment in progress.
+#   Fix: HTTP code 000 (connection refused / timeout) maps to UNKNOWN (exit 3), not FAIL.
+#   Only a definitive non-200 code (e.g. 500, 503) maps to FAIL.
+#
+# [WRONG VERDICT — Row 24 — disk threshold 500 MB, not 5 GB]:
+#   Default DISK_MIN_GB was 5 (5 GB). Truth table Row 23/24 use 500 MB as the
+#   pass/fail boundary. A box with 1 GB free got FAIL from the script but PASS per spec.
+#   Fix: change default DISK_MIN_GB from 5 to 0.5 (500 MB). Callers that need the
+#   5 GB build-threshold check must pass --disk-min-gb 5 explicitly.
+#
+# [missingFromSpec — /api/health body parse in Check 1]:
+#   Check 1 only verified HTTP 200 on /api/health. A box with pending migrations
+#   or a broken da_challenges schema returns 200 {status:'ok', gap:0} — a confirmed
+#   false-green (the migration-020 Sheila-class pattern). Adding body parse to Check 1:
+#   if /api/health returns {status:'degraded'} or {gap > 0}, mark http_api_health.pass=false
+#   with detail 'N pending migrations detected (status: degraded)'.
+#   Also added to the B.1 spec comment in route.ts.
+#
+# [missingFromSpec — --public-url CF tunnel warning]:
+#   No public-URL / CF tunnel health check exists. While not a hard B.1 gate, a
+#   CF Access misconfiguration on a client subdomain produces no automated signal.
+#   Fix: add --public-url <URL> flag. When set, cc-health-check.sh probes the
+#   public subdomain: expects 302-to-CF-login (not 200, not connection-error).
+#   Emits a WARNING (not a hard FAIL) in the JSON output under 'warnings' key.
+#   This is not a B.1 gate check; it does not affect green/not-green verdict.
+#
+# [missingFromSpec — exit code 3 for UNKNOWN/indeterminate]:
+#   The truth table explicitly requires 'a distinct indeterminate exit code so
+#   the caller can distinguish known bad from cannot tell'. Previous script only
+#   had exit 0 (green), exit 1 (not green), exit 2 (usage).
+#   Fix: add exit 3 = UNKNOWN/indeterminate. Triggered by: DB BUSY after retries,
+#   fresh-install no-company-row (not broken), server unreachable (000 = may be starting).
+#   The overall 'green' field in JSON remains false for UNKNOWN (not-green), but
+#   the exit code distinguishes UNKNOWN from definitive FAIL.
+#
+
 # REDO #9 fix [P0 — false-green, unconfigured-box branch missing empty-HTML guard]:
 #   When COMPANY_CONFIG_EXISTS_BOOL=false (config not discovered), ALLOW_DEFAULT=0,
 #   DB contains a real non-Default non-empty name (e.g. 'Acme Corp'), AND all three
@@ -116,7 +186,11 @@
 #   }
 # }
 #
-# Exit codes: 0 = green, 1 = not green, 2 = usage error
+# Exit codes: 0 = green, 1 = not green (definitive), 2 = usage error, 3 = UNKNOWN/indeterminate
+#   Exit 3 is triggered by transient infrastructure conditions (DB BUSY, server 000/connecting,
+#   fresh-install with no data). Callers must NOT treat exit 3 as a definitive failure;
+#   it means 'cannot determine green/not-green — retry when the condition clears'.
+#   B.2 auto-rollback gate: trigger rollback on exit 1 only; exit 3 → pause and retry.
 #
 # PARAMETERS (env vars or flags — flags take precedence)
 # -------------------------------------------------------
@@ -125,10 +199,14 @@
 #   --canonical-dir DIR    Canonical install directory (auto-derived; emit warning if unresolvable)
 #   --host HOST            Public hostname/URL for display only (default: http://127.0.0.1:PORT)
 #   --disk-path PATH       Path to check for disk headroom     (default: data-volume heuristic)
-#   --disk-min-gb N        Minimum free GB required            (default: 5)
+#   --disk-min-gb N        Minimum free GB required            (default: 0.5 = 500 MB per truth table Rows 23/24)
+#                          Pass --disk-min-gb 5 for the 5 GB build-preflight threshold (B.4 pre-flight gate)
 #   --pm2-check-window N   Seconds between restart-count snapshots for delta check (default: 15)
 #   --max-assets N         Max /_next/static assets to probe   (0=unlimited; default: 0)
 #                          When capped, assets_found reflects the true count and capped=true in JSON.
+#   --public-url URL       Public subdomain URL (e.g. https://acme.zerohumanworkforce.com)
+#                          When set, probes the public URL and emits a WARNING (not a hard FAIL)
+#                          if it does NOT return 302-to-CF-login. Does not affect green verdict.
 #   --allow-default        Allow 'Default' company name on unconfigured boxes (config absent)
 #                          WITHOUT this flag, 'Default' in the DB is always NOT green (catches
 #                          Sheila-class discovery-failure false-greens). DO NOT pass this flag
@@ -139,6 +217,7 @@
 # Env-var equivalents (lower priority than flags):
 #   CC_PORT, CC_DB_PATH, CC_CANONICAL_DIR, CC_PUBLIC_HOST,
 #   CC_DISK_PATH, CC_DISK_MIN_GB, CC_PM2_CHECK_WINDOW, CC_MAX_ASSETS,
+#   CC_PUBLIC_URL (public subdomain URL for CF-tunnel warning probe),
 #   CC_ALLOW_DEFAULT (set to "1" to allow 'Default' on unconfigured boxes)
 #
 # CONSUMED BY (B.1 checklist P0 — all callers must use this script)
@@ -230,10 +309,13 @@ DB_PATH_OVERRIDE="${CC_DB_PATH:-}"
 CANONICAL_DIR_OVERRIDE="${CC_CANONICAL_DIR:-}"
 PUBLIC_HOST="${CC_PUBLIC_HOST:-}"
 DISK_PATH_OVERRIDE="${CC_DISK_PATH:-}"
-DISK_MIN_GB="${CC_DISK_MIN_GB:-5}"
+# REDO #10 [Row 24]: default changed from 5 to 0.5 (500 MB per truth table Rows 23/24).
+# Pass --disk-min-gb 5 for the 5 GB build-preflight gate (B.4 pre-flight only).
+DISK_MIN_GB="${CC_DISK_MIN_GB:-0.5}"
 PM2_CHECK_WINDOW="${CC_PM2_CHECK_WINDOW:-15}"
 MAX_ASSETS="${CC_MAX_ASSETS:-0}"   # 0 = no cap (probe ALL assets)
 ALLOW_DEFAULT="${CC_ALLOW_DEFAULT:-0}"  # REDO #7: 0 = Default in DB always NOT green
+PUBLIC_URL_PROBE="${CC_PUBLIC_URL:-}"   # REDO #10: optional CF-tunnel warning probe
 JSON_ONLY="0"
 PRETTY="0"
 
@@ -247,6 +329,7 @@ while [[ $# -gt 0 ]]; do
     --disk-min-gb)      DISK_MIN_GB="${2:?--disk-min-gb requires a value}"; shift 2 ;;
     --pm2-check-window) PM2_CHECK_WINDOW="${2:?--pm2-check-window requires a value}"; shift 2 ;;
     --max-assets)       MAX_ASSETS="${2:?--max-assets requires a value}"; shift 2 ;;
+    --public-url)       PUBLIC_URL_PROBE="${2:?--public-url requires a value}"; shift 2 ;;
     --allow-default)    ALLOW_DEFAULT="1"; shift ;;
     --json-only)        JSON_ONLY="1"; shift ;;
     --pretty)           PRETTY="1"; shift ;;
@@ -353,6 +436,12 @@ _http_check() {
     fi
     _log "  OK  $label => ${display_code}"
     echo "pass"
+  elif [[ "$code" == "000" ]]; then
+    # REDO #10 [Row 10]: HTTP code 000 = connection refused or timeout.
+    # This is UNKNOWN (server may be starting; B.2 deploy calls B.1 before pm2 is fully up).
+    # Do NOT map to FAIL — that would trigger B.2 auto-rollback on a valid deploy in progress.
+    _log "  UNKNOWN $label => 000 (connection refused/timeout — server may be starting)"
+    echo "unknown:000"
   else
     _log "  FAIL $label => ${display_code}"
     echo "fail:${display_code}"
@@ -360,33 +449,99 @@ _http_check() {
 }
 
 ###############################################################################
-# CHECK 1: HTTP 200 on / and /api/health (with redirect following)
+# CHECK 1: HTTP 200 on / and /api/health (with redirect following + body parse)
+#
+# REDO #10 [Row 10]: HTTP 000 (connection refused / timeout) → UNKNOWN (exit 3),
+#   not FAIL. Server may be starting; B.2 deploy calls B.1 before pm2 is fully up.
+#
+# REDO #10 [missingFromSpec — body parse]: /api/health returns JSON with a
+#   'status' field ('ok' or 'degraded') and a 'gap' field (count of pending
+#   migrations). A 200 response with status='degraded' or gap>0 is a false-green
+#   (confirmed: migration-020 Sheila-class pattern returns gap:0,status:'ok' on a
+#   structurally broken DB — now fixed — but the body parse adds a layer of defense
+#   for future migration bugs and is required by the updated B.1 spec).
+#   If /api/health returns {status:'degraded'} or {gap > 0}, mark FAIL.
+#   If the body cannot be parsed as JSON, mark UNKNOWN (not hard FAIL — server
+#   might be starting and returning a non-JSON startup page).
 ###############################################################################
 
-_log "[1/5] HTTP liveness — / and /api/health"
+_log "[1/5] HTTP liveness — / and /api/health (with body parse)"
 
 ROOT_RESULT=$(_http_check "GET /" "${LOCAL_BASE}/")
-API_RESULT=$(_http_check "GET /api/health" "${LOCAL_BASE}/api/health")
+# For /api/health we need the body too — fetch separately to parse JSON
+API_HEALTH_BODY=$(curl -s -L --max-time 10 \
+  -w "|||%{http_code}|||%{url_effective}" \
+  "${LOCAL_BASE}/api/health" 2>/dev/null || echo "|||000|||${LOCAL_BASE}/api/health")
+# Extract body, code, final URL from the combined output
+# Format: <body>|||<code>|||<final_url>
+API_HEALTH_BODY_TEXT="${API_HEALTH_BODY%|||*}"       # strip last two segments
+API_HEALTH_BODY_TEXT="${API_HEALTH_BODY_TEXT%|||*}"  # strip code segment
+API_HTTP_CODE_RAW="${API_HEALTH_BODY#*|||}"
+API_HTTP_CODE="${API_HTTP_CODE_RAW%%|||*}"
+API_FINAL_URL="${API_HEALTH_BODY##*|||}"
+API_FINAL_HOST=$(printf '%s' "$API_FINAL_URL" | sed -E 's|^https?://([^/:?#]*).*|\1|' | tr '[:upper:]' '[:lower:]')
 
 ROOT_CODE="${ROOT_RESULT#fail:}"
-API_CODE="${API_RESULT#fail:}"
 
 if [[ "$ROOT_RESULT" == "pass" ]]; then
   _mark "http_root" "true" "HTTP 200 on /"
 elif [[ "$ROOT_RESULT" == "fail:cf-redirect:"* ]]; then
   REDIR_HOST="${ROOT_RESULT#fail:cf-redirect:}"
   _mark "http_root" "false" "HTTP 200 but redirected to non-local host '${REDIR_HOST}' — CF-Access login page intercepted the probe; probe via 127.0.0.1 must not redirect off-host"
+elif [[ "$ROOT_RESULT" == "unknown:000" ]]; then
+  # REDO #10 [Row 10]: connection refused/timeout → UNKNOWN, not FAIL
+  _mark "http_root" "unknown" "HTTP 000 on / — server unreachable (connection refused or timeout; may be starting up)"
 else
   _mark "http_root" "false" "HTTP ${ROOT_CODE} on / (expected 200)"
 fi
 
-if [[ "$API_RESULT" == "pass" ]]; then
-  _mark "http_api_health" "true" "HTTP 200 on /api/health"
-elif [[ "$API_RESULT" == "fail:cf-redirect:"* ]]; then
-  REDIR_HOST="${API_RESULT#fail:cf-redirect:}"
-  _mark "http_api_health" "false" "HTTP 200 but redirected to non-local host '${REDIR_HOST}' — CF-Access login page intercepted the probe"
+# /api/health: check HTTP code, CF-redirect, and body content
+if [[ "$API_HTTP_CODE" == "000" ]]; then
+  # REDO #10 [Row 10]: UNKNOWN — server unreachable
+  _mark "http_api_health" "unknown" "HTTP 000 on /api/health — server unreachable (connection refused or timeout; may be starting up)"
+elif [[ "$API_HTTP_CODE" == "200" && "$API_FINAL_HOST" != "localhost" && "$API_FINAL_HOST" != "127.0.0.1" ]]; then
+  # CF-Access redirect
+  _mark "http_api_health" "false" "HTTP 200 but redirected to non-local host '${API_FINAL_HOST}' — CF-Access login page intercepted the probe"
+elif [[ "$API_HTTP_CODE" == "200" ]]; then
+  # REDO #10 [body parse]: parse /api/health JSON for status and gap
+  if command -v python3 &>/dev/null; then
+    API_BODY_VERDICT=$(printf '%s' "$API_HEALTH_BODY_TEXT" | python3 -s -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  status = d.get('status', '')
+  gap = int(d.get('migrations', {}).get('gap', 0) or 0)
+  if status == 'degraded' or gap > 0:
+    print(f'fail:{gap}:{status}')
+  else:
+    print('pass')
+except (json.JSONDecodeError, ValueError):
+  print('unknown:nonjson')
+except Exception:
+  print('unknown:parse-error')
+" 2>/dev/null || echo "unknown:python-error")
+  else
+    # python3 absent — cannot parse body; accept 200 as pass (best-effort)
+    API_BODY_VERDICT="pass"
+    _log "  WARN: python3 absent — /api/health body parse skipped (cannot detect pending migrations)"
+  fi
+
+  if [[ "$API_BODY_VERDICT" == "pass" ]]; then
+    _mark "http_api_health" "true" "HTTP 200 on /api/health (status:ok, gap:0)"
+  elif [[ "$API_BODY_VERDICT" == "fail:"* ]]; then
+    _BODY_GAP="${API_BODY_VERDICT#fail:}"
+    _BODY_GAP_NUM="${_BODY_GAP%%:*}"
+    _BODY_STATUS="${_BODY_GAP#*:}"
+    _mark "http_api_health" "false" \
+      "/api/health returned HTTP 200 but body indicates non-healthy state: status=${_BODY_STATUS}, pending migrations=${_BODY_GAP_NUM} (false-green if ignored)"
+  elif [[ "$API_BODY_VERDICT" == "unknown:"* ]]; then
+    # Body not parseable — UNKNOWN, not FAIL (server may be serving startup page)
+    _mark "http_api_health" "unknown" "/api/health returned HTTP 200 but response body is not valid JSON — cannot verify migration status"
+  else
+    _mark "http_api_health" "true" "HTTP 200 on /api/health"
+  fi
 else
-  _mark "http_api_health" "false" "HTTP ${API_CODE} on /api/health (expected 200)"
+  _mark "http_api_health" "false" "HTTP ${API_HTTP_CODE} on /api/health (expected 200)"
 fi
 
 ###############################################################################
@@ -406,9 +561,21 @@ if ! command -v curl &>/dev/null; then
     '"assets_found":0,"total":0,"capped":false,"failed":[]'
 else
   # Fetch the served HTML from / via 127.0.0.1 so CF-Access cannot block the probe
-  HTML=$(curl -s -L --max-time 15 "${LOCAL_BASE}/" 2>/dev/null || true)
+  # REDO #10 [Row 10]: capture HTTP code to distinguish connection-refused (000) from
+  # genuine content errors. Connection refused → UNKNOWN (server may be starting).
+  HTML_FETCH_CODE_RAW=$(curl -s -L --max-time 15 \
+    -w "|||%{http_code}" \
+    -o /tmp/_cc_html_asset_$$ \
+    "${LOCAL_BASE}/" 2>/dev/null || echo "|||000")
+  HTML_FETCH_CODE="${HTML_FETCH_CODE_RAW##*|||}"
+  HTML=$(cat /tmp/_cc_html_asset_$$ 2>/dev/null || true)
+  rm -f /tmp/_cc_html_asset_$$
 
-  if [[ -z "$HTML" ]]; then
+  if [[ "$HTML_FETCH_CODE" == "000" && -z "$HTML" ]]; then
+    # REDO #10: server unreachable → UNKNOWN, not FAIL
+    _mark "static_assets" "unknown" "Server unreachable (HTTP 000 — connection refused or timeout) — static assets cannot be verified; may be starting up" \
+      '"assets_found":0,"total":0,"capped":false,"failed":[]'
+  elif [[ -z "$HTML" ]]; then
     _mark "static_assets" "false" "Could not fetch HTML from / to parse assets" \
       '"assets_found":0,"total":0,"capped":false,"failed":[]'
   else
@@ -920,10 +1087,13 @@ else
       CONFIG_WARN_FIELD=""
     fi
 
-    # FIX #6: Handle DB busy/lock as an explicit UNKNOWN — do not false-pass or false-fail.
+    # REDO #10 [Row 28]: DB busy/lock is UNKNOWN (transient infra condition, exit 3),
+    # NOT a definitive FAIL (exit 1). Truth table Row 28 mandates UNKNOWN;
+    # triggering a deploy rollback on a transient DB lock is operationally incorrect.
+    # The _mark pass value "unknown" propagates to exit 3 in the verdict assembly.
     if [[ "$DB_BUSY" == "true" ]]; then
-      _mark "company_name" "false" \
-        "DB locked/busy after 3 retries — company_name check is UNKNOWN (retry when DB is not locked)" \
+      _mark "company_name" "unknown" \
+        "DB locked/busy after 3 retries — company_name check is UNKNOWN (transient infra condition; retry when DB is not locked; do NOT trigger rollback on this state)" \
         "\"db_name\":\"UNKNOWN\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":${COMPANY_CONFIG_EXISTS_BOOL}${CONFIG_WARN_FIELD}"
     elif [[ "$COMPANY_CONFIG_EXISTS_BOOL" == "true" ]]; then
       # FIX #1: Configured box branch — entered solely based on file existence.
@@ -995,11 +1165,21 @@ else
           "DB shows 'Default' company name — branding not seeded (Sheila-class: config may exist at non-standard path or branding seed was never run). Pass --allow-default only on genuinely unconfigured boxes." \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
       elif [[ -z "$COMPANY_DB_NAME" ]]; then
-        # REDO #8 [mirror guard — unconfigured box, empty DB name]:
-        # If the DB has no company row at all (empty string — not 'Default', which is caught
-        # above), we cannot verify the company name — fail rather than silently pass.
-        _mark "company_name" "false" \
-          "Unconfigured box has no company row in DB — cannot verify company name" \
+        # REDO #10 [Row 6 — fresh install, no company row → UNKNOWN, not FAIL]:
+        # Truth table Row 6: fresh install is not a broken install; B.1 must not block
+        # bootstrapping. The companies table may simply be empty on a never-onboarded box.
+        # Distinguishing a fresh install from a broken install is not possible at this point
+        # (both look like an empty DB name). Map to UNKNOWN (exit 3) so callers do not
+        # trigger rollback on a genuinely fresh box.
+        #
+        # Note: the REDO #8 mirror guard (fail on no company row) was written to prevent
+        # silent passes. That guard is correct for CONFIGURED boxes (config file present)
+        # where an empty DB row indicates a failed branding seed. For UNCONFIGURED boxes
+        # (config absent), an empty DB is the normal fresh-install state.
+        # The configured-box branch (COMPANY_CONFIG_EXISTS_BOOL=true) still FAILS for
+        # empty DB (line ~1111 above) — that is correct and unchanged.
+        _mark "company_name" "unknown" \
+          "Unconfigured box — companies table is empty (fresh install / never onboarded; not a broken install). company_name check is UNKNOWN (transient state; will resolve after onboarding)" \
           "\"db_name\":\"\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
       elif [[ -z "$COMPANY_HTML_NAME" ]]; then
         # REDO #9 [P0 — false-green, symmetric mirror of REDO #8 configured-box guard]:
@@ -1380,7 +1560,7 @@ except Exception as e:
   _log "  CWD ok: ${PM2_CWD_OK} (found: ${PM2_FOUND_CWD}, canonical: ${EFFECTIVE_CANON_DIR})"
 
   PM2_PASS="true"
-  PM2_DETAIL="pm2 topology OK: 1 app on port ${PORT}, no crash-loopers, DATABASE_PATH set, cwd OK"
+  PM2_DETAIL="pm2 topology OK: 1 app on port ${PORT}, no crash-loopers, cwd OK"
 
   if [[ -n "$PM2_ERROR" ]]; then
     PM2_PASS="false"
@@ -1395,9 +1575,18 @@ except Exception as e:
     PM2_PASS="false"
     PM2_DETAIL="Crash-looping or stopped CC app(s) detected: ${PM2_CRASH_LOOPERS_JSON}"
   elif [[ "$PM2_DB_PATH_SET" == "false" ]]; then
-    PM2_PASS="false"
-    PM2_DETAIL="DATABASE_PATH not explicitly set in pm2 env — cwd-drift silent-empty-DB risk (B.4)"
-  elif [[ "$PM2_CWD_OK" == "false" ]]; then
+    # REDO #10 [Row 21]: DATABASE_PATH unset → PASS with warning, not FAIL.
+    # Truth table Row 21: 'Default path is valid; unset is not misconfigured.'
+    # A correctly deployed box where DATABASE_PATH was never set uses the
+    # src/lib/db/index.ts default (process.cwd()/mission-control.db) — this is
+    # valid as long as pm_cwd is the canonical dir (checked next).
+    # Demote to a warning detail field so operators know to set it (B.4 hardening),
+    # but do NOT fail the check — a correctly running box should not be penalised.
+    PM2_PASS="true"
+    PM2_DETAIL="pm2 topology OK (DATABASE_PATH not explicitly set — uses default process.cwd() path; set via B.4 hardening for cwd-drift resilience)"
+    # If cwd is also wrong while DATABASE_PATH is unset, the cwd check below will catch it.
+  fi
+  if [[ "$PM2_CWD_OK" == "false" && "$PM2_PASS" == "true" ]]; then
     if [[ -n "$EFFECTIVE_CANON_DIR" ]]; then
       PM2_PASS="false"
       PM2_DETAIL="pm_cwd '${PM2_FOUND_CWD}' != canonical dir '${EFFECTIVE_CANON_DIR}'"
@@ -1437,29 +1626,90 @@ if ! command -v df &>/dev/null; then
 else
   AVAIL_KB=$(df -k "$DISK_CHECK_PATH" 2>/dev/null \
     | awk 'NR==2 {print $4}' || echo "0")
-  DISK_FREE_GB=$(( ${AVAIL_KB:-0} / 1024 / 1024 ))
+  # REDO #10 [Row 24]: use floating-point comparison so DISK_MIN_GB=0.5 (500 MB) works.
+  # awk handles the decimal threshold cleanly on both macOS and Linux.
+  DISK_FREE_GB_RAW=$(awk "BEGIN {printf \"%.2f\", ${AVAIL_KB:-0} / 1024 / 1024}" 2>/dev/null || echo "0")
+  # Integer part for display (e.g. "1.23" → "1.23")
+  DISK_FREE_GB="$DISK_FREE_GB_RAW"
+
+  # Compute integer equivalent in MB for comparison (avoids floating-point in bash)
+  AVAIL_MB=$(( ${AVAIL_KB:-0} / 1024 ))
+  THRESHOLD_MB=$(awk "BEGIN {printf \"%d\", ${DISK_MIN_GB} * 1024}" 2>/dev/null || echo "5120")
 
   _log "  Disk path: ${DISK_CHECK_PATH}"
-  _log "  Free: ${DISK_FREE_GB}GB (threshold: ${DISK_MIN_GB}GB)"
+  _log "  Free: ${DISK_FREE_GB}GB (threshold: ${DISK_MIN_GB}GB = ${THRESHOLD_MB}MB)"
 
-  if [[ "$DISK_FREE_GB" -ge "$DISK_MIN_GB" ]]; then
+  if [[ "$AVAIL_MB" -ge "$THRESHOLD_MB" ]]; then
     _mark "disk_headroom" "true" \
       "${DISK_FREE_GB}GB free on ${DISK_CHECK_PATH} (threshold ${DISK_MIN_GB}GB)" \
       "\"free_gb\":${DISK_FREE_GB},\"path\":\"$(_jstr "$DISK_CHECK_PATH")\",\"threshold_gb\":${DISK_MIN_GB}"
   else
     _mark "disk_headroom" "false" \
-      "ONLY ${DISK_FREE_GB}GB free on ${DISK_CHECK_PATH} — below ${DISK_MIN_GB}GB build threshold" \
+      "ONLY ${DISK_FREE_GB}GB free on ${DISK_CHECK_PATH} — below ${DISK_MIN_GB}GB threshold" \
       "\"free_gb\":${DISK_FREE_GB},\"path\":\"$(_jstr "$DISK_CHECK_PATH")\",\"threshold_gb\":${DISK_MIN_GB}"
   fi
 fi
 
 ###############################################################################
+# REDO #10 [missingFromSpec — --public-url CF tunnel warning probe]:
+# When --public-url is set, probe the public subdomain and emit a WARNING (not
+# a hard FAIL) if it does not return 302-to-CF-login. This does not affect the
+# green/not-green verdict or any of the 5 B.1 checks.
+###############################################################################
+
+PUBLIC_URL_WARN=""
+if [[ -n "$PUBLIC_URL_PROBE" ]]; then
+  _log "[optional] CF-tunnel public-URL probe: ${PUBLIC_URL_PROBE}"
+  CF_PROBE_RESP=$(curl -s -o /dev/null \
+    -w "%{http_code}|||%{redirect_url}" \
+    --max-time 10 \
+    --max-redirs 0 \
+    "$PUBLIC_URL_PROBE" 2>/dev/null || echo "000|||")
+  CF_PROBE_CODE="${CF_PROBE_RESP%%|||*}"
+  CF_PROBE_REDIR="${CF_PROBE_RESP##*|||}"
+
+  if [[ "$CF_PROBE_CODE" == "302" || "$CF_PROBE_CODE" == "301" ]]; then
+    if printf '%s' "$CF_PROBE_REDIR" | grep -qiE 'cloudflareaccess\.com|auth\..*\.com'; then
+      _log "  OK  CF-tunnel probe: ${CF_PROBE_CODE} → CF-login (${CF_PROBE_REDIR})"
+    else
+      _log "  WARN CF-tunnel probe: ${CF_PROBE_CODE} redirect but NOT to CF-Access (${CF_PROBE_REDIR})"
+      PUBLIC_URL_WARN="CF-tunnel redirect to unexpected host (${CF_PROBE_REDIR})"
+    fi
+  elif [[ "$CF_PROBE_CODE" == "200" ]]; then
+    _log "  WARN CF-tunnel probe: 200 (expected 302 to CF-login — CF-Access may not be active on this subdomain)"
+    PUBLIC_URL_WARN="CF-tunnel returned 200 directly — CF-Access may not be active on ${PUBLIC_URL_PROBE}"
+  elif [[ "$CF_PROBE_CODE" == "000" ]]; then
+    _log "  WARN CF-tunnel probe: 000 (connection refused — tunnel may be down)"
+    PUBLIC_URL_WARN="CF-tunnel unreachable (connection refused to ${PUBLIC_URL_PROBE})"
+  else
+    _log "  WARN CF-tunnel probe: unexpected HTTP ${CF_PROBE_CODE} (expected 302)"
+    PUBLIC_URL_WARN="CF-tunnel returned unexpected HTTP ${CF_PROBE_CODE} on ${PUBLIC_URL_PROBE}"
+  fi
+fi
+
+###############################################################################
 # Assemble output JSON
+#
+# REDO #10: Check state can now be "true", "false", or "unknown".
+# - "true"  → check passed definitively
+# - "false" → check failed definitively (exit 1 = not-green)
+# - "unknown" → check indeterminate (exit 3 = UNKNOWN; transient infra condition)
+#
+# ALL_PASS = true only when every check is "true".
+# HAS_UNKNOWN = true when any check is "unknown" and none is "false"
+#   (unknown + false → still exit 1, the definitive failure is authoritative).
 ###############################################################################
 
 ALL_PASS="true"
+HAS_UNKNOWN="false"
 for k in http_root http_api_health static_assets company_name pm2_topology disk_headroom; do
-  [[ "${CHECK_PASS[$k]:-false}" == "true" ]] || ALL_PASS="false"
+  v="${CHECK_PASS[$k]:-false}"
+  if [[ "$v" == "unknown" ]]; then
+    HAS_UNKNOWN="true"
+    ALL_PASS="false"
+  elif [[ "$v" != "true" ]]; then
+    ALL_PASS="false"
+  fi
 done
 
 TS=$(_iso8601)
@@ -1469,15 +1719,52 @@ build_check_json() {
   local pass="${CHECK_PASS[$key]:-false}"
   local detail="${CHECK_DETAIL[$key]:-not run}"
   local extra="${CHECK_EXTRA[$key]:-}"
+  # "unknown" is not valid JSON bool — emit as null with an "unknown":true companion field
+  local pass_json
+  if [[ "$pass" == "unknown" ]]; then
+    pass_json='null,"unknown":true'
+  else
+    pass_json="$pass"
+  fi
   printf '"%s":{"pass":%s,"detail":"%s"%s}' \
     "$(_jstr "$key")" \
-    "$pass" \
+    "$pass_json" \
     "$(_jstr "$detail")" \
     "${extra:+,$extra}"
 }
 
+# Determine overall exit code
+if [[ "$ALL_PASS" == "true" ]]; then
+  OVERALL_EXIT=0
+  OVERALL_STATUS="GREEN"
+elif [[ "$HAS_UNKNOWN" == "true" ]]; then
+  # At least one check is UNKNOWN and no check is definitively false
+  # Re-check: if any check is "false" (definitive), use exit 1
+  _any_definitive_fail="false"
+  for k in http_root http_api_health static_assets company_name pm2_topology disk_headroom; do
+    v="${CHECK_PASS[$k]:-false}"
+    if [[ "$v" == "false" ]]; then
+      _any_definitive_fail="true"
+      break
+    fi
+  done
+  if [[ "$_any_definitive_fail" == "true" ]]; then
+    OVERALL_EXIT=1
+    OVERALL_STATUS="NOT_GREEN"
+  else
+    OVERALL_EXIT=3
+    OVERALL_STATUS="UNKNOWN"
+  fi
+else
+  OVERALL_EXIT=1
+  OVERALL_STATUS="NOT_GREEN"
+fi
+
 OUT='{'
 OUT+='"green":'${ALL_PASS}','
+if [[ "$OVERALL_EXIT" -eq 3 ]]; then
+  OUT+='"indeterminate":true,'
+fi
 OUT+='"timestamp":"'${TS}'",'
 OUT+='"checks":{'
 OUT+=$(build_check_json "http_root")
@@ -1491,7 +1778,12 @@ OUT+=','
 OUT+=$(build_check_json "pm2_topology")
 OUT+=','
 OUT+=$(build_check_json "disk_headroom")
-OUT+='}}'
+OUT+='}'
+# Append warnings if any (CF-tunnel probe, etc.)
+if [[ -n "$PUBLIC_URL_WARN" ]]; then
+  OUT+=',"warnings":["'"$(_jstr "$PUBLIC_URL_WARN")"'"]'
+fi
+OUT+='}'
 
 if [[ "$PRETTY" == "1" ]] && command -v python3 &>/dev/null; then
   printf '%s' "$OUT" | python3 -m json.tool
@@ -1501,12 +1793,21 @@ fi
 
 ###############################################################################
 # Exit code
+# REDO #10: exit 0=green, exit 1=not-green (definitive), exit 2=usage error,
+#           exit 3=UNKNOWN/indeterminate (transient infra condition)
 ###############################################################################
 
-if [[ "$ALL_PASS" == "true" ]]; then
-  _log "RESULT: GREEN — all checks passed"
-  exit 0
-else
-  _log "RESULT: NOT GREEN — one or more checks failed"
-  exit 1
-fi
+case "$OVERALL_EXIT" in
+  0)
+    _log "RESULT: GREEN — all checks passed"
+    exit 0
+    ;;
+  3)
+    _log "RESULT: UNKNOWN — one or more checks indeterminate (transient condition; retry)"
+    exit 3
+    ;;
+  *)
+    _log "RESULT: NOT GREEN — one or more checks failed (definitive)"
+    exit 1
+    ;;
+esac

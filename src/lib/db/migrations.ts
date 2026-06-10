@@ -626,22 +626,102 @@ const migrations: Migration[] = [
     id: '020',
     name: 'add_da_challenges',
     up: (db) => {
-      // Defensive: if a legacy da_challenges table is already present
-      // (from an old schema.ts shape) the canonical indexes below would
-      // 500 with "no such column: task_id". Migration 024 owns the
-      // legacy → canonical reconciliation; here we just no-op and let
-      // 024 do the work on the next pass.
+      // REDO #2 fix [Review 2 — broken contract]: the previous version of this
+      // migration detected a legacy da_challenges table (lacking task_id), logged
+      // '[Migration 020] legacy da_challenges detected — deferring to migration 024',
+      // and returned early — recording itself as applied in _migrations without
+      // actually leaving the table in canonical shape.  Migration 024 (the promised
+      // reconciliation) was never written; IDs 022, 023, and 024 are absent from
+      // the migrations array.  Consequence: getMigrationStatus() returned pending=[],
+      // so /api/health emitted {status:'ok', gap:0} on a structurally broken DB.
+      //
+      // Fix: perform the legacy → canonical reconciliation INLINE so this migration
+      // always leaves da_challenges in canonical shape before recording itself applied.
+      // The broken-contract comment ('024 owns this') is removed.
+      //
+      // Strategy for a legacy table lacking task_id:
+      //   1. Rename the legacy table to da_challenges_legacy_020.
+      //   2. CREATE the canonical da_challenges table.
+      //   3. Migrate rows from the legacy table, mapping columns that exist.
+      //   4. Drop the legacy table.
+      //   5. Create indexes on the canonical table.
+      // This is wrapped in a single transaction so a failure leaves the DB unchanged.
       const existing = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='table' AND name='da_challenges'`
       ).get() as { name: string } | undefined;
+
       if (existing) {
         const cols = db.prepare(`PRAGMA table_info(da_challenges)`).all() as { name: string }[];
-        const hasTaskId = cols.some((c) => c.name === 'task_id');
+        const colNames = cols.map((c) => c.name);
+        const hasTaskId = colNames.includes('task_id');
+
         if (!hasTaskId) {
-          console.log('[Migration 020] legacy da_challenges detected — deferring to migration 024');
-          return;
+          // Legacy table present — perform reconciliation in this migration.
+          console.log('[Migration 020] legacy da_challenges table detected (no task_id column) — performing inline legacy → canonical reconciliation');
+
+          // Determine which legacy columns are present so we can SELECT them safely.
+          const legacyCols = colNames.filter((c) =>
+            ['id', 'campaign_id', 'trigger_type', 'challenge', 'specific_concern',
+             'assumptions', 'severity', 'confidence', 'status', 'dismissal_reason',
+             'outcome', 'created_at', 'resolved_at'].includes(c)
+          );
+
+          db.transaction(() => {
+            // Step 1: rename legacy table out of the way.
+            db.exec(`ALTER TABLE da_challenges RENAME TO da_challenges_legacy_020`);
+
+            // Step 2: create canonical table (with task_id column).
+            db.exec(`
+              CREATE TABLE da_challenges (
+                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                task_id TEXT,
+                campaign_id TEXT,
+                trigger_type TEXT NOT NULL,
+                challenge TEXT NOT NULL,
+                specific_concern TEXT,
+                assumptions TEXT,
+                severity TEXT CHECK(severity IN ('low', 'medium', 'high')),
+                confidence REAL,
+                status TEXT DEFAULT 'open' CHECK(status IN ('open', 'accepted', 'dismissed', 'overridden')),
+                dismissal_reason TEXT,
+                outcome TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT
+              )
+            `);
+
+            // Step 3: migrate existing rows from legacy table (task_id will be NULL
+            // for all legacy rows — this is intentional; the data existed before
+            // task linkage was added).
+            if (legacyCols.length > 0) {
+              const colList = legacyCols.join(', ');
+              db.exec(`INSERT INTO da_challenges (${colList}) SELECT ${colList} FROM da_challenges_legacy_020`);
+              const migrated = (db.prepare('SELECT COUNT(*) as c FROM da_challenges').get() as { c: number } | undefined)?.c ?? 0;
+              console.log(`[Migration 020] migrated ${migrated} legacy rows to canonical schema`);
+            }
+
+            // Step 4: drop legacy table.
+            db.exec(`DROP TABLE da_challenges_legacy_020`);
+          })();
+
+          // Step 5: create indexes (outside the transaction — CREATE INDEX cannot run
+          // inside a transaction on some SQLite builds).
+          db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_task ON da_challenges(task_id)`).run();
+          db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_status ON da_challenges(status)`).run();
+          db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_severity ON da_challenges(severity)`).run();
+
+          console.log('[Migration 020] legacy → canonical reconciliation complete; da_challenges now has task_id column');
+          return; // reconciliation done; no further CREATE needed
         }
+        // Table already exists in canonical shape (has task_id) — ensure indexes.
+        db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_task ON da_challenges(task_id)`).run();
+        db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_status ON da_challenges(status)`).run();
+        db.prepare(`CREATE INDEX IF NOT EXISTS idx_da_severity ON da_challenges(severity)`).run();
+        console.log('[Migration 020] da_challenges already in canonical shape — indexes ensured');
+        return;
       }
+
+      // Fresh install: no existing table — create canonical shape.
       db.prepare(`
         CREATE TABLE IF NOT EXISTS da_challenges (
           id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -720,8 +800,9 @@ const migrations: Migration[] = [
   // ============================================================
   // Track S — Auto-research + auto-replace deleted SOPs
   // ============================================================
-  // NOTE: migration 024 is reserved by PR #11 (da_challenges shape
-  // reconciliation). Track S takes 025.
+  // REDO #2: The "024 reserved" note below was the broken-contract comment.
+  // Migration 020 now performs the legacy → canonical da_challenges reconciliation
+  // inline. IDs 022, 023, and 024 remain absent (never used); 025 owns Track S.
   // ============================================================
   // v3.7.0 — Eval v2.0 backlog clearance migrations
   // ============================================================
@@ -843,9 +924,9 @@ const migrations: Migration[] = [
 
       // Defensive: on a truly fresh install the sop_proposals table may not
       // exist yet (its CREATE was historically in a migration that pre-dates
-      // the locally-tracked 022/023/024 slots — those numbers are reserved
-      // in the comments above but not present in this file). Create the
-      // canonical shape lazily so this migration succeeds on a brand-new DB.
+      // slot 025; IDs 022, 023, and 024 were never used — 020 now owns the
+      // da_challenges reconciliation inline). Create the canonical shape lazily
+      // so this migration succeeds on a brand-new DB.
       const tableExists = db.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='sop_proposals'"
       ).get();

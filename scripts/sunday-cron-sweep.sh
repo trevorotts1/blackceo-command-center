@@ -4,19 +4,23 @@
 # PRD Addendum B.1 (P0): This script is one of the REQUIRED callers of
 # cc-health-check.sh. It MUST NOT implement its own green definition.
 #
+# Also runs b5-cf-access-check.sh (B.5) per box when PUBLIC_URL is in the fleet
+# file (5th column). B.5 is a warning-level check; it does not affect OVERALL_EXIT.
+#
 # Schedule (host crontab): 0 3 * * 0  /path/to/scripts/sunday-cron-sweep.sh
 #
 # Reads FLEET_BOXES from environment or the file at $FLEET_BOXES_FILE.
-# Each line in the file: PORT CANONICAL_DIR DB_PATH LABEL (tab/space separated)
+# Each line in the file: PORT CANONICAL_DIR DB_PATH LABEL [PUBLIC_URL] (tab/space sep)
 # Example:
-#   4000  /data/projects/command-center  /data/projects/command-center/mission-control.db  trevor
+#   4000  /data/projects/command-center  /data/projects/command-center/mission-control.db  trevor  https://trevor.zerohumanworkforce.com
 #
-# Exit: 0 = all boxes green, 1 = one or more boxes not green.
+# Exit: 0 = all boxes green, 1 = one or more boxes not green (exit 3 = UNKNOWN does not set exit 1).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HEALTH_CHECK="${SCRIPT_DIR}/cc-health-check.sh"
+B5_CHECK="${SCRIPT_DIR}/b5-cf-access-check.sh"
 FLEET_BOXES_FILE="${FLEET_BOXES_FILE:-${SCRIPT_DIR}/../.fleet-boxes}"
 
 if [[ ! -x "$HEALTH_CHECK" ]]; then
@@ -48,6 +52,7 @@ else
     CANON_DIR=$(printf '%s' "$line" | awk '{print $2}')
     DB_PATH=$(printf '%s' "$line" | awk '{print $3}')
     LABEL=$(printf '%s' "$line" | awk '{print $4}')
+    PUBLIC_URL_FIELD=$(printf '%s' "$line" | awk '{print $5}')
     LABEL="${LABEL:-unknown}"
 
     # FIX #9: absolutify CANON_DIR and DB_PATH from the fleet file.
@@ -78,11 +83,27 @@ else
 
     printf '{"label":"%s","port":%s,"result":%s}\n' "$LABEL" "$PORT" "$RESULT_JSON"
 
-    if [[ "$BOX_EXIT" -ne 0 ]]; then
+    # REDO #10: exit 3 (UNKNOWN) is transient — do NOT set OVERALL_EXIT=1 for it.
+    # Only a definitive exit 1 (not-green) triggers the alert.
+    if [[ "$BOX_EXIT" -eq 0 ]]; then
+      printf '[sunday-cron-sweep] BOX GREEN: %s\n' "$LABEL" >&2
+    elif [[ "$BOX_EXIT" -eq 3 ]]; then
+      printf '[sunday-cron-sweep] BOX UNKNOWN (transient — retry): %s\n' "$LABEL" >&2
+    else
       printf '[sunday-cron-sweep] BOX NOT GREEN: %s — alert required\n' "$LABEL" >&2
       OVERALL_EXIT=1
-    else
-      printf '[sunday-cron-sweep] BOX GREEN: %s\n' "$LABEL" >&2
+    fi
+
+    # B.5 CF-Access check (warning-level; does not affect OVERALL_EXIT)
+    if [[ -n "${PUBLIC_URL_FIELD:-}" && -x "$B5_CHECK" ]]; then
+      B5_RESULT=""
+      B5_EXIT=0
+      B5_RESULT=$(bash "$B5_CHECK" --public-url "$PUBLIC_URL_FIELD" --json-only 2>/dev/null) || B5_EXIT=$?
+      if [[ "$B5_EXIT" -eq 0 ]]; then
+        printf '[sunday-cron-sweep] CF-Access OK: %s (%s)\n' "$LABEL" "$PUBLIC_URL_FIELD" >&2
+      else
+        printf '[sunday-cron-sweep] CF-Access WARN: %s (%s) — %s\n' "$LABEL" "$PUBLIC_URL_FIELD" "$B5_RESULT" >&2
+      fi
     fi
   done < "$FLEET_BOXES_FILE"
 fi

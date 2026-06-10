@@ -1,3 +1,88 @@
+## [v4.34.0] — 2026-06-10 — fix(b1): REDO #10 — wrong verdicts (Row 6/10/21/24/28), migration-020 broken contract, QC gap-check, exit code 3 for UNKNOWN
+
+**QC Score (REDO #10 adversarial-review fixes — Sonnet build): targeted fix pass** (gate: 8.5)
+
+REDO #10 addresses all [Review 2] and [Review 3] findings from the adversarial halt.
+
+### REDO #10 — Wrong Verdicts + Spec Gaps
+
+**[WRONG VERDICT — Row 28 — SQLite BUSY → UNKNOWN, exit 3, not FAIL]**
+DB locked during heavy write or migration: the script was marking company_name.pass=false
+(exit 1 = definitive FAIL). Truth table Row 28 mandates UNKNOWN.
+Additionally the truth table requires a distinct indeterminate exit code.
+Fix: add exit code 3 for UNKNOWN/indeterminate states. DB BUSY path now exits 3, not 1.
+Exit code semantics: 0=green, 1=not-green (definitive), 2=usage error, 3=UNKNOWN.
+B.2 auto-rollback gate MUST trigger on exit 1 only; exit 3 = pause and retry.
+
+**[WRONG VERDICT — Row 21 — DATABASE_PATH unset → PASS]**
+A box where DATABASE_PATH was never set in pm2 env uses the src/lib/db/index.ts default
+(process.cwd()/mission-control.db). Script was failing pm2_topology. Truth table Row 21
+mandates PASS: 'Default path is valid; unset is not misconfigured.'
+Fix: demote DATABASE_PATH-unset to a warning in the detail field; pm2_topology.pass=true
+when the only issue is a missing DATABASE_PATH env var. (The cwd check still fires —
+if pm_cwd is also wrong, the cwd mismatch catches the real risk.)
+
+**[WRONG VERDICT — Row 6 — fresh install, no company row → UNKNOWN, exit 3]**
+Fresh install, never onboarded, companies table is empty. Script was marking
+company_name.pass=false ('Unconfigured box has no company row') => exit 1 (FAIL).
+Truth table Row 6: 'Fresh install is not a broken install; B.1 must not block bootstrapping.'
+Fix: unconfigured box + empty DB maps to company_name UNKNOWN (exit 3), not FAIL.
+Configured box + empty DB remains FAIL (branding not seeded — different condition, unchanged).
+
+**[WRONG VERDICT — Row 10 — server unreachable → UNKNOWN, exit 3]**
+curl to 127.0.0.1:PORT returning 000 (connection refused / timeout) was mapped to FAIL
+(exit 1), causing B.2 auto-rollback to fire on a valid deploy in progress.
+Truth table Row 10: 'Server may be starting; B.2 deploy calls B.1 before pm2 is fully up.'
+Fix: HTTP 000 → UNKNOWN (exit 3) for http_root, http_api_health, and static_assets.
+Definitive HTTP failures (e.g. 500) still map to exit 1.
+
+**[WRONG VERDICT — Row 24 — disk threshold 500 MB, not 5 GB]**
+Default DISK_MIN_GB was 5 (5 GB). Truth table Rows 23/24 use 500 MB as the boundary.
+A box with 1 GB free got FAIL from the script but PASS per spec.
+Fix: default DISK_MIN_GB changed from 5 to 0.5 (500 MB). Callers that need the 5 GB
+B.4 build-preflight threshold MUST pass --disk-min-gb 5 explicitly. deploy.sh should
+pass --disk-min-gb 5 in its pre-flight gate; the post-deploy verification gate
+(called after the app is live) should use the default 0.5 (500 MB).
+
+**[Review 2 — migration-020 broken contract fixed]**
+Migration 020 (add_da_challenges) previously detected a legacy da_challenges table
+lacking task_id, recorded itself as applied in _migrations, and returned early with
+comment 'Migration 024 owns the legacy → canonical reconciliation'. Migration 024 was
+never written; IDs 022, 023, 024 are absent from the migrations array.
+Consequence: /api/health returned {status:'ok', gap:0} on a DB with a structurally
+broken da_challenges table (the confirmed Sheila-class false-green).
+Fix: the legacy → canonical reconciliation is now performed INLINE in migration 020.
+The broken-contract comment is removed. IDs 022, 023, 024 remain unoccupied (never used).
+
+**[Review 2 — QC.md item #7 migration gap-check updated]**
+QC.md item #7 checked 'All migrations 001-021 present (no numbered gaps)'. The migration
+count has grown to 069 and the rubric's cap of 021 would pass the scorer even with
+022-024 absent. Fix: item #7 updated to dynamically cover the full current range (001-069)
+with a known-intentional-gap note for 022-024.
+
+**[missingFromSpec — /api/health body parse in Check 1]**
+Check 1 only verified HTTP 200 on /api/health. A response with {status:'degraded'} or
+{gap > 0} (pending migrations) was accepted as green — a confirmed false-green vector.
+Fix: Check 1 now parses the /api/health JSON body. If status='degraded' or gap>0,
+http_api_health.pass=false with detail showing the pending migration count.
+Body-parse failure (non-JSON response) → UNKNOWN, not FAIL (server may be starting).
+
+**[missingFromSpec — --public-url CF tunnel warning probe]**
+Added --public-url <URL> flag. When set, cc-health-check.sh probes the public subdomain
+and emits a WARNING (not a hard FAIL) if it does NOT return 302-to-CF-login.
+This does not affect the green/not-green verdict; it is informational for B.5.
+No changes to the 5 required B.1 gate checks.
+
+**[missingFromSpec — exit code 3 for UNKNOWN/indeterminate states]**
+Truth table explicitly requires a distinct exit code for UNKNOWN states.
+Previous: exit 0=green, exit 1=not-green, exit 2=usage. UNKNOWN collapsed to exit 1.
+Fixed: exit 3 = UNKNOWN/indeterminate. Triggered by DB BUSY, server 000 (starting),
+fresh-install no-company-row (not broken). JSON output gains '"indeterminate":true' when
+the exit code is 3. Callers must handle: exit 0 = definitely green; exit 1 = definitely
+not-green (trigger rollback); exit 3 = cannot determine (retry/pause, NOT rollback).
+
+---
+
 ## [v4.33.0] — 2026-06-10 — feat(b1): cc-health-check.sh — single definition of green (PRD Addendum B.1)
 
 **QC Score (REDO #7 adversarial-review fixes — Sonnet build): targeted fix pass** (gate: 8.5)
