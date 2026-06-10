@@ -139,6 +139,26 @@ describe('pm2 topology — Row 18: zero CC apps', () => {
   });
 });
 
+// ── Row 34: zombie duplicate CC apps on same port ────────────────────────────
+// Truth table row 34: pm2 list shows 2+ CC apps on the CC port → app_count > 1.
+// cc-health-check.sh line 87 (`PM2_COUNT -gt 1`) FAILs this state.  This test
+// proves that pm2-analyze-cc.py correctly returns app_count=2 for this scenario,
+// which the shell script then maps to FAIL.
+
+describe('pm2 topology — Row 34: zombie duplicate CC apps on same port', () => {
+  it('row 34: two CC apps on port 4000 (zombie duplicate) → app_count=2', () => {
+    const result = analyseFixture('fixture-duplicate-cc.json', {
+      canonicalDir: '/home/user/mission-control',
+    });
+    // Both apps match the CC port — app_count must be 2, not 1
+    expect(result.app_count).toBe(2);
+    // cwd_ok may be false because not all cwds match canonical; the shell
+    // script FAILs on PM2_COUNT > 1 before checking cwd_ok
+    // No crash-loopers — both apps are online; the failure is the count itself
+    expect(result.crash_loopers).toHaveLength(0);
+  });
+});
+
 // ── Row 19: non-CC app crash-looping, CC app healthy ─────────────────────────
 
 describe('pm2 topology — Row 19: non-CC app crash-looping', () => {

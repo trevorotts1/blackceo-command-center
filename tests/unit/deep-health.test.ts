@@ -242,6 +242,35 @@ describe('company_branding — config file rules', () => {
     expect(result.indeterminate).not.toBe(true);
   });
 
+  // Row 36: config present with valid companyName + DB companies row entirely absent → PASS
+  // A valid config is sufficient to declare the company configured; a missing DB
+  // row (e.g. fresh deploy before seed runs) must NOT be treated as a FAIL or UNKNOWN.
+  // Implementation: deep-checks.ts falls through all guards with dbRowAbsent=true,
+  // configExists=true, configName set — reaches the full happy-path return.
+  it('row 36: config present with valid companyName + DB row absent (not empty, truly absent) → pass=true', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Karen Vaughn Enterprises' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            // DB row absent — no row in companies table
+            if (sql.includes('SELECT name FROM companies')) return undefined;
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    // Config file with valid companyName is sufficient → PASS
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+  });
+
   // Row 3: config present with valid companyName + matching DB name → PASS
   it('row 3: config present with valid companyName → passes', async () => {
     writeCompanyConfig(tmpDir, { companyName: 'Acme Corp' });
@@ -267,6 +296,64 @@ describe('company_branding — config file rules', () => {
 });
 
 describe('company_branding — DB branding checks', () => {
+  // Row 4 variant: DB company row = "Command Center" → FAIL
+  // FALSE-GREEN CONFIRMED on feat/b1-cc-health-check (old branch, line 1125):
+  // only `== "default"` was checked; "Command Center" was treated as a valid
+  // client name.  The TypeScript PLACEHOLDER_NAMES set includes 'command center'
+  // so the deep-checks.ts path IS correct — this test proves it.
+  it('row 4 (Command Center, configured-box): DB name="Command Center", config matches → pass=false', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Command Center' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Command Center' };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: '/tmp/test.db',
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    // 'Command Center' is a PLACEHOLDER_NAME — must FAIL even when config and DB agree
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/placeholder/i);
+  });
+
+  // Row 4 variant: unconfigured-box path — config absent, DB="Command Center" → FAIL
+  // The shell script feat/b1-cc-health-check had a second false-green on the
+  // unconfigured-box branch (line 1163 also only checked "default").  This test
+  // covers the TypeScript equivalent: config absent + DB placeholder → FAIL via
+  // the placeholder-name check in deep-checks.ts before the "config absent" exit.
+  it('row 4 (Command Center, unconfigured-box): config absent, DB="Command Center" → pass=false', async () => {
+    // No config file written
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Command Center' };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: '/tmp/test.db',
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    // PLACEHOLDER_NAMES check fires before the "config absent + branded DB → PASS" branch
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/placeholder/i);
+  });
+
   // Row 4: DB company row = "Default" → FAIL
   it('row 4: DB company name is "Default" → pass=false', async () => {
     vi.doMock('@/lib/db', () => ({
