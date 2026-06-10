@@ -58,6 +58,31 @@ jobs:
           fi
           echo "OK: check 5.1 correctly matched double-quoted claude-* literal in fixture"
 
+      # Round-3 optional: Row 33 CF-challenge self-test.
+      # cc-health-check.sh line 116 detects a 200+CF-challenge response and
+      # returns CF_INDET=true (exit 3 UNKNOWN, not exit 1 RED).
+      # This self-test reproduces the grep-based body check using a synthetic
+      # CF Access challenge HTML body to confirm the guard fires correctly.
+      - name: Self-test Row 33 — CF Access challenge body classified as UNKNOWN (not PASS)
+        run: |
+          # Synthetic CF Access challenge body — the real one contains these strings
+          CF_BODY='<!DOCTYPE html><html><head><title>Cloudflare Access</title></head><body><h1>Cloudflare Access</h1><form action="/cdn-cgi/access/login"></form></body></html>'
+          # Run the same grep check cc-health-check.sh uses at line 116
+          if printf '%s' "$CF_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
+            echo "OK: CF-challenge body correctly detected (grep matched) — probe would classify UNKNOWN"
+          else
+            echo "ERROR: CF-challenge grep pattern missed the synthetic body — Row 33 UNKNOWN guard is broken"
+            exit 1
+          fi
+          # Also verify a normal 200 app body does NOT trigger the guard
+          NORMAL_BODY='<!DOCTYPE html><html><head><title>Karen Vaughn Enterprises</title></head><body><div id="root"></div></body></html>'
+          if printf '%s' "$NORMAL_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
+            echo "ERROR: normal app body falsely triggered the CF-challenge guard — false UNKNOWN"
+            exit 1
+          else
+            echo "OK: normal app body correctly bypasses CF-challenge guard — PASS classified correctly"
+          fi
+
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
 

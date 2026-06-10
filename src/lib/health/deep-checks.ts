@@ -281,6 +281,22 @@ export function checkCompanyBranding(): CompanyBrandingResult {
     };
   }
 
+  // Round-3 fix: Row 4 false-green — config PRESENT with placeholder companyName + DB row ABSENT.
+  // Previously: isPlaceholder(dbName) was only evaluated when dbName !== null.
+  // When dbName is null (DB row absent), the guard never fired and the function
+  // fell through to the full happy-path return (pass=true) — false-green.
+  // FIX: when config exists and DB row is absent, check if configName itself is
+  // a placeholder; if so FAIL immediately (a placeholder config is never valid).
+  if (configExists && dbRowAbsent && configName && isPlaceholder(configName)) {
+    return {
+      pass: false,
+      indeterminate: false,
+      config_exists: true,
+      config_name: configName,
+      detail: `company_branding: config/company-config.json has placeholder companyName ("${configName}") and no DB company row exists — box is unbranded (Round-3 fix: config placeholder + DB absent)`,
+    };
+  }
+
   // Row 4 / 7: DB name is placeholder or empty → FAIL
   if (dbName !== null && (isPlaceholder(dbName) || dbName === '')) {
     return {

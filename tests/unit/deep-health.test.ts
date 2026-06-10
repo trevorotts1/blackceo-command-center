@@ -242,6 +242,61 @@ describe('company_branding — config file rules', () => {
     expect(result.indeterminate).not.toBe(true);
   });
 
+  // Row 37 (Round-3 fix #7): config present with PLACEHOLDER companyName + DB row ABSENT → FAIL
+  // FALSE-GREEN closed: previously isPlaceholder() was only evaluated when dbName !== null.
+  // When dbRowAbsent=true (no row in companies table), dbName stays null and the guard never
+  // fired — the function fell through to pass=true (false-green).
+  // Fix: when configExists=true AND dbRowAbsent=true, check isPlaceholder(configName) first.
+  it('row 37: config present with placeholder companyName ("Command Center") + DB row absent → pass=false', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Command Center' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            // DB row absent — no row in companies table
+            if (sql.includes('SELECT name FROM companies')) return undefined;
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    // config has placeholder name AND DB has no row — must FAIL, not pass
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/placeholder/i);
+    expect((result as { config_name?: string }).config_name).toBe('Command Center');
+  });
+
+  // Row 37 variant: placeholder 'Default' in config + DB row absent → FAIL
+  it('row 37 variant: config companyName="Default" + DB row absent → pass=false', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Default' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return undefined;
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/placeholder/i);
+  });
+
   // Row 36: config present with valid companyName + DB companies row entirely absent → PASS
   // A valid config is sufficient to declare the company configured; a missing DB
   // row (e.g. fresh deploy before seed runs) must NOT be treated as a FAIL or UNKNOWN.
