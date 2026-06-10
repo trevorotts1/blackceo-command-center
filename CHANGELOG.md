@@ -40,6 +40,25 @@
 
 ---
 
+## QC RESULT — PRD 1.6 — 2026-06-09 — PASS (weighted 9.15/10)
+
+Scored by Sonnet QC agent against PRD Section 6 dimensions (Wiring 30, SSOT 20, Path 15, Observability 15, Docs 10, Regression 10).
+Merge SHA: 95debf861ad6db28030400cbd711d86903b86602 (squash into main)
+
+| Dimension      | Weight | Score | Evidence |
+|----------------|--------|-------|---------|
+| Wiring         | 30     | 9     | `execFileSync` fully removed from `persona-selector.ts`; `execFileAsync = promisify(execFile)` replaces it; `selectPersonaForTask` is async; `createTaskCore` broadcasts `task_created` before returning (<500ms), persona runs in detached `void(async()=>{})`, `task_updated` fires on resolution; Mac + VPS both verified. Minor: other files (`messages/route.ts`, `sop-auto-replace.ts`) retain `execFileSync` — out of PRD 1.6 scope but no isolation boundary documented. |
+| SSOT           | 20     | 9     | Single `execFileAsync` constant, no duplicate persona-selection paths. Out-of-scope files still use `execFileSync` but persona path is clean. |
+| Path           | 15     | 10    | Zero changes to `resolveScriptPath()`, `DB_PATH` env, or script invocation args. Diff confirms no path logic touched. |
+| Observability  | 15     | 9     | Full `try/catch` on async block; success logs `Persona landed for task <id>: <persona_id>`; error logs `Async persona selection threw for task <id>: <error>`. No silent swallowing. |
+| Docs           | 10     | 9     | `persona-selector.ts` doc block updated with PRD 1.6 cross-ref; `tasks.ts` async block commented; CHANGELOG entry detailed (root cause, fix, layouts, tests). |
+| Regression     | 10     | 9     | 8/8 new PRD-1.6 tests pass; 211/213 pre-existing pass (2 pre-existing unrelated: offline-seed + migration-055); CI green all 3 checks after version-drift fix committed. |
+
+**Weighted score:** (9×30 + 9×20 + 10×15 + 9×15 + 9×10 + 9×10) / 100 = (270+180+150+135+90+90)/100 = **9.15/10**
+(Haiku verify: Mac PASS, VPS PASS)
+
+---
+
 ## QC RESULT — PRD 1.5-CC — 2026-06-09 — PASS (weighted 9.22/10)
 
 Scored by Sonnet QC agent against PRD Section 6 dimensions (Wiring 30, SSOT 20, Path 15, Observability 15, Docs 10, Regression 10).
