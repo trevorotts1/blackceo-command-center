@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # run-cc-health-check-fixtures.sh — automated fixture runner for cc-health-check.sh (B.1)
 #
+# REDO #8 fixes (Round-3 adversarial, applied on top of REDO #7):
+#   - Fixture 2h: REDO #8 P0 — empty-HTML silent pass: configured box + valid non-Default
+#     DB + server serves a page with NO og:site_name, NO data-company, empty/missing
+#     <title> → expected green=false, company_name.pass=false with detail containing
+#     "branding unverifiable". This is the MANDATORY fixture for fix (d).
+#   - <title> grep now -ioE (case-insensitive) in cc-health-check.sh.
+#   - Mirror guard: unconfigured box with empty DB name → company_name.pass=false.
+#
 # REDO #7 fixes (applied on top of REDO #6):
 #   - Fixture 2f: REDO #7 P0 lock-in — config-file present + companyName='' +
 #     DB='Acme Corp' + HTML='Acme Corp' → company_name.pass=false, exit=1.
@@ -730,6 +738,100 @@ elif [[ "$FX2G_EXIT" -eq 0 ]]; then
 else
   _info "Fixture-2g [P1]: exit=${FX2G_EXIT} (non-zero — other checks also failed; company_name verdict is what matters)"
 fi
+
+###############################################################################
+# FIXTURE 2h: REDO #8 P0 — empty-HTML silent pass (MANDATORY)
+#
+# Spec: BOTH DB and HTML must be verified on a configured box.  When all three
+# HTML extraction methods (og:site_name, data-company, <title>) yield empty,
+# the previous code skipped the mismatch elif and silently passed company_name.
+# Fix (d) directive: explicit FAIL with detail "could not extract company name
+# from served HTML — branding unverifiable".
+#
+# Setup: company-config.json present + valid non-Default DB row + server serves
+# a page with NO og:site_name, NO data-company, empty/missing <title>.
+# Expected: green=false, company_name.pass=false, detail contains "branding unverifiable".
+###############################################################################
+printf '\n=== FIXTURE 2h: REDO#8 P0 — empty-HTML silent pass: no og/data/title → company_name FAIL ===\n'
+
+FX2H_DIR="${WORK_DIR}/fx2h"
+mkdir -p "${FX2H_DIR}/_next/static/bld2h/pages" \
+         "${FX2H_DIR}/_next/static/chunks" \
+         "${FX2H_DIR}/api" \
+         "${FX2H_DIR}/config"
+FX2H_PORT=$(_next_port)
+
+echo "body{}" > "${FX2H_DIR}/_next/static/bld2h/pages/_app.css"
+echo "var x=1;" > "${FX2H_DIR}/_next/static/chunks/main.js"
+echo "var m={};" > "${FX2H_DIR}/_next/static/bld2h/_buildManifest.js"
+
+# Serve HTML with NO og:site_name, NO data-company, NO <title> — bare bones page
+# that a broken build or misconfigured template could serve.
+cat > "${FX2H_DIR}/index.html" << 'FX2HHTML'
+<!DOCTYPE html>
+<html>
+<head>
+</head>
+<body>
+<script id="__NEXT_DATA__" type="application/json">{"props":{},"buildId":"bld2h"}</script>
+</body>
+</html>
+FX2HHTML
+
+echo "ok" > "${FX2H_DIR}/api/health"
+# company-config.json EXISTS with a valid companyName
+echo '{"companyName":"Acme Corp"}' > "${FX2H_DIR}/config/company-config.json"
+# DB also has a valid non-Default row
+_create_db "${FX2H_DIR}/mission-control.db" "Acme Corp"
+
+_start_server "$FX2H_PORT" "$FX2H_DIR"
+
+FX2H_OUTPUT=""
+FX2H_EXIT=0
+FX2H_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port "$FX2H_PORT" \
+  --db-path "${FX2H_DIR}/mission-control.db" \
+  --canonical-dir "$FX2H_DIR" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --max-assets 0 \
+  --json-only 2>/dev/null) || FX2H_EXIT=$?
+
+# MANDATORY: company_name MUST fail when HTML branding cannot be extracted
+_assert_check_pass "Fixture-2h [P0 MANDATORY]: no og/data/<title> in HTML + valid DB → company_name.pass=false" "company_name" "false" "$FX2H_OUTPUT"
+
+FX2H_DETAIL=$(printf '%s' "$FX2H_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('detail',''))" \
+  2>/dev/null || echo "")
+if [[ "$FX2H_DETAIL" == *"branding unverifiable"* || "$FX2H_DETAIL" == *"could not extract"* ]]; then
+  _pass "Fixture-2h [P0]: detail contains expected 'branding unverifiable'/'could not extract' message: '${FX2H_DETAIL}'"
+else
+  _fail "Fixture-2h [P0]: detail='${FX2H_DETAIL}' — expected 'branding unverifiable' or 'could not extract' (empty-HTML guard message not present)"
+fi
+
+# config_exists must still be true (file is present and has a valid companyName)
+FX2H_CONFIG_EXISTS=$(printf '%s' "$FX2H_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('config_exists') else 'false')" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2H_CONFIG_EXISTS" == "true" ]]; then
+  _pass "Fixture-2h: config_exists=true (file present with valid companyName)"
+else
+  _fail "Fixture-2h: config_exists=${FX2H_CONFIG_EXISTS} — expected true"
+fi
+
+# The overall verdict must also be NOT green
+_assert_green "Fixture-2h: empty-HTML → overall NOT green" 1 "false" "$FX2H_OUTPUT" "$FX2H_EXIT"
+
+FX2H_HTML_NAME=$(printf '%s' "$FX2H_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('html_name','NOTSET'))" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2H_HTML_NAME" == "" ]]; then
+  _pass "Fixture-2h: html_name='' in JSON (empty extraction correctly reflected)"
+else
+  _fail "Fixture-2h: html_name='${FX2H_HTML_NAME}' — expected '' (empty) when no HTML extraction possible"
+fi
+
+_stop_server
 
 ###############################################################################
 # FIXTURE 3: Crash-looper detection — Python logic unit tests

@@ -2,7 +2,19 @@
 # cc-health-check.sh — THE single definition of "green" for a deployed
 # BlackCEO Command Center instance.
 #
-# PRD Addendum B, item B.1 (P0) — REDO #7 fixes applied
+# PRD Addendum B, item B.1 (P0) — REDO #8 fixes applied
+#
+# REDO #8 fix [P0 — empty-HTML silent pass, Round-3 adversarial]:
+#   When COMPANY_CONFIG_EXISTS=true AND the DB has a real non-Default name BUT all
+#   three HTML extraction methods (og:site_name, data-company, <title>) yield empty,
+#   the mismatch elif ([[ -n "$COMPANY_HTML_NAME" && ... ]]) was skipped and
+#   company_name passed WITHOUT the HTML side ever being verified. The spec requires
+#   BOTH DB and HTML to be checked on a configured box.
+#   Fix: add an explicit FIRST branch in the configured-box path:
+#     [[ -z "$COMPANY_HTML_NAME" ]] => company_name.pass=false,
+#     detail "could not extract company name from served HTML — branding unverifiable".
+#   Mirror the same guard in the unconfigured-box branch for an empty-string DB name.
+#   Also make <title> regex case-insensitive (grep -ioE instead of grep -oE).
 #
 # REDO #7 fix [P0 — spec line 20, false-green]: Partial-branding guard in the
 #   configured-box branch (lines 852-884). When company-config.json EXISTS but
@@ -829,9 +841,10 @@ else
         # Step 1: try a separator-based split for legacy/custom titles that use a dash.
         # Step 2: if the whole string survives step 1 unchanged, strip the literal
         #         ' Command Center' suffix so the DB comparison works on the real format.
+        # REDO #8: grep -ioE makes the <title> match case-insensitive (handles <TITLE>, <Title>)
         _RAW_TITLE=$(printf '%s' "$HTML_FOR_COMPANY" \
-          | grep -oE '<title>[^<]+</title>' \
-          | sed 's/<title>//;s/<\/title>//' \
+          | grep -ioE '<title>[^<]+</title>' \
+          | sed 's/<[Tt][Ii][Tt][Ll][Ee]>//;s/<\/[Tt][Ii][Tt][Ll][Ee]>//' \
           | head -1 || true)
         if [[ -n "$_RAW_TITLE" ]]; then
           # First try separator-based split (em-dash, en-dash, pipe, or ' - ')
@@ -909,7 +922,17 @@ else
         _mark "company_name" "false" \
           "Configured box shows 'Default' company in DB — branding seed failed (Sheila bug)" \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
-      elif [[ -n "$COMPANY_HTML_NAME" && "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
+      elif [[ -z "$COMPANY_HTML_NAME" ]]; then
+        # REDO #8 [P0 — empty-HTML silent pass]: spec requires BOTH DB and HTML to be
+        # verified on a configured box.  When all three extraction methods (og:site_name,
+        # data-company, <title>) yield empty, the mismatch elif is skipped and the check
+        # was silently passing with only the DB side verified.
+        # Fix: explicit FAIL here with a clear "branding unverifiable" message so the
+        # caller knows the HTML side was never checked.
+        _mark "company_name" "false" \
+          "could not extract company name from served HTML — branding unverifiable (no og:site_name, data-company, or <title> found in served page)" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"\",\"config_exists\":true${CONFIG_WARN_FIELD}"
+      elif [[ "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
         _mark "company_name" "false" \
           "Company name mismatch: DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'" \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
@@ -937,8 +960,14 @@ else
         _mark "company_name" "false" \
           "DB shows 'Default' company name — branding not seeded (Sheila-class: config may exist at non-standard path or branding seed was never run). Pass --allow-default only on genuinely unconfigured boxes." \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
-      elif [[ -n "$COMPANY_HTML_NAME" && -n "$COMPANY_DB_NAME" \
-            && "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
+      elif [[ -z "$COMPANY_DB_NAME" ]]; then
+        # REDO #8 [mirror guard — unconfigured box, empty DB name]:
+        # If the DB has no company row at all (empty string — not 'Default', which is caught
+        # above), we cannot verify the company name — fail rather than silently pass.
+        _mark "company_name" "false" \
+          "Unconfigured box has no company row in DB — cannot verify company name" \
+          "\"db_name\":\"\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
+      elif [[ -n "$COMPANY_HTML_NAME" && "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
         _mark "company_name" "false" \
           "Company name mismatch (unconfigured box): DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'" \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
