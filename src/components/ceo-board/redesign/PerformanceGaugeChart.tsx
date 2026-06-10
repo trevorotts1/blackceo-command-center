@@ -1,10 +1,29 @@
 'use client';
 
+/**
+ * PerformanceGaugeChart — PRD 2.10 rebuild
+ *
+ * Left panel: HorizontalBars (completion/in-progress/pending) — real counts,
+ *   unchanged.
+ *
+ * Right panel: replaced the fabricated PairedBarChart (which repeated done/total
+ *   for every past day — invented history) with a real per-department grade
+ *   sparkline row driven by /api/company-health.
+ *
+ * No fabricated time series. Departments with insufficient data show a grey
+ * "no data" row, not a fake bar or a zero.
+ */
+
 import { useEffect, useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
+import { Sparkline } from '@/components/ceo-board/Sparkline';
+import { gradeToColor, scoreToGrade } from '@/lib/grading';
 import type { WorkspaceStats } from '@/lib/types';
 
-/* Horizontal Progress Bars replacing SemiGauge */
+// ---------------------------------------------------------------------------
+// HorizontalBars (unchanged from original — reads real counts)
+// ---------------------------------------------------------------------------
+
 function HorizontalBars({
   completed,
   inProgress,
@@ -71,10 +90,7 @@ function HorizontalBars({
             <div key={row.label} className="flex items-center gap-3 w-full">
               <span className="text-sm text-gray-600 w-24 shrink-0">{row.label}</span>
               <div className="flex-1 h-6 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: '0%', backgroundColor: row.color }}
-                />
+                <div className="h-full rounded-full" style={{ width: '0%', backgroundColor: row.color }} />
               </div>
               <span className="text-sm text-gray-500 w-12 text-right tabular-nums">0</span>
               <span className="text-sm text-gray-500 w-10 text-right tabular-nums">0%</span>
@@ -93,7 +109,6 @@ function HorizontalBars({
 
   return (
     <div className="flex flex-col items-center justify-center w-full gap-3 py-2">
-      {/* Large KPI percentage */}
       <p
         style={{ fontSize: '56px', fontWeight: 900, fontFamily: 'ui-monospace, monospace' }}
         className="text-[#2D5A27]"
@@ -102,7 +117,6 @@ function HorizontalBars({
       </p>
       <p className="text-sm text-gray-500 -mt-2 mb-2">Completion Rate</p>
 
-      {/* Stacked horizontal bars */}
       <div className="w-full space-y-3">
         {bars.map((row) => {
           const barWidth = hasData ? Math.max(row.pct * animPct, row.count > 0 ? 4 : 0) : 0;
@@ -131,133 +145,156 @@ function HorizontalBars({
   );
 }
 
-/* Paired Vertical Bar Chart (7 days, 2 bars each) */
-const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+// ---------------------------------------------------------------------------
+// Department Grade Sparklines (replaces fabricated PairedBarChart)
+// PRD 2.10: real per-dept scores from /api/company-health.
+// Insufficient data → grey "no data" row, never a fake bar.
+// ---------------------------------------------------------------------------
 
-function PairedBarChart({
-  departments,
-}: {
-  departments: WorkspaceStats[];
-}) {
-  const [hoveredDay, setHoveredDay] = useState<number | null>(null);
-  const [animated, setAnimated] = useState(false);
+interface ClientInputScore {
+  key: string;
+  score: number | null;
+  sampleSize: number;
+  detail: string;
+}
 
-  const dayData = useMemo(() => {
-    const total = departments.reduce(
-      (s, d) => s + (d.taskCounts?.total || 0),
-      0
-    );
-    const done = departments.reduce(
-      (s, d) => s + (d.taskCounts?.done || 0),
-      0
-    );
+interface ClientDept {
+  workspaceId: string;
+  slug: string;
+  name: string;
+  inputs: Record<string, ClientInputScore>;
+  score: number | null;
+  grade: string | null;
+  sufficientData: boolean;
+}
 
-    const today = new Date().getDay();
+interface ClientCompanyHealth {
+  score: number | null;
+  grade: string | null;
+  departments: ClientDept[];
+  worstTrending: unknown[];
+  generatedAt: string;
+}
 
-    return DAY_LABELS.map((_, i) => {
-      const isPastOrToday = i <= today;
-      if (!isPastOrToday) {
-        return { left: 0, right: 0, isPending: true };
-      }
-      if (total === 0) {
-        return { left: 0, right: 0, isPending: false };
-      }
-      const base = Math.round((done / total) * 100);
-      return { left: base, right: base, isPending: false };
-    });
-  }, [departments]);
+function DeptGradeRow({ dept }: { dept: ClientDept }) {
+  const color = dept.grade ? gradeToColor(dept.grade as Parameters<typeof gradeToColor>[0]) : '#D1D5DB';
 
-  const maxHeight = 180;
-  const barWidth = 26;
-  const pairGap = 4;
-
-  useEffect(() => {
-    const timer = setTimeout(() => setAnimated(true), 100);
-    return () => clearTimeout(timer);
-  }, []);
+  // Build mini sparkline data from the four inputs (null → excluded from sparkline)
+  const inputScores = ['throughput', 'qcPassRate', 'sopCoverage', 'kpiAttainment']
+    .map((k) => dept.inputs[k]?.score)
+    .filter((s): s is number => s !== null && s !== undefined);
 
   return (
-    <div className="flex items-end justify-around h-full px-2 pb-8 pt-8 relative">
-      {dayData.map((day, i) => {
-        const leftH = animated ? (day.left / 100) * maxHeight : 0;
-        const rightH = animated ? (day.right / 100) * maxHeight : 0;
-        const isHovered = hoveredDay === i;
-        const tallest = Math.max(leftH, rightH);
+    <div className="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0">
+      {/* Dept name */}
+      <span className="text-sm text-gray-700 w-28 shrink-0 truncate font-medium">
+        {dept.name}
+      </span>
 
-        return (
-          <div
-            key={i}
-            className="flex flex-col items-center gap-2 relative"
-            onMouseEnter={() => setHoveredDay(i)}
-            onMouseLeave={() => setHoveredDay(null)}
-          >
-            {/* Tooltip */}
-            {isHovered && (
-              <div
-                className="absolute z-10 left-1/2 -translate-x-1/2"
-                style={{ top: `-${tallest + 44}px` }}
-              >
-                <div className="bg-white rounded-lg shadow-md px-2.5 py-1 text-xs font-medium text-gray-900 relative">
-                  {day.right}%
-                  <div
-                    className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white rotate-45"
-                    style={{ boxShadow: '2px 2px 4px rgba(0,0,0,0.1)' }}
-                  />
-                </div>
-              </div>
-            )}
+      {/* Sparkline — real input scores; gaps when inputs are null */}
+      <div className="flex-1">
+        {inputScores.length >= 2 ? (
+          <Sparkline
+            data={inputScores}
+            width={100}
+            height={28}
+            color={color}
+            strokeWidth={1.5}
+          />
+        ) : (
+          // Fewer than 2 data points — show explicit no-data treatment
+          <span className="text-xs text-gray-300 italic">no data</span>
+        )}
+      </div>
 
-            {/* Paired bars container */}
-            <div className="flex items-end" style={{ gap: `${pairGap}px` }}>
-              {/* Left bar - hatched */}
-              <div
-                style={{
-                  width: barWidth,
-                  height: `${leftH}px`,
-                  borderTopLeftRadius: 8,
-                  borderTopRightRadius: 8,
-                  transition: `height 0.6s cubic-bezier(0.4, 0, 0.2, 1) ${i * 0.05}s`,
-                  background: day.isPending
-                    ? 'repeating-linear-gradient(45deg, #D1D5DB 0px, #D1D5DB 1.5px, transparent 1.5px, transparent 8px)'
-                    : 'repeating-linear-gradient(45deg, #2D5A27 0px, #2D5A27 2.5px, transparent 2.5px, transparent 5px)',
-                }}
-              />
+      {/* Grade pill */}
+      {dept.grade && dept.sufficientData ? (
+        <span
+          className="text-xs font-bold px-2 py-0.5 rounded-full shrink-0"
+          style={{ backgroundColor: `${color}20`, color }}
+        >
+          {dept.grade}
+        </span>
+      ) : (
+        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-300 shrink-0">
+          —
+        </span>
+      )}
 
-              {/* Right bar - solid */}
-              <div
-                style={{
-                  width: barWidth,
-                  height: `${rightH}px`,
-                  borderTopLeftRadius: 8,
-                  borderTopRightRadius: 8,
-                  backgroundColor: day.isPending ? '#D1D5DB' : '#3D7A3A',
-                  transition: `height 0.6s cubic-bezier(0.4, 0, 0.2, 1) ${i * 0.05}s`,
-                }}
-              />
-            </div>
-
-            {/* Hover dot */}
-            {isHovered && (
-              <div
-                className="absolute w-3 h-3 rounded-full bg-white border-2 border-emerald-500"
-                style={{
-                  top: `-${tallest + 8}px`,
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                }}
-              />
-            )}
-
-            {/* Day label */}
-            <span className="text-xs text-gray-400 mt-1">{DAY_LABELS[i]}</span>
-          </div>
-        );
-      })}
+      {/* Score number */}
+      {dept.score !== null ? (
+        <span className="text-xs tabular-nums text-gray-500 w-10 text-right shrink-0">
+          {Math.round(dept.score)}
+        </span>
+      ) : (
+        <span className="text-xs tabular-nums text-gray-200 w-10 text-right shrink-0">
+          n/a
+        </span>
+      )}
     </div>
   );
 }
 
-/* Main Export */
+function DeptGradeSparklines({ loading }: { loading: boolean }) {
+  const [health, setHealth] = useState<ClientCompanyHealth | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch('/api/company-health');
+        if (res.ok) setHealth(await res.json());
+      } catch {
+        // best-effort
+      } finally {
+        setHealthLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading || healthLoading) {
+    return (
+      <div className="flex flex-col gap-2 p-4">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="h-8 bg-gray-100 rounded animate-pulse" />
+        ))}
+      </div>
+    );
+  }
+
+  if (!health || health.departments.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full p-6">
+        <p className="text-sm text-gray-400">No department data yet</p>
+      </div>
+    );
+  }
+
+  // Sort by score desc (nulls last)
+  const sorted = [...health.departments].sort((a, b) => {
+    if (a.score !== null && b.score !== null) return b.score - a.score;
+    if (a.score !== null) return -1;
+    if (b.score !== null) return 1;
+    return 0;
+  });
+
+  return (
+    <div className="flex flex-col px-2 py-2 overflow-y-auto max-h-[280px]">
+      <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 px-1">
+        Department Scores
+      </p>
+      {sorted.map((dept) => (
+        <DeptGradeRow key={dept.workspaceId} dept={dept} />
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Export
+// ---------------------------------------------------------------------------
+
 export function PerformanceGaugeChart() {
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
   const [loading, setLoading] = useState(true);
@@ -282,35 +319,17 @@ export function PerformanceGaugeChart() {
   const { completed, inProgress, pending } = useMemo(() => {
     const filtered = departments.filter((d) => {
       const slug = d.slug || d.id;
-      return (
-        slug !== 'default' && !slug.startsWith('acme-') && !slug.startsWith('zhw-')
-      );
+      return slug !== 'default' && !slug.startsWith('acme-') && !slug.startsWith('zhw-');
     });
     const done = filtered.reduce((s, d) => s + (d.taskCounts?.done || 0), 0);
-    const ip = filtered.reduce(
-      (s, d) => s + (d.taskCounts?.in_progress || 0),
-      0
-    );
-    const blocked = filtered.reduce(
-      (s, d) => s + (d.taskCounts?.blocked || 0),
-      0
-    );
-    const review = filtered.reduce(
-      (s, d) => s + (d.taskCounts?.review || 0),
-      0
-    );
-    const backlog = filtered.reduce(
-      (s, d) => s + (d.taskCounts?.backlog || 0),
-      0
-    );
+    const ip = filtered.reduce((s, d) => s + (d.taskCounts?.in_progress || 0), 0);
+    const blocked = filtered.reduce((s, d) => s + (d.taskCounts?.blocked || 0), 0);
+    const review = filtered.reduce((s, d) => s + (d.taskCounts?.review || 0), 0);
+    const backlog = filtered.reduce((s, d) => s + (d.taskCounts?.backlog || 0), 0);
     if (done === 0 && ip === 0 && blocked === 0 && review === 0 && backlog === 0) {
       return { completed: 0, inProgress: 0, pending: 0 };
     }
-    return {
-      completed: done,
-      inProgress: ip,
-      pending: blocked + review + backlog,
-    };
+    return { completed: done, inProgress: ip, pending: blocked + review + backlog };
   }, [departments]);
 
   if (loading) {
@@ -344,9 +363,9 @@ export function PerformanceGaugeChart() {
         />
       </motion.div>
 
-      {/* Right: Paired Vertical Bar Chart (60%) */}
+      {/* Right: Department Grade Sparklines (60%) — real data, no fabrication */}
       <motion.div
-        className="lg:col-span-3 rounded-2xl shadow-sm border-0 p-6"
+        className="lg:col-span-3 rounded-2xl shadow-sm border-0 p-4"
         style={{
           backgroundColor: 'rgba(255,255,255,0.88)',
           backdropFilter: 'blur(8px)',
@@ -356,7 +375,7 @@ export function PerformanceGaugeChart() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6, delay: 0.1 }}
       >
-        <PairedBarChart departments={departments} />
+        <DeptGradeSparklines loading={loading} />
       </motion.div>
     </div>
   );

@@ -1,3 +1,49 @@
+## [v4.29.0] - 2026-06-10 - feat(prd-2.10): Rebuild Performance Board on ONE grading module (grading.ts)
+
+### PRD 2.10 — One Grading Module: Real DB-Grounded Performance Board
+
+**What changed:**
+
+- **`src/lib/grading.ts`** (REBUILT — single source of truth for all grading):
+  Four PRD-exact DB inputs: `throughput` (completed/created tasks), `qcPassRate`
+  (LLM-scored ≥8.5), `sopCoverage` (dispatched tasks with SOP), `kpiAttainment`
+  (vs role-doc Tier-1 targets). Every input returns `score: null` on insufficient
+  data — never 72, never 0. Re-normalized weighted roll-up. Exports
+  `computeDepartmentGrade`, `computeCompanyHealth`, `isRealDepartment`.
+
+- **`src/lib/grade-calculator.ts`** (SHIM): thin re-export shim for existing callers.
+  Deprecated; deleted in a follow-up PR once callers migrated.
+
+- **`src/lib/db/migrations.ts`** (migration 068): `task_qc_results` table — persists
+  every QC scoring event (score/passed/scoring_path). Additive + idempotent.
+
+- **`src/lib/db/schema.ts`**: `task_qc_results` declared for fresh DBs.
+
+- **`src/lib/qc-scorer.ts`**: `runQCOnReview` writes `task_qc_results` on all paths
+  (llm/heuristic/no-criteria). Fire-and-forget.
+
+- **`src/app/api/company-health/route.ts`** (NEW): single endpoint for Performance board.
+
+- **`src/components/ceo-board/redesign/CompanyHeroCard.tsx`**: drives grade from API;
+  `score===null` → explicit "—" insufficient-data state; 72 is gone.
+
+- **`src/components/ceo-board/health/CompanyHealthSection.tsx`**: deleted 72-bootstrap,
+  `calculateDepartmentScore`, `calculateCompanyScore`. Grades from API.
+
+- **`src/components/ceo-board/redesign/PerformanceGaugeChart.tsx`**: removed fabricated
+  `PairedBarChart` (repeated done/total for every past day). Replaced with real per-dept
+  grade sparklines from `/api/company-health`.
+
+- **`src/components/ceo-board/redesign/DepartmentGradeCards.tsx`** (NEW): dept grade
+  cards grid with per-input mini-bars, worst-trending banner, insufficient-data pill.
+
+- **`src/lib/company-config.ts`**: added `gradingInputWeights`, `gradingWindowDays`.
+
+- **`tests/unit/prd-2.10-grading-module.test.ts`** (9 tests — all pass)
+- **`tests/unit/prd-2.10-qc-results-persistence.test.ts`** (5 tests — all pass)
+
+**Test results:** 14/14 new tests pass. Pre-existing failures: 8 (none caused by this PR).
+
 ## [v4.28.0] - 2026-06-10 - feat(prd-2.5-cc): Vendor branding-questions.json from onboarding repo + sync test
 
 ### PRD 2.5-cc — Interview Content: One Source of Truth (CC side)

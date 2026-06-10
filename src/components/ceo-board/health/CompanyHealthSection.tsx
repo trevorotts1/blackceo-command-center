@@ -1,12 +1,21 @@
 'use client';
 
+/**
+ * CompanyHealthSection — PRD 2.10 rebuild
+ *
+ * Department grade badges row driven by /api/company-health.
+ * All calculateDepartmentScore / calculateCompanyScore / 72-bootstrap logic
+ * has been deleted. Grades come from the DB-grounding module (grading.ts).
+ *
+ * When a department's grade is null (insufficient data), it renders "—"
+ * rather than a fabricated letter grade.
+ */
+
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { scoreToGrade, gradeToColor, gradeToLabel, type Grade } from '@/lib/grading';
-import { calculateWeightedScore, computeAgentPerformanceScore, DEFAULT_GRADE_WEIGHTS, type GradeWeights } from '@/lib/grade-calculator';
-import type { WorkspaceStats } from '@/lib/types';
+import { gradeToColor, gradeToLabel, type Grade } from '@/lib/grading';
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -52,17 +61,46 @@ const DEPARTMENT_EMOJIS: Record<string, string> = {
   'social-media': '📱',
 };
 
+// Client-side shape from /api/company-health
+interface ClientInputScore {
+  key: string;
+  score: number | null;
+  sampleSize: number;
+  detail: string;
+}
+interface ClientDepartmentGrade {
+  workspaceId: string;
+  slug: string;
+  name: string;
+  inputs: Record<string, ClientInputScore>;
+  score: number | null;
+  grade: string | null;
+  sufficientData: boolean;
+}
+interface ClientCompanyHealth {
+  score: number | null;
+  grade: string | null;
+  departments: ClientDepartmentGrade[];
+  worstTrending: Array<{ slug: string; name: string; failingInput: string; detail: string; delta: number }>;
+  generatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Badge component
+// ---------------------------------------------------------------------------
+
 interface DepartmentBadgeProps {
   id: string;
   name: string;
-  score: number;
+  grade: string | null;
+  sufficientData: boolean;
   emoji: string;
   onClick: () => void;
 }
 
-function DepartmentBadge({ name, score, emoji, onClick }: DepartmentBadgeProps) {
-  const grade = scoreToGrade(score);
-  const color = gradeToColor(grade);
+function DepartmentBadge({ name, grade, sufficientData, emoji, onClick }: DepartmentBadgeProps) {
+  // null grade = insufficient data: show "—" pill, not a fabricated grade
+  const color = grade ? gradeToColor(grade as Grade) : '#9CA3AF';
 
   return (
     <button
@@ -71,30 +109,48 @@ function DepartmentBadge({ name, score, emoji, onClick }: DepartmentBadgeProps) 
     >
       <span className="text-lg">{emoji}</span>
       <span className="text-sm font-medium text-gray-700">{name}</span>
-      <span
-        className="text-sm font-bold px-2 py-0.5 rounded-full"
-        style={{
-          backgroundColor: `${color}20`,
-          color: color,
-        }}
-      >
-        {grade}
-      </span>
+      {grade && sufficientData ? (
+        <span
+          className="text-sm font-bold px-2 py-0.5 rounded-full"
+          style={{
+            backgroundColor: `${color}20`,
+            color: color,
+          }}
+        >
+          {grade}
+        </span>
+      ) : (
+        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-400">
+          —
+        </span>
+      )}
     </button>
   );
 }
 
 interface GradeCircleProps {
-  grade: Grade;
+  grade: Grade | null;
+  sufficientData: boolean;
 }
 
-function GradeCircle({ grade }: GradeCircleProps) {
+function GradeCircle({ grade, sufficientData }: GradeCircleProps) {
+  if (!grade || !sufficientData) {
+    // Explicit insufficient-data state — never show 72 or C+
+    return (
+      <div className="flex flex-col items-center gap-3">
+        <div className="w-24 h-24 rounded-full flex items-center justify-center border-4 border-gray-200 bg-gray-50">
+          <span className="text-5xl font-bold text-gray-300">—</span>
+        </div>
+        <span className="text-base font-semibold text-gray-400">Insufficient data</span>
+      </div>
+    );
+  }
+
   const color = gradeToColor(grade);
   const label = gradeToLabel(grade);
 
   return (
     <div className="flex flex-col items-center gap-3">
-      {/* Large Grade Circle */}
       <div
         className="w-24 h-24 rounded-full flex items-center justify-center shadow-lg"
         style={{
@@ -110,151 +166,67 @@ function GradeCircle({ grade }: GradeCircleProps) {
           {grade}
         </span>
       </div>
-
-      {/* Grade Label */}
-      <span className="text-base font-semibold text-gray-600">
-        {label}
-      </span>
+      <span className="text-base font-semibold text-gray-600">{label}</span>
     </div>
   );
 }
 
-// Calculate department score with bootstrap logic
-function calculateDepartmentScore(dept: WorkspaceStats): number {
-  const total = dept.taskCounts?.total || 0;
-  const done = dept.taskCounts?.done || 0;
-  const inProgress = dept.taskCounts?.in_progress || 0;
-
-  // No data yet - use bootstrap score
-  if (total === 0) {
-    return 72; // C+ baseline for new installs
-  }
-
-  const doneRate = done / total;
-
-  // Bootstrap condition: tasks exist but completion is too low to be meaningful (< 10%)
-  if (doneRate < 0.1) {
-    return 72; // C+ baseline - not enough completed work to grade fairly
-  }
-
-  // Has real progress - use actual completion rate
-  // Weight: done = full credit, in_progress = half credit
-  const score = ((done + inProgress * 0.5) / total) * 100;
-  return Math.round(score);
-}
-
-// Calculate company score using the 4-factor PRD formula
-function calculateCompanyScore(departments: WorkspaceStats[], weights?: GradeWeights): number {
-  const w = weights || DEFAULT_GRADE_WEIGHTS;
-  const totalTasks = departments.reduce((sum, dept) => sum + (dept.taskCounts?.total || 0), 0);
-
-  // No data yet - use bootstrap score
-  if (totalTasks === 0) {
-    return 72; // C+ baseline for new installs
-  }
-
-  const agentPerformance = computeAgentPerformanceScore(departments);
-  const kpiAchievement = agentPerformance; // Proxy until KPI snapshots wired
-  const daCompliance = 0; // No DA challenge data yet
-  const recommendationFollowThrough = 0; // No recommendation data yet
-
-  const doneTasks = departments.reduce((sum, dept) => sum + (dept.taskCounts?.done || 0), 0);
-  const doneRate = doneTasks / totalTasks;
-
-  // Bootstrap condition: too early in deployment for meaningful company grade (< 25% done)
-  if (doneRate < 0.25) {
-    return 72; // C+ baseline - system is still ramping up
-  }
-
-  return calculateWeightedScore(
-    { kpiAchievement, agentPerformance, daCompliance, recommendationFollowThrough },
-    w
-  );
-}
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export function CompanyHealthSection() {
   const router = useRouter();
-  const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
-  const [gradingWeights, setGradingWeights] = useState<GradeWeights | null>(null);
+  const [health, setHealth] = useState<ClientCompanyHealth | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function loadWorkspaceStats() {
+    async function load() {
       try {
         setLoading(true);
-
-        const [wsRes, configRes] = await Promise.all([
-          fetch('/api/workspaces?stats=true'),
-          fetch('/api/company/config'),
-        ]);
-
-        if (wsRes.ok) {
-          const data: WorkspaceStats[] = await wsRes.json();
-          
-          // Filter to only show workspaces belonging to the default company (Trevor's board)
-          // Exclude ceo, default, and any seeded demo workspaces (acme-*, zhw-*)
-          const filteredDepartments = data.filter(
-            (item) => {
-              const slug = item.slug || item.id;
-              return slug !== 'default' && 
-                     !slug.startsWith('acme-') && 
-                     !slug.startsWith('zhw-');
-            }
-          );
-
-          setDepartments(filteredDepartments);
-        }
-
-        if (configRes.ok) {
-          const config = await configRes.json();
-          if (config.gradingWeights) {
-            setGradingWeights(config.gradingWeights);
-          }
+        const res = await fetch('/api/company-health');
+        if (res.ok) {
+          const data: ClientCompanyHealth = await res.json();
+          setHealth(data);
         }
       } catch (err) {
-        console.error('Failed to load department stats:', err);
-        setDepartments([]);
+        console.error('Failed to load company health:', err);
+        setHealth(null);
       } finally {
         setLoading(false);
       }
     }
-
-    loadWorkspaceStats();
+    load();
   }, []);
 
-  const { companyScore, companyGrade, isBootstrap, sortedDepartments } = useMemo(() => {
-    const weights = gradingWeights || undefined;
-    const score = calculateCompanyScore(departments, weights);
-    const grade = scoreToGrade(score);
+  const companyGrade = (health?.grade ?? null) as Grade | null;
+  const sufficientData = health !== null && health.score !== null;
 
-    // Check if we're in bootstrap mode (no meaningful data yet)
-    const totalTasks = departments.reduce((sum, dept) => sum + (dept.taskCounts?.total || 0), 0);
-    const totalDone = departments.reduce((sum, dept) => sum + (dept.taskCounts?.done || 0), 0);
-    const doneRate = totalTasks > 0 ? totalDone / totalTasks : 0;
-    const isBootstrapMode = totalTasks === 0 || doneRate < 0.25;
-
-    // Sort departments by score (highest first)
-    const sorted = [...departments]
-      .map(dept => ({
-        id: dept.id,
+  const sortedDepartments = useMemo(() => {
+    if (!health) return [];
+    return [...health.departments]
+      .map((dept) => ({
+        id: dept.workspaceId,
         name: dept.name,
-        score: calculateDepartmentScore(dept),
-        emoji: dept.icon || DEPARTMENT_EMOJIS[dept.slug] || '🏢',
+        grade: dept.grade,
+        score: dept.score,
+        sufficientData: dept.sufficientData,
+        emoji: DEPARTMENT_EMOJIS[dept.slug] || '🏢',
         slug: dept.slug,
       }))
-      .sort((a, b) => b.score - a.score);
+      // Sort: depts with data first (by score desc), then insufficient-data depts
+      .sort((a, b) => {
+        if (a.score !== null && b.score !== null) return b.score - a.score;
+        if (a.score !== null) return -1;
+        if (b.score !== null) return 1;
+        return a.name.localeCompare(b.name);
+      });
+  }, [health]);
 
-    return {
-      companyScore: score,
-      companyGrade: grade,
-      isBootstrap: isBootstrapMode,
-      sortedDepartments: sorted,
-    };
-  }, [departments, gradingWeights]);
-
-  // Find best and worst performing departments for the explanation
-  const bestDept = sortedDepartments[0];
-  const worstDept = sortedDepartments[sortedDepartments.length - 1];
+  // Best and worst for the explanation (only among depts with data)
+  const gradedDepts = sortedDepartments.filter((d) => d.sufficientData);
+  const bestDept = gradedDepts[0];
+  const worstDept = gradedDepts[gradedDepts.length - 1];
 
   if (loading) {
     return (
@@ -279,9 +251,9 @@ export function CompanyHealthSection() {
       animate="visible"
     >
       <div className="flex flex-col items-center gap-6">
-        {/* Large Grade Display - First thing owner sees */}
+        {/* Large Grade Display */}
         <motion.div variants={itemVariants}>
-          <GradeCircle grade={companyGrade} />
+          <GradeCircle grade={companyGrade} sufficientData={sufficientData} />
         </motion.div>
 
         {/* One-sentence explanation */}
@@ -289,34 +261,32 @@ export function CompanyHealthSection() {
           className="text-base text-gray-700 text-center max-w-xl leading-relaxed"
           variants={itemVariants}
         >
-          {isBootstrap ? (
-            <>
-              Your AI workforce is getting started. Check back after agents complete their first tasks to see your performance grade.
-            </>
+          {!sufficientData ? (
+            'Your AI workforce is getting started. Check back after agents complete their first tasks to see your performance grade.'
           ) : (
             <>
               Your company earned a {companyGrade} this week.{' '}
               {bestDept && (
                 <span className="font-medium text-gray-900">{bestDept.name}</span>
-              )} is above industry average but{' '}
-              {worstDept && worstDept !== bestDept && (
-                <span className="font-medium text-gray-900">{worstDept.name}</span>
-              )} needs attention.
+              )}{' '}
+              {bestDept && worstDept && worstDept !== bestDept && (
+                <>
+                  is leading, but{' '}
+                  <span className="font-medium text-gray-900">{worstDept.name}</span>{' '}
+                  needs attention.
+                </>
+              )}
             </>
           )}
         </motion.p>
 
         {/* Department Grade Badges Row */}
         {sortedDepartments.length > 0 && (
-          <motion.div
-            className="w-full mt-4"
-            variants={itemVariants}
-          >
+          <motion.div className="w-full mt-4" variants={itemVariants}>
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider text-center mb-3">
               Department Grades
             </p>
             <div className="relative flex items-center w-full">
-              {/* Left Arrow */}
               <button
                 onClick={() => {
                   const el = document.getElementById('dept-scroll-container');
@@ -328,14 +298,10 @@ export function CompanyHealthSection() {
                 <ChevronLeft className="w-4 h-4 text-gray-500" />
               </button>
 
-              {/* Scrollable Container */}
               <div
                 id="dept-scroll-container"
                 className="dept-scroll flex gap-3 overflow-x-auto py-1 justify-start lg:justify-center px-1 flex-1"
-                style={{
-                  scrollbarWidth: 'auto',
-                  scrollbarColor: '#94A3B8 #E2E8F0',
-                }}
+                style={{ scrollbarWidth: 'auto', scrollbarColor: '#94A3B8 #E2E8F0' }}
               >
                 <style>{`
                   .dept-scroll::-webkit-scrollbar { height: 10px; }
@@ -348,14 +314,14 @@ export function CompanyHealthSection() {
                     key={dept.id}
                     id={dept.id}
                     name={dept.name}
-                    score={dept.score}
+                    grade={dept.grade}
+                    sufficientData={dept.sufficientData}
                     emoji={dept.emoji}
                     onClick={() => router.push(`/ceo-board/${dept.id}`)}
                   />
                 ))}
               </div>
 
-              {/* Right Arrow */}
               <button
                 onClick={() => {
                   const el = document.getElementById('dept-scroll-container');

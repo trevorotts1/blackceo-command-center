@@ -15,6 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import type { GradeWeights } from './grade-calculator';
 import { DEFAULT_GRADE_WEIGHTS } from './grade-calculator';
+import { DEFAULT_INPUT_WEIGHTS, type GradeInputKey } from './grading';
 
 export interface CompanyKpi {
   id: string;
@@ -44,7 +45,12 @@ export interface CompanyConfig {
   createdAt: string;
   connectedSystems: ConnectedSystems;
   companyKPIs: CompanyKpi[];
+  /** Legacy 4-factor weights — kept for shim; use gradingInputWeights for PRD 2.10 grading */
   gradingWeights: GradeWeights;
+  /** PRD 2.10: weights for the four observable DB inputs (throughput/qcPassRate/sopCoverage/kpiAttainment) */
+  gradingInputWeights?: Record<GradeInputKey, number>;
+  /** PRD 2.10: rolling window in days for grading computations (default 30) */
+  gradingWindowDays?: number;
   departments: CompanyDepartment[];
 }
 
@@ -92,6 +98,16 @@ export function loadCompanyConfig(): CompanyConfig {
       daCompliance: raw.gradingWeights?.daCompliance ?? DEFAULT_GRADE_WEIGHTS.daCompliance,
       recommendationFollowThrough: raw.gradingWeights?.recommendationFollowThrough ?? DEFAULT_GRADE_WEIGHTS.recommendationFollowThrough,
     },
+    // PRD 2.10: per-input weights for the new grading module. Safe defaults = equal weighting per spec.
+    gradingInputWeights: raw.gradingInputWeights
+      ? {
+          throughput: raw.gradingInputWeights.throughput ?? DEFAULT_INPUT_WEIGHTS.throughput,
+          qcPassRate: raw.gradingInputWeights.qcPassRate ?? DEFAULT_INPUT_WEIGHTS.qcPassRate,
+          sopCoverage: raw.gradingInputWeights.sopCoverage ?? DEFAULT_INPUT_WEIGHTS.sopCoverage,
+          kpiAttainment: raw.gradingInputWeights.kpiAttainment ?? DEFAULT_INPUT_WEIGHTS.kpiAttainment,
+        }
+      : undefined,
+    gradingWindowDays: typeof raw.gradingWindowDays === 'number' ? raw.gradingWindowDays : undefined,
     departments: Array.isArray(raw.departments) && raw.departments.length > 0
       ? raw.departments
       : [],
