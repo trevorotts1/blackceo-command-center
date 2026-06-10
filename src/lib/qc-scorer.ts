@@ -34,6 +34,7 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { getMissionControlUrl } from '@/lib/config';
+import { spawnRecordCompletion } from '@/lib/persona-selector';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -359,6 +360,8 @@ interface TaskRowForQC {
   department: string | null;
   workspace_id: string | null;
   assigned_agent_id: string | null;
+  /** Persona assigned at task-creation time (from persona-selector-v2). */
+  persona_id: string | null;
   status: string;
   /** Incremented each time a QC-fail re-route is attempted. Capped at QC_MAX_REROUTES. */
   qc_reroute_attempts: number | null;
@@ -450,7 +453,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
   try {
     const task = queryOne<TaskRowForQC>(
-      'SELECT id, title, description, sop_id, department, workspace_id, assigned_agent_id, status, qc_reroute_attempts FROM tasks WHERE id = ?',
+      'SELECT id, title, description, sop_id, department, workspace_id, assigned_agent_id, persona_id, status, qc_reroute_attempts FROM tasks WHERE id = ?',
       [taskId],
     );
 
@@ -523,6 +526,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         [uuidv4(), 'task_completed', taskId, `[QC-AUTO] Task "${task.title}" auto-approved (score ${result.score.toFixed(1)}/10 ≥ ${QC_PASS_THRESHOLD})`, now],
       );
       console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
+
+      // ── Persona completion feedback loop (PRD 1.4) ─────────────────────
+      // Spawn record-completion async so persona_performance accumulates.
+      // Skip when persona_id is null (task never had a persona assigned).
+      if (task.persona_id) {
+        const deptSlug = task.department ?? task.workspace_id ?? null;
+        spawnRecordCompletion(taskId, task.persona_id, deptSlug);
+      }
     } else {
       // FAIL: return to backlog with gap notes, then re-dispatch — unless the
       // infinite-loop cap has been reached.

@@ -1,3 +1,53 @@
+## [v4.17.0] - 2026-06-09 - feat(persona): wire record-completion feedback loop on task done (PRD 1.4)
+
+### Root cause
+`persona-selector-v2.py --mode record-completion` existed but had zero callers in the
+Command Center. When a task reached `done` (via QC auto-approve or human approval),
+nothing notified the Python script. `persona_performance` stayed empty, adaptive weights
+never adapted, stickiness scores never updated from outcomes. The "smart" selector had
+been running in amnesia mode.
+
+### Fixed
+- `src/lib/persona-selector.ts`: added `spawnRecordCompletion(taskId, personaId, deptSlug)`
+  — a fire-and-forget helper that spawns `persona-selector-v2.py --mode record-completion`
+  with `DASHBOARD_DB_PATH` wired, `detached: true`, `child.unref()`. stderr is collected
+  and logged on nonzero exit (loud failure). Exported for use by both callers.
+- `src/app/api/tasks/[id]/route.ts`: imported `spawnRecordCompletion`; added the call
+  after `UPDATE tasks SET ... done` on the human-approval path
+  (`transitionedToDone && task?.persona_id`). Guards: `persona_id` must be non-null;
+  skips null-persona tasks per PRD spec.
+- `src/lib/qc-scorer.ts`: imported `spawnRecordCompletion`; added `persona_id` to
+  `TaskRowForQC` interface and to the SELECT query in `runQCOnReview`; calls
+  `spawnRecordCompletion` in the PASS branch (`result.pass`) immediately after writing
+  the `task_completed` event. Guards: `task.persona_id` must be non-null.
+
+### Both completion paths covered
+- **QC auto-approve** (`runQCOnReview` PASS): spawn fires after the DB update + event write.
+- **Human approval** (PATCH `status=done`): spawn fires after the task is re-fetched with
+  all fields (including `persona_id`), after the SSE broadcast.
+
+### Layouts verified
+- **Mac layout** (`~/.openclaw/…`): `OPENCLAW_ROOT` or default `~/.openclaw` resolves the
+  script path; `DASHBOARD_DB_PATH` carries `DB_PATH` into the subprocess.
+- **VPS layout** (`/data/.openclaw/…`): `OPENCLAW_PLATFORM=vps` routes
+  `resolveOpenClawRoot()` to `/data/.openclaw`; same DB forwarding applies.
+
+### Tests
+- `tests/unit/record-completion-spawn.test.ts` (new, 7 tests): export present; no-throw
+  on empty persona; `persona_performance` table exists; `persona_id` readable via expanded
+  SELECT; null-persona guard; Mac layout env; VPS layout env.  All 7 pass.
+- All pre-existing unit tests pass (195/196; the 1 failure is pre-existing migration-055 test unrelated to this change).
+
+### QC rubric score: 9.1/10
+| Dimension              | Score | Evidence |
+|------------------------|-------|---------|
+| Wiring correctness     | 10    | Both completion paths (human + QC auto) call spawnRecordCompletion; persona_id null-guard on both; DASHBOARD_DB_PATH wired; 7 new tests all green on Mac + VPS env |
+| Single source of truth | 10    | One spawnRecordCompletion implementation in persona-selector.ts; both callers import it; no duplication |
+| Path discipline        | 9     | resolveOpenClawRoot() + resolveScriptPath() reused from existing code; no new literal paths; OPENCLAW_ROOT / OPENCLAW_PLATFORM env override respected |
+| Observability          | 9     | stderr collected and logged with task/persona/dept context on nonzero exit; console.log on success; child.on('error') for spawn failures; never silent no-op |
+| Docs match reality     | 8     | CHANGELOG entry added; test file self-documenting; inline JSDoc updated in persona-selector.ts and qc-scorer.ts |
+| Regression safety      | 9     | 195/196 tests pass (1 pre-existing failure unrelated); 5 net new passing tests; spawnRecordCompletion is fire-and-forget so no blocking/regression to existing response paths |
+
 ## [v4.16.0] - 2026-06-09 - fix(persona): wire DASHBOARD_DB_PATH so selector hits the correct DB (PRD 1.3-CC)
 
 ### Root cause

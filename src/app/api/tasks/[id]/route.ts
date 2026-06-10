@@ -8,6 +8,7 @@ import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/type
 import { checkTriad } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
+import { spawnRecordCompletion } from '@/lib/persona-selector';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -317,6 +318,20 @@ export async function PATCH(
         type: 'task_updated',
         payload: task,
       });
+    }
+
+    // ── Persona completion feedback loop (PRD 1.4) ─────────────────────────
+    // When a task transitions to `done` via human approval (PATCH status=done),
+    // fire record-completion so persona_performance accumulates outcome data.
+    // Skip when persona_id is null (unassigned tasks) — per PRD spec.
+    // The QC auto-approve path is handled inside runQCOnReview (qc-scorer.ts).
+    const transitionedToDone =
+      validatedData.status === 'done' && existing.status !== 'done';
+    if (transitionedToDone && task?.persona_id) {
+      const deptSlug = (task as Task & { department?: string | null }).department
+        ?? task.workspace_id
+        ?? null;
+      spawnRecordCompletion(id, task.persona_id, deptSlug);
     }
 
     // ── QC-Agent auto-scorer ────────────────────────────────────────────────

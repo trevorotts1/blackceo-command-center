@@ -13,8 +13,14 @@
  * The output JSON is a superset of what the v1 selector returned. Existing
  * callers continue to work; new fields (task_category, secondary_persona_*,
  * weights_used, layers) are available when present.
+ *
+ * spawnRecordCompletion() — fire-and-forget helper used by both the PATCH
+ * task route (human approval) and runQCOnReview (QC auto-approve) to close
+ * the feedback loop: once a task reaches `done`, we notify persona-selector-v2
+ * so it can write to persona_performance / persona_weight_overrides and make
+ * the adaptive weights actually adapt.  PRD item 1.4.
  */
-import { execFileSync } from "child_process";
+import { execFileSync, spawn } from "child_process";
 import path from "path";
 import os from "os";
 import { DB_PATH } from "@/lib/db";
@@ -120,4 +126,71 @@ export async function selectPersonaForTask(
     console.error(`[persona-selector] Failed for task ${taskId}:`, error);
     return null;
   }
+}
+
+/**
+ * Fire-and-forget: spawn `persona-selector-v2.py --mode record-completion`
+ * after a task reaches `done`, so the adaptive learning loop gets outcome data.
+ *
+ * PRD item 1.4: "spawn persona-selector-v2.py --mode record-completion
+ * --task-id <id> --persona-id <persona_id> --department <slug> async
+ * (fire-and-forget, error-logged, non-blocking). Skip null persona."
+ *
+ * Called from:
+ *   - src/app/api/tasks/[id]/route.ts  (human approval: PATCH status → done)
+ *   - src/lib/qc-scorer.ts             (QC auto-approve: runQCOnReview PASS)
+ *
+ * @param taskId     The task id.
+ * @param personaId  The persona id stored on the task. MUST be non-null before calling.
+ * @param deptSlug   Department slug (e.g. "sales").  Falls back to "general" if absent.
+ */
+export function spawnRecordCompletion(
+  taskId: string,
+  personaId: string,
+  deptSlug: string | null | undefined
+): void {
+  const scriptPath = resolveScriptPath();
+  const dept = deptSlug || "general";
+
+  const child = spawn(
+    "python3",
+    [
+      scriptPath,
+      "--mode", "record-completion",
+      "--task-id", taskId,
+      "--persona-id", personaId,
+      "--department", dept,
+    ],
+    {
+      detached: true,
+      stdio: "pipe",
+      env: { ...process.env, DASHBOARD_DB_PATH: DB_PATH },
+    }
+  );
+
+  // Collect stderr so errors are visible in the server log instead of silently swallowed.
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+  child.on("error", (err) => {
+    console.error(`[persona-selector] record-completion spawn error for task ${taskId}:`, err.message);
+  });
+
+  child.on("close", (code) => {
+    if (code !== 0) {
+      console.warn(
+        `[persona-selector] record-completion exited ${code} for task ${taskId} ` +
+        `(persona ${personaId}, dept ${dept})` +
+        (stderr ? `: ${stderr.trim()}` : "")
+      );
+    } else {
+      console.log(
+        `[persona-selector] record-completion OK for task ${taskId} ` +
+        `(persona ${personaId}, dept ${dept})`
+      );
+    }
+  });
+
+  // Detach so the child can outlive this request/process without blocking.
+  child.unref();
 }
