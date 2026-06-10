@@ -17,6 +17,7 @@
 import { execFileSync } from "child_process";
 import path from "path";
 import os from "os";
+import { DB_PATH } from "@/lib/db";
 
 export type PersonaInteractionMode = "leadership" | "coaching" | "hybrid";
 
@@ -77,10 +78,17 @@ export async function selectPersonaForTask(
     const scriptPath = resolveScriptPath();
     const dept = departmentId || "general";
 
+    // Pass the authoritative DB path so the selector can write persona_selection_log,
+    // stickiness, and variety rows — without this, find_dashboard_db() relies on a
+    // candidate list that misses the ~/projects/command-center install path (PRD 1.3-CC).
     const output = execFileSync(
       "python3",
       [scriptPath, "--task", taskDescription, "--department", dept, "--format", "json"],
-      { encoding: "utf-8", timeout: 30_000 }
+      {
+        encoding: "utf-8",
+        timeout: 30_000,
+        env: { ...process.env, DASHBOARD_DB_PATH: DB_PATH },
+      }
     );
 
     const result = JSON.parse(output) as Partial<PersonaSelectionResult>;

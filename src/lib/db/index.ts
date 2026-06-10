@@ -4,7 +4,10 @@ import fs from 'fs';
 import { schema } from './schema';
 import { runMigrations } from './migrations';
 
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db');
+// Exported so persona-selector.ts can pass it as DASHBOARD_DB_PATH to the
+// Python subprocess, making the authoritative DB location explicit rather than
+// relying on the selector's candidate-list fallback (PRD item 1.3-CC).
+export const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db');
 
 let db: Database.Database | null = null;
 

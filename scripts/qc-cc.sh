@@ -151,6 +151,17 @@ check "6.3" "PersonaGovernanceBoard component exists" \
   '[ -f src/components/ceo-board/PersonaGovernanceBoard.tsx ]'
 check "6.4" "CEO board mounts PersonaGovernanceBoard" \
   'grep -q "PersonaGovernanceBoard" src/app/ceo-board/page.tsx'
+# PRD 1.3-CC: persona-selector.ts MUST pass DASHBOARD_DB_PATH to the Python subprocess
+# so find_dashboard_db() uses the authoritative path rather than its candidate list.
+check "6.5" "persona-selector.ts passes DASHBOARD_DB_PATH env to subprocess (PRD 1.3-CC)" \
+  "grep -q 'DASHBOARD_DB_PATH' src/lib/persona-selector.ts" \
+  "add env: { ...process.env, DASHBOARD_DB_PATH: DB_PATH } to execFileSync call in src/lib/persona-selector.ts"
+check "6.6" "persona-selector.ts imports DB_PATH from @/lib/db (PRD 1.3-CC)" \
+  "grep -q 'import.*DB_PATH.*from.*lib/db' src/lib/persona-selector.ts" \
+  "add: import { DB_PATH } from '@/lib/db';"
+check "6.7" "DB_PATH is exported from src/lib/db/index.ts (PRD 1.3-CC)" \
+  "grep -q '^export const DB_PATH' src/lib/db/index.ts" \
+  "add export keyword: export const DB_PATH = ..."
 
 blue ""
 blue "════════════════════════════════════════════════════════════"
