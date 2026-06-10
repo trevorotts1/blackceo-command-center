@@ -238,17 +238,43 @@ export async function createTaskCore(
   // the workspace id by convention (seed-workspaces + add-department.sh both
   // use the slug as the workspace primary key).  If neither is available, we
   // leave workspace_id NULL rather than inserting a nonexistent 'default' row.
+  //
+  // PRD 1.5: workspaceSlug tracks the canonical slug of the resolved workspace
+  // so the persona selector always receives the slug (e.g. "marketing"), never
+  // a UUID.  UI-created workspaces have a UUID primary key; passing that UUID
+  // as --department caused the Python script's dept dir lookup, KPI layer,
+  // stickiness keys, and persona_selection_log.department_id to all key on
+  // garbage.
   let workspaceId: string | null = input.workspace_id || null;
+  let workspaceSlug: string | null = null;
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getDb: _getDb } = require('@/lib/db');
+  const _db = _getDb();
+
+  if (workspaceId) {
+    // workspaceId was supplied by the caller (UI path: a UUID for UI-created
+    // workspaces, or already a slug for seed-created ones).  Resolve the slug
+    // so the persona selector gets the canonical department name.
+    try {
+      const ws = _db.prepare('SELECT id, slug FROM workspaces WHERE id = ?').get(workspaceId) as { id: string; slug: string } | undefined;
+      if (ws) workspaceSlug = ws.slug;
+    } catch {
+      // non-fatal — workspaceSlug stays null; selector falls back to 'general'
+    }
+  }
+
   if (!workspaceId && input.department) {
     const canon = canonicalDeptSlug(input.department);
     if (canon) {
-      // Verify the workspace exists before stamping it
+      // Verify the workspace exists before stamping it; also capture the slug
+      // for the persona selector (PRD 1.5).
       try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getDb } = require('@/lib/db');
-        const db = getDb();
-        const ws = db.prepare('SELECT id FROM workspaces WHERE id = ? OR slug = ?').get(canon, canon) as { id: string } | undefined;
-        if (ws) workspaceId = ws.id;
+        const ws = _db.prepare('SELECT id, slug FROM workspaces WHERE id = ? OR slug = ?').get(canon, canon) as { id: string; slug: string } | undefined;
+        if (ws) {
+          workspaceId = ws.id;
+          workspaceSlug = ws.slug;
+        }
       } catch {
         // non-fatal — leave workspaceId null
       }
@@ -384,7 +410,14 @@ export async function createTaskCore(
   try {
     const taskDescription =
       `${input.title}${input.description ? `. ${input.description}` : ''}`.trim();
-    const departmentForSelector = workspaceId || 'general';
+
+    // PRD 1.5: Pass the workspace slug (canonicalized), never the raw UUID.
+    // workspaceSlug is populated above by resolving the workspaces row.
+    // Fallback order: workspace slug → input.department slug → 'general'.
+    const departmentForSelector =
+      canonicalDeptSlug(workspaceSlug) ||
+      (input.department ? canonicalDeptSlug(input.department) : null) ||
+      'general';
 
     const persona = await selectPersonaForTask(id, taskDescription, departmentForSelector);
 

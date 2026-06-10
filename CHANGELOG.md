@@ -1,3 +1,54 @@
+## [v4.18.0] - 2026-06-09 - fix(persona): workspace slug to selector — never pass UUID as --department (PRD 1.5)
+
+### Root cause
+`tasks.ts` line 387 passed `workspaceId` (the DB primary key) to `selectPersonaForTask`
+as `departmentForSelector`.  For workspaces seeded by scripts, `workspaces.id = slug`
+by convention, so the bug was invisible.  For **UI-created workspaces**, the id is a
+UUID (`uuidv4()`), so the Python selector received a UUID where it expected `"sales"` or
+`"marketing"`.  Downstream effects: `persona_selection_log.department_id` stored a UUID,
+stickiness keys were unresolvable (stickiness reads/writes under `"marketing"` but logged
+under `"3e4f…"`), dept-dir lookups (`departments/<slug>/`) silently failed, and KPI
+layer and adaptive weight keys all keyed on garbage.
+
+### Fixed
+- `src/lib/tasks.ts` (`createTaskCore`):
+  - Introduced `workspaceSlug: string | null` alongside `workspaceId`.
+  - When `workspaceId` is supplied via `input.workspace_id` (UI path, may be a UUID):
+    resolves `workspaces.slug` with `SELECT id, slug FROM workspaces WHERE id = ?`.
+  - When `workspaceId` is derived from `input.department` (ingest/API path): the
+    existing lookup was updated to `SELECT id, slug` and now also populates
+    `workspaceSlug`.
+  - `departmentForSelector` line (was `workspaceId || 'general'`) replaced with:
+    `canonicalDeptSlug(workspaceSlug) || canonicalDeptSlug(input.department) || 'general'`
+  - Fallback chain: workspace slug → input.department slug → `'general'`.  Never a UUID.
+
+### Observability / no silent no-op
+- The fix is loud by design: if the workspace row is not found (non-fatal catch), the
+  selector falls back to `canonicalDeptSlug(input.department)` which is already logged,
+  then `'general'` — always a valid slug.  A UUID reaching the selector would previously
+  silently key all DB rows on garbage; now a UUID can never reach the selector.
+
+### Layouts verified
+- **Mac layout** (`~/.openclaw/…`): TypeScript-only change; slug resolution is
+  platform-agnostic (DB query, no file-system paths involved).
+- **VPS layout** (`/data/.openclaw/…`): same — DB path governed by `DATABASE_PATH` env,
+  which the existing `DB_PATH` constant already handles for both platforms.
+
+### Tests
+- `tests/unit/prd-1.5-workspace-slug-to-selector.test.ts` (new, 9 tests):
+  canonicalDeptSlug exported; UUID is not a canonical slug; workspaces.slug column
+  exists; UI-style workspace stores canonical slug; tasks.department stores slug not UUID;
+  departmentForSelector fallback chain (slug > input.dept > general); Mac layout env;
+  VPS layout env; persona_selection_log.department_id column exists.  All 9 pass.
+- All pre-existing unit tests pass (204/205; the 1 failure is pre-existing
+  migration-055 unrelated to this change).
+
+### Documentation
+- `docs/TERMINOLOGY.md` (new): Department identity contract — `department_id` is always
+  the canonical slug, never a UUID.  Documents the distinction between `workspaces.id`
+  (UUID FK) and `workspaces.slug` (canonical slug), the canonical slug set reference, and
+  the enforcement points in code.
+
 ## [v4.17.0] - 2026-06-09 - feat(persona): wire record-completion feedback loop on task done (PRD 1.4)
 
 ### Root cause
