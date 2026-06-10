@@ -4,6 +4,10 @@ name: QC Command Center
 # gate so the dashboard never regresses on N17 (departments), N19 (ZHC
 # agents/ layout), migrations, no-Anthropic policy, or persona UI presence.
 #
+# AF5 addition: qc-independence job asserts every QC changelog entry was
+# scored by an independent agent (not the writer). Self-assessed entries
+# without a following independent correction fail the gate.
+#
 # Triggers on every push to main and every PR targeting main.
 
 on:
@@ -31,6 +35,23 @@ jobs:
 
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
+
+  qc-independence:
+    name: QC scorer independence
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Self-test — planted fixture MUST fail (verifies the check bites)
+        run: |
+          bash scripts/check-qc-independence.sh scripts/fixtures/qc-self-assessed-fixture.md \
+            && echo "ERROR: fixture should have exited 1 but exited 0 — check is broken" \
+            && exit 1 \
+            || echo "OK: fixture correctly detected self-assessed entry (exit 1)"
+
+      - name: Assert CHANGELOG.md has no uncorrected self-assessed QC entries
+        run: bash scripts/check-qc-independence.sh
 
   build-smoke:
     name: Build smoke test

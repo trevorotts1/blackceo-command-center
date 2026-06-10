@@ -11,6 +11,26 @@
 | Docs (10%) | 10/10 | `docs/LEAN-SIX-SIGMA-MAP.md`: all 5 DMAIC stages mapped to concrete mechanisms, explicit gap list with waiver rationale for each un-implemented item, design-decisions section. CHANGELOG entry covers every changed file. |
 | Regression (10%) | 10/10 | 278 pass, 7 pre-existing failures unchanged (5x getInterviewState, 1x offline seed, 1x migration 055). All 2.10 grading tests pass. `DEFAULT_INPUT_WEIGHTS` unchanged. T7 (grade isolation) verifies LSS data never affects the weighted score formula. |
 
+### AF5 independent re-score — v4.30.0 LSS (PRD 2.14) — 2026-06-10
+
+Scored by independent Sonnet QC agent (AF5 audit run) against PRD Section 6 dimensions.
+The original entry above had no scorer-identity declaration; this re-audit corrects the record.
+
+| Dimension | Weight | Score | Evidence |
+|-----------|--------|-------|---------|
+| Wiring | 30 | 9 | All four LSS functions wired in `grading.ts`; cron `0 8 1 * *` America/New_York registered; migration 069 + schema.ts dual-declare; `DepartmentGradeCards` renders 3 LSS rows. Minor deduction: company-level LSS (tokensPerTask, companyStaleLoopsKilled, company defect/rework rates) is computed by `/api/company-health` but not surfaced by any UI component — the `CompanyHeroCard` (PRD 2.10) does not render LSS fields. Data path is incomplete for the company-level view. |
+| SSOT | 20 | 10 | `grading.ts` is the sole compute module. `defectRate` is the complement of `qcPassRate` over the same denominator query — complement invariant enforced. No parallel paths. |
+| Path | 15 | 9 | Dept-level data path: `task_qc_results`/`tasks` → grading.ts → API → `DepartmentGradeCards` — complete. Company-level path ends at API JSON with no UI consumer for the LSS fields. `LEAN-SIX-SIGMA-MAP.md` documents the gap explicitly (accepted). |
+| Observability | 15 | 10 | `[LSS-CONTROL-REVIEW]` prefix in events table and Live Feed; `lss_control_reviews` provides auditable monthly history; null→"no data" discipline confirmed in `DepartmentGradeCards.tsx`; T5 verifies empty workspace produces null rates and 0 staleLoopsKilled (not false zeros). |
+| Docs | 10 | 10 | `docs/LEAN-SIX-SIGMA-MAP.md`: all 5 DMAIC stages mapped to concrete mechanisms; explicit gap list with waiver rationale; design-decisions section. CHANGELOG covers every changed file. |
+| Regression | 10 | 10 | T7 (grade isolation) verifies LSS data never changes the weighted score formula; `DEFAULT_INPUT_WEIGHTS` verified unchanged; 278/285 pass (7 pre-existing failures — none new). |
+
+**AF5 independent weighted score: (9×30 + 10×20 + 9×15 + 10×15 + 10×10 + 10×10) / 100 = (270+200+135+150+100+100)/100 = 9.55/10 — PASS** (gate: 8.5)
+
+Original entry claimed 10.0/10. Honest independent score: **9.55/10**. Downgraded on Wiring (company-level LSS has no UI consumer) and Path (company-level path incomplete). Docs waiver accepted because `LEAN-SIX-SIGMA-MAP.md` documents the gap explicitly.
+
+---
+
 ### PRD 2.14 — Lean Six Sigma Alignment
 
 **What changed:**
@@ -667,6 +687,24 @@ guaranteed churn loop disguised as quality control.
 | Regression safety | 10% | 10 | qc-cc.sh: 34/34 green; total test suite: 224 pass / 2 fail (both pre-existing: offline-seed + migration-055); loop-guard tests preserved via `no-criteria` path; LLM pass/fail tests unaffected |
 
 **Weighted score: 10.0/10 — PASS**
+
+### AF5 independent re-score — v4.21.0 heuristic guard (PRD 2.4) — 2026-06-10
+
+Scored by independent Sonnet QC agent (AF5 audit run) against PRD Section 6 dimensions.
+This re-score replaces the writer's self-scored 10.0/10 above with an honest independent assessment.
+
+| Dimension | Weight | Score | Evidence |
+|-----------|--------|-------|---------|
+| Wiring | 30 | 10 | Guard fires exactly on `scoringPath === 'heuristic'` (confirmed in `qc-scorer.ts` line 681). Task remains in `review` (no UPDATE issued). `qc_reroute_attempts` not incremented (increment is in the FAIL branch, which is skipped). `no-criteria` path (no SOP) is structurally not heuristic and still reroutes. All 8 fixture tests cover the contract. |
+| SSOT | 20 | 10 | One guard, one place (`runQCOnReview` in `qc-scorer.ts`), two lines of logic. No duplicate heuristic-path detection. |
+| Path | 15 | 10 | Only `src/lib/qc-scorer.ts` modified in `src/`. Guard is a focused early-return with zero new abstractions. |
+| Observability | 15 | 9 | `[QC-HEURISTIC]` event written with score, reason, path, and scorer identity. Console log shows task name + score + unchanged attempt count. Minor: no distinction logged between "no LLM key" and "LLM error" as the heuristic trigger cause — both silently bucket to heuristic with no differentiated signal. |
+| Docs | 10 | 9 | Module JSDoc and `heuristicScore()` doc block updated with PRD 2.4 contract. CHANGELOG entry covers root cause, fix, and test coverage. Minor: the described "test file updates" were comment-only changes to `qc-loop-close.test.ts` and `qc-review-wiring.test.ts`, which slightly overstates the documentation improvement. |
+| Regression | 10 | 10 | Loop-close tests fully preserved via `no-criteria` path. LLM pass/fail paths unaffected. 224/226 pass (2 pre-existing unrelated failures). qc-cc.sh: 34/34 green. |
+
+**AF5 independent weighted score: (10×30 + 10×20 + 10×15 + 9×15 + 9×10 + 10×10) / 100 = (300+200+150+135+90+100)/100 = 9.75/10 — PASS** (gate: 8.5)
+
+Original entry claimed 10.0/10. Honest independent score: **9.75/10**. Minor deductions on Observability (heuristic-cause not differentiated in logs) and Docs (test file updates were comment-only). Core implementation is solid.
 
 ---
 
