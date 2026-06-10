@@ -255,7 +255,7 @@ async function llmScoreViaGoogle(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, maxOutputTokens: 300 },
+        generationConfig: { temperature: 0, maxOutputTokens: 1024 },
       }),
     });
 
