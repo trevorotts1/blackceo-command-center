@@ -408,4 +408,23 @@ CREATE TABLE IF NOT EXISTS task_qc_results (
 CREATE INDEX IF NOT EXISTS idx_qc_results_task ON task_qc_results(task_id, scored_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qc_results_dept ON task_qc_results(department_slug, scored_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qc_results_workspace ON task_qc_results(workspace_id, scored_at DESC);
+
+-- LSS Control Reviews table (PRD 2.14 — migration 069 also creates this for existing DBs)
+-- Persists monthly Lean Six Sigma control-review artifacts: company score/grade,
+-- defect/rework/waste summary, per-dept breakdown, and narrative markdown.
+-- SAFE to declare here AND in migration 069 — CREATE TABLE IF NOT EXISTS is idempotent.
+CREATE TABLE IF NOT EXISTS lss_control_reviews (
+  id TEXT PRIMARY KEY,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  company_score REAL,
+  company_grade TEXT,
+  defect_rate REAL,
+  rework_rate REAL,
+  waste_summary TEXT,
+  department_breakdown TEXT,
+  narrative TEXT,
+  generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_lss_reviews_period ON lss_control_reviews(period_end DESC);
 `;

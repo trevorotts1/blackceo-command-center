@@ -2525,6 +2525,34 @@ const migrations: Migration[] = [
       console.log('[Migration 068] task_qc_results table + indexes ready');
     },
   },
+  {
+    // PRD 2.14: Lean Six Sigma control-review history table.
+    // Stores the monthly control-review artifact (defect/rework/waste summary +
+    // narrative markdown + department breakdown). Additive + idempotent.
+    // SAFE to declare here AND in schema.ts — CREATE TABLE IF NOT EXISTS.
+    id: '069',
+    name: 'add_lss_control_reviews',
+    up: (db) => {
+      console.log('[Migration 069] Creating lss_control_reviews table...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS lss_control_reviews (
+          id TEXT PRIMARY KEY,
+          period_start TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          company_score REAL,
+          company_grade TEXT,
+          defect_rate REAL,
+          rework_rate REAL,
+          waste_summary TEXT,
+          department_breakdown TEXT,
+          narrative TEXT,
+          generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_lss_reviews_period ON lss_control_reviews(period_end DESC);
+      `);
+      console.log('[Migration 069] lss_control_reviews table + index ready');
+    },
+  },
 ];
 
 /**

@@ -31,6 +31,19 @@ interface ClientInputScore {
   detail: string;
 }
 
+// PRD 2.14 LSS metrics (mirrors LssDepartmentMetrics from grading.ts)
+interface ClientLssRate {
+  score: number | null;
+  sampleSize: number;
+  detail: string;
+}
+
+interface ClientLssDeptMetrics {
+  defectRate: ClientLssRate;
+  reworkRate: ClientLssRate;
+  staleLoopsKilled: number;
+}
+
 interface ClientDepartmentGrade {
   workspaceId: string;
   slug: string;
@@ -39,6 +52,8 @@ interface ClientDepartmentGrade {
   score: number | null;
   grade: string | null;
   sufficientData: boolean;
+  /** PRD 2.14 LSS diagnostic lens — optional */
+  lss?: ClientLssDeptMetrics;
 }
 
 interface WorstTrendingEntry {
@@ -157,6 +172,54 @@ function DepartmentCard({ dept }: { dept: ClientDepartmentGrade }) {
           <InputMiniBar key={key} input={dept.inputs[key]} />
         ))}
       </div>
+
+      {/* PRD 2.14 LSS diagnostic lens — muted secondary rows, not part of grade */}
+      {dept.lss && (
+        <div className="mt-1 pt-2 border-t border-gray-50 flex flex-col gap-1">
+          <p className="text-xs text-gray-400 uppercase tracking-wider mb-0.5">LSS Diagnostics</p>
+
+          {/* Defect rate */}
+          <div className="flex items-center justify-between" title={dept.lss.defectRate.detail}>
+            <span className="text-xs text-gray-400">Defect rate</span>
+            {dept.lss.defectRate.score === null ? (
+              <span className="text-xs text-gray-300 tabular-nums">no data</span>
+            ) : (
+              <span
+                className="text-xs tabular-nums font-medium"
+                style={{ color: dept.lss.defectRate.score > 20 ? '#EF4444' : '#6B7280' }}
+              >
+                {dept.lss.defectRate.score}%
+              </span>
+            )}
+          </div>
+
+          {/* Rework rate */}
+          <div className="flex items-center justify-between" title={dept.lss.reworkRate.detail}>
+            <span className="text-xs text-gray-400">Rework rate</span>
+            {dept.lss.reworkRate.score === null ? (
+              <span className="text-xs text-gray-300 tabular-nums">no data</span>
+            ) : (
+              <span
+                className="text-xs tabular-nums font-medium"
+                style={{ color: dept.lss.reworkRate.score > 20 ? '#EF4444' : '#6B7280' }}
+              >
+                {dept.lss.reworkRate.score}%
+              </span>
+            )}
+          </div>
+
+          {/* Stale loops killed — always a real integer */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-400">Stale loops killed</span>
+            <span
+              className="text-xs tabular-nums font-medium"
+              style={{ color: dept.lss.staleLoopsKilled > 0 ? '#F59E0B' : '#9CA3AF' }}
+            >
+              {dept.lss.staleLoopsKilled}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Score number (only when sufficient data) */}
       {dept.score !== null && (
