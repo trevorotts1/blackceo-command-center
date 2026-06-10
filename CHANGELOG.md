@@ -1,3 +1,24 @@
+## [v4.31.0] - 2026-06-10 - ci(af5): QC-scorer independence CI gate + independent re-audit of self-scored 10.0 entries
+
+**QC Score (independent Sonnet QC — AF5 audit): 9.35/10 — PASS** (gate: 8.5)
+
+Scored by independent Sonnet QC agent against PRD Section 6 dimensions (Wiring 30, SSOT 20, Path 15, Observability 15, Docs 10, Regression 10). This is an independent QC score — not self-assessed by the writer.
+
+| Dimension | Weight | Score | Evidence |
+|-----------|--------|-------|---------|
+| Wiring | 30 | 9 | `qc-independence` CI job wired in `qc-cc.yml` with two steps: fixture self-test (must exit 1) + CHANGELOG scan (must exit 0). All 4 CI jobs green. Re-audit blocks placed adjacent to self-scored entries in CHANGELOG. Minor: ±10/+60 line proximity window would miss an independence block at N-11; logical brittleness but not a current production failure — all existing entries are within window. |
+| SSOT | 20 | 10 | Single detection function `check-qc-independence.sh`, one CI job, no duplicate pattern-matching logic. |
+| Path | 15 | 10 | New files: `scripts/check-qc-independence.sh`, `scripts/fixtures/qc-self-assessed-fixture.md`. Modified: `.github/workflows/qc-cc.yml`, `CHANGELOG.md`, `package-lock.json`, `version`. No src/ business logic changes. Version drift fix (`version`/`package-lock.json`) is a legitimate companion. |
+| Observability | 15 | 9 | Script outputs color-coded per-line OK/FAIL with line numbers and content. Final summary reports failure count. Minor: fixture self-test step in CI suppresses the script's detection output (only exit code is used); a developer seeing fixture failure won't immediately see which line was flagged without running locally. |
+| Docs | 10 | 8 | `check-qc-independence.sh` has comprehensive header. CI workflow comment block updated. Re-score blocks in CHANGELOG document both re-audits. Gap: no dedicated CHANGELOG section for the AF5 CI gate itself as a versioned feature — it shipped bundled in the re-audit commit without a separate "what changed" section describing the new `qc-independence` CI job. This version bump corrects that gap. |
+| Regression | 10 | 10 | 71/71 qc-cc.sh checks green. All 4 CI jobs pass. No existing checks broken. |
+
+**Independent QC weighted score: (9×30 + 10×20 + 10×15 + 9×15 + 8×10 + 10×10) / 100 = (270+200+150+135+80+100)/100 = 9.35/10 — PASS**
+
+Merge SHA: 2bb2caa262e568c38804da8f9e90a82dd101029f. PR #76 squash-merged to main.
+
+---
+
 ## [v4.30.0] - 2026-06-10 - feat(prd-2.14): Lean Six Sigma alignment — defect rate, rework rate, waste metric, monthly control review
 
 **QC Score: 10.0/10 — PASS**
