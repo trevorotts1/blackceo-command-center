@@ -404,64 +404,8 @@ export async function createTaskCore(
     [uuidv4(), 'task_created', input.created_by_agent_id || null, id, eventMessage, now]
   );
 
-  // Persona selection (Hop 10): non-blocking. Task creation must still succeed
-  // if the selector can't run. Skips known sentinel/fallback IDs that come out
-  // of an unpatched selector on a stale install.
-  try {
-    const taskDescription =
-      `${input.title}${input.description ? `. ${input.description}` : ''}`.trim();
-
-    // PRD 1.5: Pass the workspace slug (canonicalized), never the raw UUID.
-    // workspaceSlug is populated above by resolving the workspaces row.
-    // Fallback order: workspace slug → input.department slug → 'general'.
-    const departmentForSelector =
-      canonicalDeptSlug(workspaceSlug) ||
-      (input.department ? canonicalDeptSlug(input.department) : null) ||
-      'general';
-
-    const persona = await selectPersonaForTask(id, taskDescription, departmentForSelector);
-
-    const SENTINEL_IDS = new Set([
-      'schemaVersion',
-      'created',
-      'domainTags',
-      'perspectiveTags',
-      'personas',
-    ]);
-
-    if (
-      persona &&
-      persona.persona_id &&
-      !SENTINEL_IDS.has(persona.persona_id) &&
-      !persona.no_persona_required
-    ) {
-      const personaSelectedAt = new Date().toISOString();
-      run(
-        `UPDATE tasks
-            SET persona_id = ?,
-                persona_name = ?,
-                persona_mode = ?,
-                persona_score = ?,
-                persona_version = ?,
-                persona_selected_at = ?
-          WHERE id = ?`,
-        [
-          persona.persona_id,
-          persona.persona_name,
-          persona.interaction_mode,
-          persona.score ?? null,
-          persona.persona_version ?? 1,
-          personaSelectedAt,
-          id,
-        ]
-      );
-    }
-  } catch (personaError) {
-    // Never fail task creation on persona-selector errors.
-    console.error(`[createTaskCore] Persona selection threw for task ${id}:`, personaError);
-  }
-
-  // Fetch created task with all joined fields.
+  // Fetch created task with all joined fields BEFORE persona selection so we can
+  // broadcast task_created immediately and return < 500ms (PRD 1.6).
   const task = queryOne<Task>(
     `SELECT t.*,
       aa.name as assigned_agent_name,
@@ -475,13 +419,14 @@ export async function createTaskCore(
     [id]
   );
 
-  // Broadcast task creation via SSE (live-updates the board with no UI change).
-  if (task) {
-    broadcast({
-      type: 'task_created',
-      payload: task,
-    });
-  }
+  if (!task) return undefined;
+
+  // Broadcast task creation via SSE immediately — the card appears on the board
+  // without waiting for persona selection (which can take several seconds).
+  broadcast({
+    type: 'task_created',
+    payload: task,
+  });
 
   // Notify the OpenClaw gateway asynchronously — don't block.
   // NOTE (B4): routing now happens IN-PROCESS above via routeTask(), so this
@@ -489,7 +434,7 @@ export async function createTaskCore(
   // /api/webhooks/task-created HTTP-to-WS-gateway call was a silent no-op). It
   // is retained only as a best-effort "a task exists" announcement and is fully
   // non-fatal; routing does not depend on it.
-  if (task && options.notifyGateway !== false) {
+  if (options.notifyGateway !== false) {
     const origin =
       options.origin || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:4000';
     const webhookUrl = `${origin}/api/webhooks/task-created`;
@@ -517,6 +462,88 @@ export async function createTaskCore(
     })();
   }
 
-  if (!task) return undefined;
+  // ── ASYNC PERSONA SELECTION (PRD 1.6) ────────────────────────────────────────
+  // Run persona selection as a detached async block so the API responds instantly
+  // (task already inserted + broadcast above).  When the selector resolves, the
+  // task row is UPDATEd and a task_updated SSE event delivers the persona chip to
+  // every connected board.  Skips known sentinel IDs from stale selectors.
+  //
+  // selectPersonaForTask uses async execFile internally (never execFileSync) so
+  // this block never freezes the Node event loop even when the Python script runs
+  // semantic embed + LLM scoring calls.
+  void (async () => {
+    try {
+      const taskDescription =
+        `${input.title}${input.description ? `. ${input.description}` : ''}`.trim();
+
+      // PRD 1.5: Pass the workspace slug (canonicalized), never the raw UUID.
+      // workspaceSlug is populated above by resolving the workspaces row.
+      // Fallback order: workspace slug → input.department slug → 'general'.
+      const departmentForSelector =
+        canonicalDeptSlug(workspaceSlug) ||
+        (input.department ? canonicalDeptSlug(input.department) : null) ||
+        'general';
+
+      const persona = await selectPersonaForTask(id, taskDescription, departmentForSelector);
+
+      const SENTINEL_IDS = new Set([
+        'schemaVersion',
+        'created',
+        'domainTags',
+        'perspectiveTags',
+        'personas',
+      ]);
+
+      if (
+        persona &&
+        persona.persona_id &&
+        !SENTINEL_IDS.has(persona.persona_id) &&
+        !persona.no_persona_required
+      ) {
+        const personaSelectedAt = new Date().toISOString();
+        run(
+          `UPDATE tasks
+              SET persona_id = ?,
+                  persona_name = ?,
+                  persona_mode = ?,
+                  persona_score = ?,
+                  persona_version = ?,
+                  persona_selected_at = ?
+            WHERE id = ?`,
+          [
+            persona.persona_id,
+            persona.persona_name,
+            persona.interaction_mode,
+            persona.score ?? null,
+            persona.persona_version ?? 1,
+            personaSelectedAt,
+            id,
+          ]
+        );
+
+        // Re-fetch with joined agent fields so the SSE payload is complete.
+        const updatedTask = queryOne<Task>(
+          `SELECT t.*,
+            aa.name as assigned_agent_name,
+            aa.avatar_emoji as assigned_agent_emoji,
+            ca.name as created_by_agent_name,
+            ca.avatar_emoji as created_by_agent_emoji
+           FROM tasks t
+           LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+           LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+           WHERE t.id = ?`,
+          [id]
+        );
+        if (updatedTask) {
+          broadcast({ type: 'task_updated', payload: updatedTask });
+          console.log(`[createTaskCore] Persona landed for task ${id}: ${persona.persona_id}`);
+        }
+      }
+    } catch (personaError) {
+      // Never fail task creation on persona-selector errors — already returned above.
+      console.error(`[createTaskCore] Async persona selection threw for task ${id}:`, personaError);
+    }
+  })();
+
   return { task, deduped: false };
 }
