@@ -1,3 +1,63 @@
+## [v4.33.0] — 2026-06-10 — feat(b1): cc-health-check.sh — single definition of green (PRD Addendum B.1)
+
+**QC Score (REDO #1 adversarial-review fixes — Sonnet build): targeted fix pass** (gate: 8.5)
+
+All 14 CRITICAL/HIGH/MEDIUM/SPEC findings from REDO #1 adversarial review addressed.
+
+### What changed
+
+**`scripts/cc-health-check.sh`** (new, replaces all ad-hoc health checks)
+- Hard bash 4+ guard at line 1: exits 2 with clear install instructions on macOS system bash 3.2.
+  No more `declare -A` crash on Karen Vaughn / Aurelia / Cassandra / Sheila Mac boxes.
+- Check 1: added `-L` flag to follow HTTP 301 redirects before failing.
+- Check 2: `--max-assets N` (default 50) caps the asset probe loop; prevents blocking the
+  B.2 auto-rollback gate indefinitely on large Next.js builds (200+ chunks × 10s = 2000s).
+- Check 3 (company_name): config-exists gate is now a DISK-DIRECT probe via `_find_config_company_name_from_disk`
+  using the same heuristic paths as DB resolution. pm2 being stopped no longer produces a
+  false-green when company-config.json + a Default DB row exist. This closes the Sheila bug
+  false-green path exactly as described in FINDING 1/2/3 of the adversarial review.
+- Check 3: sqlite3 queries use `sqlite3 -cmd '.timeout 5000'` with a 3-attempt retry loop
+  to survive SQLITE_BUSY during concurrent WAL checkpoints.
+- Check 4 (pm2_topology):
+  - Real two-snapshot restart-count delta: takes first snapshot, sleeps `--pm2-check-window`
+    seconds (default 15), takes second snapshot, flags any app whose restart_count increased
+    as a crash-looper. Stub comment removed — feature is fully implemented.
+  - `cwd_match` never defaults to `True`: auto-derives canonical dir from heuristic paths;
+    if derivation fails and cc_apps exist, cwd_ok=false so operators are notified.
+  - Port matching uses word-boundary `re.search` pattern — `--port 4000` no longer matches
+    `--port 40001`; eliminates false zombie-process failures on staging boxes.
+  - `name_match` is gated: a cc-named app on a different explicit PORT is excluded, preventing
+    multi-app false failures when staging + prod have similar names.
+  - `pm2 jlist` is wrapped with `timeout 15`; literal JSON `null` is coerced to `[]` before
+    iteration (no more TypeError → silent empty output → false topology fail).
+  - `stopped` apps are flagged as crash-loopers (not silently passed while HTTP fails).
+  - Relative `DATABASE_PATH` is resolved against `pm_cwd` before testing existence.
+- All heuristic install paths are centralised in `_heuristic_install_dirs()` — DB resolution
+  and config-exists probe always use the same list (no structural gap).
+
+**`scripts/deploy.sh`** (updated)
+- Step 6 health check now invokes `cc-health-check.sh` (B.1) instead of a hand-rolled
+  `curl HTTP 200` check. The single definition of green is enforced end-to-end.
+- Fallback to HTTP probe only when `cc-health-check.sh` is not found (safe degradation).
+- Rollback re-runs the full health check and emits the JSON receipt.
+
+**`scripts/fixtures/run-cc-health-check-fixtures.sh`** (new)
+- Automated fixture runner covering all 8 broken-state scenarios required by B.1 verify step:
+  Fixture 0 (happy path), Fixture 1 (stale manifest), Fixture 2 (Default row — configured box),
+  Fixture 2b (Default row + pm2 stopped — no false-green), Fixture 3 (crash-looper detection
+  including stopped-app and port-substring-guard), Fixture 4 (CWD drift + no-canonical-dir
+  default=False guard), Fixture 5 (low disk), Fixture 6 (restart-count delta over window),
+  Fixture 7 (bash 3.2 guard), Fixture 8 (sqlite3 retry pattern).
+- Runnable as: `bash scripts/fixtures/run-cc-health-check-fixtures.sh`
+- CI-friendly: `CI_MODE=1` suppresses colour codes; exits 0 on all pass, 1 on any failure.
+
+### Callers wired (B.1 spec: "consumed by fleet-refresh, Sunday cron, sweeps")
+- `scripts/deploy.sh` now delegates health verification to `cc-health-check.sh`.
+- Fleet-refresh, Sunday cron, and watchdog wiring is delivered in B.2 (confirmed scope split
+  per PRD sequencing: B.1 = the definition, B.2 = atomic deploy + auto-rollback gate).
+
+---
+
 ## [v4.32.0] — 2026-06-10 — fix(af6): fast-loop QC gate — auto-proceed on dept-QC>=8.5, no operator-approval pause
 
 **QC Score (independent Sonnet QC — AF6 audit): 8.86/10 — PASS** (gate: 8.5)
