@@ -2,7 +2,38 @@
 # cc-health-check.sh — THE single definition of "green" for a deployed
 # BlackCEO Command Center instance.
 #
-# PRD Addendum B, item B.1 (P0) — REDO #8 fixes applied
+# PRD Addendum B, item B.1 (P0) — REDO #9 fixes applied
+#
+# REDO #9 fix [P0 — false-green, unconfigured-box branch missing empty-HTML guard]:
+#   When COMPANY_CONFIG_EXISTS_BOOL=false (config not discovered), ALLOW_DEFAULT=0,
+#   DB contains a real non-Default non-empty name (e.g. 'Acme Corp'), AND all three
+#   HTML extraction methods yield empty string, the else branch at line 974-976
+#   emitted company_name.pass=true with html_name='' — no HTML side was ever verified.
+#   Spec: 'sqlite3 DB-direct AND from served HTML; must match' — no unconfigured-box
+#   exception. This is the REDO #8 mirror guard, symmetrically applied.
+#   Fix: insert between the mismatch elif and the else: an explicit guard
+#     [[ -z "$COMPANY_HTML_NAME" ]] => company_name.pass=false,
+#     detail "could not extract company name from served HTML — branding unverifiable
+#     (unconfigured box; no og:site_name, data-company, or <title> found)".
+#
+# REDO #9 fix [NON-BLOCKING — misleading detail string]:
+#   The else branch that marks company_name.pass=true in the unconfigured path
+#   printed 'Company name OK (unconfigured box — Default acceptable with --allow-default)'
+#   even when ALLOW_DEFAULT=0 and DB is not 'Default'. The parenthetical describes
+#   the --allow-default=Default use-case, not this code path.
+#   Fix: use an accurate detail: 'Company name consistent — unconfigured box, DB: <name>, HTML: <name>'.
+#
+# REDO #9 fix [NON-BLOCKING — _CC_CFGOUT temp file leak]:
+#   /tmp/_CC_CFGOUT (line 872) was created with mktemp but had no EXIT trap.
+#   The _PM2_SCRIPT temp file (line 1031) has a proper trap. Added _CC_CFGOUT to
+#   the EXIT trap for consistency and to prevent leaks on unexpected exits.
+#
+# REDO #9 fix [NON-BLOCKING — vacuous cwd_ok=true in zero-CC-apps path]:
+#   When app_count=0, the Python script emitted cwd_ok=True because no comparison
+#   was performed. Spec line 21: 'a cwd check that compared nothing may never report
+#   cwd_ok=true.' The overall verdict is still correctly false (app_count=0 → topology
+#   fails before cwd_ok is consulted), but the JSON field was wrong per spec letter.
+#   Fix: emit cwd_ok=False explicitly in the zero-CC-apps path.
 #
 # REDO #8 fix [P0 — empty-HTML silent pass, Round-3 adversarial]:
 #   When COMPANY_CONFIG_EXISTS=true AND the DB has a real non-Default name BUT all
@@ -869,10 +900,13 @@ else
     # IMPORTANT: _find_config_from_disk() sets COMPANY_CONFIG_EXISTS_BOOL as a global.
     # It MUST be called directly (not in a subshell via $()) so the variable assignment
     # propagates to the current shell. We capture stdout via a temp file instead.
+    # REDO #9 [NON-BLOCKING]: _CC_CFGOUT now has an EXIT trap (mirrors _PM2_SCRIPT pattern).
     _CC_CFGOUT=$(mktemp /tmp/cc-cfgout-XXXXXX)
+    trap 'rm -f "$_CC_CFGOUT"' EXIT
     _find_config_from_disk > "$_CC_CFGOUT"
     CONFIG_COMPANY_NAME=$(cat "$_CC_CFGOUT" 2>/dev/null || true)
     rm -f "$_CC_CFGOUT"
+    trap - EXIT
 
     _log "  DB company name:   '${COMPANY_DB_NAME}'"
     _log "  HTML company name: '${COMPANY_HTML_NAME}'"
@@ -967,13 +1001,28 @@ else
         _mark "company_name" "false" \
           "Unconfigured box has no company row in DB — cannot verify company name" \
           "\"db_name\":\"\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
-      elif [[ -n "$COMPANY_HTML_NAME" && "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
+      elif [[ -z "$COMPANY_HTML_NAME" ]]; then
+        # REDO #9 [P0 — false-green, symmetric mirror of REDO #8 configured-box guard]:
+        # Spec: 'sqlite3 DB-direct AND from served HTML; must match' — no exception for
+        # unconfigured boxes. When COMPANY_CONFIG_EXISTS_BOOL=false, ALLOW_DEFAULT=0,
+        # DB contains a real non-Default non-empty name (e.g. 'Acme Corp'), AND all three
+        # HTML extraction methods (og:site_name, data-company, <title>) yield empty string,
+        # the old else branch emitted company_name.pass=true without the HTML side ever being
+        # verified. This guard fires before the mismatch check and before the pass-through else.
+        _mark "company_name" "false" \
+          "could not extract company name from served HTML — branding unverifiable (unconfigured box; no og:site_name, data-company, or <title> found)" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"\",\"config_exists\":false${CONFIG_WARN_FIELD}"
+      elif [[ "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
         _mark "company_name" "false" \
           "Company name mismatch (unconfigured box): DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'" \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
       else
+        # REDO #9 [NON-BLOCKING — accurate detail string]:
+        # The old parenthetical '(unconfigured box — Default acceptable with --allow-default)'
+        # was contextually wrong when ALLOW_DEFAULT=0 and DB is not 'Default'.
+        # Use an accurate description of the actual condition that triggered this branch.
         _mark "company_name" "true" \
-          "Company name OK (unconfigured box — Default acceptable with --allow-default): '${COMPANY_DB_NAME:-empty}'" \
+          "Company name consistent — unconfigured box, DB: '${COMPANY_DB_NAME}', HTML: '${COMPANY_HTML_NAME}'" \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
       fi
     fi
@@ -1195,8 +1244,9 @@ for app in cc_apps:
 # This removes the vacuous-all() hole entirely: all([]) can NEVER be reached because
 #   zero cc_apps → topology already fails on app_count (not on cwd_ok).
 # If canon_dir is not set and cc_apps exist: cwd_ok=False.
-# If no cc_apps: cwd_ok=True (topology already fails on app_count; no cwd to check).
-cwd_ok = True
+# If no cc_apps: cwd_ok=False (spec line 21: a cwd check that compared nothing may never
+#   report cwd_ok=true; topology verdict is already false via app_count=0 branch).
+cwd_ok = False
 if cc_apps and canon_dir:
     cwd_ok = all(
         os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
@@ -1205,7 +1255,13 @@ if cc_apps and canon_dir:
 elif cc_apps and not canon_dir:
     cwd_ok = False
 else:
-    cwd_ok = True  # no cc_apps — topology already fails on app_count
+    # REDO #9 [NON-BLOCKING — spec line 21]:
+    # Zero cc_apps: no cwd comparison was performed.
+    # Spec: 'a cwd check that compared nothing may never report cwd_ok=true.'
+    # The overall verdict is already correctly false via the app_count=0 branch
+    # at the verdict assembly step; this ensures the JSON field also reflects
+    # that no comparison occurred rather than claiming a vacuous pass.
+    cwd_ok = False
 
 # FIX #3: emit restart counts for CC APPS ONLY (for delta computation).
 # Using all apps for delta would let unrelated apps trip the crash-loop gate.

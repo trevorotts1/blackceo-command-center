@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # run-cc-health-check-fixtures.sh — automated fixture runner for cc-health-check.sh (B.1)
 #
+# REDO #9 fixes (applied on top of REDO #8):
+#   - Fixture 2i: REDO #9 P0 — unconfigured-box empty-HTML false-green:
+#     COMPANY_CONFIG_EXISTS_BOOL=false, no --allow-default, DB='Acme Corp',
+#     server returns HTML with no og:site_name, no data-company, no <title>.
+#     Expected: company_name.pass=false, green=false, exit=1, detail contains
+#     'branding unverifiable'. This is the mandatory mirror fixture of 2h.
+#     Without this fixture, the REDO #9 regression path is invisible to CI.
+#
 # REDO #8 fixes (Round-3 adversarial, applied on top of REDO #7):
 #   - Fixture 2h: REDO #8 P0 — empty-HTML silent pass: configured box + valid non-Default
 #     DB + server serves a page with NO og:site_name, NO data-company, empty/missing
@@ -830,6 +838,116 @@ if [[ "$FX2H_HTML_NAME" == "" ]]; then
 else
   _fail "Fixture-2h: html_name='${FX2H_HTML_NAME}' — expected '' (empty) when no HTML extraction possible"
 fi
+
+_stop_server
+
+###############################################################################
+# FIXTURE 2i: REDO #9 P0 — unconfigured-box + non-Default DB + empty HTML
+#            → company_name MUST FAIL (false-green mirror of Fixture 2h)
+#
+# This is the MANDATORY fixture for REDO #9. Without it, the unconfigured-box
+# false-green path (COMPANY_CONFIG_EXISTS_BOOL=false, non-Default non-empty DB,
+# all HTML extraction methods yield empty) is not exercised by CI.
+#
+# Spec: 'sqlite3 DB-direct AND from served HTML; must match' — no unconfigured-box
+# exception to the HTML verification requirement.
+#
+# Setup:  no company-config.json exists anywhere the script can discover it
+#         (no --canonical-dir, /tmp path outside heuristic dirs),
+#         DB has a real non-Default company name ('Acme Corp'),
+#         server serves a barebones page with NO og:site_name, NO data-company,
+#         NO <title> — the exact Sheila-class partial-remediation scenario where
+#         the DB was seeded but HTML branding was never surfaced.
+# Expected: green=false, company_name.pass=false, exit=1,
+#           detail contains 'branding unverifiable'.
+###############################################################################
+printf '\n=== FIXTURE 2i: REDO#9 P0 — unconfigured-box + non-Default DB + empty HTML → company_name FAIL ===\n'
+
+FX2I_DIR="${WORK_DIR}/fx2i"
+mkdir -p "${FX2I_DIR}/_next/static/bld2i/pages" \
+         "${FX2I_DIR}/_next/static/chunks" \
+         "${FX2I_DIR}/api"
+FX2I_PORT=$(_next_port)
+
+echo "body{}" > "${FX2I_DIR}/_next/static/bld2i/pages/_app.css"
+echo "var x=1;" > "${FX2I_DIR}/_next/static/chunks/main.js"
+echo "var m={};" > "${FX2I_DIR}/_next/static/bld2i/_buildManifest.js"
+
+# Barebones HTML: NO og:site_name, NO data-company, NO <title>
+# Mimics a custom layout or broken template that does not inject branding.
+cat > "${FX2I_DIR}/index.html" << 'FX2IHTML'
+<!DOCTYPE html>
+<html>
+<head>
+</head>
+<body>
+<script id="__NEXT_DATA__" type="application/json">{"props":{},"buildId":"bld2i"}</script>
+</body>
+</html>
+FX2IHTML
+
+echo "ok" > "${FX2I_DIR}/api/health"
+# CRITICAL: do NOT create a config/company-config.json — COMPANY_CONFIG_EXISTS_BOOL must be false.
+# DB is seeded with a real non-Default name (partial remediation: DB fixed, HTML not).
+_create_db "${FX2I_DIR}/mission-control.db" "Acme Corp"
+
+_start_server "$FX2I_PORT" "$FX2I_DIR"
+
+FX2I_OUTPUT=""
+FX2I_EXIT=0
+# Pass --canonical-dir pointing to FX2I_DIR which has NO config/company-config.json.
+# This overrides pm2/heuristic discovery (canonical-dir is priority 1) and guarantees
+# COMPANY_CONFIG_EXISTS_BOOL=false even on hosts that have a real CC install at a
+# heuristic path. Without --canonical-dir, heuristic discovery might find a config on
+# the host machine and take the configured-box branch instead of the unconfigured-box
+# branch, defeating the purpose of this fixture.
+# Do NOT pass --allow-default (tests the default=0 path).
+FX2I_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port "$FX2I_PORT" \
+  --db-path "${FX2I_DIR}/mission-control.db" \
+  --canonical-dir "${FX2I_DIR}" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --max-assets 0 \
+  --json-only 2>/dev/null) || FX2I_EXIT=$?
+
+# P0 core assertion: unconfigured box + non-Default DB + empty HTML MUST be NOT green
+_assert_check_pass "Fixture-2i [P0 MANDATORY]: unconfigured-box + DB='Acme Corp' + empty HTML → company_name.pass=false" "company_name" "false" "$FX2I_OUTPUT"
+
+FX2I_DETAIL=$(printf '%s' "$FX2I_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('detail',''))" \
+  2>/dev/null || echo "")
+if [[ "$FX2I_DETAIL" == *"branding unverifiable"* || "$FX2I_DETAIL" == *"could not extract"* ]]; then
+  _pass "Fixture-2i [P0]: detail contains 'branding unverifiable'/'could not extract': '${FX2I_DETAIL}'"
+else
+  _fail "Fixture-2i [P0]: detail='${FX2I_DETAIL}' — expected 'branding unverifiable' or 'could not extract' (REDO #9 guard message not present)"
+fi
+
+# config_exists must be false (--canonical-dir points to FX2I_DIR which has no
+# config/company-config.json — this forces COMPANY_CONFIG_EXISTS_BOOL=false,
+# guaranteeing the unconfigured-box branch is exercised regardless of what
+# heuristic dirs or pm2 pm_cwds exist on the host machine)
+FX2I_CONFIG_EXISTS=$(printf '%s' "$FX2I_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('config_exists') else 'false')" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2I_CONFIG_EXISTS" == "false" ]]; then
+  _pass "Fixture-2i: config_exists=false (--canonical-dir with no config/ subdir forces unconfigured-box path)"
+else
+  _fail "Fixture-2i: config_exists=${FX2I_CONFIG_EXISTS} — expected false (no company-config.json at --canonical-dir; REDO #9 unconfigured-box path not exercised)"
+fi
+
+# html_name must be empty (no extraction possible)
+FX2I_HTML_NAME=$(printf '%s' "$FX2I_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(repr(d.get('checks',{}).get('company_name',{}).get('html_name','NOTSET')))" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2I_HTML_NAME" == "''" ]]; then
+  _pass "Fixture-2i: html_name='' in JSON (empty extraction correctly reflected)"
+else
+  _fail "Fixture-2i: html_name=${FX2I_HTML_NAME} — expected '' (empty) when no HTML extraction possible"
+fi
+
+# The overall verdict must also be NOT green
+_assert_green "Fixture-2i: unconfigured-box + non-Default DB + empty HTML → overall NOT green" 1 "false" "$FX2I_OUTPUT" "$FX2I_EXIT"
 
 _stop_server
 
