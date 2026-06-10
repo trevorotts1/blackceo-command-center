@@ -105,6 +105,24 @@ check "3.4" "agents/_shared/USER.md is a real file" \
 check "3.5" "agents has exactly 69 symlinks (23 agents × 3 shared files)" \
   '[ "$(find agents -type l 2>/dev/null | wc -l | tr -d " ")" = "69" ]' \
   "run scripts/migrate-agents-to-zhc.py"
+# 3.5b: companion cardinality guard — adding a new agent dir with 0 symlinks
+# leaves the count at 69, so 3.5 passes while the new dir is misconfigured.
+check "3.5b" "exactly 23 non-_shared agent dirs (cardinality guard)" \
+  '[ "$(find agents -mindepth 1 -maxdepth 1 -type d ! -name "_shared" 2>/dev/null | wc -l | tr -d " ")" = "23" ]' \
+  "run scripts/migrate-agents-to-zhc.py to create the missing symlinks"
+# 3.5c: per-agent check that AGENTS.md, TOOLS.md, USER.md are symlinks (not copies).
+# A copied regular file satisfies find -type l count via cancellation but diverges
+# from _shared/ going forward.
+check "3.5c" "all agent AGENTS.md files are symlinks (not regular-file copies)" \
+  '! find agents -mindepth 2 -maxdepth 2 -name "AGENTS.md" ! -type l 2>/dev/null | grep -q .'
+check "3.5d" "all agent TOOLS.md files are symlinks (not regular-file copies)" \
+  '! find agents -mindepth 2 -maxdepth 2 -name "TOOLS.md" ! -type l 2>/dev/null | grep -q .'
+check "3.5e" "all agent USER.md files are symlinks (not regular-file copies)" \
+  '! find agents -mindepth 2 -maxdepth 2 -name "USER.md" ! -type l 2>/dev/null | grep -q .'
+# 3.5f: dangling symlink guard — find -type l matches dangling symlinks, so a
+# deleted _shared/ would yield count 69 while every symlink is broken.
+check "3.5f" "no dangling symlinks under agents/ (all symlinks resolve to a readable file)" \
+  'find agents -mindepth 2 -maxdepth 2 \( -name "AGENTS.md" -o -name "TOOLS.md" -o -name "USER.md" \) -type l | while read f; do [ -r "$f" ] || exit 1; done'
 check "3.6" "every non-_shared agent dir has IDENTITY.md" \
   'find agents -mindepth 1 -maxdepth 1 -type d ! -name "_shared" | while read d; do [ -f "$d/IDENTITY.md" ] || exit 1; done'
 check "3.7" "every agent dir has HEARTBEAT.md" \

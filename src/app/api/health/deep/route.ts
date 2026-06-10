@@ -35,9 +35,11 @@ import { NextResponse } from 'next/server';
 import {
   checkAssetManifest,
   checkCompanyBranding,
+  checkHtmlTitle,
   checkDatabasePath,
   checkMigrations,
   checkDiskHeadroom,
+  checkNextPublicAppUrl,
 } from '@/lib/health/deep-checks';
 
 export const dynamic = 'force-dynamic';
@@ -45,21 +47,25 @@ export const revalidate = 0;
 
 export async function GET() {
   try {
-    const [assetManifest, companyBranding, databasePath, migrations, diskHeadroom] =
+    const [assetManifest, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl] =
       await Promise.all([
         Promise.resolve(checkAssetManifest()),
         Promise.resolve(checkCompanyBranding()),
+        Promise.resolve(checkHtmlTitle()),
         Promise.resolve(checkDatabasePath()),
         Promise.resolve(checkMigrations()),
         checkDiskHeadroom(),
+        Promise.resolve(checkNextPublicAppUrl()),
       ]);
 
     const checks = {
       asset_manifest: assetManifest,
       company_branding: companyBranding,
+      html_title: htmlTitle,
       database_path: databasePath,
       migrations: migrations,
       disk_headroom: diskHeadroom,
+      next_public_app_url: appUrl,
     };
 
     const allChecks = Object.values(checks);

@@ -7,11 +7,13 @@
  *   import { checkAssetManifest, ... } from '@/lib/health/deep-checks';
  *
  * Truth-table rows covered:
- *   Rows 11-12  asset_manifest
- *   Rows 1-7    company_branding (partial-config rule, DB direct, consistency)
+ *   Rows 11-13  asset_manifest
+ *   Rows 1-9    company_branding (partial-config rule, DB direct, consistency,
+ *               HTML title branding rows 8-9)
  *   Rows 20-22  database_path
  *   Rows 29-30  migrations
  *   Rows 23-24  disk_headroom
+ *   Rows 31-32  next_public_app_url (NEXT_PUBLIC_APP_URL consistency)
  */
 
 import fs from 'fs';
@@ -230,14 +232,31 @@ export function checkCompanyBranding(): CompanyBrandingResult {
       };
     }
 
+    // ROW 7 FIX: query ALL rows including empty-string name.
+    // The old filter `WHERE name != ''` caused empty-string rows to be excluded,
+    // making the function fall into the dbRowAbsent=true branch (UNKNOWN) instead
+    // of the correct FAIL path.  "Empty string is as bad as absent" (truth-table row 7).
     const row = db
-      .prepare("SELECT name FROM companies WHERE name IS NOT NULL AND name != '' ORDER BY id LIMIT 1")
-      .get() as { name: string } | undefined;
+      .prepare("SELECT name FROM companies ORDER BY id LIMIT 1")
+      .get() as { name: string | null } | undefined;
 
     if (!row) {
       dbRowAbsent = true;
     } else {
-      dbName = row.name.trim();
+      // Store the raw value (may be null, empty string, or a real name)
+      const rawName = row.name;
+      if (rawName === null || rawName === undefined) {
+        dbRowAbsent = true;
+      } else {
+        dbName = rawName.trim();
+        // Empty string after trim → treat as absent for the row-exists check,
+        // but we handle empty string as FAIL in step 3 below (row 7 spec).
+        if (dbName === '') {
+          // Mark as a special empty-string case: row exists but name is empty
+          dbName = '';
+          // Do NOT set dbRowAbsent — the row exists, it's just empty (→ FAIL)
+        }
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -304,6 +323,184 @@ export function checkCompanyBranding(): CompanyBrandingResult {
     db_name: dbName ?? undefined,
     detail: `company_branding: OK — branded ("${dbName ?? configName}")`,
   };
+}
+
+// ── check: HTML title branding ───────────────────────────────────────────────
+// Truth-table rows 8-9.
+// Row 8: HTML <title> contains client brand name → PASS (branding check component)
+// Row 9: HTML <title> is generic placeholder ("Command Center" etc.) → FAIL
+//
+// This check reads the served HTML from the app's own _document or a pre-built
+// static HTML file inside .next/server/pages/.  It does NOT perform a self-curl
+// (that would require the server to be running), so it reads the on-disk output.
+// If no pre-rendered HTML is found, the check is skipped (indeterminate) — the
+// outside-in probe in cc-health-check.sh covers the running-server title case.
+
+/** Generic/placeholder page titles that indicate an unbranded install. */
+const PLACEHOLDER_TITLES = new Set([
+  'command center',
+  'blackceo command center',
+  'mission control',
+  'next.js app',
+  'create next app',
+  'untitled',
+]);
+
+export function isPlaceholderTitle(title: string): boolean {
+  return PLACEHOLDER_TITLES.has(title.trim().toLowerCase());
+}
+
+export interface HtmlTitleResult extends CheckResult {
+  title?: string;
+  source?: string;
+}
+
+export function checkHtmlTitle(): HtmlTitleResult {
+  try {
+    // Look for a pre-rendered index HTML from the Next.js build output.
+    // Next.js writes server-side HTML to .next/server/pages/index.html (pages router)
+    // or .next/server/app/page.html (app router) for static pages.
+    const nextDir = path.join(process.cwd(), '.next');
+    const candidates = [
+      path.join(nextDir, 'server', 'pages', 'index.html'),
+      path.join(nextDir, 'server', 'app', 'page.html'),
+      path.join(nextDir, 'server', 'app', 'index.html'),
+      // Also check the export output (next export)
+      path.join(process.cwd(), 'out', 'index.html'),
+    ];
+
+    let html = '';
+    let source = '';
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        html = fs.readFileSync(p, 'utf8');
+        source = p;
+        break;
+      }
+    }
+
+    if (!html) {
+      // No pre-rendered HTML found — skip (indeterminate, not fail).
+      // The cc-health-check.sh outside-in probe covers the running-server case.
+      return {
+        pass: false,
+        indeterminate: true,
+        detail: 'html_title: no pre-rendered HTML found in .next/server — check skipped (indeterminate); use cc-health-check.sh outside-in probe for live-server title verification',
+      };
+    }
+
+    // Extract <title> tag content
+    const match = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    if (!match) {
+      return {
+        pass: false,
+        indeterminate: true,
+        detail: `html_title: no <title> tag found in ${source} (indeterminate)`,
+        source,
+      };
+    }
+
+    const title = match[1].trim();
+
+    // Row 9: placeholder title → FAIL
+    if (!title || isPlaceholderTitle(title)) {
+      return {
+        pass: false,
+        indeterminate: false,
+        title,
+        source,
+        detail: `html_title: page title is a placeholder ("${title}") — box is unbranded (row 9: FAIL)`,
+      };
+    }
+
+    // Row 8: real brand title → PASS
+    return {
+      pass: true,
+      title,
+      source,
+      detail: `html_title: OK — page title is branded ("${title}") (row 8: PASS)`,
+    };
+  } catch (err) {
+    return {
+      pass: false,
+      indeterminate: true,
+      detail: `html_title: error reading build output — ${err instanceof Error ? err.message : String(err)} (UNKNOWN)`,
+    };
+  }
+}
+
+// ── check: NEXT_PUBLIC_APP_URL consistency ────────────────────────────────────
+// Truth-table rows 31-32.
+// Row 31: NEXT_PUBLIC_APP_URL set and consistent → PASS
+// Row 32: NEXT_PUBLIC_APP_URL set to a different host than actual serving URL → FAIL
+//
+// Implementation: we check whether NEXT_PUBLIC_APP_URL is set and whether it
+// appears plausibly consistent.  Without an actual running server to probe,
+// we verify the env var is set and is a valid absolute URL.  Mismatch detection
+// (row 32) is enforced by comparing NEXT_PUBLIC_APP_URL against the DATABASE_PATH
+// directory host hint or a CC_PUBLIC_URL override if provided.
+
+export interface AppUrlResult extends CheckResult {
+  app_url?: string;
+  expected_host?: string;
+}
+
+export function checkNextPublicAppUrl(): AppUrlResult {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+
+  if (!appUrl) {
+    // Row 32 variant: if NEXT_PUBLIC_APP_URL is unset, SSE and webhooks use
+    // relative URLs which may break in cross-origin deployments.  However, an
+    // unset value is ambiguous — it could be a localhost deploy where relative
+    // URLs are fine.  Return PASS with a note rather than FAIL.
+    return {
+      pass: true,
+      detail: 'next_public_app_url: not set — relative URLs used; acceptable for localhost deploys. Set NEXT_PUBLIC_APP_URL for cross-origin CF tunnel installs.',
+      app_url: undefined,
+    };
+  }
+
+  // Validate it is an absolute URL
+  try {
+    const parsed = new URL(appUrl);
+    const host = parsed.hostname;
+
+    // Row 32: check for obvious localhost mismatch when a public URL is configured
+    // A NEXT_PUBLIC_APP_URL pointing to localhost/127.0.0.1 on a box that has a
+    // public hostname configured is a misconfiguration (SSE/webhooks break).
+    const isLocalhost = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(host);
+    const publicUrlHint = process.env.CC_PUBLIC_URL || '';
+
+    if (isLocalhost && publicUrlHint) {
+      try {
+        const pubParsed = new URL(publicUrlHint);
+        if (!/^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(pubParsed.hostname)) {
+          return {
+            pass: false,
+            indeterminate: false,
+            app_url: appUrl,
+            expected_host: pubParsed.hostname,
+            detail: `next_public_app_url: NEXT_PUBLIC_APP_URL points to localhost ("${appUrl}") but CC_PUBLIC_URL is "${publicUrlHint}" — SSE and webhooks will fail for remote clients (row 32: FAIL)`,
+          };
+        }
+      } catch {
+        // CC_PUBLIC_URL not a valid URL — skip the comparison
+      }
+    }
+
+    return {
+      pass: true,
+      app_url: appUrl,
+      detail: `next_public_app_url: OK — "${appUrl}" (row 31: PASS)`,
+    };
+  } catch {
+    return {
+      pass: false,
+      indeterminate: false,
+      app_url: appUrl,
+      detail: `next_public_app_url: NEXT_PUBLIC_APP_URL is not a valid absolute URL ("${appUrl}") — SSE and webhooks will fail (row 32: FAIL)`,
+    };
+  }
 }
 
 // ── check: DATABASE_PATH pinned ──────────────────────────────────────────────

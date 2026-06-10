@@ -37,7 +37,7 @@ that returns FAIL on an ambiguous state gives false-positive HALT decisions.
 | 4 | DB `companies` row = Default row only (name="Command Center" / "Default") | FAIL | branding: company is unbranded placeholder | — | Addendum B findings; Default row blocks wave gate |
 | 5 | DB `companies` row branded (real client name, non-placeholder) | PASS | — | — | Happy path |
 | 6 | DB `companies` row absent entirely (fresh install, never onboarded) | UNKNOWN | branding: no company row | Must NOT return FAIL | Fresh install is not a broken install; B.1 must not block bootstrapping |
-| 7 | DB `companies` row present but `name` column empty string | FAIL | branding: company name is empty | — | Empty string is as bad as absent |
+| 7 | DB `companies` row present but `name` column empty string | FAIL | branding: company name is empty | — | Empty string is as bad as absent. IMPLEMENTATION NOTE: query must select ALL rows (`SELECT name FROM companies ORDER BY id LIMIT 1`) without filtering on `name != ''`; empty-string detection is done in application code after retrieval. |
 | 8 | HTML page `<title>` extractable and contains client brand name | PASS (branding check component) | — | — | B.1 branding verification |
 | 9 | HTML page `<title>` is "Command Center" / generic placeholder | FAIL | branding: HTML title is unbranded | — | Default React title = not deployed for client |
 | 10 | HTML page not reachable (server not up yet) | UNKNOWN | connectivity: server unreachable | Must NOT return FAIL | Server may be starting; B.2 deploy calls B.1 before pm2 is fully up |
@@ -63,6 +63,7 @@ that returns FAIL on an ambiguous state gives false-positive HALT decisions.
 | 30 | Migrations behind — at least one pending migration not yet applied | FAIL | db: pending migrations | — | Stale schema causes API 500s on new columns |
 | 31 | `NEXT_PUBLIC_APP_URL` set and matches actual serving URL | PASS | — | — | Happy path URL config |
 | 32 | `NEXT_PUBLIC_APP_URL` set to a different host than the actual CF tunnel URL | FAIL | config: NEXT_PUBLIC_APP_URL mismatch — SSE and webhooks will fail | — | URL mismatch causes SSE cross-origin failures and broken webhook callbacks |
+| 33 | CF Access policy misconfigured — public URL returns HTTP 200 + CF Access challenge HTML (not a redirect, not the real app) | UNKNOWN | cf: CF Access challenge intercepting public requests — local probe passes, clients blocked | Must NOT return FAIL; local probe at 127.0.0.1:PORT bypasses CF Access and sees the real app (correct), so the local-probe PASS is accurate for the local check; the public-URL probe detects the CF challenge body and returns UNKNOWN | Distinct from row 26 (redirect) and row 27 (tunnel absent). CF Access returns 200 + HTML challenge, not a 3xx. Only detectable via public-URL probe (CC_PUBLIC_URL). If CC_PUBLIC_URL is unset, this scenario is a documented gap (see row 27 handling). |
 
 ---
 
