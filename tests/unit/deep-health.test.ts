@@ -155,7 +155,36 @@ describe('asset_manifest', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('company_branding — config file rules', () => {
-  // Row 1+6: config absent + no DB row → UNKNOWN
+  // Row 1b (Round-2 fix #3): config absent + DB has real branded name → PASS.
+  // This is the API-onboarded install path: no config file is present but the
+  // company was seeded directly via the API.  The old Row 1 specification said
+  // "config absent → FAIL" which was wrong — the implementation already handled
+  // this correctly but there was no vitest proof for the passing path.
+  it('row 1b: config absent + DB has real branded name (API-onboarded) → pass=true', async () => {
+    // No config file written — tmpDir has no config/company-config.json
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Karen Vaughn Enterprises' };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/onboarded via API/i);
+    expect((result as { config_exists?: boolean }).config_exists).toBe(false);
+  });
+
+  // Row 1 (narrowed): config absent + DB empty/absent → UNKNOWN (not FAIL).
   // FIXED: mock getDb so real migration 064 does not insert 'Default' row
   it('row 1+6: config absent + no DB row → indeterminate=true (UNKNOWN, not FAIL)', async () => {
     vi.doMock('@/lib/db', () => ({

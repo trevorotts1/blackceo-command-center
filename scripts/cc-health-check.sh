@@ -39,6 +39,13 @@ if [[ "$HTTP_CODE" == "0" ]]; then
   printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"server unreachable"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   exit 3
 fi
+# FIX (Issue 2): 5xx from /api/health/deep → exit 3 UNKNOWN, not exit 1.
+# route.ts comment mandates: 500 = internal error, treat as indeterminate by caller.
+if [[ "$HTTP_CODE" -ge 500 && "$HTTP_CODE" -le 599 ]] 2>/dev/null; then
+  log "UNKNOWN: /api/health/deep returned HTTP ${HTTP_CODE} (server error — indeterminate)"
+  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"HTTP %s (5xx indeterminate)"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HTTP_CODE"
+  exit 3
+fi
 if [[ "$HTTP_CODE" != "200" ]]; then
   log "FAIL: /api/health/deep returned HTTP ${HTTP_CODE}"
   printf '{"pass":false,"indeterminate":false,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"HTTP %s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HTTP_CODE"
@@ -60,55 +67,28 @@ elif ! command -v pm2 &>/dev/null || ! command -v python3 &>/dev/null; then
   log "WARN: pm2 or python3 unavailable — topology check skipped"
 else
   PM2_RAW=$(pm2 jlist 2>/dev/null || echo "[]")
-  PM2_JSON=$(printf '%s\n' "$PM2_RAW" | python3 -s << PYEOF
-import sys, json, os, re
-port_str = "$PORT"; canon_dir = "$CANONICAL_DIR"
-def ev(env, key):
-    for layer in ('env_data','env'):
-        e=env.get(layer) or {}
-        if isinstance(e,dict):
-            v=e.get(key) or e.get(key.lower())
-            if v: return str(v)
-    v=env.get(key) or env.get(key.lower()); return str(v) if v else ''
-def pm(a,p):
-    env=a.get('pm2_env') or {}
-    if ev(env,'PORT')==p: return True
-    args=env.get('args') or ''
-    if isinstance(args,list): args=' '.join(str(x) for x in args)
-    return bool(re.search(r'(?:--port|-p)\s+'+re.escape(p)+r'(?!\d)',str(args)))
-def nm(a,p):
-    env=a.get('pm2_env') or {}
-    name=(env.get('name') or a.get('name') or '').lower()
-    if not any(kw in name for kw in ('mission-control','command-center','blackceo')): return False
-    pe=ev(env,'PORT'); return not (pe and pe!=p)
-def gcwd(a):
-    env=a.get('pm2_env') or {}; return env.get('pm_cwd') or env.get('cwd') or ''
-try:
-    apps=json.loads(sys.stdin.read()) or []
-    cc=[a for a in apps if pm(a,port_str) or nm(a,port_str)]
-    crash=[]
-    for a in cc:
-        env=a.get('pm2_env') or {}; st=env.get('status') or ''
-        if st in ('errored','stopped'): crash.append({'name':env.get('name') or 'unknown','reason':f'status={st}'})
-    db_set=any(ev(a.get('pm2_env') or {},'DATABASE_PATH') for a in cc)
-    null_c=[a for a in cc if not gcwd(a)]
-    if null_c: cwd_ok=False
-    elif cc and canon_dir: cwd_ok=all(os.path.normpath(gcwd(a))==os.path.normpath(canon_dir) for a in cc)
-    else: cwd_ok=bool(cc)
-    print(json.dumps({'app_count':len(cc),'crash_loopers':crash,'db_path_set':db_set,'cwd_ok':cwd_ok,'null_cwd_count':len(null_c)}))
-except Exception as e:
-    print(json.dumps({'error':str(e),'app_count':0,'crash_loopers':[],'db_path_set':False,'cwd_ok':False,'null_cwd_count':0}))
-PYEOF
-)
+  # Analysis extracted to scripts/pm2-analyze-cc.py for testability (vitest
+  # tests in tests/unit/cc-probe-pm2.test.ts exercise the Python logic directly
+  # using pm2 jlist fixture JSON files from tests/fixtures/pm2-stubs/).
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  PM2_JSON=$(printf '%s\n' "$PM2_RAW" | python3 -s "$SCRIPT_DIR/pm2-analyze-cc.py" \
+    --port "$PORT" ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} 2>/dev/null \
+    || echo '{"error":"pm2-analyze-cc.py failed","app_count":0,"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"null_cwd_count":0}')
 
   PM2_COUNT=$(printf '%s' "$PM2_JSON" | py_field "json.load(sys.stdin).get('app_count',0)" 0)
   PM2_CRASH=$(printf '%s' "$PM2_JSON" | py_field "cl=json.load(sys.stdin).get('crash_loopers',[]); '[]' if not cl else json.dumps(cl)" "[]")
   NULL_CWD=$(printf '%s' "$PM2_JSON"  | py_field "json.load(sys.stdin).get('null_cwd_count',0)" 0)
+  # FIX (Issue 1): also extract cwd_ok — null-cwd is caught above, but a wrong-but-
+  # non-null cwd (app running from wrong dir with --canonical-dir set) requires its
+  # own FAIL branch.  Without this, cwd_ok=false (from the Python block) is computed
+  # but never acted on, so a wrong-cwd app exits 0 GREEN.
+  CWD_OK=$(printf '%s' "$PM2_JSON"    | py_field "'true' if json.load(sys.stdin).get('cwd_ok') else 'false'" "false")
 
   if   [[ "$PM2_COUNT" -eq 0 ]];       then log "FAIL: no pm2 CC app on port ${PORT}"; PM2_PASS="fail"
   elif [[ "$PM2_COUNT" -gt 1 ]];       then log "FAIL: ${PM2_COUNT} CC apps (zombie)"; PM2_PASS="fail"
   elif [[ "$PM2_CRASH" != "[]" ]];     then log "FAIL: crash-looping CC app(s)";       PM2_PASS="fail"
   elif [[ "$NULL_CWD"  -gt 0 ]];       then log "FAIL: CC app has null cwd (drift)";   PM2_PASS="fail"
+  elif [[ "$CWD_OK"    != "true" ]];   then log "FAIL: CC app cwd mismatch (wrong dir)"; PM2_PASS="fail"
   else log "pm2 topology: PASS"; PM2_PASS="pass"; fi
 fi
 

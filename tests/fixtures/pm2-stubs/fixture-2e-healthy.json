@@ -1,0 +1,12 @@
+[
+  {
+    "name": "mission-control",
+    "pm2_env": {
+      "name": "mission-control",
+      "status": "online",
+      "pm_cwd": "/home/user/mission-control",
+      "PORT": "4000",
+      "DATABASE_PATH": "/home/user/mission-control/mission-control.db"
+    }
+  }
+]

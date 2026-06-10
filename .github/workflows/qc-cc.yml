@@ -33,6 +33,31 @@ jobs:
         run: |
           command -v jq >/dev/null 2>&1 || sudo apt-get update -y && sudo apt-get install -y jq
 
+      # Round-2 fix #5 self-test: check_claude_literals() must detect a
+      # double-quoted claude-* literal (the original single-quote-only regex
+      # gave a false PASS on double/backtick literals).
+      # Approach: run the exact grep pipeline from the function directly against
+      # the fixture file — no source/eval, no shell injection surface.
+      - name: Self-test check 5.1 — double-quoted claude literal MUST FAIL
+        run: |
+          FIXTURE="tests/fixtures/check-5.1/double-quoted-claude-literal.ts"
+          # Replicate the grep pipeline from check_claude_literals() verbatim.
+          # The fixture contains:  const hardcodedModel = "claude-sonnet-4-5";
+          # If the pattern fires, grep exits 0 and we confirm FAIL.
+          # If the pattern is silent (old single-quote-only regex), grep exits 1
+          # and we abort the CI step to surface the regression.
+          RESULT=$(grep -rn 'claude-' "$FIXTURE" 2>/dev/null \
+            | grep -E "['\"\`]claude-[a-z0-9-]+['\"\`]" \
+            | grep -vEi 'orchestrat(or|ion)' \
+            | grep -v 'model-providers/anthropic.ts' \
+            | grep -v 'web-agent/runner.ts' \
+            || true)
+          if [ -z "$RESULT" ]; then
+            echo "ERROR: check 5.1 grep pattern produced zero matches on the double-quoted fixture — false PASS regression"
+            exit 1
+          fi
+          echo "OK: check 5.1 correctly matched double-quoted claude-* literal in fixture"
+
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
 

@@ -31,7 +31,8 @@ that returns FAIL on an ambiguous state gives false-positive HALT decisions.
 
 | # | State | Expected overall verdict | Expected failing check | Must NOT cause FAIL | Source |
 |---|-------|--------------------------|----------------------|---------------------|--------|
-| 1 | `config/company-config.json` absent (no file at all) | FAIL | company-config: file missing | — | PR #78 initial spec; B.1 guidance §5.2 |
+| 1 | `config/company-config.json` absent AND DB `companies` row is empty/placeholder/absent | FAIL | company-config: file missing AND no branded DB row | — | NARROWED from original Row 1 (Round-2 fix #3): original "config absent → FAIL" was a dead-letter — the implementation correctly passes when the DB has a real branded name (Row 1b). Row 1 now only fires when BOTH config is absent AND DB is un-branded. |
+| 1b | `config/company-config.json` absent AND DB `companies` row has a real branded name (API-onboarded install) | PASS | — | Must NOT FAIL just because no config file | Round-2 fix #3: API-onboarded installs are valid; config file absence alone is not misconfigured. The deep-checks.ts code path at the "config absent + branded DB" branch implements this correctly. |
 | 2 | `config/company-config.json` present but empty (`{}`) | FAIL | company-config: all required keys absent | — | Partial-config rule (guidance §5.2): empty ≠ valid |
 | 3 | `config/company-config.json` present with all required keys populated | PASS | — | — | Happy path |
 | 4 | DB `companies` row = Default row only (name="Command Center" / "Default") | FAIL | branding: company is unbranded placeholder | — | Addendum B findings; Default row blocks wave gate |
@@ -46,7 +47,8 @@ that returns FAIL on an ambiguous state gives false-positive HALT decisions.
 | 13 | Asset manifest fresh — built within the last 24h (`mtime` check) | PASS | — | Manifest age alone does not FAIL; only missing assets fail | An old but complete build is valid |
 | 14 | `pm2 list` shows CC app process running, correct cwd, status=online | PASS | — | — | Happy path pm2 state |
 | 15 | `pm2 list` shows CC app in `errored` or `stopped` state (zombie) | FAIL | pm2: CC app not running | — | Zombie pm2 incident (B.1 findings) |
-| 16 | `pm2 list` shows CC app running but with wrong/null `cwd` | FAIL | pm2: cwd drift — process not started from CC root | — | cwd-drift incident: pm2 process running from wrong dir produces 404s |
+| 16a | `pm2 list` shows CC app running but `pm_cwd` is null/empty | FAIL | pm2: null cwd — cwd not set in pm2_env (always wrong) | — | null cwd = pm2 lost track of the working directory |
+| 16b | `pm2 list` shows CC app running, `pm_cwd` is non-null, but does NOT match `--canonical-dir` | FAIL | pm2: wrong cwd — app started from wrong directory | — | Round-2 fix #1: previous code only checked `null_cwd_count`, never checked `cwd_ok=false`. A wrong-but-non-null cwd with --canonical-dir set exits 0 GREEN in the old code. Fix: extract `cwd_ok` and add `elif cwd_ok != true → FAIL`. |
 | 17 | `pm2 list` shows CC app running with correct cwd (pinned) | PASS | — | — | cwd-pinned happy path |
 | 18 | `pm2 list` shows zero apps (pm2 never started) | FAIL | pm2: no processes managed by pm2 | — | Clean-but-unstarted install is still broken for clients |
 | 19 | `pm2 list` shows a non-CC app crash-looping (e.g. an openclaw daemon) | PASS | — | Must NOT fail just because another app is errored | B.1 scope is CC only; other-app failures are noise |
@@ -59,6 +61,7 @@ that returns FAIL on an ambiguous state gives false-positive HALT decisions.
 | 26 | Cloudflare tunnel active but returns 301/302 redirect (CF misconfigured) | FAIL | cf: redirect loop — public URL redirects instead of serving app | — | CF-redirect incident; redirect means the tunnel is up but routed wrong |
 | 27 | Cloudflare tunnel absent / CF daemon not running | UNKNOWN | cf: tunnel unreachable | Must NOT return FAIL | Tunnel may be intentionally disabled (direct-IP install); absence alone is not a break |
 | 28 | SQLite DB locked (`SQLITE_BUSY` on test query) | UNKNOWN | db: sqlite locked — cannot read | Must NOT return FAIL | Transient lock during heavy write; not a broken install. Guidance: "sqlite locked (UNKNOWN not fail)" |
+| 28b | `/api/health/deep` returns HTTP 5xx (route crashed before producing JSON) | UNKNOWN | probe: HTTP 5xx from deep endpoint | Must NOT return FAIL | Round-2 fix #2: route.ts comment mandates "500 = internal error, treat as indeterminate by caller". Old code exited 1 RED on any non-200. Fix: 5xx branch exits 3 UNKNOWN. |
 | 29 | Migrations current — `db_version` / `migrations` table shows all migrations applied | PASS | — | — | Happy path migrations |
 | 30 | Migrations behind — at least one pending migration not yet applied | FAIL | db: pending migrations | — | Stale schema causes API 500s on new columns |
 | 31 | `NEXT_PUBLIC_APP_URL` set and matches actual serving URL | PASS | — | — | Happy path URL config |
@@ -99,5 +102,5 @@ the duck ran on Sheila's box while the health check was passing a wrong verdict.
 
 ---
 
-*Row count: 32 enumerated rows + 3 TODO rows.*
-*Last updated: 2026-06-10. Owner: B.1 PR (#78) writer.*
+*Row count: 35 enumerated rows (including 1b, 16a, 16b, 28b added in Round-2) + 3 TODO rows.*
+*Last updated: 2026-06-10. Round-2 row-level fixes: 1 (narrowed), 1b (new), 16 (split into 16a/16b), 28b (5xx UNKNOWN). Owner: B.1 PR (#78+Round-2) writer.*
