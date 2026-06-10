@@ -18,7 +18,7 @@
  *   1. LLM-backed (primary): uses OPENAI_API_KEY / GOOGLE_API_KEY to call the
  *      configured model and score the work against success_criteria.
  *      Model selection: dept QC agent's model field → QC_SCORER_MODEL env →
- *      TIEBREAK_MODEL env → gpt-4o-mini (OpenAI) or gemini-flash (Google).
+ *      TIEBREAK_MODEL env → gpt-4o-mini (OpenAI) or gemini-2.5-flash (Google).
  *   2. Heuristic fallback (no API key / LLM error): structural checks on the
  *      deliverable meta (description non-empty, SOP assigned, persona assigned,
  *      title non-trivial). Returns a conservative score in [6.0, 8.0].
@@ -202,7 +202,11 @@ async function llmScoreViaOpenAI(
       }),
     });
 
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => resp.statusText);
+      console.warn(`[QCScorer] OpenAI API error ${resp.status}: ${errText}`);
+      return null;
+    }
 
     const data = (await resp.json()) as {
       choices?: { message?: { content?: string } }[];
@@ -244,7 +248,7 @@ async function llmScoreViaGoogle(
   modelOverride?: string | null,
 ): Promise<QCResult | null> {
   try {
-    const model = modelOverride || process.env.QC_SCORER_MODEL || 'gemini-2.0-flash';
+    const model = modelOverride || process.env.QC_SCORER_MODEL || 'gemini-2.5-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const resp = await fetch(url, {
       method: 'POST',
@@ -255,7 +259,11 @@ async function llmScoreViaGoogle(
       }),
     });
 
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => resp.statusText);
+      console.warn(`[QCScorer] Google Gemini API error ${resp.status} (model: ${model}): ${errText}`);
+      return null;
+    }
 
     const data = (await resp.json()) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];

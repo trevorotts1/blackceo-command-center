@@ -1,3 +1,17 @@
+## [v4.15.0] - 2026-06-09 - fix(qc): Gemini model deprecated -> gemini-2.5-flash; log non-OK API errors
+
+Fixes QC auto-scorer always falling through to the heuristic path (scoring <= 8.0, never reaching DONE).
+
+### Root cause
+`llmScoreViaGoogle` defaulted to `gemini-2.0-flash`, which Google has retired (returns HTTP 404 NOT_FOUND). The `if (!resp.ok) return null` check silently discarded the error with no log message, causing every Gemini call to return `null` -> heuristic path -> 8.0/10 score -> never >= 8.5 gate -> task never reaches `done`.
+
+### Fixed
+- `src/lib/qc-scorer.ts`: default Google model changed from `gemini-2.0-flash` -> `gemini-2.5-flash` (verified working).
+- `llmScoreViaGoogle` and `llmScoreViaOpenAI`: non-OK responses now log `console.warn` with status code + error body before returning null.
+
+### Fleet implication
+Any CC deployment using Google/Gemini for QC scoring (no OPENAI_API_KEY) was affected. Fix is code-only. Deploy: `git pull && npm ci && npm run build && pm2 restart blackceo-command-center`.
+
 ## [v4.14.0] - 2026-06-09 - Auto-dispatch: specialist tasks now invoke OpenClaw automatically after routing
 
 Closes the two-step routing gap: every task auto-routed to a specialist agent now fires the OpenClaw invocation immediately (no manual "Send to Agent" click required).
