@@ -13,10 +13,10 @@
 #   "checks": {
 #     "http_root":        { "pass": bool, "detail": "..." },
 #     "http_api_health":  { "pass": bool, "detail": "..." },
-#     "static_assets":    { "pass": bool, "detail": "...", "total": N, "failed": [...] },
-#     "company_name":     { "pass": bool, "detail": "...", "db_name": "...", "html_name": "...", "config_exists": bool },
-#     "pm2_topology":     { "pass": bool, "detail": "...", "app_count": N, "crash_loopers": [...], "database_path_set": bool, "cwd_ok": bool },
-#     "disk_headroom":    { "pass": bool, "detail": "...", "free_gb": N }
+#     "static_assets":    { "pass": bool, "detail": "...", "total": N, "failed": ["/_next/static/…:HTTP404"] },
+#     "company_name":     { "pass": bool, "detail": "...", "db_name": "Acme", "html_name": "Acme", "config_exists": bool },
+#     "pm2_topology":     { "pass": bool, "detail": "...", "app_count": 1, "crash_loopers": [], "database_path_set": bool, "cwd_ok": bool },
+#     "disk_headroom":    { "pass": bool, "detail": "...", "free_gb": 12, "path": "/data", "threshold_gb": 5 }
 #   }
 # }
 #
@@ -54,11 +54,11 @@ set -euo pipefail
 
 _log() { [[ "${JSON_ONLY:-0}" == "1" ]] || printf '%s\n' "$*" >&2; }
 
-_die_usage() { echo "ERROR: $*" >&2; exit 2; }
+_die_usage() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 
 _iso8601() { date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
-# Minimal JSON string escaper (handles the common cases without jq dependency)
+# Minimal JSON string escaper (handles common cases without jq dependency)
 _jstr() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -84,15 +84,15 @@ PRETTY="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --port)           PORT="${2:?--port requires a value}"; shift 2 ;;
-    --db-path)        DB_PATH_OVERRIDE="${2:?--db-path requires a value}"; shift 2 ;;
-    --canonical-dir)  CANONICAL_DIR_OVERRIDE="${2:?--canonical-dir requires a value}"; shift 2 ;;
-    --host)           PUBLIC_HOST="${2:?--host requires a value}"; shift 2 ;;
-    --disk-path)      DISK_PATH_OVERRIDE="${2:?--disk-path requires a value}"; shift 2 ;;
-    --disk-min-gb)    DISK_MIN_GB="${2:?--disk-min-gb requires a value}"; shift 2 ;;
+    --port)             PORT="${2:?--port requires a value}"; shift 2 ;;
+    --db-path)          DB_PATH_OVERRIDE="${2:?--db-path requires a value}"; shift 2 ;;
+    --canonical-dir)    CANONICAL_DIR_OVERRIDE="${2:?--canonical-dir requires a value}"; shift 2 ;;
+    --host)             PUBLIC_HOST="${2:?--host requires a value}"; shift 2 ;;
+    --disk-path)        DISK_PATH_OVERRIDE="${2:?--disk-path requires a value}"; shift 2 ;;
+    --disk-min-gb)      DISK_MIN_GB="${2:?--disk-min-gb requires a value}"; shift 2 ;;
     --pm2-check-window) PM2_CHECK_WINDOW="${2:?--pm2-check-window requires a value}"; shift 2 ;;
-    --json-only)      JSON_ONLY="1"; shift ;;
-    --pretty)         PRETTY="1"; shift ;;
+    --json-only)        JSON_ONLY="1"; shift ;;
+    --pretty)           PRETTY="1"; shift ;;
     *) _die_usage "Unknown argument: $1" ;;
   esac
 done
@@ -101,20 +101,18 @@ done
 # Resolved defaults
 ###############################################################################
 
-# Base URL for local probes (always 127.0.0.1 to avoid CF-Access on health checks)
+# Base URL for local probes (always 127.0.0.1 to bypass CF-Access on health checks)
 LOCAL_BASE="http://127.0.0.1:${PORT}"
 
-# Public host is used for asset-path resolution when assets have an absolute
-# URL stamped into them; defaults to LOCAL_BASE.
+# Public host used only for display; probes always hit 127.0.0.1
 PUBLIC_BASE="${PUBLIC_HOST:-${LOCAL_BASE}}"
-# Strip trailing slash
 PUBLIC_BASE="${PUBLIC_BASE%/}"
 
 ###############################################################################
 # Dependency check
 ###############################################################################
 
-for cmd in curl sqlite3 pm2 awk grep; do
+for cmd in curl sqlite3 pm2 awk grep python3 df; do
   if ! command -v "$cmd" &>/dev/null; then
     _log "WARN: $cmd not found — some checks will be skipped"
   fi
@@ -124,17 +122,23 @@ done
 # Check state accumulators
 ###############################################################################
 
+# Using parallel arrays instead of declare -A for bash 3.x compatibility on
+# macOS system bash (3.2), though fleet VPS boxes run bash 4+.
+CHECK_KEYS=()
 declare -A CHECK_PASS=()
 declare -A CHECK_DETAIL=()
-
-# Extra per-check fields stored as JSON fragments appended during assembly
 declare -A CHECK_EXTRA=()
 
 _mark() {
   local name="$1" pass="$2" detail="$3" extra="${4:-}"
-  CHECK_PASS[$name]="$pass"
-  CHECK_DETAIL[$name]="$detail"
-  CHECK_EXTRA[$name]="$extra"
+  CHECK_PASS["$name"]="$pass"
+  CHECK_DETAIL["$name"]="$detail"
+  CHECK_EXTRA["$name"]="$extra"
+  # Track order
+  for k in "${CHECK_KEYS[@]:-}"; do
+    [[ "$k" == "$name" ]] && return
+  done
+  CHECK_KEYS+=("$name")
 }
 
 ###############################################################################
@@ -147,85 +151,85 @@ _http_check() {
   local label="$1" url="$2"
   local code
   code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
+  # Normalize to decimal integer to handle curl's "000000" on connection-refused
+  local display_code
+  display_code=$(printf '%d' "$code" 2>/dev/null || echo "$code")
   if [[ "$code" == "200" ]]; then
-    _log "  OK  $label => $code"
+    _log "  OK  $label => $display_code"
     echo "pass"
   else
-    _log "  FAIL $label => $code"
-    echo "fail:$code"
+    _log "  FAIL $label => $display_code"
+    echo "fail:${display_code}"
   fi
 }
 
 ROOT_RESULT=$(_http_check "GET /" "${LOCAL_BASE}/")
 API_RESULT=$(_http_check "GET /api/health" "${LOCAL_BASE}/api/health")
 
-if [[ "$ROOT_RESULT" == "pass" && "$API_RESULT" == "pass" ]]; then
-  _mark "http_root"       "true" "HTTP 200 on /"
+ROOT_CODE="${ROOT_RESULT#fail:}"
+API_CODE="${API_RESULT#fail:}"
+
+if [[ "$ROOT_RESULT" == "pass" ]]; then
+  _mark "http_root" "true" "HTTP 200 on /"
+else
+  _mark "http_root" "false" "HTTP ${ROOT_CODE} on / (expected 200)"
+fi
+
+if [[ "$API_RESULT" == "pass" ]]; then
   _mark "http_api_health" "true" "HTTP 200 on /api/health"
 else
-  ROOT_CODE="${ROOT_RESULT#fail:}"
-  API_CODE="${API_RESULT#fail:}"
-  [[ "$ROOT_RESULT" == "pass" ]] \
-    && _mark "http_root"       "true"  "HTTP 200 on /" \
-    || _mark "http_root"       "false" "HTTP $ROOT_CODE on / (expected 200)"
-  [[ "$API_RESULT" == "pass" ]] \
-    && _mark "http_api_health" "true"  "HTTP 200 on /api/health" \
-    || _mark "http_api_health" "false" "HTTP $API_CODE on /api/health (expected 200)"
+  _mark "http_api_health" "false" "HTTP ${API_CODE} on /api/health (expected 200)"
 fi
 
 ###############################################################################
 # CHECK 2: Serve HTML → extract EVERY /_next/static asset → curl each → 200
+#          This is the Sheila bug detector: stale manifest hash absent on disk.
 ###############################################################################
 
 _log "[2/5] Static asset integrity (stale-manifest detection)"
-
-ASSETS_PASS="true"
-ASSETS_DETAIL="all assets OK"
-ASSETS_TOTAL=0
-ASSETS_FAILED_JSON="[]"
 
 if ! command -v curl &>/dev/null; then
   _mark "static_assets" "false" "curl not available — cannot check assets" \
     '"total":0,"failed":[]'
 else
-  # Fetch the served HTML from /
+  # Fetch the served HTML from / via 127.0.0.1 so CF-Access cannot block the probe
   HTML=$(curl -s --max-time 15 "${LOCAL_BASE}/" 2>/dev/null || true)
 
   if [[ -z "$HTML" ]]; then
     _mark "static_assets" "false" "Could not fetch HTML from / to parse assets" \
       '"total":0,"failed":[]'
   else
-    # Extract all /_next/static/... href and src references from HTML.
-    # Capture both href="..." and src="..." attributes containing /_next/static.
-    # Also picks up url(/_next/static/...) in inline styles.
+    # Extract all /_next/static/... href, src, and url() references from HTML.
+    # The pattern covers: href="/....", src="/_next...", url(/_next...),
+    # and JSON-embedded paths like "src":"/_next/...".
     ASSET_PATHS=$(printf '%s' "$HTML" \
-      | grep -oE '(href|src|url)\s*[=\(]\s*"?(/?)_next/static/[^"'\'') >]+' \
-      | grep -oE '/_next/static/[^"'\'') >]+' \
+      | grep -oE '/_next/static/[^"'"'"') >\\]+' \
+      | grep -v '^[[:space:]]*$' \
       | sort -u || true)
 
-    # Also parse the __NEXT_DATA__ script block's buildId → check
-    # _next/static/chunks/pages/_app-*.js exists (catch stale BUILD_ID)
+    # Also extract the buildId from __NEXT_DATA__ and probe the _buildManifest.js.
+    # This is the critical catch: a stale buildId means the manifest hash on disk
+    # no longer matches what the server serves in the HTML.
     BUILD_ID=$(printf '%s' "$HTML" \
       | grep -oE '"buildId":"[^"]+"' \
-      | grep -oE '"[^"]+"}' \
-      | tr -d '"}' \
+      | sed 's/"buildId":"//;s/"//' \
       | head -1 || true)
 
     if [[ -n "$BUILD_ID" ]]; then
-      # The main app JS is stamped with the buildId; confirm it's reachable
       BUILDID_ASSET="/_next/static/${BUILD_ID}/_buildManifest.js"
-      ASSET_PATHS=$(printf '%s\n%s' "$ASSET_PATHS" "$BUILDID_ASSET" | sort -u)
+      ASSET_PATHS=$(printf '%s\n%s' "$ASSET_PATHS" "$BUILDID_ASSET" \
+        | grep -v '^[[:space:]]*$' | sort -u || true)
     fi
 
-    ASSET_PATHS=$(printf '%s' "$ASSET_PATHS" | grep -v '^$' || true)
-    ASSET_COUNT=$(printf '%s' "$ASSET_PATHS" | grep -c '.' 2>/dev/null || echo "0")
+    # Count only non-blank lines
+    ASSET_COUNT=$(printf '%s' "$ASSET_PATHS" \
+      | grep -v '^[[:space:]]*$' | grep -c '.' 2>/dev/null || echo "0")
 
     if [[ "$ASSET_COUNT" -eq 0 ]]; then
-      # No /_next/static refs in HTML is suspicious but not necessarily fatal
-      # on a non-Next.js route; mark as a soft warning encoded as fail so
-      # any sweep operator investigates.
+      # No /_next/static refs in HTML is suspicious — Next.js always injects them.
+      # Flag as fail so sweeps don't silently pass a non-Next-JS response.
       _mark "static_assets" "false" \
-        "No /_next/static asset references found in served HTML — build may not be wired" \
+        "No /_next/static asset references found in served HTML — build may not be wired or server is returning an error page" \
         '"total":0,"failed":[]'
     else
       _log "  Found $ASSET_COUNT /_next/static asset references"
@@ -236,17 +240,17 @@ else
         [[ -z "$asset_path" ]] && continue
         TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
 
-        # Resolve URL: if asset already has http prefix use as-is; otherwise prepend PUBLIC_BASE
+        # Always probe via 127.0.0.1:PORT regardless of how the path was stamped.
+        # If the path has an absolute URL, extract just the path component.
         if [[ "$asset_path" =~ ^https?:// ]]; then
-          asset_url="$asset_path"
-          # Replace the host with 127.0.0.1:PORT for the probe so CF-Access doesn't block us
-          asset_path_only=$(printf '%s' "$asset_path" | grep -oE '/_next/.*')
+          asset_path_only=$(printf '%s' "$asset_path" | grep -oE '/_next/.*' || true)
+          [[ -z "$asset_path_only" ]] && asset_path_only="$asset_path"
           asset_url="${LOCAL_BASE}${asset_path_only}"
         else
           asset_url="${LOCAL_BASE}${asset_path}"
         fi
 
-        # Fetch: get HTTP code and Content-Type
+        # Fetch: get HTTP code and Content-Type header
         RESP=$(curl -s -o /dev/null \
           -w "%{http_code}|||%{content_type}" \
           --max-time 10 \
@@ -255,12 +259,13 @@ else
         ASSET_CODE="${RESP%%|||*}"
         ASSET_CT="${RESP##*|||}"
 
-        # Content-type validation: Next.js static assets must be JS, CSS, or
-        # font/image types — never text/html (which signals a 200 error page).
+        # Content-type validation:
+        #   .js  must return application/javascript or text/javascript (NOT text/html)
+        #   .css must return text/css (NOT text/html)
+        # A 200 with text/html means the server is returning an error page for a
+        # missing file — the exact pattern of the Sheila stale-manifest bug.
         CT_OK="true"
         if [[ "$ASSET_CODE" == "200" ]]; then
-          # If the server returns text/html for a .js or .css file, the asset
-          # is missing and the error page is being served — a false 200.
           case "$asset_path" in
             *.js)
               [[ "$ASSET_CT" == *"javascript"* ]] || CT_OK="false" ;;
@@ -270,14 +275,14 @@ else
         fi
 
         if [[ "$ASSET_CODE" == "200" && "$CT_OK" == "true" ]]; then
-          :  # pass
+          : # pass
         else
           if [[ "$ASSET_CODE" == "200" && "$CT_OK" == "false" ]]; then
             FAILED_ASSETS+=("${asset_path}:wrong-content-type(${ASSET_CT})")
           else
             FAILED_ASSETS+=("${asset_path}:HTTP${ASSET_CODE}")
           fi
-          _log "  FAIL asset $asset_path => $ASSET_CODE ($ASSET_CT)"
+          _log "  FAIL asset ${asset_path} => ${ASSET_CODE} (${ASSET_CT})"
         fi
       done <<< "$ASSET_PATHS"
 
@@ -290,8 +295,7 @@ else
       else
         ASSETS_PASS="false"
         FAILED_COUNT=${#FAILED_ASSETS[@]}
-        ASSETS_DETAIL="${FAILED_COUNT}/${ASSETS_TOTAL} static assets failed (stale manifest or missing files)"
-        # Build JSON array of failed asset paths
+        ASSETS_DETAIL="${FAILED_COUNT}/${ASSETS_TOTAL} static assets failed (stale manifest or missing files on disk)"
         FAILED_JSON_ARR="["
         first=1
         for fa in "${FAILED_ASSETS[@]}"; do
@@ -310,15 +314,10 @@ fi
 
 ###############################################################################
 # CHECK 3: Company name — DB-direct AND served HTML; must match; not "Default"
+#          on a box with company-config.json present.
 ###############################################################################
 
 _log "[3/5] Company name consistency (DB-direct vs served HTML)"
-
-COMPANY_PASS="false"
-COMPANY_DETAIL="check not run"
-COMPANY_DB_NAME=""
-COMPANY_HTML_NAME=""
-COMPANY_CONFIG_EXISTS="false"
 
 # Resolve the DB path in priority order:
 #   1. --db-path flag / CC_DB_PATH env
@@ -330,24 +329,29 @@ _resolve_db_path() {
     return
   fi
 
-  # Try pm2 process env
-  if command -v pm2 &>/dev/null; then
-    local pm2_db
-    pm2_db=$(pm2 jlist 2>/dev/null \
-      | python3 -c "
+  # Try pm2 process env (pipe pm2 output through python3)
+  if command -v pm2 &>/dev/null && command -v python3 &>/dev/null; then
+    local pm2_raw pm2_db
+    pm2_raw=$(pm2 jlist 2>/dev/null || echo "[]")
+    pm2_db=$(printf '%s\n' "$pm2_raw" | python3 -s -c "
 import sys, json
 try:
   apps = json.load(sys.stdin)
   for app in apps:
-    env = (app.get('pm2_env') or {})
-    # Check top-level env and env_data
-    for ekey in ('env', 'env_data'):
+    env = app.get('pm2_env') or {}
+    for ekey in ('env_data', 'env'):
       e = env.get(ekey) or {}
       if isinstance(e, dict):
         v = e.get('DATABASE_PATH') or e.get('database_path')
         if v:
           print(v)
-          sys.exit(0)
+          raise SystemExit(0)
+    v = env.get('DATABASE_PATH') or env.get('database_path')
+    if v:
+      print(v)
+      raise SystemExit(0)
+except SystemExit:
+  pass
 except Exception:
   pass
 " 2>/dev/null || true)
@@ -372,62 +376,62 @@ except Exception:
   echo ""
 }
 
-# Determine whether the box is "configured" (has a real company-config.json
-# with a non-empty companyName) — used to decide if "Default" is an error.
-_is_configured_box() {
+# Determine whether the box has a real company-config.json with a non-empty companyName.
+_get_config_company_name() {
   local install_dir="${1:-}"
-  if [[ -z "$install_dir" ]]; then return 1; fi
+  [[ -z "$install_dir" ]] && echo "" && return
   local cfg="${install_dir}/config/company-config.json"
-  if [[ ! -f "$cfg" ]]; then return 1; fi
-  local cname
-  cname=$(python3 -c "
+  [[ ! -f "$cfg" ]] && echo "" && return
+  python3 -s -c "
 import json, sys
 try:
   d = json.load(open('${cfg}'))
-  n = d.get('companyName','').strip()
-  print(n if n else '')
+  n = (d.get('companyName') or '').strip()
+  print(n)
 except Exception:
   print('')
-" 2>/dev/null || true)
-  [[ -n "$cname" ]]
+" 2>/dev/null || echo ""
 }
 
 if ! command -v sqlite3 &>/dev/null; then
-  COMPANY_DETAIL="sqlite3 not available — DB-direct check skipped"
-  COMPANY_PASS="false"
-  _mark "company_name" "$COMPANY_PASS" "$COMPANY_DETAIL" \
-    "\"db_name\":\"\",\"html_name\":\"\",\"config_exists\":false"
+  _mark "company_name" "false" "sqlite3 not available — DB-direct check skipped" \
+    '"db_name":"","html_name":"","config_exists":false'
 else
   DB_PATH=$(_resolve_db_path)
 
   if [[ -z "$DB_PATH" || ! -f "$DB_PATH" ]]; then
-    COMPANY_DETAIL="DB not found (tried override, pm2 env, heuristic paths) — cannot verify company name"
-    COMPANY_PASS="false"
-    _mark "company_name" "$COMPANY_PASS" "$COMPANY_DETAIL" \
-      "\"db_name\":\"\",\"html_name\":\"\",\"config_exists\":false"
+    _mark "company_name" "false" \
+      "DB not found (tried override, pm2 env, heuristic paths) — cannot verify company name" \
+      '"db_name":"","html_name":"","config_exists":false'
   else
     _log "  Querying DB: $DB_PATH"
 
-    # Read name from DB
+    # Read name from DB — first non-null row by created_at
     DB_COMPANY=$(sqlite3 "$DB_PATH" \
-      "SELECT name FROM companies ORDER BY created_at ASC LIMIT 1;" 2>/dev/null || true)
-
+      "SELECT name FROM companies WHERE name IS NOT NULL AND name != '' ORDER BY created_at ASC LIMIT 1;" \
+      2>/dev/null || true)
+    # Fallback: any row
+    if [[ -z "$DB_COMPANY" ]]; then
+      DB_COMPANY=$(sqlite3 "$DB_PATH" \
+        "SELECT name FROM companies ORDER BY created_at ASC LIMIT 1;" \
+        2>/dev/null || true)
+    fi
     COMPANY_DB_NAME="${DB_COMPANY:-}"
 
-    # Read name from served HTML — look for the og:site_name meta tag,
-    # then <title>, then data-company-name attributes
+    # Read name from served HTML.
+    # Strategy: try og:site_name (order-independent), data-company, then <title>.
     HTML_FOR_COMPANY=$(curl -s --max-time 10 "${LOCAL_BASE}/" 2>/dev/null || true)
 
     COMPANY_HTML_NAME=""
     if [[ -n "$HTML_FOR_COMPANY" ]]; then
-      # Try og:site_name first (most reliable branding signal)
+      # og:site_name — handle both attribute orderings (property= before or after content=)
       COMPANY_HTML_NAME=$(printf '%s' "$HTML_FOR_COMPANY" \
-        | grep -oE 'property="og:site_name"\s+content="[^"]+"' \
-        | grep -oE 'content="[^"]+"' \
-        | sed 's/content="//;s/"//' \
+        | grep -oiE '<meta[^>]*og:site_name[^>]*>' \
+        | grep -oiE 'content="[^"]+"' \
+        | sed 's/[Cc]ontent="//;s/"//' \
         | head -1 || true)
 
-      # Fallback: data-company attribute on body/header
+      # Fallback: data-company attribute on any element
       if [[ -z "$COMPANY_HTML_NAME" ]]; then
         COMPANY_HTML_NAME=$(printf '%s' "$HTML_FOR_COMPANY" \
           | grep -oE 'data-company="[^"]+"' \
@@ -435,201 +439,238 @@ else
           | head -1 || true)
       fi
 
-      # Fallback: <title> tag (often "Acme Corp — Command Center")
+      # Fallback: <title> tag — strip the " — Command Center" / " - Dashboard" suffix
       if [[ -z "$COMPANY_HTML_NAME" ]]; then
         COMPANY_HTML_NAME=$(printf '%s' "$HTML_FOR_COMPANY" \
           | grep -oE '<title>[^<]+</title>' \
           | sed 's/<title>//;s/<\/title>//' \
-          | awk -F' [—–-] ' '{print $1}' \
+          | awk -F' [—–|-] ' '{print $1}' \
           | head -1 || true)
       fi
     fi
 
-    # Detect install dir for config check
+    # Resolve install dir for config check
     INSTALL_DIR_FOR_CONFIG=""
     if [[ -n "$CANONICAL_DIR_OVERRIDE" ]]; then
       INSTALL_DIR_FOR_CONFIG="$CANONICAL_DIR_OVERRIDE"
-    elif command -v pm2 &>/dev/null; then
-      INSTALL_DIR_FOR_CONFIG=$(pm2 jlist 2>/dev/null \
-        | python3 -c "
+    elif command -v pm2 &>/dev/null && command -v python3 &>/dev/null; then
+      PM2_RAW_FOR_CONFIG=$(pm2 jlist 2>/dev/null || echo "[]")
+      INSTALL_DIR_FOR_CONFIG=$(printf '%s\n' "$PM2_RAW_FOR_CONFIG" | python3 -s -c "
 import sys, json
 try:
   apps = json.load(sys.stdin)
   for app in apps:
     env = app.get('pm2_env') or {}
-    cwd = env.get('pm_cwd') or ''
+    cwd = env.get('pm_cwd') or env.get('cwd') or ''
     if cwd:
       print(cwd)
-      sys.exit(0)
+      raise SystemExit(0)
+except SystemExit:
+  pass
 except Exception:
   pass
 " 2>/dev/null || true)
     fi
 
-    if _is_configured_box "$INSTALL_DIR_FOR_CONFIG"; then
+    CONFIG_COMPANY_NAME=$(_get_config_company_name "$INSTALL_DIR_FOR_CONFIG")
+    if [[ -n "$CONFIG_COMPANY_NAME" ]]; then
       COMPANY_CONFIG_EXISTS="true"
     else
       COMPANY_CONFIG_EXISTS="false"
     fi
 
-    _log "  DB company name: '${COMPANY_DB_NAME}'"
+    _log "  DB company name:   '${COMPANY_DB_NAME}'"
     _log "  HTML company name: '${COMPANY_HTML_NAME}'"
-    _log "  Config exists with real company: ${COMPANY_CONFIG_EXISTS}"
+    _log "  Config exists (non-empty name): ${COMPANY_CONFIG_EXISTS}"
 
-    # Validation logic:
-    # On a configured box (company-config.json present with non-empty companyName):
-    #   - DB name must not be empty and must not be "Default"
-    #   - If we found an HTML name, it must match the DB name
-    # On an unconfigured box:
-    #   - "Default" or empty is acceptable
+    # Validation:
+    # Configured box (company-config.json with non-empty companyName):
+    #   - DB must have a non-empty name
+    #   - DB name must not be "Default" (case-insensitive)
+    #   - If HTML name found, it must match DB name
+    # Unconfigured box:
+    #   - "Default" is allowed
+    #   - If both names found they must still match
 
     if [[ "$COMPANY_CONFIG_EXISTS" == "true" ]]; then
       if [[ -z "$COMPANY_DB_NAME" ]]; then
-        COMPANY_PASS="false"
-        COMPANY_DETAIL="Configured box has no company row in DB — branding not seeded"
+        _mark "company_name" "false" \
+          "Configured box has no company row in DB — branding not seeded (run B.3 seed)" \
+          "\"db_name\":\"\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true"
       elif [[ "${COMPANY_DB_NAME,,}" == "default" ]]; then
-        COMPANY_PASS="false"
-        COMPANY_DETAIL="Configured box has 'Default' company in DB — branding seed failed (Sheila bug)"
+        _mark "company_name" "false" \
+          "Configured box shows 'Default' company in DB — branding seed failed (Sheila bug)" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true"
       elif [[ -n "$COMPANY_HTML_NAME" && "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
-        COMPANY_PASS="false"
-        COMPANY_DETAIL="Company name mismatch: DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'"
+        _mark "company_name" "false" \
+          "Company name mismatch: DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true"
       else
-        COMPANY_PASS="true"
-        COMPANY_DETAIL="Company name consistent: '${COMPANY_DB_NAME}'"
+        _mark "company_name" "true" \
+          "Company name consistent: '${COMPANY_DB_NAME}'" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true"
       fi
     else
-      # Unconfigured box — "Default" is allowed, but still flag if mismatch
+      # Unconfigured box — Default is allowed but mismatch is still a fail
       if [[ -n "$COMPANY_HTML_NAME" && -n "$COMPANY_DB_NAME" \
             && "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
-        COMPANY_PASS="false"
-        COMPANY_DETAIL="Company name mismatch (unconfigured box): DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'"
+        _mark "company_name" "false" \
+          "Company name mismatch (unconfigured box): DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false"
       else
-        COMPANY_PASS="true"
-        COMPANY_DETAIL="Company name OK (unconfigured box — Default acceptable)"
+        _mark "company_name" "true" \
+          "Company name OK (unconfigured box — Default acceptable): '${COMPANY_DB_NAME:-empty}'" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false"
       fi
     fi
-
-    _mark "company_name" "$COMPANY_PASS" "$COMPANY_DETAIL" \
-      "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":${COMPANY_CONFIG_EXISTS}"
   fi
 fi
 
 ###############################################################################
 # CHECK 4: pm2 topology
 #   - Exactly ONE app bound to CC port
-#   - Zero crash-loopers (restart-count delta over check window)
-#   - pm_cwd == canonical install dir
-#   - DATABASE_PATH explicitly set in env
+#   - Zero crash-loopers (errored status OR high restart-count delta over window)
+#   - pm_cwd == canonical install dir (when --canonical-dir set)
+#   - DATABASE_PATH explicitly set in env (B.4 pin)
 ###############################################################################
 
 _log "[4/5] pm2 topology (port binding, crash-loop, cwd, DATABASE_PATH)"
 
-PM2_PASS="false"
-PM2_DETAIL="check not run"
-PM2_APP_COUNT=0
-PM2_CRASH_LOOPERS_JSON="[]"
-PM2_DB_PATH_SET="false"
-PM2_CWD_OK="false"
-
 if ! command -v pm2 &>/dev/null; then
-  PM2_DETAIL="pm2 not available — topology check skipped"
-  PM2_PASS="false"
-  _mark "pm2_topology" "$PM2_PASS" "$PM2_DETAIL" \
-    "\"app_count\":0,\"crash_loopers\":[],\"database_path_set\":false,\"cwd_ok\":false"
+  _mark "pm2_topology" "false" "pm2 not available — topology check skipped" \
+    '"app_count":0,"crash_loopers":[],"database_path_set":false,"cwd_ok":false'
+elif ! command -v python3 &>/dev/null; then
+  _mark "pm2_topology" "false" "python3 not available — pm2 topology analysis skipped" \
+    '"app_count":0,"crash_loopers":[],"database_path_set":false,"cwd_ok":false'
 else
   PM2_JSON=$(pm2 jlist 2>/dev/null || echo "[]")
 
-  PM2_ANALYSIS=$(python3 -s - "$PORT" "$CANONICAL_DIR_OVERRIDE" "$PM2_CHECK_WINDOW" <<'PYEOF'
-import sys, json, time, os
+  # FIX: pipe PM2_JSON to python3 via stdin (printf | python3), with the Python
+  # script sourced from a temp file. This avoids the heredoc+herestring conflict
+  # where bash would feed the heredoc as stdin to python3 and the <<< herestring
+  # would be ignored or vice versa — both cannot redirect the same fd simultaneously.
+  _PM2_SCRIPT=$(mktemp /tmp/cc-pm2-check-XXXXXX.py)
+  trap 'rm -f "$_PM2_SCRIPT"' EXIT
 
-port_str    = sys.argv[1]
-canon_dir   = sys.argv[2]   # may be empty
+  cat > "$_PM2_SCRIPT" << 'PYEOF'
+import sys
+import json
+import os
+
+port_str     = sys.argv[1]
+canon_dir    = sys.argv[2]   # may be empty string
 check_window = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 
+# Configurable: apps with restart_time above this threshold (and status != 'online')
+# are flagged as crash-loopers even without a delta window.
+RESTART_CRASH_THRESHOLD = 10
+
 try:
-    apps = json.loads(sys.stdin.read())
+    apps = json.load(sys.stdin)
 except Exception as e:
-    print(json.dumps({"error": f"pm2 jlist parse failed: {e}",
-                      "cc_apps": [], "crash_loopers": [],
-                      "db_path_set": False, "cwd_ok": False}))
+    print(json.dumps({
+        "error": f"pm2 jlist parse failed: {e}",
+        "cc_apps": [], "crash_loopers": [],
+        "db_path_set": False, "cwd_ok": False, "found_cwd": ""
+    }))
     sys.exit(0)
 
+
 def env_val(pm2_env, key):
-    """Search all env layers for a key."""
+    """Search all env layers for a key (case-sensitive then case-lower fallback)."""
     for layer in ('env_data', 'env'):
         e = pm2_env.get(layer) or {}
         if isinstance(e, dict):
             v = e.get(key) or e.get(key.lower())
             if v:
                 return str(v)
-    # Also check top-level pm2_env
+    # Also check direct pm2_env keys
     v = pm2_env.get(key) or pm2_env.get(key.lower())
     if v:
         return str(v)
     return ""
 
-# Identify apps that are bound to our CC port
+
+def get_name(app):
+    env = app.get('pm2_env') or {}
+    return env.get('name') or app.get('name') or 'unknown'
+
+
+def get_status(app):
+    env = app.get('pm2_env') or {}
+    return env.get('status') or ''
+
+
+def get_restart_count(app):
+    env = app.get('pm2_env') or {}
+    try:
+        return int(env.get('restart_time') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# Identify apps bound to the CC port.
+# Matching rules (any one sufficient):
+#   a) PORT env var == port_str
+#   b) app was started with -p <port> or --port <port> in its args
+#   c) pm2 app name contains mission-control, command-center, or blackceo
+# We do NOT use "next in script path" alone because that would match any Next.js app.
 cc_apps = []
 for app in apps:
     env = app.get('pm2_env') or {}
-    name = env.get('name') or app.get('name') or ''
-
-    # Check if this app is the CC: port in args or PORT env var matches
-    args = env.get('args') or env.get('node_args') or ''
-    if isinstance(args, list):
-        args = ' '.join(str(a) for a in args)
-    port_in_args = f'-p {port_str}' in str(args) or f'--port {port_str}' in str(args)
+    name = get_name(app).lower()
 
     port_env = env_val(env, 'PORT')
     port_from_env = (port_env == port_str)
 
-    script = env.get('pm_exec_path') or env.get('script') or ''
-    is_nextjs = ('next' in str(script).lower() or
-                 'node_modules/.bin/next' in str(script).lower() or
-                 port_in_args or port_from_env)
+    args = env.get('args') or env.get('node_args') or ''
+    if isinstance(args, list):
+        args = ' '.join(str(a) for a in args)
+    port_in_args = (f'-p {port_str}' in str(args) or
+                    f'--port {port_str}' in str(args))
 
-    # Also accept if pm2 name contains 'mission-control' or 'command-center'
-    name_match = any(kw in name.lower() for kw in
+    name_match = any(kw in name for kw in
                      ('mission-control', 'command-center', 'blackceo'))
 
-    if is_nextjs or name_match:
+    if port_from_env or port_in_args or name_match:
         cc_apps.append(app)
 
-# Crash-looper detection: any app with status 'errored' or restart_count
-# above a threshold delta (we take a snapshot here; caller can compare two runs)
+# Crash-looper detection across ALL pm2 apps (not just cc_apps):
+#   1. status == 'errored'  — definitive crash
+#   2. status != 'online' AND restart_time > RESTART_CRASH_THRESHOLD — unstable
+# The "restart-delta over a window" feature: if check_window > 0, the caller
+# should run this script twice separated by check_window seconds and compare
+# the restart_count fields. For a single-shot health check (check_window == 0)
+# we flag definitively errored apps only, plus high-restart-count non-online apps.
 crash_loopers = []
-RESTART_THRESHOLD = 5  # more than 5 restarts in the check window = crash loop
-
 for app in apps:
-    env = app.get('pm2_env') or {}
-    status = env.get('status') or ''
-    name = env.get('name') or app.get('name') or 'unknown'
-    restart_count = env.get('restart_time') or 0
-    try:
-        restart_count = int(restart_count)
-    except (TypeError, ValueError):
-        restart_count = 0
+    name   = get_name(app)
+    status = get_status(app)
+    rc     = get_restart_count(app)
 
     if status == 'errored':
-        crash_loopers.append({'name': name, 'reason': 'status=errored',
-                               'restart_count': restart_count})
-    elif restart_count > RESTART_THRESHOLD and check_window == 0:
-        # On a first-pass check we flag anything with >5 total restarts as
-        # a warning (not definitive — box may have just had a deploy)
-        pass  # Don't flag on snapshot-only mode; only flag 'errored'
+        crash_loopers.append({
+            'name': name,
+            'reason': 'status=errored',
+            'restart_count': rc
+        })
+    elif status not in ('online', 'launching', '') and rc > RESTART_CRASH_THRESHOLD:
+        crash_loopers.append({
+            'name': name,
+            'reason': f'status={status} with restart_count={rc} > {RESTART_CRASH_THRESHOLD}',
+            'restart_count': rc
+        })
 
-# DATABASE_PATH check: look in all CC apps
+# Per-app checks on cc_apps: DATABASE_PATH set, pm_cwd matches canonical dir
 db_path_set = False
-cwd_match   = True   # assume OK if we can't verify
+cwd_match   = True   # assume OK when canonical dir not specified
 found_cwd   = ""
 
 for app in cc_apps:
     env = app.get('pm2_env') or {}
-    dbp = env_val(env, 'DATABASE_PATH')
-    if dbp:
+    if env_val(env, 'DATABASE_PATH'):
         db_path_set = True
 
-    # pm_cwd is where pm2 started the process
     cwd = env.get('pm_cwd') or env.get('cwd') or ''
     if cwd:
         found_cwd = cwd
@@ -639,36 +680,55 @@ for app in cc_apps:
             cwd_match = False
 
 print(json.dumps({
-    "cc_apps":      [{"name": (a.get('pm2_env') or {}).get('name','?'),
-                      "status": (a.get('pm2_env') or {}).get('status','?'),
-                      "cwd": (a.get('pm2_env') or {}).get('pm_cwd',''),
-                      "restart_count": (a.get('pm2_env') or {}).get('restart_time',0)}
-                     for a in cc_apps],
-    "crash_loopers": crash_loopers,
-    "db_path_set":   db_path_set,
-    "cwd_ok":        cwd_match,
-    "found_cwd":     found_cwd,
+    "cc_apps": [
+        {
+            "name":          get_name(a),
+            "status":        get_status(a),
+            "cwd":           (a.get('pm2_env') or {}).get('pm_cwd', ''),
+            "restart_count": get_restart_count(a),
+        }
+        for a in cc_apps
+    ],
+    "crash_loopers":  crash_loopers,
+    "db_path_set":    db_path_set,
+    "cwd_ok":         cwd_match,
+    "found_cwd":      found_cwd,
 }))
 PYEOF
-  <<< "$PM2_JSON"
-  )
 
-  # Parse the python3 output
-  PM2_ERROR=$(printf '%s' "$PM2_ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null || true)
-  PM2_CC_APP_COUNT=$(printf '%s' "$PM2_ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('cc_apps',[])))" 2>/dev/null || echo "0")
-  PM2_CRASH_LOOPERS_JSON=$(printf '%s' "$PM2_ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('crash_loopers',[])))" 2>/dev/null || echo "[]")
-  PM2_DB_PATH_SET_RAW=$(printf '%s' "$PM2_ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('db_path_set') else 'false')" 2>/dev/null || echo "false")
-  PM2_CWD_OK_RAW=$(printf '%s' "$PM2_ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('cwd_ok') else 'false')" 2>/dev/null || echo "false")
-  PM2_FOUND_CWD=$(printf '%s' "$PM2_ANALYSIS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('found_cwd',''))" 2>/dev/null || echo "")
+  PM2_ANALYSIS=$(printf '%s\n' "$PM2_JSON" | python3 -s "$_PM2_SCRIPT" "$PORT" "$CANONICAL_DIR_OVERRIDE" "$PM2_CHECK_WINDOW" 2>/dev/null || echo '{"error":"pm2 analysis script failed","cc_apps":[],"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"found_cwd":""}')
+  rm -f "$_PM2_SCRIPT"
+  trap - EXIT
+
+  # Parse results
+  PM2_ERROR=$(printf '%s' "$PM2_ANALYSIS" \
+    | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" \
+    2>/dev/null || true)
+  PM2_CC_APP_COUNT=$(printf '%s' "$PM2_ANALYSIS" \
+    | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('cc_apps',[])))" \
+    2>/dev/null || echo "0")
+  PM2_CRASH_LOOPERS_JSON=$(printf '%s' "$PM2_ANALYSIS" \
+    | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('crash_loopers',[])))" \
+    2>/dev/null || echo "[]")
+  PM2_DB_PATH_SET=$(printf '%s' "$PM2_ANALYSIS" \
+    | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('db_path_set') else 'false')" \
+    2>/dev/null || echo "false")
+  PM2_CWD_OK=$(printf '%s' "$PM2_ANALYSIS" \
+    | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('cwd_ok') else 'false')" \
+    2>/dev/null || echo "false")
+  PM2_FOUND_CWD=$(printf '%s' "$PM2_ANALYSIS" \
+    | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('found_cwd',''))" \
+    2>/dev/null || echo "")
 
   PM2_APP_COUNT="$PM2_CC_APP_COUNT"
-  PM2_DB_PATH_SET="$PM2_DB_PATH_SET_RAW"
-  PM2_CWD_OK="$PM2_CWD_OK_RAW"
 
   _log "  CC apps on port ${PORT}: ${PM2_APP_COUNT}"
   _log "  Crash-loopers: ${PM2_CRASH_LOOPERS_JSON}"
   _log "  DATABASE_PATH set: ${PM2_DB_PATH_SET}"
   _log "  CWD ok: ${PM2_CWD_OK} (found: ${PM2_FOUND_CWD})"
+
+  PM2_PASS="true"
+  PM2_DETAIL="pm2 topology OK: 1 app on port ${PORT}, no crash-loopers, DATABASE_PATH set"
 
   if [[ -n "$PM2_ERROR" ]]; then
     PM2_PASS="false"
@@ -678,19 +738,16 @@ PYEOF
     PM2_DETAIL="No pm2 app found bound to port ${PORT}"
   elif [[ "$PM2_APP_COUNT" -gt 1 ]]; then
     PM2_PASS="false"
-    PM2_DETAIL="${PM2_APP_COUNT} pm2 apps bound to port ${PORT} — zombie process(es) present"
+    PM2_DETAIL="${PM2_APP_COUNT} pm2 apps bound to port ${PORT} — zombie process(es) fighting for port"
   elif [[ "$PM2_CRASH_LOOPERS_JSON" != "[]" ]]; then
     PM2_PASS="false"
     PM2_DETAIL="Crash-looping app(s) detected: ${PM2_CRASH_LOOPERS_JSON}"
   elif [[ "$PM2_DB_PATH_SET" == "false" ]]; then
     PM2_PASS="false"
-    PM2_DETAIL="DATABASE_PATH not explicitly set in pm2 env — cwd-drift DB risk (B.4)"
+    PM2_DETAIL="DATABASE_PATH not explicitly set in pm2 env — cwd-drift silent-empty-DB risk (B.4)"
   elif [[ "$PM2_CWD_OK" == "false" && -n "$CANONICAL_DIR_OVERRIDE" ]]; then
     PM2_PASS="false"
     PM2_DETAIL="pm_cwd '${PM2_FOUND_CWD}' != canonical dir '${CANONICAL_DIR_OVERRIDE}'"
-  else
-    PM2_PASS="true"
-    PM2_DETAIL="pm2 topology OK: 1 app on port ${PORT}, no crash-loopers, DATABASE_PATH set"
   fi
 
   _mark "pm2_topology" "$PM2_PASS" "$PM2_DETAIL" \
@@ -703,50 +760,45 @@ fi
 
 _log "[5/5] Disk headroom (build threshold: ${DISK_MIN_GB}GB)"
 
-DISK_PASS="false"
-DISK_FREE_GB=0
-DISK_DETAIL="check not run"
-
-# Resolve the path to check: explicit override, else heuristic
+# Resolve the path to check: explicit override, then VPS heuristic, then HOME
 _resolve_disk_path() {
   if [[ -n "$DISK_PATH_OVERRIDE" ]]; then
     echo "$DISK_PATH_OVERRIDE"
     return
   fi
-  # VPS: /data is the bind-mounted volume
   if [[ -d "/data" ]]; then
     echo "/data"
     return
   fi
-  # Mac: use HOME
   echo "$HOME"
 }
 
 DISK_CHECK_PATH=$(_resolve_disk_path)
 
 if ! command -v df &>/dev/null; then
-  DISK_DETAIL="df not available — disk check skipped"
-  DISK_PASS="false"
+  _mark "disk_headroom" "false" "df not available — disk check skipped" \
+    '"free_gb":0,"path":"","threshold_gb":'"${DISK_MIN_GB}"
 else
-  # df -k: 1024-byte blocks; column 4 = Available
+  # df -k gives 1024-byte blocks; column 4 = Available.
+  # Works on both Linux and macOS (POSIX df).
   AVAIL_KB=$(df -k "$DISK_CHECK_PATH" 2>/dev/null \
     | awk 'NR==2 {print $4}' || echo "0")
-  DISK_FREE_GB=$(( AVAIL_KB / 1024 / 1024 ))
+  # Convert KB to GB using integer arithmetic; minimum 0
+  DISK_FREE_GB=$(( ${AVAIL_KB:-0} / 1024 / 1024 ))
 
   _log "  Disk path: ${DISK_CHECK_PATH}"
   _log "  Free: ${DISK_FREE_GB}GB (threshold: ${DISK_MIN_GB}GB)"
 
   if [[ "$DISK_FREE_GB" -ge "$DISK_MIN_GB" ]]; then
-    DISK_PASS="true"
-    DISK_DETAIL="${DISK_FREE_GB}GB free on ${DISK_CHECK_PATH} (threshold ${DISK_MIN_GB}GB)"
+    _mark "disk_headroom" "true" \
+      "${DISK_FREE_GB}GB free on ${DISK_CHECK_PATH} (threshold ${DISK_MIN_GB}GB)" \
+      "\"free_gb\":${DISK_FREE_GB},\"path\":\"$(_jstr "$DISK_CHECK_PATH")\",\"threshold_gb\":${DISK_MIN_GB}"
   else
-    DISK_PASS="false"
-    DISK_DETAIL="ONLY ${DISK_FREE_GB}GB free on ${DISK_CHECK_PATH} — below ${DISK_MIN_GB}GB build threshold"
+    _mark "disk_headroom" "false" \
+      "ONLY ${DISK_FREE_GB}GB free on ${DISK_CHECK_PATH} — below ${DISK_MIN_GB}GB build threshold" \
+      "\"free_gb\":${DISK_FREE_GB},\"path\":\"$(_jstr "$DISK_CHECK_PATH")\",\"threshold_gb\":${DISK_MIN_GB}"
   fi
 fi
-
-_mark "disk_headroom" "$DISK_PASS" "$DISK_DETAIL" \
-  "\"free_gb\":${DISK_FREE_GB},\"path\":\"$(_jstr "$DISK_CHECK_PATH")\",\"threshold_gb\":${DISK_MIN_GB}"
 
 ###############################################################################
 # Assemble output JSON
@@ -759,7 +811,6 @@ done
 
 TS=$(_iso8601)
 
-# Build JSON inline (avoids jq dependency; escaping handled by _jstr)
 build_check_json() {
   local key="$1"
   local pass="${CHECK_PASS[$key]:-false}"
@@ -776,11 +827,16 @@ OUT='{'
 OUT+='"green":'${ALL_PASS}','
 OUT+='"timestamp":"'${TS}'",'
 OUT+='"checks":{'
-OUT+=$(build_check_json "http_root")','
-OUT+=$(build_check_json "http_api_health")','
-OUT+=$(build_check_json "static_assets")','
-OUT+=$(build_check_json "company_name")','
-OUT+=$(build_check_json "pm2_topology")','
+OUT+=$(build_check_json "http_root")
+OUT+=','
+OUT+=$(build_check_json "http_api_health")
+OUT+=','
+OUT+=$(build_check_json "static_assets")
+OUT+=','
+OUT+=$(build_check_json "company_name")
+OUT+=','
+OUT+=$(build_check_json "pm2_topology")
+OUT+=','
 OUT+=$(build_check_json "disk_headroom")
 OUT+='}}'
 
