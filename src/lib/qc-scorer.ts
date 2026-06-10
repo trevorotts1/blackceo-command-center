@@ -636,7 +636,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     // The grading module itself filters to scoring_path='llm' for qcPassRate.
     try {
       // Resolve workspace_id and department_slug from the task + workspaces table.
-      let wsId: string | null = task.workspace_id ?? null;
+      const wsId: string | null = task.workspace_id ?? null;
       let deptSlug: string | null = task.department ?? null;
       if (!deptSlug && wsId) {
         try {
