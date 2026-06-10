@@ -312,12 +312,15 @@ ${stepLines.join('\n')}
         task.priority
       ] ?? '⚪';
 
-    const projectsPath = getProjectsPath();
-    const projectDir = task.title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-    const taskProjectDir = `${projectsPath}/${projectDir}`;
+    // ── Artifact save path (duck-fix) ──────────────────────────────────────
+    // Always use the SERVABLE base (PROJECTS_PATH, default ~/projects) so that
+    // /api/files/download can serve the file without a 403.
+    // Sub-dir: task-artifacts/<task-id>/ to avoid collisions and make it easy
+    // for the file-serve route to locate artifacts by task ID.
+    // Legacy title-slug path under ~/Documents/Shared/... is no longer used.
+    const rawProjectsPath = process.env.PROJECTS_PATH || '~/projects';
+    const projectsPath = rawProjectsPath.replace(/^~/, process.env.HOME || '');
+    const taskProjectDir = `${projectsPath}/task-artifacts/${task.id}`;
     const missionControlUrl = getMissionControlUrl();
 
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**

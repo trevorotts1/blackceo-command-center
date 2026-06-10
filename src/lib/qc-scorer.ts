@@ -28,6 +28,16 @@
  *      below the 8.5 gate. This prevents keyless installs from spinning every
  *      task through 3 reroutes and into `blocked` (PRD 2.4).
  *
+ * Artifact-aware QC (duck-fix):
+ *   When a task has file deliverables, the QC scorer shifts from "did the brief
+ *   describe the work completely?" to "did the artifact FULFILL the request?".
+ *   A terse brief ("create a picture of a blue duck") is NEVER penalised —
+ *   the score is entirely based on whether the artifact exists, is non-empty,
+ *   has the right type, and satisfies the stated request.
+ *   Missing / zero-byte / wrong-type artifacts fail with a named reason so the
+ *   agent knows exactly what to fix.  Text-only tasks (no deliverables) use the
+ *   existing brief-completeness path unchanged.
+ *
  * The QC event is always written to the `events` table regardless of pass/fail
  * so the board + agent can see the reasoning.
  *
@@ -35,7 +45,7 @@
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -65,6 +75,84 @@ const DISABLE_QC_SCORER =
 // Types
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Image magic-byte detection helpers
+// ---------------------------------------------------------------------------
+
+/** Known image magic-byte signatures (offset, bytes). */
+const IMAGE_SIGNATURES: Array<{ ext: string; offset: number; bytes: number[] }> = [
+  { ext: 'png',  offset: 0, bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { ext: 'jpg',  offset: 0, bytes: [0xff, 0xd8, 0xff] },
+  { ext: 'gif',  offset: 0, bytes: [0x47, 0x49, 0x46] }, // GIF8
+  { ext: 'webp', offset: 8, bytes: [0x57, 0x45, 0x42, 0x50] }, // RIFF????WEBP
+  { ext: 'bmp',  offset: 0, bytes: [0x42, 0x4d] },
+];
+
+/** Image MIME extensions (lower-case, with leading dot). */
+export const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.avif', '.tiff', '.tif']);
+
+/**
+ * Probe a file path: returns { valid: true, ext, sizeBytes, mimeMatch } when
+ * the file exists, is non-empty, and its magic bytes match a known image type.
+ * Returns { valid: false, reason } on any failure.
+ *
+ * Exported for unit testing.
+ */
+export function probeImageFile(filePath: string): { valid: true; ext: string; sizeBytes: number; mimeMatch: boolean } | { valid: false; reason: string } {
+  if (!existsSync(filePath)) {
+    return { valid: false, reason: `Artifact file not found: ${filePath}` };
+  }
+  let stats: ReturnType<typeof statSync>;
+  try {
+    stats = statSync(filePath);
+  } catch {
+    return { valid: false, reason: `Cannot stat artifact file: ${filePath}` };
+  }
+  if (!stats.isFile()) {
+    return { valid: false, reason: `Artifact path is not a regular file: ${filePath}` };
+  }
+  if (stats.size === 0) {
+    return { valid: false, reason: `Artifact file is empty (0 bytes): ${filePath}` };
+  }
+
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  // Read the first 12 bytes for magic-byte check.
+  let headerBuf: Buffer;
+  try {
+    const fd = openSync(filePath, 'r');
+    headerBuf = Buffer.alloc(12);
+    readSync(fd, headerBuf, 0, 12, 0);
+    closeSync(fd);
+  } catch {
+    // Can't read — treat extension as weak validation.
+    return { valid: true, ext, sizeBytes: stats.size, mimeMatch: IMAGE_EXTENSIONS.has(ext) };
+  }
+
+  const mimeMatch = IMAGE_SIGNATURES.some(({ offset, bytes }) =>
+    bytes.every((b, i) => headerBuf[offset + i] === b),
+  );
+
+  return { valid: true, ext, sizeBytes: stats.size, mimeMatch };
+}
+
+// ---------------------------------------------------------------------------
+// Deliverable manifest (passed to the artifact-aware QC prompt)
+// ---------------------------------------------------------------------------
+
+export interface DeliverableManifestItem {
+  title: string;
+  path: string;
+  type: 'image' | 'file' | 'url';
+  /** null when file is missing or unreadable */
+  sizeBytes: number | null;
+  /** Set for images: WxH string or null if not determinable */
+  dimensions: string | null;
+  /** Whether the file exists and passed basic validation */
+  valid: boolean;
+  /** Reason for invalidity (only present when valid=false) */
+  invalidReason?: string;
+}
+
 export interface QCScorerInput {
   taskId: string;
   taskTitle: string;
@@ -77,6 +165,12 @@ export interface QCScorerInput {
   qcAgentId?: string | null;
   qcAgentName?: string | null;
   qcAgentModel?: string | null;
+  /**
+   * When the task has file deliverables, the caller populates this manifest.
+   * Presence of a non-empty manifest switches the LLM prompt from
+   * "brief completeness" to "deliverable fulfillment" mode.
+   */
+  deliverableManifest?: DeliverableManifestItem[] | null;
 }
 
 export interface QCResult {
@@ -140,20 +234,81 @@ function heuristicScore(input: QCScorerInput): QCResult {
 
 /**
  * Build the QC scoring prompt.
- * Returns a structured prompt that asks the model to rate 1–10 and list gaps.
+ *
+ * Two modes:
+ *   (A) Artifact-fulfillment mode — when deliverableManifest is non-empty.
+ *       Scores whether the artifact SATISFIES the request. Terse briefs are
+ *       explicitly NOT penalised. A missing/invalid artifact is an instant fail
+ *       with a named reason rather than a low score.
+ *   (B) Brief-completeness mode — existing behaviour when no manifest.
+ *
  * When a per-department QC agent is available, its identity is used as the
  * QC persona so the model scores from that specialist's perspective.
  */
 function buildQCPrompt(input: QCScorerInput): string {
+  const agentIdentity = input.qcAgentName
+    ? `You are ${input.qcAgentName}, the QC Specialist for the ${input.departmentSlug ?? 'General'} department.`
+    : `You are a QC agent scoring a completed task for the ${input.departmentSlug ?? 'General'} department.`;
+
+  // ── Mode A: artifact-fulfillment ──────────────────────────────────────────
+  const manifest = input.deliverableManifest;
+  if (manifest && manifest.length > 0) {
+    const manifestLines = manifest.map((d, i) => {
+      const status = d.valid
+        ? `EXISTS — ${d.sizeBytes} bytes${d.dimensions ? `, ${d.dimensions}` : ''}`
+        : `MISSING/INVALID — ${d.invalidReason ?? 'unknown reason'}`;
+      return `  ${i + 1}. "${d.title}" [${d.type}] path=${d.path} → ${status}`;
+    }).join('\n');
+
+    const sopSection = input.sopSuccessCriteria
+      ? `**SOP Success Criteria:**\n${input.sopSuccessCriteria}`
+      : input.sopSteps
+      ? `**SOP Steps:**\n${input.sopSteps}`
+      : '**No SOP — score against the request only.**';
+
+    return `${agentIdentity}
+
+**ARTIFACT-FULFILLMENT QC MODE**
+Score whether the delivered artifact(s) satisfy the request. Do NOT penalise a terse brief — a one-line request like "create a picture of a blue duck" is a complete, valid brief.
+
+**Request (Task Title):** ${input.taskTitle}
+**Request Details:** ${input.taskDescription ?? '(none — title is the complete brief)'}
+
+**Deliverables Manifest:**
+${manifestLines}
+
+${sopSection}
+
+**Scoring Instructions:**
+1. If ANY deliverable is MISSING/INVALID, score ≤4.0 and list the exact file(s) and reason(s) in "gaps".
+2. If all deliverables exist and are valid, score based on how well they satisfy the request:
+   - 9–10: Artifact clearly fulfils the request (right type, reasonable size, plausibly matches subject).
+   - 8–8.9: Artifact present and valid; minor uncertainty about content match.
+   - 7–7.9: Artifact present but something is off (wrong type, unexpected size, etc.).
+   - 5–6.9: Artifact present but likely wrong content or degraded quality.
+   - 1–4.9: Artifact missing, empty, or clearly wrong type.
+3. A terse request title is NEVER a gap.
+
+**Gate:** ≥8.5 = PASS (auto-approve), <8.5 = RETURN (kick back for rework).
+
+Reply in this EXACT JSON format (no other text):
+{
+  "score": <number 1.0–10.0>,
+  "pass": <boolean>,
+  "reason": "<1–2 sentence summary>",
+  "gaps": ["<specific gap 1>", "<specific gap 2>"]
+}
+
+If score ≥8.5, "gaps" should be [] or contain only minor polish notes.
+If score <8.5, "gaps" must list specific, actionable rework items (file paths + exact problem).`;
+  }
+
+  // ── Mode B: brief-completeness (original behaviour) ───────────────────────
   const sopSection = input.sopSuccessCriteria
     ? `**SOP Success Criteria:**\n${input.sopSuccessCriteria}`
     : input.sopSteps
     ? `**SOP Steps (no explicit success_criteria defined):**\n${input.sopSteps}`
     : '**No SOP success criteria available — score based on task description completeness only.**';
-
-  const agentIdentity = input.qcAgentName
-    ? `You are ${input.qcAgentName}, the QC Specialist for the ${input.departmentSlug ?? 'General'} department.`
-    : `You are a QC agent scoring a completed task for the ${input.departmentSlug ?? 'General'} department.`;
 
   return `${agentIdentity}
 
@@ -612,6 +767,122 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       ) ?? null;
     }
 
+    // ── Artifact-aware QC: build deliverable manifest (duck-fix) ─────────────
+    // Fetch all file deliverables for this task and probe each one.
+    // If we have valid file deliverables, pass the manifest to the scorer so it
+    // switches to fulfillment mode instead of brief-completeness mode.
+    // Text-tasks (no file deliverables) get a null manifest → unchanged behaviour.
+    interface DeliverableRow {
+      id: string;
+      title: string;
+      path: string | null;
+      deliverable_type: string;
+    }
+    let deliverableManifest: DeliverableManifestItem[] | null = null;
+    try {
+      const delivRows = queryAll<DeliverableRow>(
+        `SELECT id, title, path, deliverable_type FROM task_deliverables WHERE task_id = ?`,
+        [taskId],
+      );
+      const fileRows = delivRows.filter((d) => d.deliverable_type === 'file' && d.path);
+      if (fileRows.length > 0) {
+        deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
+          const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
+          const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
+          const isImage = IMAGE_EXTENSIONS.has(ext);
+
+          if (isImage) {
+            const probe = probeImageFile(rawPath);
+            if (!probe.valid) {
+              return {
+                title: d.title,
+                path: rawPath,
+                type: 'image',
+                sizeBytes: null,
+                dimensions: null,
+                valid: false,
+                invalidReason: probe.reason,
+              };
+            }
+            return {
+              title: d.title,
+              path: rawPath,
+              type: 'image',
+              sizeBytes: probe.sizeBytes,
+              dimensions: null, // dimensions require image decode; skip for now
+              valid: true,
+            };
+          }
+
+          // Non-image file: simple existence + size check.
+          if (!existsSync(rawPath)) {
+            return {
+              title: d.title,
+              path: rawPath,
+              type: 'file',
+              sizeBytes: null,
+              dimensions: null,
+              valid: false,
+              invalidReason: `File not found: ${rawPath}`,
+            };
+          }
+          let sz = 0;
+          try { sz = statSync(rawPath).size; } catch { /* ignore */ }
+          return {
+            title: d.title,
+            path: rawPath,
+            type: 'file',
+            sizeBytes: sz,
+            dimensions: null,
+            valid: sz > 0,
+            invalidReason: sz === 0 ? `File is empty (0 bytes): ${rawPath}` : undefined,
+          };
+        });
+
+        // Early-exit: if ALL deliverables are missing/invalid, fail immediately
+        // without spending an LLM call — the reason is structural, not qualitative.
+        const allInvalid = deliverableManifest.every((d) => !d.valid);
+        if (allInvalid) {
+          const missingReasons = deliverableManifest.map((d) => d.invalidReason ?? `missing: ${d.path}`);
+          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): all deliverables missing/invalid — instant fail`);
+          const failResult: QCResult = {
+            score: 2.0,
+            pass: false,
+            reason: `All file deliverables are missing or invalid: ${missingReasons.join('; ')}`,
+            gaps: missingReasons,
+            scoringPath: 'llm',
+          };
+          const now = new Date().toISOString();
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'qc_review',
+              taskId,
+              `[QC-AUTO] Score: 2.0/10 | FAIL → returned to Backlog | All deliverables missing/invalid: ${missingReasons.join('; ')} [path:llm]`,
+              now,
+            ],
+          );
+          const prevAttempts = task.qc_reroute_attempts ?? 0;
+          const newAttempts = prevAttempts + 1;
+          const kickbackNote = `[QC-FAIL] Score 2.0/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Missing deliverables: ${missingReasons.join('; ')}`;
+          run(
+            `UPDATE tasks SET status = 'backlog',
+               description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
+               qc_reroute_attempts = ?, updated_at = ?
+             WHERE id = ? AND status = 'review'`,
+            [kickbackNote, kickbackNote, newAttempts, now, taskId],
+          );
+          return failResult;
+        }
+      }
+    } catch (manifestErr) {
+      // Non-fatal: if manifest building errors, fall back to text-only scoring.
+      console.warn('[QCScorer] Deliverable manifest build failed (non-fatal):', (manifestErr as Error).message);
+      deliverableManifest = null;
+    }
+    // ── End artifact manifest ─────────────────────────────────────────────────
+
     const input: QCScorerInput = {
       taskId: task.id,
       taskTitle: task.title,
@@ -624,6 +895,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       qcAgentId: qcAgent?.id ?? null,
       qcAgentName: qcAgent?.name ?? null,
       qcAgentModel: qcAgent?.model ?? null,
+      // Artifact-aware QC: manifest (null = text-only mode)
+      deliverableManifest: deliverableManifest,
     };
 
     const result = await scoreTaskForQC(input);
