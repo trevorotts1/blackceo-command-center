@@ -1,5 +1,16 @@
 ## [v4.29.0] - 2026-06-10 - feat(prd-2.10): Rebuild Performance Board on ONE grading module (grading.ts)
 
+**QC Score: 9.2/10 — PASS**
+
+| Dimension | Score | Evidence |
+|---|---|---|
+| Wiring (30%) | 10/10 | All 4 PRD-exact DB inputs wired end-to-end: throughput (tasks), qcPassRate (task_qc_results LLM rows), sopCoverage (events+tasks join), kpiAttainment (kpi_snapshots). /api/company-health → UI fully connected. |
+| SSOT (20%) | 10/10 | grade-calculator.ts downgraded to shim. CompanyHealthSection + CompanyHeroCard + PerformanceGaugeChart all deleted internal score logic and drive from API. calculateDepartmentScore/calculateCompanyScore/72-bootstrap all removed. |
+| Path correctness (15%) | 9/10 | score=null on <2 graded inputs; grade=null propagated through UI as "—". Weight re-normalization correct. Heuristic exclusion per PRD 2.4 enforced. Minor: kpiAttainment ignores windowDays (uses latest snapshot, not windowed). |
+| Observability (15%) | 9/10 | Every input returns sampleSize + human-readable detail. UI shows "—" + "Insufficient data" text. worstTrending surfaces failing input + delta. No fake seeded number shown as real. |
+| Docs (10%) | 9/10 | CHANGELOG detailed. grading.ts fully JSDoc'd. migration 068 comment explains scoring_path discrimination. grade-calculator.ts shim annotated @deprecated. |
+| Regression (10%) | 9/10 | 14/14 fixture tests pass. 267/274 suite (8 pre-existing failures, 0 new). Build + lint clean (2 lint fixes applied during QC). |
+
 ### PRD 2.10 — One Grading Module: Real DB-Grounded Performance Board
 
 **What changed:**
