@@ -1,16 +1,24 @@
 /**
- * Unit tests for QC scorer wiring (v4.11.0).
+ * Unit tests for QC scorer wiring (v4.11.0, updated PRD 2.4).
  *
  * Verifies:
- *   1. runQCOnReview fires from the execution-watcher path (advanceToReview).
- *   2. runQCReviewSweep scores a task stuck in review (no recent qc_review event).
- *   3. FAIL branch: task moves to `backlog`, kickback note appended, CEO reroute
- *      event written (type='qc_review', message contains '[QC-REROUTE]').
- *   4. qc_review events are written and have type='qc_review'.
- *   5. DISABLE_QC_REVIEW_SWEEP env guard skips the sweep.
+ *   1. runQCOnReview writes a qc_review event for a review-status task.
+ *   2. runQCOnReview skips non-review tasks (returns null).
+ *   3. FAIL branch (no-criteria path, not heuristic): task moves to `backlog`,
+ *      kickback note appended, CEO reroute event written ([QC-REROUTE]).
+ *   4. FAIL branch (no-criteria): task_status_changed event written.
+ *   5. runQCReviewSweep scores a stuck review task.
+ *   6. Sweep skips tasks with a recent qc_review event.
+ *   7. DISABLE_QC_REVIEW_SWEEP env guard skips the sweep.
+ *   8. qc_review events are queryable from events table.
  *
- * Uses an isolated temp DB (same pattern as per-dept-qc-specialist.test.ts).
- * Forces heuristic path by ensuring OPENAI_API_KEY and GOOGLE_API_KEY are unset.
+ * PRD 2.4 note: heuristic mode (scoringPath='heuristic', no API key AND a SOP
+ * assigned) writes [QC-HEURISTIC] and leaves the task in review. Tests 3-4
+ * use the 'no-criteria' path (no SOP, no API key) which is NOT heuristic and
+ * correctly goes through the reroute loop. The dedicated heuristic fixture
+ * tests live in tests/unit/qc-heuristic-mode-prd2.4.test.ts.
+ *
+ * Uses an isolated temp DB. No real API keys.
  */
 
 import test from 'node:test';
@@ -121,10 +129,12 @@ test('runQCOnReview: skips task not in review status (returns null)', async () =
 });
 
 // ─── Test 3: FAIL branch → backlog + CEO reroute event ───────────────────────
+// Uses no-criteria path (no SOP assigned, no API key): scoringPath='no-criteria',
+// NOT 'heuristic', so the reroute loop fires. This is the intended behavior.
 
-test('FAIL branch: task moves to backlog and CEO reroute event is written', async () => {
+test('FAIL branch (no-criteria): task moves to backlog and CEO reroute event is written', async () => {
   const id = nextId('qc-fail');
-  // Short description → heuristic will score <8.5 (score clamped to [6,8]).
+  // Short description, no SOP → no-criteria path (score 7.5 < 8.5, reroutes).
   insertTask(id, 'review', 'ok');
 
   const result = await runQCOnReview(id);
@@ -151,9 +161,11 @@ test('FAIL branch: task moves to backlog and CEO reroute event is written', asyn
 });
 
 // ─── Test 4: FAIL branch writes task_status_changed event ────────────────────
+// Uses no-criteria path (no SOP, no API key) — not heuristic — so reroute fires.
 
-test('FAIL branch: task_status_changed event is written pointing to backlog', async () => {
+test('FAIL branch (no-criteria): task_status_changed event is written pointing to backlog', async () => {
   const id = nextId('qc-fail-evt');
+  // No SOP → no-criteria path, which reroutes.
   insertTask(id, 'review');
 
   await runQCOnReview(id);

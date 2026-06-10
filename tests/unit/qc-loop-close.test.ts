@@ -1,16 +1,23 @@
 /**
- * Unit tests for QC loop-close fixes (v4.12.0).
+ * Unit tests for QC loop-close fixes (v4.12.0, updated PRD 2.4).
  *
  * Verifies:
  *   1. getMissionControlUrl() returns port 4000 (not 3000) when NEXTAUTH_URL is unset.
  *   2. getMissionControlUrl() uses MISSION_CONTROL_URL env when set.
- *   3. FAIL branch increments qc_reroute_attempts on each QC fail.
- *   4. After QC_MAX_REROUTES fails, task is set to `blocked` (not backlog).
- *   5. Blocked task gets a QC-BLOCKED event (not QC-REROUTE).
- *   6. qc_reroute_attempts column exists (migration 061).
- *   7. ceo-delegation-sweep picks up QC-fail backlog tasks (qc_reroute_attempts > 0).
+ *   3. migration 061 adds qc_reroute_attempts column (schema guard).
+ *   4. FAIL branch (non-heuristic path) increments qc_reroute_attempts on each fail.
+ *   5. After QC_MAX_REROUTES non-heuristic fails, task is set to `blocked`.
+ *   6. Blocked task gets a QC-BLOCKED event (not QC-REROUTE).
+ *   7. Sub-cap non-heuristic FAIL stays in backlog (not blocked).
+ *   8. ceo-delegation-sweep picks up QC-fail backlog tasks (qc_reroute_attempts > 0).
  *
- * Uses an isolated temp DB. Forces heuristic path (no API keys).
+ * PRD 2.4 note: heuristic mode (no API key, scoringPath='heuristic') NEVER
+ * increments qc_reroute_attempts and NEVER reroutes — see
+ * tests/unit/qc-heuristic-mode-prd2.4.test.ts for the dedicated fixture tests.
+ * Tests 4-7 below use the 'no-criteria' scoring path (no SOP assigned, no API key)
+ * which is NOT heuristic and correctly goes through the reroute loop.
+ *
+ * Uses an isolated temp DB. Forces no-criteria path (no API keys, no SOP).
  */
 
 import test from 'node:test';
@@ -139,16 +146,20 @@ test('migration 061: qc_reroute_attempts column exists on tasks table', () => {
   );
 });
 
-// ─── Test 4: qc_reroute_attempts increments on each FAIL ────────────────────
+// ─── Test 4: qc_reroute_attempts increments on each FAIL (non-heuristic path) ─
+// Uses the 'no-criteria' path (no SOP assigned, no API key) which is NOT
+// heuristic and goes through the reroute loop.
 
-test('FAIL branch: qc_reroute_attempts increments from 0 → 1 on first fail', async () => {
+test('FAIL branch (no-criteria): qc_reroute_attempts increments from 0 → 1 on first fail', async () => {
   const id = nextId('attempts-incr');
-  // Short description → heuristic scores <8.5.
-  insertTask(id, 'review', 'x');
+  // No SOP → no-criteria path (scoringPath='no-criteria', score=7.5, pass=false).
+  // This path is not heuristic, so the reroute loop fires.
+  insertTask(id, 'review');
 
   const result = await runQCOnReview(id);
   assert.ok(result !== null, 'must return a result');
-  assert.ok(!result.pass, 'heuristic must fail');
+  assert.ok(!result.pass, 'no-criteria path must fail');
+  assert.equal(result.scoringPath, 'no-criteria', 'path must be no-criteria (no SOP + no key)');
 
   const task = queryOne<{ qc_reroute_attempts: number; status: string }>(
     `SELECT qc_reroute_attempts, status FROM tasks WHERE id = ?`,
@@ -156,16 +167,17 @@ test('FAIL branch: qc_reroute_attempts increments from 0 → 1 on first fail', a
   );
   assert.ok(task, 'task must exist');
   assert.equal(task.qc_reroute_attempts, 1, 'qc_reroute_attempts must be 1 after first fail');
-  assert.equal(task.status, 'backlog', 'task must be in backlog after first fail');
+  // Task must have left review (backlog or in_progress after auto-route attempt).
+  assert.notEqual(task.status, 'review', 'task must leave review on no-criteria fail');
 });
 
-// ─── Test 5: cap reached → task blocked, not backlog ────────────────────────
+// ─── Test 5: cap reached → task blocked, not backlog (non-heuristic path) ────
 
-test('FAIL branch: task is set to `blocked` after QC_MAX_REROUTES fails', async () => {
+test('FAIL branch (no-criteria, cap): task is set to `blocked` after QC_MAX_REROUTES fails', async () => {
   const id = nextId('attempts-cap');
-  // Pre-set attempts = QC_MAX_REROUTES (env set to 2) so this run is the cap.
-  // Use explicit value (2) rather than QC_MAX_REROUTES_val to avoid any closure timing edge case.
-  insertTask(id, 'review', 'x');
+  // No SOP → no-criteria path, which goes through the reroute loop.
+  // Pre-set attempts = QC_MAX_REROUTES so this run trips the cap.
+  insertTask(id, 'review');
   // Directly set the counter to QC_MAX_REROUTES_val (must equal 2 from env).
   run(`UPDATE tasks SET qc_reroute_attempts = ? WHERE id = ?`, [QC_MAX_REROUTES_val, id]);
   // Verify it took.
@@ -177,7 +189,8 @@ test('FAIL branch: task is set to `blocked` after QC_MAX_REROUTES fails', async 
 
   const result = await runQCOnReview(id);
   assert.ok(result !== null, 'must return a result');
-  assert.ok(!result.pass, 'heuristic must fail');
+  assert.ok(!result.pass, 'no-criteria path must fail');
+  assert.equal(result.scoringPath, 'no-criteria', 'path must be no-criteria');
 
   const task = queryOne<{ status: string; description: string | null; qc_reroute_attempts: number }>(
     `SELECT status, description, qc_reroute_attempts FROM tasks WHERE id = ?`,
@@ -198,9 +211,10 @@ test('FAIL branch: task is set to `blocked` after QC_MAX_REROUTES fails', async 
 
 // ─── Test 6: blocked task gets QC-BLOCKED event, not QC-REROUTE ─────────────
 
-test('FAIL branch (cap): QC-BLOCKED event written, no QC-REROUTE event', async () => {
+test('FAIL branch (no-criteria, cap): QC-BLOCKED event written, no QC-REROUTE event', async () => {
   const id = nextId('blocked-evt');
-  insertTask(id, 'review', 'x');
+  // No SOP → no-criteria path.
+  insertTask(id, 'review');
   // Directly set counter to cap value.
   run(`UPDATE tasks SET qc_reroute_attempts = ? WHERE id = ?`, [QC_MAX_REROUTES_val, id]);
 
@@ -225,19 +239,24 @@ test('FAIL branch (cap): QC-BLOCKED event written, no QC-REROUTE event', async (
   assert.ok(!reroute, 'no QC-REROUTE event should be written when cap is reached');
 });
 
-// ─── Test 7: sub-cap FAIL → task stays in backlog, NOT blocked ──────────────
+// ─── Test 7: sub-cap FAIL → task leaves review (not blocked) ────────────────
+// Uses no-criteria path (no SOP) — not heuristic — so the reroute fires.
 
-test('FAIL branch (sub-cap): task stays backlog (not blocked) on first fail', async () => {
+test('FAIL branch (no-criteria, sub-cap): task leaves review and is not blocked on first fail', async () => {
   const id = nextId('subcap');
-  insertTask(id, 'review', 'y'); // 0 prior attempts
+  // No SOP → no-criteria path (not heuristic). 0 prior attempts.
+  insertTask(id, 'review');
 
-  await runQCOnReview(id);
+  const result = await runQCOnReview(id);
+  assert.ok(result !== null, 'must return a result');
+  assert.equal(result.scoringPath, 'no-criteria', 'path must be no-criteria');
 
   const task = queryOne<{ status: string }>(
     `SELECT status FROM tasks WHERE id = ?`, [id],
   );
   assert.ok(task, 'task must exist');
-  assert.equal(task.status, 'backlog', 'sub-cap fail must land in backlog, not blocked');
+  assert.notEqual(task.status, 'review', 'sub-cap fail must leave review');
+  assert.notEqual(task.status, 'blocked', 'sub-cap fail must not be blocked on first fail');
 });
 
 // ─── Test 8: ceo-delegation-sweep picks up QC-fail backlog tasks ─────────────
@@ -246,7 +265,7 @@ test('ceo-delegation-sweep: QC-fail backlog task (qc_reroute_attempts > 0) is in
   // We only test that the query logic returns qc-fail tasks — not the full
   // routeTask round-trip (requires a full agents/workspaces seed and internet).
   const id = nextId('sweep-qcfail');
-  insertTask(id, 'backlog', '[QC-FAIL] score 7.0/10. Needs rework.');
+  insertTask(id, 'backlog', { description: '[QC-FAIL] score 7.0/10. Needs rework.' });
   // Directly set counter to 1 (> 0 = QC-fail marker).
   run(`UPDATE tasks SET qc_reroute_attempts = 1 WHERE id = ?`, [id]);
 
