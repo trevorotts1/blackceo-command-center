@@ -1,3 +1,21 @@
+## QC RESULT — PRD 3.4 — 2026-06-10 — PASS (weighted 9.45/10)
+
+Scored by independent Sonnet QC agent against PRD Section 6 dimensions (Wiring 30, SSOT 20, Path 15, Observability 15, Docs 10, Regression 10).
+Merge SHA: 9bcfacbf67b3e84f184f220b14434525832db3c1 (squash into main)
+
+| Dimension      | Weight | Score | Evidence |
+|----------------|--------|-------|---------|
+| Wiring         | 30     | 9     | `console.warn` fires with "STALE INSTALL DETECTED" + sentinel id + skill version + task_id when a sentinel appears (Test 5 live-verified). Guard still filters: persona_id NOT written to DB on sentinel (Test 5 DB check). Real persona triggers DB update + `task_updated` broadcast (Test 6). `getInstalledSkillVersion()` called at warn-time. Minor: warn runs inside `void(async()=>{})` — consistent with PRD 1.6 async pattern, no isolation regression. |
+| SSOT           | 20     | 10    | `SENTINEL_IDS` is single module-level exported constant; no inline `const SENTINEL_IDS = new Set([...])` in async block (Test 7 source-level assertion). Single `getInstalledSkillVersion()` function with no duplicate lookup logic. Used in both warn check and filter condition. |
+| Path           | 15     | 9     | Version file paths use `os.homedir()` + `path.join()` (no literal tildes). Fallback chain: env var → `/data/.onboarding-version` (VPS) → `~/.onboarding-version` (Mac) → "unknown". VPS path before Mac is safe assumption since VPS `/data` won't exist on Mac and catch handles absence. |
+| Observability  | 15     | 10    | Before: silent filter (zero signal). After: `console.warn` with `[createTaskCore]` prefix, "STALE INSTALL DETECTED", sentinel id, skill version, task_id, actionable "update onboarding skills" message. Live test output confirms exact message fires. Real persona path logs "Persona landed". |
+| Docs           | 10     | 9     | CHANGELOG entry covers root cause + 3 files changed + self-assessed QC score. Source has JSDoc on both `getInstalledSkillVersion()` and `SENTINEL_IDS`. Async guard comment links to PRD 3.4 rationale. Minor: self-assessed score in CHANGELOG was from writer, not independent QC. |
+| Regression     | 10     | 10    | 9/9 new tests pass (live-run confirmed above). 7 pre-existing failures unchanged (none introduced). CI green: Build smoke test, QC Command Center, Version consistency all pass. |
+
+**Weighted score:** (9×30 + 10×20 + 9×15 + 10×15 + 9×10 + 10×10) / 100 = (270+200+135+150+90+100)/100 = **9.45/10 PASS** (gate: 8.5)
+
+---
+
 ## [v4.25.0] - 2026-06-10 - fix(prd-3.4): SENTINEL_IDS guard — loud warning with installed skill version
 
 ### PRD 3.4 — SENTINEL_IDS: keep guard, add loud warning with skill version
