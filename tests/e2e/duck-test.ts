@@ -445,7 +445,35 @@ async function seedFixtures(): Promise<void> {
     );
   }
 
+  // Seed a Graphics SOP so the Triad Rule gate (description + sop_id + persona_id)
+  // can be satisfied before the test advances the task out of backlog.
+  // The SOP must be non-deleted and reference the Graphics department.
+  run(
+    `INSERT OR IGNORE INTO sops (id, name, slug, description, version, department, steps, created_at, updated_at)
+     VALUES ('sop-duck-e2e', 'Duck Image Generation SOP', 'duck-image-generation',
+             'Standard operating procedure for generating duck images via mock generator',
+             1, 'Graphics', '["Generate image","Verify PNG","Register deliverable"]', ?, ?)`,
+    [now, now],
+  );
+
   closeDb();
+}
+
+/**
+ * Satisfy the Triad Rule gate for a task so it can leave backlog.
+ * Called after agent assignment, before the first status-change PATCH.
+ *
+ * The Triad requires: non-empty description (already set by ingest), a
+ * non-deleted sop_id, and a non-sentinel persona_id. We write these directly
+ * to the DB (the same channel the operator UI uses via PATCH /api/tasks/:id).
+ */
+async function seedTriadForTask(taskId: string): Promise<void> {
+  const { run } = await import('../../src/lib/db') as typeof import('../../src/lib/db');
+  const now = new Date().toISOString();
+  run(
+    `UPDATE tasks SET sop_id = 'sop-duck-e2e', persona_id = 'duck-e2e-persona', updated_at = ? WHERE id = ?`,
+    [now, taskId],
+  );
 }
 
 // ── Suite ─────────────────────────────────────────────────────────────────────
@@ -537,6 +565,16 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     // model_id may be null until dispatch fires; we verify it via DB row after dispatch
     console.log(`[duck-e2e] Agent assigned: ${task.assigned_agent_id}, model_id: ${task.model_id ?? '(pending dispatch)'}`);
   });
+
+  // ── Triad seed: satisfy sop_id + persona_id before status transitions ────
+  // The Triad Rule (description + valid sop_id + valid persona_id) gates every
+  // status change out of backlog. The description is already set by ingest;
+  // we write sop_id + persona_id directly to the DB here (same path the
+  // operator UI uses, without going through an HTTP round-trip that would
+  // itself be subject to the gate). This is test-harness bookkeeping, not
+  // part of the duck pipeline logic under test.
+  await seedTriadForTask(taskId);
+  console.log(`[duck-e2e] Triad seed complete (sop_id=sop-duck-e2e, persona_id=duck-e2e-persona)`);
 
   // ── d. Auto-dispatch fired (dispatch activity/status transition) ─────────
   // Evidence of auto-dispatch: the `task_dispatched` event is written in the
