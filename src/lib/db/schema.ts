@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- returned to backlog by the QC scorer. Capped at QC_MAX_REROUTES (default 3)
   -- before the task is set to blocked status and the CEO is notified.
   qc_reroute_attempts INTEGER DEFAULT 0,
+  -- PRD 2.12-cc dispatch-time SOP authoring link (migration 066 owns this for
+  -- existing DBs; this base CREATE covers fresh installs). When set, this task
+  -- is the "Author SOP" sub-task for the referenced original task. The fast-loop
+  -- recursion guard skips SOP authoring for any task with this column set.
+  sop_authoring_for_task_id TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

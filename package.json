@@ -11,6 +11,8 @@
     "start": "next start -p ${PORT:-4000}",
     "lint": "next lint",
     "test:unit": "node --import tsx --test tests/unit/*.test.ts",
+    "test:smoke:sop-auto-replace": "npx tsx scripts/smoke-test-sop-auto-replace.ts",
+    "test:smoke:sop-authoring": "npx tsx scripts/smoke-test-sop-authoring.ts",
     "db:seed": "tsx src/lib/db/seed.ts",
     "db:seed:sops": "tsx scripts/seed-starter-sops.ts",
     "db:import:role-library": "tsx scripts/import-role-library.ts",

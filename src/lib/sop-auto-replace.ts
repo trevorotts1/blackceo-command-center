@@ -32,7 +32,7 @@ export interface AutoReplaceProposalRow {
   draft_steps: string;
   based_on_task_ids: string;
   evidence_summary: string | null;
-  status: 'pending' | 'approved' | 'rejected' | 'auto-generated-pending-review' | 'escalated';
+  status: 'pending' | 'approved' | 'rejected' | 'auto-generated-pending-review' | 'escalated' | 'auto-authored-filed';
   created_at: string;
   reviewed_at: string | null;
   reviewed_by: string | null;
@@ -51,9 +51,9 @@ export interface AutoReplaceResult {
   notified: boolean;
 }
 
-const WORKSPACE_BASE = process.env.OPENCLAW_WORKSPACE_PATH || '/data/.openclaw/workspace';
+export const WORKSPACE_BASE = process.env.OPENCLAW_WORKSPACE_PATH || '/data/.openclaw/workspace';
 
-function safeReadWorkspaceFile(filename: string): string {
+export function safeReadWorkspaceFile(filename: string): string {
   // Workspace files live outside the Next.js sandbox on the VPS. Try direct
   // fs read first (dev path), fall back to `cat` via execFileSync when
   // Node lacks direct read permission (prod sandbox).
@@ -69,34 +69,68 @@ function safeReadWorkspaceFile(filename: string): string {
   }
 }
 
-function readSoulAndUser(): { soul: string; user: string } {
+export function readSoulAndUser(): { soul: string; user: string } {
   return {
     soul: safeReadWorkspaceFile('SOUL.md').slice(0, 8_000),
     user: safeReadWorkspaceFile('USER.md').slice(0, 4_000),
   };
 }
 
-function buildResearchQuery(sop: SOP): string {
+export function buildResearchQueryForSOP(sop: SOP): string {
   const year = new Date().getFullYear();
   const dept = sop.department || '';
   return `${dept} ${sop.name} best practices ${year}`.trim();
 }
 
-function buildSynthesisPrompt(opts: {
-  deletedSop: SOP;
+/**
+ * Generic synthesis prompt builder — handles both the Track S delete case and
+ * the 2.12 dispatch-time new-SOP-authoring case.
+ *
+ * When `noV1` is true (dispatch-time case) the "deleted v1" section is
+ * replaced with a positive mandate: author a brand-new SOP for this role/dept
+ * under the Tier-1 research mandate (McKinsey/HBR/IBISWorld/Statista-grade).
+ */
+export function buildSynthesisPrompt(opts: {
+  /** Track S: the deleted SOP to replace (requires noV1=false or omitted). */
+  deletedSop?: SOP;
   soul: string;
   user: string;
   tavilyResults: TavilyResult[];
   tavilyAnswer?: string;
+  /** 2.12 dispatch path: no v1 exists, author from scratch. */
+  noV1?: boolean;
+  /** 2.12 dispatch path: dept + role hints for the mandate. */
+  deptSlug?: string;
+  agentRoleSlug?: string;
+  taskTitle?: string;
 }): string {
-  const { deletedSop, soul, user, tavilyResults, tavilyAnswer } = opts;
+  const { deletedSop, soul, user, tavilyResults, tavilyAnswer, noV1, deptSlug, agentRoleSlug, taskTitle } = opts;
   const research = tavilyResults
     .slice(0, 5)
     .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${(r.content || '').slice(0, 600)}`)
     .join('\n\n');
 
+  const v1Section = noV1
+    ? [
+        `### Authoring mandate (NEW SOP — Tier-1 research required)`,
+        `You are authoring a BRAND NEW SOP for department: "${deptSlug || 'unknown'}"${agentRoleSlug ? `, role: "${agentRoleSlug}"` : ''}.`,
+        taskTitle ? `Triggered by task: "${taskTitle}"` : '',
+        `TIER-1 RESEARCH MANDATE: Your SOP MUST be grounded in current best practices from`,
+        `authoritative sources (McKinsey, HBR, IBISWorld, Statista, or equivalent industry`,
+        `leaders). Each step should cite or reference at least one of the sources provided below.`,
+        `Do not fabricate citations. Your confidence score should reflect source quality.`,
+      ].filter(Boolean).join('\n')
+    : [
+        `### Deleted v1 (the operator rejected this; produce a DIFFERENT approach)`,
+        `Name: ${deletedSop?.name || 'unknown'}`,
+        `Department: ${deletedSop?.department || 'n/a'}`,
+        `Steps JSON: ${deletedSop?.steps || '[]'}`,
+      ].join('\n');
+
   return [
-    `You are drafting a v2 SOP to replace one an operator just deleted.`,
+    noV1
+      ? `You are authoring a new SOP from scratch based on Tier-1 research.`
+      : `You are drafting a v2 SOP to replace one an operator just deleted.`,
     `Your output MUST be a single JSON object matching this schema (no markdown, no commentary):`,
     `{`,
     `  "name": "string",`,
@@ -108,10 +142,7 @@ function buildSynthesisPrompt(opts: {
     `  "confidence": 0.0-1.0`,
     `}`,
     ``,
-    `### Deleted v1 (the operator rejected this; produce a DIFFERENT approach)`,
-    `Name: ${deletedSop.name}`,
-    `Department: ${deletedSop.department || 'n/a'}`,
-    `Steps JSON: ${deletedSop.steps}`,
+    v1Section,
     ``,
     `### Client voice (SOUL.md excerpt)`,
     soul ? soul : '(no SOUL.md available; use a neutral professional tone)',
@@ -127,13 +158,15 @@ function buildSynthesisPrompt(opts: {
     `1. Steps must be concrete, sequenced, and actionable, not platitudes.`,
     `2. Each step has a checklist of 2-5 atomic items and a success_criteria sentence.`,
     `3. Match the client's voice. If SOUL.md is empty, default to plain professional English.`,
-    `4. Produce a DIFFERENT approach from the deleted v1; assume v1 failed for some reason.`,
+    noV1
+      ? `4. Author a complete, actionable SOP that a non-expert could follow step-by-step.`
+      : `4. Produce a DIFFERENT approach from the deleted v1; assume v1 failed for some reason.`,
     `5. Confidence is your honest 0-1 estimate based on how grounded the research was.`,
     `6. Output the JSON object only. No prose, no markdown fences.`,
   ].join('\n');
 }
 
-interface DraftedSOP {
+export interface DraftedSOP {
   name: string;
   description?: string;
   department?: string;
@@ -143,7 +176,7 @@ interface DraftedSOP {
   confidence?: number;
 }
 
-function parseDraftedSOP(raw: string): DraftedSOP {
+export function parseDraftedSOP(raw: string): DraftedSOP {
   // Strip ```json``` fences Gemini sometimes emits despite response_mime_type.
   const cleaned = raw
     .trim()
@@ -176,7 +209,7 @@ function parseDraftedSOP(raw: string): DraftedSOP {
   };
 }
 
-function getRecentAttemptCount(deletedSop: SOP): number {
+export function getRecentAttemptCount(deletedSop: SOP): number {
   // "Same slug" = same department + name match within the last 7 days.
   // Counts both successful auto-research proposals AND rejected ones —
   // a rejected proposal still consumed Tavily + Gemini budget.
@@ -200,7 +233,7 @@ function countImpactedTasks(sopId: string): number {
   return row?.n ?? 0;
 }
 
-function findClientChatId(): string | null {
+export function findClientChatId(): string | null {
   // Per MEMORY.md: source of truth for paired Telegram chat IDs is
   // agents/main/sessions/sessions.json under `agent:main:telegram:direct:<id>`.
   const sessionsPath = path.join(WORKSPACE_BASE, 'agents/main/sessions/sessions.json');
@@ -225,7 +258,7 @@ function findClientChatId(): string | null {
   }
 }
 
-function notifyTelegram(opts: { chatId: string; message: string }): boolean {
+export function notifyTelegram(opts: { chatId: string; message: string }): boolean {
   // Per MEMORY.md, never bypass OpenClaw's gateway. Always shell to
   // `openclaw message send`. Honor a disable flag for tests.
   if (process.env.SOP_AUTO_REPLACE_TELEGRAM_DISABLED === '1') {
@@ -302,7 +335,7 @@ export async function enqueueAutoReplace(
 
   // ----- Research + synthesis -----
   const { soul, user } = readSoulAndUser();
-  const query = buildResearchQuery(deletedSop);
+  const query = buildResearchQueryForSOP(deletedSop);
   const tavily = await tavilySearch(query, { max_results: 5 });
   const synthesisPrompt = buildSynthesisPrompt({
     deletedSop,
@@ -310,6 +343,7 @@ export async function enqueueAutoReplace(
     user,
     tavilyResults: tavily.results,
     tavilyAnswer: tavily.answer,
+    noV1: false,
   });
   const raw = await geminiGenerate(synthesisPrompt, { response_mime_type: 'application/json' });
   const drafted = parseDraftedSOP(raw);

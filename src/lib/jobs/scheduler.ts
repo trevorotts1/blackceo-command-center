@@ -28,6 +28,9 @@ import {
 } from './weekly-done-clear';
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
+import { scoreTaskForQC } from '@/lib/qc-scorer';
+import { queryAll, run } from '@/lib/db';
+import type { QCScorerInput } from '@/lib/qc-scorer';
 
 export interface RegisteredJob {
   name: string;
@@ -143,6 +146,78 @@ async function runMemoryIndexRebuild(): Promise<void> {
  * so re-running it never creates duplicate drafts. Opt out per box with
  * DISABLE_SOP_LEARNING_CRON=1.
  */
+/**
+ * PRD 2.12: Run QC verdict tagging for pending sop_proposals from the slow loop.
+ *
+ * The slow loop (detectPatternsAndPropose) remains human-approval-gated — this
+ * does NOT auto-file. It ONLY stamps each draft proposal with a
+ * [QC-PASS <score>] or [QC-FAIL <score> — needs rework] tag in evidence_summary
+ * so the /sops/proposals queue shows the operator an LLM quality signal before
+ * they approve. Clustering/dedup logic is UNCHANGED.
+ */
+async function tagPendingProposalsWithQC(): Promise<void> {
+  try {
+    interface ProposalRow {
+      id: string;
+      proposed_name: string;
+      proposed_department: string | null;
+      draft_steps: string | null;
+      evidence_summary: string | null;
+    }
+    const pending = queryAll<ProposalRow>(
+      `SELECT id, proposed_name, proposed_department, draft_steps, evidence_summary
+       FROM sop_proposals
+       WHERE status = 'pending'
+         AND (evidence_summary IS NULL OR (evidence_summary NOT LIKE '%[QC-PASS%' AND evidence_summary NOT LIKE '%[QC-FAIL%'))
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [],
+    );
+    if (pending.length === 0) return;
+
+    let tagged = 0;
+    for (const proposal of pending) {
+      try {
+        const qcInput: QCScorerInput = {
+          taskId: proposal.id,
+          taskTitle: proposal.proposed_name,
+          taskDescription: null,
+          sopSuccessCriteria: null,
+          sopName: proposal.proposed_name,
+          sopSteps: proposal.draft_steps,
+          departmentSlug: proposal.proposed_department ?? null,
+          qcAgentId: null,
+          qcAgentName: null,
+          qcAgentModel: null,
+        };
+        const qcResult = await scoreTaskForQC(qcInput);
+        const verdict =
+          qcResult.scoringPath === 'heuristic'
+            ? `[QC-HEURISTIC ${qcResult.score.toFixed(1)}/10 — human review required (no LLM key)]`
+            : qcResult.pass
+            ? `[QC-PASS ${qcResult.score.toFixed(1)}/10]`
+            : `[QC-FAIL ${qcResult.score.toFixed(1)}/10 — needs rework: ${qcResult.gaps.slice(0, 2).join('; ')}]`;
+
+        const updatedEvidence = proposal.evidence_summary
+          ? `${verdict}\n\n${proposal.evidence_summary}`
+          : verdict;
+        run(
+          `UPDATE sop_proposals SET evidence_summary = ? WHERE id = ? AND status = 'pending'`,
+          [updatedEvidence, proposal.id],
+        );
+        tagged++;
+      } catch {
+        // Non-fatal per proposal — continue tagging others.
+      }
+    }
+    if (tagged > 0) {
+      console.log(`[cron] sop-learning: QC verdict tagged ${tagged} pending proposal(s)`);
+    }
+  } catch (err) {
+    console.warn('[cron] sop-learning: QC verdict tagging failed (non-fatal):', (err as Error).message);
+  }
+}
+
 async function runSopLearning(): Promise<void> {
   if (process.env.DISABLE_SOP_LEARNING_CRON === '1' || process.env.DISABLE_SOP_LEARNING_CRON === 'true') {
     console.log('[cron] sop-learning: DISABLE_SOP_LEARNING_CRON set, skipping');
@@ -154,6 +229,8 @@ async function runSopLearning(): Promise<void> {
       `${result.clusters_found} candidate clusters, ${result.proposals_created} new proposal(s)` +
       (result.proposal_ids.length > 0 ? ` [${result.proposal_ids.join(', ')}]` : '')
   );
+  // PRD 2.12: Tag each pending proposal with a QC verdict (verdict-only, no auto-file).
+  await tagPendingProposalsWithQC();
 }
 
 const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezone?: string }> = [

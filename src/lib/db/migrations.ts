@@ -2355,6 +2355,31 @@ const migrations: Migration[] = [
     },
   },
   {
+    id: '066',
+    name: 'add_tasks_sop_authoring_link',
+    // PRD 2.12-cc: links the "Author SOP" sub-task back to the original task
+    // that triggered the fast-loop authoring. Additive + idempotent.
+    // For existing databases this migration adds the column; schema.ts carries
+    // the column definition for fresh installs (noted there with a migration-066
+    // comment per the 050/060 convention).
+    up: (db) => {
+      console.log('[Migration 066] Adding tasks.sop_authoring_for_task_id (PRD 2.12-cc)...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      if (!cols.includes('sop_authoring_for_task_id')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN sop_authoring_for_task_id TEXT`);
+        console.log('[Migration 066] Added tasks.sop_authoring_for_task_id');
+      } else {
+        console.log('[Migration 066] tasks.sop_authoring_for_task_id already present, skipping');
+      }
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_tasks_sop_authoring ON tasks(sop_authoring_for_task_id)`,
+      );
+      console.log('[Migration 066] idx_tasks_sop_authoring ready');
+    },
+  },
+  {
     id: '064',
     name: 'seed_default_company_sentinel',
     // BUG FIX (v4.22.0): POST /api/workspaces INSERT omits company_id and
@@ -2396,6 +2421,71 @@ const migrations: Migration[] = [
       } else {
         console.log("[Migration 064] Sentinel companies row already present, skipping");
       }
+    },
+  },
+  {
+    id: '067',
+    name: 'expand_sop_proposals_status_auto_authored',
+    // PRD 2.12-cc: dispatch-time authoring files proposals with
+    // status='auto-authored-filed'. The CHECK on sop_proposals only went up to
+    // 'escalated' (migration 025). Expand it via table-rebuild (SQLite cannot
+    // ALTER…DROP CONSTRAINT). Idempotent: no-op if already expanded.
+    up: (db) => {
+      console.log('[Migration 067] Expanding sop_proposals.status CHECK to include auto-authored-filed...');
+      const tableSql = (
+        db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sop_proposals'").get() as
+          | { sql: string }
+          | undefined
+      )?.sql ?? '';
+
+      // Already includes the new status → nothing to do.
+      if (tableSql.includes("'auto-authored-filed'")) {
+        console.log('[Migration 067] CHECK already includes auto-authored-filed, skipping rebuild');
+        return;
+      }
+
+      // Defensive: if the table doesn't exist yet (extremely old DB), skip —
+      // migration 025 will create it with the old CHECK and this migration will
+      // then run next boot to fix it.
+      if (!tableSql) {
+        console.log('[Migration 067] sop_proposals table not found yet, skipping');
+        return;
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sop_proposals_m067_new (
+          id TEXT PRIMARY KEY,
+          proposed_name TEXT NOT NULL,
+          proposed_department TEXT,
+          draft_steps TEXT NOT NULL,
+          based_on_task_ids TEXT NOT NULL,
+          evidence_summary TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+            'pending', 'approved', 'rejected',
+            'auto-generated-pending-review', 'escalated',
+            'auto-authored-filed'
+          )),
+          created_at TEXT DEFAULT (datetime('now')),
+          reviewed_at TEXT,
+          reviewed_by TEXT,
+          approved_sop_id TEXT REFERENCES sops(id),
+          replaces_sop_id TEXT REFERENCES sops(id),
+          confidence REAL,
+          auto_research_attempts INTEGER DEFAULT 0,
+          research_sources TEXT
+        );
+        INSERT OR IGNORE INTO sop_proposals_m067_new
+          SELECT id, proposed_name, proposed_department, draft_steps, based_on_task_ids,
+                 evidence_summary, status, created_at, reviewed_at, reviewed_by,
+                 approved_sop_id, replaces_sop_id, confidence, auto_research_attempts, research_sources
+          FROM sop_proposals;
+        DROP TABLE sop_proposals;
+        ALTER TABLE sop_proposals_m067_new RENAME TO sop_proposals;
+        CREATE INDEX IF NOT EXISTS idx_sop_proposals_status ON sop_proposals(status);
+        CREATE INDEX IF NOT EXISTS idx_sop_proposals_created ON sop_proposals(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sop_proposals_replaces ON sop_proposals(replaces_sop_id);
+      `);
+      console.log('[Migration 067] sop_proposals rebuilt with expanded status CHECK');
     },
   },
 ];

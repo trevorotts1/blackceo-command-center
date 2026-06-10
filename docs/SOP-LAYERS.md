@@ -121,12 +121,67 @@ SOP.
 
 ---
 
+---
+
+## Layer 3b — Dispatch-time fast-loop authoring (custom departments only)
+
+- **Introduced:** PRD 2.12-cc (v4.27.0)
+- **Where:** `src/lib/sop-authoring.ts`, invoked from `src/lib/task-dispatcher.ts`
+- **Trigger:** a task dispatches to a **custom** (non-ZHC-canonical) department with
+  NO SOP match above the 0.5 threshold.
+- **Canonical departments (24 ZHC slugs) → REFUSED.** The guard is absolute. The
+  build gate (`scripts/qc-cc.sh §9`) asserts this in source. Canonical depts use
+  `copyCanonicalSOPForTask` to pull from the `role-library` instead (near-zero tokens).
+- **Custom departments → authored.** Flow:
+  1. Safety cap (≥3 attempts / 7 days → escalate via Telegram, file `escalated` proposal).
+  2. Linked "Author SOP" sub-task created, routed to the dept's **research specialist**
+     (`role_type='research'`, resolved by `resolveTrioAgents`). The original task is
+     HELD in `backlog` until the SOP is filed.
+  3. Tavily research under the **Tier-1 mandate** (McKinsey / HBR / IBISWorld / Statista).
+  4. Gemini synthesis → `parseDraftedSOP`.
+  5. QC gate at **8.5** via `scoreTaskForQC` (per-dept QC agent). Heuristic (no LLM key)
+     → file as `pending` proposal for human review, never auto-file.
+  6. On QC pass: file to BOTH stores simultaneously:
+     - **DB (`sops` table):** `source = NULL` (critical — NOT `'role-library'` — so the
+       role-library importer never clobbers it and the canonical guard never mistakes it
+       for a library copy). An audit-trail `sop_proposals` row with `status='auto-authored-filed'`
+       carries `research_sources` + `confidence`.
+     - **Disk (`<OPENCLAW_WORKSPACE_PATH>/departments/<dept>/<role>/how-to.md`):** the
+       permanent on-disk procedure so agents read it at runtime. Gated by
+       `SOP_AUTHORING_WRITE_DISK !== '0'`. DB row always files even if disk write fails
+       (loud `sop_disk_write_failed` event).
+  7. `sop_id` attached to the original task; sub-task marked `done`.
+  8. Original task dispatch re-fired via `autoDispatchTask(originalTaskId, 'sop-authored-resume')`.
+
+- **`sop_authoring_for_task_id` column (migration 066):** links the authoring sub-task
+  back to the original task. The dispatch fast-loop recursion guard skips authoring for
+  any task with this column set (infinite-recursion prevention).
+- **Slow loop unchanged:** `detectPatternsAndPropose` clustering/dedup logic is
+  unmodified. PRD 2.12 adds QC verdict tagging (`[QC-PASS <score>]` /
+  `[QC-FAIL <score> — needs rework]`) to each pending proposal so the `/sops/proposals`
+  queue surfaces a quality signal to the operator. The slow loop NEVER auto-files —
+  it remains human-gated as the catch-all safety net.
+
+### Key invariants
+
+| Property | Value |
+|---|---|
+| `source` for authored SOPs | `NULL` (never `'role-library'`) |
+| Canonical dept authoring | REFUSED (copy from library instead) |
+| QC threshold | 8.5 LLM score; heuristic → pending for human |
+| Recursion guard | `sop_authoring_for_task_id IS NOT NULL` → skip fast loop |
+| Kill switch | `DISABLE_SOP_FAST_LOOP=1` |
+| Disk write guard | `SOP_AUTHORING_WRITE_DISK=0` disables disk write (tests) |
+
+---
+
 ## Quick reference
 
-| | Layer 1 (DB) | Layer 2 (disk) | After bridge |
-|---|---|---|---|
-| Lives in | `sops` table | `departments/<dept>/<role>/how-to.md` | `sops` rows w/ `source='role-library'` |
-| Keyed by | `department` | dept → role folders | `department` + `role` |
-| `source` | `NULL` | n/a | `'role-library'` |
-| Authored by | seed / learning loop / operator | Skill-23 build | imported from disk |
-| Synced? | — | — | `POST /api/sops/import-role-library` |
+| | Layer 1 (DB) | Layer 2 (disk) | After bridge | Layer 3b (fast loop) |
+|---|---|---|---|---|
+| Lives in | `sops` table | `departments/<dept>/<role>/how-to.md` | `sops` rows w/ `source='role-library'` | `sops` + disk |
+| Keyed by | `department` | dept → role folders | `department` + `role` | `department` + `role` |
+| `source` | `NULL` | n/a | `'role-library'` | `NULL` |
+| Authored by | seed / learning loop / operator | Skill-23 build | imported from disk | dispatch-time fast loop |
+| Synced? | — | — | `POST /api/sops/import-role-library` | automatic on dispatch |
+| Canonical guard | — | — | n/a | REFUSED (copy instead) |
