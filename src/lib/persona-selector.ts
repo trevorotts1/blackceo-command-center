@@ -146,24 +146,39 @@ export async function selectPersonaForTask(
  * after a task reaches `done`, so the adaptive learning loop gets outcome data.
  *
  * PRD item 1.4: "spawn persona-selector-v2.py --mode record-completion
- * --task-id <id> --persona-id <persona_id> --department <slug> async
- * (fire-and-forget, error-logged, non-blocking). Skip null persona."
+ * --task-id <id> --persona-id <persona_id> --department <slug>
+ * --task-output <text> async (fire-and-forget, error-logged, non-blocking).
+ * Skip null persona."
+ *
+ * BUG FIX (v4.22.0): The Python script at ~line 972 requires either
+ * --task-output or --task-output-file to be present; without it the script
+ * exits with code 2 and persona_performance is never populated (PRD 1.4
+ * learning loop was completely dead). We now accept taskOutput and pass it
+ * as --task-output so record_completion() in the Python script can write the
+ * persona_performance row.
  *
  * Called from:
  *   - src/app/api/tasks/[id]/route.ts  (human approval: PATCH status → done)
  *   - src/lib/qc-scorer.ts             (QC auto-approve: runQCOnReview PASS)
  *
- * @param taskId     The task id.
- * @param personaId  The persona id stored on the task. MUST be non-null before calling.
- * @param deptSlug   Department slug (e.g. "sales").  Falls back to "general" if absent.
+ * @param taskId      The task id.
+ * @param personaId   The persona id stored on the task. MUST be non-null before calling.
+ * @param deptSlug    Department slug (e.g. "sales").  Falls back to "general" if absent.
+ * @param taskOutput  Task title + description concatenated (used by the Python script's
+ *                    record_completion() to categorise the outcome). Defaults to the
+ *                    taskId when not supplied so the argument is always present.
  */
 export function spawnRecordCompletion(
   taskId: string,
   personaId: string,
-  deptSlug: string | null | undefined
+  deptSlug: string | null | undefined,
+  taskOutput?: string | null
 ): void {
   const scriptPath = resolveScriptPath();
   const dept = deptSlug || "general";
+  // Python requires --task-output (or --task-output-file); always supply it.
+  // Fall back to the task id so the argument is never omitted.
+  const outputText = (taskOutput && taskOutput.trim()) ? taskOutput.trim() : taskId;
 
   const child = spawn(
     "python3",
@@ -173,6 +188,7 @@ export function spawnRecordCompletion(
       "--task-id", taskId,
       "--persona-id", personaId,
       "--department", dept,
+      "--task-output", outputText,
     ],
     {
       detached: true,

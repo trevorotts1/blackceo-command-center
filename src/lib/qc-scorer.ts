@@ -567,7 +567,10 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // Skip when persona_id is null (task never had a persona assigned).
       if (task.persona_id) {
         const deptSlug = task.department ?? task.workspace_id ?? null;
-        spawnRecordCompletion(taskId, task.persona_id, deptSlug);
+        // Pass task title + description as --task-output so the Python
+        // record_completion() function can write the persona_performance row.
+        const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');
+        spawnRecordCompletion(taskId, task.persona_id, deptSlug, taskOutput);
       }
     } else {
       // FAIL: return to backlog with gap notes, then re-dispatch — unless the
