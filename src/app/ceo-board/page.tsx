@@ -17,6 +17,7 @@ import { PerformanceGaugeChart } from '@/components/ceo-board/redesign/Performan
 import { NeedsAttentionSection } from '@/components/ceo-board/redesign/NeedsAttentionSection';
 import { RecommendationsRow } from '@/components/ceo-board/redesign/RecommendationsRow';
 import { SectionContainer } from '@/components/ceo-board/redesign/SectionContainer';
+import { DepartmentGradeCards } from '@/components/ceo-board/redesign/DepartmentGradeCards';
 import { Breadcrumb } from '@/components/Breadcrumb';
 
 // Existing bottom sections (kept as-is)
@@ -332,6 +333,13 @@ export default function CEOPerformanceBoardPage() {
           <motion.section variants={sectionVariants}>
             <SectionContainer title="Performance" accentColor="bg-blue-500">
               <PerformanceGaugeChart />
+            </SectionContainer>
+          </motion.section>
+
+          {/* 6b. Department Grade Cards (PRD 2.10 — real grading module) */}
+          <motion.section variants={sectionVariants}>
+            <SectionContainer title="Department Grades" accentColor="bg-indigo-500">
+              <DepartmentGradeCards />
             </SectionContainer>
           </motion.section>
 

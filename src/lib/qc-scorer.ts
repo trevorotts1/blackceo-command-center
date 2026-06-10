@@ -629,6 +629,49 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     const result = await scoreTaskForQC(input);
     const now = new Date().toISOString();
 
+    // ── PRD 2.10: Persist QC result to task_qc_results for grading module ─────
+    // Fire-and-forget: wrap in try/catch so any DB error never breaks the scorer.
+    // All paths (llm, heuristic, no-criteria) write a row so the grading module
+    // can surface the "awaiting LLM key" insufficient-data state.
+    // The grading module itself filters to scoring_path='llm' for qcPassRate.
+    try {
+      // Resolve workspace_id and department_slug from the task + workspaces table.
+      const wsId: string | null = task.workspace_id ?? null;
+      let deptSlug: string | null = task.department ?? null;
+      if (!deptSlug && wsId) {
+        try {
+          const ws = queryOne<{ slug: string }>('SELECT slug FROM workspaces WHERE id = ?', [wsId]);
+          deptSlug = ws?.slug ?? wsId;
+        } catch { /* no workspace row — use workspace_id as fallback */ }
+      }
+      if (deptSlug) {
+        deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
+      }
+      const attemptNum = (task.qc_reroute_attempts ?? 0) + 1;
+      const passed = result.scoringPath === 'llm' && result.score >= QC_PASS_THRESHOLD ? 1 : 0;
+
+      run(
+        `INSERT INTO task_qc_results
+           (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          taskId,
+          wsId,
+          deptSlug,
+          result.score,
+          passed,
+          result.scoringPath,
+          qcAgent?.id ?? null,
+          attemptNum,
+          now,
+        ],
+      );
+    } catch (qcPersistErr) {
+      console.warn('[QCScorer] task_qc_results INSERT failed (non-fatal):', (qcPersistErr as Error).message);
+    }
+    // ── End of PRD 2.10 QC persistence ───────────────────────────────────────
+
     // ── PRD 2.4: heuristic mode guard ─────────────────────────────────────────
     // When the scorer runs in heuristic mode (no LLM key / LLM error), the task
     // STAYS in `review`. We write an explanatory event and return WITHOUT

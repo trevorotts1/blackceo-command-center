@@ -387,4 +387,25 @@ CREATE TABLE IF NOT EXISTS sops (
 CREATE INDEX IF NOT EXISTS idx_sops_department ON sops(department);
 CREATE INDEX IF NOT EXISTS idx_sops_slug ON sops(slug);
 CREATE INDEX IF NOT EXISTS idx_sops_deleted ON sops(deleted_at);
+
+-- Task QC Results table (PRD 2.10 — migration 068 also creates this for existing DBs)
+-- Persists each scored QC result so the grading module can compute real pass-rates
+-- without parsing free-text event messages. One row per scoring event; scoring_path
+-- discriminates LLM results (gradeable) from heuristic/no-criteria (not graded).
+-- SAFE to declare here AND in migration 068 — CREATE TABLE IF NOT EXISTS is idempotent.
+CREATE TABLE IF NOT EXISTS task_qc_results (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  workspace_id TEXT,
+  department_slug TEXT,
+  score REAL NOT NULL,
+  passed INTEGER NOT NULL,
+  scoring_path TEXT NOT NULL,
+  qc_agent_id TEXT,
+  attempt INTEGER DEFAULT 1,
+  scored_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_qc_results_task ON task_qc_results(task_id, scored_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qc_results_dept ON task_qc_results(department_slug, scored_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qc_results_workspace ON task_qc_results(workspace_id, scored_at DESC);
 `;

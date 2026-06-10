@@ -1,32 +1,60 @@
 'use client';
 
+/**
+ * CompanyHeroCard — PRD 2.10 rebuild
+ *
+ * Drives grade + label from /api/company-health (the single grading source of
+ * truth). score===null → explicit "Insufficient data" state, never 72 or 0.
+ * Stat pills (total tasks, active agents, completion rate) read from real counts
+ * via existing /api/workspaces and /api/agents endpoints.
+ */
+
 import { useEffect, useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { scoreToGrade, gradeToLabel } from '@/lib/grading';
-import { calculateWeightedScore, computeAgentPerformanceScore, DEFAULT_GRADE_WEIGHTS, type GradeWeights } from '@/lib/grade-calculator';
+import { gradeToLabel } from '@/lib/grading';
+import type { Grade } from '@/lib/grading';
 import type { WorkspaceStats, Agent } from '@/lib/types';
 
-interface CompanyConfig {
-  companyName: string;
-  gradingWeights: GradeWeights;
-  companyKPIs: { id: string; name: string; target: number; unit: string }[];
+// Client-side shape from /api/company-health
+interface ClientCompanyHealth {
+  score: number | null;
+  grade: string | null;
+  departments: unknown[];
+  worstTrending: unknown[];
+  generatedAt: string;
+}
+
+const GRADE_COLORS: Record<string, string> = {
+  A: '#10B981',
+  B: '#10B981',
+  C: '#F59E0B',
+  D: '#EF4444',
+  F: '#EF4444',
+};
+
+function gradeColor(grade: string | null): string {
+  if (!grade) return '#9CA3AF';
+  return GRADE_COLORS[grade] ?? '#9CA3AF';
 }
 
 export function CompanyHeroCard() {
+  const [health, setHealth] = useState<ClientCompanyHealth | null>(null);
   const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [config, setConfig] = useState<CompanyConfig | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       try {
         setLoading(true);
-        const [wsRes, agentsRes, configRes] = await Promise.all([
+        const [healthRes, wsRes, agentsRes] = await Promise.all([
+          fetch('/api/company-health'),
           fetch('/api/workspaces?stats=true'),
           fetch('/api/agents'),
-          fetch('/api/company/config'),
         ]);
+        if (healthRes.ok) {
+          setHealth(await healthRes.json());
+        }
         if (wsRes.ok) {
           const data: WorkspaceStats[] = await wsRes.json();
           setDepartments(
@@ -41,9 +69,6 @@ export function CompanyHeroCard() {
         if (agentsRes.ok) {
           setAgents(await agentsRes.json());
         }
-        if (configRes.ok) {
-          setConfig(await configRes.json());
-        }
       } catch {
         // handled by loading state
       } finally {
@@ -53,66 +78,39 @@ export function CompanyHeroCard() {
     load();
   }, []);
 
-  const { grade, label, totalTasks, activeAgents, completionRate } = useMemo(() => {
-    const weights = config?.gradingWeights || DEFAULT_GRADE_WEIGHTS;
-
-    // Compute agent performance from real workspace stats
-    const agentPerformance = computeAgentPerformanceScore(departments);
-
-    // For now, KPI achievement comes from workspace completion as proxy
-    // until KPI snapshot data is wired in
-    const kpiAchievement = agentPerformance;
-
-    // DA compliance and recommendation follow-through: 0 until wired to real data
-    const daCompliance = 0;
-    const recommendationFollowThrough = 0;
-
-    // If no tasks exist, use bootstrap score
+  const { totalTasks, activeAgents, completionRate } = useMemo(() => {
     const total = departments.reduce((s, d) => s + (d.taskCounts?.total || 0), 0);
     const done = departments.reduce((s, d) => s + (d.taskCounts?.done || 0), 0);
-
-    let score: number;
-    if (total === 0) {
-      // No data yet — show bootstrap placeholder
-      score = 72;
-    } else {
-      score = calculateWeightedScore(
-        { kpiAchievement, agentPerformance, daCompliance, recommendationFollowThrough },
-        weights
-      );
-    }
-
-    const g = scoreToGrade(score);
-    const active = agents.filter(
-      (a) => a.status === 'active' || a.status === 'working'
-    ).length;
+    const active = agents.filter((a) => a.status === 'active' || a.status === 'working').length;
     return {
-      grade: g,
-      label: gradeToLabel(g),
       totalTasks: total,
       activeAgents: active,
       completionRate: total > 0 ? Math.round((done / total) * 100) : 0,
     };
-  }, [departments, agents, config]);
+  }, [departments, agents]);
+
+  const grade = health?.grade ?? null;
+  const color = gradeColor(grade);
+  const label = grade ? gradeToLabel(grade as Grade) : null;
+  const sufficientData = health !== null && health.score !== null;
 
   const statusLine = useMemo(() => {
+    if (!sufficientData) {
+      return 'Your AI workforce is getting started. Check back after agents complete their first tasks to see your performance grade.';
+    }
     const needsAttention = departments.filter((d) => {
       const total = d.taskCounts?.total || 0;
       const done = d.taskCounts?.done || 0;
       const blocked = d.taskCounts?.blocked || 0;
       if (total === 0) return false;
-      const score = Math.round(
-        ((done + (d.taskCounts?.in_progress || 0) * 0.5) / total) * 100
-      );
-      const g = scoreToGrade(score);
-      return g === 'D' || g === 'F' || blocked > 0;
+      const rate = Math.round(((done + (d.taskCounts?.in_progress || 0) * 0.5) / total) * 100);
+      return rate < 60 || blocked > 0;
     }).length;
-
     if (needsAttention > 0) {
-      return `Your company is performing ${label.toLowerCase()}. ${needsAttention} item${needsAttention > 1 ? 's' : ''} need${needsAttention === 1 ? 's' : ''} attention.`;
+      return `Your company is performing ${(label ?? '').toLowerCase()}. ${needsAttention} item${needsAttention > 1 ? 's' : ''} need${needsAttention === 1 ? 's' : ''} attention.`;
     }
     return 'Your company is performing well. All departments are on track.';
-  }, [departments, label]);
+  }, [sufficientData, departments, label]);
 
   if (loading) {
     return (
@@ -140,22 +138,30 @@ export function CompanyHeroCard() {
       transition={{ duration: 0.6, ease: [0.4, 0, 0.2, 1] }}
     >
       <div className="flex flex-col items-center gap-2">
-        {/* Letter Grade */}
-        <span
-          className="font-mono text-[96px] font-black text-white leading-none"
-        >
-          {grade}
-        </span>
+        {/* Grade display — real letter or insufficient-data state */}
+        {sufficientData && grade ? (
+          <>
+            <span className="font-mono text-[96px] font-black text-white leading-none">
+              {grade}
+            </span>
+            <span style={{ color: '#81C784' }} className="text-xl font-medium">
+              {label}
+            </span>
+          </>
+        ) : (
+          <>
+            {/* Explicit insufficient-data state — never shows 72 or a fake grade */}
+            <div className="w-24 h-24 rounded-full border-4 border-white/30 flex items-center justify-center">
+              <span className="font-mono text-4xl font-bold text-white/50">—</span>
+            </div>
+            <span className="text-white/60 text-lg font-medium mt-1">Insufficient data</span>
+          </>
+        )}
 
-        {/* Grade Label */}
-        <span className="text-[#81C784] text-xl font-medium">{label}</span>
+        {/* Status line */}
+        <p className="text-white/80 text-base text-center max-w-lg mt-1">{statusLine}</p>
 
-        {/* Status Line */}
-        <p className="text-white/80 text-base text-center max-w-lg mt-1">
-          {statusLine}
-        </p>
-
-        {/* Bottom Stat Pills */}
+        {/* Bottom stat pills — always real counts, never fabricated */}
         <div className="flex gap-3 mt-6">
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
             <span className="text-white text-base font-semibold">{totalTasks}</span>
