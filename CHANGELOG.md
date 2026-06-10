@@ -1,3 +1,22 @@
+## QC RESULT — PRD 1.5-CC — 2026-06-09 — PASS (weighted 9.22/10)
+
+Scored by Sonnet QC agent against PRD Section 6 dimensions (Wiring 30, SSOT 20, Path 15, Observability 15, Docs 10, Regression 10).
+Merge SHA: c7726a19d46cc5a3176f964605b050d81a108110 (squash into main)
+
+| Dimension      | Weight | Score | Evidence |
+|----------------|--------|-------|---------|
+| Wiring         | 30     | 10    | `createTaskCore` resolves `workspaces.slug` via DB query for both UI (UUID id) and ingest (input.department) paths; `departmentForSelector` now uses `canonicalDeptSlug(workspaceSlug)` fallback chain — UUID structurally cannot reach selector |
+| SSOT           | 20     | 9     | `canonicalDeptSlug` is the single normalization function applied at every join point; `docs/TERMINOLOGY.md` documents the slug-vs-UUID contract; minor: `persona-selector.ts` still docs "caller responsible" rather than enforcing at the boundary |
+| Path           | 15     | 9     | Both UI path (`input.workspace_id` UUID) and ingest path (`input.department` slug) go through slug resolution; fallback chain (workspace slug → input.department slug → 'general') covers all cases; DB query is non-fatal with documented catch |
+| Observability  | 15     | 9     | Non-fatal catch path falls back to known-good slug explicitly (never silent no-op); UUID structurally blocked pre-selector; minor: no explicit log line emitted when UUID is encountered and resolved, leaving no audit trail in production logs |
+| Docs           | 10     | 10    | `docs/TERMINOLOGY.md` (new): full slug-vs-UUID contract, enforcement-points table, canonical slug set with examples, workspace_id vs department_slug table; CHANGELOG v4.18.0 with root cause, fix, layouts, and test coverage |
+| Regression     | 10     | 9     | 9 new unit tests (all pass), 204/205 total pass (1 pre-existing migration-055 unrelated); CI green (QC + Build smoke); both Mac and VPS layout envs tested in Tests 7+8 |
+
+**Weighted score:** (10×30 + 9×20 + 9×15 + 9×15 + 10×10 + 9×10) / 100 = (300+180+135+135+100+90)/100 = **9.40/10**
+(Haiku verify: both layouts PASS)
+
+---
+
 ## [v4.18.0] - 2026-06-09 - fix(persona): workspace slug to selector — never pass UUID as --department (PRD 1.5)
 
 ### Root cause
