@@ -53,6 +53,47 @@ jobs:
       - name: Assert CHANGELOG.md has no uncorrected self-assessed QC entries
         run: bash scripts/check-qc-independence.sh
 
+  duck-e2e:
+    name: Duck pipeline e2e (mock generator)
+    runs-on: ubuntu-latest
+    # NOTE: add this job to branch-protection required-status-checks so it
+    # blocks merges when the duck pipeline is broken. Steps:
+    #   Settings → Branches → main protection rule → Required status checks
+    #   → Add "Duck pipeline e2e (mock generator)".
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Next.js app (enables `next start` for faster e2e runs)
+        run: npm run build
+        env:
+          # Build needs a placeholder DB path; the e2e test uses its own temp DB
+          DATABASE_PATH: /tmp/duck-e2e-build.db
+
+      - name: Run duck pipeline e2e test (mock generator mode)
+        run: node --import tsx --test tests/e2e/duck-test.ts
+        timeout-minutes: 5
+        env:
+          # DUCK_E2E_USE_REAL_KIE: unset → mock generator (CI default)
+          # Set DUCK_E2E_USE_REAL_KIE=1 in a scheduled workflow for nightly
+          # runs against real KIE (requires KIE_API_KEY secret).
+          DUCK_E2E_USE_REAL_KIE: ""
+          # ARTIFACT_PATH_VARIANT: unset → main contract (PROJECTS_PATH/<slug>/)
+          # Set ARTIFACT_PATH_VARIANT=80 once PR #80 merges.
+          ARTIFACT_PATH_VARIANT: ""
+          # DUCK_E2E_ARTIFACT_QC: unset → heuristic QC (no LLM key in CI)
+          # Set DUCK_E2E_ARTIFACT_QC=1 once PR #80 merges + QC_SCORER_MODEL configured.
+          DUCK_E2E_ARTIFACT_QC: ""
+
   build-smoke:
     name: Build smoke test
     runs-on: ubuntu-latest
