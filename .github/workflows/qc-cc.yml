@@ -196,7 +196,10 @@ jobs:
 
       - name: Run cc-health-check.sh — expect GREEN (exit 0)
         run: |
-          bash scripts/cc-health-check.sh --port 4000 --json-only
+          # --public-url resolves the CF probe to the local server (exit 3 UNKNOWN without it).
+          # In CI there is no CF tunnel; pointing --public-url to localhost makes the
+          # CF probe see HTTP 200 instead of returning UNKNOWN (no-URL → CF_INDET=true → exit 3).
+          bash scripts/cc-health-check.sh --port 4000 --public-url http://localhost:4000 --json-only
           echo "EXIT: $?"
 
       - name: Break the build — remove a static asset to simulate stale manifest
