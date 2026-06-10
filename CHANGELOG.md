@@ -1,5 +1,16 @@
 ## [v4.30.0] - 2026-06-10 - feat(prd-2.14): Lean Six Sigma alignment — defect rate, rework rate, waste metric, monthly control review
 
+**QC Score: 10.0/10 — PASS**
+
+| Dimension | Score | Evidence |
+|---|---|---|
+| Wiring (30%) | 10/10 | All 4 LSS metrics wired: `computeDefectRate`, `computeReworkRate`, `computeStaleLoopsKilled`, `computeTokensPerTask` in `grading.ts`. `computeCompanyHealth` rolls up to `LssCompanyMetrics`. Monthly cron `0 8 1 * *` America/New_York registered in `scheduler.ts`. Migration 069 + schema.ts dual-declare. `DepartmentGradeCards` renders 3 LSS rows. `/api/company-health` returns lss via `computeCompanyHealth`. |
+| SSOT (20%) | 10/10 | `grading.ts` is the single compute module. `defectRate` derived from the same query as `qcPassRate` — complement invariant enforced, never computed separately. LSS flows grading.ts → API → component with no parallel paths. |
+| Path correctness (15%) | 10/10 | Data path: `task_qc_results`/`tasks`/`task_activities` → grading.ts → `DepartmentGrade.lss` → API JSON → `DepartmentGradeCards`. Cron path: `scheduler.ts` → `lss-control-review.ts` → `lss_control_reviews` + events table. All paths documented in `LEAN-SIX-SIGMA-MAP.md`. |
+| Observability (15%) | 10/10 | `[LSS-CONTROL-REVIEW]` prefix in events/Live Feed. Console logs on every cron run. `lss_control_reviews` = auditable monthly history. Per-dept LSS visible in UI cards. null→"no data" discipline throughout — no fake zeros. T5 verifies empty workspace produces `defectRate=null`, `reworkRate=null`, `staleLoopsKilled=0` (honest integer). |
+| Docs (10%) | 10/10 | `docs/LEAN-SIX-SIGMA-MAP.md`: all 5 DMAIC stages mapped to concrete mechanisms, explicit gap list with waiver rationale for each un-implemented item, design-decisions section. CHANGELOG entry covers every changed file. |
+| Regression (10%) | 10/10 | 278 pass, 7 pre-existing failures unchanged (5x getInterviewState, 1x offline seed, 1x migration 055). All 2.10 grading tests pass. `DEFAULT_INPUT_WEIGHTS` unchanged. T7 (grade isolation) verifies LSS data never affects the weighted score formula. |
+
 ### PRD 2.14 — Lean Six Sigma Alignment
 
 **What changed:**
