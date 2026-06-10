@@ -1,3 +1,21 @@
+## [v4.24.0] - 2026-06-10 - chore(prd-3.1): move build-note docs to docs/archive/
+
+### PRD 3.1 — Repo root cleanup: archive point-in-time build notes
+
+Moved 8 point-in-time build-note docs from repo root to `docs/archive/` per PRD Section 4 item 3.1.
+Files moved: `HANDOFF.md`, `DEMO_DEPLOY.md`, `DEMO_READINESS.md`, `REALTIME_IMPLEMENTATION_SUMMARY.md`,
+`UI_CHANGES_SUMMARY.md`, `QUICKSTART_REALTIME.md`, `VERIFICATION_CHECKLIST.md`, `BUILD-NOTES.md`.
+Root retains only `README.md`, `CHANGELOG.md`, `PRD.md`, `DEPLOYMENT.md`, `QC.md` + code
+(plus `CHECKLIST.md`, `HEARTBEAT.md`, `ORCHESTRATION.md`, `PRODUCTION_SETUP.md` which were not in the PRD move list).
+Updated `PRODUCTION_SETUP.md` cross-reference links to `docs/archive/` paths.
+Added `docs/archive/README.md` index of all archived files.
+
+**QC Score (independent Sonnet 4.6): 10.0/10 PASS**
+All 10 rubric dimensions pass (pure doc move, zero code changes, CI green — Build smoke test, QC Command Center, version-consistency all pass).
+PR #69 merged at 96ad332322e66a13c39d33d119810f7a89292e4c.
+
+---
+
 ## [v4.23.0] - 2026-06-10 - fix(cc-2.9): PRD 2.9 integration once-over — dept-head real names, null-dept slug, qc-cc checks
 
 ### PRD 2.9(e) — Department head display: real agent name instead of generic "Head of <Dept>"
