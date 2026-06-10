@@ -31,6 +31,9 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { selectPersonaForTask } from '@/lib/persona-selector';
@@ -39,6 +42,58 @@ import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import type { Task, TaskPriority, Agent } from '@/lib/types';
+
+// ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
+
+/**
+ * Read the onboarding skill version installed on this box.
+ *
+ * The installer writes a single-line version string to one of these locations:
+ *   Mac Mini:   ~/.onboarding-version
+ *   VPS Docker: /data/.onboarding-version
+ *
+ * Falls back to the ONBOARDING_VERSION env var (useful for testing / CI).
+ * Returns "unknown" if neither source is available.
+ *
+ * Exported so unit tests can verify the lookup without spawning processes.
+ */
+export function getInstalledSkillVersion(): string {
+  const envOverride = process.env.ONBOARDING_VERSION;
+  if (envOverride && envOverride.trim()) return envOverride.trim();
+
+  const candidates: string[] = [
+    '/data/.onboarding-version',               // VPS Docker (persistent /data volume)
+    path.join(os.homedir(), '.onboarding-version'), // Mac Mini / dev
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const raw = fs.readFileSync(candidate, 'utf-8').trim();
+      if (raw) return raw;
+    } catch {
+      // File absent — try next candidate.
+    }
+  }
+
+  return 'unknown';
+}
+
+/**
+ * Persona IDs that an old, buggy list_available_personas() emitted instead of
+ * real persona ids (the bug was fixed in persona-selector-v2.py, see line
+ * 604-611 of that file).  This guard is intentionally kept for ONE release to
+ * surface stale installs via a loud warning, not silently swallow them.
+ *
+ * PRD 3.4: keep the guard, but LOG A LOUD WARNING with the installed skill
+ * version so operators can identify and update stale boxes.
+ */
+export const SENTINEL_IDS = new Set([
+  'schemaVersion',
+  'created',
+  'domainTags',
+  'perspectiveTags',
+  'personas',
+]);
 
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
 
@@ -486,13 +541,21 @@ export async function createTaskCore(
 
       const persona = await selectPersonaForTask(id, taskDescription, departmentForSelector);
 
-      const SENTINEL_IDS = new Set([
-        'schemaVersion',
-        'created',
-        'domainTags',
-        'perspectiveTags',
-        'personas',
-      ]);
+      // PRD 3.4 — SENTINEL GUARD: keep filtering bad persona ids emitted by the
+      // old, buggy list_available_personas(), but NOW log a LOUD warning with
+      // the installed skill version so stale installs are identified and updated
+      // instead of silently tolerated.
+      if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
+        const skillVer = getInstalledSkillVersion();
+        console.warn(
+          `[createTaskCore] ⚠️  STALE INSTALL DETECTED: persona selector returned sentinel id` +
+          ` "${persona.persona_id}" instead of a real persona id.` +
+          ` This is caused by an outdated list_available_personas() bug that was fixed in the` +
+          ` persona-selector.  Installed skill version: ${skillVer}.` +
+          ` Please update the onboarding skills on this box to the latest version.` +
+          ` (task_id=${id}, sentinel_id=${persona.persona_id})`,
+        );
+      }
 
       if (
         persona &&
