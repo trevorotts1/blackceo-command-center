@@ -114,11 +114,11 @@ check "3.5b" "exactly 23 non-_shared agent dirs (cardinality guard)" \
 # A copied regular file satisfies find -type l count via cancellation but diverges
 # from _shared/ going forward.
 check "3.5c" "all agent AGENTS.md files are symlinks (not regular-file copies)" \
-  '! find agents -mindepth 2 -maxdepth 2 -name "AGENTS.md" ! -type l 2>/dev/null | grep -q .'
+  '! find agents -mindepth 2 -maxdepth 2 -name "AGENTS.md" ! -type l 2>/dev/null | grep -v "_shared" | grep -q .'
 check "3.5d" "all agent TOOLS.md files are symlinks (not regular-file copies)" \
-  '! find agents -mindepth 2 -maxdepth 2 -name "TOOLS.md" ! -type l 2>/dev/null | grep -q .'
+  '! find agents -mindepth 2 -maxdepth 2 -name "TOOLS.md" ! -type l 2>/dev/null | grep -v "_shared" | grep -q .'
 check "3.5e" "all agent USER.md files are symlinks (not regular-file copies)" \
-  '! find agents -mindepth 2 -maxdepth 2 -name "USER.md" ! -type l 2>/dev/null | grep -q .'
+  '! find agents -mindepth 2 -maxdepth 2 -name "USER.md" ! -type l 2>/dev/null | grep -v "_shared" | grep -q .'
 # 3.5f: dangling symlink guard — find -type l matches dangling symlinks, so a
 # deleted _shared/ would yield count 69 while every symlink is broken.
 check "3.5f" "no dangling symlinks under agents/ (all symlinks resolve to a readable file)" \
