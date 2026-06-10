@@ -35,6 +35,7 @@
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
+import { readFileSync } from 'fs';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -318,6 +319,26 @@ async function llmScoreViaGoogle(
  * Falls back to heuristic on any LLM error (never throws).
  */
 export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
+  // Fixture path for testing — no live cost. Set QC_FIXTURE_JSON_PATH to a JSON
+  // file with shape { score, pass, reason, gaps } to force a deterministic result.
+  const qcFixturePath = process.env.QC_FIXTURE_JSON_PATH;
+  if (qcFixturePath) {
+    try {
+      const raw = readFileSync(qcFixturePath, 'utf8');
+      const fixture = JSON.parse(raw) as { score: number; pass: boolean; reason: string; gaps: string[] };
+      const score = typeof fixture.score === 'number' ? Math.max(1, Math.min(10, fixture.score)) : 9;
+      return {
+        score,
+        pass: score >= QC_PASS_THRESHOLD,
+        reason: typeof fixture.reason === 'string' ? fixture.reason : `Fixture score: ${score}/10`,
+        gaps: Array.isArray(fixture.gaps) ? fixture.gaps : [],
+        scoringPath: 'llm',
+      };
+    } catch {
+      // If fixture fails to load, fall through to normal scoring.
+    }
+  }
+
   // If no SOP success criteria and no SOP steps — score based on structure only.
   if (!input.sopSuccessCriteria && !input.sopSteps) {
     return {

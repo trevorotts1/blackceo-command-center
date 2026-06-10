@@ -45,6 +45,7 @@ import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { getBestSOPForTask } from '@/lib/sops';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
+import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
@@ -109,6 +110,16 @@ export async function autoDispatchTask(
         `[${context}] autoDispatchTask: task ${taskId} hit QC cap (${qcAttempts}/${QC_MAX_REROUTES}) — blocked`,
       );
       return;
+    }
+
+    // GUARD 5 (PRD 2.12-cc): recursion guard — SOP-authoring sub-tasks MUST NOT
+    // trigger the fast loop themselves (infinite recursion prevention).
+    const sopAuthoringLink = (task as Task & { sop_authoring_for_task_id?: string | null }).sop_authoring_for_task_id;
+    if (sopAuthoringLink) {
+      console.log(
+        `[${context}] autoDispatchTask: task ${taskId} is a SOP-authoring sub-task (for ${sopAuthoringLink}) — skipping fast loop`,
+      );
+      // Fall through to normal dispatch (the sub-task itself is just a regular task).
     }
 
     // ── Load full agent row ─────────────────────────────────────────────────
@@ -205,6 +216,63 @@ export async function autoDispatchTask(
         /* non-fatal */
       }
     }
+
+    // ── PRD 2.12-cc: no-SOP detection → fast loop or canonical copy ──────────
+    // Only fires when:
+    //   (a) still no SOP after the pull above,
+    //   (b) the fast-loop kill switch is NOT set,
+    //   (c) this task is NOT itself a SOP-authoring sub-task (recursion guard).
+    if (!resolvedSopId && process.env.DISABLE_SOP_FAST_LOOP !== '1' && !sopAuthoringLink) {
+      try {
+        const deptSlug = task.department ?? task.workspace_id ?? '';
+        const agentRoleSlug = agent.role ?? null;
+        const ctx = isCanonicalContext(deptSlug, agentRoleSlug);
+
+        if (ctx.canonical) {
+          // Canonical path: copy from library (near-zero tokens).
+          const copied = copyCanonicalSOPForTask(
+            { title: task.title, description: task.description, department: task.department, workspace_id: task.workspace_id },
+            agentRoleSlug,
+          );
+          if (copied) {
+            resolvedSopId = copied.id;
+            // Attach the library SOP to the task for future dispatches.
+            run(`UPDATE tasks SET sop_id = ?, updated_at = ? WHERE id = ?`, [
+              copied.id,
+              new Date().toISOString(),
+              task.id,
+            ]);
+            console.log(`[${context}] autoDispatchTask: canonical SOP copy "${copied.name}" attached to task ${taskId}`);
+          } else {
+            // No library row → loud library-gap event; dispatch proceeds SOP-less.
+            const gapMsg = `[sop_library_gap] Canonical dept "${deptSlug}" has no role-library SOP for task "${task.title}" (${taskId}). Library/build gap — human review required.`;
+            console.warn(gapMsg);
+            run(
+              `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'sop_library_gap', ?, ?, ?)`,
+              [uuidv4(), taskId, gapMsg, new Date().toISOString()],
+            );
+          }
+        } else {
+          // Custom dept → fire the authoring fast loop and HOLD this dispatch.
+          // The original task stays in backlog; authorSOPForTask will re-fire
+          // dispatch (via 'sop-authored-resume') after the SOP is filed.
+          console.log(`[${context}] autoDispatchTask: custom dept "${deptSlug}" — firing SOP authoring fast loop for task ${taskId}`);
+          void authorSOPForTask({
+            originalTaskId: task.id,
+            title: task.title,
+            description: task.description ?? null,
+            department: task.department ?? null,
+            agentRoleSlug,
+            workspaceId: task.workspace_id ?? null,
+          });
+          return; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
+        }
+      } catch (fastLoopErr) {
+        // Fast loop errors are non-fatal — dispatch proceeds SOP-less.
+        console.error(`[${context}] autoDispatchTask: fast-loop error (non-fatal):`, (fastLoopErr as Error).message);
+      }
+    }
+    // ── End PRD 2.12-cc fast loop ──────────────────────────────────────────────
 
     let sopBlock = '';
     if (resolvedSopId) {

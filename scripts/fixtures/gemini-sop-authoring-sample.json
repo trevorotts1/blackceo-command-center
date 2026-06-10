@@ -1,0 +1,70 @@
+{
+  "name": "Hat Creation Department — Custom Hat Design & Production SOP",
+  "description": "Standard Operating Procedure for designing and producing custom hats for the Hat Creation Department. Grounded in IBISWorld headwear industry benchmarks and HBR creative production best practices.",
+  "department": "hat-creation",
+  "task_keywords": "hat,design,production,custom,headwear,manufacturing,quality-control",
+  "success_criteria": "A custom hat design brief is approved, materials are sourced from certified suppliers, production completes within the agreed timeline, and quality passes a 3-point inspection before delivery.",
+  "steps": [
+    {
+      "name": "Design Brief & Client Requirements Capture",
+      "checklist": [
+        "Document client brand colors and logo files",
+        "Confirm hat style (baseball cap, snapback, bucket, beanie)",
+        "Record material preferences and quantity",
+        "Establish delivery deadline and budget"
+      ],
+      "success_criteria": "A signed design brief document is on file with all required fields completed."
+    },
+    {
+      "name": "Material Sourcing & Supplier Verification",
+      "checklist": [
+        "Select certified fabric supplier from approved vendor list",
+        "Request material samples and verify color matching",
+        "Confirm MOQ and lead time alignment with project deadline",
+        "Issue purchase order with confirmed specs"
+      ],
+      "success_criteria": "Materials ordered from a verified supplier with confirmed lead time inside project deadline."
+    },
+    {
+      "name": "Digital Mockup & Client Approval",
+      "checklist": [
+        "Create 3D digital mockup using approved design files",
+        "Send mockup to client with 2 revision rounds included",
+        "Document any client change requests with timestamps",
+        "Obtain written client approval before production starts"
+      ],
+      "success_criteria": "Written client approval email or signature received for the final mockup."
+    },
+    {
+      "name": "Production Run",
+      "checklist": [
+        "Release production order to manufacturing team",
+        "Confirm embroidery or printing specifications match approved mockup",
+        "Track production progress at 50% and 100% milestones",
+        "Document any production deviations for QC review"
+      ],
+      "success_criteria": "Production completes within ±1 business day of agreed timeline with no unresolved deviations."
+    },
+    {
+      "name": "Quality Control Inspection",
+      "checklist": [
+        "Inspect 10% of units for stitching defects and color accuracy",
+        "Verify hat sizing consistency across the batch",
+        "Confirm labeling and packaging match order specs",
+        "Approve batch or quarantine units failing inspection"
+      ],
+      "success_criteria": "At least 97% of units pass all three QC checkpoints; any failures are documented and resolved before shipment."
+    },
+    {
+      "name": "Delivery & Client Sign-Off",
+      "checklist": [
+        "Package units per client shipping instructions",
+        "Generate shipping label and tracking confirmation",
+        "Send client a delivery notification with tracking link",
+        "Request client sign-off within 5 business days of receipt"
+      ],
+      "success_criteria": "Client confirms delivery receipt and signs off on order satisfaction within 5 business days."
+    }
+  ],
+  "confidence": 0.91
+}

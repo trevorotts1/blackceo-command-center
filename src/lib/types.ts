@@ -91,6 +91,10 @@ export interface Task {
   // this task to backlog after a FAIL. Capped at QC_MAX_REROUTES (default 3)
   // before the task is set to `blocked` for human review.
   qc_reroute_attempts?: number | null;
+  // PRD 2.12-cc: when set, this task IS the "Author SOP" sub-task for the
+  // referenced originalTaskId. The dispatch fast-loop recursion guard skips
+  // SOP authoring for any task with this field set. (migration 066)
+  sop_authoring_for_task_id?: string | null;
   // Joined fields (populated by the tasks API GET; not stored on the row)
   model_label?: string | null;
   model_provider?: string | null;

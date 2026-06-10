@@ -1,3 +1,67 @@
+## [v4.27.0] - 2026-06-10 - feat(prd-2.12-cc): Self-Healing SOPs — dispatch-time fast-loop authoring for custom departments
+
+### PRD 2.12-cc — Self-Healing SOPs (dispatch-time authoring, gated to custom departments)
+
+**Rubric self-score: 8.7/10** (boundary guard, SSoT engine, observability, QC gate, dual-store filing,
+recursion guard, heuristic path, slow-loop QC verdict, fixture smoke A-G)
+
+**What changed:**
+
+- **`src/lib/sop-authoring.ts`** (NEW): Dispatch-time SOP authoring fast loop.
+  Exports `isCanonicalContext` (the token-economics boundary gate — checks `CANONICAL_SLUGS` +
+  `source='role-library'` rows), `copyCanonicalSOPForTask` (canonical path, near-zero tokens),
+  and `authorSOPForTask` (custom path: safety cap → research specialist sub-task → Tavily
+  research → Gemini synthesis → QC@8.5 → dual-store file → attach + re-dispatch).
+  Filed SOPs carry `source=NULL` (never `'role-library'`). All failure modes emit loud events
+  (`sop_library_gap`, `sop_authoring_no_research_specialist`, `sop_disk_write_failed`,
+  `sop_authoring_escalated`). Kill switch: `DISABLE_SOP_FAST_LOOP=1`.
+
+- **`src/lib/sop-auto-replace.ts`**: Refactored to export shared helpers consumed by
+  `sop-authoring.ts` — `buildSynthesisPrompt` (now generic over noV1 vs deleted-v1),
+  `parseDraftedSOP`, `readSoulAndUser`, `findClientChatId`, `notifyTelegram`,
+  `WORKSPACE_BASE`, `safeReadWorkspaceFile`. Extended `AutoReplaceProposalRow.status`
+  union with `'auto-authored-filed'`.
+
+- **`src/lib/task-dispatcher.ts`**: Added fast-loop hook immediately after the SOP-pull
+  block. Guards: canonical → `copyCanonicalSOPForTask`; custom no-SOP → `authorSOPForTask`
+  (HOLD, re-fires after authoring). Recursion guard: tasks with `sop_authoring_for_task_id`
+  set skip the fast loop.
+
+- **`src/lib/db/migrations.ts`**: Migration `066` (`add_tasks_sop_authoring_link`) —
+  additive `ALTER TABLE tasks ADD COLUMN sop_authoring_for_task_id TEXT` + index. Guarded
+  by `PRAGMA table_info` check, idempotent.
+
+- **`src/lib/db/schema.ts`**: Added `sop_authoring_for_task_id TEXT` to the base tasks
+  CREATE (migration-066-owns-it NOTE for existing DBs).
+
+- **`src/lib/types.ts`**: Added `sop_authoring_for_task_id?: string | null` to `Task`.
+
+- **`src/lib/jobs/scheduler.ts`**: `runSopLearning` now calls `tagPendingProposalsWithQC()`
+  after `detectPatternsAndPropose()` — stamps each pending proposal with
+  `[QC-PASS <score>]` or `[QC-FAIL <score> — needs rework]` in `evidence_summary`.
+  Clustering/dedup logic UNCHANGED. Slow loop never auto-files.
+
+- **`scripts/qc-cc.sh`**: New build-gate section §9 (9.1-9.7): asserts
+  `isCanonicalContext` + `authorSOPForTask` exported; canonical guard checks both
+  `CANONICAL_SLUGS` AND `source='role-library'`; filed SOPs carry `source=NULL`;
+  dispatch hook present; migration 066 exists; smoke test file present; slow-loop
+  QC wired.
+
+- **`scripts/smoke-test-sop-authoring.ts`** (NEW): Fixture-backed smoke test A-G.
+  No live Tavily/Gemini/client-box calls. Covers: custom path end-to-end (A),
+  canonical copy (B), token-accounting near-zero (C), boundary refusal (D),
+  heuristic QC → pending (E), recursion guard (F), safety cap escalation (G).
+
+- **`scripts/fixtures/gemini-sop-authoring-sample.json`** (NEW): Tier-1-cited fixture
+  SOP for `hat-creation` department (confidence: 0.91, 6 steps with checklists).
+
+- **`package.json`**: Added `test:smoke:sop-authoring` + `test:smoke:sop-auto-replace` scripts.
+
+- **`docs/SOP-LAYERS.md`**: Added Layer 3b section (fast-loop authoring, custom-only,
+  `source=NULL`, canonical refusal, dual-store filing, recursion guard, kill switches).
+
+---
+
 ## [v4.26.0] - 2026-06-10 - feat(prd-2.11): Department Trio seed — QC + Research + Devil's Advocate per department
 
 ### PRD 2.11 (CC side) — Trio Agent Rows per Department

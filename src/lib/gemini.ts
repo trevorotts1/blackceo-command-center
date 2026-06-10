@@ -9,7 +9,7 @@
  * contents are the SOP JSON Gemini would normally return. No live cost.
  */
 
-import fs from 'node:fs';
+import fs from 'fs';
 
 export interface GeminiGenerateOptions {
   model?: string; // default 'gemini-1.5-flash'

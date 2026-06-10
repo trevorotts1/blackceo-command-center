@@ -28,9 +28,14 @@ const nextConfig = {
       // node-only INSTALLED packages reachable from the node-guarded instrumentation
       // graph. fallback doesn't apply to resolvable packages — alias:false does, which
       // stubs the whole module for edge so their internal node:* imports never compile.
+      // Also stub node: URI-prefixed variants (used in sop-auto-replace / sop-authoring).
       config.resolve.alias = {
         ...(config.resolve.alias || {}),
         'node-cron': false, 'better-sqlite3': false,
+        'node:fs': false, 'node:path': false, 'node:os': false,
+        'node:child_process': false, 'node:crypto': false,
+        'node:net': false, 'node:tls': false, 'node:stream': false,
+        'node:http': false, 'node:https': false, 'node:dns': false,
       };
     }
     return config;

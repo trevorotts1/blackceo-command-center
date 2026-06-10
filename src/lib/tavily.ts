@@ -13,7 +13,7 @@
  * the response shape — no live network calls fire when this env var is set.
  */
 
-import fs from 'node:fs';
+import fs from 'fs';
 
 export interface TavilyResult {
   title: string;

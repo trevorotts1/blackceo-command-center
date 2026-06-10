@@ -266,6 +266,45 @@ check "8.13" "prd-2.11-trio-agent-seed.test.ts exists (fixture for trio seeding)
   '[ -f tests/unit/prd-2.11-trio-agent-seed.test.ts ]'
 
 blue ""
+blue "── 9. PRD 2.12-cc — Self-Healing SOPs (dispatch-time fast loop) ──"
+
+# 9.1 sop-authoring.ts exports the two key functions.
+check "9.1" "sop-authoring.ts exports isCanonicalContext and authorSOPForTask" \
+  "grep -q 'export function isCanonicalContext' src/lib/sop-authoring.ts && grep -q 'export async function authorSOPForTask' src/lib/sop-authoring.ts"
+
+# 9.2 The canonical guard checks BOTH CANONICAL_SLUGS and source='role-library'.
+check "9.2" "fast loop refuses canonical: guard checks CANONICAL_SLUGS AND source='role-library'" \
+  "grep -q 'CANONICAL_SLUGS' src/lib/sop-authoring.ts && grep -q \"ROLE_LIBRARY_SOURCE\" src/lib/sop-authoring.ts"
+
+# 9.3 Filed SOPs carry source=NULL (NOT 'role-library').
+check "9.3" "filed SOPs carry source=NULL not 'role-library' (INSERT in sop-authoring.ts)" \
+  "grep -q 'NULL, NULL, ?, ?)' src/lib/sop-authoring.ts || grep -A5 'INSERT INTO sops' src/lib/sop-authoring.ts | grep -q 'NULL'"
+
+# 9.4 Dispatch hook present in task-dispatcher.ts.
+check "9.4" "task-dispatcher.ts: authorSOPForTask + isCanonicalContext imported and called" \
+  "grep -q 'authorSOPForTask' src/lib/task-dispatcher.ts && grep -q 'isCanonicalContext' src/lib/task-dispatcher.ts"
+
+# 9.5 Migration 066 exists and is additive.
+check "9.5" "migration 066 add_tasks_sop_authoring_link exists in migrations.ts" \
+  "grep -q 'add_tasks_sop_authoring_link' src/lib/db/migrations.ts"
+
+# 9.6 Fixture smoke test file exists.
+check "9.6" "smoke-test-sop-authoring.ts exists" \
+  "[ -f scripts/smoke-test-sop-authoring.ts ]"
+
+# 9.7 Slow-loop QC wiring: runSopLearning (scheduler.ts) references scoreTaskForQC.
+check "9.7" "scheduler.ts runSopLearning references scoreTaskForQC (slow-loop QC verdict)" \
+  "grep -q 'scoreTaskForQC' src/lib/jobs/scheduler.ts"
+
+# 9.8 Migration 067 expands sop_proposals status CHECK to include auto-authored-filed.
+check "9.8" "migration 067 expand_sop_proposals_status_auto_authored exists" \
+  "grep -q 'expand_sop_proposals_status_auto_authored' src/lib/db/migrations.ts"
+
+# 9.9 QC_FIXTURE_JSON_PATH bypass in qc-scorer.ts (smoke test support).
+check "9.9" "qc-scorer.ts supports QC_FIXTURE_JSON_PATH fixture bypass" \
+  "grep -q 'QC_FIXTURE_JSON_PATH' src/lib/qc-scorer.ts"
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"
