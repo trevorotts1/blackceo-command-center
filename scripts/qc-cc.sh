@@ -227,6 +227,44 @@ check "7.14" "BrandTheme reads brand_color from client context (PRD 2.9d)" \
 check "7.15" "prd-2.9f-null-dept-slug.test.ts exists (fixture for null-department slug)" \
   '[ -f tests/unit/prd-2.9f-null-dept-slug.test.ts ]'
 
+blue "── 8. PRD 2.11 — Department Trio (QC + Research + Devil's Advocate) ──"
+
+# Migration 065 seeding.
+check "8.1" "migrations.ts: migration 065 exists (trio seed)" \
+  "grep -q \"id: '065'\" src/lib/db/migrations.ts"
+check "8.2" "migrations.ts: migration 065 seeds role_type='research'" \
+  "grep -q \"'research'\" src/lib/db/migrations.ts"
+check "8.3" "migrations.ts: migration 065 seeds role_type='devils-advocate'" \
+  "grep -q \"'devils-advocate'\" src/lib/db/migrations.ts"
+check "8.4" "migrations.ts: autoSeedTrioAgents exported (deferred-seed path)" \
+  "grep -q 'export function autoSeedTrioAgents' src/lib/db/migrations.ts"
+check "8.5" "migrations.ts: autoSeedTrioAgents called from runMigrations post-chain" \
+  "grep -q 'autoSeedTrioAgents(db)' src/lib/db/migrations.ts"
+check "8.6" "migrations.ts: autoSeedTrioAgents called from autoSeedFromDepartmentsJson" \
+  "grep -A5 'autoSeedTrioAgents' src/lib/db/migrations.ts | grep -q 'autoSeedTrioAgents'"
+
+# resolveTrioAgents + getMissingTrioRoles in qc-scorer.
+check "8.7" "qc-scorer.ts: resolveTrioAgents exported (build-gate resolver)" \
+  "grep -q 'export function resolveTrioAgents' src/lib/qc-scorer.ts"
+check "8.8" "qc-scorer.ts: getMissingTrioRoles exported (build-gate assertion)" \
+  "grep -q 'export function getMissingTrioRoles' src/lib/qc-scorer.ts"
+check "8.9" "qc-scorer.ts: DeptTrioAgents interface exported (PRD 2.11 trio type)" \
+  "grep -q 'export interface DeptTrioAgents' src/lib/qc-scorer.ts"
+
+# DA is internal — verify its description carries the INTERNAL marker.
+check "8.10" "migrations.ts: DA description carries INTERNAL marker (never surfaced to client)" \
+  "grep -q 'INTERNAL' src/lib/db/migrations.ts"
+
+# Deterministic ID pattern.
+check "8.11" "migrations.ts: research agent id prefix 'research-agent-'" \
+  "grep -q \"research-agent-\" src/lib/db/migrations.ts"
+check "8.12" "migrations.ts: DA agent id prefix 'da-agent-'" \
+  "grep -q \"da-agent-\" src/lib/db/migrations.ts"
+
+# Fixture test file.
+check "8.13" "prd-2.11-trio-agent-seed.test.ts exists (fixture for trio seeding)" \
+  '[ -f tests/unit/prd-2.11-trio-agent-seed.test.ts ]'
+
 blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then

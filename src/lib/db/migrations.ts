@@ -2247,6 +2247,90 @@ const migrations: Migration[] = [
     },
   },
 
+  // ── Migration 065 — Department Trio: research + devil's-advocate agents (PRD 2.11) ──
+  {
+    id: '065',
+    name: 'seed_research_and_devils_advocate_agents',
+    up: (db) => {
+      // PRD 2.11 (CC side): seed the trio agent rows per department.
+      //
+      // Every operational department must have THREE specialist agents with
+      // distinct role_type values:
+      //   'qc'               — QC Specialist (seeded by migration 060)
+      //   'research'         — Deep-Research Specialist (seeded here)
+      //   'devils-advocate'  — Devil's Advocate (seeded here)
+      //
+      // Devil's Advocate is an INTERNAL role: it is auto-created and NEVER
+      // surfaced to client-facing UI (is_client_facing = 0 by convention;
+      // the resolver and dispatch logic filter it by role_type only, never
+      // by name). It is deliberately absent from any persona/agent picker
+      // that shows up in the client board view.
+      //
+      // Idempotent: INSERT OR IGNORE on deterministic ids
+      //   research agent id:        'research-agent-<workspace.id>'
+      //   devils-advocate agent id: 'da-agent-<workspace.id>'
+      //
+      // Deferred: if no workspaces exist yet, this migration records a log
+      // message and returns cleanly. The autoSeedFromDepartmentsJson path
+      // (which runs after migrations on every boot) also seeds the trio for
+      // any workspace created after migration time, so no workspace is ever
+      // left without its trio.
+      console.log('[Migration 065] Seeding per-dept Research + Devil\'s Advocate agents (PRD 2.11)...');
+
+      // Guard: role_type column must exist (added by migration 060).
+      const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(c => c.name);
+      if (!agentCols.includes('role_type')) {
+        console.warn('[Migration 065] agents.role_type column missing — migration 060 may not have run yet; skipping');
+        return;
+      }
+
+      const workspaces = db.prepare('SELECT id, name FROM workspaces').all() as { id: string; name: string }[];
+      if (workspaces.length === 0) {
+        console.log('[Migration 065] No workspaces yet — trio seeding deferred to next boot');
+        return;
+      }
+
+      const insertResearch = db.prepare(`
+        INSERT OR IGNORE INTO agents
+          (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+           specialist_type, role_type, created_at, updated_at)
+        VALUES (?, ?, 'Research Specialist', ?, '🔬', 'standby', 0, ?, 'permanent', 'research', datetime('now'), datetime('now'))
+      `);
+
+      const insertDA = db.prepare(`
+        INSERT OR IGNORE INTO agents
+          (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+           specialist_type, role_type, created_at, updated_at)
+        VALUES (?, ?, 'Devil''s Advocate', ?, '😈', 'standby', 0, ?, 'permanent', 'devils-advocate', datetime('now'), datetime('now'))
+      `);
+
+      let researchSeeded = 0;
+      let daSeeded = 0;
+
+      for (const ws of workspaces) {
+        const researchId = `research-agent-${ws.id}`;
+        const daId = `da-agent-${ws.id}`;
+
+        const researchName = `${ws.name} Research Specialist`;
+        const researchDesc = `Deep-research specialist for the ${ws.name} department. Applies the Tier-1 research mandate (McKinsey, Harvard Business Review, IBISWorld, Statista citations required) to discover, synthesise, and validate information needed by the department's specialists and SOP library.`;
+        insertResearch.run(researchId, researchName, researchDesc, ws.id);
+        researchSeeded++;
+
+        const daName = `${ws.name} Devil's Advocate`;
+        // DA is internal: description is intentionally operator-facing only —
+        // it never appears in client-facing UI.
+        const daDesc = `[INTERNAL — not surfaced to client] Devil's Advocate for the ${ws.name} department. Stress-tests plans, decisions, and deliverables by surfacing assumptions, edge cases, and counter-arguments BEFORE they become problems. Reports findings only to the department's QC Specialist and the master orchestrator.`;
+        insertDA.run(daId, daName, daDesc, ws.id);
+        daSeeded++;
+      }
+
+      console.log(
+        `[Migration 065] Seeded/verified ${researchSeeded} Research + ${daSeeded} Devil's Advocate agent(s)` +
+        ` across ${workspaces.length} workspace(s)`,
+      );
+    },
+  },
+
   // ── Migration 063 — SOP embeddings model-drift index (PRD 1.8c) ─────────────
   {
     id: '063',
@@ -2377,6 +2461,11 @@ export function runMigrations(db: Database.Database): void {
   // Auto-seed from departments.json if workspaces table is empty
   autoSeedFromDepartmentsJson(db);
 
+  // PRD 2.11: Ensure the trio (QC + research + DA) exists for every workspace.
+  // This covers the case where migration 065 ran before any workspaces existed
+  // (autoSeedFromDepartmentsJson may have just created them above). Idempotent.
+  autoSeedTrioAgents(db);
+
   // Auto-seed the starter SOP library (B6). Chained here — the same first-boot /
   // DB-init path where the Skill-23 workspace auto-seed runs — so the role
   // library (workspaces/agents) AND the SOPs load together exactly where the
@@ -2385,6 +2474,72 @@ export function runMigrations(db: Database.Database): void {
   // Triad Rule silently blocked every task. seedStarterSOPs is idempotent
   // (skips existing slugs) so it is safe on every boot.
   autoSeedStarterSOPs(db);
+}
+
+/**
+ * Auto-seed the department trio (QC + research + Devil's Advocate) for every
+ * workspace that does not yet have all three role_type rows.
+ *
+ * PRD 2.11 (CC side): called from runMigrations() (after migration 065) AND
+ * from autoSeedFromDepartmentsJson() so that any workspace created on first-boot
+ * also gets its trio immediately, even when migration 065 ran before workspaces
+ * existed.
+ *
+ * Idempotent: INSERT OR IGNORE on deterministic ids.
+ * Non-fatal: any error is logged but never crashes app startup.
+ *
+ * Devil's Advocate invariant: role_type='devils-advocate' agents are INTERNAL.
+ * They are seeded here but are NEVER returned by any client-facing query; the
+ * resolveTrioAgents() function in qc-scorer.ts is the only resolver, and
+ * dispatch logic that needs the DA must call that function, not query agents
+ * directly, to preserve the "never surface to client" contract.
+ */
+export function autoSeedTrioAgents(db: Database.Database): void {
+  try {
+    // Guard: role_type column must exist (migration 060).
+    const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(c => c.name);
+    if (!agentCols.includes('role_type')) {
+      // Pre-migration-060 DB — trio will seed when migration 060 + 065 run.
+      return;
+    }
+
+    const workspaces = db.prepare('SELECT id, name FROM workspaces').all() as { id: string; name: string }[];
+    if (workspaces.length === 0) return;
+
+    const insertResearch = db.prepare(`
+      INSERT OR IGNORE INTO agents
+        (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+         specialist_type, role_type, created_at, updated_at)
+      VALUES (?, ?, 'Research Specialist', ?, '🔬', 'standby', 0, ?, 'permanent', 'research', datetime('now'), datetime('now'))
+    `);
+
+    const insertDA = db.prepare(`
+      INSERT OR IGNORE INTO agents
+        (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+         specialist_type, role_type, created_at, updated_at)
+      VALUES (?, ?, 'Devil''s Advocate', ?, '😈', 'standby', 0, ?, 'permanent', 'devils-advocate', datetime('now'), datetime('now'))
+    `);
+
+    let count = 0;
+    for (const ws of workspaces) {
+      const researchName = `${ws.name} Research Specialist`;
+      const researchDesc = `Deep-research specialist for the ${ws.name} department. Applies the Tier-1 research mandate (McKinsey, Harvard Business Review, IBISWorld, Statista citations required) to discover, synthesise, and validate information needed by the department's specialists and SOP library.`;
+      insertResearch.run(`research-agent-${ws.id}`, researchName, researchDesc, ws.id);
+
+      const daName = `${ws.name} Devil's Advocate`;
+      // DA description is intentionally operator-facing only — never shown in client UI.
+      const daDesc = `[INTERNAL — not surfaced to client] Devil's Advocate for the ${ws.name} department. Stress-tests plans, decisions, and deliverables by surfacing assumptions, edge cases, and counter-arguments BEFORE they become problems. Reports findings only to the department's QC Specialist and the master orchestrator.`;
+      insertDA.run(`da-agent-${ws.id}`, daName, daDesc, ws.id);
+      count++;
+    }
+
+    if (count > 0) {
+      console.log(`[Auto-seed Trio] Seeded/verified Research + Devil's Advocate for ${count} workspace(s)`);
+    }
+  } catch (err) {
+    // Non-fatal: log and continue.
+    console.log('[Auto-seed Trio] Skipped:', (err as Error).message);
+  }
 }
 
 // Auto-seed starter SOPs on boot (B6). Non-fatal: a missing `sops` table or any
@@ -2496,6 +2651,11 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
       );
       console.log('[Auto-seed] Created workspace:', dept.id, dept.name, isCeo ? '(CEO → sort_order 0)' : '');
     }
+
+    // ── PRD 2.11: seed the trio (QC + research + DA) for every workspace ──────
+    // Called here so any workspace created on first-boot via autoSeedFromDepartmentsJson
+    // also gets its trio, even when migration 065 ran before any workspaces existed.
+    autoSeedTrioAgents(db);
 
     console.log('[Auto-seed] Done. Seeded company +', depts.length, 'workspaces');
   } catch (err) {
