@@ -19,11 +19,21 @@
  * the feedback loop: once a task reaches `done`, we notify persona-selector-v2
  * so it can write to persona_performance / persona_weight_overrides and make
  * the adaptive weights actually adapt.  PRD item 1.4.
+ *
+ * PRD item 1.6: selectPersonaForTask uses promisified async execFile (never
+ * execFileSync) so it never freezes the Node event loop.  createTaskCore calls
+ * this function with await AFTER the task INSERT + first broadcast, so the
+ * API responds in <500ms and the persona chip appears via a second task_updated
+ * SSE event a few seconds later.
  */
-import { execFileSync, spawn } from "child_process";
+import { promisify } from "util";
+import { execFile, spawn } from "child_process";
 import path from "path";
 import os from "os";
 import { DB_PATH } from "@/lib/db";
+
+// Promisified async version — never blocks the event loop.
+const execFileAsync = promisify(execFile);
 
 export type PersonaInteractionMode = "leadership" | "coaching" | "hybrid";
 
@@ -89,7 +99,10 @@ export async function selectPersonaForTask(
     // find_dashboard_db() in the Python script falls through its candidate list and
     // resolves to an empty string, silently no-opping every DB interaction (stickiness,
     // variety, weight overrides, record_selection).
-    const output = execFileSync(
+    //
+    // PRD 1.6: use async execFile (promisified) — never execFileSync which freezes the
+    // Node event loop for up to 30s during semantic embed + LLM scoring calls.
+    const { stdout: output } = await execFileAsync(
       "python3",
       [scriptPath, "--task", taskDescription, "--department", dept, "--format", "json"],
       {
