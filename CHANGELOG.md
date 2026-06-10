@@ -1,5 +1,9 @@
 ## [v4.32.0] — 2026-06-10 — fix(af6): fast-loop QC gate — auto-proceed on dept-QC>=8.5, no operator-approval pause
 
+**QC Score (independent Sonnet QC — AF6 audit): 8.86/10 — PASS** (gate: 8.5)
+
+Scored by independent Sonnet QC agent against PRD 2.12-cc (SOP-LAYERS.md Layer 3b). Dimensions: correctness 9, type safety 9, test quality 8.5, build gates 8.5, docs 9, PRD compliance 9, regression safety 9. Weighted: 8.86. Pass.
+
 **Audit Fix 6 (AF6) — PRD 2.12-cc dispatch-time SOP fast loop QC gate.**
 
 Confirmed the fast SOP-authoring loop correctly auto-proceeds on dept-QC>=8.5 with
