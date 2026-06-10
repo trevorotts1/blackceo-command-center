@@ -50,6 +50,21 @@ else
     LABEL=$(printf '%s' "$line" | awk '{print $4}')
     LABEL="${LABEL:-unknown}"
 
+    # FIX #9: absolutify CANON_DIR and DB_PATH from the fleet file.
+    # A relative value causes false cwd-mismatch + DB-not-found in cc-health-check.sh.
+    if [[ -n "$CANON_DIR" && "$CANON_DIR" != /* ]]; then
+      CANON_DIR="$(cd "$CANON_DIR" 2>/dev/null && pwd)" || {
+        printf '[sunday-cron-sweep] WARN: cannot absolutify CANON_DIR=%s for box %s — skipping\n' "$CANON_DIR" "$LABEL" >&2
+        continue
+      }
+    fi
+    if [[ -n "$DB_PATH" && "$DB_PATH" != /* ]]; then
+      DB_PATH="$(cd "$(dirname "$DB_PATH")" 2>/dev/null && pwd)/$(basename "$DB_PATH")" || {
+        printf '[sunday-cron-sweep] WARN: cannot absolutify DB_PATH=%s for box %s — skipping\n' "$DB_PATH" "$LABEL" >&2
+        continue
+      }
+    fi
+
     printf '[sunday-cron-sweep] Checking box: %s (port %s)\n' "$LABEL" "$PORT" >&2
 
     RESULT_JSON=""

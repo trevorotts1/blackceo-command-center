@@ -1,28 +1,70 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Standup Heartbeat for Mission Control
 # Runs 3x daily: 8 AM, 12 PM, 5 PM Eastern
-# Checks for tasks in INBOX, TESTING, IN_PROGRESS, and ASSIGNED states
+#
+# PRD Addendum B.1 (P0): green definition delegated to cc-health-check.sh.
+# This script no longer implements its own health signature.
+# Checks for tasks in INBOX, TESTING, IN_PROGRESS, and ASSIGNED states,
+# but the overall "green" gate is the B.1 deep health check.
+#
+# Usage:
+#   CC_PORT=4000 CC_CANONICAL_DIR=/data/projects/command-center bash scripts/standup-heartbeat.sh
 
-set -e
+set -euo pipefail
 
-# Configuration - use environment variable or default
+# Configuration — use environment variables or defaults
 MISSION_CONTROL_URL="${MISSION_CONTROL_URL:-http://localhost:4000}"
 LOG_FILE="${LOG_FILE:-/tmp/standup-heartbeat.log}"
+CC_PORT="${CC_PORT:-4000}"
+CC_CANONICAL_DIR="${CC_CANONICAL_DIR:-}"
+CC_DB_PATH="${CC_DB_PATH:-}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEALTH_CHECK="${SCRIPT_DIR}/cc-health-check.sh"
 
 # Logging function
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FILE"
 }
 
 log "=== Standup Heartbeat Started ==="
 log "Mission Control URL: $MISSION_CONTROL_URL"
 
-# Function to make API calls
+# ── B.1 deep health gate ──────────────────────────────────────────────────────
+# "Green" is defined solely by cc-health-check.sh (PRD Addendum B.1).
+# This script stops writing its own green signature; callers invoke cc-health-check.sh.
+if [[ ! -x "$HEALTH_CHECK" ]]; then
+  log "FATAL: cc-health-check.sh not found at ${HEALTH_CHECK} — cannot determine green status"
+  exit 1
+fi
+
+log "Running B.1 deep health check..."
+HEALTH_ARGS=(--port "$CC_PORT" --pm2-check-window 0 --json-only)
+[[ -n "$CC_CANONICAL_DIR" ]] && HEALTH_ARGS+=(--canonical-dir "$CC_CANONICAL_DIR")
+[[ -n "$CC_DB_PATH" ]] && HEALTH_ARGS+=(--db-path "$CC_DB_PATH")
+
+HEALTH_JSON=""
+HEALTH_EXIT=0
+HEALTH_JSON=$(bash "$HEALTH_CHECK" "${HEALTH_ARGS[@]}" 2>/dev/null) || HEALTH_EXIT=$?
+
+HEALTH_GREEN=$(printf '%s' "$HEALTH_JSON" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('green') else 'false')" \
+  2>/dev/null || echo "false")
+
+if [[ "$HEALTH_GREEN" != "true" ]]; then
+  log "ALERT: B.1 health check NOT GREEN — standup aborting task check"
+  log "Health result: ${HEALTH_JSON}"
+  exit 1
+fi
+
+log "B.1 health check: GREEN — proceeding with task standup"
+
+# ── Function to make API calls ────────────────────────────────────────────────
 api_call() {
     local method="$1"
     local endpoint="$2"
     local data="${3:-}"
-    
+
     if [ -n "$data" ]; then
         curl -s -X "$method" "$MISSION_CONTROL_URL$endpoint" \
             -H "Content-Type: application/json" \
@@ -64,13 +106,13 @@ fi
 # Step 3: Check IN_PROGRESS tasks
 log "Checking IN_PROGRESS tasks..."
 IN_PROGRESS_TASKS=$(api_call "GET" "/api/tasks?status=in_progress")
-IN_PROGRESS_COUNT=$(echo "$IN_PROGRESS_TASKS" | grep -c '"id"' || echo "0")
+IN_PROGRESS_COUNT=$(count_task_ids "$IN_PROGRESS_TASKS")
 log "Found $IN_PROGRESS_COUNT tasks in IN_PROGRESS"
 
 # Step 4: Check ASSIGNED tasks (rework loop)
 log "Checking ASSIGNED tasks..."
 ASSIGNED_TASKS=$(api_call "GET" "/api/tasks?status=assigned")
-ASSIGNED_COUNT=$(echo "$ASSIGNED_TASKS" | grep -c '"id"' || echo "0")
+ASSIGNED_COUNT=$(count_task_ids "$ASSIGNED_TASKS")
 log "Found $ASSIGNED_COUNT tasks in ASSIGNED (rework loop)"
 
 # Summary

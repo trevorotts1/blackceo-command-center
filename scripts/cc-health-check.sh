@@ -2,7 +2,7 @@
 # cc-health-check.sh — THE single definition of "green" for a deployed
 # BlackCEO Command Center instance.
 #
-# PRD Addendum B, item B.1 (P0) — REDO #2 fixes applied
+# PRD Addendum B, item B.1 (P0) — REDO #3 fixes applied
 #
 # REQUIRES: bash 4+ (hard guard below), curl, sqlite3, pm2, python3, df
 # macOS note: GNU coreutils 'timeout' must be available (brew install coreutils).
@@ -121,6 +121,21 @@ _jstr() {
   printf '%s' "$s"
 }
 
+# FIX #9: absolutify a path — exits 2 immediately if the value does not start with '/'.
+# Relative paths are never accepted; the caller must provide an absolute path.
+_absolutify_path() {
+  local val="$1"
+  if [[ -z "$val" ]]; then
+    echo ""
+    return
+  fi
+  if [[ "$val" != /* ]]; then
+    printf 'ERROR: path must be absolute (starts with /), got relative: %s\n' "$val" >&2
+    exit 2
+  fi
+  echo "$val"
+}
+
 ###############################################################################
 # Argument parsing
 ###############################################################################
@@ -151,6 +166,14 @@ while [[ $# -gt 0 ]]; do
     *) _die_usage "Unknown argument: $1" ;;
   esac
 done
+
+# FIX #9: absolutify --db-path and --canonical-dir on ingestion; exit 2 on relative input.
+if [[ -n "$DB_PATH_OVERRIDE" ]]; then
+  DB_PATH_OVERRIDE="$(_absolutify_path "$DB_PATH_OVERRIDE")"
+fi
+if [[ -n "$CANONICAL_DIR_OVERRIDE" ]]; then
+  CANONICAL_DIR_OVERRIDE="$(_absolutify_path "$CANONICAL_DIR_OVERRIDE")"
+fi
 
 ###############################################################################
 # Resolved defaults
@@ -210,26 +233,50 @@ _heuristic_install_dirs() {
 }
 
 ###############################################################################
+# FIX #5: CF-Access redirect guard
+# Validate that the FINAL URL host after -L redirect is still localhost/127.0.0.1.
+# A 302 -> CF-login -> 200 text/html must NOT be accepted as a passing probe.
+# Returns "pass", "fail:CODE", or "fail:cf-redirect:FINAL_URL"
+###############################################################################
+_http_check() {
+  local label="$1" url="$2"
+  local code final_url
+  # -L follows redirects; --max-time 10; write final http_code + url_effective
+  local resp
+  resp=$(curl -s -L -o /dev/null \
+    -w "%{http_code}|||%{url_effective}" \
+    --max-time 10 "$url" 2>/dev/null || echo "000|||${url}")
+
+  code="${resp%%|||*}"
+  final_url="${resp##*|||}"
+
+  local display_code
+  display_code=$(printf '%d' "$code" 2>/dev/null || echo "$code")
+
+  # FIX #5: reject any probe where the final URL host is NOT localhost/127.0.0.1
+  # This catches 302->CF-Access-login->200 text/html redirects.
+  if [[ "$code" == "200" ]]; then
+    local final_host
+    # Extract host from URL (strip protocol, path, port)
+    final_host=$(printf '%s' "$final_url" | sed -E 's|^https?://([^/:?#]*).*|\1|' | tr '[:upper:]' '[:lower:]')
+    if [[ "$final_host" != "localhost" && "$final_host" != "127.0.0.1" ]]; then
+      _log "  FAIL $label => 200 but redirected to non-local host: ${final_host} (CF-Access login page?)"
+      echo "fail:cf-redirect:${final_host}"
+      return
+    fi
+    _log "  OK  $label => ${display_code}"
+    echo "pass"
+  else
+    _log "  FAIL $label => ${display_code}"
+    echo "fail:${display_code}"
+  fi
+}
+
+###############################################################################
 # CHECK 1: HTTP 200 on / and /api/health (with redirect following)
 ###############################################################################
 
 _log "[1/5] HTTP liveness — / and /api/health"
-
-_http_check() {
-  local label="$1" url="$2"
-  local code
-  # -L follows redirects; --max-time 10; write only the final status code
-  code=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
-  local display_code
-  display_code=$(printf '%d' "$code" 2>/dev/null || echo "$code")
-  if [[ "$code" == "200" ]]; then
-    _log "  OK  $label => $display_code"
-    echo "pass"
-  else
-    _log "  FAIL $label => $display_code"
-    echo "fail:${display_code}"
-  fi
-}
 
 ROOT_RESULT=$(_http_check "GET /" "${LOCAL_BASE}/")
 API_RESULT=$(_http_check "GET /api/health" "${LOCAL_BASE}/api/health")
@@ -239,12 +286,18 @@ API_CODE="${API_RESULT#fail:}"
 
 if [[ "$ROOT_RESULT" == "pass" ]]; then
   _mark "http_root" "true" "HTTP 200 on /"
+elif [[ "$ROOT_RESULT" == "fail:cf-redirect:"* ]]; then
+  REDIR_HOST="${ROOT_RESULT#fail:cf-redirect:}"
+  _mark "http_root" "false" "HTTP 200 but redirected to non-local host '${REDIR_HOST}' — CF-Access login page intercepted the probe; probe via 127.0.0.1 must not redirect off-host"
 else
   _mark "http_root" "false" "HTTP ${ROOT_CODE} on / (expected 200)"
 fi
 
 if [[ "$API_RESULT" == "pass" ]]; then
   _mark "http_api_health" "true" "HTTP 200 on /api/health"
+elif [[ "$API_RESULT" == "fail:cf-redirect:"* ]]; then
+  REDIR_HOST="${API_RESULT#fail:cf-redirect:}"
+  _mark "http_api_health" "false" "HTTP 200 but redirected to non-local host '${REDIR_HOST}' — CF-Access login page intercepted the probe"
 else
   _mark "http_api_health" "false" "HTTP ${API_CODE} on /api/health (expected 200)"
 fi
@@ -252,13 +305,6 @@ fi
 ###############################################################################
 # CHECK 2: Serve HTML → extract EVERY /_next/static asset → curl each → 200
 #          This is the Sheila bug detector: stale manifest hash absent on disk.
-#
-# FIXED (REDO #2):
-#   - assets_found reflects the TRUE count of refs extracted from HTML.
-#   - total reflects how many were actually probed (may be < assets_found if capped).
-#   - capped=true is emitted in JSON when MAX_ASSETS > 0 and probed < found.
-#   - When capped, the check FAILS because un-probed assets cannot be verified.
-#   - MAX_ASSETS=0 means probe ALL (no cap) — this is now the default.
 ###############################################################################
 
 _log "[2/5] Static asset integrity (stale-manifest detection)"
@@ -409,14 +455,17 @@ fi
 # CHECK 3: Company name — DB-direct AND served HTML; must match; not "Default"
 #          on a box with company-config.json present.
 #
-# FIXED (REDO #2):
-#   - _get_config_company_name() uses python3 sys.argv to pass the path — NO
-#     string interpolation inside a quoted Python literal (path injection fix).
-#   - _find_config_company_name_from_disk() derives canonical dir from pm2
-#     pm_cwd FIRST (before heuristic) so installs outside the 4 heuristic
-#     paths are correctly found.
-#   - When COMPANY_CONFIG_EXISTS falls to false via heuristic miss (not a
-#     genuine absence), a config_warn field is emitted in the JSON output.
+# FIX #1 (FALSE-GREEN): COMPANY_CONFIG_EXISTS is determined by FILE EXISTENCE on
+#   disk, completely independent of whether companyName is empty/null/whitespace.
+#   An empty companyName in company-config.json is a configured-but-broken box —
+#   it must NOT fall through to the "unconfigured, Default OK" branch.
+#
+# FIX #5 (CF-Access redirect): The HTML fetch for company name extraction validates
+#   the final URL host is still localhost/127.0.0.1 before trusting the body.
+#
+# FIX #6 (sqlite3 busy-vs-empty): Distinguish SQLITE_BUSY/locked (UNKNOWN/retry)
+#   from a genuinely empty companies table. A lock/timeout is treated as UNKNOWN,
+#   not "no company row."
 ###############################################################################
 
 _log "[3/5] Company name consistency (DB-direct vs served HTML)"
@@ -480,7 +529,7 @@ except Exception:
   echo ""
 }
 
-# FIXED: pass path via sys.argv — never interpolate into a Python string literal.
+# pass path via sys.argv — never interpolate into a Python string literal.
 # This avoids Python SyntaxError on paths containing single quotes (e.g. /home/o'brien/…).
 _get_config_company_name() {
   local install_dir="${1:-}"
@@ -498,8 +547,10 @@ except Exception:
 PYEOF
 }
 
-# Derive pm2 pm_cwd for config-existence probing.
-# Returns the first cc app's pm_cwd, empty if pm2 unavailable or no cc app.
+# FIX #4 (wrong cwd): _pm2_cwd_for_config now filters by CC port OR canonical app name
+# so that a non-CC app registered before the CC app doesn't hijack the cwd.
+# Returns the cwd of the FIRST cc_app (port-matched or name-matched), not the first
+# of ALL apps.
 _pm2_cwd_for_config() {
   if ! command -v pm2 &>/dev/null || ! command -v python3 &>/dev/null; then
     echo ""
@@ -508,85 +559,148 @@ _pm2_cwd_for_config() {
   local pm2_raw
   pm2_raw=$(_timeout_cmd 15 pm2 jlist 2>/dev/null || echo "[]")
   printf '%s\n' "$pm2_raw" | python3 -s -c "
-import sys, json
-try:
-  apps = json.loads(sys.stdin.read())
-  if apps is None: apps = []
-  for app in apps:
+import sys, json, re
+port_str = sys.argv[1] if len(sys.argv) > 1 else ''
+
+def env_val(pm2_env, key):
+    for layer in ('env_data', 'env'):
+        e = pm2_env.get(layer) or {}
+        if isinstance(e, dict):
+            v = e.get(key) or e.get(key.lower())
+            if v:
+                return str(v)
+    v = pm2_env.get(key) or pm2_env.get(key.lower())
+    if v:
+        return str(v)
+    return ''
+
+def port_matches(app, port_str):
     env = app.get('pm2_env') or {}
-    cwd = env.get('pm_cwd') or env.get('cwd') or ''
-    if cwd:
-      print(cwd)
-      raise SystemExit(0)
+    port_env = env_val(env, 'PORT')
+    if port_env == port_str:
+        return True
+    args = env.get('args') or env.get('node_args') or ''
+    if isinstance(args, list):
+        args = ' '.join(str(a) for a in args)
+    args_str = str(args)
+    if re.search(r'(?:^|\s)-p\s+' + re.escape(port_str) + r'(?:\s|$)', args_str):
+        return True
+    if re.search(r'--port\s+' + re.escape(port_str) + r'(?!\d)', args_str):
+        return True
+    return False
+
+def name_matches_cc(app, port_str):
+    env = app.get('pm2_env') or {}
+    name = (env.get('name') or app.get('name') or '').lower()
+    name_kw = any(kw in name for kw in ('mission-control', 'command-center', 'blackceo'))
+    if not name_kw:
+        return False
+    port_env = env_val(env, 'PORT')
+    if port_env and port_env != port_str:
+        return False
+    return True
+
+try:
+    apps = json.loads(sys.stdin.read())
+    if apps is None:
+        apps = []
+    for app in apps:
+        env = app.get('pm2_env') or {}
+        if port_matches(app, port_str) or name_matches_cc(app, port_str):
+            cwd = env.get('pm_cwd') or env.get('cwd') or ''
+            if cwd:
+                print(cwd)
+                raise SystemExit(0)
 except Exception:
-  pass
-" 2>/dev/null || true
+    pass
+" "$PORT" 2>/dev/null || true
 }
 
-# DISK-DIRECT config probe: find company-config.json from disk, independent of pm2 state.
-#
-# FIXED (REDO #2): priority order is now:
+# FIX #1: Disk-direct config probe.
+# COMPANY_CONFIG_EXISTS is set based on FILE EXISTENCE of company-config.json,
+# INDEPENDENT of the companyName value inside it.
+# Priority order:
 #   1. --canonical-dir flag (explicit, highest priority)
-#   2. pm2 pm_cwd (catches installs at non-heuristic paths)
+#   2. pm2 pm_cwd of the CC app (catches installs at non-heuristic paths)
 #   3. heuristic dirs
 #
-# Returns the company name string (empty if not found or no companyName key).
-# Also sets CONFIG_DISCOVERY_METHOD (global) for the warning field.
+# Sets COMPANY_CONFIG_EXISTS_BOOL (global) to "true"/"false" based purely on
+# whether company-config.json exists on disk (not on its content).
+# Also sets CONFIG_COMPANY_NAME (possibly empty even when file exists).
 CONFIG_DISCOVERY_METHOD=""
 CONFIG_DISCOVERY_WARN=""
+COMPANY_CONFIG_EXISTS_BOOL="false"  # FIX #1: set by file existence, not name content
 
-_find_config_company_name_from_disk() {
+_find_config_from_disk() {
   # Priority 1: explicit canonical dir
   if [[ -n "$CANONICAL_DIR_OVERRIDE" ]]; then
     CONFIG_DISCOVERY_METHOD="canonical-dir-flag"
-    local result
-    result=$(_get_config_company_name "$CANONICAL_DIR_OVERRIDE")
-    echo "$result"
+    local cfg="${CANONICAL_DIR_OVERRIDE}/config/company-config.json"
+    if [[ -f "$cfg" ]]; then
+      COMPANY_CONFIG_EXISTS_BOOL="true"
+    else
+      COMPANY_CONFIG_EXISTS_BOOL="false"
+    fi
+    _get_config_company_name "$CANONICAL_DIR_OVERRIDE"
     return
   fi
 
-  # Priority 2: pm2 pm_cwd
+  # Priority 2: pm2 pm_cwd (filtered to CC app)
   local pm2_cwd
   pm2_cwd=$(_pm2_cwd_for_config)
-  if [[ -n "$pm2_cwd" && -f "${pm2_cwd}/config/company-config.json" ]]; then
-    CONFIG_DISCOVERY_METHOD="pm2-pm_cwd"
-    local result
-    result=$(_get_config_company_name "$pm2_cwd")
-    echo "$result"
-    return
+  if [[ -n "$pm2_cwd" ]]; then
+    local cfg="${pm2_cwd}/config/company-config.json"
+    if [[ -f "$cfg" ]]; then
+      CONFIG_DISCOVERY_METHOD="pm2-pm_cwd"
+      COMPANY_CONFIG_EXISTS_BOOL="true"
+      _get_config_company_name "$pm2_cwd"
+      return
+    fi
   fi
 
-  # Priority 3: heuristic dirs (same list as DB resolution)
+  # Priority 3: heuristic dirs
   while IFS= read -r candidate_dir; do
-    if [[ -f "${candidate_dir}/config/company-config.json" ]]; then
+    local cfg="${candidate_dir}/config/company-config.json"
+    if [[ -f "$cfg" ]]; then
       CONFIG_DISCOVERY_METHOD="heuristic"
-      local result
-      result=$(_get_config_company_name "$candidate_dir")
-      if [[ -n "$result" ]]; then
-        echo "$result"
-        return
-      fi
+      COMPANY_CONFIG_EXISTS_BOOL="true"
+      _get_config_company_name "$candidate_dir"
+      return
     fi
   done < <(_heuristic_install_dirs)
 
-  # Not found — emit a warning so the caller can distinguish genuine absence
-  # from a heuristic miss.
+  # Not found
   CONFIG_DISCOVERY_METHOD="not-found"
+  COMPANY_CONFIG_EXISTS_BOOL="false"
   CONFIG_DISCOVERY_WARN="company-config.json not found via --canonical-dir, pm2 pm_cwd, or heuristic paths. If the app is installed outside standard dirs, supply --canonical-dir. config_exists=false may be a false negative."
   echo ""
 }
 
-# sqlite3 query with retry on SQLITE_BUSY (up to 3 attempts, 5000ms timeout each)
-_sqlite3_query() {
+# FIX #6: sqlite3 busy-vs-empty.
+# Returns one of:
+#   "UNKNOWN:BUSY"    — SQLITE_BUSY or lock/timeout detected
+#   ""                — empty result (table present, no matching row)
+#   "<name>"          — the company name
+_sqlite3_query_with_busy_detect() {
   local db_path="$1" query="$2"
-  local attempt result
+  local attempt result err_output
   for attempt in 1 2 3; do
-    result=$(sqlite3 -cmd '.timeout 5000' "$db_path" "$query" 2>/dev/null || true)
-    if [[ -n "$result" || "$attempt" -eq 3 ]]; then
-      echo "$result"
+    # Capture both stdout and stderr; detect SQLITE_BUSY keyword
+    err_output=$(sqlite3 -cmd '.timeout 5000' "$db_path" "$query" 2>&1 1>/tmp/_cc_sq_out_$$ || true)
+    result=$(cat /tmp/_cc_sq_out_$$ 2>/dev/null || true)
+    rm -f /tmp/_cc_sq_out_$$
+    # If stderr contains SQLITE_BUSY, database locked, or unable to open, treat as UNKNOWN
+    if printf '%s' "$err_output" | grep -qiE 'SQLITE_BUSY|database is locked|unable to open|disk I/O error'; then
+      if [[ "$attempt" -lt 3 ]]; then
+        sleep 2
+        continue
+      fi
+      echo "UNKNOWN:BUSY"
       return
     fi
-    sleep 1
+    # Normal result (may be empty string for empty table)
+    echo "$result"
+    return
   done
   echo ""
 }
@@ -604,17 +718,41 @@ else
   else
     _log "  Querying DB: $DB_PATH"
 
-    # Read name from DB with retry on lock
-    DB_COMPANY=$(_sqlite3_query "$DB_PATH" \
+    # FIX #6: Use busy-detecting query; treat UNKNOWN:BUSY as an explicit unknown state.
+    DB_COMPANY_RAW=$(_sqlite3_query_with_busy_detect "$DB_PATH" \
       "SELECT name FROM companies WHERE name IS NOT NULL AND name != '' ORDER BY created_at ASC LIMIT 1;")
-    if [[ -z "$DB_COMPANY" ]]; then
-      DB_COMPANY=$(_sqlite3_query "$DB_PATH" \
-        "SELECT name FROM companies ORDER BY created_at ASC LIMIT 1;")
-    fi
-    COMPANY_DB_NAME="${DB_COMPANY:-}"
 
-    # Read name from served HTML.
-    HTML_FOR_COMPANY=$(curl -s -L --max-time 10 "${LOCAL_BASE}/" 2>/dev/null || true)
+    DB_BUSY="false"
+    if [[ "$DB_COMPANY_RAW" == "UNKNOWN:BUSY" ]]; then
+      DB_BUSY="true"
+      DB_COMPANY_RAW=""
+    fi
+
+    if [[ -z "$DB_COMPANY_RAW" && "$DB_BUSY" == "false" ]]; then
+      DB_COMPANY_RAW=$(_sqlite3_query_with_busy_detect "$DB_PATH" \
+        "SELECT name FROM companies ORDER BY created_at ASC LIMIT 1;")
+      if [[ "$DB_COMPANY_RAW" == "UNKNOWN:BUSY" ]]; then
+        DB_BUSY="true"
+        DB_COMPANY_RAW=""
+      fi
+    fi
+    COMPANY_DB_NAME="${DB_COMPANY_RAW:-}"
+
+    # FIX #5: Fetch HTML for company name — validate final URL host before trusting body.
+    HTML_FOR_COMPANY=""
+    HTML_FETCH_RESP=$(curl -s -L --max-time 10 \
+      -w "|||%{url_effective}" \
+      -o /tmp/_cc_html_fetch_$$ \
+      "${LOCAL_BASE}/" 2>/dev/null || true)
+    HTML_FETCH_FINAL_URL="${HTML_FETCH_RESP##*|||}"
+    HTML_FETCH_FINAL_HOST=$(printf '%s' "$HTML_FETCH_FINAL_URL" | sed -E 's|^https?://([^/:?#]*).*|\1|' | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$HTML_FETCH_FINAL_HOST" == "localhost" || "$HTML_FETCH_FINAL_HOST" == "127.0.0.1" ]]; then
+      HTML_FOR_COMPANY=$(cat /tmp/_cc_html_fetch_$$ 2>/dev/null || true)
+    else
+      _log "  WARN: HTML fetch for company_name redirected to ${HTML_FETCH_FINAL_HOST} — ignoring body (CF-Access login page)"
+    fi
+    rm -f /tmp/_cc_html_fetch_$$
 
     COMPANY_HTML_NAME=""
     if [[ -n "$HTML_FOR_COMPANY" ]]; then
@@ -640,18 +778,18 @@ else
       fi
     fi
 
-    # DISK-DIRECT: determine configured-box status from filesystem, not pm2.
-    # This means pm2 being stopped never silently passes a Default-seeded configured box.
-    CONFIG_COMPANY_NAME=$(_find_config_company_name_from_disk)
-    if [[ -n "$CONFIG_COMPANY_NAME" ]]; then
-      COMPANY_CONFIG_EXISTS="true"
-    else
-      COMPANY_CONFIG_EXISTS="false"
-    fi
+    # FIX #1: Determine configured-box status from FILE EXISTENCE, not name content.
+    # IMPORTANT: _find_config_from_disk() sets COMPANY_CONFIG_EXISTS_BOOL as a global.
+    # It MUST be called directly (not in a subshell via $()) so the variable assignment
+    # propagates to the current shell. We capture stdout via a temp file instead.
+    _CC_CFGOUT=$(mktemp /tmp/cc-cfgout-XXXXXX)
+    _find_config_from_disk > "$_CC_CFGOUT"
+    CONFIG_COMPANY_NAME=$(cat "$_CC_CFGOUT" 2>/dev/null || true)
+    rm -f "$_CC_CFGOUT"
 
     _log "  DB company name:   '${COMPANY_DB_NAME}'"
     _log "  HTML company name: '${COMPANY_HTML_NAME}'"
-    _log "  Config exists (disk-direct via ${CONFIG_DISCOVERY_METHOD}): ${COMPANY_CONFIG_EXISTS}"
+    _log "  Config file exists (disk-direct via ${CONFIG_DISCOVERY_METHOD}): ${COMPANY_CONFIG_EXISTS_BOOL}"
     [[ -n "$CONFIG_DISCOVERY_WARN" ]] && _log "  WARN: ${CONFIG_DISCOVERY_WARN}"
 
     # Build optional config_warn JSON field
@@ -661,7 +799,14 @@ else
       CONFIG_WARN_FIELD=""
     fi
 
-    if [[ "$COMPANY_CONFIG_EXISTS" == "true" ]]; then
+    # FIX #6: Handle DB busy/lock as an explicit UNKNOWN — do not false-pass or false-fail.
+    if [[ "$DB_BUSY" == "true" ]]; then
+      _mark "company_name" "false" \
+        "DB locked/busy after 3 retries — company_name check is UNKNOWN (retry when DB is not locked)" \
+        "\"db_name\":\"UNKNOWN\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":${COMPANY_CONFIG_EXISTS_BOOL}${CONFIG_WARN_FIELD}"
+    elif [[ "$COMPANY_CONFIG_EXISTS_BOOL" == "true" ]]; then
+      # FIX #1: Configured box branch — entered solely based on file existence.
+      # An empty companyName in config (empty/null/'   ') still lands here.
       if [[ -z "$COMPANY_DB_NAME" ]]; then
         _mark "company_name" "false" \
           "Configured box has no company row in DB — branding not seeded (run B.3 seed)" \
@@ -702,14 +847,18 @@ fi
 #   - pm_cwd == canonical install dir
 #   - DATABASE_PATH explicitly set in env
 #
-# FIXED (REDO #2):
-#   - crash-looper loop iterates cc_apps ONLY (not all apps)
-#   - name_matches_cc() requires PORT env present and equal to target port (or
-#     completely absent on legacy apps); an app with a different explicit PORT
-#     is excluded even if its name matches
-#   - Delta crash-loop detection uses a THRESHOLD of >= 3 restarts in window
-#     to avoid false-positives from single operator restarts
-#   - _timeout_cmd portable wrapper replaces bare 'timeout' (macOS compat)
+# FIX #2 (vacuous all()): if --canonical-dir is set and cc_apps is non-empty but
+#   ALL lack a pm_cwd, emit cwd_ok=FALSE. The old `all(... if get_cwd(a))` was vacuously
+#   True on the empty set.
+#
+# FIX #3 (crash-loop scope): delta crash map iterates cc_apps ONLY. A non-CC app
+#   (e.g. openclaw-telegram-worker) with restart-delta>=3 must NOT fail pm2_topology.
+#
+# FIX #4 (wrong cwd for config probe): _pm2_cwd_for_config is now port/name filtered.
+#   Here the pm2 Python also filters cc_apps by CC port/name, so a non-CC app before
+#   the CC app in the list cannot steal the cwd used for the canon-dir check.
+#
+# FIX #10 (argv[3] label): Python script reads sys.argv[3] as snapshot_label.
 ###############################################################################
 
 _log "[4/5] pm2 topology (port binding, crash-loop delta, cwd, DATABASE_PATH)"
@@ -724,7 +873,7 @@ else
   # Determine canonical dir for cwd check.
   EFFECTIVE_CANON_DIR="$CANONICAL_DIR_OVERRIDE"
   if [[ -z "$EFFECTIVE_CANON_DIR" ]]; then
-    # Priority: pm2 pm_cwd, then heuristic dirs
+    # Priority: pm2 pm_cwd (CC-filtered), then heuristic dirs
     EFFECTIVE_CANON_DIR=$(_pm2_cwd_for_config)
     if [[ -z "$EFFECTIVE_CANON_DIR" ]]; then
       while IFS= read -r candidate_dir; do
@@ -747,8 +896,9 @@ import json
 import os
 import re
 
-port_str  = sys.argv[1]
-canon_dir = sys.argv[2]   # may be empty string
+port_str       = sys.argv[1]
+canon_dir      = sys.argv[2]   # may be empty string
+snapshot_label = sys.argv[3] if len(sys.argv) > 3 else "unknown"  # FIX #10
 
 # Crash restart delta threshold: require >= N restarts within the window
 # to distinguish a crash-loop from a single operator-initiated restart.
@@ -823,13 +973,11 @@ def port_matches(app, port_str):
 
 def name_matches_cc(app, port_str):
     """Name-based CC detection.
-    FIXED: an app is only counted as a CC app via name match if:
+    An app is only counted as a CC app via name match if:
       - its name contains a CC keyword AND
       - its PORT env is either (a) absent/empty (legacy app, no explicit port) OR
         (b) equals the target port.
-    An app with an explicit different PORT is NEVER counted, even if named 'blackceo-something'.
-    This prevents staging/cron/embedding workers with CC-style names from creating
-    false zombie-port verdicts.
+    An app with an explicit different PORT is NEVER counted.
     """
     env = app.get('pm2_env') or {}
     name = get_name(app).lower()
@@ -838,7 +986,7 @@ def name_matches_cc(app, port_str):
         return False
     port_env = env_val(env, 'PORT')
     if port_env and port_env != port_str:
-        return False  # explicitly targets a different port — not our app
+        return False
     return True
 
 
@@ -847,6 +995,7 @@ apps, parse_error = parse_apps(raw_input)
 if apps is None:
     print(json.dumps({
         "error": parse_error,
+        "snapshot_label": snapshot_label,
         "cc_apps": [], "crash_loopers": [],
         "db_path_set": False, "cwd_ok": False, "found_cwd": "",
         "app_restarts": {}
@@ -860,9 +1009,8 @@ for app in apps:
         cc_apps.append(app)
 
 # -------------------------------------------------------------------------
-# FIXED: crash-looper detection iterates CC APPS ONLY.
-# Unrelated pm2 processes (backup scripts, seed workers, cron helpers) that
-# happen to be stopped/errored do NOT trigger this check.
+# FIX #3: crash-looper detection iterates CC APPS ONLY.
+# Unrelated pm2 processes that happen to be stopped/errored do NOT trigger.
 # -------------------------------------------------------------------------
 crash_loopers = []
 for app in cc_apps:
@@ -883,7 +1031,6 @@ for app in cc_apps:
 
 db_path_set = False
 found_cwd   = ""
-cwd_match   = True
 
 for app in cc_apps:
     env = app.get('pm2_env') or {}
@@ -898,21 +1045,34 @@ for app in cc_apps:
     if cwd:
         found_cwd = cwd
 
-# CWD check: always performed — never defaults True without a canon_dir match
+# FIX #2: CWD check — vacuous-all() fix.
+# If canon_dir is set and cc_apps is non-empty:
+#   - If ALL cc_apps lack a pm_cwd, cwd_ok=FALSE (not vacuously True).
+#   - If at least one has a cwd, require ALL with cwd to match canon_dir.
+# If canon_dir is not set and cc_apps exist: cwd_ok=False.
+# If no cc_apps: cwd_ok=True (topology already fails on app_count).
+cwd_ok = True
 if cc_apps and canon_dir:
-    cwd_match = all(
-        os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
-        for a in cc_apps if get_cwd(a)
-    )
+    apps_with_cwd = [a for a in cc_apps if get_cwd(a)]
+    if not apps_with_cwd:
+        # FIX #2: every cc_app lacks pm_cwd — this is not "all match", it's unknown/broken
+        cwd_ok = False
+    else:
+        cwd_ok = all(
+            os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
+            for a in apps_with_cwd
+        )
 elif cc_apps and not canon_dir:
-    cwd_match = False
+    cwd_ok = False
 else:
-    cwd_match = True  # no cc_apps — topology already fails on app_count
+    cwd_ok = True  # no cc_apps — topology already fails on app_count
 
-# Emit restart counts keyed by app name (for ALL apps, for delta computation)
-app_restarts = {get_name(a): get_restart_count(a) for a in apps}
+# FIX #3: emit restart counts for CC APPS ONLY (for delta computation).
+# Using all apps for delta would let unrelated apps trip the crash-loop gate.
+app_restarts = {get_name(a): get_restart_count(a) for a in cc_apps}
 
 print(json.dumps({
+    "snapshot_label": snapshot_label,
     "cc_apps": [
         {
             "name":          get_name(a),
@@ -924,19 +1084,20 @@ print(json.dumps({
     ],
     "crash_loopers":  crash_loopers,
     "db_path_set":    db_path_set,
-    "cwd_ok":         cwd_match,
+    "cwd_ok":         cwd_ok,
     "found_cwd":      found_cwd,
     "app_restarts":   app_restarts,
 }))
 PYEOF
 
   _run_pm2_snapshot() {
+    # FIX #10: pass snapshot label as argv[3] so both snapshots are distinguishable in errors.
     local label="$1"
     local raw
     raw=$(_timeout_cmd 15 pm2 jlist 2>/dev/null || echo "[]")
     printf '%s\n' "$raw" \
       | python3 -s "$_PM2_SCRIPT" "$PORT" "$EFFECTIVE_CANON_DIR" "$label" 2>/dev/null \
-      || echo '{"error":"pm2 analysis script failed","cc_apps":[],"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"found_cwd":"","app_restarts":{}}'
+      || echo "{\"error\":\"pm2 analysis script failed\",\"snapshot_label\":\"${label}\",\"cc_apps\":[],\"crash_loopers\":[],\"db_path_set\":false,\"cwd_ok\":false,\"found_cwd\":\"\",\"app_restarts\":{}}"
   }
 
   _log "  Taking first pm2 snapshot..."
@@ -951,8 +1112,8 @@ PYEOF
     SNAP2="$SNAP1"
   fi
 
-  # FIXED: delta crash-loop threshold >= RESTART_DELTA_THRESHOLD (default 3).
-  # A single operator restart (delta=1) does NOT trigger the crash-looper flag.
+  # FIX #3: delta crash-loop detection over CC APPS ONLY.
+  # app_restarts in each snapshot now contains only CC apps (set in Python above).
   DELTA_CRASHERS=$(python3 -s -c "
 import sys, json
 RESTART_DELTA_THRESHOLD = 3

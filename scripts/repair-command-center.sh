@@ -405,6 +405,41 @@ main().catch((err) => { console.error('PROBE_ERROR:' + err.message); process.exi
   fi
 fi
 
+# ── B.1 deep health gate ─────────────────────────────────────────────────────
+# PRD Addendum B.1 (P0): green definition is delegated to cc-health-check.sh.
+# repair-command-center.sh's own probe steps above are diagnostic/repair steps,
+# NOT the definition of green. After all repair steps, run cc-health-check.sh
+# as the authoritative final verdict.
+echo ""
+echo "────────────────────────────────────────────────────────────"
+log "(h) B.1 final health gate — cc-health-check.sh (authoritative green definition)"
+HEALTH_CHECK_SCRIPT="$REPO_ROOT/scripts/cc-health-check.sh"
+if [[ ! -x "$HEALTH_CHECK_SCRIPT" ]]; then
+  warn "cc-health-check.sh not found at ${HEALTH_CHECK_SCRIPT} — B.1 green gate skipped (non-fatal for repair steps, but required for deploy)"
+else
+  REPAIR_CC_PORT="${CC_PORT:-4000}"
+  REPAIR_CC_DIR="${CC_CANONICAL_DIR:-$REPO_ROOT}"
+  REPAIR_CC_DB="${CC_DB_PATH:-}"
+
+  HEALTH_ARGS=(--port "$REPAIR_CC_PORT" --canonical-dir "$REPAIR_CC_DIR" --pm2-check-window 0 --disk-min-gb 1)
+  [[ -n "$REPAIR_CC_DB" ]] && HEALTH_ARGS+=(--db-path "$REPAIR_CC_DB")
+
+  HEALTH_JSON=""
+  HEALTH_EXIT=0
+  HEALTH_JSON=$(bash "$HEALTH_CHECK_SCRIPT" "${HEALTH_ARGS[@]}" 2>/dev/null) || HEALTH_EXIT=$?
+
+  HEALTH_GREEN=$(printf '%s' "$HEALTH_JSON" \
+    | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('green') else 'false')" \
+    2>/dev/null || echo "false")
+
+  if [[ "$HEALTH_GREEN" == "true" ]]; then
+    ok "B.1 health check: GREEN — all checks passed"
+  else
+    fail "B.1 health check: NOT GREEN — repair steps completed but box is not fully green"
+    warn "  Health check output: ${HEALTH_JSON}"
+  fi
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────────────────────"

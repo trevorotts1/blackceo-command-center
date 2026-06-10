@@ -60,22 +60,33 @@ jobs:
   # B.1 REQUIRED gate: fixture suite must pass on every PR.
   # A failing fixture means cc-health-check.sh has regressed on a broken-state
   # detection or false-green case — this is more critical than a feature regression.
+  #
+  # FIX #8: pm2 is installed in CI so Fixtures 19 and 20 (end-to-end pm2 topology
+  # with fake pm2 binaries) run as real checks, not skips.
   cc-health-check-fixtures:
-    name: B.1 cc-health-check fixture suite
+    name: B.1 cc-health-check fixture suite (REQUIRED)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install sqlite3
+      - name: Install sqlite3 and pm2
         run: |
           command -v sqlite3 >/dev/null 2>&1 || (sudo apt-get update -y && sudo apt-get install -y sqlite3)
+          # Install pm2 so Fixture 19/20 (fake-pm2 binary) and Fixture 0-pm2 (full green path)
+          # run as real assertions, not skips.
+          npm install -g pm2 2>/dev/null || true
+          command -v pm2 >/dev/null 2>&1 && echo "pm2 installed: $(pm2 --version)" || echo "pm2 not available"
+
+      - name: Mark cc-health-check.sh executable
+        run: chmod +x scripts/cc-health-check.sh
 
       - name: Run cc-health-check fixture suite (bash 4)
         run: |
           # Ubuntu ships bash 5+, so the bash 4 guard is satisfied.
-          # pm2 is not available in CI; pm2_topology checks are correctly skipped
-          # by the fixture suite for CI-incompatible tests.
+          # Fixtures 19/20 use a fake pm2 binary injected into PATH — pm2_topology
+          # end-to-end assertions run even when no real CC app is deployed.
+          # Fixture 0-pm2 (full green=true path) is attempted when pm2 is installed.
           CI_MODE=1 bash scripts/fixtures/run-cc-health-check-fixtures.sh
 
   build-smoke:

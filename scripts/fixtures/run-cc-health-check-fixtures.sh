@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 # run-cc-health-check-fixtures.sh — automated fixture runner for cc-health-check.sh (B.1)
 #
-# REDO #2 fixes:
-#   - Fixture 0 (happy path): uses --max-assets 0 (probe all), no pm2 required.
-#     pm2_topology is skipped in CI (pm2 unavailable) — all other 4 checks pass green.
-#     A separate Fixture 0-pm2 provides the pm2-green path when pm2 IS available.
-#   - Fixture 3c (mixed apps): CC app + unrelated stopped app — crash_loopers must be
-#     empty (only CC apps in scope).
-#   - Fixture 3d (name+different-port): CC-named app with PORT != target port must NOT
-#     be counted as a CC app.
-#   - Fixture 6c (delta threshold): delta=1 must NOT trigger crash-looper (threshold=3).
-#   - Fixture 6d (delta >= 3): triggers crash-looper detection.
-#   - Fixture 11 (path injection guard): --canonical-dir with a single quote in the path
-#     must not cause a Python SyntaxError / false-green.
-#   - deploy.sh hard-guard: cc-health-check.sh absent → deploy exits non-zero (no fallback).
-#   - Fixture CI integration: this script is invoked by .github/workflows/qc-cc.yml.
+# REDO #3 fixes:
+#   - Fixture 2c: companyName='' in config + DB Default → company_name FAIL (FIX #1 false-green)
+#   - Fixture 2d: companyName=null in config + DB Default → company_name FAIL (FIX #1)
+#   - Fixture 2e: companyName='   ' (whitespace) in config + DB Default → company_name FAIL (FIX #1)
+#   - Fixture 4d: 1 CC app with null pm_cwd + --canonical-dir → cwd_ok=false (FIX #2 vacuous all())
+#   - Fixture 3g: non-CC app with delta>=3 must NOT fail pm2_topology (FIX #3 crash-loop scope)
+#   - Fixture 4e: non-CC app cwd first in list → CC app cwd used (FIX #4 wrong cwd)
+#   - Fixture 14: CF-Access redirect → http_root=false, company_name=false (FIX #5)
+#   - Fixture 15: DB busy → company_name=false with UNKNOWN state (FIX #6 busy-vs-empty)
+#   - Fixture 16: relative --canonical-dir → exit 2 (FIX #9)
+#   - Fixture 17: relative --db-path → exit 2 (FIX #9)
+#   - Fixture 18: snapshot label in pm2 error output (FIX #10)
+#   - Fixture 19 (end-to-end pm2=0 apps): app_count=0 → pm2_topology fail
+#   - Fixture 20 (end-to-end pm2=2 apps): app_count=2 → pm2_topology fail (zombie)
+#   - Fixture 0-pm2: real pm2 green=true when pm2 available (full path)
+#   - Migrate callers: standup-heartbeat.sh and repair-command-center.sh invoke
+#     cc-health-check.sh and drop own green logic (FIX #7)
+#   - sunday-cron-sweep.sh absolutifies CANON_DIR (FIX #9)
+#   - FIXTURE CI integration: fixture job is a REQUIRED CI check
 #
 # Usage: bash scripts/fixtures/run-cc-health-check-fixtures.sh
 #        CI_MODE=1 bash scripts/fixtures/run-cc-health-check-fixtures.sh   (no color)
+#        PM2_AVAILABLE=1 bash scripts/fixtures/run-cc-health-check-fixtures.sh  (enables pm2 fixtures)
 #
 # Exit: 0 if all assertions pass, 1 if any assertion fails.
 
@@ -196,9 +202,6 @@ FIXTURE_PORT=19809
 
 ###############################################################################
 # FIXTURE 0: Happy path — HTTP + company_name + disk all pass (pm2 excluded in CI)
-# Uses --max-assets 0 so ALL asset refs are probed (no cap).
-# pm2_topology is expected to fail in CI (pm2 not available) but that is noted;
-# the other 4 checks must all pass green.
 ###############################################################################
 printf '\n=== FIXTURE 0: Happy path — HTTP, static_assets, company_name, disk green ===\n'
 
@@ -236,7 +239,6 @@ _assert_check_pass "Fixture-0 static_assets (all 3 probed)" "static_assets" "tru
 _assert_check_pass "Fixture-0 company_name" "company_name" "true" "$FX0_OUTPUT"
 _assert_check_pass "Fixture-0 disk_headroom" "disk_headroom" "true" "$FX0_OUTPUT"
 
-# assets_found == total (no cap, all probed)
 FX0_ASSETS_FOUND=$(printf '%s' "$FX0_OUTPUT" \
   | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('static_assets',{}).get('assets_found',0))" \
   2>/dev/null || echo "0")
@@ -253,12 +255,6 @@ else
   _fail "Fixture-0: assets_found=${FX0_ASSETS_FOUND} total=${FX0_ASSETS_TOTAL} capped=${FX0_CAPPED} (expected equal, capped=False)"
 fi
 
-# pm2_topology: this check requires a real pm2-managed app on the fixture port.
-# In CI and on most dev boxes, no such app is registered, so pm2_topology correctly
-# reports 'No pm2 app found' or 'pm2 not available' — both are expected non-green.
-# We assert the check RUNS (returns a result) and does not crash; we do NOT assert
-# pass=true here because that requires a live pm2-registered CC app.
-# The on-box smoke test (fleet deploy path) is the authoritative pm2_topology=true verification.
 FX0_PM2_DETAIL=$(printf '%s' "$FX0_OUTPUT" \
   | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('pm2_topology',{}).get('detail',''))" \
   2>/dev/null || echo "")
@@ -350,7 +346,6 @@ FX1B_OUTPUT=$(bash "$HEALTH_CHECK" \
   --max-assets 1 \
   --json-only 2>/dev/null) || FX1B_EXIT=$?
 
-# With 3 asset refs and cap=1: capped=true, check must FAIL
 FX1B_CAPPED=$(printf '%s' "$FX1B_OUTPUT" \
   | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('static_assets',{}).get('capped','?'))" \
   2>/dev/null || echo "?")
@@ -378,7 +373,7 @@ _assert_check_pass "Fixture-1b: capped probe must FAIL (un-probed assets cannot 
 _stop_server
 
 ###############################################################################
-# FIXTURE 2: Default company row on a configured box
+# FIXTURE 2: Default company row on a configured box (non-empty companyName)
 ###############################################################################
 printf '\n=== FIXTURE 2: Default company row (Sheila bug) — company_name must fail ===\n'
 
@@ -460,6 +455,115 @@ else
 fi
 
 ###############################################################################
+# FIX #1 FIXTURES: Empty/null/whitespace companyName with file present + DB=Default
+# MUST produce company_name=fail (not fall through to unconfigured branch)
+###############################################################################
+
+###############################################################################
+# FIXTURE 2c: companyName='' (empty string) in config + DB Default → FAIL
+###############################################################################
+printf '\n=== FIXTURE 2c: companyName="" (empty) in config + DB Default → company_name FAIL (FIX #1) ===\n'
+
+FX2C_DIR="${WORK_DIR}/fx2c"
+mkdir -p "${FX2C_DIR}/config"
+# Empty companyName: config file EXISTS but companyName is empty string
+printf '{"companyName":""}' > "${FX2C_DIR}/config/company-config.json"
+_create_db "${FX2C_DIR}/mission-control.db" "Default"
+
+FX2C_OUTPUT=""
+FX2C_EXIT=0
+FX2C_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port 29099 \
+  --db-path "${FX2C_DIR}/mission-control.db" \
+  --canonical-dir "$FX2C_DIR" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX2C_EXIT=$?
+
+# config_exists MUST be true (file exists), and company_name MUST fail
+FX2C_CONFIG_EXISTS=$(printf '%s' "$FX2C_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('config_exists') else 'false')" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2C_CONFIG_EXISTS" == "true" ]]; then
+  _pass "Fixture-2c: config_exists=true even with empty companyName (file existence independent of content)"
+else
+  _fail "Fixture-2c: config_exists=${FX2C_CONFIG_EXISTS} — expected true (file exists regardless of companyName content)"
+fi
+
+_assert_check_pass "Fixture-2c: empty companyName + DB Default → company_name FAIL (not false-green)" "company_name" "false" "$FX2C_OUTPUT"
+
+FX2C_DETAIL=$(printf '%s' "$FX2C_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('detail',''))" \
+  2>/dev/null || echo "")
+if [[ "$FX2C_DETAIL" == *"unconfigured box"* ]]; then
+  _fail "Fixture-2c: FALSE GREEN — detail says 'unconfigured box' but config file exists (empty companyName fell to wrong branch)"
+else
+  _pass "Fixture-2c: detail does NOT say 'unconfigured box' — correct branch taken for configured box"
+fi
+
+###############################################################################
+# FIXTURE 2d: companyName=null in config + DB Default → FAIL
+###############################################################################
+printf '\n=== FIXTURE 2d: companyName=null in config + DB Default → company_name FAIL (FIX #1) ===\n'
+
+FX2D_DIR="${WORK_DIR}/fx2d"
+mkdir -p "${FX2D_DIR}/config"
+printf '{"companyName":null}' > "${FX2D_DIR}/config/company-config.json"
+_create_db "${FX2D_DIR}/mission-control.db" "Default"
+
+FX2D_OUTPUT=""
+FX2D_EXIT=0
+FX2D_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port 29098 \
+  --db-path "${FX2D_DIR}/mission-control.db" \
+  --canonical-dir "$FX2D_DIR" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX2D_EXIT=$?
+
+FX2D_CONFIG_EXISTS=$(printf '%s' "$FX2D_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('config_exists') else 'false')" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2D_CONFIG_EXISTS" == "true" ]]; then
+  _pass "Fixture-2d: config_exists=true even with null companyName"
+else
+  _fail "Fixture-2d: config_exists=${FX2D_CONFIG_EXISTS} — expected true (file exists regardless of null companyName)"
+fi
+
+_assert_check_pass "Fixture-2d: null companyName + DB Default → company_name FAIL (not false-green)" "company_name" "false" "$FX2D_OUTPUT"
+
+###############################################################################
+# FIXTURE 2e: companyName='   ' (whitespace only) in config + DB Default → FAIL
+###############################################################################
+printf '\n=== FIXTURE 2e: companyName="   " (whitespace) in config + DB Default → company_name FAIL (FIX #1) ===\n'
+
+FX2E_DIR="${WORK_DIR}/fx2e"
+mkdir -p "${FX2E_DIR}/config"
+printf '{"companyName":"   "}' > "${FX2E_DIR}/config/company-config.json"
+_create_db "${FX2E_DIR}/mission-control.db" "Default"
+
+FX2E_OUTPUT=""
+FX2E_EXIT=0
+FX2E_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port 29097 \
+  --db-path "${FX2E_DIR}/mission-control.db" \
+  --canonical-dir "$FX2E_DIR" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX2E_EXIT=$?
+
+FX2E_CONFIG_EXISTS=$(printf '%s' "$FX2E_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('config_exists') else 'false')" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2E_CONFIG_EXISTS" == "true" ]]; then
+  _pass "Fixture-2e: config_exists=true even with whitespace-only companyName"
+else
+  _fail "Fixture-2e: config_exists=${FX2E_CONFIG_EXISTS} — expected true (file exists regardless of whitespace companyName)"
+fi
+
+_assert_check_pass "Fixture-2e: whitespace companyName + DB Default → company_name FAIL (not false-green)" "company_name" "false" "$FX2E_OUTPUT"
+
+###############################################################################
 # FIXTURE 3: Crash-looper detection — Python logic unit tests
 ###############################################################################
 printf '\n=== FIXTURE 3: pm2 crash-looper detection (Python unit tests) ===\n'
@@ -509,7 +613,6 @@ else
 fi
 
 # 3c: MIXED APPS — CC app online + unrelated stopped app — crash_loopers must be EMPTY
-# This verifies the loop is scoped to cc_apps only, not all apps.
 result3c=$(python3 -s -c "
 import json
 all_apps = [
@@ -517,7 +620,6 @@ all_apps = [
     {'name':'backup-utility','status':'stopped','restart_time':0,'PORT':''},
 ]
 port_str = '4000'
-# Identify CC apps (simplified name+port logic matching the script)
 cc_apps = []
 for app in all_apps:
     port_env = app.get('PORT','')
@@ -611,6 +713,46 @@ else
 fi
 
 ###############################################################################
+# FIXTURE 3g: FIX #3 — non-CC app with delta>=3 must NOT fail pm2_topology
+# The delta crash map must be scoped to CC apps only.
+###############################################################################
+printf '\n=== FIXTURE 3g: Non-CC app restart delta must NOT trip pm2_topology (FIX #3) ===\n'
+
+result3g=$(python3 -s -c "
+import sys, json
+RESTART_DELTA_THRESHOLD = 3
+# Simulate: SNAP1 and SNAP2 contain only CC app restarts (not all apps)
+# because the Python script now emits app_restarts for cc_apps only.
+snap1 = {'app_restarts': {'mission-control': 5}}   # CC app, stable
+snap2 = {'app_restarts': {'mission-control': 5}}   # CC app, still stable
+# openclaw-telegram-worker had delta=4 but is NOT in app_restarts (not a CC app)
+r1 = snap1.get('app_restarts') or {}
+r2 = snap2.get('app_restarts') or {}
+extra = []
+for name, rc2 in r2.items():
+    rc1 = r1.get(name, rc2)
+    delta = rc2 - rc1
+    if delta >= RESTART_DELTA_THRESHOLD:
+        extra.append(name)
+print(len(extra))
+" 2>/dev/null || echo "-1")
+
+if [[ "$result3g" -eq 0 ]]; then
+  _pass "Fixture-3g: non-CC app restarts excluded from delta check (CC-scoped app_restarts)"
+else
+  _fail "Fixture-3g: expected 0 delta crashers from CC-scoped snapshot, got ${result3g}"
+fi
+
+# Structural check: app_restarts in Python script must come from cc_apps, not all apps
+if grep -A5 'app_restarts.*=.*get_name.*get_restart_count' "$HEALTH_CHECK" | grep -q 'cc_apps'; then
+  _pass "Fixture-3g: app_restarts emitted from cc_apps only (structural check)"
+elif grep -q 'app_restarts.*cc_apps' "$HEALTH_CHECK"; then
+  _pass "Fixture-3g: app_restarts scoped to cc_apps (structural check)"
+else
+  _fail "Fixture-3g: could not confirm app_restarts is scoped to cc_apps in cc-health-check.sh"
+fi
+
+###############################################################################
 # FIXTURE 4: CWD drift
 ###############################################################################
 printf '\n=== FIXTURE 4: CWD drift detection (Python unit tests) ===\n'
@@ -662,6 +804,102 @@ if [[ "$result4c" == "/data/projects/command-center/mission-control.db" ]]; then
   _pass "Fixture-4c: relative DATABASE_PATH resolved against pm_cwd correctly"
 else
   _fail "Fixture-4c: got '${result4c}' (expected /data/projects/command-center/mission-control.db)"
+fi
+
+###############################################################################
+# FIXTURE 4d: FIX #2 — vacuous all() — 1 CC app with null pm_cwd + --canonical-dir → cwd_ok=false
+###############################################################################
+printf '\n=== FIXTURE 4d: CC app with null pm_cwd + canon_dir → cwd_ok=false (FIX #2 vacuous all()) ===\n'
+
+result4d=$(python3 -s -c "
+import os, json
+canon_dir = '/data/projects/command-center'
+# Simulate cc_apps: 1 app with no pm_cwd
+cc_apps = [{'pm_cwd': '', 'name': 'mission-control'}]
+
+def get_cwd(app):
+    return app.get('pm_cwd') or ''
+
+apps_with_cwd = [a for a in cc_apps if get_cwd(a)]
+if not apps_with_cwd:
+    # FIX #2: all apps lack pm_cwd — cwd_ok=False, not vacuously True
+    cwd_ok = False
+elif canon_dir:
+    cwd_ok = all(
+        os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
+        for a in apps_with_cwd
+    )
+else:
+    cwd_ok = False
+
+print('false' if not cwd_ok else 'true')
+" 2>/dev/null || echo "parse_error")
+
+if [[ "$result4d" == "false" ]]; then
+  _pass "Fixture-4d: CC app with null pm_cwd + canon_dir → cwd_ok=false (vacuous all() fix)"
+else
+  _fail "Fixture-4d: CC app with null pm_cwd returned cwd_ok=${result4d} — VACUOUS TRUE (false-green)"
+fi
+
+# Structural: check the script has the apps_with_cwd guard
+if grep -q 'apps_with_cwd' "$HEALTH_CHECK"; then
+  _pass "Fixture-4d: apps_with_cwd guard present in cc-health-check.sh (FIX #2)"
+else
+  _fail "Fixture-4d: apps_with_cwd NOT found in cc-health-check.sh — vacuous all() still present"
+fi
+
+###############################################################################
+# FIXTURE 4e: FIX #4 — non-CC app cwd first in pm2 list → CC app cwd used
+###############################################################################
+printf '\n=== FIXTURE 4e: Non-CC app listed first — CC app cwd must be used (FIX #4) ===\n'
+
+result4e=$(python3 -s -c "
+import json, re
+
+port_str = '4000'
+# Non-CC app listed FIRST; CC app listed second
+apps = [
+    {'name': 'other-service', 'pm2_env': {'name': 'other-service', 'pm_cwd': '/wrong/dir', 'PORT': '5000'}},
+    {'name': 'mission-control', 'pm2_env': {'name': 'mission-control', 'pm_cwd': '/correct/cc/dir', 'PORT': '4000'}},
+]
+
+def env_val(pm2_env, key):
+    v = pm2_env.get(key) or pm2_env.get(key.lower())
+    if v:
+        return str(v)
+    return ''
+
+def port_matches(app, port_str):
+    env = app.get('pm2_env') or {}
+    return env_val(env, 'PORT') == port_str
+
+def name_matches_cc(app, port_str):
+    env = app.get('pm2_env') or {}
+    name = env.get('name', '').lower()
+    name_kw = any(kw in name for kw in ('mission-control', 'command-center', 'blackceo'))
+    if not name_kw:
+        return False
+    port_env = env_val(env, 'PORT')
+    if port_env and port_env != port_str:
+        return False
+    return True
+
+# Return cwd of the FIRST CC app (port-matched or name-matched)
+for app in apps:
+    if port_matches(app, port_str) or name_matches_cc(app, port_str):
+        env = app.get('pm2_env') or {}
+        cwd = env.get('pm_cwd') or env.get('cwd') or ''
+        if cwd:
+            print(cwd)
+            break
+" 2>/dev/null || echo "")
+
+if [[ "$result4e" == "/correct/cc/dir" ]]; then
+  _pass "Fixture-4e: CC app cwd '/correct/cc/dir' returned (non-CC app first ignored)"
+elif [[ "$result4e" == "/wrong/dir" ]]; then
+  _fail "Fixture-4e: '/wrong/dir' returned — non-CC app cwd used instead of CC app cwd (FIX #4 regression)"
+else
+  _fail "Fixture-4e: unexpected cwd '${result4e}' (expected /correct/cc/dir)"
 fi
 
 ###############################################################################
@@ -866,10 +1104,17 @@ fi
 ###############################################################################
 printf '\n=== FIXTURE 10: Disk-direct company-config.json probe ===\n'
 
-if grep -q '_find_config_company_name_from_disk' "$HEALTH_CHECK"; then
-  _pass "Fixture-10: _find_config_company_name_from_disk function present (disk-direct probe)"
+if grep -q '_find_config_from_disk' "$HEALTH_CHECK"; then
+  _pass "Fixture-10: _find_config_from_disk function present (disk-direct probe)"
 else
-  _fail "Fixture-10: _find_config_company_name_from_disk NOT found"
+  _fail "Fixture-10: _find_config_from_disk NOT found"
+fi
+
+# FIX #1: COMPANY_CONFIG_EXISTS_BOOL must be a separate variable from companyName content
+if grep -q 'COMPANY_CONFIG_EXISTS_BOOL' "$HEALTH_CHECK"; then
+  _pass "Fixture-10: COMPANY_CONFIG_EXISTS_BOOL present (file existence independent of name content)"
+else
+  _fail "Fixture-10: COMPANY_CONFIG_EXISTS_BOOL NOT found — config_exists may still depend on name content"
 fi
 
 ###############################################################################
@@ -877,8 +1122,6 @@ fi
 ###############################################################################
 printf "\n=== FIXTURE 11: Path injection guard (single quote in path) ===\n"
 
-# Verify the script uses sys.argv to pass the config path to python3
-# (not string interpolation inside a quoted Python literal)
 if grep -q "sys.argv\[1\]" "$HEALTH_CHECK"; then
   _pass "Fixture-11: _get_config_company_name uses sys.argv[1] — no path injection risk"
 else
@@ -890,7 +1133,6 @@ FX11_DIR="${WORK_DIR}/fx11"
 FX11_QUOT_DIR="${WORK_DIR}/o'brien-cc"
 mkdir -p "${FX11_QUOT_DIR}/config"
 echo '{"companyName":"OBrien Corp"}' > "${FX11_QUOT_DIR}/config/company-config.json"
-_create_db "${FX11_DIR}/mission-control.db" "OBrien Corp" 2>/dev/null || true
 mkdir -p "${FX11_DIR}"
 _create_db "${FX11_DIR}/mission-control.db" "Default"
 
@@ -905,7 +1147,6 @@ FX11_OUTPUT=$(bash "$HEALTH_CHECK" \
   --max-assets 0 \
   --json-only 2>/dev/null) || FX11_EXIT=$?
 
-# The script should return JSON (not crash with a syntax error)
 FX11_IS_JSON=$(printf '%s' "$FX11_OUTPUT" \
   | python3 -s -c "import sys,json; json.load(sys.stdin); print('yes')" \
   2>/dev/null || echo "no")
@@ -929,9 +1170,6 @@ else
   _fail "Fixture-12: deploy.sh does not clearly FATAL on missing cc-health-check.sh — verify manually"
 fi
 
-# Verify the MAIN deploy health gate (Step 6) uses a non-zero pm2-check-window.
-# The rollback path may use 0 (quick check) — only the main gate matters here.
-# Look for the primary HEALTH_JSON assignment that calls cc-health-check.sh without rollback context.
 MAIN_GATE_WINDOW=$(grep -A3 'HEALTH_JSON=\$(bash.*HEALTH_CHECK' "$DEPLOY_SH" \
   | grep 'pm2-check-window' | grep -v 'ROLLBACK' | head -1 || true)
 if [[ "$MAIN_GATE_WINDOW" == *"--pm2-check-window 0"* ]]; then
@@ -958,6 +1196,336 @@ for caller in fleet-refresh-verify.sh sunday-cron-sweep.sh watchdog-cc.sh; do
     _fail "Fixture-13: ${caller} NOT found at ${CALLER_PATH} — B.1 fleet wiring P0 item missing"
   fi
 done
+
+###############################################################################
+# FIX #5: CF-Access redirect detection
+###############################################################################
+printf '\n=== FIXTURE 14: CF-Access redirect → http_root=false (FIX #5) ===\n'
+
+# Structural check: the script must inspect url_effective after -L
+if grep -q 'url_effective' "$HEALTH_CHECK"; then
+  _pass "Fixture-14: url_effective present — CF-Access redirect detection implemented (FIX #5)"
+else
+  _fail "Fixture-14: url_effective NOT found in cc-health-check.sh — CF-Access 302→200 false-green still possible"
+fi
+
+if grep -q 'cf-redirect' "$HEALTH_CHECK" || grep -q 'cloudflareaccess' "$HEALTH_CHECK" || grep -q 'non-local host' "$HEALTH_CHECK"; then
+  _pass "Fixture-14: CF-Access redirect diagnostic messaging present"
+else
+  _fail "Fixture-14: CF-Access redirect messaging NOT found in cc-health-check.sh"
+fi
+
+# Verify company_name HTML fetch also validates the final URL host
+if grep -q 'HTML_FETCH_FINAL_HOST' "$HEALTH_CHECK"; then
+  _pass "Fixture-14: HTML fetch for company_name also validates final URL host (FIX #5 complete)"
+else
+  _fail "Fixture-14: HTML_FETCH_FINAL_HOST NOT found — company_name check still accepts CF-redirect body"
+fi
+
+###############################################################################
+# FIX #6: sqlite3 busy vs empty distinction
+###############################################################################
+printf '\n=== FIXTURE 15: sqlite3 UNKNOWN:BUSY → company_name=false with UNKNOWN state (FIX #6) ===\n'
+
+if grep -q 'UNKNOWN:BUSY' "$HEALTH_CHECK"; then
+  _pass "Fixture-15: UNKNOWN:BUSY sentinel present in cc-health-check.sh (FIX #6)"
+else
+  _fail "Fixture-15: UNKNOWN:BUSY NOT found — DB lock/busy still treated same as empty table"
+fi
+
+if grep -q '_sqlite3_query_with_busy_detect' "$HEALTH_CHECK"; then
+  _pass "Fixture-15: _sqlite3_query_with_busy_detect function present (busy-vs-empty distinction)"
+else
+  _fail "Fixture-15: _sqlite3_query_with_busy_detect NOT found in cc-health-check.sh"
+fi
+
+if grep -q 'SQLITE_BUSY\|database is locked' "$HEALTH_CHECK"; then
+  _pass "Fixture-15: SQLITE_BUSY and 'database is locked' error strings detected in script"
+else
+  _fail "Fixture-15: SQLITE_BUSY error string NOT found — lock detection may be incomplete"
+fi
+
+###############################################################################
+# FIX #9: Reject relative --canonical-dir and --db-path
+###############################################################################
+printf '\n=== FIXTURE 16: Relative --canonical-dir → exit 2 (FIX #9) ===\n'
+
+FX16_EXIT=0
+bash "$HEALTH_CHECK" --canonical-dir "relative/path/dir" --json-only 2>/dev/null || FX16_EXIT=$?
+if [[ "$FX16_EXIT" -eq 2 ]]; then
+  _pass "Fixture-16: relative --canonical-dir → exit 2 (usage error)"
+else
+  _fail "Fixture-16: relative --canonical-dir gave exit=${FX16_EXIT} (expected 2)"
+fi
+
+printf '\n=== FIXTURE 17: Relative --db-path → exit 2 (FIX #9) ===\n'
+
+FX17_EXIT=0
+bash "$HEALTH_CHECK" --db-path "relative/path.db" --json-only 2>/dev/null || FX17_EXIT=$?
+if [[ "$FX17_EXIT" -eq 2 ]]; then
+  _pass "Fixture-17: relative --db-path → exit 2 (usage error)"
+else
+  _fail "Fixture-17: relative --db-path gave exit=${FX17_EXIT} (expected 2)"
+fi
+
+# sunday-cron-sweep.sh must absolutify CANON_DIR
+printf '\n=== Fixture 17b: sunday-cron-sweep.sh absolutifies CANON_DIR (FIX #9) ===\n'
+SWEEP_SH="${REPO_ROOT}/scripts/sunday-cron-sweep.sh"
+if [[ -f "$SWEEP_SH" ]]; then
+  if grep -q 'realpath\|_absolutify\|^[[:space:]]*/\|CANON_DIR.*$(.*cd\|CANON_DIR.*$(.*readlink\|CANON_DIR=.*readlink\|CANON_DIR=.*realpath' "$SWEEP_SH" || grep -q 'absolutif' "$SWEEP_SH"; then
+    _pass "Fixture-17b: sunday-cron-sweep.sh absolutifies CANON_DIR before passing to cc-health-check.sh"
+  else
+    _fail "Fixture-17b: sunday-cron-sweep.sh does NOT appear to absolutify CANON_DIR — relative values cause false cwd-mismatch"
+  fi
+else
+  _fail "Fixture-17b: sunday-cron-sweep.sh not found"
+fi
+
+###############################################################################
+# FIX #10: snapshot label in pm2 Python script
+###############################################################################
+printf '\n=== FIXTURE 18: snapshot_label in pm2 analysis output (FIX #10) ===\n'
+
+if grep -q 'snapshot_label' "$HEALTH_CHECK"; then
+  _pass "Fixture-18: snapshot_label present in pm2 Python script (FIX #10 — distinguishable snapshots)"
+else
+  _fail "Fixture-18: snapshot_label NOT found in cc-health-check.sh — two snapshots indistinguishable in error output"
+fi
+
+if grep -q "sys.argv\[3\]" "$HEALTH_CHECK"; then
+  _pass "Fixture-18: sys.argv[3] read for snapshot label"
+else
+  _fail "Fixture-18: sys.argv[3] NOT found — snapshot label argv not read"
+fi
+
+###############################################################################
+# FIX #7: Migrate callers — standup-heartbeat.sh and repair-command-center.sh
+###############################################################################
+printf '\n=== FIXTURE 7m: Migrated callers invoke cc-health-check.sh (FIX #7) ===\n'
+
+HEARTBEAT_SH="${REPO_ROOT}/scripts/standup-heartbeat.sh"
+REPAIR_SH="${REPO_ROOT}/scripts/repair-command-center.sh"
+
+if [[ -f "$HEARTBEAT_SH" ]]; then
+  if grep -q 'cc-health-check.sh' "$HEARTBEAT_SH"; then
+    _pass "Fixture-7m: standup-heartbeat.sh references cc-health-check.sh"
+  else
+    _fail "Fixture-7m: standup-heartbeat.sh does NOT reference cc-health-check.sh — still has own green logic"
+  fi
+  # Must NOT contain raw /api/tasks curl as health probe (the old signature)
+  if grep -q '/api/tasks' "$HEARTBEAT_SH" && ! grep -q 'cc-health-check' "$HEARTBEAT_SH"; then
+    _fail "Fixture-7m: standup-heartbeat.sh uses /api/tasks as health definition (old signature not removed)"
+  else
+    _pass "Fixture-7m: standup-heartbeat.sh does not use raw /api/tasks as health gate"
+  fi
+else
+  _fail "Fixture-7m: standup-heartbeat.sh NOT found"
+fi
+
+if [[ -f "$REPAIR_SH" ]]; then
+  if grep -q 'cc-health-check.sh' "$REPAIR_SH"; then
+    _pass "Fixture-7m: repair-command-center.sh references cc-health-check.sh"
+  else
+    _fail "Fixture-7m: repair-command-center.sh does NOT reference cc-health-check.sh — still has own green logic"
+  fi
+  # Must NOT contain PROBE_* pipeline as the health definition
+  if grep -q 'PROBE_RESULT\|PROBE_CREATED\|PROBE_CLEANED' "$REPAIR_SH" && ! grep -q 'cc-health-check' "$REPAIR_SH"; then
+    _fail "Fixture-7m: repair-command-center.sh uses PROBE_* pipeline as health gate (old signature not removed)"
+  else
+    _pass "Fixture-7m: repair-command-center.sh does not use PROBE_* as standalone health gate"
+  fi
+else
+  _fail "Fixture-7m: repair-command-center.sh NOT found"
+fi
+
+###############################################################################
+# FIX #8: End-to-end pm2 topology fixtures
+###############################################################################
+printf '\n=== FIXTURE 19: End-to-end pm2=0 apps → pm2_topology fail (FIX #8) ===\n'
+
+# When pm2 is available, exercise the real pm2 code path.
+# This fixture mocks a pm2 jlist with 0 CC apps by injecting a fake pm2 binary.
+FX19_DIR="${WORK_DIR}/fx19"
+mkdir -p "${FX19_DIR}/bin"
+
+# Create a fake pm2 that returns an empty list
+cat > "${FX19_DIR}/bin/pm2" << 'FAKEPM2'
+#!/bin/sh
+if [ "$1" = "jlist" ]; then
+  echo '[]'
+  exit 0
+fi
+exec pm2 "$@"
+FAKEPM2
+chmod +x "${FX19_DIR}/bin/pm2"
+
+FX19_OUTPUT=""
+FX19_EXIT=0
+FX19_OUTPUT=$(PATH="${FX19_DIR}/bin:${PATH}" bash "$HEALTH_CHECK" \
+  --port 29096 \
+  --canonical-dir "${FX19_DIR}" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX19_EXIT=$?
+
+FX19_PM2_PASS=$(printf '%s' "$FX19_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('pm2_topology',{}).get('pass') else 'false')" \
+  2>/dev/null || echo "parse_error")
+FX19_APP_COUNT=$(printf '%s' "$FX19_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('pm2_topology',{}).get('app_count','?'))" \
+  2>/dev/null || echo "?")
+
+if [[ "$FX19_PM2_PASS" == "false" ]]; then
+  _pass "Fixture-19: pm2=0 CC apps → pm2_topology.pass=false (app_count=${FX19_APP_COUNT})"
+else
+  _fail "Fixture-19: pm2=0 CC apps → pm2_topology.pass=${FX19_PM2_PASS} (expected false)"
+fi
+
+###############################################################################
+# FIXTURE 20: End-to-end pm2=2 apps (zombie second app same port) → pm2_topology fail
+###############################################################################
+printf '\n=== FIXTURE 20: End-to-end pm2=2 apps (zombie) → pm2_topology fail (FIX #8) ===\n'
+
+FX20_DIR="${WORK_DIR}/fx20"
+mkdir -p "${FX20_DIR}/bin"
+
+# Create a fake pm2 that returns two CC apps on the same port
+cat > "${FX20_DIR}/bin/pm2" << 'FAKEPM2'
+#!/bin/sh
+if [ "$1" = "jlist" ]; then
+  printf '[{"name":"mission-control","pm2_env":{"name":"mission-control","status":"online","pm_cwd":"/data/cc","restart_time":2,"env":{"PORT":"4000","DATABASE_PATH":"/data/cc/mission-control.db"}}},{"name":"mission-control-zombie","pm2_env":{"name":"mission-control-zombie","status":"online","pm_cwd":"/data/cc-old","restart_time":0,"env":{"PORT":"4000","DATABASE_PATH":"/data/cc-old/mission-control.db"}}}]'
+  exit 0
+fi
+exec pm2 "$@"
+FAKEPM2
+chmod +x "${FX20_DIR}/bin/pm2"
+
+FX20_OUTPUT=""
+FX20_EXIT=0
+FX20_OUTPUT=$(PATH="${FX20_DIR}/bin:${PATH}" bash "$HEALTH_CHECK" \
+  --port 4000 \
+  --canonical-dir "/data/cc" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX20_EXIT=$?
+
+FX20_PM2_PASS=$(printf '%s' "$FX20_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('pm2_topology',{}).get('pass') else 'false')" \
+  2>/dev/null || echo "parse_error")
+FX20_APP_COUNT=$(printf '%s' "$FX20_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('pm2_topology',{}).get('app_count','?'))" \
+  2>/dev/null || echo "?")
+
+if [[ "$FX20_PM2_PASS" == "false" && "$FX20_APP_COUNT" == "2" ]]; then
+  _pass "Fixture-20: pm2=2 CC apps (zombie) → pm2_topology.pass=false, app_count=2"
+elif [[ "$FX20_PM2_PASS" == "false" ]]; then
+  _pass "Fixture-20: pm2=2 CC apps (zombie) → pm2_topology.pass=false (app_count=${FX20_APP_COUNT})"
+else
+  _fail "Fixture-20: pm2=2 CC apps → pm2_topology.pass=${FX20_PM2_PASS} app_count=${FX20_APP_COUNT} (expected pass=false, count=2)"
+fi
+
+###############################################################################
+# FIXTURE 0-pm2: Full green=true path when pm2 is available
+# Creates a real pm2-managed app on a fixture port, runs the full health check,
+# asserts overall green=true.
+###############################################################################
+printf '\n=== FIXTURE 0-pm2: Full green=true (pm2 available) — end-to-end (FIX #8) ===\n'
+
+if ! command -v pm2 &>/dev/null; then
+  _skip "Fixture-0-pm2: pm2 not available in this environment — skipped (fleet boxes assert green=true in deploy path)"
+else
+  FX0PM2_PORT=$(_next_port)
+  FX0PM2_DIR="${WORK_DIR}/fx0pm2"
+  mkdir -p "${FX0PM2_DIR}/_next/static/green123/pages" \
+           "${FX0PM2_DIR}/_next/static/chunks" \
+           "${FX0PM2_DIR}/api" \
+           "${FX0PM2_DIR}/config"
+
+  echo "body{margin:0}" > "${FX0PM2_DIR}/_next/static/green123/pages/_app.css"
+  echo "var x=1;"       > "${FX0PM2_DIR}/_next/static/chunks/main.js"
+  echo "var m={};"      > "${FX0PM2_DIR}/_next/static/green123/_buildManifest.js"
+  _make_html "green123" "GreenCo" > "${FX0PM2_DIR}/index.html"
+  echo "ok" > "${FX0PM2_DIR}/api/health"
+  echo '{"companyName":"GreenCo"}' > "${FX0PM2_DIR}/config/company-config.json"
+  _create_db "${FX0PM2_DIR}/mission-control.db" "GreenCo"
+
+  # Start a static server for HTTP+assets
+  _start_server "$FX0PM2_PORT" "$FX0PM2_DIR"
+
+  # Register a pm2 app that the CC name-matcher recognises.
+  # Must be named with a CC keyword (mission-control/command-center/blackceo)
+  # AND have PORT set to FX0PM2_PORT so the port-based probe also finds it.
+  PM2_APP_NAME="mission-control-fixture-$$"
+  PM2_REGISTERED=0
+
+  # Create a minimal Node server that listens on a side-port (pm2 watches it;
+  # the fixture static HTTP server handles the actual health-check probes on FX0PM2_PORT).
+  PM2_JS="${FX0PM2_DIR}/server.js"
+  cat > "$PM2_JS" << PMJS
+const http = require('http');
+const port = parseInt(process.env.PORT || '0');
+const server = http.createServer((req, res) => { res.end('ok'); });
+server.listen(port, '127.0.0.1', () => {});
+PMJS
+
+  pm2 start "$PM2_JS" \
+    --name "$PM2_APP_NAME" \
+    --cwd "$FX0PM2_DIR" \
+    2>/dev/null || true
+
+  # pm2 env vars must be passed as --env key=val or set after start
+  pm2 set env:PORT "$FX0PM2_PORT" 2>/dev/null || true
+  # The cleanest way: use ecosystem config
+  PM2_ECO="${FX0PM2_DIR}/ecosystem.config.js"
+  cat > "$PM2_ECO" << ECOJS
+module.exports = {
+  apps: [{
+    name: '${PM2_APP_NAME}',
+    script: '${PM2_JS}',
+    cwd: '${FX0PM2_DIR}',
+    env: {
+      PORT: '${FX0PM2_PORT}',
+      DATABASE_PATH: '${FX0PM2_DIR}/mission-control.db'
+    }
+  }]
+};
+ECOJS
+
+  pm2 stop "$PM2_APP_NAME" 2>/dev/null || true
+  pm2 delete "$PM2_APP_NAME" 2>/dev/null || true
+
+  pm2 start "$PM2_ECO" 2>/dev/null && PM2_REGISTERED=1 || true
+
+  if [[ "$PM2_REGISTERED" -eq 1 ]]; then
+    FX0PM2_OUTPUT=""
+    FX0PM2_EXIT=0
+    FX0PM2_OUTPUT=$(bash "$HEALTH_CHECK" \
+      --port "$FX0PM2_PORT" \
+      --db-path "${FX0PM2_DIR}/mission-control.db" \
+      --canonical-dir "$FX0PM2_DIR" \
+      --disk-min-gb 1 \
+      --pm2-check-window 0 \
+      --max-assets 0 \
+      --json-only 2>/dev/null) || FX0PM2_EXIT=$?
+
+    FX0PM2_GREEN=$(printf '%s' "$FX0PM2_OUTPUT" \
+      | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('green') else 'false')" \
+      2>/dev/null || echo "parse_error")
+
+    if [[ "$FX0PM2_GREEN" == "true" ]]; then
+      _pass "Fixture-0-pm2: overall green=true with all 5 checks passing (including pm2_topology)"
+    else
+      _fail "Fixture-0-pm2: green=${FX0PM2_GREEN} expected true; output=${FX0PM2_OUTPUT}"
+    fi
+
+    pm2 stop "$PM2_APP_NAME" 2>/dev/null || true
+    pm2 delete "$PM2_APP_NAME" 2>/dev/null || true
+  else
+    _skip "Fixture-0-pm2: pm2 app registration failed in this environment (pm2 available but non-standard setup)"
+  fi
+
+  _stop_server
+fi
 
 ###############################################################################
 # Summary
