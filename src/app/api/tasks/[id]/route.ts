@@ -331,7 +331,10 @@ export async function PATCH(
       const deptSlug = (task as Task & { department?: string | null }).department
         ?? task.workspace_id
         ?? null;
-      spawnRecordCompletion(id, task.persona_id, deptSlug);
+      // Pass task title + description as --task-output so the Python
+      // record_completion() function can write the persona_performance row.
+      const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');
+      spawnRecordCompletion(id, task.persona_id, deptSlug, taskOutput);
     }
 
     // ── QC-Agent auto-scorer ────────────────────────────────────────────────

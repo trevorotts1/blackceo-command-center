@@ -2270,6 +2270,50 @@ const migrations: Migration[] = [
       console.log('[Migration 063] idx_sop_embeddings_model ready');
     },
   },
+  {
+    id: '064',
+    name: 'seed_default_company_sentinel',
+    // BUG FIX (v4.22.0): POST /api/workspaces INSERT omits company_id and
+    // relies on the column DEFAULT 'default', but workspaces.company_id has
+    // a FK reference to companies(id) and no row with id='default' exists on a
+    // clean install → SQLITE_CONSTRAINT_FOREIGNKEY → 500 on every POST /api/workspaces
+    // request from a fresh DB.
+    //
+    // Root cause: migration 012 deliberately chose not to seed a default company
+    // ("No default company seeded. Client's company is created by seed-workspaces.py")
+    // but the FK + DEFAULT combo still requires the sentinel row to be present for
+    // the DEFAULT path to work without an explicit company_id.
+    //
+    // Fix strategy (belt-AND-suspenders):
+    //   1. Seed a sentinel row (id='default', slug='default') so the FK is satisfied
+    //      whenever the workspaces INSERT falls through to the DEFAULT value.
+    //   2. Use INSERT OR IGNORE so re-running this migration on an existing DB that
+    //      already has a real company row is completely safe — no overwrite, no crash.
+    //   3. The workspaces route.ts also accepts company_id from the POST body (added
+    //      separately), but the seed is the canonical fix for all callers.
+    up: (db) => {
+      console.log('[Migration 064] Seeding sentinel default company row (BUG 4 fix)...');
+      // Guard: companies table must exist. On very old DBs that pre-date migration 012
+      // the table may not yet be present; let migration 012 create it first.
+      const hasTable = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='companies'"
+      ).get() as { name: string } | undefined;
+      if (!hasTable) {
+        console.log('[Migration 064] companies table not yet present — skipping (will run again after 012)');
+        return;
+      }
+      // INSERT OR IGNORE: idempotent on every subsequent boot.
+      const result = db.prepare(`
+        INSERT OR IGNORE INTO companies (id, name, slug, config)
+        VALUES ('default', 'Default', 'default', '{}')
+      `).run();
+      if (result.changes > 0) {
+        console.log("[Migration 064] Inserted sentinel companies row id='default'");
+      } else {
+        console.log("[Migration 064] Sentinel companies row already present, skipping");
+      }
+    },
+  },
 ];
 
 /**
