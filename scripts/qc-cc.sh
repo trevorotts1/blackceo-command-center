@@ -177,6 +177,57 @@ check "6.4" "CEO board mounts PersonaGovernanceBoard" \
   'grep -q "PersonaGovernanceBoard" src/app/ceo-board/page.tsx'
 
 blue ""
+blue "── 7. PRD 2.9 integration checks ──"
+# (e) Department head names — headTitle must use head_agent_name from the
+# workspace's agents JOIN, not a hardcoded generic "Head of <Dept>". The fix
+# lives in src/lib/routing/resolve-department.ts: normalizeWorkspace() reads
+# ws.head_agent_name and uses it when present.
+check "7.1" "resolve-department: normalizeWorkspace reads head_agent_name (PRD 2.9e)" \
+  "grep -q 'head_agent_name' src/lib/routing/resolve-department.ts"
+check "7.2" "resolve-department: headTitle uses real agent name when available (PRD 2.9e)" \
+  "grep -q 'headAgentName || ' src/lib/routing/resolve-department.ts"
+check "7.3" "DepartmentResolution interface includes headAgentName field (PRD 2.9e)" \
+  "grep -q 'headAgentName' src/lib/routing/resolve-department.ts"
+
+# (f) Null department → workspace slug resolution. When task.department is NULL
+# the deptSlug callers in qc-scorer.ts and tasks/[id]/route.ts MUST resolve the
+# workspace slug from the DB (never pass UUID raw to record-completion).
+check "7.4" "qc-scorer: null department resolved via workspace slug lookup (PRD 2.9f)" \
+  "grep -q 'SELECT slug FROM workspaces WHERE id' src/lib/qc-scorer.ts"
+check "7.5" "qc-scorer: canonicalDeptSlug applied after workspace slug lookup (PRD 2.9f)" \
+  "grep -A10 'SELECT slug FROM workspaces WHERE id' src/lib/qc-scorer.ts | grep -q 'canonicalDeptSlug'"
+check "7.6" "tasks PATCH route: null department resolved via workspace slug lookup (PRD 2.9f)" \
+  "grep -q 'SELECT slug FROM workspaces WHERE id' 'src/app/api/tasks/[id]/route.ts'"
+check "7.7" "tasks PATCH route: canonicalDeptSlug imported for slug normalization (PRD 2.9f)" \
+  "grep -q 'canonicalDeptSlug' 'src/app/api/tasks/[id]/route.ts'"
+
+# (a) Heuristic mode never triggers reroute loop (PRD 2.4 — verify still live).
+check "7.8" "qc-scorer: heuristic guard present — skips reroute loop (PRD 2.4)" \
+  "grep -q 'scoringPath.*heuristic' src/lib/qc-scorer.ts"
+
+# (b) Live feed covers task_created / task_dispatched / task_completed.
+check "7.9" "tasks.ts emits task_created event" \
+  "grep -q \"'task_created'\" src/lib/tasks.ts"
+check "7.10" "tasks.ts emits task_dispatched event for routed tasks" \
+  "grep -q \"'task_dispatched'\" src/lib/tasks.ts"
+check "7.11" "task PATCH route emits task_completed event on done transition" \
+  "grep -q \"'task_completed'\" 'src/app/api/tasks/[id]/route.ts'"
+
+# (c) Auto-dispatch skips master/CEO agents (route-not-execute).
+check "7.12" "task-dispatcher: master/CEO agent guard present (PRD 2.9c)" \
+  "grep -q 'is_master' src/lib/task-dispatcher.ts"
+
+# (d) Company Settings theming is wired.
+check "7.13" "BrandTheme component exists (PRD 2.9d)" \
+  '[ -f src/components/BrandTheme.tsx ]'
+check "7.14" "BrandTheme reads brand_color from client context (PRD 2.9d)" \
+  "grep -q 'brand_color' src/components/BrandTheme.tsx"
+
+# PRD 2.9(f) fixture test file ships.
+check "7.15" "prd-2.9f-null-dept-slug.test.ts exists (fixture for null-department slug)" \
+  '[ -f tests/unit/prd-2.9f-null-dept-slug.test.ts ]'
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"

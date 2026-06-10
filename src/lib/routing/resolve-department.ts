@@ -9,6 +9,10 @@
  *   1. Call /api/workspaces/${slugOrId} (direct lookup by slug or id)
  *   2. If that fails, fall back to listing all workspaces and matching by id or slug
  *   3. Return a normalized DepartmentResolution object
+ *
+ * PRD 2.9(e): headTitle is the REAL per-client agent name from head_agent_name
+ * (populated via the agents JOIN in /api/workspaces routes). Generic
+ * "Head of <Dept>" is only used when no agent is registered as head yet.
  */
 
 export interface DepartmentResolution {
@@ -20,7 +24,11 @@ export interface DepartmentResolution {
   name: string;
   /** Emoji icon */
   emoji: string;
-  /** Head title (e.g. "Head of Marketing") */
+  /**
+   * Head display title — the real per-client agent name when one is registered
+   * as the department head (head_agent_name from the agents JOIN), or the
+   * generic "Head of <Dept>" fallback when no head agent is seeded yet.
+   */
   headTitle: string;
   /** Grade (A-F) */
   grade: 'A' | 'B' | 'C' | 'D' | 'F';
@@ -30,6 +38,8 @@ export interface DepartmentResolution {
   insight: string;
   /** Description from workspace record */
   description?: string;
+  /** Real agent name used as department head (null when no head registered) */
+  headAgentName?: string | null;
 }
 
 /**
@@ -73,18 +83,29 @@ export async function resolveDepartment(
 /**
  * Normalize a workspace API response into a DepartmentResolution.
  * Handles both singular workspace objects and list items.
+ *
+ * PRD 2.9(e): headTitle uses the real per-client agent name (head_agent_name
+ * from the agents LEFT JOIN in all /api/workspaces routes). Falls back to the
+ * generic "Head of <Name>" only when no head agent has been registered yet.
  */
 function normalizeWorkspace(ws: Record<string, unknown>): DepartmentResolution {
   const name = (ws.name as string) || 'Unknown Department';
   const slug = (ws.slug as string) || (ws.id as string) || '';
   const description = ws.description as string | undefined;
 
+  // head_agent_name is populated by the agents LEFT JOIN in /api/workspaces/[id]
+  // and /api/workspaces (list). When present it is the real per-client agent
+  // identity (e.g. "Candace", "Sir Jordan") rather than a generic role label.
+  const headAgentName = (ws.head_agent_name as string | null | undefined) ?? null;
+  const headTitle = headAgentName || `Head of ${name}`;
+
   return {
     id: ws.id as string,
     slug,
     name,
     emoji: (ws.icon as string) || (ws.emoji as string) || '🏢',
-    headTitle: `Head of ${name}`,
+    headTitle,
+    headAgentName,
     grade: 'B',
     gradeScore: 75,
     insight: description || `${name} department is active and operational.`,
