@@ -2,7 +2,13 @@
 # cc-health-check.sh — THE single definition of "green" for a deployed
 # BlackCEO Command Center instance.
 #
-# PRD Addendum B, item B.1 (P0) — REDO #3 fixes applied
+# PRD Addendum B, item B.1 (P0) — REDO #4 fixes applied
+# REDO #4 fix: DEFECT 3 — macOS BSD grep -c two-stage pipeline multiline bug.
+#   ASSETS_FOUND_TOTAL was computed via 'grep -v ... | grep -c .' which returns
+#   '0\n0' on macOS when the input is empty. The subsequent [[ -eq 0 ]] arithmetic
+#   test threw a syntax error and silently skipped the zero-assets FAIL branch,
+#   causing static_assets.pass=true on a page with no /_next/static refs.
+#   Fix: single-stage 'grep -c [^[:space:]]' + sanitize with ${...%%$'\n'*}.
 #
 # REQUIRES: bash 4+ (hard guard below), curl, sqlite3, pm2, python3, df
 # macOS note: GNU coreutils 'timeout' must be available (brew install coreutils).
@@ -345,9 +351,18 @@ else
         | grep -v '^[[:space:]]*$' | sort -u || true)
     fi
 
-    # True count of ALL asset refs found in HTML (never truncated)
+    # True count of ALL asset refs found in HTML (never truncated).
+    # FIX #3 (REDO): macOS BSD grep -c on a two-stage pipeline ('printf | grep -v | grep -c')
+    # returns '0\n0' (one line per grep stage, not one total) when the input is empty.
+    # ASSETS_FOUND_TOTAL would become a multiline string; [[ "$ASSETS_FOUND_TOTAL" -eq 0 ]]
+    # would throw a bash arithmetic syntax error, evaluate false, and skip the intended
+    # zero-assets FAIL branch, emitting static_assets.pass=true (false-green).
+    # Fix: use a single-stage grep -c that counts non-blank lines, then sanitize the result
+    # to strip any trailing newline artifact before the arithmetic comparison.
     ASSETS_FOUND_TOTAL=$(printf '%s' "$ASSET_PATHS" \
-      | grep -v '^[[:space:]]*$' | grep -c '.' 2>/dev/null || echo "0")
+      | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
+    # Sanitize: strip any multiline artifact (BSD grep quirk on empty pipeline)
+    ASSETS_FOUND_TOTAL=$(( ${ASSETS_FOUND_TOTAL%%$'\n'*} + 0 ))
 
     if [[ "$ASSETS_FOUND_TOTAL" -eq 0 ]]; then
       # No /_next/static refs in HTML is suspicious — Next.js always injects them.

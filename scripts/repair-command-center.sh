@@ -415,7 +415,14 @@ echo "────────────────────────�
 log "(h) B.1 final health gate — cc-health-check.sh (authoritative green definition)"
 HEALTH_CHECK_SCRIPT="$REPO_ROOT/scripts/cc-health-check.sh"
 if [[ ! -x "$HEALTH_CHECK_SCRIPT" ]]; then
-  warn "cc-health-check.sh not found at ${HEALTH_CHECK_SCRIPT} — B.1 green gate skipped (non-fatal for repair steps, but required for deploy)"
+  # BLOCKER FIX: The B.1 spec (PRD Addendum B.1 P0) mandates that every caller use
+  # cc-health-check.sh as the ONLY definition of green. A missing or non-executable
+  # script is a FATAL error — not advisory. Using warn() here allowed repair-command-center.sh
+  # to exit 0 (ALL STEPS PASSED) even on a Sheila-class box (Default branding, stale assets)
+  # when cc-health-check.sh was absent. This contradicts the hard-guard pattern in
+  # deploy.sh and standup-heartbeat.sh (both exit 1 on missing script).
+  # Pattern: fail() adds to FAILURES[], which causes exit 1 in the summary block.
+  fail "cc-health-check.sh not found or not executable at ${HEALTH_CHECK_SCRIPT} — B.1 green gate CANNOT be skipped; add the script and make it executable"
 else
   REPAIR_CC_PORT="${CC_PORT:-4000}"
   REPAIR_CC_DIR="${CC_CANONICAL_DIR:-$REPO_ROOT}"
