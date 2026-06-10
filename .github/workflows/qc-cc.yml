@@ -8,6 +8,10 @@ name: QC Command Center
 # scored by an independent agent (not the writer). Self-assessed entries
 # without a following independent correction fail the gate.
 #
+# B.1 addition: cc-health-check-fixtures job runs the full fixture suite as a
+# REQUIRED gate. Fixture regressions block the PR — a red fixture is a broken
+# health check, which is worse than a broken feature.
+#
 # Triggers on every push to main and every PR targeting main.
 
 on:
@@ -52,6 +56,27 @@ jobs:
 
       - name: Assert CHANGELOG.md has no uncorrected self-assessed QC entries
         run: bash scripts/check-qc-independence.sh
+
+  # B.1 REQUIRED gate: fixture suite must pass on every PR.
+  # A failing fixture means cc-health-check.sh has regressed on a broken-state
+  # detection or false-green case — this is more critical than a feature regression.
+  cc-health-check-fixtures:
+    name: B.1 cc-health-check fixture suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install sqlite3
+        run: |
+          command -v sqlite3 >/dev/null 2>&1 || (sudo apt-get update -y && sudo apt-get install -y sqlite3)
+
+      - name: Run cc-health-check fixture suite (bash 4)
+        run: |
+          # Ubuntu ships bash 5+, so the bash 4 guard is satisfied.
+          # pm2 is not available in CI; pm2_topology checks are correctly skipped
+          # by the fixture suite for CI-incompatible tests.
+          CI_MODE=1 bash scripts/fixtures/run-cc-health-check-fixtures.sh
 
   build-smoke:
     name: Build smoke test

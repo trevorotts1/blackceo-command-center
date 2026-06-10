@@ -1,8 +1,11 @@
 #!/bin/bash
 # deploy.sh — Mission Control safe deploy with B.1 health-check gate.
-# Health verification delegates to scripts/cc-health-check.sh (PRD Addendum B.1).
-# A shallow HTTP 200 check is NOT sufficient; the full check catches stale manifests,
-# Default branding, pm2 topology failures, and disk issues.
+# Health verification delegates EXCLUSIVELY to scripts/cc-health-check.sh (PRD Addendum B.1).
+#
+# CRITICAL: cc-health-check.sh is the ONLY definition of green.
+# If the script is absent, the deploy FAILS HARD — no fallback to HTTP 200.
+# A missing script on a new box means the deploy tooling is not fully installed;
+# fix the install, do not silently degrade.
 set -e
 
 APP_DIR=~/projects/mission-control
@@ -18,6 +21,17 @@ HEALTH_CHECK="${SCRIPT_DIR}/cc-health-check.sh"
 # Example: SITE_URL=http://YOUR_VPS_IP:4000
 
 echo "=== Mission Control Safe Deploy ==="
+
+# ─── HARD GUARD: health check script must exist ───────────────────────────────
+# cc-health-check.sh is the ONLY definition of green (PRD B.1).
+# A missing script is a deployment tooling failure — never fall back to HTTP 200.
+if [[ ! -x "$HEALTH_CHECK" ]]; then
+  echo "FATAL: cc-health-check.sh not found or not executable at: ${HEALTH_CHECK}"
+  echo "  This script is required; the deploy cannot proceed without it."
+  echo "  Ensure the full scripts/ directory was deployed and permissions are set:"
+  echo "    chmod +x scripts/cc-health-check.sh"
+  exit 1
+fi
 
 # Step 1: Backup current .next build
 echo "[1/6] Backing up current build..."
@@ -55,32 +69,20 @@ echo "  Build successful"
 echo "[5/6] Restarting PM2..."
 pm2 restart "$PM2_NAME"
 
-# Step 6: Deep health check via cc-health-check.sh (B.1) — the single definition of green.
-# This replaces the former hand-rolled HTTP 200 check and catches stale manifests,
-# Default branding, pm2 topology failures, and disk issues.
+# Step 6: Deep health check via cc-health-check.sh (B.1) — the ONLY definition of green.
+# --pm2-check-window 15: take two snapshots 15 seconds apart to detect crash-looping apps.
+# (window=0 would disable delta-based crash-loop detection — never use 0 in deploy path)
 echo "[6/6] Health check (B.1 deep check)..."
 sleep 5
 
 HEALTH_JSON=""
 HEALTH_EXIT=0
 
-if [[ -x "$HEALTH_CHECK" ]]; then
-  HEALTH_JSON=$(bash "$HEALTH_CHECK" \
-    --port "$CC_PORT" \
-    --canonical-dir "$APP_DIR" \
-    --pm2-check-window 0 \
-    --json-only 2>/dev/null) || HEALTH_EXIT=$?
-else
-  echo "  WARN: cc-health-check.sh not found at ${HEALTH_CHECK} — falling back to HTTP probe"
-  HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 10 "http://127.0.0.1:${CC_PORT}/" 2>/dev/null || echo "000")
-  if [ "$HTTP_CODE" = "200" ]; then
-    HEALTH_EXIT=0
-    HEALTH_JSON='{"green":true,"fallback":true}'
-  else
-    HEALTH_EXIT=1
-    HEALTH_JSON='{"green":false,"fallback":true}'
-  fi
-fi
+HEALTH_JSON=$(bash "$HEALTH_CHECK" \
+  --port "$CC_PORT" \
+  --canonical-dir "$APP_DIR" \
+  --pm2-check-window 15 \
+  --json-only 2>/dev/null) || HEALTH_EXIT=$?
 
 HEALTH_GREEN=$(printf '%s' "$HEALTH_JSON" \
   | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('green') else 'false')" \
