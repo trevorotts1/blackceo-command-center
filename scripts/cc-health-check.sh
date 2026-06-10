@@ -2,7 +2,29 @@
 # cc-health-check.sh — THE single definition of "green" for a deployed
 # BlackCEO Command Center instance.
 #
-# PRD Addendum B, item B.1 (P0) — REDO #6 fixes applied
+# PRD Addendum B, item B.1 (P0) — REDO #7 fixes applied
+#
+# REDO #7 fix [P0 — spec line 20, false-green]: Partial-branding guard in the
+#   configured-box branch (lines 852-884). When company-config.json EXISTS but
+#   companyName is empty/null/whitespace AND the DB has a valid non-Default name
+#   (e.g. 'Acme Corp'), the script was taking the configured-box branch, matching
+#   DB+HTML, and returning company_name.pass=true / green=true.  Spec line 20 states
+#   NOT green unconditionally when config file exists but companyName is empty/null/
+#   whitespace.  Fix: add an explicit guard at the top of the configured-box branch:
+#   if COMPANY_CONFIG_EXISTS_BOOL='true' and the resolved companyName is empty/null/
+#   whitespace → emit company_name.pass=false with detail 'config file present but
+#   companyName is empty — misconfigured box' before any DB comparison.
+#
+# REDO #7 fix [P1 — Sheila-class, spec intent]: Discovery-failure + DB=Default.
+#   When company-config.json exists at a non-standard path not reachable by any of
+#   the three discovery methods (--canonical-dir, pm2 pm_cwd, heuristic dirs) AND
+#   the DB contains 'Default', the script set COMPANY_CONFIG_EXISTS_BOOL='false',
+#   took the 'unconfigured box — Default acceptable' branch, and returned green=true.
+#   This is exactly the Sheila branding-seed failure B.1 was designed to catch.
+#   Fix (option a): treat DB='Default' as NOT green in the unconfigured branch as well,
+#   unless --allow-default is explicitly passed.  This closes the gap with no path-
+#   passing changes needed in callers.  Post-deploy gates MUST NOT pass --allow-default.
+#
 # REDO #6 fix: PRD directive (c) — apps_with_cwd filter removed from the cwd check.
 #   The old `apps_with_cwd = [a for a in cc_apps if get_cwd(a)]` filtered out CC apps
 #   that lacked pm_cwd, allowing them to silently pass the cwd check. Fix: compare ALL
@@ -64,12 +86,17 @@
 #   --pm2-check-window N   Seconds between restart-count snapshots for delta check (default: 15)
 #   --max-assets N         Max /_next/static assets to probe   (0=unlimited; default: 0)
 #                          When capped, assets_found reflects the true count and capped=true in JSON.
+#   --allow-default        Allow 'Default' company name on unconfigured boxes (config absent)
+#                          WITHOUT this flag, 'Default' in the DB is always NOT green (catches
+#                          Sheila-class discovery-failure false-greens). DO NOT pass this flag
+#                          in post-deploy gates or fleet sweeps.
 #   --json-only            Suppress all stderr progress lines
 #   --pretty               Pretty-print the JSON output
 #
 # Env-var equivalents (lower priority than flags):
 #   CC_PORT, CC_DB_PATH, CC_CANONICAL_DIR, CC_PUBLIC_HOST,
-#   CC_DISK_PATH, CC_DISK_MIN_GB, CC_PM2_CHECK_WINDOW, CC_MAX_ASSETS
+#   CC_DISK_PATH, CC_DISK_MIN_GB, CC_PM2_CHECK_WINDOW, CC_MAX_ASSETS,
+#   CC_ALLOW_DEFAULT (set to "1" to allow 'Default' on unconfigured boxes)
 #
 # CONSUMED BY (B.1 checklist P0 — all callers must use this script)
 # -----------------------------------------------------------------
@@ -163,6 +190,7 @@ DISK_PATH_OVERRIDE="${CC_DISK_PATH:-}"
 DISK_MIN_GB="${CC_DISK_MIN_GB:-5}"
 PM2_CHECK_WINDOW="${CC_PM2_CHECK_WINDOW:-15}"
 MAX_ASSETS="${CC_MAX_ASSETS:-0}"   # 0 = no cap (probe ALL assets)
+ALLOW_DEFAULT="${CC_ALLOW_DEFAULT:-0}"  # REDO #7: 0 = Default in DB always NOT green
 JSON_ONLY="0"
 PRETTY="0"
 
@@ -176,6 +204,7 @@ while [[ $# -gt 0 ]]; do
     --disk-min-gb)      DISK_MIN_GB="${2:?--disk-min-gb requires a value}"; shift 2 ;;
     --pm2-check-window) PM2_CHECK_WINDOW="${2:?--pm2-check-window requires a value}"; shift 2 ;;
     --max-assets)       MAX_ASSETS="${2:?--max-assets requires a value}"; shift 2 ;;
+    --allow-default)    ALLOW_DEFAULT="1"; shift ;;
     --json-only)        JSON_ONLY="1"; shift ;;
     --pretty)           PRETTY="1"; shift ;;
     *) _die_usage "Unknown argument: $1" ;;
@@ -852,7 +881,18 @@ else
     elif [[ "$COMPANY_CONFIG_EXISTS_BOOL" == "true" ]]; then
       # FIX #1: Configured box branch — entered solely based on file existence.
       # An empty companyName in config (empty/null/'   ') still lands here.
-      if [[ -z "$COMPANY_DB_NAME" ]]; then
+      #
+      # REDO #7 [P0 guard — spec line 20]:
+      # If config file exists but companyName is empty/null/whitespace, that is a
+      # misconfigured box regardless of what the DB contains (even a valid non-Default
+      # name like 'Acme Corp').  Spec line 20 mandates NOT green unconditionally in
+      # this case.  This guard must fire BEFORE any DB comparison so that a healthy DB
+      # never masks a broken config file.
+      if [[ -z "$CONFIG_COMPANY_NAME" ]]; then
+        _mark "company_name" "false" \
+          "config file present but companyName is empty — misconfigured box (spec line 20: NOT green unconditionally)" \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
+      elif [[ -z "$COMPANY_DB_NAME" ]]; then
         _mark "company_name" "false" \
           "Configured box has no company row in DB — branding not seeded (run B.3 seed)" \
           "\"db_name\":\"\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
@@ -870,15 +910,32 @@ else
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":true${CONFIG_WARN_FIELD}"
       fi
     else
-      # Unconfigured box — Default is allowed but mismatch is still a fail
-      if [[ -n "$COMPANY_HTML_NAME" && -n "$COMPANY_DB_NAME" \
+      # Unconfigured box — config file absent entirely (COMPANY_CONFIG_EXISTS_BOOL=false).
+      #
+      # REDO #7 [P1 — Sheila-class false-green]:
+      # 'Default' in the DB is NOT green even when config discovery failed, UNLESS
+      # --allow-default is explicitly passed.  Without this guard, a box whose config
+      # file lives at a non-standard path (outside --canonical-dir / pm2 pm_cwd /
+      # heuristic dirs) silently returns green=true when the DB still says 'Default' —
+      # the exact Sheila branding-seed failure.  The script's own comment at line 699
+      # acknowledged 'config_exists=false may be a false negative' but accepted it
+      # silently; this guard converts that silent pass into an explicit fail.
+      #
+      # --allow-default is provided for genuine unconfigured installs (fresh boxes,
+      # local dev) but MUST NOT be passed in deploy.sh, fleet-refresh-verify.sh,
+      # sunday-cron-sweep.sh, or watchdog-cc.sh.
+      if [[ "${ALLOW_DEFAULT:-0}" != "1" && "${COMPANY_DB_NAME,,}" == "default" ]]; then
+        _mark "company_name" "false" \
+          "DB shows 'Default' company name — branding not seeded (Sheila-class: config may exist at non-standard path or branding seed was never run). Pass --allow-default only on genuinely unconfigured boxes." \
+          "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
+      elif [[ -n "$COMPANY_HTML_NAME" && -n "$COMPANY_DB_NAME" \
             && "$COMPANY_HTML_NAME" != "$COMPANY_DB_NAME" ]]; then
         _mark "company_name" "false" \
           "Company name mismatch (unconfigured box): DB='${COMPANY_DB_NAME}' vs HTML='${COMPANY_HTML_NAME}'" \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
       else
         _mark "company_name" "true" \
-          "Company name OK (unconfigured box — Default acceptable): '${COMPANY_DB_NAME:-empty}'" \
+          "Company name OK (unconfigured box — Default acceptable with --allow-default): '${COMPANY_DB_NAME:-empty}'" \
           "\"db_name\":\"$(_jstr "$COMPANY_DB_NAME")\",\"html_name\":\"$(_jstr "$COMPANY_HTML_NAME")\",\"config_exists\":false${CONFIG_WARN_FIELD}"
       fi
     fi

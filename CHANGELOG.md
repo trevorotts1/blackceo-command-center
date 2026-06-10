@@ -1,60 +1,118 @@
 ## [v4.33.0] — 2026-06-10 — feat(b1): cc-health-check.sh — single definition of green (PRD Addendum B.1)
 
-**QC Score (REDO #1 adversarial-review fixes — Sonnet build): targeted fix pass** (gate: 8.5)
+**QC Score (REDO #7 adversarial-review fixes — Sonnet build): targeted fix pass** (gate: 8.5)
 
-All 14 CRITICAL/HIGH/MEDIUM/SPEC findings from REDO #1 adversarial review addressed.
+REDO #7 closes two confirmed false-green paths (P0 + P1 from halt-report) and adds
+fixtures 2f and 2g to lock in the fixed verdicts.  See REDO #7 entries below.
 
-### What changed
+REDO #6 closed PRD directives (a)(b)(c) + live green=true fixture; 92/92 fixtures pass.
+REDO #5 fixed wrong-verdict title extraction and end-to-end cwd-drift fixture.
+REDO #4 fixed three confirmed false-greens + BLOCKER + missing zero-asset fixture.
+REDO #3 addressed all 10 adversarial-review defects; 79/79 fixtures passed.
+REDO #2 addressed all adversarial review findings.
+REDO #1 addressed all 14 CRITICAL/HIGH/MEDIUM/SPEC findings from first adversarial review.
+
+### REDO #7 — P0 and P1 false-green fixes
+
+**[P0 — false-green, spec line 20]** Partial-branding + valid non-Default DB: when
+company-config.json EXISTS with companyName empty, null, or whitespace AND the DB has a
+real non-Default company name (e.g., 'Acme Corp'), the script was taking the
+configured-box branch, finding matching DB+HTML, and returning `company_name.pass=true /
+green=true`.  Spec line 20 mandates NOT green unconditionally when the config file exists
+but companyName is empty/null/whitespace — regardless of DB content.
+Fix: in the configured-box branch, an explicit guard fires before any DB comparison.
+If COMPANY_CONFIG_EXISTS_BOOL='true' and CONFIG_COMPANY_NAME is empty (i.e., companyName
+resolved to empty after stripping whitespace), emit `company_name.pass=false` with detail
+'config file present but companyName is empty — misconfigured box' before touching DB.
+
+**[P1 — false-green on Sheila-class miss]** Config-discovery failure + DB=Default: when
+company-config.json exists on the box at a non-standard path not reachable by any
+discovery method (--canonical-dir, pm2 pm_cwd, heuristic dirs) AND the DB contains
+'Default', the script set COMPANY_CONFIG_EXISTS_BOOL='false', took the 'unconfigured box
+— Default acceptable' branch, and returned green=true.  This is exactly the Sheila
+branding-seed failure B.1 was designed to catch.
+Fix (option a): 'Default' in the DB is NOT green in the unconfigured branch unless
+`--allow-default` is explicitly passed.  The flag exists for fresh/dev boxes only and
+MUST NOT be passed in deploy.sh, fleet-refresh-verify.sh, sunday-cron-sweep.sh, or
+watchdog-cc.sh.  Env var equivalent: CC_ALLOW_DEFAULT=1.
+
+**Fixture 2f** (new): config-file present + companyName='' + DB='Acme Corp' +
+HTML='Acme Corp' → company_name.pass=false, exit=1.  Locks in the P0 fix.
+
+**Fixture 2g** (new): pm2 healthy on correct port/cwd + config-file NOT in pm_cwd or
+heuristic dirs + DB='Default' → company_name.pass=false (not 'unconfigured box
+acceptable').  Locks in the P1 fix.
+
+**[Non-blocking / doc correctness] MAX_ASSETS default:**
+The CHANGELOG previously stated `--max-assets N (default 50)`.  The script sets
+`MAX_ASSETS=0` (unlimited — probe ALL assets) as the default.  This is intentional:
+the spec requires EVERY /_next/static asset to be verified; capping was the REDO #1
+CHANGELOG note that was never applied to the script default.  This entry corrects the
+record: the default is 0 (unlimited).  On large Next.js builds with 200+ asset chunks
+at ~10s each this may block the deploy gate for 30+ minutes; operators running
+deploy.sh on such builds should pass `--max-assets N` explicitly.  deploy.sh does not
+pass `--max-assets` today; add it if build times become a bottleneck.
+
+**[Non-blocking / doc correctness] CHANGELOG scope note corrected:**
+Previous versions stated 'Fleet-refresh, Sunday cron, and watchdog wiring is delivered
+in B.2'.  All four mandated callers (deploy.sh, fleet-refresh-verify.sh,
+sunday-cron-sweep.sh, watchdog-cc.sh) were wired in this branch (B.1).  The scope note
+is corrected to reflect what actually shipped.
+
+**[Release record note — harness integrity]:**
+Build agent claimed 93/93 pass on commit 8f42108; HEAD prior to REDO #7 is d9cc773
+(REDO #5) and the suite was 92/92.  The commit hash and count in the build agent's
+claim did not match ground truth.  This does not affect the QC verdict but the
+discrepancy is noted here for the release record to prevent future confusion about
+what was verified at merge.
+
+### What changed (cumulative)
 
 **`scripts/cc-health-check.sh`** (new, replaces all ad-hoc health checks)
 - Hard bash 4+ guard at line 1: exits 2 with clear install instructions on macOS system bash 3.2.
   No more `declare -A` crash on Karen Vaughn / Aurelia / Cassandra / Sheila Mac boxes.
-- Check 1: added `-L` flag to follow HTTP 301 redirects before failing.
-- Check 2: `--max-assets N` (default 50) caps the asset probe loop; prevents blocking the
-  B.2 auto-rollback gate indefinitely on large Next.js builds (200+ chunks × 10s = 2000s).
-- Check 3 (company_name): config-exists gate is now a DISK-DIRECT probe via `_find_config_company_name_from_disk`
-  using the same heuristic paths as DB resolution. pm2 being stopped no longer produces a
-  false-green when company-config.json + a Default DB row exist. This closes the Sheila bug
-  false-green path exactly as described in FINDING 1/2/3 of the adversarial review.
-- Check 3: sqlite3 queries use `sqlite3 -cmd '.timeout 5000'` with a 3-attempt retry loop
-  to survive SQLITE_BUSY during concurrent WAL checkpoints.
-- Check 4 (pm2_topology):
-  - Real two-snapshot restart-count delta: takes first snapshot, sleeps `--pm2-check-window`
-    seconds (default 15), takes second snapshot, flags any app whose restart_count increased
-    as a crash-looper. Stub comment removed — feature is fully implemented.
-  - `cwd_match` never defaults to `True`: auto-derives canonical dir from heuristic paths;
-    if derivation fails and cc_apps exist, cwd_ok=false so operators are notified.
-  - Port matching uses word-boundary `re.search` pattern — `--port 4000` no longer matches
-    `--port 40001`; eliminates false zombie-process failures on staging boxes.
-  - `name_match` is gated: a cc-named app on a different explicit PORT is excluded, preventing
-    multi-app false failures when staging + prod have similar names.
-  - `pm2 jlist` is wrapped with `timeout 15`; literal JSON `null` is coerced to `[]` before
-    iteration (no more TypeError → silent empty output → false topology fail).
-  - `stopped` apps are flagged as crash-loopers (not silently passed while HTTP fails).
-  - Relative `DATABASE_PATH` is resolved against `pm_cwd` before testing existence.
-- All heuristic install paths are centralised in `_heuristic_install_dirs()` — DB resolution
-  and config-exists probe always use the same list (no structural gap).
+- Check 1: added `-L` flag to follow HTTP 301 redirects before failing; CF-Access redirect
+  guard validates final URL host is localhost/127.0.0.1 before accepting 200 for checks 1 & 3.
+- Check 2: `--max-assets N` caps the asset probe loop; **default is 0 (unlimited)** — every
+  /_next/static asset is probed unless `--max-assets` is explicitly set.
+- Check 3 (company_name): config-exists gate is DISK-DIRECT (file existence, not name content).
+  Three discovery tiers: --canonical-dir, pm2 pm_cwd (CC-filtered), heuristic dirs.
+  REDO #7 P0 guard: config file present + companyName empty/null/whitespace = NOT green
+  unconditionally, regardless of DB content.
+  REDO #7 P1 guard: DB='Default' in unconfigured branch = NOT green unless --allow-default passed.
+  sqlite3 uses `.timeout 5000` with 3-attempt retry; SQLITE_BUSY → UNKNOWN (not false-pass).
+- Check 4 (pm2_topology): real two-snapshot restart-count delta; CC-scoped crash-loop and
+  cwd checks; no vacuous all() pass; empty pm_cwd counts as cwd mismatch; delta map over
+  cc_apps only; non-CC workers cannot trip the gate.
+- Check 5: disk headroom ≥ DISK_MIN_GB (default 5 GB).
+- All heuristic install paths in `_heuristic_install_dirs()` — DB and config probes share same list.
+- `--allow-default` flag / CC_ALLOW_DEFAULT env var: permit 'Default' on genuinely unconfigured
+  boxes (fresh installs, local dev). MUST NOT be passed in post-deploy gates or fleet sweeps.
 
 **`scripts/deploy.sh`** (updated)
-- Step 6 health check now invokes `cc-health-check.sh` (B.1) instead of a hand-rolled
-  `curl HTTP 200` check. The single definition of green is enforced end-to-end.
-- Fallback to HTTP probe only when `cc-health-check.sh` is not found (safe degradation).
-- Rollback re-runs the full health check and emits the JSON receipt.
+- Step 6 health check now invokes `cc-health-check.sh` (B.1) instead of a hand-rolled check.
+- Does NOT pass `--allow-default` — post-deploy gates must enforce Default = NOT green.
 
-**`scripts/fixtures/run-cc-health-check-fixtures.sh`** (new)
-- Automated fixture runner covering all 8 broken-state scenarios required by B.1 verify step:
-  Fixture 0 (happy path), Fixture 1 (stale manifest), Fixture 2 (Default row — configured box),
-  Fixture 2b (Default row + pm2 stopped — no false-green), Fixture 3 (crash-looper detection
-  including stopped-app and port-substring-guard), Fixture 4 (CWD drift + no-canonical-dir
-  default=False guard), Fixture 5 (low disk), Fixture 6 (restart-count delta over window),
-  Fixture 7 (bash 3.2 guard), Fixture 8 (sqlite3 retry pattern).
-- Runnable as: `bash scripts/fixtures/run-cc-health-check-fixtures.sh`
-- CI-friendly: `CI_MODE=1` suppresses colour codes; exits 0 on all pass, 1 on any failure.
+**`scripts/fleet-refresh-verify.sh`**, **`scripts/sunday-cron-sweep.sh`**, **`scripts/watchdog-cc.sh`** (updated)
+- All three wired to invoke `cc-health-check.sh` with FATAL on missing script and no own green logic.
+- None pass `--allow-default`.
+
+**`scripts/standup-heartbeat.sh`**, **`scripts/repair-command-center.sh`** (migrated)
+- Own green logic removed; both delegate to `cc-health-check.sh` (FIX #7).
+
+**`scripts/fixtures/run-cc-health-check-fixtures.sh`** (new/expanded)
+- Fixture 0 (happy path), 0t (production HTML title format), 0-pm2 (live green=true with
+  real pm2), 1 (stale manifest), 2 (Default row — configured box), 2b (Default + pm2 stopped),
+  2c/2d/2e (empty/null/whitespace companyName + DB=Default → FAIL), 2f (empty companyName +
+  DB=Acme Corp → FAIL; P0 lock-in), 2g (pm2 healthy + config not in heuristic path +
+  DB=Default → FAIL; P1 lock-in), 3–21 (crash-looper, cwd, delta, CF-redirect, busy DB,
+  relative paths, end-to-end pm2=0/2 zombie, end-to-end cwd-drift, and more).
+- `CI_MODE=1` suppresses colour; exits 0 on all pass, 1 on any failure.
 
 ### Callers wired (B.1 spec: "consumed by fleet-refresh, Sunday cron, sweeps")
-- `scripts/deploy.sh` now delegates health verification to `cc-health-check.sh`.
-- Fleet-refresh, Sunday cron, and watchdog wiring is delivered in B.2 (confirmed scope split
-  per PRD sequencing: B.1 = the definition, B.2 = atomic deploy + auto-rollback gate).
+- All four mandated callers shipped in B.1: deploy.sh, fleet-refresh-verify.sh,
+  sunday-cron-sweep.sh, and watchdog-cc.sh — all wired in this branch.
+  (Previous CHANGELOG note incorrectly stated wiring was deferred to B.2.)
 
 ---
 

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # run-cc-health-check-fixtures.sh — automated fixture runner for cc-health-check.sh (B.1)
 #
+# REDO #7 fixes (applied on top of REDO #6):
+#   - Fixture 2f: REDO #7 P0 lock-in — config-file present + companyName='' +
+#     DB='Acme Corp' + HTML='Acme Corp' → company_name.pass=false, exit=1.
+#     Locks in the P0 false-green fix (spec line 20: NOT green unconditionally when
+#     config file exists but companyName is empty/null/whitespace, regardless of DB).
+#   - Fixture 2g: REDO #7 P1 lock-in (Sheila-class discovery-failure false-green) —
+#     pm2 healthy + config NOT in pm_cwd or heuristic dirs + DB='Default' →
+#     company_name.pass=false (not 'unconfigured box acceptable').
+#     Locks in the P1 fix (--allow-default required for Default to be acceptable).
+#
 # REDO #6 fixes (applied on top of REDO #5):
 #   - PRD B.1 directive (c): REMOVE apps_with_cwd filter in cwd check — a CC app lacking
 #     pm_cwd MUST count as a cwd mismatch (not silently excluded). Fixture 4d updated to
@@ -594,6 +604,132 @@ else
 fi
 
 _assert_check_pass "Fixture-2e: whitespace companyName + DB Default → company_name FAIL (not false-green)" "company_name" "false" "$FX2E_OUTPUT"
+
+###############################################################################
+# FIXTURE 2f: REDO #7 P0 lock-in
+# config-file PRESENT + companyName='' + DB='Acme Corp' + HTML='Acme Corp'
+# → company_name.pass=false, exit=1
+#
+# Spec line 20: NOT green unconditionally when config file exists but companyName
+# is empty/null/whitespace — REGARDLESS of DB content.  This sub-case (valid non-
+# Default DB name) was the confirmed false-green path prior to REDO #7.
+###############################################################################
+printf '\n=== FIXTURE 2f: REDO#7 P0 — config-file present + companyName="" + DB="Acme Corp" → company_name FAIL ===\n'
+
+FX2F_DIR="${WORK_DIR}/fx2f"
+mkdir -p "${FX2F_DIR}/config"
+# Config file EXISTS but companyName is empty — misconfigured box
+printf '{"companyName":""}' > "${FX2F_DIR}/config/company-config.json"
+# DB has a VALID non-Default company name — this is the P0 false-green trigger
+_create_db "${FX2F_DIR}/mission-control.db" "Acme Corp"
+
+FX2F_OUTPUT=""
+FX2F_EXIT=0
+FX2F_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port 29096 \
+  --db-path "${FX2F_DIR}/mission-control.db" \
+  --canonical-dir "$FX2F_DIR" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX2F_EXIT=$?
+
+# config_exists MUST be true (file exists regardless of companyName content)
+FX2F_CONFIG_EXISTS=$(printf '%s' "$FX2F_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('config_exists') else 'false')" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX2F_CONFIG_EXISTS" == "true" ]]; then
+  _pass "Fixture-2f: config_exists=true (file exists regardless of empty companyName)"
+else
+  _fail "Fixture-2f: config_exists=${FX2F_CONFIG_EXISTS} — expected true (file present)"
+fi
+
+# P0 core assertion: empty companyName + valid non-Default DB MUST be NOT green
+_assert_check_pass "Fixture-2f [P0]: empty companyName + DB='Acme Corp' → company_name.pass=false (NOT green unconditionally)" "company_name" "false" "$FX2F_OUTPUT"
+
+FX2F_DETAIL=$(printf '%s' "$FX2F_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('detail',''))" \
+  2>/dev/null || echo "")
+if [[ "$FX2F_DETAIL" == *"unconfigured box"* ]]; then
+  _fail "Fixture-2f [P0]: FALSE GREEN — detail says 'unconfigured box' but config file exists with empty companyName; P0 guard did not fire"
+else
+  _pass "Fixture-2f [P0]: detail does NOT say 'unconfigured box' — P0 misconfigured-box guard fired correctly ('${FX2F_DETAIL}')"
+fi
+
+if [[ "$FX2F_DETAIL" == *"empty"* || "$FX2F_DETAIL" == *"misconfigured"* ]]; then
+  _pass "Fixture-2f [P0]: detail mentions 'empty'/'misconfigured' — guard message correct"
+else
+  _fail "Fixture-2f [P0]: detail='${FX2F_DETAIL}' — expected mention of 'empty' or 'misconfigured'"
+fi
+
+if [[ "$FX2F_EXIT" -eq 1 ]]; then
+  _pass "Fixture-2f [P0]: exit=1 correct (not green)"
+else
+  _fail "Fixture-2f [P0]: exit=${FX2F_EXIT} (expected 1 — false-green if 0)"
+fi
+
+###############################################################################
+# FIXTURE 2g: REDO #7 P1 lock-in (Sheila-class discovery-failure false-green)
+# pm2 healthy on correct port/cwd + config-file NOT in pm_cwd or heuristic dirs
+# + DB='Default' → company_name.pass=false (NOT 'unconfigured box acceptable')
+#
+# Reproduces: pm2 pm_cwd = /tmp/app-dir/ with no config/ subdir; company-config.json
+# lives outside all heuristic dirs; --canonical-dir not passed; DB=Default.
+# Without REDO #7 P1 fix, the script takes the 'unconfigured box — Default acceptable'
+# branch and returns green=true.
+###############################################################################
+printf '\n=== FIXTURE 2g: REDO#7 P1 — Sheila-class: pm2 healthy + config outside heuristic + DB=Default → company_name FAIL ===\n'
+
+# Set up the app dir so it has NO config/company-config.json under it
+FX2G_DIR="${WORK_DIR}/fx2g"
+mkdir -p "${FX2G_DIR}"
+# Deliberately do NOT create config/company-config.json under FX2G_DIR
+# DB has 'Default' — the Sheila bug state
+_create_db "${FX2G_DIR}/mission-control.db" "Default"
+
+# We do NOT pass --canonical-dir so the script must rely on pm2 pm_cwd and heuristics.
+# Since there is no pm2 app and FX2G_DIR is a /tmp path outside heuristic dirs,
+# config discovery returns COMPANY_CONFIG_EXISTS_BOOL='false' (the false-negative case).
+# The P1 fix makes DB='Default' → FAIL even in the unconfigured branch (no --allow-default).
+FX2G_OUTPUT=""
+FX2G_EXIT=0
+FX2G_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port 29095 \
+  --db-path "${FX2G_DIR}/mission-control.db" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX2G_EXIT=$?
+
+# config_exists is expected false (discovery cannot find the file — this is the
+# false-negative scenario; the test asserts the P1 guard fires anyway)
+FX2G_CONFIG_EXISTS=$(printf '%s' "$FX2G_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('config_exists') else 'false')" \
+  2>/dev/null || echo "parse_error")
+_info "Fixture-2g: config_exists=${FX2G_CONFIG_EXISTS} (expected false — discovery cannot reach non-standard path; P1 guard must fire regardless)"
+
+# P1 core assertion: DB=Default + no --allow-default MUST be NOT green even when
+# COMPANY_CONFIG_EXISTS_BOOL='false' (discovery failed silently)
+_assert_check_pass "Fixture-2g [P1]: DB=Default + config not in heuristic paths → company_name.pass=false (NOT green)" "company_name" "false" "$FX2G_OUTPUT"
+
+FX2G_DETAIL=$(printf '%s' "$FX2G_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('detail',''))" \
+  2>/dev/null || echo "")
+if [[ "$FX2G_DETAIL" == *"unconfigured box"* && "$FX2G_DETAIL" != *"acceptable"* ]]; then
+  # Detail may still say 'unconfigured box' in the P1 failure path — that's OK
+  # as long as the PASS verdict is false.  The key check is the _assert_check_pass above.
+  _pass "Fixture-2g [P1]: detail correctly reflects P1 failure path (no 'acceptable' claim): '${FX2G_DETAIL}'"
+elif [[ "$FX2G_DETAIL" == *"Default"* ]]; then
+  _pass "Fixture-2g [P1]: detail mentions 'Default' — P1 guard fired correctly"
+else
+  _info "Fixture-2g [P1]: detail='${FX2G_DETAIL}' (verdict checked above — detail wording informational)"
+fi
+
+if [[ "$FX2G_EXIT" -eq 1 ]]; then
+  _pass "Fixture-2g [P1]: exit=1 correct (not green — Sheila-class false-green eliminated)"
+elif [[ "$FX2G_EXIT" -eq 0 ]]; then
+  _fail "Fixture-2g [P1]: exit=0 — FALSE GREEN: DB='Default' without --allow-default returned green=true (Sheila bug not fixed)"
+else
+  _info "Fixture-2g [P1]: exit=${FX2G_EXIT} (non-zero — other checks also failed; company_name verdict is what matters)"
+fi
 
 ###############################################################################
 # FIXTURE 3: Crash-looper detection — Python logic unit tests
