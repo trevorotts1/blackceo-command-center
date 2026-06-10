@@ -22,6 +22,11 @@
  *   2. Heuristic fallback (no API key / LLM error): structural checks on the
  *      deliverable meta (description non-empty, SOP assigned, persona assigned,
  *      title non-trivial). Returns a conservative score in [6.0, 8.0].
+ *      IMPORTANT: heuristic mode NEVER triggers the auto-reroute loop. The task
+ *      stays in `review` with a "QC ran in heuristic mode (no LLM key); human
+ *      review required" event. Reroutes are ONLY triggered by a real LLM score
+ *      below the 8.5 gate. This prevents keyless installs from spinning every
+ *      task through 3 reroutes and into `blocked` (PRD 2.4).
  *
  * The QC event is always written to the `events` table regardless of pass/fail
  * so the board + agent can see the reasoning.
@@ -89,6 +94,10 @@ export interface QCResult {
  * Score the task using only structural heuristics — no API call needed.
  * Returns a score in [6.0, 8.0] so it never auto-passes (≥8.5 gate).
  * The human reviewer always sees the score and can manually promote.
+ *
+ * IMPORTANT (PRD 2.4): callers MUST check `scoringPath === 'heuristic'` and
+ * skip the reroute loop entirely when this path runs. The task stays in
+ * `review`; a "human review required" event is written instead.
  */
 function heuristicScore(input: QCScorerInput): QCResult {
   const gaps: string[] = [];
@@ -501,6 +510,32 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
     const result = await scoreTaskForQC(input);
     const now = new Date().toISOString();
+
+    // ── PRD 2.4: heuristic mode guard ─────────────────────────────────────────
+    // When the scorer runs in heuristic mode (no LLM key / LLM error), the task
+    // STAYS in `review`. We write an explanatory event and return WITHOUT
+    // triggering the auto-reroute loop. Reroutes must only fire on a real LLM
+    // score below the 8.5 gate. This prevents keyless installs from churning
+    // every task through QC_MAX_REROUTES and landing in `blocked`.
+    if (result.scoringPath === 'heuristic') {
+      const scoredBy = qcAgent ? ` [scorer:${qcAgent.name}]` : ' [scorer:global-heuristic]';
+      const gapNote = result.gaps.length > 0 ? ` Gaps: ${result.gaps.join('; ')}` : '';
+      const heuristicEventMsg =
+        `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [uuidv4(), 'qc_review', taskId, heuristicEventMsg, now],
+      );
+
+      console.log(
+        `[QCScorer] Task "${task.title}" (${taskId}): heuristic mode — task stays in review, human review required (score ${result.score.toFixed(1)}/10, qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
+      );
+
+      return result;
+    }
+    // ── End of heuristic guard ────────────────────────────────────────────────
 
     // Write QC event — include QC agent identity so audit trail shows who scored
     const scoredBy = qcAgent ? ` [scorer:${qcAgent.name}]` : ' [scorer:global-heuristic]';
