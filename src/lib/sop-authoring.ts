@@ -11,6 +11,20 @@
  *      workspace layer (`<OPENCLAW_WORKSPACE_PATH>/departments/<dept>/<role>/how-to.md`).
  *   6. Attaches the new sop_id back to the original task and re-fires dispatch.
  *
+ * QC gate contract (AF6):
+ *   - dept-QC >= 8.5 (LLM-scored) → auto-file ('auto-authored-filed') with NO
+ *     operator-approval step; original task is not blocked on a human.
+ *   - heuristic (no LLM key)       → file as 'pending' proposal; dispatch
+ *     proceeds SOP-less (loud event); operator can review quality later.
+ *   - QC < 8.5 after redo          → same 'pending' / SOP-less dispatch behaviour.
+ *   - parse fail (twice)            → same 'pending' / SOP-less dispatch behaviour.
+ *   The 'pending' fallbacks do NOT block the original task — dispatch continues
+ *   without a SOP while the proposal sits in the queue. Only the QC-pass path
+ *   re-fires dispatch WITH the authored SOP attached.
+ *
+ * Build gate: qc-cc.sh §9 asserts the above in source (§9.10 = auto-authored-filed
+ * on pass; §9.11 = proposeDraftFromTask absent from task-dispatcher.ts).
+ *
  * Token-economics protection: canonical departments NEVER trigger generation.
  * The guard is absolute — the build gate (qc-cc.sh §9) asserts it in source.
  *
