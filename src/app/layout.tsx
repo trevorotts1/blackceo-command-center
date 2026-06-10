@@ -25,6 +25,12 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: process.env.COMPANY_NAME ? `${process.env.COMPANY_NAME} Command Center` : 'Command Center',
   description: 'AI Agent Orchestration Dashboard',
+  // openGraph.siteName emits <meta property="og:site_name" content="COMPANY_NAME" />
+  // into the served HTML.  cc-health-check.sh (B.1 Check 3) uses this to extract the
+  // company name from HTML without string-mangling the title suffix.
+  ...(process.env.COMPANY_NAME
+    ? { openGraph: { siteName: process.env.COMPANY_NAME } }
+    : {}),
   icons: {
     icon: '/favicon.svg',
   },

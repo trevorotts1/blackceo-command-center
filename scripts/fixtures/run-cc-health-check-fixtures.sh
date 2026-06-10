@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # run-cc-health-check-fixtures.sh — automated fixture runner for cc-health-check.sh (B.1)
 #
+# REDO #5 fixes (applied on top of REDO #4):
+#   - Fixture 0t: real-format HTML (no og:site_name, title='Co Command Center') must
+#     produce company_name.pass=true (fixes wrong-verdict false-fail on every healthy box)
+#   - Fixture 21: end-to-end shell-level cwd-drift (fake pm2 binary returns wrong pm_cwd,
+#     invokes cc-health-check.sh, asserts pm2_topology.pass=false) — spec compliance
+#
 # REDO #4 fixes (applied on top of REDO #3):
 #   - Fixture j: no /_next/static refs in HTML → static_assets FAIL (DEFECT 3 fix: BSD grep-c multiline)
 #   - Fixture 7n: repair-command-center.sh exits non-zero when cc-health-check.sh absent (BLOCKER fix)
@@ -1575,6 +1581,166 @@ elif [[ "$FX20_PM2_PASS" == "false" ]]; then
   _pass "Fixture-20: pm2=2 CC apps (zombie) → pm2_topology.pass=false (app_count=${FX20_APP_COUNT})"
 else
   _fail "Fixture-20: pm2=2 CC apps → pm2_topology.pass=${FX20_PM2_PASS} app_count=${FX20_APP_COUNT} (expected pass=false, count=2)"
+fi
+
+###############################################################################
+# FIXTURE 0t: Real-format HTML (no og:site_name) — title extraction must produce
+# company_name.pass=true for a healthy configured box.
+#
+# WRONG-VERDICT FIX (REDO #5): production layout.tsx emits
+#   <title>Acme Corp Command Center</title>
+# with NO og:site_name / data-company attributes.  The previous awk separator
+# did not match this format; the full string 'Acme Corp Command Center' was
+# compared against DB name 'Acme Corp' → mismatch → false-fail on every real box.
+###############################################################################
+printf '\n=== FIXTURE 0t: Real-format HTML (no og:site_name, title=Co+suffix) → company_name PASS ===\n'
+
+FX0T_DIR="${WORK_DIR}/fx0t"
+mkdir -p "${FX0T_DIR}/_next/static/realfmt123/pages" \
+         "${FX0T_DIR}/_next/static/chunks" \
+         "${FX0T_DIR}/api" \
+         "${FX0T_DIR}/config"
+FX0T_PORT=$(_next_port)
+
+echo "body{margin:0}" > "${FX0T_DIR}/_next/static/realfmt123/pages/_app.css"
+echo "var x=1;"       > "${FX0T_DIR}/_next/static/chunks/main.js"
+echo "var m={};"      > "${FX0T_DIR}/_next/static/realfmt123/_buildManifest.js"
+
+# Real production HTML format: NO og:site_name meta tag, title = 'Co Command Center'
+cat > "${FX0T_DIR}/index.html" << 'REALHTML'
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Acme Corp Command Center</title>
+  <link rel="stylesheet" href="/_next/static/realfmt123/pages/_app.css" />
+  <script src="/_next/static/chunks/main.js"></script>
+</head>
+<body>
+<script id="__NEXT_DATA__" type="application/json">{"props":{},"buildId":"realfmt123"}</script>
+</body>
+</html>
+REALHTML
+
+echo "ok" > "${FX0T_DIR}/api/health"
+echo '{"companyName":"Acme Corp"}' > "${FX0T_DIR}/config/company-config.json"
+_create_db "${FX0T_DIR}/mission-control.db" "Acme Corp"
+
+_start_server "$FX0T_PORT" "$FX0T_DIR"
+
+FX0T_OUTPUT=""
+FX0T_EXIT=0
+FX0T_OUTPUT=$(bash "$HEALTH_CHECK" \
+  --port "$FX0T_PORT" \
+  --db-path "${FX0T_DIR}/mission-control.db" \
+  --canonical-dir "$FX0T_DIR" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --max-assets 0 \
+  --json-only 2>/dev/null) || FX0T_EXIT=$?
+
+# company_name MUST pass on a healthy configured box with real HTML format
+_assert_check_pass "Fixture-0t: real-format HTML (no og:site_name) → company_name.pass=true" "company_name" "true" "$FX0T_OUTPUT"
+
+FX0T_HTML_NAME=$(printf '%s' "$FX0T_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('html_name',''))" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX0T_HTML_NAME" == "Acme Corp" ]]; then
+  _pass "Fixture-0t: html_name='Acme Corp' — ' Command Center' suffix correctly stripped from title"
+else
+  _fail "Fixture-0t: html_name='${FX0T_HTML_NAME}' — expected 'Acme Corp' (suffix strip did not work; title extraction still broken for production HTML)"
+fi
+
+FX0T_DB_NAME=$(printf '%s' "$FX0T_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('company_name',{}).get('db_name',''))" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX0T_DB_NAME" == "Acme Corp" && "$FX0T_HTML_NAME" == "Acme Corp" ]]; then
+  _pass "Fixture-0t: db_name='${FX0T_DB_NAME}' matches html_name='${FX0T_HTML_NAME}' (both from real-format production HTML)"
+else
+  _fail "Fixture-0t: db_name='${FX0T_DB_NAME}' html_name='${FX0T_HTML_NAME}' — mismatch or wrong extraction"
+fi
+
+# Spec test plan item 1: 'Run against a healthy box → green: true' with real HTML format.
+# Full green=true (including pm2_topology) is asserted in Fixture-0-pm2, which also uses
+# production-format HTML via _make_html (og:site_name path).  This fixture specifically
+# proves the TITLE extraction path works on the real format — the blocker was that
+# html_name always mismatched the DB name, preventing green=true on any real client box.
+# We assert company_name.pass=true (the repaired check) and that exit code is 0 only when
+# pm2 is available with a registered app.  Without pm2, pm2_topology always fails, so we
+# only assert the company_name repair here and leave full-green to Fixture-0-pm2.
+FX0T_COMPANY_PASS=$(printf '%s' "$FX0T_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('company_name',{}).get('pass') else 'false')" \
+  2>/dev/null || echo "parse_error")
+if [[ "$FX0T_COMPANY_PASS" == "true" ]]; then
+  _pass "Fixture-0t: company_name.pass=true on real production-format HTML (spec test plan item 1 title path verified)"
+else
+  _fail "Fixture-0t: company_name.pass=${FX0T_COMPANY_PASS} — extraction still broken for real HTML format (WRONG-VERDICT not fixed)"
+fi
+
+_stop_server
+
+###############################################################################
+# FIXTURE 21: End-to-end cwd-drift (shell-level fake pm2 binary)
+# Spec requirement: a fixture that constructs a fake pm2 binary reporting a wrong
+# pm_cwd, invokes cc-health-check.sh, and asserts pm2_topology.pass=false.
+#
+# This covers the spec Verify item 'cwd drift' with a real shell-level invocation
+# (not a Python unit test).  Reviewer compliance: missingFromSpec + coverage gap.
+###############################################################################
+printf '\n=== FIXTURE 21: End-to-end cwd drift (fake pm2 binary, wrong pm_cwd) → pm2_topology FAIL ===\n'
+
+FX21_DIR="${WORK_DIR}/fx21"
+FX21_CANON_DIR="${FX21_DIR}/canon"
+FX21_WRONG_DIR="${FX21_DIR}/wrong"
+mkdir -p "${FX21_DIR}/bin" "${FX21_CANON_DIR}" "${FX21_WRONG_DIR}"
+
+# Fake pm2: one CC app with a pm_cwd that does NOT match --canonical-dir
+cat > "${FX21_DIR}/bin/pm2" << FAKEPM2CWD
+#!/bin/sh
+if [ "\$1" = "jlist" ]; then
+  printf '[{"name":"mission-control","pm2_env":{"name":"mission-control","status":"online","pm_cwd":"${FX21_WRONG_DIR}","restart_time":0,"env":{"PORT":"29095","DATABASE_PATH":"${FX21_WRONG_DIR}/mission-control.db"}}}]'
+  echo ""
+  exit 0
+fi
+exec pm2 "\$@"
+FAKEPM2CWD
+chmod +x "${FX21_DIR}/bin/pm2"
+
+FX21_OUTPUT=""
+FX21_EXIT=0
+FX21_OUTPUT=$(PATH="${FX21_DIR}/bin:${PATH}" bash "$HEALTH_CHECK" \
+  --port 29095 \
+  --canonical-dir "${FX21_CANON_DIR}" \
+  --disk-min-gb 1 \
+  --pm2-check-window 0 \
+  --json-only 2>/dev/null) || FX21_EXIT=$?
+
+FX21_PM2_PASS=$(printf '%s' "$FX21_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('pm2_topology',{}).get('pass') else 'false')" \
+  2>/dev/null || echo "parse_error")
+FX21_CWD_OK=$(printf '%s' "$FX21_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('checks',{}).get('pm2_topology',{}).get('cwd_ok') else 'false')" \
+  2>/dev/null || echo "parse_error")
+
+if [[ "$FX21_PM2_PASS" == "false" ]]; then
+  _pass "Fixture-21: cwd drift (wrong pm_cwd) → pm2_topology.pass=false (end-to-end shell-level)"
+else
+  _fail "Fixture-21: cwd drift → pm2_topology.pass=${FX21_PM2_PASS} (expected false — cwd mismatch not caught)"
+fi
+
+if [[ "$FX21_CWD_OK" == "false" ]]; then
+  _pass "Fixture-21: cwd_ok=false in JSON output (wrong pm_cwd correctly reported)"
+else
+  _fail "Fixture-21: cwd_ok=${FX21_CWD_OK} (expected false — cwd mismatch not reflected in JSON)"
+fi
+
+# Verify the detail message mentions the cwd mismatch
+FX21_DETAIL=$(printf '%s' "$FX21_OUTPUT" \
+  | python3 -s -c "import sys,json; d=json.load(sys.stdin); print(d.get('checks',{}).get('pm2_topology',{}).get('detail',''))" \
+  2>/dev/null || echo "")
+if [[ "$FX21_DETAIL" == *"pm_cwd"* || "$FX21_DETAIL" == *"canonical dir"* || "$FX21_DETAIL" == *"cwd"* ]]; then
+  _pass "Fixture-21: detail mentions cwd context: '${FX21_DETAIL}'"
+else
+  _fail "Fixture-21: detail='${FX21_DETAIL}' — does not mention cwd mismatch"
 fi
 
 ###############################################################################

@@ -785,11 +785,32 @@ else
       fi
 
       if [[ -z "$COMPANY_HTML_NAME" ]]; then
-        COMPANY_HTML_NAME=$(printf '%s' "$HTML_FOR_COMPANY" \
+        # Title fallback.  Production layout.tsx emits:
+        #   <title>COMPANY_NAME Command Center</title>
+        # (space-separated suffix, NO em-dash / en-dash / pipe).
+        # Step 1: try a separator-based split for legacy/custom titles that use a dash.
+        # Step 2: if the whole string survives step 1 unchanged, strip the literal
+        #         ' Command Center' suffix so the DB comparison works on the real format.
+        _RAW_TITLE=$(printf '%s' "$HTML_FOR_COMPANY" \
           | grep -oE '<title>[^<]+</title>' \
           | sed 's/<title>//;s/<\/title>//' \
-          | awk -F' [—–|-] ' '{print $1}' \
           | head -1 || true)
+        if [[ -n "$_RAW_TITLE" ]]; then
+          # First try separator-based split (em-dash, en-dash, pipe, or ' - ')
+          _SPLIT=$(printf '%s' "$_RAW_TITLE" | awk -F' [—–|-] ' '{print $1}')
+          if [[ "$_SPLIT" != "$_RAW_TITLE" ]]; then
+            # Separator found — use the left-hand part
+            COMPANY_HTML_NAME="$_SPLIT"
+          else
+            # No separator — strip the canonical ' Command Center' suffix
+            # (handles: 'Acme Corp Command Center' → 'Acme Corp')
+            COMPANY_HTML_NAME=$(printf '%s' "$_RAW_TITLE" \
+              | sed 's/ Command Center$//' | sed 's/ command center$//')
+            # If stripping produced an empty string (title WAS 'Command Center'),
+            # fall back to the raw title so an unconfigured default doesn't false-pass.
+            [[ -z "$COMPANY_HTML_NAME" ]] && COMPANY_HTML_NAME="$_RAW_TITLE"
+          fi
+        fi
       fi
     fi
 
