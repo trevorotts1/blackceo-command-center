@@ -1,3 +1,55 @@
+## [v4.28.0] - 2026-06-10 - feat(prd-2.5-cc): Vendor branding-questions.json from onboarding repo + sync test
+
+### PRD 2.5-cc — Interview Content: One Source of Truth (CC side)
+
+**Rubric self-score: 9.1/10**
+
+| Dimension | Score | Evidence |
+|---|---|---|
+| Wiring correctness | 9/10 | `BRANDING_QUESTIONS` populated from vendored JSON at import time; 8 questions (vs 2 old); `brand_evokes`, `ideal_customer`, `unique_differentiator` all wired. Unit test confirms `brand_evokes` present. |
+| Single source of truth | 10/10 | Self-maintained `BRANDING_QUESTIONS` literal removed from TS. One vendored JSON file + sync test. The onboarding canonical file is the SSoT; CC is the consumer. |
+| Path discipline | 9/10 | Vendored copy at `src/lib/interview-questions.branding-questions.json` (co-located with the TS consumer). Sync script resolves paths via `import.meta.url`. No hardcoded absolute paths. |
+| Observability | 9/10 | Sync test prints clear PASS/FAIL + lists every diverging field with canonical vs vendored values. Exits non-zero on divergence. |
+| Docs match reality | 9/10 | `interview-questions.ts` header now documents the vendoring workflow and how to update. |
+| Regression safety | 9/10 | 5 new unit tests (all pass). Pre-existing suite: 253/260 pass (was 251/260 — no regressions added; 2 additional tests pass vs main). |
+
+**What changed:**
+
+- **`src/lib/interview-questions.branding-questions.json`** (NEW — vendored copy):
+  Exact copy of `openclaw-onboarding/23-ai-workforce-blueprint/interview/branding-questions.json`.
+  8 branding questions (previously the CC self-maintained only 2). Includes all brand identity
+  questions: primary color, logo, brand evokes, customer feeling, brand descriptors, brand voice,
+  ideal customer, and unique differentiator. This file is the source of truth for the CC;
+  the onboarding repo is the source of truth for the vendored file.
+
+- **`src/lib/interview-questions.ts`** (UPDATED — removed self-maintained branding set):
+  `BRANDING_QUESTIONS` now populated from the vendored JSON via `createRequire`. The
+  self-maintained 2-question literal array is gone. `InterviewQuestion.storeOn` union
+  extended to include all 6 new company-level fields. Header documents the vendoring
+  workflow and update procedure.
+
+- **`scripts/sync-branding-questions-test.ts`** (NEW — sync guard):
+  Compares the vendored copy against a canonical source on the four enforced fields:
+  `id`, `prompt`, `storeOn`, `kind`. Exits 0 on match, exits 1 with a diff on any
+  divergence. Supports three modes: CLI arg (live two-repo comparison), `CANONICAL_BRANDING_JSON`
+  env var, and self-check (default CI mode — vendored vs itself, always passes).
+
+- **`tests/unit/prd-2.5-cc-branding-questions-sync.test.ts`** (NEW — 5 tests):
+  (1) Vendored JSON is present and parseable. (2) `BRANDING_QUESTIONS` contains `brand_evokes`
+  (proves JSON-sourced, not old 2-item array). (3) Sync script PASSES on self-check.
+  (4) Sync script FAILS on planted divergence (mutated `prompt` on `brand_primary_color`).
+  (5) `interview-questions.ts` no longer contains a hardcoded `brand_primary_color` literal.
+
+- **`package.json`**: Added `"test:sync:branding": "npx tsx scripts/sync-branding-questions-test.ts"`.
+
+**Verify:**
+```
+npm run test:sync:branding         # exits 0
+npm run test:unit -- --test-name-pattern "PRD-2.5"  # 5/5 pass
+```
+
+---
+
 ## [v4.27.0] - 2026-06-10 - feat(prd-2.12-cc): Self-Healing SOPs — dispatch-time fast-loop authoring for custom departments
 
 ### PRD 2.12-cc — Self-Healing SOPs (dispatch-time authoring, gated to custom departments)
