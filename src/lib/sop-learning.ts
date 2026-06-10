@@ -27,6 +27,44 @@ export interface SOPFeedbackRow {
   created_at: string;
 }
 
+/**
+ * Full status union for sop_proposals rows.
+ *
+ * SLOW-LOOP / TRIAD paths (human-approval-gated — requires operator action):
+ *   'pending'           — nightly detectPatternsAndPropose cluster draft OR
+ *                         Triad-block proposeDraftFromTask draft awaiting approval
+ *   'approved'          — operator approved via /sops/proposals → real sops row created
+ *   'rejected'          — operator rejected (or 7-day cap exceeded)
+ *
+ * FAST-LOOP paths (auto-gated — NO operator-approval step):
+ *   'auto-authored-filed'           — dispatch-time fast loop authored + QC>=8.5 PASSED →
+ *                                     SOP already filed to sops table; audit trail only
+ *   'auto-generated-pending-review' — Track S auto-research replacement draft (sop-auto-replace.ts)
+ *   'escalated'                     — safety cap (>=3 attempts in 7 days) triggered; human author required
+ *
+ * The FAST loop (sop-authoring.ts / authorSOPForTask) NEVER inserts 'pending'
+ * on a QC-pass (>=8.5, LLM-scored) path. It inserts 'pending' ONLY when:
+ *   - LLM key is absent (heuristic scoring) → operator must review quality
+ *   - QC score <8.5 after one redo         → operator must rework the draft
+ *   - JSON parse fails twice               → operator must review raw output
+ * These "slow-down" cases do put a human in the loop, but the ORIGINAL TASK
+ * is NOT blocked on that approval — dispatch proceeds SOP-less (with a loud
+ * sop_authoring_* event) while the proposal sits in the queue. The fast loop
+ * NEVER pauses the dispatch hot-path waiting for an operator to click Approve.
+ *
+ * The 'pending' wording "approve to author the SOP and unblock the task" in
+ * proposeDraftFromTask (Triad-block path) refers to the SLOW path only — it
+ * applies when a human-initiated status change tries to move a task out of
+ * backlog without a SOP, NOT to the autonomous dispatch-time fast loop.
+ */
+export type SOPProposalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'auto-authored-filed'
+  | 'auto-generated-pending-review'
+  | 'escalated';
+
 export interface SOPProposalRow {
   id: string;
   proposed_name: string;
@@ -34,7 +72,8 @@ export interface SOPProposalRow {
   draft_steps: string; // JSON SOPStep[]
   based_on_task_ids: string; // JSON string[]
   evidence_summary: string | null;
-  status: 'pending' | 'approved' | 'rejected';
+  /** See SOPProposalStatus for the full union and which paths each value belongs to. */
+  status: SOPProposalStatus;
   created_at: string;
   reviewed_at: string | null;
   reviewed_by: string | null;
@@ -367,12 +406,24 @@ export interface TriadDraftResult {
 const TRIAD_DRAFT_MARKER = '[TRIAD-BLOCK DRAFT — needs-review]';
 
 /**
+ * SLOW-LOOP PATH ONLY (human-approval-gated).
+ *
  * Create a DRAFT SOP proposal from a task that the Triad Rule just blocked for
  * having no SOP. The draft is pre-filled from the task title/description (+ the
- * task's department and intended persona) and inserted as a normal `pending`
+ * task's department and intended persona) and inserted as a `'pending'`
  * proposal so it shows up in the existing /sops/proposals review queue, where
  * the dept head approves it into a real SOP (approveProposal) and then attaches
  * it to the task.
+ *
+ * This function is called ONLY from the PATCH /api/tasks/[id] route (Triad-block
+ * path). It is NEVER called from task-dispatcher.ts or the dispatch-time fast
+ * loop (authorSOPForTask). That separation is the QC gate: the fast loop
+ * auto-proceeds on dept-QC >= 8.5 with no operator-approval step; this function
+ * inserts a proposal that REQUIRES human approval before the SOP is created.
+ *
+ * Callers must not route dispatch-time tasks through this function.
+ * Build gate: qc-cc.sh §9.11 asserts proposeDraftFromTask is absent from
+ * task-dispatcher.ts.
  *
  * Idempotent: if a pending Triad-block draft already exists for this exact
  * task_id we return {created:false} instead of inserting a duplicate. Never

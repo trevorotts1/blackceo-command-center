@@ -1,3 +1,62 @@
+## [v4.32.0] — 2026-06-10 — fix(af6): fast-loop QC gate — auto-proceed on dept-QC>=8.5, no operator-approval pause
+
+**Audit Fix 6 (AF6) — PRD 2.12-cc dispatch-time SOP fast loop QC gate.**
+
+Confirmed the fast SOP-authoring loop correctly auto-proceeds on dept-QC>=8.5 with
+no operator-approval step; aligned docs, types, and source-level build gates to make
+the contract unambiguous; added 9 unit tests + 4 qc-cc.sh checks to prevent regression.
+
+### What changed
+
+**`src/lib/sop-learning.ts`**
+- `SOPProposalRow.status` type narrowed from `'pending'|'approved'|'rejected'` to the full
+  `SOPProposalStatus` union (`pending|approved|rejected|auto-authored-filed|
+  auto-generated-pending-review|escalated`). The previous narrow type made `'auto-authored-filed'`
+  invisible at the type layer, giving the false impression that all proposals required human approval.
+- Exported `SOPProposalStatus` as a named type so callers can narrow on it.
+- `proposeDraftFromTask` JSDoc updated with `SLOW-LOOP PATH ONLY` marker, explicit note
+  that it is never called from `task-dispatcher.ts`, and a reference to qc-cc.sh §9.11.
+
+**`src/lib/sop-authoring.ts`**
+- Module-level JSDoc updated with the AF6 QC gate contract:
+  - QC>=8.5 (LLM-scored): auto-file as `'auto-authored-filed'` — no operator-approval pause.
+  - Heuristic / QC-fail / parse-fail: file as `'pending'` — dispatch proceeds SOP-less while
+    the proposal sits in the queue (original task is NOT blocked on human click).
+- Added `AF6` marker so qc-cc.sh §9.12 can assert the contract comment is present.
+
+**`scripts/qc-cc.sh`** — added four new §9 source-level checks:
+- `9.10` Fast loop QC-pass path inserts `'auto-authored-filed'` (asserts string exists in source).
+- `9.11` `proposeDraftFromTask` absent from `task-dispatcher.ts` (fast loop stays auto-gated).
+- `9.12` `sop-authoring.ts` contains the AF6 contract comment.
+- `9.13` `tests/unit/prd-2.12-fast-loop-qc-gate.test.ts` exists.
+
+**`tests/unit/prd-2.12-fast-loop-qc-gate.test.ts`** — 9 new fixture-backed unit tests:
+1. Fast loop QC>=8.5 auto-files: `status=authored`, `sop_proposals=auto-authored-filed` (fixture: score 9.2).
+2. Fast loop refuses canonical dept: no sops row, no pending proposal inserted.
+3. Slow nightly loop creates `'pending'` proposals (human-approval-gated).
+4. `proposeDraftFromTask` (Triad-block) creates `'pending'` proposal (human-gated).
+5. `proposeDraftFromTask` is idempotent: second call for same task returns `created=false`.
+6. Source: `proposeDraftFromTask` NOT imported/called in `task-dispatcher.ts`.
+7. Source: `sop-authoring.ts` inserts `'auto-authored-filed'` on QC pass.
+8. Source: `sop-learning.ts` exports `SOPProposalStatus` covering full status union.
+9. Source: `proposeDraftFromTask` JSDoc has `SLOW-LOOP PATH ONLY` marker.
+
+### Root-cause analysis
+
+The `SOPProposalRow.status` type used `'pending'|'approved'|'rejected'` — a subset that omitted
+`'auto-authored-filed'` and the other non-human-gated statuses. A reader seeing `proposeDraftFromTask`
+(which inserts `'pending'` and says "approve to author the SOP and unblock the task") alongside this
+narrow type could incorrectly conclude the fast-loop path also requires human approval. In reality:
+- The fast-loop QC-pass path in `sop-authoring.ts` inserts `'auto-authored-filed'` directly (no human step).
+- `proposeDraftFromTask` is only called from the PATCH `/api/tasks/[id]` Triad-block route, never from
+  `task-dispatcher.ts`. The fast loop and the Triad-block draft are separate, non-overlapping paths.
+- The heuristic/QC-fail fallback paths do insert `'pending'`, but dispatch proceeds SOP-less — the
+  original task is NOT blocked waiting for an operator to click Approve.
+
+No business logic changed; this is a types + docs + build-gate alignment fix.
+
+---
+
 ## [v4.31.0] - 2026-06-10 - ci(af5): QC-scorer independence CI gate + independent re-audit of self-scored 10.0 entries
 
 **QC Score (independent Sonnet QC — AF5 audit): 9.35/10 — PASS** (gate: 8.5)

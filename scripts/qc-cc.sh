@@ -304,6 +304,27 @@ check "9.8" "migration 067 expand_sop_proposals_status_auto_authored exists" \
 check "9.9" "qc-scorer.ts supports QC_FIXTURE_JSON_PATH fixture bypass" \
   "grep -q 'QC_FIXTURE_JSON_PATH' src/lib/qc-scorer.ts"
 
+# 9.10 AF6: fast loop (QC>=8.5 pass) inserts 'auto-authored-filed', NEVER 'pending'.
+# The 'auto-authored-filed' string must exist in sop-authoring.ts (auto-file audit trail),
+# and the QC-pass INSERT block must NOT insert 'pending' (only fallback/heuristic paths do).
+check "9.10" "AF6: fast loop QC-pass path inserts 'auto-authored-filed' (no operator-approval pause)" \
+  "grep -q \"'auto-authored-filed'\" src/lib/sop-authoring.ts"
+
+# 9.11 AF6: proposeDraftFromTask (human-approval-gated slow path) must NOT appear in
+# task-dispatcher.ts. The fast loop and the Triad-block path are separate code paths —
+# dispatch must never route through the human-approval proposal queue.
+check "9.11" "AF6: proposeDraftFromTask absent from task-dispatcher.ts (fast loop stays auto-gated)" \
+  "! grep -q 'proposeDraftFromTask' src/lib/task-dispatcher.ts"
+
+# 9.12 AF6: sop-authoring.ts QC gate comment documents the AF6 contract
+# (auto-proceed on >=8.5, no operator-approval pause).
+check "9.12" "AF6: sop-authoring.ts contains AF6 contract comment (dept-QC >= 8.5 -> auto-file)" \
+  "grep -q 'AF6' src/lib/sop-authoring.ts"
+
+# 9.13 AF6: unit test for the fast-loop QC gate exists.
+check "9.13" "AF6: prd-2.12-fast-loop-qc-gate.test.ts exists" \
+  "[ -f tests/unit/prd-2.12-fast-loop-qc-gate.test.ts ]"
+
 blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
