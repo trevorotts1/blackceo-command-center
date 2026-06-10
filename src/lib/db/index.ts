@@ -4,7 +4,19 @@ import fs from 'fs';
 import { schema } from './schema';
 import { runMigrations } from './migrations';
 
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db');
+/**
+ * The authoritative, process-resolved path to mission-control.db.
+ *
+ * Exported so other server-side modules (e.g. persona-selector.ts) can pass
+ * it as DASHBOARD_DB_PATH in subprocess env — making the Python selector
+ * hit the correct DB on both Mac and VPS layouts without its own candidate-
+ * list heuristics.
+ *
+ * Resolution order:
+ *   1. DATABASE_PATH env var (explicit override)
+ *   2. process.cwd()/mission-control.db  (default install: ~/projects/command-center)
+ */
+export const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db');
 
 let db: Database.Database | null = null;
 

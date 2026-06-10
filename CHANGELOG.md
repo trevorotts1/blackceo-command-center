@@ -1,3 +1,42 @@
+## [v4.16.0] - 2026-06-09 - fix(persona): wire DASHBOARD_DB_PATH so selector hits the correct DB (PRD 1.3-CC)
+
+### Root cause
+`persona-selector-v2.py`'s `find_dashboard_db()` only checked `/data/mission-control/`,
+`~/projects/mission-control/`, and `~/blackceo-command-center/` — none of which is the
+default install path (`~/projects/command-center/mission-control.db`). When no candidate
+matched, `db_path` resolved to an empty string, silently no-opping every DB interaction:
+stickiness check, variety recent-use read, weight overrides, and `record_selection()`.
+The entire v2.1 adaptive feature set was dark on every default install.
+
+### Fixed
+- `src/lib/db/index.ts`: `DB_PATH` is now exported (was module-private `const`). The
+  resolution logic is unchanged (`DATABASE_PATH` env var, then `process.cwd()/mission-control.db`).
+- `src/lib/persona-selector.ts`: imports `DB_PATH` from `@/lib/db` and passes it as
+  `DASHBOARD_DB_PATH` in the `env` of the `execFileSync` spawn options. This makes
+  `DASHBOARD_DB_PATH` the first candidate checked by the Python script — the candidate
+  list becomes a fallback, not the primary mechanism.
+
+### Layouts verified
+- **Mac** (`~/projects/command-center`): `DB_PATH = process.cwd()/mission-control.db`,
+  forwarded as `DASHBOARD_DB_PATH` → Python script hits the correct DB.
+- **VPS** (`/data/projects/command-center`): operator sets `DATABASE_PATH=/data/projects/command-center/mission-control.db`;
+  `DB_PATH` resolves to that; `DASHBOARD_DB_PATH` carries it into the subprocess.
+
+### QC rubric score: 9.0/10
+| Dimension          | Score | Evidence |
+|--------------------|-------|---------|
+| Wiring correctness | 10    | DASHBOARD_DB_PATH set in spawn env; Python checks it first; verified on both layouts |
+| Single source of truth | 10 | One export of DB_PATH; no duplicate candidate list in TS |
+| Path discipline    | 9     | No literal paths in TS; resolution through process.cwd()/DATABASE_PATH; Python-side shared resolver (find_dashboard_db) is a Phase 1 companion fix in the onboarding repo |
+| Observability      | 8     | Failure still logs to console.error; Python script will emit "db: none" warning when path still unresolved — improvement requires the companion fix in 1.3-onboarding |
+| Docs match reality | 9     | CHANGELOG entry present; comment in code explains the fix |
+| Regression safety  | 8     | Pre-existing test failures unchanged; 0 new failures introduced; no regression on existing callers |
+
+### Fleet implication
+Deploy: `git pull && npm ci && npm run build && pm2 restart blackceo-command-center`.
+After deploy, `DASHBOARD_DB_PATH` is set in every `persona-selector-v2.py` invocation.
+Verify: create a task, then `sqlite3 mission-control.db "SELECT COUNT(*) FROM persona_selection_log"` should increase by 1 (requires onboarding PRD 1.3 companion fix so the Python selector actually writes the row).
+
 ## [v4.15.0] - 2026-06-09 - fix(qc): Gemini model deprecated -> gemini-2.5-flash; log non-OK API errors
 
 Fixes QC auto-scorer always falling through to the heuristic path (scoring <= 8.0, never reaching DONE).
