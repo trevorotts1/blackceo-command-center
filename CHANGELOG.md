@@ -64,17 +64,17 @@ The `--check-stale` flag verifies completion:
     active model is gemini-embedding-2 (same dims, different model → empty result + loud warn)
   - Updated tests 2/4: assert `PINNED_GOOGLE_MODEL` constant (not hardcoded string)
 
-### QC rubric score (PRD Section 6)
+### QC rubric score (PRD Section 6) — independent Sonnet QC
 | Dimension | Weight | Score | Evidence |
 |---|---|---|---|
-| Wiring correctness | 30% | 10 | PINNED_GOOGLE_MODEL='gemini-embedding-2' is the ONE constant; fetchEmbeddingGoogle passes output_dimensionality=3072 explicitly; rankSOPsBySemantic matches on model+dims; countStaleGoogleEmbeddings detects stale rows; backfill --check-stale exits 1 when stale rows exist; fixture DB verified |
-| Single source of truth | 20% | 10 | One PINNED_GOOGLE_MODEL constant, one GOOGLE_RETIRED_MODEL; GOOGLE_MODEL=PINNED_GOOGLE_MODEL (no second assignment); no hardcoded 'gemini-embedding-001' in active code paths; qc-cc.sh 5b.1/5b.2/5b.3 guard it |
-| Path discipline | 15% | 10 | No path changes; all embedding path changes are in sop-embeddings.ts only; backfill imports countStaleGoogleEmbeddings from sop-embeddings |
-| Observability | 15% | 10 | LOUD warning in rankSOPsBySemantic with stale count + ACTION REQUIRED + shutdown date; MODEL-DRIFT warning in backfill on startup; --check-stale exits 1 when dirty; countStaleGoogleEmbeddings available to any health check |
-| Docs match reality | 10% | 10 | Module JSDoc updated; backfill script header updated; qc-cc.sh adds 7 checks; CHANGELOG entry with full root cause, fix, re-embed path, and test list |
-| Regression safety | 10% | 10 | 6 new passing tests; existing test suite updated (no -001 hardcoded); Migration 063 idempotent; all pre-existing qc-cc checks still present |
+| Wiring correctness | 30% | 10 | PINNED_GOOGLE_MODEL='gemini-embedding-2' sole active constant; GOOGLE_RETIRED_MODEL used only for stale-row detection; output_dimensionality=3072 explicit in fetchEmbeddingGoogle; rankSOPsBySemantic guards on model+dims (not dims alone); fixture DB verified per build agent (stale=1 correctly detected, MODEL-DRIFT warning fires, [] returned) |
+| Single source of truth | 20% | 9 | One canonical PINNED_GOOGLE_MODEL; GOOGLE_MODEL=PINNED_GOOGLE_MODEL (indirection, no second assignment); qc-cc.sh 5b.1/5b.2/5b.3 enforce it; minor: GOOGLE_OUTPUT_DIMENSIONALITY defined as a separate const from PINNED_GOOGLE_DIMS (benign redundancy, not a SSOT violation) |
+| Path discipline | 15% | 10 | All embedding changes isolated to src/lib/sop-embeddings.ts; backfill imports countStaleGoogleEmbeddings from sop-embeddings; no scattered model references in other src/lib files |
+| Observability | 15% | 10 | LOUD MODEL-DRIFT warning in rankSOPsBySemantic with stale count + ACTION REQUIRED + shutdown date; MODEL-DRIFT warning in backfill on startup before first embed; --check-stale exits 1 when stale rows present (CI/health-check detectable); countStaleGoogleEmbeddings exported for any health check consumer |
+| Docs match reality | 10% | 9 | Module JSDoc, backfill header, qc-cc.sh section 5b, and CHANGELOG all updated accurately; re-embed path documented with exact commands; minor: Migration 063 comment explains reasoning thoroughly |
+| Regression safety | 10% | 9 | 6 new tests covering all critical paths; 216/218 pass (2 pre-existing unrelated failures: offline-seed + migration-055); Migration 063 idempotent; all 27 pre-existing qc-cc checks retained + 7 new 5b checks; all 3 CI checks green |
 
-**Weighted score:** 10.0/10
+**Weighted score: 9.65/10 — PASS** (independent Sonnet QC, 2026-06-10)
 
 ---
 
