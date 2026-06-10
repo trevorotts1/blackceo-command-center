@@ -185,10 +185,14 @@ jobs:
 
       - name: Start app for outside-in probe
         run: |
-          DATABASE_PATH=/tmp/probe-fixture.db npm run start &
+          # Bind explicitly on 0.0.0.0 so both IPv4 and IPv6 curl calls work.
+          # Ubuntu runners resolve 'localhost' to ::1 (IPv6); without -H 0.0.0.0
+          # the server may only accept ::1 connections and the probe's
+          # --public-url http://127.0.0.1:4000 would get CF_HTTP=000.
+          DATABASE_PATH=/tmp/probe-fixture.db npx next start -p 4000 -H 0.0.0.0 &
           # Wait for the server to be ready (up to 30s)
           for i in $(seq 1 30); do
-            curl -sf http://localhost:4000/api/health && break || sleep 1
+            curl -sf http://127.0.0.1:4000/api/health && break || sleep 1
           done
         env:
           DATABASE_PATH: /tmp/probe-fixture.db
@@ -196,10 +200,9 @@ jobs:
 
       - name: Run cc-health-check.sh — expect GREEN (exit 0)
         run: |
-          # --public-url resolves the CF probe to the local server (exit 3 UNKNOWN without it).
-          # In CI there is no CF tunnel; pointing --public-url to localhost makes the
-          # CF probe see HTTP 200 instead of returning UNKNOWN (no-URL → CF_INDET=true → exit 3).
-          bash scripts/cc-health-check.sh --port 4000 --public-url http://localhost:4000 --json-only
+          # --public-url http://127.0.0.1:4000 so the CF probe hits the running
+          # server (IPv4 explicit, avoids ::1 vs 0.0.0.0 mismatch on Ubuntu runners).
+          bash scripts/cc-health-check.sh --port 4000 --public-url http://127.0.0.1:4000 --json-only
           echo "EXIT: $?"
 
       - name: Break the build — remove a static asset to simulate stale manifest
