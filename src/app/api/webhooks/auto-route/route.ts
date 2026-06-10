@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { run, queryOne } from '@/lib/db';
 import { routeTask } from '@/lib/routing/department-router';
+import { autoDispatchTask } from '@/lib/task-dispatcher';
 import type { Task } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -82,6 +83,11 @@ export async function POST(request: NextRequest) {
     console.log(
       `[AutoRoute] Task "${task.title}" (${taskId}) assigned to ${result.agentName} via ${result.department} → in_progress`,
     );
+
+    // AUTO-DISPATCH (v4.14.0): fire OpenClaw invocation immediately after routing.
+    // autoDispatchTask guards against master/CEO agents and terminal statuses.
+    // Fire-and-forget so routing response is not blocked by OpenClaw latency.
+    void autoDispatchTask(taskId, 'auto-route');
 
     return NextResponse.json({
       success: true,

@@ -27,6 +27,7 @@
 import { queryAll, run, queryOne } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { routeTask } from '@/lib/routing/department-router';
+import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 
@@ -144,6 +145,10 @@ export async function runCeoDelegationSweep(): Promise<void> {
       console.log(
         `[ceo-delegation] ${isQcFail ? 'QC-fail re-dispatch' : 'Re-homed'} task ${task.id} ("${task.title}") → ${routing.agentName} (${routing.department})`,
       );
+
+      // AUTO-DISPATCH (v4.14.0): fire OpenClaw invocation after re-homing.
+      // Guards inside autoDispatchTask handle master/CEO skip + status checks.
+      void autoDispatchTask(task.id, 'ceo-delegation-sweep');
     } catch (err) {
       console.warn(`[ceo-delegation] Sweep failed for task ${task.id}:`, (err as Error).message);
     }

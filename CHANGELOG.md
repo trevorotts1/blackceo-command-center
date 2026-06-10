@@ -1,3 +1,38 @@
+## [v4.14.0] - 2026-06-09 - Auto-dispatch: specialist tasks now invoke OpenClaw automatically after routing
+
+Closes the two-step routing gap: every task auto-routed to a specialist agent now fires the OpenClaw invocation immediately (no manual "Send to Agent" click required).
+
+### Fixed
+
+- **Routed specialist tasks now auto-invoke OpenClaw** (`src/lib/task-dispatcher.ts` + three call-sites): The Command Center has always had two steps — (1) routing assigns `assigned_agent_id`, (2) dispatch connects to OpenClaw and advances the task to `in_progress`. Step 2 only fired on a manual UI click. This meant every auto-routed task (Curtis routing a purple-duck to Graphics Lead; any agent ingest via Telegram/ingest endpoint) stalled in backlog indefinitely — the specialist was never invoked, no deliverable produced, no QC. Proven on Sheila's box.
+
+### Added
+
+- **`src/lib/task-dispatcher.ts`** — new server-only module exporting `autoDispatchTask(taskId, context?)`. Replicates the `POST /api/tasks/[id]/dispatch` Step-2 logic in-process: connects to OpenClaw, creates/reuses a session, builds the full task message (SOP pull, intelligence resolution, persona, output dir, API callbacks), calls `chat.send`, advances task to `in_progress`, sets agent to `working`, writes `task_dispatched` event + `task_activities` row. Fire-and-forget (`void autoDispatchTask(...)`) so routing never fails due to an OpenClaw connectivity issue.
+
+- **Guards inside `autoDispatchTask`** (all verified by tests):
+  1. Master/CEO agents (`is_master=1`) → **skip** (routing artifacts; CEO orchestrates, specialists execute).
+  2. No `assigned_agent_id` → skip.
+  3. Task already `in_progress`/`review`/`done`/`blocked`/`archived` → skip.
+  4. `qc_reroute_attempts > QC_MAX_REROUTES` → skip (QC loop cap already blocked the task).
+  5. Errors logged, never thrown — routing always completes.
+
+- **`src/lib/tasks.ts`** — `createTaskCore` now calls `void autoDispatchTask(id, 'createTaskCore')` immediately after in-process routing assigns a non-null `resolvedAgentId`. Import added.
+
+- **`src/app/api/webhooks/auto-route/route.ts`** — `POST` handler now calls `void autoDispatchTask(taskId, 'auto-route')` after the routing UPDATE. Import added. (This is the path the QC scorer and CEO delegation sweep hit.)
+
+- **`src/lib/jobs/ceo-delegation-sweep.ts`** — sweep loop now calls `void autoDispatchTask(task.id, 'ceo-delegation-sweep')` after re-homing a task. Import added. Ensures QC-fail re-routed tasks also get invoked.
+
+- **`tests/unit/auto-dispatch-routing.test.ts`** — 9 unit tests: function export, no-agent skip, master/CEO guard, `in_progress` guard, `review`/`done`/`blocked` terminal guards, QC cap guard, non-existent task ID graceful handling, import stability.
+
+### Unchanged / Backward Compatible
+
+- **Manual "Send to Agent" path** (`POST /api/tasks/[id]/dispatch`) continues to work for operator UI use.
+- Pre-existing ~24 stale backlog tasks are NOT mass-dispatched — `autoDispatchTask` only fires on the routing/assignment event for newly-routed tasks, and the terminal-status guard prevents re-dispatching tasks already in flight.
+- QC re-route loop guard (`qc_reroute_attempts`, `QC_MAX_REROUTES=3`) fully respected.
+
+---
+
 ## [v4.13.0] - 2026-06-09 - Company Settings: brand secondary color, auto-derived product name, full CSS-variable theming
 
 Extends the Company Settings page (`/settings/company`) so operators can make the dashboard their own:

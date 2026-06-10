@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.14.0 (2026-06-09)** closes the two-step routing gap: specialist tasks now **auto-invoke OpenClaw** after routing without any manual "Send to Agent" click. `src/lib/task-dispatcher.ts` (`autoDispatchTask`) is called fire-and-forget from `createTaskCore`, `auto-route`, and `ceo-delegation-sweep`. Guards: master/CEO agents skipped, terminal statuses skipped, QC loop cap respected. See `CHANGELOG.md` for the full v4.14.0 entry.
+>
 > **v4.13.0 (2026-06-09)** extends Company Settings with a **brand secondary color** field (color picker + hex/name input), **auto-derived Product Name** from the Company Name (`"<Name> Command Center"`), and full CSS-variable theming: primary + secondary colors cascade app-wide via `--brand-secondary-*` CSS variables and `BrandTheme` Tailwind utility overrides. Migration 062 adds `clients.brand_secondary_color`. See `CHANGELOG.md` for the full v4.13.0 entry.
 >
 > **v4.12.0 (2026-06-09)** closes the QC re-dispatch loop: fixes the "fetch failed" bug (wrong port 3000 → port 4000 via `getMissionControlUrl()`), ensures QC-fail backlog tasks are re-dispatched to the correct department specialist (`in_progress`), and adds an infinite-loop guard (`qc_reroute_attempts` counter, cap via `QC_MAX_REROUTES` env, default 3 — exceeded tasks go `blocked` with a CEO-addressed event). See `CHANGELOG.md` for the full v4.12.0 entry.

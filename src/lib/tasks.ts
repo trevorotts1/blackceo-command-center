@@ -37,6 +37,7 @@ import { selectPersonaForTask } from '@/lib/persona-selector';
 import { getBestSOPForTask } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { autoDispatchTask } from '@/lib/task-dispatcher';
 import type { Task, TaskPriority, Agent } from '@/lib/types';
 
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
@@ -351,6 +352,15 @@ export async function createTaskCore(
     }
   }
   // --- END INSTANT ROUTING ---
+
+  // --- AUTO-DISPATCH (v4.14.0) ---
+  // If routing assigned a non-master specialist, fire the OpenClaw invocation
+  // immediately so the specialist actually runs without a manual UI click.
+  // Fire-and-forget: routing must not fail if OpenClaw is temporarily down.
+  if (resolvedAgentId) {
+    void autoDispatchTask(id, 'createTaskCore');
+  }
+  // --- END AUTO-DISPATCH ---
 
   // Log event. Caller may supply an explicit message (the ingest path embeds
   // its idempotency/provenance marker here).
