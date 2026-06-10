@@ -329,9 +329,9 @@ ls -la mission-control.db
 ## 📖 Further Reading
 
 - [Agent Protocol Documentation](docs/AGENT_PROTOCOL.md)
-- [Real-Time Implementation](REALTIME_IMPLEMENTATION_SUMMARY.md)
+- [Real-Time Implementation](docs/archive/REALTIME_IMPLEMENTATION_SUMMARY.md)
 - [the orchestrator Orchestration Guide](src/lib/orchestration.ts)
-- [Verification Checklist](VERIFICATION_CHECKLIST.md)
+- [Verification Checklist](docs/archive/VERIFICATION_CHECKLIST.md)
 
 ---
 
