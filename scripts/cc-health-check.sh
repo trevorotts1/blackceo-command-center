@@ -66,7 +66,7 @@ else
   # Write pm2 output to a temp file rather than piping it to Python's stdin
   # (a heredoc on the same process would bind stdin first, causing
   # sys.stdin.read() to return '' — the root cause fixed in REDO #2).
-  _J=$(mktemp /tmp/pm2_raw_$$.json)
+  _J=$(mktemp /tmp/pm2_raw_XXXXXX.json)
   pm2 jlist 2>/dev/null > "$_J" || echo "[]" > "$_J"
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   PM2_JSON=$(python3 -s "$SCRIPT_DIR/pm2-analyze-cc.py" \
@@ -108,7 +108,7 @@ else log "WARN: no /_next/static ref — outside-in skipped"; fi
 # 3xx → row 26 FAIL.  000 → row 27 UNKNOWN.  200+CF-challenge → new row UNKNOWN.
 CF_PASS="skip"; CF_INDET=false; CF_DETAIL="public URL not configured (row 27: UNKNOWN)"
 if [[ -n "$PUBLIC_URL" ]]; then
-  _CF=$(mktemp /tmp/cf_probe_$$.html)
+  _CF=$(mktemp /tmp/cf_probe_XXXXXX.html)
   CF_HTTP=$(curl -s --max-time 15 --max-redirs 0 -w '%{http_code}' -o "$_CF" "$PUBLIC_URL" 2>/dev/null || echo "000")
   CF_BODY=$(cat "$_CF" 2>/dev/null || echo ""); rm -f "$_CF"
   if   [[ "$CF_HTTP" == "000" ]]; then CF_INDET=true; CF_DETAIL="CF tunnel unreachable (row 27: UNKNOWN)"
