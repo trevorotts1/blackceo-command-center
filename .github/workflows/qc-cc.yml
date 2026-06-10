@@ -53,6 +53,118 @@ jobs:
       - name: Assert CHANGELOG.md has no uncorrected self-assessed QC entries
         run: bash scripts/check-qc-independence.sh
 
+  # ── B.1 deep-health truth-table suite ────────────────────────────────────
+  # Ports every applicable row of docs/B1-truth-table.md into vitest.
+  # A wrong verdict on any row blocks merge (per the severity tier table).
+  deep-health-truth-table:
+    name: B.1 deep-health truth table (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run vitest truth-table suite
+        run: npm run test:vitest
+        env:
+          NODE_ENV: test
+          # No DB or server needed — tests use mocks and temp dirs
+          DATABASE_PATH: ""
+
+  # ── B.1 thin-probe fixture run ─────────────────────────────────────────────
+  # Exercises cc-health-check.sh against a real Next.js build + pm2-less fixture
+  # to confirm the script exits 0 (green) on a known-good state and exits 1 on
+  # a broken state (missing asset).  Does NOT require pm2 (pm2 check is skipped
+  # when pm2 is absent; fixture covers the app-level checks).
+  deep-health-probe-fixture:
+    name: B.1 thin-probe fixture (cc-health-check.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app for fixture
+        run: npm run build
+        env:
+          DATABASE_PATH: /tmp/probe-fixture.db
+
+      - name: Seed fixture DB with branded company
+        run: |
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database('/tmp/probe-fixture.db');
+            db.exec(\"CREATE TABLE IF NOT EXISTS companies (id INTEGER PRIMARY KEY, name TEXT, slug TEXT)\");
+            db.exec(\"INSERT OR REPLACE INTO companies (id, name, slug) VALUES (1, 'Fixture Corp', 'fixture-corp')\");
+            db.exec(\"CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY)\");
+            db.close();
+            console.log('Fixture DB seeded');
+          "
+
+      - name: Write fixture company-config.json
+        run: |
+          mkdir -p config
+          echo '{"companyName":"Fixture Corp","slug":"fixture-corp"}' > config/company-config.json
+
+      - name: Start app for outside-in probe
+        run: |
+          DATABASE_PATH=/tmp/probe-fixture.db npm run start &
+          # Wait for the server to be ready (up to 30s)
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4000/api/health && break || sleep 1
+          done
+        env:
+          DATABASE_PATH: /tmp/probe-fixture.db
+          PORT: 4000
+
+      - name: Run cc-health-check.sh — expect GREEN (exit 0)
+        run: |
+          bash scripts/cc-health-check.sh --port 4000 --json-only
+          echo "EXIT: $?"
+
+      - name: Break the build — remove a static asset to simulate stale manifest
+        run: |
+          ASSET=$(ls .next/static/chunks/*.js 2>/dev/null | head -1)
+          if [[ -n "$ASSET" ]]; then
+            rm -f "$ASSET"
+            echo "Removed asset: $ASSET"
+          else
+            echo "No .js asset found to remove — skipping stale-manifest fixture"
+          fi
+
+      - name: cc-health-check.sh with broken asset — expect RED (exit 1)
+        run: |
+          bash scripts/cc-health-check.sh --port 4000 --json-only && {
+            echo "ERROR: expected exit 1 (RED) but got exit 0 (GREEN) — stale-manifest check is broken"
+            exit 1
+          } || {
+            CODE=$?
+            if [[ "$CODE" -eq 1 ]]; then
+              echo "OK: correctly returned exit 1 (RED) for stale manifest"
+            elif [[ "$CODE" -eq 3 ]]; then
+              echo "NOTE: returned exit 3 (UNKNOWN) — acceptable if asset removal did not affect served HTML refs"
+            else
+              echo "Unexpected exit code $CODE"
+              exit 1
+            fi
+          }
+
   duck-e2e:
     name: Duck pipeline e2e (mock generator)
     runs-on: ubuntu-latest

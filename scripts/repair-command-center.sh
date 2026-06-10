@@ -407,6 +407,28 @@ fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
+# ── Final health check via thin probe ────────────────────────────────────────
+# B.1: repair delegates final verdict to cc-health-check.sh (the single
+# definition of green).  repair-command-center never implements its own
+# green logic.  Exit 3 (UNKNOWN/indeterminate) = transient, not a failure.
+HEALTH_SCRIPT="$REPO_ROOT/scripts/cc-health-check.sh"
+if [[ -x "$HEALTH_SCRIPT" ]]; then
+  log "Running cc-health-check.sh for final verdict..."
+  bash "$HEALTH_SCRIPT" --skip-pm2 --json-only 2>&1 | while IFS= read -r line; do
+    log "  [health] $line"
+  done
+  HEALTH_EXIT="${PIPESTATUS[0]:-$?}"
+  if [[ "$HEALTH_EXIT" -eq 0 ]]; then
+    ok "cc-health-check: GREEN — box confirmed healthy"
+  elif [[ "$HEALTH_EXIT" -eq 3 ]]; then
+    warn "cc-health-check: UNKNOWN (transient — DB may be busy or server still starting)"
+  else
+    fail "cc-health-check: RED after repair — manual investigation required"
+  fi
+else
+  warn "cc-health-check.sh not found or not executable — skipping final health probe"
+fi
+
 echo "────────────────────────────────────────────────────────────"
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
   printf "${GREEN}repair-command-center: ALL STEPS PASSED${NC}\n"

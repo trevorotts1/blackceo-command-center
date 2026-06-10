@@ -148,10 +148,22 @@ export function readCachedStatus(): SystemStatusPayload | null {
 
     if (rows.length === 0) return null;
 
+    // FALSE-GREEN FIX (§5 guidance, item 4):
+    // probed_at is stored as a full ISO-8601 string that already ends in 'Z'
+    // (written via new Date().toISOString()).  Appending another 'Z' produces
+    // "...ZZ" which Date.parse returns NaN, making cacheAgeMs NaN, causing
+    // Number.isFinite(NaN) === false, causing the cache to NEVER serve a hit,
+    // forcing every request to re-run all probes regardless of TTL.
+    // Fix: parse directly without appending 'Z'.
+    const parseTs = (ts: string): number => {
+      const ms = Date.parse(ts);
+      return Number.isFinite(ms) ? ms : 0;
+    };
+
     const newest = rows.reduce((acc, r) =>
-      new Date(r.probed_at + 'Z').getTime() > new Date(acc.probed_at + 'Z').getTime() ? r : acc
+      parseTs(r.probed_at) > parseTs(acc.probed_at) ? r : acc
     );
-    const cacheAgeMs = Date.now() - new Date(newest.probed_at + 'Z').getTime();
+    const cacheAgeMs = Date.now() - parseTs(newest.probed_at);
     if (!Number.isFinite(cacheAgeMs) || cacheAgeMs > STATUS_CACHE_TTL_MS) {
       return null;
     }
