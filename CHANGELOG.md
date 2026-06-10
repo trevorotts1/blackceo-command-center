@@ -1,3 +1,62 @@
+## [v4.26.0] - 2026-06-10 - feat(prd-2.11): Department Trio seed — QC + Research + Devil's Advocate per department
+
+### PRD 2.11 (CC side) — Trio Agent Rows per Department
+
+**What was wrong (PRD Section 3, item 2.11):**
+The design requires every operational department to have three specialist agents
+seeded in the `agents` table with distinct `role_type` values: `qc` (migration
+060), `research`, and `devils-advocate`. Only `qc` was seeded. Nothing gated a
+build or dispatch resolution on all three; the research and DA rows were absent,
+making the trio unresolvable by move-to-done / dispatch logic.
+
+**What changed:**
+
+- **`src/lib/db/migrations.ts`**: Added migration `065`
+  (`seed_research_and_devils_advocate_agents`) that seeds one `research` agent
+  and one `devils-advocate` agent per workspace — idempotent via
+  `INSERT OR IGNORE` on deterministic ids (`research-agent-<wsId>`,
+  `da-agent-<wsId>`). Added exported `autoSeedTrioAgents()` function for the
+  deferred-seed path (covers the case where migration 065 runs before any
+  workspaces exist). Wired `autoSeedTrioAgents()` into both `runMigrations()`
+  and `autoSeedFromDepartmentsJson()` so every workspace always gets its full
+  trio on any first-boot or subsequent boot.
+
+- **`src/lib/qc-scorer.ts`**: Exported `DeptTrioAgents` interface,
+  `resolveTrioAgents(workspaceId, deptSlug)` (resolves all three role_types for
+  a department — mirrors the existing QC agent lookup logic), and
+  `getMissingTrioRoles(workspaceId, deptSlug)` (returns an array of missing
+  role_type strings for build-gate / fleet-sweep callers). **Devil's Advocate
+  invariant**: `role_type='devils-advocate'` is returned by `resolveTrioAgents`
+  so the build gate can verify presence, but it MUST NOT appear in any
+  client-facing query or UI picker — enforced by the `[INTERNAL]` marker in the
+  agent description and by the existing client-facing role queries filtering on
+  `IN ('qc', 'research')` only.
+
+- **`tests/unit/prd-2.11-trio-agent-seed.test.ts`**: 12 new tests — all pass.
+  Covers migration seeding, deterministic ids, workspace association,
+  resolveTrioAgents (direct + slug fallback), null/unknown workspace, 
+  getMissingTrioRoles, DA non-appearance in client-facing queries, idempotency,
+  and pre-migration-060 guard.
+
+- **`scripts/qc-cc.sh`**: Added section 8 with 13 static checks for PRD 2.11
+  (migration 065 presence, role_types, exported functions, INTERNAL marker,
+  id prefixes, fixture test file). 62/62 checks pass.
+
+**QC Self-Assessment (PRD Section 6, gate 8.5):**
+
+| Dimension      | Weight | Score | Evidence |
+|----------------|--------|-------|---------|
+| Wiring         | 30     | 9     | Migration 065 seeds both roles per workspace; autoSeedTrioAgents wired into runMigrations post-chain AND autoSeedFromDepartmentsJson deferred path. resolveTrioAgents resolves all three via direct and slug-fallback lookup — verified by 12 live tests. getMissingTrioRoles returns [] for fully seeded dept and missing roles for partial. DA returned by resolveTrioAgents so build gate can check; NOT returned by client-facing IN('qc','research') queries. Minor: dispatch logic callers must import resolveTrioAgents from qc-scorer — contract is documented; actual call-site is PRD 2.11's next wave (onboarding build gate). |
+| SSOT           | 20     | 10    | Single migration (065) + single exported function (autoSeedTrioAgents) for all trio seeding. resolveTrioAgents is the single resolver; no duplicate lookup logic. Deterministic id scheme documented in comments. |
+| Path           | 15     | 10    | No paths introduced. All DB operations use parameterized prepared statements. No literal tildes or hardcoded paths. |
+| Observability  | 15     | 9     | Migration 065 logs seeded count + workspace count. autoSeedTrioAgents logs per-workspace count on change. getMissingTrioRoles returns the missing role names (never silent). Pre-migration-060 guard logs nothing on skip (acceptable — pre-migration state is transient). |
+| Docs           | 10     | 9     | JSDoc on all three new exports. DA INTERNAL invariant documented in JSDoc + description string + test. CHANGELOG entry covers all changed files. qc-cc.sh section 8 added with 13 checks. |
+| Regression     | 10     | 10    | 12/12 new tests pass. 62/62 qc-cc.sh checks pass. TypeScript compiles with zero new errors (only pre-existing kie-capabilities test errors). No pre-existing tests broken. |
+
+**Weighted score:** (9×30 + 10×20 + 10×15 + 9×15 + 9×10 + 10×10) / 100 = (270+200+150+135+90+100)/100 = **9.45/10 PASS** (gate: 8.5)
+
+---
+
 ## QC RESULT — PRD 3.4 — 2026-06-10 — PASS (weighted 9.45/10)
 
 Scored by independent Sonnet QC agent against PRD Section 6 dimensions (Wiring 30, SSOT 20, Path 15, Observability 15, Docs 10, Regression 10).

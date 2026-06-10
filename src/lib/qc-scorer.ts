@@ -436,6 +436,103 @@ function resolveQCAgent(task: TaskRowForQC): QCAgentRow | null {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PRD 2.11 — Trio resolver
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-department trio row.  All three role_type agents are required per
+ * department; `null` means the agent is missing and the build gate must fail.
+ *
+ * Devil's Advocate (role_type='devils-advocate') is INTERNAL: it is returned
+ * here so the build gate and dispatch logic can verify its existence, but it
+ * MUST NOT be exposed to any client-facing query or UI picker.
+ */
+export interface DeptTrioAgents {
+  qc: QCAgentRow | null;
+  research: QCAgentRow | null;
+  /** INTERNAL — never surface to client UI. */
+  devilsAdvocate: QCAgentRow | null;
+}
+
+/**
+ * Resolve all three trio agents for the given department workspace.
+ *
+ * Lookup order (mirrors resolveQCAgent):
+ *   1. agents WHERE workspace_id = workspaceId AND role_type = <type>
+ *   2. agents WHERE lower(workspace_id) = canonicalSlug(deptSlug) AND role_type = <type>
+ *   3. null
+ *
+ * Returns a DeptTrioAgents object where any null member indicates a missing
+ * trio agent (build gate / fleet-sweep can treat any null as a failure).
+ *
+ * Safe on pre-migration-060 DBs: returns { qc: null, research: null,
+ * devilsAdvocate: null } when the role_type column doesn't exist yet.
+ *
+ * @param workspaceId  The workspace.id (preferred — direct FK match)
+ * @param deptSlug     The department slug (fallback when workspaceId is null)
+ */
+export function resolveTrioAgents(
+  workspaceId: string | null,
+  deptSlug: string | null,
+): DeptTrioAgents {
+  const empty: DeptTrioAgents = { qc: null, research: null, devilsAdvocate: null };
+
+  try {
+    // Guard: role_type column must exist.
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(agents)', []);
+    if (!cols.some((c) => c.name === 'role_type')) return empty;
+
+    const resolveRole = (roleType: string): QCAgentRow | null => {
+      // 1. Direct workspace_id match
+      if (workspaceId) {
+        const row = queryOne<QCAgentRow>(
+          'SELECT id, name, model FROM agents WHERE workspace_id = ? AND role_type = ? LIMIT 1',
+          [workspaceId, roleType],
+        );
+        if (row) return row;
+      }
+
+      // 2. Canonical slug match via deptSlug
+      if (deptSlug) {
+        const canonical = canonicalDeptSlug(deptSlug);
+        const row = queryOne<QCAgentRow>(
+          'SELECT id, name, model FROM agents WHERE lower(workspace_id) = ? AND role_type = ? LIMIT 1',
+          [canonical, roleType],
+        );
+        if (row) return row;
+      }
+
+      return null;
+    };
+
+    return {
+      qc: resolveRole('qc'),
+      research: resolveRole('research'),
+      devilsAdvocate: resolveRole('devils-advocate'),
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Assert that the full trio (qc + research + devils-advocate) exists for the
+ * given department. Returns an array of missing role_type strings (empty = all
+ * present). Used by the build gate and fleet-sweep checks.
+ */
+export function getMissingTrioRoles(
+  workspaceId: string | null,
+  deptSlug: string | null,
+): string[] {
+  const trio = resolveTrioAgents(workspaceId, deptSlug);
+  const missing: string[] = [];
+  if (!trio.qc) missing.push('qc');
+  if (!trio.research) missing.push('research');
+  if (!trio.devilsAdvocate) missing.push('devils-advocate');
+  return missing;
+}
+
 /**
  * Run QC scoring for a task that just entered `review` status.
  *
