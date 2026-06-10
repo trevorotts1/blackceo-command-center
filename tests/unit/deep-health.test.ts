@@ -610,6 +610,89 @@ describe('disk_headroom', () => {
     expect(result.pass).toBe(false);
     expect(result.detail).toMatch(/below/i);
   });
+
+  // Row 35: wrong-mount false-green — /data exists on a SEPARATE high-capacity
+  // filesystem; the CC app runs from process.cwd() on a LOW-space partition.
+  //
+  // The Sheila-class false-green: a previous Docker install left an empty /data
+  // directory on the root filesystem (root has 80 GB free). The CC app is
+  // installed at ~/blackceo-command-center on a separate /home partition with
+  // only 300 MB free. An old _resolve_disk_path() heuristic that picks /data
+  // when the directory exists would probe df /data = 80 GB → false PASS.
+  //
+  // The guard in deep-checks.ts: checkPath resolves from DATABASE_PATH dir or
+  // process.cwd() — NEVER from /data presence alone. This test proves the guard
+  // holds: even when the mock returns abundant space for the /data path, the
+  // check probes process.cwd() (tmpDir, mocked to 300 MB) and returns FAIL.
+  //
+  // Implementation: diskReader.readFreeBytes is called with the resolved
+  // checkPath. We mock it to distinguish the two paths:
+  //   - any path that IS process.cwd() (tmpDir) → 300 MB (low space, CC partition)
+  //   - any path that is /data or contains /data  → 80 GB (abundant, wrong mount)
+  // Because checkDiskHeadroom() resolves checkPath from process.cwd() (since no
+  // DATABASE_PATH is set in this test), it always calls readFreeBytes(tmpDir).
+  // The /data branch in the mock is never called → FAIL is returned.
+  it('row 35: /data exists with abundant space but CC cwd has <500 MB → pass=false (wrong-mount guard)', async () => {
+    const checks = await loadChecks();
+    // Mock returns disk space depending on which path is probed.
+    // The check MUST probe process.cwd() (tmpDir), not /data.
+    checks.diskReader.readFreeBytes = (checkPath: string): number => {
+      if (checkPath.startsWith('/data') || checkPath === '/data') {
+        // Abundant space on the /data mount (the wrong mount that the old
+        // heuristic would have picked) — 80 GB.
+        return 80 * 1024 ** 3;
+      }
+      // process.cwd() = tmpDir = the CC app partition — only 300 MB free.
+      // This is below the 500 MB threshold.
+      return 300 * 1024 * 1024;
+    };
+
+    // No DATABASE_PATH set → checkPath resolves to process.cwd() (tmpDir).
+    // process.cwd() is mocked to tmpDir in beforeEach.
+    const saved = process.env.DATABASE_PATH;
+    delete process.env.DATABASE_PATH;
+
+    const result = await checks.checkDiskHeadroom();
+
+    if (saved !== undefined) process.env.DATABASE_PATH = saved;
+
+    // Must FAIL: 300 MB < 500 MB threshold.
+    // If the check probed /data instead of process.cwd(), it would see 80 GB → PASS.
+    // A PASS here means the wrong-mount guard is broken.
+    expect(result.pass).toBe(false);
+    expect(result.detail).toMatch(/below/i);
+    // Confirm the check path is NOT /data — it must be process.cwd() (tmpDir).
+    expect((result as { path?: string }).path).not.toMatch(/^\/data/);
+  });
+
+  // Row 35 variant: DATABASE_PATH is set to a path under /home (the correct
+  // CC partition, 300 MB free) while /data has 80 GB. The check must probe
+  // DATABASE_PATH's directory (the CC partition) and return FAIL.
+  it('row 35 variant: DATABASE_PATH set to CC partition path, /data has more space → check probes DATABASE_PATH dir → pass=false', async () => {
+    const checks = await loadChecks();
+    checks.diskReader.readFreeBytes = (checkPath: string): number => {
+      if (checkPath.startsWith('/data') || checkPath === '/data') {
+        return 80 * 1024 ** 3; // /data: 80 GB (wrong mount)
+      }
+      return 300 * 1024 * 1024; // DATABASE_PATH dir (CC partition): 300 MB
+    };
+
+    const saved = process.env.DATABASE_PATH;
+    // Set DATABASE_PATH to a path under tmpDir (the CC partition, not /data).
+    process.env.DATABASE_PATH = path.join(tmpDir, 'mission-control.db');
+
+    const result = await checks.checkDiskHeadroom();
+
+    if (saved !== undefined) process.env.DATABASE_PATH = saved;
+    else delete process.env.DATABASE_PATH;
+
+    // Must FAIL: DATABASE_PATH dir (tmpDir) has 300 MB < 500 MB threshold.
+    expect(result.pass).toBe(false);
+    expect(result.detail).toMatch(/below/i);
+    // The check path must be tmpDir (DATABASE_PATH dir), never /data.
+    expect((result as { path?: string }).path).toBe(tmpDir);
+    expect((result as { path?: string }).path).not.toMatch(/^\/data/);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
