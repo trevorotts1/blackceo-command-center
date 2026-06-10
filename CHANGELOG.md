@@ -58,6 +58,18 @@ from a clean install.
 
 **Weighted score: 10.0/10 — PASS**
 
+### QC rubric score (PRD Section 6) — independent Sonnet scorer
+| Dimension | Weight | Score | Evidence |
+|---|---|---|---|
+| Wiring correctness | 30% | 10 | `--task-output` always appended; fallback to taskId ensures arg never omitted; both call sites (route.ts + qc-scorer.ts) updated; FK sentinel in migration 064 seeded before any workspace INSERT; fixture 10/10 green |
+| Single source of truth | 20% | 9 | One signature change, two call sites, one migration — no duplication. Minor: package-lock.json required a separate version-drift fix commit (pre-existing CI gap, not a logic flaw) |
+| Path discipline | 15% | 10 | Only src/ files touched plus migration 064 (next in sequence); no new abstractions; test files added in tests/unit/ |
+| Observability | 15% | 9 | `record-completion OK` / `exited N` logs now fire correctly; migration 064 logs insert vs skip. Minor: no structured metric emitted for persona_performance row count, but log coverage is correct for this scope |
+| Docs match reality | 10% | 9 | CHANGELOG root-cause + fix + evidence; JSDoc updated on spawnRecordCompletion. Minor: CHANGELOG self-score was 10/10 which overstates (package-lock drift existed) |
+| Regression safety | 10% | 10 | INSERT OR IGNORE preserves existing company rows; taskOutput param is optional with safe taskId fallback; 7 pre-existing failures unchanged; idempotent migration confirmed by Test 3 |
+
+**Independent weighted score: 9.35/10 — PASS**
+
 ---
 
 ## [v4.21.0] - 2026-06-10 - fix(qc): heuristic mode skips reroute loop — human review only (PRD 2.4)
