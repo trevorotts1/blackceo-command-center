@@ -2,7 +2,16 @@
 # cc-health-check.sh — THE single definition of "green" for a deployed
 # BlackCEO Command Center instance.
 #
-# PRD Addendum B, item B.1 (P0) — REDO #4 fixes applied
+# PRD Addendum B, item B.1 (P0) — REDO #6 fixes applied
+# REDO #6 fix: PRD directive (c) — apps_with_cwd filter removed from the cwd check.
+#   The old `apps_with_cwd = [a for a in cc_apps if get_cwd(a)]` filtered out CC apps
+#   that lacked pm_cwd, allowing them to silently pass the cwd check. Fix: compare ALL
+#   cc_apps directly. get_cwd(a) returning '' normalises to '.' via normpath, which !=
+#   any real canon_dir → cwd_ok=False. This closes the vacuous-all() hole entirely:
+#   all([]) cannot be reached because zero cc_apps → topology fails on app_count first.
+#
+# REDO #5 fix: WRONG-VERDICT title extraction — production HTML format.
+#
 # REDO #4 fix: DEFECT 3 — macOS BSD grep -c two-stage pipeline multiline bug.
 #   ASSETS_FOUND_TOTAL was computed via 'grep -v ... | grep -c .' which returns
 #   '0\n0' on macOS when the input is empty. The subsequent [[ -eq 0 ]] arithmetic
@@ -883,9 +892,10 @@ fi
 #   - pm_cwd == canonical install dir
 #   - DATABASE_PATH explicitly set in env
 #
-# FIX #2 (vacuous all()): if --canonical-dir is set and cc_apps is non-empty but
-#   ALL lack a pm_cwd, emit cwd_ok=FALSE. The old `all(... if get_cwd(a))` was vacuously
-#   True on the empty set.
+# FIX #2 (vacuous all() + missing-cwd mismatch): PRD B.1 directive (c) — a CC app
+#   lacking pm_cwd COUNTS as a cwd mismatch (topology fail). The old `apps_with_cwd`
+#   filter excluded apps without pm_cwd from comparison (silent pass on missing cwd).
+#   Fix: compare ALL cc_apps directly; missing cwd normalises to '.' which != canon_dir.
 #
 # FIX #3 (crash-loop scope): delta crash map iterates cc_apps ONLY. A non-CC app
 #   (e.g. openclaw-telegram-worker) with restart-delta>=3 must NOT fail pm2_topology.
@@ -1081,23 +1091,22 @@ for app in cc_apps:
     if cwd:
         found_cwd = cwd
 
-# FIX #2: CWD check — vacuous-all() fix.
-# If canon_dir is set and cc_apps is non-empty:
-#   - If ALL cc_apps lack a pm_cwd, cwd_ok=FALSE (not vacuously True).
-#   - If at least one has a cwd, require ALL with cwd to match canon_dir.
+# CWD check — no vacuous pass, no get_cwd() filter.
+# PRD B.1 directive (c): a CC app lacking pm_cwd COUNTS as a cwd mismatch (topology fail).
+# The old `apps_with_cwd = [a for a in cc_apps if get_cwd(a)]` filter allowed an app
+# with missing pm_cwd to pass silently by being excluded from comparison.
+# Fix: compare ALL cc_apps directly. get_cwd(a) returning '' gives
+#   os.path.normpath('') == '.' which will != canon_dir → mismatch → cwd_ok=False.
+# This removes the vacuous-all() hole entirely: all([]) can NEVER be reached because
+#   zero cc_apps → topology already fails on app_count (not on cwd_ok).
 # If canon_dir is not set and cc_apps exist: cwd_ok=False.
-# If no cc_apps: cwd_ok=True (topology already fails on app_count).
+# If no cc_apps: cwd_ok=True (topology already fails on app_count; no cwd to check).
 cwd_ok = True
 if cc_apps and canon_dir:
-    apps_with_cwd = [a for a in cc_apps if get_cwd(a)]
-    if not apps_with_cwd:
-        # FIX #2: every cc_app lacks pm_cwd — this is not "all match", it's unknown/broken
-        cwd_ok = False
-    else:
-        cwd_ok = all(
-            os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
-            for a in apps_with_cwd
-        )
+    cwd_ok = all(
+        os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
+        for a in cc_apps
+    )
 elif cc_apps and not canon_dir:
     cwd_ok = False
 else:

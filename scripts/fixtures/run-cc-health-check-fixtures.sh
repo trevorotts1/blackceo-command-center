@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # run-cc-health-check-fixtures.sh — automated fixture runner for cc-health-check.sh (B.1)
 #
+# REDO #6 fixes (applied on top of REDO #5):
+#   - PRD B.1 directive (c): REMOVE apps_with_cwd filter in cwd check — a CC app lacking
+#     pm_cwd MUST count as a cwd mismatch (not silently excluded). Fixture 4d updated to
+#     verify the new logic (4d-i: single empty cwd; 4d-ii: mixed cwds; structural no-filter check).
+#   - Fixture 0-pm2 (mandatory live green=true): purge ALL mission-control-fixture-* stale apps
+#     (not just port-matched ones), use dedicated port 29090, add 8s online-wait, fail-fast
+#     if app doesn't reach online. Also orphan-kill 29090 at startup.
+#   - cc-health-check.sh: apps_with_cwd filter removed; cwd check now compares ALL cc_apps
+#     directly; get_cwd('')→normpath('')='.' != canon_dir → mismatch (no vacuous pass possible).
+#
 # REDO #5 fixes (applied on top of REDO #4):
 #   - Fixture 0t: real-format HTML (no og:site_name, title='Co Command Center') must
 #     produce company_name.pass=true (fixes wrong-verdict false-fail on every healthy box)
@@ -80,9 +90,10 @@ _skip() { printf "  SKIP %s (counted as pass)\n" "$*"; PASS_COUNT=$((PASS_COUNT+
 SERVER_PID=""
 
 # Kill any orphaned Python http.server processes from previous fixture runs
-# that may still be listening on our port range (19810-19830).
+# that may still be listening on our port range (19810-19830) or the dedicated
+# Fixture-0-pm2 port (29090).
 # These accumulate when a test run is interrupted before cleanup (trap doesn't fire).
-for _orphan_port in $(seq 19810 19830); do
+for _orphan_port in $(seq 19810 19830) 29090; do
   _orphan_pid=$(lsof -t -i ":${_orphan_port}" 2>/dev/null | head -1 || true)
   if [[ -n "$_orphan_pid" ]]; then
     kill "$_orphan_pid" 2>/dev/null || true
@@ -828,45 +839,71 @@ else
 fi
 
 ###############################################################################
-# FIXTURE 4d: FIX #2 — vacuous all() — 1 CC app with null pm_cwd + --canonical-dir → cwd_ok=false
+# FIXTURE 4d: PRD B.1 directive (c) — CC app with null pm_cwd MUST count as cwd mismatch.
+# A CC app lacking pm_cwd is NOT silently excluded: get_cwd returns '' which normalises
+# to '.' via normpath; '.' != canon_dir → cwd_ok=False.
+# This exercises both the "all apps lack pm_cwd" path AND the "some apps lack pm_cwd" path.
 ###############################################################################
-printf '\n=== FIXTURE 4d: CC app with null pm_cwd + canon_dir → cwd_ok=false (FIX #2 vacuous all()) ===\n'
+printf '\n=== FIXTURE 4d: CC app with null pm_cwd + canon_dir → cwd_ok=false (directive c: missing cwd = mismatch) ===\n'
 
-result4d=$(python3 -s -c "
-import os, json
+# 4d-i: single CC app with empty pm_cwd — must mismatch
+result4d_i=$(python3 -s -c "
+import os
 canon_dir = '/data/projects/command-center'
-# Simulate cc_apps: 1 app with no pm_cwd
 cc_apps = [{'pm_cwd': '', 'name': 'mission-control'}]
 
 def get_cwd(app):
     return app.get('pm_cwd') or ''
 
-apps_with_cwd = [a for a in cc_apps if get_cwd(a)]
-if not apps_with_cwd:
-    # FIX #2: all apps lack pm_cwd — cwd_ok=False, not vacuously True
-    cwd_ok = False
-elif canon_dir:
-    cwd_ok = all(
-        os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
-        for a in apps_with_cwd
-    )
-else:
-    cwd_ok = False
+# PRD directive (c): no get_cwd() filter — compare ALL cc_apps directly.
+# get_cwd('') → '' → normpath('') = '.' → '.' != canon_dir → mismatch.
+cwd_ok = all(
+    os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
+    for a in cc_apps
+) if (cc_apps and canon_dir) else (False if cc_apps else True)
 
 print('false' if not cwd_ok else 'true')
 " 2>/dev/null || echo "parse_error")
 
-if [[ "$result4d" == "false" ]]; then
-  _pass "Fixture-4d: CC app with null pm_cwd + canon_dir → cwd_ok=false (vacuous all() fix)"
+if [[ "$result4d_i" == "false" ]]; then
+  _pass "Fixture-4d-i: CC app with empty pm_cwd → cwd_ok=false (missing cwd counts as mismatch)"
 else
-  _fail "Fixture-4d: CC app with null pm_cwd returned cwd_ok=${result4d} — VACUOUS TRUE (false-green)"
+  _fail "Fixture-4d-i: CC app with empty pm_cwd returned cwd_ok=${result4d_i} — MISSING CWD SILENTLY PASSES (false-green)"
 fi
 
-# Structural: check the script has the apps_with_cwd guard
-if grep -q 'apps_with_cwd' "$HEALTH_CHECK"; then
-  _pass "Fixture-4d: apps_with_cwd guard present in cc-health-check.sh (FIX #2)"
+# 4d-ii: two CC apps, one with correct cwd, one with empty cwd — must still fail
+result4d_ii=$(python3 -s -c "
+import os
+canon_dir = '/data/projects/command-center'
+cc_apps = [
+    {'pm_cwd': '/data/projects/command-center', 'name': 'mission-control'},
+    {'pm_cwd': '', 'name': 'mission-control-2'},
+]
+
+def get_cwd(app):
+    return app.get('pm_cwd') or ''
+
+cwd_ok = all(
+    os.path.normpath(get_cwd(a)) == os.path.normpath(canon_dir)
+    for a in cc_apps
+) if (cc_apps and canon_dir) else (False if cc_apps else True)
+
+print('false' if not cwd_ok else 'true')
+" 2>/dev/null || echo "parse_error")
+
+if [[ "$result4d_ii" == "false" ]]; then
+  _pass "Fixture-4d-ii: mixed (one cwd ok, one empty) → cwd_ok=false (empty cwd not silently excluded)"
 else
-  _fail "Fixture-4d: apps_with_cwd NOT found in cc-health-check.sh — vacuous all() still present"
+  _fail "Fixture-4d-ii: mixed cwds returned cwd_ok=${result4d_ii} — empty cwd app was silently excluded (old behavior)"
+fi
+
+# Structural: confirm no apps_with_cwd variable ASSIGNMENT in cc-health-check.sh.
+# PRD directive (c): the filter was removed; all cc_apps are compared directly.
+# We check for actual assignment lines (apps_with_cwd =), not comments that mention the name.
+if grep -v '^[[:space:]]*#' "$HEALTH_CHECK" | grep -q 'apps_with_cwd'; then
+  _fail "Fixture-4d: apps_with_cwd assignment still present in cc-health-check.sh (non-comment) — PRD directive (c) NOT applied (missing cwd still silently excluded)"
+else
+  _pass "Fixture-4d: apps_with_cwd assignment removed from cc-health-check.sh — all cc_apps compared directly (directive c: missing cwd = mismatch)"
 fi
 
 ###############################################################################
@@ -1745,39 +1782,54 @@ fi
 
 ###############################################################################
 # FIXTURE 0-pm2: Full green=true path when pm2 is available
-# Creates a real pm2-managed app on a fixture port, runs the full health check,
-# asserts overall green=true.
+#
+# PRD B.1 spec requirement: "a health check whose passing verdict was never
+# exercised is unproven." This fixture is MANDATORY — a real pm2-registered CC
+# app must return green=true from the full script end-to-end.
+#
+# Robustness fixes (causes of the previous intermittent failure):
+#   1. Delete ALL mission-control-fixture-* apps (not just port-matched ones)
+#      at the start so stale stopped apps do not get counted as CC apps.
+#   2. Use a dedicated port far from the standard fixture range (29090) to
+#      reduce the chance of port reuse collisions from previous runs.
+#   3. Explicitly delete any app with the target name before starting fresh —
+#      pm2 may silently reuse a stopped app rather than creating a new one.
+#   4. Wait up to 8s (not 5s) for 'online' and verify via a tighter jlist check.
 ###############################################################################
-printf '\n=== FIXTURE 0-pm2: Full green=true (pm2 available) — end-to-end (FIX #8) ===\n'
+printf '\n=== FIXTURE 0-pm2: Full green=true (pm2 available) — end-to-end mandatory ===\n'
 
 if ! command -v pm2 &>/dev/null; then
   _skip "Fixture-0-pm2: pm2 not available in this environment — skipped (fleet boxes assert green=true in deploy path)"
 else
-  FX0PM2_PORT=$(_next_port)
+  # Use a dedicated high port to avoid collision with other fixture ports
+  FX0PM2_PORT=29090
   FX0PM2_DIR="${WORK_DIR}/fx0pm2"
+  PM2_APP_NAME="mission-control-fixture-$$"
 
-  # Clean up any leftover mission-control-fixture-* apps from previous test runs
-  # that may still be registered in pm2 on the same port number.
-  # Each test run uses the same port (determined by fixture ordering), so stale apps
-  # from prior runs can accumulate and cause false crash-looper detections.
-  pm2 jlist 2>/dev/null \
-    | python3 -s -c "
+  # STEP 1: Purge ALL leftover mission-control-fixture-* apps regardless of port.
+  # The old cleanup only deleted apps matching the fixture port, which left stale
+  # stopped apps from prior runs. A stopped CC-named app on ANY port gets counted
+  # in cc_apps if its PORT env is absent or matches — causing app_count>1 or
+  # crash-looper false-fail. Purge all of them first.
+  _pm2_cleanup_fixture_apps() {
+    pm2 jlist 2>/dev/null \
+      | python3 -s -c "
 import sys, json
 try:
-  apps = json.load(sys.stdin)
-  if not apps: apps = []
+  apps = json.load(sys.stdin) or []
   for a in apps:
     env = a.get('pm2_env') or {}
     name = env.get('name') or a.get('name','')
-    port = str((env.get('env_data') or {}).get('PORT','') or (env.get('env') or {}).get('PORT',''))
-    if 'mission-control-fixture-' in name and (port == '${FX0PM2_PORT}' or not port):
+    if 'mission-control-fixture-' in name:
       print(name)
 except Exception:
   pass
 " 2>/dev/null \
-    | while IFS= read -r stale_name; do
-        [[ -n "$stale_name" ]] && pm2 delete "$stale_name" 2>/dev/null || true
-      done
+      | while IFS= read -r stale_name; do
+          [[ -n "$stale_name" ]] && pm2 delete "$stale_name" 2>/dev/null || true
+        done
+  }
+  _pm2_cleanup_fixture_apps
 
   mkdir -p "${FX0PM2_DIR}/_next/static/green123/pages" \
            "${FX0PM2_DIR}/_next/static/chunks" \
@@ -1795,38 +1847,22 @@ except Exception:
   # Start a static server for HTTP+assets
   _start_server "$FX0PM2_PORT" "$FX0PM2_DIR"
 
-  # Register a pm2 app that the CC name-matcher recognises.
-  # Must be named with a CC keyword (mission-control/command-center/blackceo)
-  # AND have PORT set to FX0PM2_PORT so the port-based probe also finds it.
-  PM2_APP_NAME="mission-control-fixture-$$"
+  # Register a pm2 app via ecosystem.config.js so PORT and DATABASE_PATH are
+  # properly visible in pm2's env layers.
+  # The Node process listens on port 0 (random OS-assigned) — not on FX0PM2_PORT —
+  # so it does not conflict with the Python fixture HTTP server.
   PM2_REGISTERED=0
-
-  # Create a minimal Node process that does NOT bind to FX0PM2_PORT.
-  # The Python static server handles HTTP probes on FX0PM2_PORT.
-  # The pm2 app only needs to be registered with the correct PORT env var and cwd —
-  # pm2 reports PORT from env, not from what the process actually binds to.
-  # Having the Node process also bind to FX0PM2_PORT would conflict with the Python server.
   PM2_JS="${FX0PM2_DIR}/server.js"
-  cat > "$PM2_JS" << PMJS
-// This process does not listen on FX0PM2_PORT — the Python static server handles
-// HTTP probes. pm2 registers PORT in its env for the health-check topology probe.
-// We just keep this process alive so pm2 shows it as online.
-const port = parseInt(process.env.PORT || '0');
+  cat > "$PM2_JS" << 'PMJS'
 const http = require('http');
-// Listen on a random free port (OS assigns when port=0), NOT on FX0PM2_PORT.
-// This avoids conflicting with the Python fixture HTTP server.
 const server = http.createServer((req, res) => { res.end('fixture-pm2-ok'); });
 server.listen(0, '127.0.0.1', () => {});
 PMJS
 
-  pm2 start "$PM2_JS" \
-    --name "$PM2_APP_NAME" \
-    --cwd "$FX0PM2_DIR" \
-    2>/dev/null || true
+  # Explicit delete by name before creating fresh (prevents pm2 from reusing a
+  # stopped app from a prior run that somehow survived the purge above).
+  pm2 delete "$PM2_APP_NAME" 2>/dev/null || true
 
-  # pm2 env vars must be passed as --env key=val or set after start
-  pm2 set env:PORT "$FX0PM2_PORT" 2>/dev/null || true
-  # The cleanest way: use ecosystem config
   PM2_ECO="${FX0PM2_DIR}/ecosystem.config.js"
   cat > "$PM2_ECO" << ECOJS
 module.exports = {
@@ -1842,32 +1878,42 @@ module.exports = {
 };
 ECOJS
 
-  pm2 stop "$PM2_APP_NAME" 2>/dev/null || true
-  pm2 delete "$PM2_APP_NAME" 2>/dev/null || true
-
   pm2 start "$PM2_ECO" 2>/dev/null && PM2_REGISTERED=1 || true
 
-  # Wait up to 5 seconds for the app to reach 'online' status before running the health check.
-  # Without this, the health check may see the app in 'launching' or transient 'stopped' state
-  # (from a brief pm2 lifecycle window) and incorrectly flag it as a crash-looper.
+  # Wait up to 8 seconds for the app to reach 'online' status.
+  # The pm2 lifecycle has a brief 'launching'→'online' window; without the wait,
+  # the health check may see 'launching' or an empty list and false-fail.
   if [[ "$PM2_REGISTERED" -eq 1 ]]; then
     FX0PM2_WAIT_I=0
-    for FX0PM2_WAIT_I in 1 2 3 4 5; do
+    for FX0PM2_WAIT_I in 1 2 3 4 5 6 7 8; do
       APP_STATUS=$(pm2 jlist 2>/dev/null \
         | python3 -s -c "
 import sys, json
-apps = json.load(sys.stdin)
-for a in apps:
+try:
+  apps = json.load(sys.stdin) or []
+  for a in apps:
     env = a.get('pm2_env') or {}
     if (env.get('name') or a.get('name','')) == '${PM2_APP_NAME}':
         print(env.get('status','unknown'))
-        break
+        raise SystemExit(0)
+  print('not-found')
+except SystemExit:
+  raise
+except Exception:
+  print('unknown')
 " 2>/dev/null || echo "unknown")
       if [[ "$APP_STATUS" == "online" ]]; then
         break
       fi
       sleep 1
     done
+    # Final status check
+    if [[ "${APP_STATUS:-unknown}" != "online" ]]; then
+      _fail "Fixture-0-pm2: pm2 app '${PM2_APP_NAME}' did not reach 'online' status after 8s (status: ${APP_STATUS:-unknown}) — skipping health check assertion"
+      pm2 delete "$PM2_APP_NAME" 2>/dev/null || true
+      _stop_server
+      PM2_REGISTERED=0
+    fi
   fi
 
   if [[ "$PM2_REGISTERED" -eq 1 ]]; then
