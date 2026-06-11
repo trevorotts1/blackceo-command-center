@@ -45,6 +45,14 @@ if [[ "$HTTP_CODE" != "200" ]]; then
   exit 1
 fi
 
+# P3 FIX: HTTP 200 + non-JSON body → exit 3 UNKNOWN (ambiguous, not definitively red).
+# A proxy splash page or error page returned as 200 means we cannot determine health.
+if ! python3 -s -c "import sys,json; json.loads(sys.stdin.read())" <<< "$DEEP_BODY" 2>/dev/null; then
+  log "UNKNOWN: /api/health/deep returned HTTP 200 but body is not valid JSON (P3 fix)"
+  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"HTTP 200 but non-JSON body — ambiguous (P3: exit 3 UNKNOWN)"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  exit 3
+fi
+
 DEEP_PASS=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('pass') else 'false'" "false")
 DEEP_INDET=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('indeterminate') else 'false'" "false")
 [[ "$DEEP_INDET" == "true" ]] && { printf '%s\n' "$DEEP_BODY"; exit 3; }
@@ -94,14 +102,19 @@ fi
 # ── (b2) outside-in asset probe ───────────────────────────────────────────────
 ROOT_HTML=$(curl -s --max-time 10 --max-redirs 0 "${BASE_URL}/" 2>/dev/null || echo "")
 ASSET_REF=$(printf '%s' "$ROOT_HTML" | grep -oE '/_next/static/[^"'"'"' >]+\.(js|css)' | head -1 || echo "")
-ASSET_PASS="skip"
+ASSET_PASS="skip"; ASSET_INDET=false
 if [[ -n "$ASSET_REF" ]]; then
   ASSET_CODE=$(curl -s --max-time 10 --max-redirs 0 -w '%{http_code}' -o /dev/null "${BASE_URL}${ASSET_REF}" 2>/dev/null || echo "000")
   ASSET_CT=$(curl -s --max-time 10 --max-redirs 0 -I "${BASE_URL}${ASSET_REF}" 2>/dev/null | grep -i 'content-type:' | head -1 || echo "")
   if [[ "$ASSET_CODE" == "200" ]] && printf '%s' "$ASSET_CT" | grep -qiE 'javascript|css|text'; then
     log "outside-in: PASS"; ASSET_PASS="pass"
   else log "FAIL: asset ${ASSET_REF} → HTTP ${ASSET_CODE}"; ASSET_PASS="fail"; fi
-else log "WARN: no /_next/static ref — outside-in skipped"; fi
+else
+  # P2 FIX: a probe that verified nothing must not green.
+  # 'skip' was leaking as pass=true; set ASSET_INDET=true → exit 3 UNKNOWN.
+  log "UNKNOWN: no /_next/static ref in root HTML — outside-in probe verified nothing (P2 fix: exit 3)"
+  ASSET_INDET=true
+fi
 
 # ── (c) CF public-URL probe (truth-table rows 25-27 + CF-Access-policy row) ──
 # CC_PUBLIC_URL unset → row 27 UNKNOWN (never FAIL; tunnel may be off).
@@ -122,10 +135,11 @@ else CF_INDET=true; fi
 
 # ── verdict ───────────────────────────────────────────────────────────────────
 FINAL_PASS=true; EXIT_CODE=0; FINAL_INDET=false
-[[ "$PM2_PASS"  == "fail" ]] && FINAL_PASS=false && EXIT_CODE=1
-[[ "$ASSET_PASS" == "fail" ]] && FINAL_PASS=false && EXIT_CODE=1
-[[ "$CF_PASS"    == "fail" ]] && FINAL_PASS=false && EXIT_CODE=1
-[[ "$CF_INDET"   == "true" ]] && FINAL_INDET=true
+[[ "$PM2_PASS"   == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
+[[ "$ASSET_PASS" == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
+[[ "$CF_PASS"    == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
+[[ "$CF_INDET"   == "true" ]]  && FINAL_INDET=true
+[[ "$ASSET_INDET" == "true" ]] && FINAL_INDET=true  # P2 FIX: no-ref path → exit 3
 [[ "$FINAL_INDET" == "true" && "$EXIT_CODE" -eq 0 ]] && FINAL_PASS=false && EXIT_CODE=3
 printf '%s\n' "$DEEP_BODY" | python3 -s -c "
 import sys,json

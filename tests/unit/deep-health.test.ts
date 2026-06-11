@@ -1021,22 +1021,18 @@ describe('disk_headroom', () => {
   // Fix: resolveCheckPath() evaluates WRONG_MOUNT_PREFIXES against the resolved
   // candidate regardless of which branch produced it.  Returns null on wrong-mount.
   // checkDiskHeadroom() returns immediate FAIL when resolveCheckPath() returns null.
-  it('row 35b: DATABASE_PATH unset + process.cwd()="/data/app" (Docker wrong-mount) → pass=false (REDO-REDO primary false-green fix)', async () => {
+  it('row 35b (P1 updated): DATABASE_PATH unset + process.cwd()="/data/app" (VPS/Docker subdir) → pass=true when headroom ok (P1 fix: exact-match guard, subdirs are valid app dirs)', async () => {
     const checks = await loadChecks();
 
-    // Mock diskReader: return abundant space for /data paths (the wrong Docker mount),
-    // and 300 MB for any other path (the real CC partition).
+    // P1 FIX: guard fires only for the exact bare mount point '/data' itself.
+    // '/data/app' is a real app dir — its own filesystem is checked normally.
+    // Mock diskReader: return abundant space for /data/ paths (real app dir).
     checks.diskReader.readFreeBytes = (checkPath: string): number => {
-      if (checkPath === '/data' || checkPath.startsWith('/data/')) {
-        return 80 * 1024 ** 3;  // 80 GB — wrong Docker volume, abundant space
-      }
-      // Any other path (root FS, /home, etc.) → 300 MB (low space CC partition)
-      return 300 * 1024 * 1024;
+      // Return 10 GB — plenty of headroom, should pass.
+      return 10 * 1024 ** 3;
     };
 
-    // The key trigger: mock process.cwd() to return '/data/app'.
-    // The existing Row 35 tests mock CWD to tmpDir (/tmp/...) which is NOT /data —
-    // that is why they never exposed this false-green.
+    // Mock process.cwd() to return '/data/app' — a VPS canonical app path.
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/data/app');
     const saved = process.env.DATABASE_PATH;
     delete process.env.DATABASE_PATH;
@@ -1049,15 +1045,11 @@ describe('disk_headroom', () => {
       if (saved !== undefined) process.env.DATABASE_PATH = saved;
     }
 
-    // OLD behaviour: resolveCheckPath() returned '/data/app' → diskReader returned
-    // 80 GB → pass:true (false-green — the bug this test exposes).
-    // NEW behaviour: resolveCheckPath() detects '/data/app' as a wrong-mount path
-    // → returns null → checkDiskHeadroom() returns immediate FAIL.
-    expect(result.pass).toBe(false);
-    // Must NOT be indeterminate — this is a detectable wrong-mount misconfiguration.
-    expect(result.indeterminate).not.toBe(true);
-    // Detail must mention wrong-mount or bind-mount to identify the cause.
-    expect(result.detail).toMatch(/wrong.mount|bind.mount|Row 35/i);
+    // P1 UPDATED BEHAVIOUR: '/data/app' is NOT the bare /data mount point,
+    // so the wrong-mount guard (exact-match) does NOT fire. checkPath resolves
+    // to '/data/app', diskReader returns 10 GB → pass:true.
+    // (Previous REDO-REDO verdict of FAIL is superseded by P1 fix.)
+    expect(result.pass).toBe(true);
   });
 });
 
