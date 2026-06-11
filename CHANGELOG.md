@@ -1,3 +1,5 @@
+## [v4.38.0] — 2026-06-11 — docs(skill44): crosslink convert-and-flow-agent how-to
+
 ## [v4.37.0] — 2026-06-11 — fix(b3+b4): branding seed guard (never Default over configured client) + DATABASE_PATH ecosystem template
 
 ## [v4.36.0] — 2026-06-11 — feat(duck): §3 state machine + artifact contract, §4 QC modes + owner-approval lane
