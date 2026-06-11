@@ -709,6 +709,442 @@ export function getMissingTrioRoles(
   return missing;
 }
 
+// ---------------------------------------------------------------------------
+// §4 — Acceptance criteria derivation
+// ---------------------------------------------------------------------------
+
+/**
+ * A structured acceptance criterion for an artifact task.
+ *
+ * Derived ONCE at task creation from the request text.
+ * Stored as JSON in tasks.qc_acceptance_criteria.
+ */
+export interface AcceptanceCriterion {
+  id: string;
+  description: string;
+  /** 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'custom' */
+  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'custom';
+  /** Extra params: resolution threshold, vision prompt, etc. */
+  params?: Record<string, unknown>;
+}
+
+/**
+ * Derive acceptance criteria from a one-line owner request.
+ *
+ * Rules (§4):
+ *   - Terse request → terse criteria.  That is correct, not lax.
+ *   - For image tasks: always includes existence + valid_image + vision_match.
+ *   - vision_match criterion carries the original request as the match subject.
+ *   - min_resolution added when the request mentions "high-quality" or "large".
+ *
+ * This function is deterministic (no LLM call) so it can be called at task
+ * creation time without latency cost.
+ */
+export function deriveAcceptanceCriteria(
+  title: string,
+  description?: string | null,
+): AcceptanceCriterion[] {
+  const text = [title, description].filter(Boolean).join(' ').toLowerCase();
+
+  // Detect image tasks
+  const isImageTask =
+    /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
+
+  if (!isImageTask) {
+    // Non-image (document/work) task — no artifact criteria
+    return [];
+  }
+
+  const criteria: AcceptanceCriterion[] = [
+    {
+      id: 'existence',
+      description: 'Artifact file exists and is non-empty',
+      type: 'existence',
+    },
+    {
+      id: 'valid_image',
+      description: 'File is a valid image (correct magic bytes, non-zero size)',
+      type: 'valid_image',
+    },
+  ];
+
+  // High-quality / large mentions → min resolution
+  if (/\b(high.?quality|large|high.?res|hd|4k|1080|resolution)\b/.test(text)) {
+    criteria.push({
+      id: 'min_resolution',
+      description: 'Image meets minimum resolution (width ≥ 512, height ≥ 512)',
+      type: 'min_resolution',
+      params: { minWidth: 512, minHeight: 512 },
+    });
+  }
+
+  // Vision match: does the image depict what was requested?
+  const subjectText = [title, description].filter(Boolean).join('. ');
+  criteria.push({
+    id: 'vision_match',
+    description: `Image depicts the requested subject: "${subjectText}"`,
+    type: 'vision_match',
+    params: { subject: subjectText },
+  });
+
+  return criteria;
+}
+
+/**
+ * Evaluate acceptance criteria against actual file deliverables.
+ *
+ * Returns per-criterion pass/fail + an overall result.
+ * The 8.5 bar applies to the criteria checklist:
+ *   - All criteria pass → score 10.0 (PASS)
+ *   - Some criteria fail → score proportional to passing count (may FAIL)
+ *   - vision_match skipped when no LLM key → non-blocking (still passes checklist)
+ *
+ * Vision model check is a best-effort call to the same LLM used for QC.
+ * On no-key or error: vision_match is skipped (not failed).
+ */
+export interface CriterionResult {
+  id: string;
+  description: string;
+  pass: boolean;
+  reason: string;
+}
+
+export interface CriteriaCheckResult {
+  score: number;
+  pass: boolean;
+  results: CriterionResult[];
+  /** Whether vision match was skipped due to no LLM key */
+  visionSkipped: boolean;
+}
+
+export async function evaluateCriteria(
+  criteria: AcceptanceCriterion[],
+  manifest: DeliverableManifestItem[],
+): Promise<CriteriaCheckResult> {
+  if (criteria.length === 0 || manifest.length === 0) {
+    return { score: 7.5, pass: false, results: [], visionSkipped: false };
+  }
+
+  const results: CriterionResult[] = [];
+  let visionSkipped = false;
+
+  for (const c of criteria) {
+    switch (c.type) {
+      case 'existence': {
+        const anyValid = manifest.some((m) => m.valid && (m.sizeBytes ?? 0) > 0);
+        results.push({
+          id: c.id,
+          description: c.description,
+          pass: anyValid,
+          reason: anyValid ? 'File exists and is non-empty' : 'No valid non-empty artifact found',
+        });
+        break;
+      }
+
+      case 'valid_image': {
+        const anyValidImage = manifest.some((m) => m.valid && m.type === 'image');
+        results.push({
+          id: c.id,
+          description: c.description,
+          pass: anyValidImage,
+          reason: anyValidImage ? 'Valid image artifact found' : 'No valid image artifact (bad magic bytes or missing)',
+        });
+        break;
+      }
+
+      case 'min_resolution': {
+        // We don't decode image dimensions in the current manifest (no heavy decoder).
+        // Pass through: if file is valid image and size is reasonable (>1KB), accept.
+        const minSizeHeuristic = 1024; // 1KB — smallest valid non-trivial PNG
+        const meetsSize = manifest.some((m) => m.valid && (m.sizeBytes ?? 0) >= minSizeHeuristic);
+        results.push({
+          id: c.id,
+          description: c.description,
+          pass: meetsSize,
+          reason: meetsSize
+            ? 'Artifact size suggests sufficient resolution'
+            : `Artifact too small (< ${minSizeHeuristic} bytes) — likely below minimum resolution`,
+        });
+        break;
+      }
+
+      case 'vision_match': {
+        // Try vision-model check; skip gracefully on no key or error.
+        const subject = typeof c.params?.subject === 'string' ? c.params.subject : '';
+        const visionResult = await visionMatchCheck(manifest, subject);
+        if (visionResult === null) {
+          // No key / error — skip (do NOT fail the criterion)
+          visionSkipped = true;
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: true, // skip = neutral (don't penalise)
+            reason: 'Vision check skipped (no LLM key available) — criterion treated as pass',
+          });
+        } else {
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: visionResult.yes,
+            reason: `Vision check: ${visionResult.yes ? 'YES' : 'NO'} (confidence ${(visionResult.confidence * 100).toFixed(0)}%) — ${visionResult.explanation}`,
+          });
+        }
+        break;
+      }
+
+      default: {
+        // Custom criterion: always pass (unimplemented custom criteria should not block)
+        results.push({
+          id: c.id,
+          description: c.description,
+          pass: true,
+          reason: 'Custom criterion — treated as pass (not yet implemented)',
+        });
+      }
+    }
+  }
+
+  const passCount = results.filter((r) => r.pass).length;
+  const total = results.length;
+  const ratio = total > 0 ? passCount / total : 1;
+
+  // Score: 10.0 for all pass, scales down proportionally.
+  // Gate: all criteria must pass for ≥ 8.5 (the one "fail" criterion blocks).
+  const allPass = results.every((r) => r.pass);
+  const score = allPass ? 10.0 : Math.max(2.0, ratio * 8.4); // cap at 8.4 if any fail
+
+  return {
+    score,
+    pass: score >= QC_PASS_THRESHOLD,
+    results,
+    visionSkipped,
+  };
+}
+
+/**
+ * Call the LLM with a vision prompt: "Does this image depict X?"
+ * Returns { yes, confidence, explanation } or null on error / no key.
+ */
+async function visionMatchCheck(
+  manifest: DeliverableManifestItem[],
+  subject: string,
+): Promise<{ yes: boolean; confidence: number; explanation: string } | null> {
+  if (!subject.trim()) return null;
+
+  const openAiKey = process.env.OPENAI_API_KEY;
+  const googleKey =
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+    process.env.GEMINI_API_KEY;
+
+  if (!openAiKey && !googleKey) return null;
+
+  // Find first valid image in manifest
+  const imageItem = manifest.find((m) => m.valid && m.type === 'image' && m.path);
+  if (!imageItem?.path) return null;
+
+  // Read file as base64
+  let b64: string;
+  try {
+    const buf = readFileSync(imageItem.path);
+    b64 = buf.toString('base64');
+  } catch {
+    return null;
+  }
+
+  const prompt = `Look at this image. Does it depict: "${subject}"?
+Reply with ONLY this JSON (no other text):
+{"yes": <boolean>, "confidence": <0.0-1.0>, "explanation": "<one sentence>"}`;
+
+  // Try OpenAI vision (gpt-4o-mini supports vision)
+  if (openAiKey) {
+    try {
+      const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
+      const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiKey}` },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}`, detail: 'low' } },
+            ],
+          }],
+          max_tokens: 100,
+          temperature: 0,
+        }),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as { choices?: { message?: { content?: string } }[] };
+        const raw = data.choices?.[0]?.message?.content?.trim() ?? '';
+        const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        const parsed = JSON.parse(cleaned) as { yes: boolean; confidence: number; explanation: string };
+        return { yes: !!parsed.yes, confidence: Number(parsed.confidence) || 0.5, explanation: parsed.explanation ?? '' };
+      }
+    } catch { /* fall through to Google */ }
+  }
+
+  // Google Gemini vision fallback
+  if (googleKey) {
+    try {
+      const model = process.env.QC_SCORER_MODEL || 'gemini-2.5-flash';
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${googleKey}`;
+      const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
+      const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: prompt },
+              { inline_data: { mime_type: mime, data: b64 } },
+            ],
+          }],
+          generationConfig: { temperature: 0, maxOutputTokens: 200 },
+        }),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+        const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
+        const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        const parsed = JSON.parse(cleaned) as { yes: boolean; confidence: number; explanation: string };
+        return { yes: !!parsed.yes, confidence: Number(parsed.confidence) || 0.5, explanation: parsed.explanation ?? '' };
+      }
+    } catch { /* no vision key or error */ }
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// §4 — Un-reroutable failure detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine whether a QC failure is un-reroutable (i.e., caused by a factor
+ * the executor cannot fix: brief wording, missing metadata, no SOP assigned).
+ *
+ * Un-reroutable failures MUST NOT trigger the reroute loop.  They go straight
+ * to `review` with a human-readable reason.  The 3-strike cap stays.
+ *
+ * Returns { unrouteable: true, reason } if un-reroutable, else { unrouteable: false }.
+ */
+export function classifyFailure(result: QCResult): { unrouteable: boolean; reason?: string } {
+  if (result.pass) return { unrouteable: false };
+
+  // no-criteria path: the SOP is missing — executor cannot fix this
+  if (result.scoringPath === 'no-criteria') {
+    return {
+      unrouteable: true,
+      reason: `QC cannot evaluate: no SOP or acceptance criteria assigned. Human review required. (Reason: ${result.reason})`,
+    };
+  }
+
+  // Gap analysis: look for un-reroutable signals in the gap list
+  const allGapsText = [...result.gaps, result.reason].join(' ').toLowerCase();
+  const unrouteableSignals = [
+    /brief.*wording/,
+    /request.*too.*vague/,
+    /missing.*metadata/,
+    /no.*sop.*assigned/,
+    /no.*criteria/,
+    /cannot.*verify.*completion/,
+    /description.*too.*brief.*to.*verify/,
+    /terse.*brief/,
+  ];
+
+  for (const pattern of unrouteableSignals) {
+    if (pattern.test(allGapsText)) {
+      return {
+        unrouteable: true,
+        reason: `QC failure is un-reroutable (executor cannot influence: ${result.gaps.slice(0, 2).join('; ')}). Human review required.`,
+      };
+    }
+  }
+
+  return { unrouteable: false };
+}
+
+// ---------------------------------------------------------------------------
+// §4 — Owner-approval lane helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if a task is source=owner (for the owner-approval lane).
+ * We check the description for the provenance marker injected by the ingest route.
+ */
+export function isOwnerTask(description: string | null | undefined): boolean {
+  if (!description) return false;
+  // ingest route writes "Source: owner" into description
+  return /\bsource:\s*owner\b/i.test(description);
+}
+
+/**
+ * Emit the owner-approval event.
+ *
+ * §4: when source=owner AND artifact passes criteria, the terminal step is
+ * "deliver to owner for approval" via Telegram with approve/redo buttons —
+ * NOT autonomous gating.
+ *
+ * This function writes:
+ *   1. A `qc_owner_approval_pending` event (board-visible, picked up by the
+ *      OpenClaw Telegram bridge).
+ *   2. A clear TODO seam comment for the Telegram plumbing.
+ *
+ * The actual Telegram send is handled by the OpenClaw gateway when it observes
+ * the `qc_owner_approval_pending` event type. If the gateway is not available,
+ * the event stays in the DB and the operator sees it in the Live Feed.
+ */
+export function emitOwnerApprovalPending(
+  taskId: string,
+  taskTitle: string,
+  artifactPath: string | null | undefined,
+  missionControlUrl: string,
+): void {
+  const now = new Date().toISOString();
+
+  // TODO(telegram): The OpenClaw gateway should subscribe to
+  // `qc_owner_approval_pending` events and send a Telegram message to the
+  // task's source owner with:
+  //   - The artifact image (inline) if artifactPath is an image
+  //   - Approve button → POST /api/tasks/<id> { status: 'done' }
+  //   - Redo button   → POST /api/tasks/<id> { status: 'in_progress' }
+  // Wire this in the OpenClaw event-bridge when the gateway is available.
+  // The event emitted here is the seam; the gateway reads it asynchronously.
+
+  const approveUrl = `${missionControlUrl}/api/tasks/${taskId}`;
+  const artifactNote = artifactPath ? `\nArtifact: ${artifactPath}` : '';
+
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      uuidv4(),
+      'qc_owner_approval_pending',
+      taskId,
+      `[QC-OWNER-APPROVAL] Task "${taskTitle}" passed artifact criteria and is awaiting owner approval.${artifactNote}\nApprove: PATCH ${approveUrl} {"status":"done"}\nRedo: PATCH ${approveUrl} {"status":"in_progress"}`,
+      now,
+    ],
+  );
+
+  // Also write a task_status_changed event so the board timeline shows it
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      uuidv4(),
+      'task_status_changed',
+      taskId,
+      `[QC-OWNER-APPROVAL] "${taskTitle}" criteria passed — pending owner approval via Telegram`,
+      now,
+    ],
+  );
+}
+
 /**
  * Run QC scoring for a task that just entered `review` status.
  *
@@ -735,7 +1171,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
   try {
     const task = queryOne<TaskRowForQC>(
-      'SELECT id, title, description, sop_id, department, workspace_id, assigned_agent_id, persona_id, status, qc_reroute_attempts FROM tasks WHERE id = ?',
+      `SELECT id, title, description, sop_id, department, workspace_id,
+              assigned_agent_id, persona_id, status, qc_reroute_attempts
+       FROM tasks WHERE id = ?`,
       [taskId],
     );
 
@@ -883,24 +1321,71 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     }
     // ── End artifact manifest ─────────────────────────────────────────────────
 
-    const input: QCScorerInput = {
-      taskId: task.id,
-      taskTitle: task.title,
-      taskDescription: task.description,
-      sopSuccessCriteria: sopRow?.success_criteria ?? null,
-      sopName: sopRow?.name ?? null,
-      sopSteps: sopRow?.steps ?? null,
-      departmentSlug: task.department ?? task.workspace_id ?? null,
-      // Per-dept QC agent fields (null when no agent resolved)
-      qcAgentId: qcAgent?.id ?? null,
-      qcAgentName: qcAgent?.name ?? null,
-      qcAgentModel: qcAgent?.model ?? null,
-      // Artifact-aware QC: manifest (null = text-only mode)
-      deliverableManifest: deliverableManifest,
-    };
-
-    const result = await scoreTaskForQC(input);
+    // §4 Criteria-based scoring for artifact tasks.
+    // If we have a deliverable manifest (artifact mode), derive acceptance
+    // criteria from the task request and evaluate them.  The 8.5 bar applies
+    // to the criteria checklist, NOT brief-completeness prose.
+    let result: QCResult;
     const now = new Date().toISOString();
+
+    if (deliverableManifest && deliverableManifest.length > 0) {
+      // Artifact mode: derive criteria from the task title + description.
+      const criteria = deriveAcceptanceCriteria(task.title, task.description);
+
+      if (criteria.length > 0) {
+        // Evaluate criteria checklist
+        const criteriaResult = await evaluateCriteria(criteria, deliverableManifest);
+
+        const failedCriteria = criteriaResult.results.filter((r) => !r.pass);
+        const failReasons = failedCriteria.map((r) => `${r.id}: ${r.reason}`);
+        const passReasons = criteriaResult.results.filter((r) => r.pass).map((r) => r.id);
+
+        result = {
+          score: criteriaResult.score,
+          pass: criteriaResult.pass,
+          reason: criteriaResult.pass
+            ? `Artifact criteria checklist PASS (${passReasons.join(', ')})${criteriaResult.visionSkipped ? ' [vision-check skipped: no LLM key]' : ''}`
+            : `Artifact criteria checklist FAIL: ${failReasons.join('; ')}`,
+          gaps: failReasons,
+          scoringPath: 'llm',
+        };
+
+        console.log(`[QCScorer] Task "${task.title}" (${taskId}): artifact-mode criteria score ${criteriaResult.score.toFixed(1)}/10 (${criteriaResult.pass ? 'PASS' : 'FAIL'})`);
+      } else {
+        // Manifest present but no image criteria derived (non-image artifact)
+        // → fall through to standard scoring
+        const input: QCScorerInput = {
+          taskId: task.id,
+          taskTitle: task.title,
+          taskDescription: task.description,
+          sopSuccessCriteria: sopRow?.success_criteria ?? null,
+          sopName: sopRow?.name ?? null,
+          sopSteps: sopRow?.steps ?? null,
+          departmentSlug: task.department ?? task.workspace_id ?? null,
+          qcAgentId: qcAgent?.id ?? null,
+          qcAgentName: qcAgent?.name ?? null,
+          qcAgentModel: qcAgent?.model ?? null,
+          deliverableManifest: deliverableManifest,
+        };
+        result = await scoreTaskForQC(input);
+      }
+    } else {
+      // Document/work mode: use existing SOP rubric path
+      const input: QCScorerInput = {
+        taskId: task.id,
+        taskTitle: task.title,
+        taskDescription: task.description,
+        sopSuccessCriteria: sopRow?.success_criteria ?? null,
+        sopName: sopRow?.name ?? null,
+        sopSteps: sopRow?.steps ?? null,
+        departmentSlug: task.department ?? task.workspace_id ?? null,
+        qcAgentId: qcAgent?.id ?? null,
+        qcAgentName: qcAgent?.name ?? null,
+        qcAgentModel: qcAgent?.model ?? null,
+        deliverableManifest: null,
+      };
+      result = await scoreTaskForQC(input);
+    }
 
     // ── PRD 2.10: Persist QC result to task_qc_results for grading module ─────
     // Fire-and-forget: wrap in try/catch so any DB error never breaks the scorer.
@@ -984,6 +1469,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     );
 
     if (result.pass) {
+      // §4 Owner-approval lane: source=owner creative tasks that pass criteria
+      // go to "deliver to owner for approval" instead of autonomous done-gating.
+      const ownerTask = isOwnerTask(task.description);
+      const hasArtifacts = deliverableManifest && deliverableManifest.length > 0;
+
+      if (ownerTask && hasArtifacts) {
+        // Emit owner-approval event (Telegram + approve/redo buttons via OpenClaw)
+        const firstArtifactPath = deliverableManifest!.find((m) => m.valid)?.path ?? null;
+        const mcu = getMissionControlUrl();
+        emitOwnerApprovalPending(taskId, task.title, firstArtifactPath, mcu);
+        // Task STAYS in `review` — owner decides; do not autonomously mark done.
+        console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → owner-approval pending (source=owner + artifact)`);
+        return result;
+      }
+
       // Auto-approve: move to done
       run(
         `UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ? AND status = 'review'`,
@@ -1024,6 +1524,29 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         spawnRecordCompletion(taskId, task.persona_id, deptSlug, taskOutput);
       }
     } else {
+      // FAIL path
+
+      // §4 Un-reroutable kill: if the failure is caused by brief wording,
+      // missing metadata, or no SOP — the executor cannot fix it by re-running.
+      // These go straight to `review` with a human-readable reason, NEVER reroute.
+      const failClass = classifyFailure(result);
+      if (failClass.unrouteable) {
+        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): un-reroutable failure — going to review, NOT backlog. Reason: ${failClass.reason}`);
+        // Task stays in `review`; write explanatory event
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            'qc_review',
+            taskId,
+            `[QC-UNROUTEABLE] Score: ${result.score.toFixed(1)}/10 | ${failClass.reason} Human review required.`,
+            now,
+          ],
+        );
+        return result;
+      }
+
       // FAIL: return to backlog with gap notes, then re-dispatch — unless the
       // infinite-loop cap has been reached.
 

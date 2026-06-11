@@ -146,14 +146,14 @@ test('migration 061: qc_reroute_attempts column exists on tasks table', () => {
   );
 });
 
-// ─── Test 4: qc_reroute_attempts increments on each FAIL (non-heuristic path) ─
-// Uses the 'no-criteria' path (no SOP assigned, no API key) which is NOT
-// heuristic and goes through the reroute loop.
+// ─── Test 4: §4 no-criteria = un-reroutable → stays in review, no increment ──
+// §4: "if QC fails on criteria the executor cannot influence (brief wording,
+// missing metadata), it must NOT reroute." No SOP = un-reroutable.
+// Updated: qc_reroute_attempts must NOT increment (no reroute fired).
 
-test('FAIL branch (no-criteria): qc_reroute_attempts increments from 0 → 1 on first fail', async () => {
+test('FAIL branch (no-criteria): §4 un-reroutable → task stays in review, qc_reroute_attempts unchanged', async () => {
   const id = nextId('attempts-incr');
   // No SOP → no-criteria path (scoringPath='no-criteria', score=7.5, pass=false).
-  // This path is not heuristic, so the reroute loop fires.
   insertTask(id, 'review');
 
   const result = await runQCOnReview(id);
@@ -166,85 +166,73 @@ test('FAIL branch (no-criteria): qc_reroute_attempts increments from 0 → 1 on 
     [id],
   );
   assert.ok(task, 'task must exist');
-  assert.equal(task.qc_reroute_attempts, 1, 'qc_reroute_attempts must be 1 after first fail');
-  // Task must have left review (backlog or in_progress after auto-route attempt).
-  assert.notEqual(task.status, 'review', 'task must leave review on no-criteria fail');
+  // §4: un-reroutable → qc_reroute_attempts must NOT increment.
+  assert.equal(task.qc_reroute_attempts ?? 0, 0, '§4 un-reroutable: qc_reroute_attempts must stay at 0');
+  // §4: task must stay in review (not moved to backlog).
+  assert.equal(task.status, 'review', '§4 un-reroutable: task must stay in review');
 });
 
-// ─── Test 5: cap reached → task blocked, not backlog (non-heuristic path) ────
+// ─── Test 5: §4 no-criteria un-reroutable even when at cap ───────────────────
+// §4: un-reroutable path should still leave task in review (not backlog or blocked).
 
-test('FAIL branch (no-criteria, cap): task is set to `blocked` after QC_MAX_REROUTES fails', async () => {
+test('FAIL branch (no-criteria, cap): §4 un-reroutable → task stays in review (not blocked)', async () => {
   const id = nextId('attempts-cap');
-  // No SOP → no-criteria path, which goes through the reroute loop.
-  // Pre-set attempts = QC_MAX_REROUTES so this run trips the cap.
+  // No SOP → no-criteria path, §4 un-reroutable.
   insertTask(id, 'review');
-  // Directly set the counter to QC_MAX_REROUTES_val (must equal 2 from env).
+  // Set counter to QC_MAX_REROUTES — but un-reroutable fires BEFORE the cap check.
   run(`UPDATE tasks SET qc_reroute_attempts = ? WHERE id = ?`, [QC_MAX_REROUTES_val, id]);
-  // Verify it took.
-  const beforeTask = queryOne<{ qc_reroute_attempts: number }>(
-    `SELECT qc_reroute_attempts FROM tasks WHERE id = ?`, [id],
-  );
-  assert.equal(beforeTask?.qc_reroute_attempts, QC_MAX_REROUTES_val,
-    `qc_reroute_attempts must be ${QC_MAX_REROUTES_val} before runQCOnReview`);
 
   const result = await runQCOnReview(id);
   assert.ok(result !== null, 'must return a result');
   assert.ok(!result.pass, 'no-criteria path must fail');
   assert.equal(result.scoringPath, 'no-criteria', 'path must be no-criteria');
 
-  const task = queryOne<{ status: string; description: string | null; qc_reroute_attempts: number }>(
-    `SELECT status, description, qc_reroute_attempts FROM tasks WHERE id = ?`,
+  const task = queryOne<{ status: string; qc_reroute_attempts: number }>(
+    `SELECT status, qc_reroute_attempts FROM tasks WHERE id = ?`,
     [id],
   );
   assert.ok(task, 'task must exist');
-  assert.equal(task.status, 'blocked', `task must be 'blocked' at cap, got: ${task.status}`);
-  assert.ok(
-    task.description?.includes('[QC-BLOCKED]'),
-    'description must contain [QC-BLOCKED] marker',
-  );
-  assert.equal(
-    task.qc_reroute_attempts,
-    QC_MAX_REROUTES_val + 1,
-    `qc_reroute_attempts must be ${QC_MAX_REROUTES_val + 1} at cap`,
-  );
+  // §4: un-reroutable fires before cap check → task stays in review (not blocked/backlog).
+  assert.equal(task.status, 'review', `§4 un-reroutable: task must stay in review even at cap, got: ${task.status}`);
+  // qc_reroute_attempts must not be incremented by un-reroutable path.
+  assert.equal(task.qc_reroute_attempts, QC_MAX_REROUTES_val, 'qc_reroute_attempts must not increment on un-reroutable path');
 });
 
-// ─── Test 6: blocked task gets QC-BLOCKED event, not QC-REROUTE ─────────────
+// ─── Test 6: §4 no-criteria → QC-UNROUTEABLE event, no QC-BLOCKED ───────────
 
-test('FAIL branch (no-criteria, cap): QC-BLOCKED event written, no QC-REROUTE event', async () => {
+test('FAIL branch (no-criteria, cap): §4 un-reroutable → QC-UNROUTEABLE event, no QC-BLOCKED', async () => {
   const id = nextId('blocked-evt');
-  // No SOP → no-criteria path.
+  // No SOP → no-criteria path, §4 un-reroutable.
   insertTask(id, 'review');
-  // Directly set counter to cap value.
   run(`UPDATE tasks SET qc_reroute_attempts = ? WHERE id = ?`, [QC_MAX_REROUTES_val, id]);
 
   await runQCOnReview(id);
 
-  // QC-BLOCKED event must exist.
-  const blocked = queryOne<{ message: string }>(
-    `SELECT message FROM events WHERE task_id = ? AND message LIKE '%[QC-BLOCKED]%' LIMIT 1`,
+  // §4: QC-UNROUTEABLE event must exist (not QC-BLOCKED).
+  const unrouteableEvt = queryOne<{ message: string }>(
+    `SELECT message FROM events WHERE task_id = ? AND message LIKE '%[QC-UNROUTEABLE]%' LIMIT 1`,
     [id],
   );
-  assert.ok(blocked, 'QC-BLOCKED event must be written when cap is reached');
+  assert.ok(unrouteableEvt, '§4: QC-UNROUTEABLE event must be written for no-criteria failure');
   assert.ok(
-    blocked.message.includes('Human review') || blocked.message.includes('human attention') || blocked.message.includes('needs human'),
-    `blocked message must mention human review, got: ${blocked.message}`,
+    unrouteableEvt.message.includes('Human review'),
+    `QC-UNROUTEABLE message must mention Human review, got: ${unrouteableEvt.message}`,
   );
 
-  // No QC-REROUTE event at this point.
+  // No QC-REROUTE event.
   const reroute = queryOne<{ id: string }>(
     `SELECT id FROM events WHERE task_id = ? AND message LIKE '%[QC-REROUTE]%' LIMIT 1`,
     [id],
   );
-  assert.ok(!reroute, 'no QC-REROUTE event should be written when cap is reached');
+  assert.ok(!reroute, '§4: no QC-REROUTE event should be written for un-reroutable failure');
 });
 
-// ─── Test 7: sub-cap FAIL → task leaves review (not blocked) ────────────────
-// Uses no-criteria path (no SOP) — not heuristic — so the reroute fires.
+// ─── Test 7: §4 no-criteria sub-cap → task stays in review (not blocked) ─────
+// §4: un-reroutable fires before the cap check, so task always stays in review.
 
-test('FAIL branch (no-criteria, sub-cap): task leaves review and is not blocked on first fail', async () => {
+test('FAIL branch (no-criteria, sub-cap): §4 un-reroutable → task stays in review', async () => {
   const id = nextId('subcap');
-  // No SOP → no-criteria path (not heuristic). 0 prior attempts.
+  // No SOP → no-criteria path (§4 un-reroutable). 0 prior attempts.
   insertTask(id, 'review');
 
   const result = await runQCOnReview(id);
@@ -255,8 +243,8 @@ test('FAIL branch (no-criteria, sub-cap): task leaves review and is not blocked 
     `SELECT status FROM tasks WHERE id = ?`, [id],
   );
   assert.ok(task, 'task must exist');
-  assert.notEqual(task.status, 'review', 'sub-cap fail must leave review');
-  assert.notEqual(task.status, 'blocked', 'sub-cap fail must not be blocked on first fail');
+  // §4: task stays in review (un-reroutable kill prevents reroute loop).
+  assert.equal(task.status, 'review', '§4 un-reroutable: task must stay in review, not leave it');
 });
 
 // ─── Test 8: ceo-delegation-sweep picks up QC-fail backlog tasks ─────────────

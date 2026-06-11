@@ -2553,6 +2553,46 @@ const migrations: Migration[] = [
       console.log('[Migration 069] lss_control_reviews table + index ready');
     },
   },
+
+  // §3 — task_events structured audit trail + task_deliverables extended columns
+  {
+    id: '070',
+    name: 'task_events_artifact_contract',
+    up: (db) => {
+      console.log('[Migration 070] Creating task_events table + artifact columns on task_deliverables...');
+
+      // task_events: structured audit trail written by task-lifecycle.ts transition()
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_events (
+          id         TEXT PRIMARY KEY,
+          task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          from_status TEXT NOT NULL,
+          to_status  TEXT NOT NULL,
+          actor      TEXT,
+          reason     TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, created_at);
+      `);
+
+      // Extend task_deliverables with mime_type, file_size_bytes, sha256 columns
+      // (idempotent via ALTER TABLE … IF NOT EXISTS is not supported in older SQLite;
+      //  we guard with a PRAGMA check instead)
+      const cols = (db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name);
+
+      if (!cols.includes('mime_type')) {
+        db.exec(`ALTER TABLE task_deliverables ADD COLUMN mime_type TEXT`);
+      }
+      if (!cols.includes('file_size_bytes')) {
+        db.exec(`ALTER TABLE task_deliverables ADD COLUMN file_size_bytes INTEGER`);
+      }
+      if (!cols.includes('sha256')) {
+        db.exec(`ALTER TABLE task_deliverables ADD COLUMN sha256 TEXT`);
+      }
+
+      console.log('[Migration 070] task_events table + task_deliverables columns ready');
+    },
+  },
 ];
 
 /**

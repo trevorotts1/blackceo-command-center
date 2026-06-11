@@ -228,6 +228,7 @@ CREATE TABLE IF NOT EXISTS task_activities (
 );
 
 -- Task deliverables table (files, URLs, artifacts)
+-- NOTE: mime_type, file_size_bytes, sha256 added by migration 070 on existing DBs.
 CREATE TABLE IF NOT EXISTS task_deliverables (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -235,8 +236,27 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   title TEXT NOT NULL,
   path TEXT,
   description TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  mime_type TEXT,
+  file_size_bytes INTEGER,
+  sha256 TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- §3 task_events: structured audit trail for every lifecycle transition.
+-- Written atomically with the DB update by task-lifecycle.ts transition().
+-- The legacy events table remains for backwards compat; this table gives
+-- the board and feed a clean query surface without parsing message strings.
+CREATE TABLE IF NOT EXISTS task_events (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  from_status TEXT NOT NULL,
+  to_status  TEXT NOT NULL,
+  actor      TEXT,
+  reason     TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, created_at);
 
 -- Agent daily memory logs
 CREATE TABLE IF NOT EXISTS agent_memory_logs (
