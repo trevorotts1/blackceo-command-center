@@ -1,3 +1,5 @@
+## [v4.37.0] — 2026-06-11 — fix(b3+b4): branding seed guard (never Default over configured client) + DATABASE_PATH ecosystem template
+
 ## [v4.36.0] — 2026-06-11 — feat(duck): §3 state machine + artifact contract, §4 QC modes + owner-approval lane
 
 ## [v4.35.0] — 2026-06-11 — feat(b2): atomic self-verifying deploy + auto-rollback + B.1 prerequisite fixes P1-P4
