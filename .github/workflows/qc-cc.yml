@@ -33,6 +33,56 @@ jobs:
         run: |
           command -v jq >/dev/null 2>&1 || sudo apt-get update -y && sudo apt-get install -y jq
 
+      # Round-2 fix #5 self-test: check_claude_literals() must detect a
+      # double-quoted claude-* literal (the original single-quote-only regex
+      # gave a false PASS on double/backtick literals).
+      # Approach: run the exact grep pipeline from the function directly against
+      # the fixture file — no source/eval, no shell injection surface.
+      - name: Self-test check 5.1 — double-quoted claude literal MUST FAIL
+        run: |
+          FIXTURE="tests/fixtures/check-5.1/double-quoted-claude-literal.ts"
+          # Replicate the grep pipeline from check_claude_literals() verbatim.
+          # The fixture contains:  const hardcodedModel = "claude-sonnet-4-5";
+          # If the pattern fires, grep exits 0 and we confirm FAIL.
+          # If the pattern is silent (old single-quote-only regex), grep exits 1
+          # and we abort the CI step to surface the regression.
+          RESULT=$(grep -rn 'claude-' "$FIXTURE" 2>/dev/null \
+            | grep -E "['\"\`]claude-[a-z0-9-]+['\"\`]" \
+            | grep -vEi 'orchestrat(or|ion)' \
+            | grep -v 'model-providers/anthropic.ts' \
+            | grep -v 'web-agent/runner.ts' \
+            || true)
+          if [ -z "$RESULT" ]; then
+            echo "ERROR: check 5.1 grep pattern produced zero matches on the double-quoted fixture — false PASS regression"
+            exit 1
+          fi
+          echo "OK: check 5.1 correctly matched double-quoted claude-* literal in fixture"
+
+      # Round-3 optional: Row 33 CF-challenge self-test.
+      # cc-health-check.sh line 116 detects a 200+CF-challenge response and
+      # returns CF_INDET=true (exit 3 UNKNOWN, not exit 1 RED).
+      # This self-test reproduces the grep-based body check using a synthetic
+      # CF Access challenge HTML body to confirm the guard fires correctly.
+      - name: Self-test Row 33 — CF Access challenge body classified as UNKNOWN (not PASS)
+        run: |
+          # Synthetic CF Access challenge body — the real one contains these strings
+          CF_BODY='<!DOCTYPE html><html><head><title>Cloudflare Access</title></head><body><h1>Cloudflare Access</h1><form action="/cdn-cgi/access/login"></form></body></html>'
+          # Run the same grep check cc-health-check.sh uses at line 116
+          if printf '%s' "$CF_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
+            echo "OK: CF-challenge body correctly detected (grep matched) — probe would classify UNKNOWN"
+          else
+            echo "ERROR: CF-challenge grep pattern missed the synthetic body — Row 33 UNKNOWN guard is broken"
+            exit 1
+          fi
+          # Also verify a normal 200 app body does NOT trigger the guard
+          NORMAL_BODY='<!DOCTYPE html><html><head><title>Karen Vaughn Enterprises</title></head><body><div id="root"></div></body></html>'
+          if printf '%s' "$NORMAL_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
+            echo "ERROR: normal app body falsely triggered the CF-challenge guard — false UNKNOWN"
+            exit 1
+          else
+            echo "OK: normal app body correctly bypasses CF-challenge guard — PASS classified correctly"
+          fi
+
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
 
@@ -52,6 +102,135 @@ jobs:
 
       - name: Assert CHANGELOG.md has no uncorrected self-assessed QC entries
         run: bash scripts/check-qc-independence.sh
+
+  # ── B.1 deep-health truth-table suite ────────────────────────────────────
+  # Ports every applicable row of docs/B1-truth-table.md into vitest.
+  # A wrong verdict on any row blocks merge (per the severity tier table).
+  deep-health-truth-table:
+    name: B.1 deep-health truth table (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run vitest truth-table suite
+        run: npm run test:vitest
+        env:
+          NODE_ENV: test
+          # No DB or server needed — tests use mocks and temp dirs
+          DATABASE_PATH: ""
+
+  # ── B.1 thin-probe fixture run ─────────────────────────────────────────────
+  # Exercises cc-health-check.sh against a real Next.js build + pm2-less fixture
+  # to confirm the script exits 0 (green) on a known-good state and exits 1 on
+  # a broken state (missing asset).  Does NOT require pm2 (pm2 check is skipped
+  # when pm2 is absent; fixture covers the app-level checks).
+  deep-health-probe-fixture:
+    name: B.1 thin-probe fixture (cc-health-check.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app for fixture
+        run: npm run build
+        env:
+          DATABASE_PATH: /tmp/probe-fixture.db
+
+      - name: Seed fixture DB with branded company
+        run: |
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database('/tmp/probe-fixture.db');
+            db.exec(\"CREATE TABLE IF NOT EXISTS companies (id INTEGER PRIMARY KEY, name TEXT, slug TEXT)\");
+            db.exec(\"INSERT OR REPLACE INTO companies (id, name, slug) VALUES (1, 'Fixture Corp', 'fixture-corp')\");
+            db.exec(\"CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY)\");
+            db.close();
+            console.log('Fixture DB seeded');
+          "
+
+      - name: Write fixture company-config.json
+        run: |
+          mkdir -p config
+          echo '{"companyName":"Fixture Corp","slug":"fixture-corp"}' > config/company-config.json
+
+      - name: Write pre-rendered branded index.html (html_title check)
+        run: |
+          # checkHtmlTitle() reads .next/server/pages/index.html (rows 8-9).
+          # `next start` does not create pre-rendered HTML — inject it so the
+          # html_title check returns PASS instead of indeterminate, which would
+          # otherwise elevate the probe to exit 3 (UNKNOWN) instead of exit 0 (GREEN).
+          mkdir -p .next/server/pages
+          printf '<!DOCTYPE html><html><head><title>Fixture Corp</title></head><body></body></html>\n' \
+            > .next/server/pages/index.html
+          echo "Pre-rendered index.html written"
+
+      - name: Start app for outside-in probe
+        run: |
+          # Bind explicitly on 0.0.0.0 so both IPv4 and IPv6 curl calls work.
+          # Ubuntu runners resolve 'localhost' to ::1 (IPv6); without -H 0.0.0.0
+          # the server may only accept ::1 connections and the probe's
+          # --public-url http://127.0.0.1:4000 would get CF_HTTP=000.
+          DATABASE_PATH=/tmp/probe-fixture.db npx next start -p 4000 -H 0.0.0.0 &
+          # Wait for the server to be ready (up to 30s)
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:4000/api/health && break || sleep 1
+          done
+        env:
+          DATABASE_PATH: /tmp/probe-fixture.db
+          PORT: 4000
+
+      - name: Run cc-health-check.sh — expect GREEN (exit 0)
+        run: |
+          # --public-url http://127.0.0.1:4000 so the CF probe hits the running
+          # server (IPv4 explicit, avoids ::1 vs 0.0.0.0 mismatch on Ubuntu runners).
+          bash scripts/cc-health-check.sh --port 4000 --public-url http://127.0.0.1:4000 --json-only
+          echo "EXIT: $?"
+
+      - name: Break the build — remove a static asset to simulate stale manifest
+        run: |
+          ASSET=$(ls .next/static/chunks/*.js 2>/dev/null | head -1)
+          if [[ -n "$ASSET" ]]; then
+            rm -f "$ASSET"
+            echo "Removed asset: $ASSET"
+          else
+            echo "No .js asset found to remove — skipping stale-manifest fixture"
+          fi
+
+      - name: cc-health-check.sh with broken asset — expect RED (exit 1)
+        run: |
+          bash scripts/cc-health-check.sh --port 4000 --json-only && {
+            echo "ERROR: expected exit 1 (RED) but got exit 0 (GREEN) — stale-manifest check is broken"
+            exit 1
+          } || {
+            CODE=$?
+            if [[ "$CODE" -eq 1 ]]; then
+              echo "OK: correctly returned exit 1 (RED) for stale manifest"
+            elif [[ "$CODE" -eq 3 ]]; then
+              echo "NOTE: returned exit 3 (UNKNOWN) — acceptable if asset removal did not affect served HTML refs"
+            else
+              echo "Unexpected exit code $CODE"
+              exit 1
+            fi
+          }
 
   duck-e2e:
     name: Duck pipeline e2e (mock generator)

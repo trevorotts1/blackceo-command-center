@@ -105,6 +105,24 @@ check "3.4" "agents/_shared/USER.md is a real file" \
 check "3.5" "agents has exactly 69 symlinks (23 agents × 3 shared files)" \
   '[ "$(find agents -type l 2>/dev/null | wc -l | tr -d " ")" = "69" ]' \
   "run scripts/migrate-agents-to-zhc.py"
+# 3.5b: companion cardinality guard — adding a new agent dir with 0 symlinks
+# leaves the count at 69, so 3.5 passes while the new dir is misconfigured.
+check "3.5b" "exactly 23 non-_shared agent dirs (cardinality guard)" \
+  '[ "$(find agents -mindepth 1 -maxdepth 1 -type d ! -name "_shared" 2>/dev/null | wc -l | tr -d " ")" = "23" ]' \
+  "run scripts/migrate-agents-to-zhc.py to create the missing symlinks"
+# 3.5c: per-agent check that AGENTS.md, TOOLS.md, USER.md are symlinks (not copies).
+# A copied regular file satisfies find -type l count via cancellation but diverges
+# from _shared/ going forward.
+check "3.5c" "all agent AGENTS.md files are symlinks (not regular-file copies)" \
+  '! find agents -mindepth 2 -maxdepth 2 -name "AGENTS.md" ! -type l 2>/dev/null | grep -v "_shared" | grep -q .'
+check "3.5d" "all agent TOOLS.md files are symlinks (not regular-file copies)" \
+  '! find agents -mindepth 2 -maxdepth 2 -name "TOOLS.md" ! -type l 2>/dev/null | grep -v "_shared" | grep -q .'
+check "3.5e" "all agent USER.md files are symlinks (not regular-file copies)" \
+  '! find agents -mindepth 2 -maxdepth 2 -name "USER.md" ! -type l 2>/dev/null | grep -v "_shared" | grep -q .'
+# 3.5f: dangling symlink guard — find -type l matches dangling symlinks, so a
+# deleted _shared/ would yield count 69 while every symlink is broken.
+check "3.5f" "no dangling symlinks under agents/ (all symlinks resolve to a readable file)" \
+  'find agents -mindepth 2 -maxdepth 2 \( -name "AGENTS.md" -o -name "TOOLS.md" -o -name "USER.md" \) -type l | while read f; do [ -r "$f" ] || exit 1; done'
 check "3.6" "every non-_shared agent dir has IDENTITY.md" \
   'find agents -mindepth 1 -maxdepth 1 -type d ! -name "_shared" | while read d; do [ -f "$d/IDENTITY.md" ] || exit 1; done'
 check "3.7" "every agent dir has HEARTBEAT.md" \
@@ -127,7 +145,10 @@ blue "── 5. No Anthropic models in non-orchestrator code (QC.md #8 cost poli
 # Cost policy: business logic must NOT hardcode an Anthropic model as an
 # inference target — it should route through the model resolver / cheaper
 # providers. Three classes of match are legitimately exempt:
-#   - *orchestrator*           : the CEO/orchestration layer may name Claude.
+#   - *orchestrat(or|ion)*     : the CEO/orchestration layer may name Claude.
+#                                Exclusion covers both "orchestrator" (file names)
+#                                and "orchestration" (module names / comments) to
+#                                avoid false-not-green on sibling files.
 #   - model-providers/anthropic.ts : the dedicated Anthropic connector. Its
 #     job is to emit Anthropic model-family LABELS ('claude-opus', etc.) for
 #     the UI — these are groupings, not hardcoded inference targets.
@@ -136,8 +157,39 @@ blue "── 5. No Anthropic models in non-orchestrator code (QC.md #8 cost poli
 #     provider-agnostic. Its model id is env-overridable (WEB_AGENT_MODEL); the
 #     fallback literal must stay a valid Anthropic id for the live API call.
 # Any NEW hardcoded 'claude-...' id in other src/lib business logic still fails.
-check "5.1" "no hardcoded 'claude-' model id in src/lib (excl. orchestrator + anthropic connector + web-agent runner)" \
-  "! grep -rE \"'claude-[a-z0-9-]+'\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v -i orchestrator | grep -v 'model-providers/anthropic.ts' | grep -v 'web-agent/runner.ts' | grep ."
+#
+# FIX (Issue 5): match all three quote styles (', ", `) so a double-quoted or
+# backtick-quoted claude-* literal is NOT silently skipped, which would make
+# the inverted (!) expression vacuously TRUE = false PASS.
+#
+# FIX (Issue 6): -iE 'orchestrat(or|ion)' instead of -i orchestrator to also
+# exclude file paths / module names containing "orchestration" (sibling files).
+# check_claude_literals: returns 1 (FAIL) if any file in src/lib/ contains a
+# claude-* model literal in any quote style (', ", `).  Excludes:
+#   - orchestrat(or|ion)     — CEO/orchestration layer is exempt
+#   - model-providers/anthropic.ts — emits labels, not inference targets
+#   - web-agent/runner.ts        — direct Anthropic API consumer, env-overridable
+#
+# FIX (Issue 5): original used 'claude-[a-z0-9-]+' (single-quotes only); a
+# double-quoted or backtick-quoted literal matched 0 lines → inverted ! gave
+# a vacuous TRUE = false PASS.  Now all three delimiter styles are checked.
+#
+# FIX (Issue 6): exclusion widened from '-i orchestrator' to
+# '-iE orchestrat(or|ion)' to cover sibling file names / module paths that
+# contain "orchestration" rather than just "orchestrator".
+check_claude_literals() {
+  local pat='claude-'
+  local results
+  results=$(grep -rn "$pat" src/lib/ --include='*.ts' --include='*.tsx' 2>/dev/null \
+    | grep -E "['\"\`]claude-[a-z0-9-]+['\"\`]" \
+    | grep -vEi 'orchestrat(or|ion)' \
+    | grep -v 'model-providers/anthropic.ts' \
+    | grep -v 'web-agent/runner.ts' \
+    || true)
+  [[ -z "$results" ]]  # exit 0 (pass) when no matches; exit 1 (fail) when matches found
+}
+check "5.1" "no hardcoded claude-* model id in src/lib (excl. orchestrat(or|ion) + anthropic connector + web-agent runner)" \
+  "check_claude_literals"
 check "5.2" "no 'anthropic/' provider id in src/lib" \
   "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep ."
 

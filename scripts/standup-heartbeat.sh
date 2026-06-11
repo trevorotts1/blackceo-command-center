@@ -2,6 +2,11 @@
 # Standup Heartbeat for Mission Control
 # Runs 3x daily: 8 AM, 12 PM, 5 PM Eastern
 # Checks for tasks in INBOX, TESTING, IN_PROGRESS, and ASSIGNED states
+#
+# B.1 integration: delegates green/red verdict to scripts/cc-health-check.sh.
+# This script does NOT implement its own health signature — it calls the single
+# definition of green.  Exit 3 (UNKNOWN/indeterminate) is logged as transient,
+# NOT treated as not-green.
 
 set -e
 
@@ -14,8 +19,27 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEALTH_SCRIPT="$SCRIPT_DIR/cc-health-check.sh"
+
 log "=== Standup Heartbeat Started ==="
 log "Mission Control URL: $MISSION_CONTROL_URL"
+
+# B.1: check box health before doing task work.
+# Exit 3 (UNKNOWN/indeterminate) = transient — log it but do NOT alert or fail.
+if [[ -x "$HEALTH_SCRIPT" ]]; then
+  log "Running cc-health-check.sh..."
+  bash "$HEALTH_SCRIPT" --json-only >> "$LOG_FILE" 2>&1
+  HEALTH_EXIT=$?
+  if [[ "$HEALTH_EXIT" -eq 1 ]]; then
+    log "ALERT: cc-health-check reports RED — box is not healthy, skipping task work"
+    exit 1
+  elif [[ "$HEALTH_EXIT" -eq 3 ]]; then
+    log "WARN: cc-health-check reports UNKNOWN (transient) — continuing with task work"
+  else
+    log "cc-health-check: GREEN"
+  fi
+fi
 
 # Function to make API calls
 api_call() {
