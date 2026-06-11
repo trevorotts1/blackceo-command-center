@@ -462,7 +462,7 @@ if [[ ! -f "$BUILD_ID_FILE" && -f "${APP_DIR}/.next/BUILD_ID" ]]; then
   NEXT_BUILD_ID_MTIME=$(stat -c%Y "${APP_DIR}/.next/BUILD_ID" 2>/dev/null \
     || stat -f%m "${APP_DIR}/.next/BUILD_ID" 2>/dev/null \
     || echo 0)
-  if (( NEXT_BUILD_ID_MTIME <= BUILD_START_TS )); then
+  if (( NEXT_BUILD_ID_MTIME < BUILD_START_TS )); then
     _err "  BUILD_ID mtime (${NEXT_BUILD_ID_MTIME}) predates build start (${BUILD_START_TS})."
     _err "  This BUILD_ID is the Phase 1c snapshot copy, not a fresh build artefact."
     _err "  Treating as build failure — live .next is untouched."
@@ -498,8 +498,8 @@ fi
 BUILD_ID_MTIME=$(stat -c%Y "$BUILD_ID_FILE" 2>/dev/null \
   || stat -f%m "$BUILD_ID_FILE" 2>/dev/null \
   || echo 0)
-if (( BUILD_ID_MTIME <= BUILD_START_TS )); then
-  _err "  BUILD_ID mtime (${BUILD_ID_MTIME}) <= build start (${BUILD_START_TS})."
+if (( BUILD_ID_MTIME < BUILD_START_TS )); then
+  _err "  BUILD_ID mtime (${BUILD_ID_MTIME}) < build start (${BUILD_START_TS})."
   _err "  This BUILD_ID predates the build — stale artefact in BUILD_TMP."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
   _preflight_abort_receipt "Build failed: BUILD_ID in BUILD_TMP is stale (mtime predates build start)."
@@ -509,6 +509,16 @@ fi
 # npm exit code must be 0 for a successful build.
 if [[ $BUILD_EXIT -ne 0 ]]; then
   _err "Build FAILED — npm run build exited ${BUILD_EXIT}."
+  # DATA-LOSS GUARD: if this is the NEXT_DIST_DIR-bypass path (APP_DIR/.next was moved
+  # into BUILD_TMP at the mtime check above), we must restore it before cleaning up
+  # BUILD_TMP — otherwise we leave APP_DIR/.next MISSING and break the live server.
+  # The .next.rollback snapshot is intact; restore from it to honour the exit-2 contract:
+  # "old build untouched".
+  if [[ -d "$BUILD_TMP" && ! -d "${APP_DIR}/.next" && $ROLLBACK_EXISTS -eq 1 ]]; then
+    _warn "  NEXT_DIST_DIR bypass path: restoring APP_DIR/.next from rollback snapshot before cleanup ..."
+    cp -r "$ROLLBACK_DIR" "${APP_DIR}/.next" 2>/dev/null || \
+      _err "  CRITICAL: failed to restore APP_DIR/.next from rollback snapshot — manual intervention required."
+  fi
   rm -rf "$BUILD_TMP" 2>/dev/null || true
   _preflight_abort_receipt "npm run build exited ${BUILD_EXIT}. Live .next was NOT swapped."
   exit 2

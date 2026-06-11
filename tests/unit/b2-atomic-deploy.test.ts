@@ -253,7 +253,9 @@ function runDeploy(fixture: Fixture, extraEnv: Record<string, string> = {}): {
   exitCode: number; stdout: string; stderr: string;
 } {
   const result = spawnSync(
-    '/bin/bash',
+    (() => {
+      try { return execSync('which bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
+    })(),
     [fixture.deployScript,
       '--app-dir', fixture.appDir,
       '--pm2-app', 'mission-control',
@@ -480,6 +482,195 @@ test('Spec Verify (e): disk below threshold after cleanup → exit 2, pre-flight
   }
 });
 
+// ─── Spec Verify (f): mtime same-second edge case ───────────────────────────
+
+/**
+ * Mtime false-fail regression: BUILD_ID mtime exactly equal to BUILD_START_TS.
+ *
+ * On fast machines (M-series Mac, any SSD) the npm stub writes BUILD_ID in
+ * << 1 ms; date +%s has 1-second resolution, so BUILD_ID_MTIME == BUILD_START_TS
+ * virtually always in CI / fixture runs.  The old <= guard rejected this as a
+ * "stale artefact" and exited 2.  After the fix (< instead of <=) the same-second
+ * case must be accepted and the deploy must complete with exit 0.
+ *
+ * This test pins the scenario explicitly: good build + health green → exit 0.
+ * The mtime equality is guaranteed by the fixture harness running in << 1 second
+ * with a no-op sleep stub.
+ */
+test('Spec Verify (f): good build + BUILD_ID mtime equal to BUILD_START_TS (same second) → exit 0, not stale-artefact exit 2', async () => {
+  const healthJson = '{"green":true,"timestamp":"2026-06-10T00:00:00Z","checks":{"http":true}}';
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, healthJson, liveNextExists: true });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    assert.strictEqual(exitCode, 0,
+      `Expected exit 0 (success) even when BUILD_ID mtime == BUILD_START_TS (same second). ` +
+      `The <= mtime guard must have been changed to <.\n` +
+      `Got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // Success receipt must appear (not a stale-artefact abort)
+    assert.ok(
+      !stderr.includes('stale artefact') && !stderr.includes('predates the build'),
+      `Must not report stale artefact for a fresh build written in the same second.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `Success receipt must appear for same-second mtime build.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Spec Verify (g): NEXT_DIST_DIR bypass + npm non-zero → .next intact ────
+
+/**
+ * Data-loss regression: NEXT_DIST_DIR bypass path + npm exits non-zero.
+ *
+ * Scenario: the installed Next.js version ignores NEXT_DIST_DIR so the build
+ * goes to APP_DIR/.next.  The mtime guard passes (fresh BUILD_ID), so the script
+ * moves APP_DIR/.next into BUILD_TMP.  npm then exits non-zero (e.g. TypeScript
+ * error after webpack wrote .next/BUILD_ID).  Without the fix, the script would
+ * rm -rf BUILD_TMP and exit 2 — leaving APP_DIR/.next MISSING and breaking the
+ * live server while reporting "old build untouched".
+ *
+ * After the fix: if BUILD_TMP exists, APP_DIR/.next is absent, and ROLLBACK_EXISTS=1,
+ * the script restores APP_DIR/.next from .next.rollback before deleting BUILD_TMP.
+ * Exit 2 is still returned (correct: no swap happened), but the live .next is
+ * present and intact as the spec requires.
+ *
+ * The fixture simulates this by:
+ *   - Setting buildExitCode = 1 (npm fails)
+ *   - Writing a fresh BUILD_ID directly to APP_DIR/.next (simulating NEXT_DIST_DIR
+ *     being ignored — build went to .next, not to NEXT_DIST_DIR/BUILD_TMP)
+ *     and deleting APP_DIR/.next AFTER the move, which the npm stub handles by
+ *     not writing to NEXT_DIST_DIR at all.
+ *
+ * NOTE: the exact NEXT_DIST_DIR-ignored path in atomic-deploy.sh requires that
+ * APP_DIR/.next/BUILD_ID exists AND BUILD_ID is absent from BUILD_TMP at the
+ * detection point.  The npm stub achieves this by writing nothing to NEXT_DIST_DIR
+ * and exiting 1.  To trigger the fallback detection, we pre-write a fresh BUILD_ID
+ * to APP_DIR/.next in the fixture setup so the fallback branch is entered.
+ */
+test('Spec Verify (g): NEXT_DIST_DIR bypass + npm exits non-zero → exit 2, APP_DIR/.next still present (old build untouched)', async () => {
+  // Build a fixture where npm writes nothing to NEXT_DIST_DIR and exits 1
+  const baseDir = makeTmpDir();
+  const appDir = path.join(baseDir, 'app');
+  const binDir = path.join(baseDir, 'bin');
+  const stubsDir = path.join(baseDir, 'stubs');
+  mkdirSync(appDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(stubsDir, { recursive: true });
+
+  // Fake DB
+  writeFileSync(path.join(appDir, 'mission-control.db'), 'SQLite fixture');
+
+  // Existing live .next with a BUILD_ID that will be "fresh" (mtime guard passes
+  // because we touch it just before the script runs — the fixture harness runs
+  // in << 1 second of real time, so the timestamp will be >= BUILD_START_TS).
+  mkdirSync(path.join(appDir, '.next'), { recursive: true });
+  writeFileSync(path.join(appDir, '.next', 'BUILD_ID'), 'old-build-id');
+
+  // npm stub: ignores NEXT_DIST_DIR, writes nothing there, exits 1.
+  // It also writes BUILD_ID to APP_DIR/.next to simulate the NEXT_DIST_DIR-ignored path,
+  // and writes exit code 1 to BUILD_EXIT_FILE.
+  const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "run" && "$2" == "build" ]]; then
+  # Simulate Next.js ignoring NEXT_DIST_DIR — write fresh BUILD_ID to APP_DIR/.next
+  # (it was already there; just touch it so mtime == now, making the guard pass)
+  touch "${path.join(appDir, '.next', 'BUILD_ID')}" 2>/dev/null || true
+  # Write failure exit code
+  if [[ -n "\${BUILD_EXIT_FILE:-}" ]]; then
+    echo "1" > "$BUILD_EXIT_FILE"
+  fi
+  exit 1
+fi
+exit 0
+`;
+  writeFileSync(path.join(binDir, 'npm'), npmStub, { mode: 0o755 });
+
+  // Standard stubs
+  const pm2Stub = `#!/usr/bin/env bash
+case "$1" in
+  jlist) echo '[]' ;;
+  list)  echo 'mission-control' ;;
+  restart|reload|start|delete|stop) exit 0 ;;
+  *) exit 0 ;;
+esac
+`;
+  writeFileSync(path.join(binDir, 'pm2'), pm2Stub, { mode: 0o755 });
+  writeFileSync(path.join(binDir, 'sqlite3'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  const freeKb = 10 * 1024 * 1024;
+  writeFileSync(path.join(binDir, 'df'), `#!/usr/bin/env bash\necho "Filesystem     1K-blocks    Used  Available Use% Mounted on"\necho "/dev/sda1       20971520 1000000  ${freeKb}  10% /"\n`, { mode: 0o755 });
+  writeFileSync(path.join(binDir, 'curl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  writeFileSync(path.join(binDir, 'python3'), '#!/usr/bin/env python3\nimport sys\nprint("")\n', { mode: 0o755 });
+  writeFileSync(path.join(binDir, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+
+  // Health check stub (should never be called in this path — build fails before swap)
+  const healthStubPath = path.join(stubsDir, 'cc-health-check.sh');
+  writeFileSync(healthStubPath, '#!/usr/bin/env bash\necho \'{"green":true}\'\nexit 0\n', { mode: 0o755 });
+
+  const deployScript = path.join(process.cwd(), 'scripts', 'atomic-deploy.sh');
+
+  let exitCode: number;
+  let stderr: string;
+  try {
+    const result = spawnSync(
+      (() => {
+        try { return execSync('which bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
+      })(),
+      [deployScript,
+        '--app-dir', appDir,
+        '--pm2-app', 'mission-control',
+        '--port', '4000',
+        '--disk-min-gb', '5',
+        '--health-retries', '2',
+        '--health-retry-wait', '0',
+      ],
+      {
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          HOME: baseDir,
+          CC_HEALTH_CHECK_PATH: healthStubPath,
+        },
+        cwd: appDir,
+        timeout: 60_000,
+        encoding: 'utf8',
+      },
+    );
+    exitCode = result.status ?? 1;
+    stderr = result.stderr ?? '';
+  } finally {
+    // cleanup happens after assertions below
+  }
+
+  try {
+    // Must exit 2 (pre-flight/build abort — no swap occurred)
+    assert.strictEqual(exitCode, 2,
+      `Expected exit 2 (build failed, no swap) but got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // APP_DIR/.next must still exist — the data-loss bug would leave it missing
+    assert.ok(
+      existsSync(path.join(appDir, '.next')),
+      'APP_DIR/.next must still exist after exit 2 (spec: old build untouched). ' +
+      'Data-loss bug: .next was moved into BUILD_TMP and then BUILD_TMP was deleted.',
+    );
+
+    // The BUILD_ID content must be intact (old build or rollback restore)
+    const buildIdPath = path.join(appDir, '.next', 'BUILD_ID');
+    assert.ok(existsSync(buildIdPath), 'APP_DIR/.next/BUILD_ID must exist after exit 2');
+
+    // ATOMIC DEPLOY SUCCESS must never appear
+    assert.ok(
+      !stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `ATOMIC DEPLOY SUCCESS must not appear when build failed.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    try { rmSync(baseDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // ─── Static / structural tests (fast, no fixture execution) ─────────────────
 
 /**
@@ -693,10 +884,12 @@ test('B.2 structural: mtime guard present — rejects stale BUILD_ID (BUILD_STAR
     src.includes('BUILD_ID_MTIME') || src.includes('NEXT_BUILD_ID_MTIME'),
     'mtime guard must capture BUILD_ID mtime for comparison',
   );
-  // Comparison must use <= BUILD_START_TS to reject stale artefacts
+  // Comparison must use < BUILD_START_TS (strictly less than) to reject stale artefacts.
+  // Using <= would reject a fresh build whose BUILD_ID mtime equals BUILD_START_TS
+  // (same wall-clock second) — a spurious false-fail on fast machines like M-series Macs.
   assert.ok(
-    /BUILD_ID_MTIME.*<=.*BUILD_START_TS|NEXT_BUILD_ID_MTIME.*<=.*BUILD_START_TS/.test(src),
-    'mtime guard must reject BUILD_ID with mtime <= BUILD_START_TS',
+    /BUILD_ID_MTIME\s*<\s*BUILD_START_TS|NEXT_BUILD_ID_MTIME\s*<\s*BUILD_START_TS/.test(src),
+    'mtime guard must reject BUILD_ID with mtime < BUILD_START_TS (strictly less than, not <=)',
   );
 });
 
