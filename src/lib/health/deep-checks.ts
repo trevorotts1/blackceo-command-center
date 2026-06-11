@@ -8,11 +8,12 @@
  *
  * Truth-table rows covered:
  *   Rows 11-13, 39  asset_manifest (incl. Round-4: empty manifest guard)
- *   Rows 1-9        company_branding (partial-config rule, DB direct, consistency,
- *                   HTML title branding rows 8-9)
+ *   Rows 1-9, 9b   company_branding (partial-config rule, DB direct, consistency,
+ *                   HTML title branding rows 8-9, 9b REDO-REDO compound-form fix)
  *   Rows 20-22      database_path
  *   Rows 29-30      migrations
- *   Rows 23-24      disk_headroom
+ *   Rows 23-24, 35, 35b  disk_headroom (incl. REDO #1 wrong-mount DATABASE_PATH
+ *                         variant, REDO-REDO wrong-mount CWD variant)
  *   Rows 31-32, 40  next_public_app_url (incl. Round-4: IPv6 [::1] false-fail fix)
  */
 
@@ -381,10 +382,27 @@ export function checkCompanyBranding(): CompanyBrandingResult {
 // If no pre-rendered HTML is found, the check is skipped (indeterminate) — the
 // outside-in probe in cc-health-check.sh covers the running-server title case.
 
-/** Generic/placeholder page titles that indicate an unbranded install. */
+/** Generic/placeholder page titles that indicate an unbranded install.
+ *
+ * REDO-REDO FIX (SECONDARY FALSE-GREEN):
+ * The original set covered bare placeholders but missed compound forms that
+ * layout.tsx generates when COMPANY_NAME env is set to a generic word at
+ * build time.  layout.tsx line 26 produces `${COMPANY_NAME} Command Center`.
+ * Examples:
+ *   - COMPANY_NAME='Default'         → 'Default Command Center'
+ *   - COMPANY_NAME='Black CEO'       → 'Black CEO Command Center'
+ *     (vs 'blackceo command center' with no space — old entry missed the space variant)
+ *
+ * Fix: add 'default command center' and 'black ceo command center' (with space).
+ * Also add pattern-style entries: any title whose suffix is a known placeholder
+ * suffix ('command center', 'mission control') and whose prefix is a known
+ * placeholder word is covered by explicit entries below.
+ */
 const PLACEHOLDER_TITLES = new Set([
   'command center',
   'blackceo command center',
+  'black ceo command center',       // REDO-REDO: space-variant of 'blackceo command center'
+  'default command center',         // REDO-REDO: COMPANY_NAME='Default' at build time
   'mission control',
   'next.js app',
   'create next app',
@@ -734,33 +752,60 @@ export function checkMigrations(): CheckResult {
 // process.cwd() instead.
 const WRONG_MOUNT_PREFIXES = ['/data'];
 
-function resolveCheckPath(): string {
+/**
+ * Resolve the filesystem path that checkDiskHeadroom() should probe.
+ *
+ * Returns the chosen path, or null when the resolved path falls under a
+ * known wrong-mount prefix (WRONG_MOUNT_PREFIXES).  checkDiskHeadroom()
+ * treats null as an immediate FAIL (wrong-mount false-green guard).
+ *
+ * REDO #1 FIX (Row 35 DATABASE_PATH=/data/... variant):
+ * The original fix guarded the DATABASE_PATH branch but NOT process.cwd().
+ *
+ * REDO-REDO FIX (Row 35 CWD=/data/... variant — the remaining gap):
+ * When DATABASE_PATH is unset and process.cwd() is itself under /data
+ * (e.g. a Docker install where the app root is /data/app), the previous code
+ * returned process.cwd() without any mount check, causing diskReader to probe
+ * the large Docker volume (~80 GB free) and return pass:true — a false-green.
+ *
+ * Fix: evaluate WRONG_MOUNT_PREFIXES against the resolved candidate regardless
+ * of whether it came from DATABASE_PATH dir or process.cwd().  Return null when
+ * on a wrong mount so checkDiskHeadroom() can emit a named FAIL.
+ */
+export function resolveCheckPath(): string | null {
   const envPath = process.env.DATABASE_PATH;
-  if (envPath) {
-    const dir = path.dirname(envPath);
-    // REDO #1 FIX (Row 35 DATABASE_PATH=/data/... variant):
-    // If DATABASE_PATH points into /data (or another known large bind-mount),
-    // probing that directory would return the large mount's free space, not the
-    // CC partition's free space — false-green.
-    // Guard: if the resolved dir starts with a wrong-mount prefix, fall back to
-    // process.cwd() (the CC app's own partition).
-    const isWrongMount = WRONG_MOUNT_PREFIXES.some(
-      (prefix) => dir === prefix || dir.startsWith(prefix + '/')
-    );
-    if (!isWrongMount) {
-      return dir;
-    }
-    // Fall through to process.cwd() for wrong-mount paths.
+  // Choose candidate: DATABASE_PATH dir (if set) else process.cwd().
+  const candidate = envPath ? path.dirname(envPath) : process.cwd();
+
+  const isWrongMount = WRONG_MOUNT_PREFIXES.some(
+    (prefix) => candidate === prefix || candidate.startsWith(prefix + '/')
+  );
+  if (isWrongMount) {
+    // Candidate is on a known large bind-mount — return null to signal FAIL.
+    return null;
   }
-  return process.cwd();
+
+  return candidate;
 }
 
 export async function checkDiskHeadroom(): Promise<CheckResult> {
   try {
     // Resolve check path — NEVER from /data presence alone.
-    // resolveCheckPath() guards against DATABASE_PATH pointing into a separate
-    // large mount (Sheila-class false-green, truth-table Row 35).
+    // resolveCheckPath() returns null when both DATABASE_PATH dir and
+    // process.cwd() resolve into a WRONG_MOUNT_PREFIXES path (Sheila-class
+    // false-green, truth-table Row 35, incl. CWD variant from REDO-REDO fix).
     const checkPath = resolveCheckPath();
+    if (checkPath === null) {
+      // Both DATABASE_PATH dir and process.cwd() are on a known large bind-mount
+      // (e.g. /data in Docker).  Probing that mount would return its large free
+      // space (~80 GB) not the host partition's free space — false-green.
+      // Return FAIL immediately rather than probing the wrong mount.
+      return {
+        pass: false,
+        detail: 'disk_headroom: check path resolves to a known large bind-mount — wrong-mount false-green guard (Row 35 CWD variant)',
+        path: process.env.DATABASE_PATH ? String(process.env.DATABASE_PATH) : process.cwd(),
+      };
+    }
 
     // diskReader.readFreeBytes throws on Node 18 (statfsSync absent).
     // We let that propagate to the outer catch, which returns indeterminate=true

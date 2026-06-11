@@ -856,17 +856,19 @@ describe('disk_headroom', () => {
   //
   // Fix (resolveCheckPath): explicit WRONG_MOUNT_PREFIXES guard — when
   // DATABASE_PATH dir starts with '/data', fall back to process.cwd().
-  it('row 35 DATABASE_PATH=/data/... variant: DATABASE_PATH points into /data, /data=80GB, cwd=300MB → must FAIL, not PASS (REDO #1 false-green fix)', async () => {
+  it('row 35 DATABASE_PATH=/data/... variant: DATABASE_PATH points into /data, /data=80GB → must FAIL via wrong-mount guard (REDO #1 + REDO-REDO unified fix)', async () => {
     const checks = await loadChecks();
 
-    // Mock: /data reports 80 GB (the wrong large mount);
-    //       process.cwd() (tmpDir) reports 300 MB (the real CC partition).
+    // Mock: /data reports 80 GB (the wrong large mount).
+    // NOTE: after the REDO-REDO fix, resolveCheckPath() returns null for any
+    // candidate under /data — so diskReader.readFreeBytes() is NEVER called for
+    // /data paths.  The mock is kept to demonstrate that even if called, the
+    // guard fires before the probe.
     checks.diskReader.readFreeBytes = (checkPath: string): number => {
       if (checkPath === '/data' || checkPath.startsWith('/data/')) {
         return 80 * 1024 ** 3;  // 80 GB — wrong mount, abundant space
       }
-      // Any other path (including tmpDir = process.cwd()) → 300 MB
-      return 300 * 1024 * 1024;
+      return 300 * 1024 * 1024;  // Any other path → 300 MB
     };
 
     const saved = process.env.DATABASE_PATH;
@@ -878,17 +880,73 @@ describe('disk_headroom', () => {
     if (saved !== undefined) process.env.DATABASE_PATH = saved;
     else delete process.env.DATABASE_PATH;
 
-    // Must FAIL: resolveCheckPath falls back to process.cwd() (tmpDir=300 MB)
-    // because /data is a wrong-mount prefix.
-    // A PASS here means the resolveCheckPath guard is broken and the false-green
-    // is not fixed.
+    // Must FAIL: resolveCheckPath returns null (candidate '/data' is a wrong-mount prefix).
+    // checkDiskHeadroom() returns immediate FAIL without probing any disk.
+    // A PASS here means the resolveCheckPath guard is broken and the false-green is not fixed.
     expect(result.pass).toBe(false);
-    expect(result.detail).toMatch(/below/i);
-    // The check path must NOT be /data — it must be process.cwd() (tmpDir).
-    const reportedPath = (result as { path?: string }).path;
-    expect(reportedPath).not.toMatch(/^\/data/);
-    // The check path must be the fallback process.cwd() (tmpDir).
-    expect(reportedPath).toBe(tmpDir);
+    // Must NOT be indeterminate — wrong-mount is a detectable misconfiguration.
+    expect(result.indeterminate).not.toBe(true);
+    // Detail must mention wrong-mount (new behaviour) — NOT 'below' (old behaviour that
+    // would only appear if the disk was probed and returned 300 MB < threshold).
+    expect(result.detail).toMatch(/wrong.mount|bind.mount|Row 35/i);
+  });
+
+  // Row 35b: REDO-REDO PRIMARY FALSE-GREEN FIX (CWD entry path — the remaining gap).
+  //
+  // The REDO #1 fix closed the DATABASE_PATH=/data/... false-green by guarding
+  // the `if (envPath)` branch of resolveCheckPath().  However, the process.cwd()
+  // fallback branch had NO WRONG_MOUNT_PREFIXES guard.
+  //
+  // Concrete trigger: CC app installed in a Docker container where /data is the
+  // app root (process.cwd() = '/data/app'), DATABASE_PATH unset.
+  //   - resolveCheckPath() chose process.cwd() = '/data/app' (no guard applied).
+  //   - diskReader.readFreeBytes('/data/app') queried the Docker volume (~80 GB).
+  //   - checkDiskHeadroom() returned pass:true — false-green.
+  //
+  // The existing Row 35 tests at line 727 (no DATABASE_PATH) did NOT catch this
+  // because vi.spyOn(process,'cwd') mocked CWD to a tmpDir (/tmp/...), not /data/...
+  // The mock returned 300 MB for tmpDir → FAIL regardless of the mount guard.
+  //
+  // Fix: resolveCheckPath() evaluates WRONG_MOUNT_PREFIXES against the resolved
+  // candidate regardless of which branch produced it.  Returns null on wrong-mount.
+  // checkDiskHeadroom() returns immediate FAIL when resolveCheckPath() returns null.
+  it('row 35b: DATABASE_PATH unset + process.cwd()="/data/app" (Docker wrong-mount) → pass=false (REDO-REDO primary false-green fix)', async () => {
+    const checks = await loadChecks();
+
+    // Mock diskReader: return abundant space for /data paths (the wrong Docker mount),
+    // and 300 MB for any other path (the real CC partition).
+    checks.diskReader.readFreeBytes = (checkPath: string): number => {
+      if (checkPath === '/data' || checkPath.startsWith('/data/')) {
+        return 80 * 1024 ** 3;  // 80 GB — wrong Docker volume, abundant space
+      }
+      // Any other path (root FS, /home, etc.) → 300 MB (low space CC partition)
+      return 300 * 1024 * 1024;
+    };
+
+    // The key trigger: mock process.cwd() to return '/data/app'.
+    // The existing Row 35 tests mock CWD to tmpDir (/tmp/...) which is NOT /data —
+    // that is why they never exposed this false-green.
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/data/app');
+    const saved = process.env.DATABASE_PATH;
+    delete process.env.DATABASE_PATH;
+
+    let result: Awaited<ReturnType<typeof checks.checkDiskHeadroom>>;
+    try {
+      result = await checks.checkDiskHeadroom();
+    } finally {
+      cwdSpy.mockRestore();
+      if (saved !== undefined) process.env.DATABASE_PATH = saved;
+    }
+
+    // OLD behaviour: resolveCheckPath() returned '/data/app' → diskReader returned
+    // 80 GB → pass:true (false-green — the bug this test exposes).
+    // NEW behaviour: resolveCheckPath() detects '/data/app' as a wrong-mount path
+    // → returns null → checkDiskHeadroom() returns immediate FAIL.
+    expect(result.pass).toBe(false);
+    // Must NOT be indeterminate — this is a detectable wrong-mount misconfiguration.
+    expect(result.indeterminate).not.toBe(true);
+    // Detail must mention wrong-mount or bind-mount to identify the cause.
+    expect(result.detail).toMatch(/wrong.mount|bind.mount|Row 35/i);
   });
 });
 
@@ -939,6 +997,36 @@ describe('html_title', () => {
     const { checkHtmlTitle } = await loadChecks();
     const result = checkHtmlTitle();
     expect(result.pass).toBe(false);
+  });
+
+  // Row 9b: REDO-REDO SECONDARY FALSE-GREEN FIX
+  // PLACEHOLDER_TITLES covered bare placeholders but missed compound forms that
+  // layout.tsx generates when COMPANY_NAME env is set to a generic word at build time.
+  // layout.tsx: `${COMPANY_NAME} Command Center`
+  // Trigger: COMPANY_NAME='Default' → title = 'Default Command Center'
+  //          isPlaceholderTitle('default command center') returned false → pass:true
+  // Fix: add 'default command center' to PLACEHOLDER_TITLES.
+  it('row 9b: "Default Command Center" (COMPANY_NAME=Default compound form) → pass=false (REDO-REDO secondary false-green fix)', async () => {
+    writeServerHtml(tmpDir, 'Default Command Center');
+    const { checkHtmlTitle } = await loadChecks();
+    const result = checkHtmlTitle();
+    // OLD behaviour: isPlaceholderTitle('default command center') returned false → pass:true (false-green).
+    // NEW behaviour: 'default command center' is in PLACEHOLDER_TITLES → pass:false.
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/placeholder|unbranded/i);
+  });
+
+  // Row 9b variant: 'Black CEO Command Center' (with space) — not caught by 'blackceo command center' (no space)
+  it('row 9b variant: "Black CEO Command Center" (with space in company name) → pass=false (REDO-REDO)', async () => {
+    writeServerHtml(tmpDir, 'Black CEO Command Center');
+    const { checkHtmlTitle } = await loadChecks();
+    const result = checkHtmlTitle();
+    // OLD behaviour: 'black ceo command center' (with space) not in PLACEHOLDER_TITLES → pass:true (false-green).
+    // NEW behaviour: 'black ceo command center' added to PLACEHOLDER_TITLES → pass:false.
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/placeholder|unbranded/i);
   });
 
   // No pre-rendered HTML → indeterminate (not FAIL; live server may have branded title)
