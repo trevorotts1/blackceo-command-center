@@ -41,7 +41,7 @@
  *
  * The actual "image generation" is performed by THIS test (the mock generator)
  * rather than a real KIE run:
- *   - After in_progress, the test writes a valid 8×8 blue PNG to the artifact
+ *   - After in_progress, the test writes a valid 64×64 gradient blue PNG to the artifact
  *     directory.
  *   - Registers a deliverable row via POST /api/tasks/:id/deliverables.
  *   - Advances the task to `review` via PATCH /api/tasks/:id.
@@ -655,6 +655,14 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     const stat = fs.statSync(artifactPath);
     assert.ok(stat.size > 0, `PNG must be non-empty; got ${stat.size} bytes`);
 
+    // Verify the PNG is ≥1 KB so the QC scorer's min_resolution heuristic passes.
+    // The mock generator writes a 64×64 gradient PNG (~11 KB) — a solid-colour
+    // 8×8 PNG compresses to ~73 bytes which fails the ≥1024-byte size proxy.
+    assert.ok(
+      stat.size >= 1024,
+      `PNG must be ≥1024 bytes to satisfy QC min_resolution heuristic; got ${stat.size} bytes`,
+    );
+
     // Verify magic bytes (PNG signature: 89 50 4E 47 0D 0A 1A 0A)
     const buf = Buffer.alloc(8);
     const fd  = fs.openSync(artifactPath, 'r');
@@ -715,7 +723,8 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
 
   // ── g. QC runs in artifact mode and task reaches done (or owner-approval) ──
   // §4 contract: artifact-mode QC derives criteria from "create a blue duck image",
-  // evaluates the 8×8 PNG (existence ✓, valid_image ✓), scores ≥8.5, and either:
+  // evaluates the 64×64 gradient PNG (existence ✓, valid_image ✓, min_resolution ✓,
+  // vision_match → skipped/pass when no LLM key), scores ≥8.5, and either:
   //   (a) source != 'owner' → task moves to `done` (auto-approve)
   //   (b) source == 'owner' → task stays in `review` with qc_owner_approval_pending event
   //
