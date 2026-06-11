@@ -726,7 +726,9 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     let qcEventFound = false;
     let finalStatus = '';
     const start = Date.now();
-    while (Date.now() - start < 20_000) {
+    // 45s gives CI enough time for up to 3 reroute cycles to resolve to blocked,
+    // or for artifact-mode QC to reach done/review on slower Ubuntu runners.
+    while (Date.now() - start < 45_000) {
       const events = await getEventsForTask(taskId);
       const qcEvt = events.find((e) => {
         const msg = String(e.message ?? '');
@@ -740,8 +742,9 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
       const { json } = await get(`${appBase}/api/tasks/${taskId}`);
       const taskNow = json as Record<string, unknown>;
       finalStatus = taskNow.status as string;
-      if (finalStatus === 'done' || finalStatus === 'review') {
-        if (qcEventFound) break;
+      // Break as soon as any ACCEPTABLE_TERMINAL state is reached
+      if ((finalStatus === 'done' || finalStatus === 'review' || finalStatus === 'blocked') && qcEventFound) {
+        break;
       }
       await sleep(400);
     }
