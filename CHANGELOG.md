@@ -1,3 +1,5 @@
+## [v4.35.0] — 2026-06-11 — feat(b2): atomic self-verifying deploy + auto-rollback + B.1 prerequisite fixes P1-P4
+
 ## [v4.34.0] — 2026-06-11 — fix(b1): B.1 deep health check — 65 vitest rows green, all truth-table rows pass
 
 ## [v4.33.0] — 2026-06-10 — test(e2e): headless duck pipeline CI gate (mock generator) + B.1 truth table
