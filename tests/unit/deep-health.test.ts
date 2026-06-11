@@ -996,6 +996,46 @@ describe('next_public_app_url', () => {
     expect(result.detail).toMatch(/cannot verify|CC_PUBLIC_URL|row 32/i);
   });
 
+  // Row 32 sub-case (REDO #2): NEXT_PUBLIC_APP_URL=non-localhost + CC_PUBLIC_URL=truthy-but-invalid → FAIL
+  // FALSE-GREEN CLOSED: when CC_PUBLIC_URL is truthy but not a valid URL (e.g. 'not-a-valid-url'),
+  // the catch{} at the comparison block swallowed the TypeError.  The !publicUrlHint guard at the
+  // "unset" FAIL branch did not fire (publicUrlHint is truthy), so the function fell through to
+  // pass=true — a false-green.
+  // Fix: set publicUrlHintInvalid=true in the catch{}, then widen the FAIL guard to cover
+  // truthy-but-invalid CC_PUBLIC_URL: if (!isLocalhost && (!publicUrlHint || publicUrlHintInvalid)).
+  it('row 32 sub-case REDO #2: NEXT_PUBLIC_APP_URL=non-localhost + CC_PUBLIC_URL=truthy-but-invalid ("not-a-valid-url") → pass=false, indeterminate not true', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://real-client.zerohumanworkforce.com';
+    process.env.CC_PUBLIC_URL = 'not-a-valid-url';  // truthy but not a valid URL
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    // Must FAIL — truthy-but-invalid CC_PUBLIC_URL cannot verify the hostname
+    expect(result.pass).toBe(false);
+    // Must NOT be indeterminate — this is a detectable misconfiguration (FAIL, not UNKNOWN)
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/not a valid URL|cannot verify|row 32/i);
+  });
+
+  // Row 32 sub-case (REDO #2 additional variants): other truthy-but-invalid CC_PUBLIC_URL forms
+  it('row 32 sub-case REDO #2 variant: CC_PUBLIC_URL="   " (whitespace-only) → pass=false', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://real-client.zerohumanworkforce.com';
+    process.env.CC_PUBLIC_URL = '   ';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    // Whitespace-only CC_PUBLIC_URL is falsy after trimming but truthy as-is.
+    // new URL('   ') throws, so publicUrlHintInvalid=true → FAIL.
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+  });
+
+  it('row 32 sub-case REDO #2 variant: CC_PUBLIC_URL="http://" (no hostname) → pass=false', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://real-client.zerohumanworkforce.com';
+    process.env.CC_PUBLIC_URL = 'http://';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+  });
+
   // Row 32 sub-case: non-localhost URL with matching CC_PUBLIC_URL → PASS
   // (demonstrates that setting CC_PUBLIC_URL correctly unlocks Row 31 PASS)
   it('row 32 sub-case: NEXT_PUBLIC_APP_URL non-localhost + CC_PUBLIC_URL same host → pass=true', async () => {

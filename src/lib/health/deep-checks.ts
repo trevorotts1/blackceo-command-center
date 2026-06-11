@@ -542,6 +542,12 @@ export function checkNextPublicAppUrl(): AppUrlResult {
     // If CC_PUBLIC_URL IS set and doesn't match NEXT_PUBLIC_APP_URL, that is a
     // confirmed mismatch → FAIL (the localhost branch above handles this when
     // the URL is localhost; the block below handles the non-localhost case).
+    // REDO #2 FIX (Row 32 false-green — truthy-but-invalid CC_PUBLIC_URL):
+    // Track whether CC_PUBLIC_URL is set but cannot be parsed as a valid URL.
+    // This flag is checked below alongside the "unset" guard so that both cases
+    // (CC_PUBLIC_URL unset AND CC_PUBLIC_URL truthy-but-invalid) trigger FAIL.
+    let publicUrlHintInvalid = false;
+
     if (!isLocalhost && publicUrlHint) {
       try {
         const pubParsed = new URL(publicUrlHint);
@@ -555,29 +561,35 @@ export function checkNextPublicAppUrl(): AppUrlResult {
           };
         }
       } catch {
-        // CC_PUBLIC_URL not a valid URL — skip the comparison
+        // CC_PUBLIC_URL is set but is not a valid URL (e.g. 'not-a-valid-url',
+        // '   ', 'http://', 'ftp://', '://nodomain').
+        // REDO #2: set the flag so the guard below can trigger FAIL.
+        // The old code silently skipped the comparison, letting the function fall
+        // through to pass=true — a false-green (Row 32: FAIL expected).
+        publicUrlHintInvalid = true;
       }
     }
 
-    if (!isLocalhost && !publicUrlHint) {
-      // REDO #1 FIX (Row 32 false-green — confirmed):
-      // Non-localhost URL with CC_PUBLIC_URL unset — cannot verify the hostname
-      // is correct (might be a copy-paste from another client, e.g.
-      // https://wrong-client.tunnel.com left in NEXT_PUBLIC_APP_URL).
-      // Without CC_PUBLIC_URL, the endpoint cannot distinguish a correct tunnel
-      // URL from a wrong one — silently passing is a false-green.
-      //
-      // Verdict: FAIL.
-      //   - A non-localhost NEXT_PUBLIC_APP_URL on a CF tunnel deploy REQUIRES
-      //     CC_PUBLIC_URL to be set so the health check can verify the hostname.
-      //   - Without it, the check is unverifiable and must not pass.
-      //   - Operators who want Row 31 PASS must set CC_PUBLIC_URL.
-      //   - This closes the false-green described in the confirmed finding.
+    // REDO #1 FIX (Row 32 false-green — CC_PUBLIC_URL unset):
+    // REDO #2 FIX (Row 32 false-green — CC_PUBLIC_URL truthy-but-invalid):
+    // Non-localhost NEXT_PUBLIC_APP_URL with CC_PUBLIC_URL absent OR unparseable
+    // means the hostname cannot be verified — silently passing is a false-green.
+    //
+    // Verdict: FAIL.
+    //   - A non-localhost NEXT_PUBLIC_APP_URL on a CF tunnel deploy REQUIRES a
+    //     valid CC_PUBLIC_URL so the health check can verify the hostname.
+    //   - Without it (unset or invalid), the check is unverifiable and must FAIL.
+    //   - Operators who want Row 31 PASS must set CC_PUBLIC_URL to a valid URL
+    //     matching the actual CF tunnel hostname.
+    if (!isLocalhost && (!publicUrlHint || publicUrlHintInvalid)) {
+      const reason = publicUrlHintInvalid
+        ? `CC_PUBLIC_URL is set but is not a valid URL ("${publicUrlHint}") — cannot verify hostname`
+        : 'CC_PUBLIC_URL is not configured — cannot verify hostname is correct';
       return {
         pass: false,
         indeterminate: false,
         app_url: appUrl,
-        detail: `next_public_app_url: NEXT_PUBLIC_APP_URL is set to a non-localhost URL ("${appUrl}") but CC_PUBLIC_URL is not configured — cannot verify hostname is correct; set CC_PUBLIC_URL matching the actual CF tunnel URL to enable mismatch detection (row 32: FAIL)`,
+        detail: `next_public_app_url: NEXT_PUBLIC_APP_URL is set to a non-localhost URL ("${appUrl}") but ${reason}; set CC_PUBLIC_URL to a valid URL matching the actual CF tunnel URL to enable mismatch detection (row 32: FAIL)`,
       };
     }
 
