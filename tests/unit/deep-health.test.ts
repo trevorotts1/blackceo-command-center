@@ -148,6 +148,43 @@ describe('asset_manifest', () => {
     const result = checkAssetManifest();
     expect(result.pass).toBe(false);
   });
+
+  // Round-4 fix (Item 8): empty manifest vacuous PASS.
+  // When build-manifest.json has pages:{} (and all other path arrays are empty),
+  // referenced.size===0. The old code ran zero loop iterations and returned
+  // pass=true with detail '0 referenced assets present' — a false-green.
+  // An interrupted build leaves exactly this state: BUILD_ID written, manifest
+  // written, no chunks compiled, so the server 404s every /_next/static route.
+  //
+  // Fix: guard before the loop — if referenced.size === 0 → FAIL.
+  // Truth-table row added: 'manifest present with 0 referenced assets + static/ present → FAIL'.
+  it('Round-4 Item 8: manifest present with pages:{} (0 referenced assets) + static/ present → pass=false (empty build guard)', async () => {
+    // Use makeNextBuild with withStaticDir=false to avoid creating the static dir,
+    // then manually add the static dir and a BUILD_ID.  The manifest has pages:{}
+    // so referenced.size===0 triggers the new guard before the static-dir check.
+    const nextDir = path.join(tmpDir, '.next');
+    fs.mkdirSync(nextDir, { recursive: true });
+    fs.writeFileSync(path.join(nextDir, 'BUILD_ID'), 'empty-build-test');
+    // Write a manifest with pages:{} — exactly the interrupted-build state
+    const emptyManifest = {
+      pages: {},
+      polyfillFiles: [],
+      lowPriorityFiles: [],
+    };
+    fs.writeFileSync(path.join(nextDir, 'build-manifest.json'), JSON.stringify(emptyManifest));
+    // Create the static/ dir so the guard fires on referenced.size=0, not on static dir absence
+    const staticDir = path.join(nextDir, 'static');
+    fs.mkdirSync(staticDir, { recursive: true });
+
+    const { checkAssetManifest } = await loadChecks();
+    const result = checkAssetManifest();
+
+    // Must FAIL: manifest has 0 referenced assets — empty or interrupted build
+    expect(result.pass).toBe(false);
+    expect(result.detail).toMatch(/0 referenced assets|empty or incomplete/i);
+    // referenced_count must be 0 in the returned detail (not absent)
+    expect((result as { referenced_count?: number }).referenced_count).toBe(0);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1055,6 +1092,40 @@ describe('next_public_app_url', () => {
     expect(result.pass).toBe(false);
     expect(result.indeterminate).not.toBe(true);
     expect(result.detail).toMatch(/does not match|row 32/i);
+  });
+
+  // Round-4 fix (Item 9): IPv6 false-fail.
+  // URL.hostname for 'http://[::1]:3000' returns '[::1]' (with brackets).
+  // The old isLocalhost regex was /^(localhost|127\.\d+\.\d+\.\d+|::1)$/ which
+  // did NOT match '[::1]' — so [::1] was treated as a non-localhost remote URL
+  // and the function returned FAIL with "cannot verify hostname".
+  // Fix: add '\[::1\]' to the regex to accept the bracketed IPv6 loopback form.
+  //
+  // Truth-table row: NEXT_PUBLIC_APP_URL='http://[::1]:3000' → PASS (localhost, acceptable).
+  it('Round-4 Item 9: NEXT_PUBLIC_APP_URL with IPv6 loopback [::1] → pass=true (localhost, acceptable)', async () => {
+    // [::1] is the bracketed form URL.hostname returns for IPv6 loopback
+    process.env.NEXT_PUBLIC_APP_URL = 'http://[::1]:3000';
+    // CC_PUBLIC_URL not set — localhost is acceptable without a public URL hint
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    // Must PASS: [::1] is IPv6 loopback, equivalent to 127.0.0.1
+    // Old code: FAIL (treated [::1] as non-localhost, CC_PUBLIC_URL unset → "cannot verify")
+    // Fixed code: PASS ([::1] is in the isLocalhost regex)
+    expect(result.pass).toBe(true);
+    expect(result.detail).not.toMatch(/cannot verify|row 32/i);
+  });
+
+  // Row 32 variant: [::1] with CC_PUBLIC_URL pointing to a real domain → FAIL
+  // (IPv6 loopback + remote CC_PUBLIC_URL = same mismatch as 127.0.0.1 + remote CC_PUBLIC_URL)
+  it('Round-4 Item 9 mismatch: NEXT_PUBLIC_APP_URL=[::1] + CC_PUBLIC_URL=real domain → pass=false (IPv6 localhost mismatch)', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'http://[::1]:3000';
+    process.env.CC_PUBLIC_URL = 'https://karen.zerohumanworkforce.com';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    // Must FAIL: IPv6 localhost + remote CC_PUBLIC_URL = localhost mismatch
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/mismatch|row 32|localhost/i);
   });
 });
 

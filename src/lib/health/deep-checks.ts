@@ -7,13 +7,13 @@
  *   import { checkAssetManifest, ... } from '@/lib/health/deep-checks';
  *
  * Truth-table rows covered:
- *   Rows 11-13  asset_manifest
- *   Rows 1-9    company_branding (partial-config rule, DB direct, consistency,
- *               HTML title branding rows 8-9)
- *   Rows 20-22  database_path
- *   Rows 29-30  migrations
- *   Rows 23-24  disk_headroom
- *   Rows 31-32  next_public_app_url (NEXT_PUBLIC_APP_URL consistency)
+ *   Rows 11-13, 39  asset_manifest (incl. Round-4: empty manifest guard)
+ *   Rows 1-9        company_branding (partial-config rule, DB direct, consistency,
+ *                   HTML title branding rows 8-9)
+ *   Rows 20-22      database_path
+ *   Rows 29-30      migrations
+ *   Rows 23-24      disk_headroom
+ *   Rows 31-32, 40  next_public_app_url (incl. Round-4: IPv6 [::1] false-fail fix)
  */
 
 import fs from 'fs';
@@ -135,6 +135,24 @@ export function checkAssetManifest(): CheckResult {
         // rel is now e.g. 'static/chunks/main-abc123.js'
         referenced.add(rel);
       }
+    }
+
+    // Round-4 fix (Item 8): empty manifest vacuous PASS.
+    // When build-manifest.json has pages:{} (and all other arrays are empty),
+    // referenced.size === 0.  The missing-assets loop runs zero iterations and
+    // the function falls through to pass=true — a false-green.  An interrupted
+    // build can write BUILD_ID + build-manifest.json and then fail before
+    // compiling any chunks, leaving a manifest with 0 referenced assets.  The
+    // running server will 404 every /_next/static route even though this check
+    // previously said OK.
+    // Guard: if referenced.size === 0, the build is empty or incomplete → FAIL.
+    if (referenced.size === 0) {
+      return {
+        pass: false,
+        detail: `asset_manifest: manifest has 0 referenced assets — build is empty or incomplete (BUILD_ID=${buildId})`,
+        build_id: buildId,
+        referenced_count: 0,
+      };
     }
 
     // Also check the static directory exists
@@ -495,13 +513,21 @@ export function checkNextPublicAppUrl(): AppUrlResult {
     // Row 32: check for localhost mismatch when a public URL is configured.
     // A NEXT_PUBLIC_APP_URL pointing to localhost/127.0.0.1 on a box that has a
     // public hostname configured is a misconfiguration (SSE/webhooks break).
-    const isLocalhost = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(host);
+    //
+    // Round-4 fix (Item 9): IPv6 false-fail.
+    // URL.hostname returns '[::1]' (with brackets) for IPv6 loopback literals,
+    // e.g. 'http://[::1]:3000' → hostname='[::1]'.  The old regex matched only
+    // '::1' (without brackets), so '[::1]' failed the isLocalhost test and the
+    // URL was treated as a non-localhost remote URL → FAIL (false-fail).
+    // Fix: add '\[::1\]' (the bracketed form) to the regex so both '::1' and
+    // '[::1]' are recognised as IPv6 loopback.
+    const isLocalhost = /^(localhost|127\.\d+\.\d+\.\d+|::1|\[::1\])$/.test(host);
     const publicUrlHint = process.env.CC_PUBLIC_URL || '';
 
     if (isLocalhost && publicUrlHint) {
       try {
         const pubParsed = new URL(publicUrlHint);
-        if (!/^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(pubParsed.hostname)) {
+        if (!/^(localhost|127\.\d+\.\d+\.\d+|::1|\[::1\])$/.test(pubParsed.hostname)) {
           return {
             pass: false,
             indeterminate: false,
