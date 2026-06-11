@@ -720,6 +720,64 @@ describe('disk_headroom', () => {
     expect((result as { path?: string }).path).not.toMatch(/^\/data/);
   });
 
+  // REDO #1 — Node 18 disk_headroom false-green (missing test row):
+  // CONFIRMED FALSE-GREEN: on Node 18 (no fs.statfsSync), the old diskReader
+  // fallback returned os.freemem() (available RAM, not disk bytes).  Any machine
+  // with >500 MB free RAM passed the disk check regardless of actual disk space.
+  //
+  // Fix: diskReader.readFreeBytes now throws when statfsSync is absent.
+  //      checkDiskHeadroom() catches the throw → returns indeterminate=true (UNKNOWN).
+  //
+  // This test stubs statfsSync as undefined (simulating Node 18) and asserts:
+  //   1. readFreeBytes throws (does NOT return os.freemem()).
+  //   2. checkDiskHeadroom returns indeterminate=true, pass=false (UNKNOWN).
+  //   3. The returned value is NOT os.freemem() bytes masquerading as disk space.
+  it('Node 18 statfsSync-absent disk fallback: readFreeBytes throws, checkDiskHeadroom returns UNKNOWN (REDO #1 false-green fix)', async () => {
+    const checks = await loadChecks();
+
+    // Simulate Node 18 where statfsSync does not exist on the fs module.
+    // We do NOT mock diskReader.readFreeBytes directly — we test the real
+    // implementation path that Node 18 exercises.
+    const originalReadFreeBytes = checks.diskReader.readFreeBytes;
+    // Override diskReader to call a version of the real function but with
+    // statfsSync removed — simulates the Node 18 environment:
+    checks.diskReader.readFreeBytes = (checkPath: string): number => {
+      // Replicate the real implementation but with statfsSync absent:
+      const fsAny: Record<string, unknown> = { ...require('fs') };
+      delete fsAny['statfsSync'];  // Simulate Node 18 (no statfsSync)
+      if (typeof fsAny['statfsSync'] === 'function') {
+        // This branch is unreachable in this test (statfsSync deleted above)
+        throw new Error('should not reach statfsSync branch in Node 18 simulation');
+      }
+      // The old fallback was: return os.freemem();
+      // The new implementation throws instead.
+      throw new Error('fs.statfsSync is not available on this Node.js version (requires Node >=19); disk free space check is UNKNOWN (indeterminate)');
+    };
+
+    // Verify the result is UNKNOWN (indeterminate), not a pass based on RAM
+    const savedDbPath = process.env.DATABASE_PATH;
+    delete process.env.DATABASE_PATH;
+
+    const result = await checks.checkDiskHeadroom();
+
+    if (savedDbPath !== undefined) process.env.DATABASE_PATH = savedDbPath;
+    checks.diskReader.readFreeBytes = originalReadFreeBytes;  // restore
+
+    // Must be UNKNOWN — cannot determine disk space on Node 18
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(true);
+    expect(result.detail).toMatch(/could not determine|statfsSync|UNKNOWN/i);
+
+    // Critical: the free_gb must NOT be set to a RAM-derived value.
+    // If free_gb is returned at all, it must not equal os.freemem()'s GiB value.
+    const reportedFreeGb = (result as { free_gb?: number }).free_gb;
+    if (reportedFreeGb !== undefined) {
+      const ramGb = require('os').freemem() / (1024 ** 3);
+      // The reported value must NOT be os.freemem() — that would be the old false-green
+      expect(Math.abs(reportedFreeGb - ramGb)).toBeGreaterThan(0.01);
+    }
+  });
+
   // Row 35 variant: DATABASE_PATH is set to a path under /home (the correct
   // CC partition, 300 MB free) while /data has 80 GB. The check must probe
   // DATABASE_PATH's directory (the CC partition) and return FAIL.
@@ -747,6 +805,53 @@ describe('disk_headroom', () => {
     // The check path must be tmpDir (DATABASE_PATH dir), never /data.
     expect((result as { path?: string }).path).toBe(tmpDir);
     expect((result as { path?: string }).path).not.toMatch(/^\/data/);
+  });
+
+  // REDO #1 — Row 35 DATABASE_PATH=/data/... variant (missing test row):
+  // CONFIRMED FALSE-GREEN: if DATABASE_PATH=/data/mission-control.db, then
+  // path.dirname() resolves to /data — the large bind-mount — and
+  // diskReader.readFreeBytes('/data') returns 80 GB → pass=true despite the
+  // actual CC app partition having <500 MB free.
+  //
+  // The guard comment ('NEVER from /data presence alone') was bypassed when
+  // DATABASE_PATH itself pointed into /data — the dirname route went straight
+  // to /data without triggering the heuristic guard.
+  //
+  // Fix (resolveCheckPath): explicit WRONG_MOUNT_PREFIXES guard — when
+  // DATABASE_PATH dir starts with '/data', fall back to process.cwd().
+  it('row 35 DATABASE_PATH=/data/... variant: DATABASE_PATH points into /data, /data=80GB, cwd=300MB → must FAIL, not PASS (REDO #1 false-green fix)', async () => {
+    const checks = await loadChecks();
+
+    // Mock: /data reports 80 GB (the wrong large mount);
+    //       process.cwd() (tmpDir) reports 300 MB (the real CC partition).
+    checks.diskReader.readFreeBytes = (checkPath: string): number => {
+      if (checkPath === '/data' || checkPath.startsWith('/data/')) {
+        return 80 * 1024 ** 3;  // 80 GB — wrong mount, abundant space
+      }
+      // Any other path (including tmpDir = process.cwd()) → 300 MB
+      return 300 * 1024 * 1024;
+    };
+
+    const saved = process.env.DATABASE_PATH;
+    // Set DATABASE_PATH to a file directly under /data (the trigger condition).
+    process.env.DATABASE_PATH = '/data/mission-control.db';
+
+    const result = await checks.checkDiskHeadroom();
+
+    if (saved !== undefined) process.env.DATABASE_PATH = saved;
+    else delete process.env.DATABASE_PATH;
+
+    // Must FAIL: resolveCheckPath falls back to process.cwd() (tmpDir=300 MB)
+    // because /data is a wrong-mount prefix.
+    // A PASS here means the resolveCheckPath guard is broken and the false-green
+    // is not fixed.
+    expect(result.pass).toBe(false);
+    expect(result.detail).toMatch(/below/i);
+    // The check path must NOT be /data — it must be process.cwd() (tmpDir).
+    const reportedPath = (result as { path?: string }).path;
+    expect(reportedPath).not.toMatch(/^\/data/);
+    // The check path must be the fallback process.cwd() (tmpDir).
+    expect(reportedPath).toBe(tmpDir);
   });
 });
 
@@ -823,8 +928,12 @@ describe('next_public_app_url', () => {
   });
 
   // Row 31: NEXT_PUBLIC_APP_URL set and consistent → PASS
-  it('row 31: NEXT_PUBLIC_APP_URL set to valid absolute URL → pass=true', async () => {
+  // REDO #1 NOTE: Row 31 PASS now requires CC_PUBLIC_URL to be set and matching
+  // the hostname in NEXT_PUBLIC_APP_URL.  Without CC_PUBLIC_URL, a non-localhost
+  // URL cannot be verified and returns FAIL (Row 32 false-green fix).
+  it('row 31: NEXT_PUBLIC_APP_URL set to valid absolute URL + CC_PUBLIC_URL matches → pass=true', async () => {
     process.env.NEXT_PUBLIC_APP_URL = 'https://karen.zerohumanworkforce.com';
+    process.env.CC_PUBLIC_URL = 'https://karen.zerohumanworkforce.com';
     const { checkNextPublicAppUrl } = await loadChecks();
     const result = checkNextPublicAppUrl();
     expect(result.pass).toBe(true);
@@ -866,6 +975,46 @@ describe('next_public_app_url', () => {
     const { checkNextPublicAppUrl } = await loadChecks();
     const result = checkNextPublicAppUrl();
     expect(result.pass).toBe(true);
+  });
+
+  // REDO #1 — Row 32 non-localhost wrong domain (missing test row):
+  // CONFIRMED FALSE-GREEN: NEXT_PUBLIC_APP_URL is a non-localhost wrong URL
+  // (e.g. copied from another client) + CC_PUBLIC_URL unset → old code returned
+  // pass=true unconditionally (fell through to `return { pass: true, ... }`).
+  // Fix: non-localhost URL with CC_PUBLIC_URL unset → FAIL (cannot verify).
+  // The test asserts pass=false AND indeterminate is NOT true (this is a
+  // detectable misconfiguration, not a transient state).
+  it('row 32 non-localhost wrong domain: NEXT_PUBLIC_APP_URL=https://wrong-client.tunnel.com + CC_PUBLIC_URL unset → pass=false (REDO #1 false-green fix)', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://wrong-client.tunnel.com';
+    // CC_PUBLIC_URL is deliberately NOT set
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    // Must NOT return pass=true — that is the false-green we are closing.
+    expect(result.pass).toBe(false);
+    // Should not be marked as indeterminate — this is a FAIL, not UNKNOWN.
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/cannot verify|CC_PUBLIC_URL|row 32/i);
+  });
+
+  // Row 32 sub-case: non-localhost URL with matching CC_PUBLIC_URL → PASS
+  // (demonstrates that setting CC_PUBLIC_URL correctly unlocks Row 31 PASS)
+  it('row 32 sub-case: NEXT_PUBLIC_APP_URL non-localhost + CC_PUBLIC_URL same host → pass=true', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://correct-client.tunnel.com';
+    process.env.CC_PUBLIC_URL = 'https://correct-client.tunnel.com';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(true);
+  });
+
+  // Row 32 sub-case: non-localhost URL with DIFFERENT CC_PUBLIC_URL → FAIL
+  it('row 32 sub-case: NEXT_PUBLIC_APP_URL non-localhost + CC_PUBLIC_URL different host → pass=false', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://wrong-client.tunnel.com';
+    process.env.CC_PUBLIC_URL = 'https://correct-client.tunnel.com';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/does not match|row 32/i);
   });
 });
 

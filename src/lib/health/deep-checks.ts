@@ -57,6 +57,15 @@ export interface CheckResult {
 // Use process.cwd() (or DATABASE_PATH dir) so the check runs against the
 // filesystem where the build actually executes, not a separate mount.
 
+// REDO #1 FIX (Node 18 disk_headroom false-green):
+// fs.statfsSync was added in Node 19.  On Node 18 the old fallback returned
+// os.freemem() (available RAM) — a completely different metric.  Any machine
+// with >500 MB free RAM would pass the disk check regardless of actual disk
+// space (confirmed false-green).
+// Fix: when statfsSync is absent, throw an error so checkDiskHeadroom() catches
+// it as indeterminate (UNKNOWN) rather than silently substituting RAM bytes.
+// The caller's outer try/catch returns indeterminate=true, which correctly
+// means "cannot determine" rather than a wrong metric being reported as a pass.
 export const diskReader: { readFreeBytes: (checkPath: string) => number } = {
   readFreeBytes: (checkPath: string): number => {
     const fsAny = fs as { statfsSync?: (p: string) => { bfree: number; bsize: number } };
@@ -64,8 +73,10 @@ export const diskReader: { readFreeBytes: (checkPath: string) => number } = {
       const stats = fsAny.statfsSync(checkPath);
       return stats.bfree * stats.bsize;
     }
-    // Node 18 fallback — os.freemem() is mockable in tests
-    return os.freemem();
+    // Node 18: statfsSync absent — cannot determine disk free bytes.
+    // Throwing here causes checkDiskHeadroom() to return indeterminate=true
+    // (UNKNOWN) rather than substituting os.freemem() (RAM bytes — wrong metric).
+    throw new Error('fs.statfsSync is not available on this Node.js version (requires Node >=19); disk free space check is UNKNOWN (indeterminate)');
   },
 };
 
@@ -481,7 +492,7 @@ export function checkNextPublicAppUrl(): AppUrlResult {
     const parsed = new URL(appUrl);
     const host = parsed.hostname;
 
-    // Row 32: check for obvious localhost mismatch when a public URL is configured
+    // Row 32: check for localhost mismatch when a public URL is configured.
     // A NEXT_PUBLIC_APP_URL pointing to localhost/127.0.0.1 on a box that has a
     // public hostname configured is a misconfiguration (SSE/webhooks break).
     const isLocalhost = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(host);
@@ -502,6 +513,72 @@ export function checkNextPublicAppUrl(): AppUrlResult {
       } catch {
         // CC_PUBLIC_URL not a valid URL — skip the comparison
       }
+    }
+
+    // REDO #1 FIX (Row 32 false-green — non-localhost wrong domain):
+    // If NEXT_PUBLIC_APP_URL is set to a non-localhost absolute URL but
+    // CC_PUBLIC_URL is NOT set, the old code returned pass=true unconditionally.
+    // A non-localhost URL (e.g. https://wrong-client.tunnel.com) is suspicious:
+    // the endpoint cannot verify the hostname is correct without CC_PUBLIC_URL,
+    // but it CAN verify it is NOT localhost (which would be an obvious mismatch on
+    // a public-URL deploy).
+    //
+    // Truth-table Row 32 says FAIL when NEXT_PUBLIC_APP_URL is set to a different
+    // host than the actual CF tunnel URL — no precondition requiring CC_PUBLIC_URL
+    // to be set.  We cannot detect the WRONG non-localhost hostname without a hint,
+    // but we MUST NOT silently pass it.  The correct verdict when CC_PUBLIC_URL is
+    // unset and NEXT_PUBLIC_APP_URL is non-localhost is UNKNOWN (indeterminate):
+    // the endpoint cannot confirm whether this URL is correct or wrong.
+    //
+    // Rationale for UNKNOWN not FAIL:
+    //   - FAIL would block deploys on boxes where CC_PUBLIC_URL is intentionally
+    //     not configured (e.g. a direct-IP install where the tunnel URL is stable
+    //     and the operator hasn't set the optional hint variable).
+    //   - UNKNOWN surfaces the gap without false rollbacks.
+    //   - The truth-table Row 32 vitest MUST assert pass=false (which indeterminate
+    //     gives, since indeterminate → overall pass=false) and must NOT assert
+    //     pass=true — both are satisfied.
+    //
+    // If CC_PUBLIC_URL IS set and doesn't match NEXT_PUBLIC_APP_URL, that is a
+    // confirmed mismatch → FAIL (the localhost branch above handles this when
+    // the URL is localhost; the block below handles the non-localhost case).
+    if (!isLocalhost && publicUrlHint) {
+      try {
+        const pubParsed = new URL(publicUrlHint);
+        if (pubParsed.hostname !== host) {
+          return {
+            pass: false,
+            indeterminate: false,
+            app_url: appUrl,
+            expected_host: pubParsed.hostname,
+            detail: `next_public_app_url: NEXT_PUBLIC_APP_URL host ("${host}") does not match CC_PUBLIC_URL host ("${pubParsed.hostname}") — SSE and webhooks will fail for remote clients (row 32: FAIL)`,
+          };
+        }
+      } catch {
+        // CC_PUBLIC_URL not a valid URL — skip the comparison
+      }
+    }
+
+    if (!isLocalhost && !publicUrlHint) {
+      // REDO #1 FIX (Row 32 false-green — confirmed):
+      // Non-localhost URL with CC_PUBLIC_URL unset — cannot verify the hostname
+      // is correct (might be a copy-paste from another client, e.g.
+      // https://wrong-client.tunnel.com left in NEXT_PUBLIC_APP_URL).
+      // Without CC_PUBLIC_URL, the endpoint cannot distinguish a correct tunnel
+      // URL from a wrong one — silently passing is a false-green.
+      //
+      // Verdict: FAIL.
+      //   - A non-localhost NEXT_PUBLIC_APP_URL on a CF tunnel deploy REQUIRES
+      //     CC_PUBLIC_URL to be set so the health check can verify the hostname.
+      //   - Without it, the check is unverifiable and must not pass.
+      //   - Operators who want Row 31 PASS must set CC_PUBLIC_URL.
+      //   - This closes the false-green described in the confirmed finding.
+      return {
+        pass: false,
+        indeterminate: false,
+        app_url: appUrl,
+        detail: `next_public_app_url: NEXT_PUBLIC_APP_URL is set to a non-localhost URL ("${appUrl}") but CC_PUBLIC_URL is not configured — cannot verify hostname is correct; set CC_PUBLIC_URL matching the actual CF tunnel URL to enable mismatch detection (row 32: FAIL)`,
+      };
     }
 
     return {
@@ -612,21 +689,48 @@ export function checkMigrations(): CheckResult {
 // ── check: disk headroom ─────────────────────────────────────────────────────
 // Truth-table rows 23-24. Threshold: 500 MB.
 
+// Well-known large bind-mount paths that must NOT be used as the disk check
+// target (Sheila-class wrong-mount false-green: /data is a separate large
+// mount; probing it returns 80 GB free while the CC partition has <500 MB).
+// When DATABASE_PATH resolves into one of these mounts, fall back to
+// process.cwd() instead.
+const WRONG_MOUNT_PREFIXES = ['/data'];
+
+function resolveCheckPath(): string {
+  const envPath = process.env.DATABASE_PATH;
+  if (envPath) {
+    const dir = path.dirname(envPath);
+    // REDO #1 FIX (Row 35 DATABASE_PATH=/data/... variant):
+    // If DATABASE_PATH points into /data (or another known large bind-mount),
+    // probing that directory would return the large mount's free space, not the
+    // CC partition's free space — false-green.
+    // Guard: if the resolved dir starts with a wrong-mount prefix, fall back to
+    // process.cwd() (the CC app's own partition).
+    const isWrongMount = WRONG_MOUNT_PREFIXES.some(
+      (prefix) => dir === prefix || dir.startsWith(prefix + '/')
+    );
+    if (!isWrongMount) {
+      return dir;
+    }
+    // Fall through to process.cwd() for wrong-mount paths.
+  }
+  return process.cwd();
+}
+
 export async function checkDiskHeadroom(): Promise<CheckResult> {
   try {
-    // Resolve check path from DATABASE_PATH or process.cwd() — NEVER from /data
-    // presence alone (Sheila-class false-green: /data is a separate large mount
-    // but CC install filesystem has < 500 MB free).
-    const checkPath = process.env.DATABASE_PATH
-      ? path.dirname(process.env.DATABASE_PATH)
-      : process.cwd();
+    // Resolve check path — NEVER from /data presence alone.
+    // resolveCheckPath() guards against DATABASE_PATH pointing into a separate
+    // large mount (Sheila-class false-green, truth-table Row 35).
+    const checkPath = resolveCheckPath();
 
-    let freeBytes: number;
-    try {
-      freeBytes = diskReader.readFreeBytes(checkPath);
-    } catch {
-      freeBytes = os.freemem();
-    }
+    // diskReader.readFreeBytes throws on Node 18 (statfsSync absent).
+    // We let that propagate to the outer catch, which returns indeterminate=true
+    // (UNKNOWN) — the correct verdict when the metric cannot be obtained.
+    // DO NOT fall back to os.freemem() here: it measures RAM, not disk space,
+    // and would cause a false-green on any machine with >500 MB free RAM
+    // (confirmed REDO #1 false-green on Node 18).
+    const freeBytes = diskReader.readFreeBytes(checkPath);
 
     const freeGb = freeBytes / (1024 ** 3);
     const thresholdGb = DISK_MIN_BYTES / (1024 ** 3);
