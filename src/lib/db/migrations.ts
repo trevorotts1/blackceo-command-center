@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { seedStarterSOPs } from '../sops-seed';
+import { seedCompanyGuarded } from './branding-seed';
 
 interface Migration {
   id: string;
@@ -2812,15 +2813,20 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
 
     console.log('[Auto-seed] Found departments.json with', depts.length, 'departments');
 
-    // Get company name from env, interview answers, or use placeholder
-    const companyName = findCompanyName();
-    const companySlug = companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'my-company';
+    // B.3 guard: seed the company row through the guarded function.
+    // It reads company-config.json first; if present + valid it uses that.
+    // If the config is present but companyName is blank (partial-config per B.1),
+    // we abort the entire workspace seed — a misconfigured box must not silently
+    // get a "Command Center" / "Default" company row.
+    const seedResult = seedCompanyGuarded(db);
+    if (seedResult.reason === 'partial-config') {
+      console.warn('[Auto-seed] Aborting workspace seed: company-config.json exists but companyName is blank (partial-config — box is misconfigured)');
+      return;
+    }
+    console.log('[Auto-seed] Company seed result:', seedResult.reason, '—', seedResult.companyId);
 
-    // Create company entry first
-    db.prepare(
-      'INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)'
-    ).run(companySlug, companyName, companySlug, '', '{}');
-    console.log('[Auto-seed] Created company:', companyName);
+    // Use the company id that seedCompanyGuarded resolved/created.
+    const companySlug = seedResult.companyId ?? 'default';
 
     for (const dept of depts) {
       // Board layout guarantee — two anchor rows on every seed:

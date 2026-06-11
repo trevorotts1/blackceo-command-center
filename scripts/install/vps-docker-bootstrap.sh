@@ -116,6 +116,9 @@ ECOSYSTEM_FILE="$ECOSYSTEM_DIR/ecosystem.config.cjs"
 mkdir -p "$ECOSYSTEM_DIR"
 if [ ! -f "$ECOSYSTEM_FILE" ]; then
   echo "[8b/9] Writing PM2 ecosystem template to $ECOSYSTEM_FILE..."
+  # B.4 (PRD Addendum B): DATABASE_PATH is pinned to the canonical absolute path
+  # so a pm2 restart from any cwd always opens the same DB. B.1 check-4 enforces
+  # this; writing it here makes fresh VPS installs born compliant.
   cat > "$ECOSYSTEM_FILE" <<'EOF'
 module.exports = {
   apps: [{
@@ -125,7 +128,8 @@ module.exports = {
     args: "run start -- -p 4000 -H 0.0.0.0",
     env: {
       PORT: "4000",
-      NODE_ENV: "production"
+      NODE_ENV: "production",
+      DATABASE_PATH: "/data/projects/command-center/mission-control.db"
     },
     instances: 1,
     autorestart: true,
