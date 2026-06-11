@@ -7,6 +7,11 @@
 #   3 = UNKNOWN/indeterminate → sleep + retry N times, escalate if never clears
 #                               NEVER rollback on 3 (may be a valid deployment
 #                               still warming up)
+#
+# P4 FIX: deploy.sh now passes --canonical-dir "$APP_DIR" to
+# cc-health-check.sh so pm2-analyze-cc.py has a real canonical_dir to compare
+# against pm2 app cwd.  Without this the cwd check is vacuous (always
+# cwd_ok=true regardless of the actual pm2 working directory).
 set -e
 
 APP_DIR=~/projects/mission-control
@@ -31,7 +36,8 @@ run_health_check() {
     # aborting the script before we can inspect the code. `bash ... ; local code=$?`
     # would be aborted by set -e on non-zero exit before the assignment runs.
     local code=0
-    bash "$HEALTH_SCRIPT" --json-only || code=$?
+    # P4 FIX: pass --canonical-dir so pm2 cwd check has a real target (not vacuous)
+    bash "$HEALTH_SCRIPT" --json-only --canonical-dir "$APP_DIR" || code=$?
     if [[ "$code" -eq 0 ]]; then
       echo "[health] GREEN — ${context}"
       return 0
