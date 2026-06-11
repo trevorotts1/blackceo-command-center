@@ -378,6 +378,69 @@ check "9.13" "AF6: prd-2.12-fast-loop-qc-gate.test.ts exists" \
   "[ -f tests/unit/prd-2.12-fast-loop-qc-gate.test.ts ]"
 
 blue ""
+blue "── 10. B.2 Atomic deploy integrity ──"
+
+# 10.1 atomic-deploy.sh is not the placeholder stub (no longer exits 2 with "pending" message)
+check "10.1" "atomic-deploy.sh is implemented (no 'implementation pending' stub)" \
+  "! grep -q 'implementation pending' scripts/atomic-deploy.sh"
+
+# 10.2 atomic-deploy.sh has the pre-flight disk gate
+check "10.2" "atomic-deploy.sh: pre-flight disk gate (DISK_MIN_GB)" \
+  "grep -q 'DISK_MIN_GB' scripts/atomic-deploy.sh"
+
+# 10.3 atomic-deploy.sh backs up the DB before touching build artifacts
+check "10.3" "atomic-deploy.sh: DB backup in pre-flight (sqlite3 checkpoint)" \
+  "grep -q 'wal_checkpoint' scripts/atomic-deploy.sh"
+
+# 10.4 atomic-deploy.sh creates .next.rollback snapshot
+check "10.4" "atomic-deploy.sh: rollback snapshot (.next.rollback)" \
+  "grep -q 'next.rollback' scripts/atomic-deploy.sh"
+
+# 10.5 atomic-deploy.sh kills non-canonical pm2 apps before build
+check "10.5" "atomic-deploy.sh: kills non-canonical pm2 apps in pre-flight" \
+  "grep -q 'NON_CANONICAL\|non-canonical' scripts/atomic-deploy.sh"
+
+# 10.6 atomic-deploy.sh builds to a TEMP dir (not directly to .next)
+check "10.6" "atomic-deploy.sh: build to temp dir (NEXT_DIST_DIR or BUILD_TMP)" \
+  "grep -q 'BUILD_TMP\|NEXT_DIST_DIR' scripts/atomic-deploy.sh"
+
+# 10.7 atomic-deploy.sh performs atomic swap (single rename/move, no partial window)
+check "10.7" "atomic-deploy.sh: atomic swap via mv (single rename)" \
+  "grep -q 'mv.*next\|atomic.*swap\|Atomic swap' scripts/atomic-deploy.sh"
+
+# 10.8 atomic-deploy.sh restarts the server before health check (never serves stale)
+check "10.8" "atomic-deploy.sh: pm2 restart before health check" \
+  "grep -q 'pm2 restart\|pm2 reload' scripts/atomic-deploy.sh"
+
+# 10.9 atomic-deploy.sh calls cc-health-check.sh and captures JSON
+check "10.9" "atomic-deploy.sh: calls cc-health-check.sh and captures JSON output" \
+  "grep -q 'cc-health-check.sh' scripts/atomic-deploy.sh && grep -q 'HEALTH_JSON' scripts/atomic-deploy.sh"
+
+# 10.10 atomic-deploy.sh: exit 1 from health check triggers auto-rollback (never stays deployed)
+check "10.10" "atomic-deploy.sh: exit-1 health check triggers auto-rollback path" \
+  "grep -q 'ROLLBACK\|rollback' scripts/atomic-deploy.sh && grep -q 'HEALTH_EXIT.*eq.*1\|exit.*1.*rollback\|1.*rollback\|rollback.*1' scripts/atomic-deploy.sh"
+
+# 10.11 atomic-deploy.sh: auto-rollback restores .next.rollback and restarts
+check "10.11" "atomic-deploy.sh: auto-rollback restores .next.rollback + restarts pm2" \
+  "grep -A5 'ROLLBACK_DIR\|rollback.*restore\|restoring' scripts/atomic-deploy.sh | grep -qi 'pm2\|restart\|next'"
+
+# 10.12 atomic-deploy.sh: rollback itself is health-checked after restore
+check "10.12" "atomic-deploy.sh: rollback health-checked (re-runs cc-health-check.sh after restore)" \
+  "grep -q 'ROLLBACK_HEALTH\|rollback.*health\|health.*rollback' scripts/atomic-deploy.sh"
+
+# 10.13 atomic-deploy.sh: loud receipt includes health-check JSON in both success and rollback paths
+check "10.13" "atomic-deploy.sh: receipts include health-check JSON" \
+  "grep -q 'HEALTH_JSON\|health_json\|health JSON' scripts/atomic-deploy.sh"
+
+# 10.14 atomic-deploy.sh: exit 3 from health check pauses/retries and NEVER triggers rollback
+check "10.14" "atomic-deploy.sh: exit-3 health check retries (never rolls back on UNKNOWN)" \
+  "grep -q 'HEALTH_RETRIES\|health.*retry\|retry.*health\|Never rollback.*3\|exit 3\|HEALTH_EXIT.*eq.*3' scripts/atomic-deploy.sh"
+
+# 10.15 B.2 fixture test exists
+check "10.15" "tests/unit/b2-atomic-deploy.test.ts fixture test exists" \
+  "[ -f tests/unit/b2-atomic-deploy.test.ts ]"
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"
