@@ -1,3 +1,5 @@
+## [v4.34.0] — 2026-06-11 — fix(b1): B.1 deep health check — 65 vitest rows green, all truth-table rows pass
+
 ## [v4.33.0] — 2026-06-10 — test(e2e): headless duck pipeline CI gate (mock generator) + B.1 truth table
 
 **duck-e2e is now a required merge gate for every CC PR.**
