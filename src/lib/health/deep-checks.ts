@@ -783,8 +783,12 @@ export function resolveCheckPath(): string | null {
   // Choose candidate: DATABASE_PATH dir (if set) else process.cwd().
   const candidate = envPath ? path.dirname(envPath) : process.cwd();
 
+  // P1 FIX: exact-match only — subdirectories of /data (e.g. /data/mission-control)
+  // are real app dirs whose own filesystem is checked normally.  The old
+  // `startsWith(prefix + '/')` form also rejected VPS canonical paths under /data,
+  // causing every VPS deploy to disk-FAIL deterministically.
   const isWrongMount = WRONG_MOUNT_PREFIXES.some(
-    (prefix) => candidate === prefix || candidate.startsWith(prefix + '/')
+    (prefix) => candidate === prefix
   );
   if (isWrongMount) {
     // Candidate is on a known large bind-mount — return null to signal FAIL.

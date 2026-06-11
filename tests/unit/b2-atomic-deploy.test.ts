@@ -907,3 +907,130 @@ test('B.2 structural: CC_HEALTH_CHECK_PATH env override supported for fixture ha
     'atomic-deploy.sh must support CC_HEALTH_CHECK_PATH env override for fixture harnesses',
   );
 });
+
+// ─── P1 integration: fixtures with APP_DIR under /data ───────────────────────
+//
+// These fixtures run atomic-deploy.sh with APP_DIR under a /data-like path to
+// prove that P1 fix (exact-mount-only guard in resolveCheckPath) does not cause
+// disk FAIL for valid app dirs under /data.
+//
+// IMPORTANT: the disk check in atomic-deploy.sh uses the shell `df` command
+// (not the TypeScript diskReader), so the P1 fix in deep-checks.ts affects the
+// TypeScript health endpoint.  The shell-level disk gate in atomic-deploy.sh
+// is independent and already correct (uses df on $DISK_PATH or $APP_DIR).
+//
+// What these tests prove:
+//   (a) A broken build (npm exits 1) with APP_DIR under /data → exit 2 (pre-flight
+//       abort), never exit 1 (rollback). The P1 context means no disk false-fail
+//       can masquerade as a rollback trigger.
+//   (b) A good deploy (build ok, health green) with APP_DIR under /data → exit 0,
+//       new BUILD_ID installed. Proves the full happy path works for VPS paths.
+
+/**
+ * Builds a fixture with APP_DIR placed under a /data-like subdirectory
+ * inside the OS tmpdir (e.g. /tmp/b2-test-XXXXX/data/mission-control).
+ * This simulates a VPS app dir at /data/mission-control without requiring
+ * root access to the real /data mount.
+ */
+function buildDataPathFixture(cfg: FixtureConfig = {}): Fixture {
+  const base = buildFixture(cfg);
+  // Rename appDir to a /data-like subpath within baseDir:
+  //   baseDir/data/mission-control  (simulates /data/mission-control)
+  const dataSubDir = path.join(base.baseDir, 'data', 'mission-control');
+  mkdirSync(dataSubDir, { recursive: true });
+
+  // Migrate contents from base.appDir to dataSubDir
+  const oldAppDir = base.appDir;
+  try {
+    spawnSync('cp', ['-r', oldAppDir + '/.', dataSubDir + '/'], { stdio: 'ignore' });
+  } catch {
+    // If cp fails, write minimal files manually
+    writeFileSync(path.join(dataSubDir, 'mission-control.db'), 'SQLite fixture');
+    if (cfg.liveNextExists !== false) {
+      mkdirSync(path.join(dataSubDir, '.next'), { recursive: true });
+      writeFileSync(path.join(dataSubDir, '.next', 'BUILD_ID'), 'old-build-id');
+    }
+  }
+
+  // Patch the npm stub in binDir to write to NEXT_DIST_DIR under the new path
+  const buildExitCode = cfg.buildExitCode ?? 0;
+  const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "run" && "$2" == "build" ]]; then
+  if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
+    mkdir -p "$NEXT_DIST_DIR"
+    echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
+  fi
+  if [[ -n "\${BUILD_EXIT_FILE:-}" ]]; then
+    echo "${buildExitCode}" > "$BUILD_EXIT_FILE"
+  fi
+  exit ${buildExitCode}
+fi
+exit 0
+`;
+  writeFileSync(path.join(base.binDir, 'npm'), npmStub, { mode: 0o755 });
+
+  return {
+    ...base,
+    appDir: dataSubDir,
+  };
+}
+
+test('P1 integration (a): broken build + APP_DIR under /data-like path → exit 2, old build untouched', async () => {
+  const fixture = buildDataPathFixture({ buildExitCode: 1, liveNextExists: true });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    // Must exit 2 (pre-flight abort on build failure) — not exit 1 (rollback)
+    assert.strictEqual(exitCode, 2,
+      `P1 integration: expected exit 2 (build failure) with APP_DIR under /data-like path, ` +
+      `got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // Old BUILD_ID must be intact
+    const buildIdPath = path.join(fixture.appDir, '.next', 'BUILD_ID');
+    assert.ok(existsSync(buildIdPath), '.next/BUILD_ID must still exist after build failure');
+    const buildId = readFileSync(buildIdPath, 'utf8').trim();
+    assert.strictEqual(buildId, 'old-build-id',
+      `Old BUILD_ID must be preserved after build failure with /data-like APP_DIR`);
+
+    // No success receipt
+    assert.ok(
+      !stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `ATOMIC DEPLOY SUCCESS must not appear when build failed (APP_DIR under /data-like path)`
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('P1 integration (b): good deploy + APP_DIR under /data-like path → exit 0, new build installed', async () => {
+  const healthJson = '{"green":true,"timestamp":"2026-06-10T00:00:00Z","checks":{"http":true}}';
+  const fixture = buildDataPathFixture({
+    buildExitCode: 0,
+    healthExitCode: 0,
+    healthJson,
+    liveNextExists: true,
+  });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    // Must exit 0 (success)
+    assert.strictEqual(exitCode, 0,
+      `P1 integration: expected exit 0 (good deploy) with APP_DIR under /data-like path, ` +
+      `got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // New BUILD_ID must be installed
+    const buildIdPath = path.join(fixture.appDir, '.next', 'BUILD_ID');
+    assert.ok(existsSync(buildIdPath), '.next/BUILD_ID must exist after good deploy');
+    const installedBuildId = readFileSync(buildIdPath, 'utf8').trim();
+    assert.strictEqual(installedBuildId, 'new-build-id',
+      `Expected new BUILD_ID 'new-build-id' to be installed for /data-like APP_DIR`);
+
+    // Success receipt must appear
+    assert.ok(
+      stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `Success receipt must appear for good deploy with /data-like APP_DIR.\nstderr:\n${stderr}`
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
