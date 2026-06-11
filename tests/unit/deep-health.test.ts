@@ -142,11 +142,56 @@ describe('asset_manifest', () => {
     expect(result.detail).toMatch(/BUILD_ID missing/i);
   });
 
-  it('static dir absent → pass=false', async () => {
+  // REDO #2 DEAD CODE PATH FIX: the old test label 'static dir absent' was
+  // misleading.  makeNextBuild(withStaticDir:false) writes pages:{} (no pages
+  // entries), so referenced.size===0 and the Round-4 0-asset guard fires FIRST
+  // (deep-checks.ts line ~150).  The actual static-dir-absent code path at
+  // lines 160-165 was never reached.  Retitled to match what it actually tests.
+  it('empty manifest (0 referenced assets, static/ absent) → pass=false (Round-4 0-asset guard fires first)', async () => {
     makeNextBuild(tmpDir, { withStaticDir: false });
     const { checkAssetManifest } = await loadChecks();
     const result = checkAssetManifest();
     expect(result.pass).toBe(false);
+    // Must match the 0-asset guard detail, not the static-dir-absent detail
+    expect(result.detail).toMatch(/0 referenced assets|empty or incomplete/i);
+  });
+
+  // Row 41 (REDO #2 MISSING ROW): manifest with non-empty pages map BUT .next/static/
+  // directory absent.  This is the true static-dir-absent code path (deep-checks.ts
+  // lines 160-165) which was unreachable under the old 'withStaticDir:false' fixture
+  // because pages:{} always fired the 0-asset guard first.
+  //
+  // Fixture: write BUILD_ID + a manifest with one real pages entry (so referenced.size>0)
+  // but do NOT create the .next/static/ directory.
+  // Expected: FAIL with detail matching /static directory missing/i.
+  it('row 41: manifest with 1+ pages entry + .next/static/ absent → pass=false (static directory missing)', async () => {
+    const nextDir = path.join(tmpDir, '.next');
+    fs.mkdirSync(nextDir, { recursive: true });
+    fs.writeFileSync(path.join(nextDir, 'BUILD_ID'), 'static-absent-test');
+    // Write manifest with a real pages entry so referenced.size > 0
+    const manifestWithEntry = {
+      pages: {
+        '/': ['static/chunks/main-abc123.js'],
+        '/_app': ['static/chunks/main-abc123.js'],
+      },
+      polyfillFiles: [],
+      lowPriorityFiles: [],
+    };
+    fs.writeFileSync(
+      path.join(nextDir, 'build-manifest.json'),
+      JSON.stringify(manifestWithEntry)
+    );
+    // Deliberately do NOT create .next/static/ — this triggers the static-dir-absent check
+
+    const { checkAssetManifest } = await loadChecks();
+    const result = checkAssetManifest();
+
+    // Must FAIL via the static-dir-absent path (lines 160-165), NOT the 0-asset guard
+    expect(result.pass).toBe(false);
+    // Detail must match the static-directory-missing message, not the 0-asset message
+    expect(result.detail).toMatch(/static directory missing/i);
+    // Must NOT match the 0-asset guard message (that would mean the wrong path fired)
+    expect(result.detail).not.toMatch(/0 referenced assets/i);
   });
 
   // Round-4 fix (Item 8): empty manifest vacuous PASS.
@@ -560,6 +605,72 @@ describe('company_branding — DB branding checks', () => {
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+  });
+
+  // Row 7n (REDO #2 MISSING ROW): companies row present with name=NULL (literal SQL NULL).
+  //
+  // This is distinct from:
+  //   Row 7: empty string '' (row present, name='')
+  //   Row 6: row absent entirely (no row in companies table)
+  //
+  // The old code set dbRowAbsent=true when rawName===null, which caused:
+  //   - config absent → Row 6 UNKNOWN (wrong: a row exists but has no name)
+  //   - valid config + null DB name → fell through to pass=true (false-green)
+  //
+  // Fix: when rawName===null, assign dbName='' (do NOT set dbRowAbsent) so the
+  // empty-string guard in step 3 fires correctly → FAIL.
+  // Verdict: FAIL, same as empty string (row 7).  A row with NULL name provides
+  // no branding information.
+  it('row 7n: DB companies row present with name=NULL (literal SQL NULL) → pass=false, indeterminate not true', async () => {
+    // No config file — this exercises the path where config is absent and DB has a
+    // null-name row.  Old behavior: dbRowAbsent=true → Row 6 → indeterminate=true.
+    // New behavior: dbName='' → step 3 empty-string guard → pass=false.
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            // Row present but name column is SQL NULL
+            if (sql.includes('SELECT name FROM companies')) return { name: null };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: [], pending: [] }),
+      DB_PATH: '/tmp/test.db',
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    // Must FAIL: row exists but name is NULL — treated same as empty string (Row 7)
+    expect(result.pass).toBe(false);
+    // Must NOT be indeterminate — a null-name row is a detectable misconfiguration
+    // (a real row exists; this is not a transient DB state)
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/empty|placeholder/i);
+  });
+
+  it('row 7n variant: DB null-name row + valid config → pass=false (null name overrides valid config)', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Acme Corp' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: null };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: [], pending: [] }),
+      DB_PATH: '/tmp/test.db',
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding();
+    // Must FAIL: DB row has null name — same as empty string, which overrides valid config
     expect(result.pass).toBe(false);
     expect(result.indeterminate).not.toBe(true);
   });
@@ -1215,6 +1326,37 @@ describe('next_public_app_url', () => {
     expect(result.indeterminate).not.toBe(true);
     expect(result.detail).toMatch(/mismatch|row 32|localhost/i);
   });
+
+  // Row 42 (REDO #2 MISSING ROW): NEXT_PUBLIC_APP_URL=localhost + CC_PUBLIC_URL truthy-but-invalid.
+  //
+  // The publicUrlHintInvalid flag is only set in the !isLocalhost branch.
+  // When isLocalhost=true, the inner try/catch for `new URL(publicUrlHint)` silently
+  // swallows the TypeError and the function falls through to pass=true.
+  //
+  // This is INTENTIONAL: a localhost deploy is always valid — the CC_PUBLIC_URL hint
+  // is only consulted to detect cross-origin mismatches, which cannot apply to localhost
+  // (there is no wrong "public URL" for a localhost-only deployment).  An invalid hint
+  // is therefore irrelevant when the app URL is already localhost.
+  //
+  // Enumerate explicitly so this behavior is not mistaken for a bug in the future.
+  it('row 42: NEXT_PUBLIC_APP_URL=localhost + CC_PUBLIC_URL=truthy-but-invalid ("not-a-url") → pass=true (localhost valid, invalid hint ignored)', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'http://localhost:3000';
+    process.env.CC_PUBLIC_URL = 'not-a-url';
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    // Must PASS: localhost is always valid; an invalid CC_PUBLIC_URL hint is ignored
+    // for localhost URLs (publicUrlHintInvalid flag is not set in the isLocalhost branch)
+    expect(result.pass).toBe(true);
+    expect(result.detail).not.toMatch(/cannot verify|row 32/i);
+  });
+
+  it('row 42 variant: NEXT_PUBLIC_APP_URL=127.0.0.1 + CC_PUBLIC_URL=truthy-but-invalid → pass=true (localhost valid, invalid hint ignored)', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'http://127.0.0.1:3000';
+    process.env.CC_PUBLIC_URL = '   ';  // whitespace-only
+    const { checkNextPublicAppUrl } = await loadChecks();
+    const result = checkNextPublicAppUrl();
+    expect(result.pass).toBe(true);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1222,8 +1364,30 @@ describe('next_public_app_url', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('GET /api/health/deep — response shape', () => {
+  // REDO #2 MODULE-INSTANCE FIX:
+  // The old pattern:
+  //   1. loadChecks()                    — vi.resetModules() then import deep-checks (instance A)
+  //   2. checks.diskReader.readFreeBytes — mocks instance A
+  //   3. vi.resetModules()               — clears module cache (instance A gone, mock lost)
+  //   4. import('...route.js')           — fresh import, creates deep-checks instance B
+  //                                        (original diskReader — the mock is NOT present)
+  //
+  // The route-level integration test was therefore NEVER actually verifying disk-headroom
+  // behaviour — it always used the real diskReader on instance B.  Any regression in
+  // checkDiskHeadroom() would not be caught by these tests.
+  //
+  // Fix: use vi.doMock('@/lib/health/deep-checks', …) to inject a controlled deep-checks
+  // module factory BEFORE calling vi.resetModules() and importing the route.  Both the
+  // route and the test operate on the same mocked instance (instance B from the factory)
+  // so diskReader is guaranteed to return the test value.
+  //
+  // The factory re-exports real implementations for all functions (via dynamic require)
+  // but overrides diskReader.readFreeBytes.  This ensures the route exercises the actual
+  // check logic (not stubs) while the disk metric is deterministic.
+
   it('response always includes pass, indeterminate, timestamp, and checks object', async () => {
     makeNextBuild(tmpDir);
+
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
@@ -1239,9 +1403,19 @@ describe('GET /api/health/deep — response shape', () => {
       DB_PATH: path.join(tmpDir, 'test.db'),
     }));
 
-    // Inject disk mock before loading route
-    const checks = await loadChecks();
-    checks.diskReader.readFreeBytes = () => 20 * 1024 ** 3;
+    // REDO #2 FIX: mock the deep-checks module factory with the diskReader override
+    // BEFORE vi.resetModules() so the route loads this same factory (not a fresh instance
+    // with the real diskReader).
+    vi.doMock('../../src/lib/health/deep-checks.js', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const actual = await vi.importActual('../../src/lib/health/deep-checks.js') as typeof import('../../src/lib/health/deep-checks');
+      return {
+        ...actual,
+        diskReader: {
+          readFreeBytes: () => 20 * 1024 ** 3,  // 20 GB — above threshold
+        },
+      };
+    });
 
     vi.resetModules();
     const mod = await import('../../src/app/api/health/deep/route.js') as {
@@ -1263,6 +1437,8 @@ describe('GET /api/health/deep — response shape', () => {
   });
 
   it('indeterminate=true when any check is UNKNOWN — overall pass stays false', async () => {
+    makeNextBuild(tmpDir);
+
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: () => ({
@@ -1273,10 +1449,18 @@ describe('GET /api/health/deep — response shape', () => {
       getMigrationStatus: () => { throw new Error('SQLITE_BUSY: database is locked'); },
       DB_PATH: path.join(tmpDir, 'test.db'),
     }));
-    makeNextBuild(tmpDir);
 
-    const checks = await loadChecks();
-    checks.diskReader.readFreeBytes = () => 20 * 1024 ** 3;
+    // REDO #2 FIX: same module-instance fix — inject diskReader override via factory
+    // so the route uses the mocked diskReader on the same instance.
+    vi.doMock('../../src/lib/health/deep-checks.js', async () => {
+      const actual = await vi.importActual('../../src/lib/health/deep-checks.js') as typeof import('../../src/lib/health/deep-checks');
+      return {
+        ...actual,
+        diskReader: {
+          readFreeBytes: () => 20 * 1024 ** 3,  // 20 GB — above threshold
+        },
+      };
+    });
 
     vi.resetModules();
     const mod = await import('../../src/app/api/health/deep/route.js') as {

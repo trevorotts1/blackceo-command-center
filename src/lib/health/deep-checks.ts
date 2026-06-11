@@ -276,7 +276,13 @@ export function checkCompanyBranding(): CompanyBrandingResult {
       // Store the raw value (may be null, empty string, or a real name)
       const rawName = row.name;
       if (rawName === null || rawName === undefined) {
-        dbRowAbsent = true;
+        // ROW 7 NULL-NAME FIX: a SQL NULL in name column is treated the same as
+        // an empty string — the row exists but carries no branding information.
+        // "NULL name is as bad as empty string" (mirrors the empty-string rule).
+        // Do NOT set dbRowAbsent — the row exists, it's just null (→ FAIL via
+        // the placeholder/empty guard in step 3, same path as empty string '').
+        dbName = '';
+        // Do NOT set dbRowAbsent here.
       } else {
         dbName = rawName.trim();
         // Empty string after trim → treat as absent for the row-exists check,
