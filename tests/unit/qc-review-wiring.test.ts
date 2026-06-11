@@ -128,54 +128,62 @@ test('runQCOnReview: skips task not in review status (returns null)', async () =
   assert.ok(!evt, 'no qc_review event should be written for a non-review task');
 });
 
-// ─── Test 3: FAIL branch → backlog + CEO reroute event ───────────────────────
-// Uses no-criteria path (no SOP assigned, no API key): scoringPath='no-criteria',
-// NOT 'heuristic', so the reroute loop fires. This is the intended behavior.
+// ─── Test 3: §4 no-criteria = un-reroutable → stays in review ────────────────
+// §4: "if QC fails on criteria the executor cannot influence (brief wording,
+// missing metadata), it must NOT reroute; it goes to review with a human-readable
+// reason."  No SOP assigned = missing metadata = un-reroutable.
+// Updated from original: test now asserts §4 behavior (stays in review, no backlog).
 
-test('FAIL branch (no-criteria): task moves to backlog and CEO reroute event is written', async () => {
+test('FAIL branch (no-criteria): §4 un-reroutable → task stays in review, QC-UNROUTEABLE event written', async () => {
   const id = nextId('qc-fail');
-  // Short description, no SOP → no-criteria path (score 7.5 < 8.5, reroutes).
+  // Short description, no SOP → no-criteria path (score 7.5 < 8.5).
   insertTask(id, 'review', 'ok');
 
   const result = await runQCOnReview(id);
   assert.ok(result !== null, 'must return a result');
-  assert.ok(!result.pass, 'heuristic must fail (score ≤ 8.0 < 8.5 threshold)');
+  assert.ok(!result.pass, 'no-criteria path must fail');
 
-  // Task must be in backlog, not in_progress.
+  // §4: task must STAY in review (un-reroutable), not move to backlog.
   const task = queryOne<{ status: string; description: string | null }>(
     `SELECT status, description FROM tasks WHERE id = ?`,
     [id],
   );
   assert.ok(task, 'task must exist');
-  assert.equal(task.status, 'backlog', 'FAIL must move task to backlog, not in_progress');
-  assert.ok(task.description?.includes('[QC-FAIL]'), 'kickback note must be appended to description');
+  assert.equal(task.status, 'review', '§4 un-reroutable: task must stay in review, not backlog');
 
-  // CEO reroute event must be written.
-  const reroute = queryOne<{ type: string; message: string }>(
-    `SELECT type, message FROM events WHERE task_id = ? AND message LIKE '%[QC-REROUTE]%' LIMIT 1`,
+  // QC-UNROUTEABLE event must be written.
+  const unrouteableEvt = queryOne<{ type: string; message: string }>(
+    `SELECT type, message FROM events WHERE task_id = ? AND message LIKE '%[QC-UNROUTEABLE]%' LIMIT 1`,
     [id],
   );
-  assert.ok(reroute, 'CEO reroute event must be written on FAIL');
-  assert.equal(reroute.type, 'qc_review', 'reroute event type must be qc_review');
-  assert.ok(reroute.message.includes('FAILED QC'), 'reroute message must say FAILED QC');
+  assert.ok(unrouteableEvt, '§4: QC-UNROUTEABLE event must be written for un-reroutable failure');
+  assert.ok(unrouteableEvt.message.includes('Human review'), '§4: event message must mention Human review');
+
+  // No QC-REROUTE event (§4 kill).
+  const reroute = queryOne<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND message LIKE '%[QC-REROUTE]%' LIMIT 1`,
+    [id],
+  );
+  assert.ok(!reroute, '§4: NO QC-REROUTE event must be written for un-reroutable failure');
 });
 
-// ─── Test 4: FAIL branch writes task_status_changed event ────────────────────
-// Uses no-criteria path (no SOP, no API key) — not heuristic — so reroute fires.
+// ─── Test 4: §4 no-criteria task_status_changed not written (stays in review) ──
+// §4: un-reroutable path does not write a task_status_changed to backlog.
 
-test('FAIL branch (no-criteria): task_status_changed event is written pointing to backlog', async () => {
+test('FAIL branch (no-criteria): §4 → no task_status_changed event to backlog', async () => {
   const id = nextId('qc-fail-evt');
-  // No SOP → no-criteria path, which reroutes.
+  // No SOP → no-criteria path, §4 un-reroutable.
   insertTask(id, 'review');
 
   await runQCOnReview(id);
 
-  const evt = queryOne<{ message: string }>(
-    `SELECT message FROM events WHERE task_id = ? AND type = 'task_status_changed' LIMIT 1`,
+  // task_status_changed events (if any) must NOT mention moving to Backlog.
+  const evts = queryAll<{ message: string }>(
+    `SELECT message FROM events WHERE task_id = ? AND type = 'task_status_changed'`,
     [id],
   );
-  assert.ok(evt, 'task_status_changed event must be written');
-  assert.ok(evt.message.includes('Backlog'), 'event message must mention Backlog');
+  const backlogEvt = evts.find((e) => e.message.toLowerCase().includes('backlog'));
+  assert.ok(!backlogEvt, '§4 un-reroutable: no task_status_changed to backlog should exist');
 });
 
 // ─── Test 5: runQCReviewSweep scores a stuck review task ─────────────────────

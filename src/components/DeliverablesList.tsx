@@ -1,14 +1,20 @@
 /**
  * DeliverablesList Component
- * Displays deliverables (files, URLs, artifacts) for a task
+ * Displays deliverables (files, URLs, artifacts) for a task.
+ *
+ * Image deliverables (duck-fix): renders an inline <img> thumbnail that links
+ * to the full-size preview.  Non-image files keep the Finder-reveal behaviour.
  */
 
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { FileText, Link as LinkIcon, Package, ExternalLink, Eye } from 'lucide-react';
+import { FileText, Link as LinkIcon, Package, ExternalLink, Eye, Image as ImageIcon } from 'lucide-react';
 import { debug } from '@/lib/debug';
 import type { TaskDeliverable } from '@/lib/types';
+
+/** Image file extensions (lower-case, with leading dot). */
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.avif', '.tiff', '.tif', '.svg']);
 
 interface DeliverablesListProps {
   taskId: string;
@@ -36,8 +42,25 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
     loadDeliverables();
   }, [loadDeliverables]);
 
-  const getDeliverableIcon = (type: string) => {
-    switch (type) {
+  /** Return true when the deliverable path points to an image file. */
+  const isImageDeliverable = (deliverable: TaskDeliverable): boolean => {
+    if (deliverable.deliverable_type !== 'file' || !deliverable.path) return false;
+    const ext = deliverable.path.slice(deliverable.path.lastIndexOf('.')).toLowerCase();
+    return IMAGE_EXTS.has(ext);
+  };
+
+  /**
+   * Build the URL for serving a file deliverable inline via /api/files/preview.
+   * The preview route now supports images (duck-fix).
+   */
+  const previewUrl = (filePath: string): string =>
+    `/api/files/preview?path=${encodeURIComponent(filePath)}`;
+
+  const getDeliverableIcon = (deliverable: TaskDeliverable) => {
+    if (isImageDeliverable(deliverable)) {
+      return <ImageIcon className="w-5 h-5" />;
+    }
+    switch (deliverable.deliverable_type) {
       case 'file':
         return <FileText className="w-5 h-5" />;
       case 'url':
@@ -97,7 +120,7 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
   const handlePreview = (deliverable: TaskDeliverable) => {
     if (deliverable.path) {
       debug.file('Opening preview', { path: deliverable.path });
-      window.open(`/api/files/preview?path=${encodeURIComponent(deliverable.path)}`, '_blank');
+      window.open(previewUrl(deliverable.path), '_blank');
     }
   };
 
@@ -130,91 +153,117 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
 
   return (
     <div className="space-y-3">
-      {deliverables.map((deliverable) => (
-        <div
-          key={deliverable.id}
-          className="flex gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200 hover:border-indigo-300 transition-colors"
-        >
-          {/* Icon */}
-          <div className="flex-shrink-0 text-indigo-600">
-            {getDeliverableIcon(deliverable.deliverable_type)}
-          </div>
+      {deliverables.map((deliverable) => {
+        const isImg = isImageDeliverable(deliverable);
+        return (
+          <div
+            key={deliverable.id}
+            className="flex gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200 hover:border-indigo-300 transition-colors"
+          >
+            {/* Icon */}
+            <div className="flex-shrink-0 text-indigo-600">
+              {getDeliverableIcon(deliverable)}
+            </div>
 
-          {/* Content */}
-          <div className="flex-1 min-w-0">
-            {/* Title - clickable for URLs */}
-            <div className="flex items-start justify-between gap-2">
-              {deliverable.deliverable_type === 'url' && deliverable.path ? (
+            {/* Content */}
+            <div className="flex-1 min-w-0">
+              {/* Title - clickable for URLs */}
+              <div className="flex items-start justify-between gap-2">
+                {deliverable.deliverable_type === 'url' && deliverable.path ? (
+                  <a
+                    href={deliverable.path}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-indigo-600 hover:text-indigo-700 hover:underline flex items-center gap-1.5"
+                  >
+                    {deliverable.title}
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                ) : (
+                  <h4 className="font-medium text-gray-900">{deliverable.title}</h4>
+                )}
+                <div className="flex items-center gap-1">
+                  {/* Preview button for HTML or image files */}
+                  {deliverable.deliverable_type === 'file' && deliverable.path &&
+                    (deliverable.path.endsWith('.html') || deliverable.path.endsWith('.htm') || isImg) && (
+                    <button
+                      onClick={() => handlePreview(deliverable)}
+                      className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-cyan-600 transition-colors"
+                      title={isImg ? 'View full-size image' : 'Preview in browser'}
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                  )}
+                  {/* Open/Reveal button */}
+                  {deliverable.path && (
+                    <button
+                      onClick={() => handleOpen(deliverable)}
+                      className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-indigo-600 transition-colors"
+                      title={deliverable.deliverable_type === 'url' ? 'Open URL' : 'Reveal in Finder'}
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Inline image thumbnail (duck-fix) */}
+              {isImg && deliverable.path && (
                 <a
-                  href={deliverable.path}
+                  href={previewUrl(deliverable.path)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="font-medium text-indigo-600 hover:text-indigo-700 hover:underline flex items-center gap-1.5"
+                  className="block mt-2"
+                  title="Click to view full-size"
                 >
-                  {deliverable.title}
-                  <ExternalLink className="w-3.5 h-3.5" />
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={previewUrl(deliverable.path)}
+                    alt={deliverable.title}
+                    className="max-h-48 max-w-full rounded border border-gray-200 object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
+                    onError={(e) => {
+                      // Hide broken image on load error (file may not be served yet).
+                      (e.currentTarget as HTMLImageElement).style.display = 'none';
+                    }}
+                  />
                 </a>
-              ) : (
-                <h4 className="font-medium text-gray-900">{deliverable.title}</h4>
               )}
-              <div className="flex items-center gap-1">
-                {/* Preview button for HTML files */}
-                {deliverable.deliverable_type === 'file' && deliverable.path?.endsWith('.html') && (
-                  <button
-                    onClick={() => handlePreview(deliverable)}
-                    className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-cyan-600 transition-colors"
-                    title="Preview in browser"
+
+              {/* Description */}
+              {deliverable.description && (
+                <p className="text-sm text-gray-600 mt-1">
+                  {deliverable.description}
+                </p>
+              )}
+
+              {/* Path - clickable for URLs */}
+              {deliverable.path && (
+                deliverable.deliverable_type === 'url' ? (
+                  <a
+                    href={deliverable.path}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-2 p-2 bg-gray-100 rounded text-xs text-indigo-600 hover:text-indigo-700 font-mono break-all block hover:bg-gray-200 transition-colors"
                   >
-                    <Eye className="w-4 h-4" />
-                  </button>
-                )}
-                {/* Open/Reveal button */}
-                {deliverable.path && (
-                  <button
-                    onClick={() => handleOpen(deliverable)}
-                    className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-indigo-600 transition-colors"
-                    title={deliverable.deliverable_type === 'url' ? 'Open URL' : 'Reveal in Finder'}
-                  >
-                    <ExternalLink className="w-4 h-4" />
-                  </button>
-                )}
+                    {deliverable.path}
+                  </a>
+                ) : (
+                  <div className="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-600 font-mono break-all">
+                    {deliverable.path}
+                  </div>
+                )
+              )}
+
+              {/* Metadata */}
+              <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                <span className="capitalize">{deliverable.deliverable_type}</span>
+                <span>•</span>
+                <span>{formatTimestamp(deliverable.created_at)}</span>
               </div>
             </div>
-
-            {/* Description */}
-            {deliverable.description && (
-              <p className="text-sm text-gray-600 mt-1">
-                {deliverable.description}
-              </p>
-            )}
-
-            {/* Path - clickable for URLs */}
-            {deliverable.path && (
-              deliverable.deliverable_type === 'url' ? (
-                <a
-                  href={deliverable.path}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-2 p-2 bg-gray-100 rounded text-xs text-indigo-600 hover:text-indigo-700 font-mono break-all block hover:bg-gray-200 transition-colors"
-                >
-                  {deliverable.path}
-                </a>
-              ) : (
-                <div className="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-600 font-mono break-all">
-                  {deliverable.path}
-                </div>
-              )
-            )}
-
-            {/* Metadata */}
-            <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
-              <span className="capitalize">{deliverable.deliverable_type}</span>
-              <span>•</span>
-              <span>{formatTimestamp(deliverable.created_at)}</span>
-            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

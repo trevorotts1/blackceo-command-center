@@ -311,12 +311,13 @@ test('[PRD 2.4c] scoreTaskForQC: pass=true when score >= 8.5 (LLM path gate logi
   );
 });
 
-// ─── PRD 2.4 (b): no-criteria path (not heuristic) still reroutes ────────────
-// Confirms the reroute loop is intact for non-heuristic failing paths.
-// 'no-criteria' scoringPath != 'heuristic', so the heuristic guard does not
-// intercept it and the reroute loop fires as before.
+// ─── §4 (b): no-criteria path is un-reroutable (brief/metadata issue) ────────
+// §4 guidance: "if QC fails on criteria the executor cannot influence (brief
+// wording, missing metadata), it must NOT reroute; it goes to review with a
+// human-readable reason."  No SOP assigned = missing metadata = un-reroutable.
+// Updated from PRD 2.4b (which expected rerouting) to the §4 contract.
 
-test('[PRD 2.4b] non-heuristic fail (no-criteria): still reroutes as before', async () => {
+test('[§4] no-criteria path is un-reroutable: task stays in review with QC-UNROUTEABLE event', async () => {
   // No SOP + no API key → no-criteria path (scoringPath='no-criteria', not 'heuristic').
   const id = nextId('no-criteria-reroutes');
   insertNoCriteriaTask(id);
@@ -331,26 +332,32 @@ test('[PRD 2.4b] non-heuristic fail (no-criteria): still reroutes as before', as
     [id],
   );
   assert.ok(task, 'task must exist');
-  // Task must NOT stay in review — it must have moved to backlog (rerouted).
-  assert.notEqual(
+  // §4: un-reroutable failure → task STAYS in review (not moved to backlog).
+  assert.equal(
     task.status,
     'review',
-    `non-heuristic fail must leave review (backlog or blocked), got: ${task.status}`,
+    `§4 un-reroutable fail: task must stay in review, got: ${task.status}`,
   );
-  // qc_reroute_attempts must have been incremented.
+  // qc_reroute_attempts must NOT have been incremented (no reroute fired).
+  assert.equal(
+    task.qc_reroute_attempts ?? 0,
+    0,
+    `§4 un-reroutable fail: qc_reroute_attempts must not increment, got: ${task.qc_reroute_attempts}`,
+  );
+  // A QC-UNROUTEABLE event must exist (not a QC-REROUTE event).
+  const unrouteableEvt = queryOne<{ message: string }>(
+    `SELECT message FROM events WHERE task_id = ? AND message LIKE '%[QC-UNROUTEABLE]%' LIMIT 1`,
+    [id],
+  );
   assert.ok(
-    (task.qc_reroute_attempts ?? 0) > 0,
-    `qc_reroute_attempts must increment on non-heuristic fail, got: ${task.qc_reroute_attempts}`,
+    unrouteableEvt,
+    '§4: a [QC-UNROUTEABLE] event must be written for no-criteria failure',
   );
-  // A reroute event must exist.
   const reroute = queryOne<{ message: string }>(
     `SELECT message FROM events WHERE task_id = ? AND message LIKE '%[QC-REROUTE]%' LIMIT 1`,
     [id],
   );
-  assert.ok(
-    reroute,
-    'a [QC-REROUTE] event must be written for non-heuristic fail (no-criteria path)',
-  );
+  assert.ok(!reroute, '§4: NO [QC-REROUTE] event must be written for un-reroutable failure');
 });
 
 // ─── PRD 2.4 (a): heuristic task never transitions to blocked ────────────────

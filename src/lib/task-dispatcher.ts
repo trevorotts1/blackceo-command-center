@@ -41,11 +41,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
-import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
+import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { getBestSOPForTask } from '@/lib/sops';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
+import { artifactDispatchPayload } from '@/lib/task-lifecycle';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
@@ -312,13 +313,14 @@ ${stepLines.join('\n')}
         task.priority
       ] ?? '⚪';
 
-    const projectsPath = getProjectsPath();
-    const projectDir = task.title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-    const taskProjectDir = `${projectsPath}/${projectDir}`;
+    // ── Artifact save path (duck-fix) ──────────────────────────────────────
+    // §3 Artifact Contract: artifacts live at <PROJECTS_PATH>/artifacts/<task-id>/
+    // The specialist is TOLD the exact directory via ARTIFACT_DIR in the dispatch
+    // message — it never chooses its own path.  ensureArtifactDir() creates the
+    // directory at dispatch time so the specialist can write immediately.
     const missionControlUrl = getMissionControlUrl();
+    const { artifactDir: taskArtifactDir, messageFragment: artifactFragment } =
+      artifactDispatchPayload(task.id);
 
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 
@@ -347,15 +349,12 @@ After selecting, log your choice to persona-selection-log.md:
     : ''
 }
 **Specialist Type:** ${specialistType}
-
-**OUTPUT DIRECTORY:** ${taskProjectDir}
-Create this directory and save all deliverables there.
-
+${artifactFragment}
 **IMPORTANT:** After completing work, you MUST call these APIs:
 1. Log activity: POST ${missionControlUrl}/api/tasks/${task.id}/activities
    Body: {"activity_type": "completed", "message": "Description of what was done"}
 2. Register deliverable: POST ${missionControlUrl}/api/tasks/${task.id}/deliverables
-   Body: {"deliverable_type": "file", "title": "File name", "path": "${taskProjectDir}/filename.html"}
+   Body: {"deliverable_type": "artifact", "title": "File name", "path": "${taskArtifactDir}/filename.png"}
 3. Update status: PATCH ${missionControlUrl}/api/tasks/${task.id}
    Body: {"status": "review"}
 
@@ -372,16 +371,23 @@ If you need help or clarification, ask the orchestrator.`;
       idempotencyKey: `auto-dispatch-${task.id}-${Date.now()}`,
     });
 
-    // ── Advance task to in_progress ─────────────────────────────────────────
-    run('UPDATE tasks SET status = ?, model_id = ?, updated_at = ? WHERE id = ?', [
-      'in_progress',
-      settings.model || null,
-      now,
-      task.id,
-    ]);
+    // ── Advance task to in_progress via lifecycle transition ───────────────
+    // Pin model_id first (not part of the state machine itself), then transition.
+    if (settings.model) {
+      run('UPDATE tasks SET model_id = ?, updated_at = ? WHERE id = ?', [settings.model, now, task.id]);
+    }
 
-    const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
-    if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
+    try {
+      const { transition } = await import('@/lib/task-lifecycle');
+      await transition(task.id, 'in_progress', { actor: agent.id, reason: `[${context}] auto-dispatched to ${agent.name}` });
+    } catch (tErr) {
+      // transition() may throw if the task is already in_progress (concurrent dispatch).
+      // Fall back to direct SQL to keep the fire-and-forget guarantee.
+      console.warn(`[${context}] autoDispatchTask: transition() failed (${(tErr as Error).message}), falling back to direct SQL`);
+      run('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?', ['in_progress', now, task.id]);
+      const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
+      if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
+    }
 
     // ── Agent status → working ──────────────────────────────────────────────
     run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['working', now, agent.id]);
