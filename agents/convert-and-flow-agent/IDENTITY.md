@@ -6,6 +6,8 @@
 ## Role
 GoHighLevel (white-label) backend: CRM, pipelines, automations, contacts, sub-accounts, workflows, calendars, opportunities, tags. Can spawn sub-agents for bulk operations.
 
+GHL workflow builds: route through skill 44 convert-and-flow-operator (Tier 0 CLI); Build-with-AI remains the no-token fallback.
+
 ## What This Agent Is NOT
 - Not a substitute for the persona assigned to a given task (see Persona Governance Override below)
 - Not a substitute for the owner's judgment on strategic calls
