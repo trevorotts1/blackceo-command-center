@@ -20,9 +20,15 @@
  *      after cleanup, exit 2.
  *   6. Both the success receipt and the rollback receipt contain the
  *      health-check JSON (key invariant from B.2 spec).
+ *   7. FALSE-GREEN GUARD: npm build fails (buildExitCode=1) + live .next/BUILD_ID
+ *      present → script exits 2 (not 0), old BUILD_ID is unchanged, 'ATOMIC
+ *      DEPLOY SUCCESS' never appears in output.
  *
- * These tests use shell fixtures (stub cc-health-check.sh + stub npm) so they
- * run without a real Next.js install and without pm2. All paths are in tmpdir.
+ * HEALTH CHECK STUB WIRING: atomic-deploy.sh resolves the health check from
+ * CC_HEALTH_CHECK_PATH env var (if set) or SCRIPT_DIR. The fixture writes
+ * the stub to a temp file and passes its path via CC_HEALTH_CHECK_PATH so
+ * the script uses it unconditionally, regardless of where atomic-deploy.sh
+ * lives on disk.
  *
  * Run: node --import tsx --test tests/unit/b2-atomic-deploy.test.ts
  */
@@ -54,7 +60,18 @@ function rmTmpDir(dir: string): void {
  *       npm                  ← stub npm (configurable exit code + output)
  *       pm2                  ← stub pm2
  *       sqlite3              ← stub sqlite3
- *       cc-health-check.sh   ← stub health check (configurable exit code + JSON)
+ *       df                   ← stub df
+ *       curl                 ← stub curl
+ *       python3              ← stub python3
+ *       sleep                ← no-op stub (tests run fast)
+ *     stubs/
+ *       cc-health-check.sh   ← stub health check (injected via CC_HEALTH_CHECK_PATH)
+ *
+ * HEALTH CHECK STUB WIRING: the stub is written to baseDir/stubs/ and its path
+ * is returned as `healthCheckStubPath`. The caller passes this via
+ * CC_HEALTH_CHECK_PATH env var when invoking atomic-deploy.sh. The script reads
+ * CC_HEALTH_CHECK_PATH before falling back to SCRIPT_DIR, so this wiring works
+ * regardless of where atomic-deploy.sh lives on disk.
  */
 interface FixtureConfig {
   /** Exit code stub npm build should return (0 = success) */
@@ -75,6 +92,8 @@ interface Fixture {
   baseDir: string;
   appDir: string;
   binDir: string;
+  /** Absolute path to the stub cc-health-check.sh (injected via CC_HEALTH_CHECK_PATH) */
+  healthCheckStubPath: string;
   /** Path to atomic-deploy.sh being tested */
   deployScript: string;
   cleanup(): void;
@@ -93,8 +112,10 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
   const baseDir = makeTmpDir();
   const appDir = path.join(baseDir, 'app');
   const binDir = path.join(baseDir, 'bin');
+  const stubsDir = path.join(baseDir, 'stubs');
   mkdirSync(appDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
+  mkdirSync(stubsDir, { recursive: true });
 
   // Fake DB
   writeFileSync(path.join(appDir, 'mission-control.db'), 'SQLite fixture');
@@ -106,13 +127,19 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
   }
 
   // ── stub npm ────────────────────────────────────────────────────────────
-  // When npm run build is called, create NEXT_DIST_DIR/BUILD_ID if exit 0.
+  // When npm run build is called:
+  // - if buildExitCode=0 and NEXT_DIST_DIR is set, write BUILD_ID there
+  // - always write the exit code to BUILD_EXIT_FILE (the temp file the script reads)
   const npmStub = `#!/usr/bin/env bash
 # Stub npm for B.2 fixture tests
 if [[ "$1" == "run" && "$2" == "build" ]]; then
-  if [[ "${buildExitCode}" -eq 0 && -n "$NEXT_DIST_DIR" ]]; then
+  if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
     mkdir -p "$NEXT_DIST_DIR"
     echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
+  fi
+  # Write exit code to BUILD_EXIT_FILE so atomic-deploy.sh subshell captures it correctly
+  if [[ -n "\${BUILD_EXIT_FILE:-}" ]]; then
+    echo "${buildExitCode}" > "$BUILD_EXIT_FILE"
   fi
   exit ${buildExitCode}
 fi
@@ -159,16 +186,32 @@ exit 0
   // ── stub python3 ─────────────────────────────────────────────────────────
   const python3Stub = `#!/usr/bin/env python3
 import sys
-# Return empty string for all pm2 queries (no apps)
+# Return empty string for all pm2 queries (no non-canonical apps)
 print('')
 `;
   writeFileSync(path.join(binDir, 'python3'), python3Stub, { mode: 0o755 });
 
+  // ── stub sleep (no-op so tests run fast) ─────────────────────────────────
+  const sleepStub = `#!/usr/bin/env bash
+exit 0
+`;
+  writeFileSync(path.join(binDir, 'sleep'), sleepStub, { mode: 0o755 });
+
   // ── stub cc-health-check.sh ──────────────────────────────────────────────
-  // First call returns healthExitCode; subsequent calls (rollback check) return
-  // rollbackHealthExitCode. Use a counter file to track invocations.
+  // Written to stubsDir; path injected via CC_HEALTH_CHECK_PATH env var.
+  // atomic-deploy.sh checks CC_HEALTH_CHECK_PATH before falling back to
+  // SCRIPT_DIR, so this stub is always picked up regardless of where
+  // atomic-deploy.sh lives on disk.
+  //
+  // First call returns healthExitCode + healthJson.
+  // Subsequent calls (rollback re-check) return rollbackHealthExitCode.
+  // A counter file in baseDir tracks invocation count.
+  const healthStubPath = path.join(stubsDir, 'cc-health-check.sh');
+  const healthJsonEscaped = healthJson.replace(/'/g, "'\\''");
+  const rollbackGreen = rollbackHealthExitCode === 0 ? 'true' : 'false';
   const healthStub = `#!/usr/bin/env bash
 # Stub cc-health-check.sh for B.2 fixture tests
+# Injected via CC_HEALTH_CHECK_PATH; never needs to live in SCRIPT_DIR.
 COUNTER_FILE="${baseDir}/.health-call-count"
 COUNT=0
 if [[ -f "$COUNTER_FILE" ]]; then
@@ -178,41 +221,22 @@ COUNT=$((COUNT + 1))
 echo "$COUNT" > "$COUNTER_FILE"
 
 if [[ "$COUNT" -eq 1 ]]; then
-  echo '${healthJson}'
+  echo '${healthJsonEscaped}'
   exit ${healthExitCode}
 else
-  echo '{"green":${rollbackHealthExitCode === 0 ? 'true' : 'false'},"timestamp":"2026-06-10T00:00:00Z","checks":{}}'
+  echo '{"green":${rollbackGreen},"timestamp":"2026-06-10T00:00:00Z","checks":{}}'
   exit ${rollbackHealthExitCode}
 fi
 `;
-  // Write the stub; note this is interpolated at fixture creation time
-  const healthStubResolved = `#!/usr/bin/env bash
-# Stub cc-health-check.sh for B.2 fixture tests
-COUNTER_FILE="${baseDir}/.health-call-count"
-COUNT=0
-if [[ -f "$COUNTER_FILE" ]]; then
-  COUNT=$(cat "$COUNTER_FILE")
-fi
-COUNT=$((COUNT + 1))
-echo "$COUNT" > "$COUNTER_FILE"
-
-if [[ "$COUNT" -eq 1 ]]; then
-  echo '${healthJson.replace(/'/g, "'\\''")}'
-  exit ${healthExitCode}
-else
-  echo '{"green":${rollbackHealthExitCode === 0 ? 'true' : 'false'},"timestamp":"2026-06-10T00:00:00Z","checks":{}}'
-  exit ${rollbackHealthExitCode}
-fi
-`;
-  writeFileSync(path.join(binDir, 'cc-health-check.sh'), healthStubResolved, { mode: 0o755 });
-  // atomic-deploy.sh looks for cc-health-check.sh in its own SCRIPT_DIR
-  // We'll patch the HEALTH_CHECK path via env override in the test runner.
+  writeFileSync(healthStubPath, healthStub, { mode: 0o755 });
 
   // ── resolve atomic-deploy.sh location ───────────────────────────────────
   const deployScript = path.join(process.cwd(), 'scripts', 'atomic-deploy.sh');
 
   return {
-    baseDir, appDir, binDir, deployScript,
+    baseDir, appDir, binDir,
+    healthCheckStubPath: healthStubPath,
+    deployScript,
     cleanup() { rmTmpDir(baseDir); },
   };
 }
@@ -220,6 +244,10 @@ fi
 /**
  * Run atomic-deploy.sh with the fixture environment.
  * Returns { exitCode, stdout, stderr }.
+ *
+ * CC_HEALTH_CHECK_PATH is always set to fixture.healthCheckStubPath so
+ * atomic-deploy.sh uses our stub instead of SCRIPT_DIR/cc-health-check.sh.
+ * sleep is stubbed with a no-op in binDir so tests don't wait real seconds.
  */
 function runDeploy(fixture: Fixture, extraEnv: Record<string, string> = {}): {
   exitCode: number; stdout: string; stderr: string;
@@ -239,14 +267,13 @@ function runDeploy(fixture: Fixture, extraEnv: Record<string, string> = {}): {
         ...process.env,
         PATH: `${fixture.binDir}:${process.env.PATH ?? ''}`,
         HOME: fixture.baseDir,
-        // Point HEALTH_CHECK to our stub by overriding SCRIPT_DIR via a wrapper
-        // (atomic-deploy.sh resolves SCRIPT_DIR from ${BASH_SOURCE[0]}, so we
-        //  use CC_HEALTH_CHECK_PATH env to override the HEALTH_CHECK variable
-        //  if supported, or we copy stub to same dir as deploy script)
+        // Inject health check stub path — atomic-deploy.sh reads CC_HEALTH_CHECK_PATH
+        // before falling back to SCRIPT_DIR, so this always wins.
+        CC_HEALTH_CHECK_PATH: fixture.healthCheckStubPath,
         ...extraEnv,
       },
       cwd: fixture.appDir,
-      timeout: 30_000,
+      timeout: 60_000,
       encoding: 'utf8',
     },
   );
@@ -258,7 +285,202 @@ function runDeploy(fixture: Fixture, extraEnv: Record<string, string> = {}): {
   };
 }
 
-// ─── tests ───────────────────────────────────────────────────────────────────
+// ─── Spec Verify (a+fg): FALSE-GREEN guard ───────────────────────────────────
+
+/**
+ * FALSE-GREEN guard: npm build exits 1 + live .next/BUILD_ID present.
+ * Script must exit 2 (pre-flight abort), old BUILD_ID must be unchanged,
+ * and 'ATOMIC DEPLOY SUCCESS' must never appear in output.
+ *
+ * This is the primary false-green scenario from REDO #1: the pipe construction
+ * 'npm run build ... | while ... done || true' previously masked the npm exit
+ * code, and the fallback condition accepted the old BUILD_ID as the new build.
+ */
+test('Spec Verify (a+fg): broken build (npm exits 1) + live BUILD_ID → exit 2, old build untouched, no SUCCESS in output', async () => {
+  const fixture = buildFixture({ buildExitCode: 1, liveNextExists: true });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    // Must exit 2 — pre-flight abort, not exit 0 (false-green) and not exit 1 (rollback)
+    assert.strictEqual(exitCode, 2,
+      `Expected exit 2 (pre-flight abort on build failure) but got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // Old BUILD_ID must still be 'old-build-id' — live .next must not have been swapped
+    const liveNextBuildId = path.join(fixture.appDir, '.next', 'BUILD_ID');
+    assert.ok(existsSync(liveNextBuildId), '.next/BUILD_ID must still exist after build failure');
+    const currentBuildId = readFileSync(liveNextBuildId, 'utf8').trim();
+    assert.strictEqual(currentBuildId, 'old-build-id',
+      `BUILD_ID must remain 'old-build-id' after failed build, got '${currentBuildId}'`);
+
+    // 'ATOMIC DEPLOY SUCCESS' must never appear in output
+    assert.ok(
+      !stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `ATOMIC DEPLOY SUCCESS must not appear in output when build failed.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Spec Verify (b): good deploy ───────────────────────────────────────────
+
+/**
+ * Good deploy: build exits 0, health check exits 0.
+ * Script must exit 0, new BUILD_ID installed, receipt contains health JSON.
+ */
+test('Spec Verify (b): good deploy (build ok, health ok) → exit 0, new BUILD_ID, receipt has health JSON', async () => {
+  const healthJson = '{"green":true,"timestamp":"2026-06-10T00:00:00Z","checks":{"http":true}}';
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, healthJson, liveNextExists: true });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    assert.strictEqual(exitCode, 0,
+      `Expected exit 0 (success) but got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // New BUILD_ID must be installed
+    const liveNextBuildId = path.join(fixture.appDir, '.next', 'BUILD_ID');
+    assert.ok(existsSync(liveNextBuildId), '.next/BUILD_ID must exist after good deploy');
+    const installedBuildId = readFileSync(liveNextBuildId, 'utf8').trim();
+    assert.strictEqual(installedBuildId, 'new-build-id',
+      `Expected new BUILD_ID 'new-build-id' but got '${installedBuildId}'`);
+
+    // Success receipt must appear
+    assert.ok(
+      stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `Success receipt must appear in output for a good deploy.\nstderr:\n${stderr}`,
+    );
+    // Receipt must contain health JSON
+    assert.ok(
+      stderr.includes('Health JSON') || stderr.includes('green'),
+      `Receipt must contain health JSON for a good deploy.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Spec Verify (c): build ok + health exits 1 → rollback ─────────────────
+
+/**
+ * Build succeeds but health check exits 1 (definitive NOT GREEN).
+ * Script must exit 1, auto-rollback fires, .next.rollback restored,
+ * rollback receipt emitted in output.
+ */
+test('Spec Verify (c): build ok + health exits 1 → rollback fires, .next.rollback restored, exit 1', async () => {
+  const failHealthJson = '{"green":false,"timestamp":"2026-06-10T00:00:00Z","checks":{"http":false}}';
+  const fixture = buildFixture({
+    buildExitCode: 0,
+    healthExitCode: 1,
+    healthJson: failHealthJson,
+    rollbackHealthExitCode: 0,
+    liveNextExists: true,
+  });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    assert.strictEqual(exitCode, 1,
+      `Expected exit 1 (rollback) but got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // Rollback receipt must be emitted
+    assert.ok(
+      stderr.includes('AUTO-ROLLBACK EXECUTED') || stderr.includes('ROLLBACK'),
+      `Rollback receipt must appear in output when health check fails.\nstderr:\n${stderr}`,
+    );
+
+    // .next.rollback must exist (was created in Phase 1c and must survive)
+    const rollbackDir = path.join(fixture.appDir, '.next.rollback');
+    assert.ok(existsSync(rollbackDir), '.next.rollback must exist after rollback');
+
+    // .next must have been restored (contains old-build-id from rollback)
+    const liveNextBuildId = path.join(fixture.appDir, '.next', 'BUILD_ID');
+    assert.ok(existsSync(liveNextBuildId), '.next/BUILD_ID must exist after rollback restore');
+    const restoredBuildId = readFileSync(liveNextBuildId, 'utf8').trim();
+    assert.strictEqual(restoredBuildId, 'old-build-id',
+      `Expected rollback to restore 'old-build-id' but got '${restoredBuildId}'`);
+
+    // Receipt must contain both deploy and rollback health JSON
+    assert.ok(
+      stderr.includes('Deploy health JSON') || stderr.includes('failed build'),
+      `Rollback receipt must include deploy health JSON.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Rollback health JSON') || stderr.includes('restored build'),
+      `Rollback receipt must include rollback health JSON.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Spec Verify (d): health exits 3 → retry, no rollback, exit 3 ───────────
+
+/**
+ * Health check exits 3 (UNKNOWN/transient) on all retry attempts.
+ * Script must exit 3, NO rollback triggered, new build remains in .next.
+ */
+test('Spec Verify (d): health exits 3 (all retries) → exit 3, no rollback, new build stays live', async () => {
+  const unknownHealthJson = '{"green":null,"timestamp":"2026-06-10T00:00:00Z","checks":{}}';
+  const fixture = buildFixture({
+    buildExitCode: 0,
+    healthExitCode: 3,
+    healthJson: unknownHealthJson,
+    rollbackHealthExitCode: 3,  // Rollback never fires, so this is not called
+    liveNextExists: true,
+  });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    assert.strictEqual(exitCode, 3,
+      `Expected exit 3 (UNKNOWN after retries) but got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // Rollback must NOT have fired
+    assert.ok(
+      !stderr.includes('AUTO-ROLLBACK EXECUTED'),
+      `Rollback must NOT fire on exit-3 UNKNOWN state.\nstderr:\n${stderr}`,
+    );
+
+    // New build must still be in .next (deploy is NOT rolled back on exit 3)
+    const liveNextBuildId = path.join(fixture.appDir, '.next', 'BUILD_ID');
+    if (existsSync(liveNextBuildId)) {
+      const currentBuildId = readFileSync(liveNextBuildId, 'utf8').trim();
+      assert.strictEqual(currentBuildId, 'new-build-id',
+        'New build must stay live on exit-3 (no rollback on UNKNOWN)');
+    }
+
+    // UNKNOWN receipt must be emitted
+    assert.ok(
+      stderr.includes('UNKNOWN') || stderr.includes('exit 3'),
+      `UNKNOWN receipt must appear in output for exit-3 state.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Spec Verify (e): disk gate ─────────────────────────────────────────────
+
+/**
+ * Disk is below DISK_MIN_GB (5 GB) even after cleanup.
+ * Script must exit 2 with a loud pre-flight abort.
+ */
+test('Spec Verify (e): disk below threshold after cleanup → exit 2, pre-flight abort', async () => {
+  const fixture = buildFixture({ freeDiskGb: 1, liveNextExists: true });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    assert.strictEqual(exitCode, 2,
+      `Expected exit 2 (disk pre-flight abort) but got exit ${exitCode}`);
+
+    assert.ok(
+      stderr.includes('disk') || stderr.includes('Disk') || stderr.includes('PRE-FLIGHT'),
+      `Pre-flight abort receipt must mention disk in output.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Static / structural tests (fast, no fixture execution) ─────────────────
 
 /**
  * Smoke: verify qc-cc.sh B.2 static checks pass on the committed atomic-deploy.sh.
@@ -266,7 +488,6 @@ function runDeploy(fixture: Fixture, extraEnv: Record<string, string> = {}): {
  * something about the script's structure regressed.
  */
 test('B.2 static QC: qc-cc.sh section 10 checks all pass on atomic-deploy.sh', () => {
-  // Run only the B.2 section by checking each condition directly against the source.
   const deployScriptPath = path.join(process.cwd(), 'scripts', 'atomic-deploy.sh');
   assert.ok(existsSync(deployScriptPath), 'atomic-deploy.sh must exist');
 
@@ -348,17 +569,19 @@ test('B.2 static QC: qc-cc.sh section 10 checks all pass on atomic-deploy.sh', (
     src.includes('HEALTH_RETRIES') || /exit.*3|UNKNOWN/i.test(src),
     '10.14: must retry on exit-3 and never rollback',
   );
-  // Confirm there is no rollback code in the exit-3 branch:
-  // The exit-3 verdict block must not reference cp -r $ROLLBACK_DIR or rm -rf .next
-  // We verify this structurally: search for rollback code in the vicinity of "exit 3"
-  const exit3Index = src.indexOf('exit 3');
-  assert.ok(exit3Index !== -1, '10.14: script must exit 3 for UNKNOWN state');
-  // The rollback cp command must not appear between the exit-3 verdict and the "exit 3" line
-  // (crude but effective: the rollback cp and the "exit 3" should not be in the same 20-line window)
-  const contextAround3 = src.slice(Math.max(0, exit3Index - 600), exit3Index + 20);
+  // Confirm there is no rollback code in the exit-3 verdict block.
+  // Use lastIndexOf to find the ACTUAL exit-3 verdict statement in Phase 5,
+  // not the first occurrence in the header comment (~line 35).
+  const exit3LastIndex = src.lastIndexOf('exit 3');
+  assert.ok(exit3LastIndex !== -1, '10.14: script must exit 3 for UNKNOWN state');
+  // Verify the 600-char context around the actual exit-3 verdict statement
+  // does not contain rollback restore code (cp -r ... ROLLBACK_DIR).
+  const contextAroundActualExit3 = src.slice(Math.max(0, exit3LastIndex - 600), exit3LastIndex + 20);
+  const hasRollbackCommandNearExit3 =
+    /cp -r .*(ROLLBACK_DIR|\.next\.rollback)/.test(contextAroundActualExit3);
   assert.ok(
-    !contextAround3.includes('.next.rollback') || contextAround3.includes('NEVER'),
-    '10.14: rollback must NOT be triggered on exit-3 path',
+    !hasRollbackCommandNearExit3,
+    '10.14: rollback cp command must NOT appear near the exit-3 verdict statement',
   );
 });
 
@@ -421,9 +644,6 @@ test('B.2 structural: rollback receipt references both deploy and rollback healt
     path.join(process.cwd(), 'scripts', 'atomic-deploy.sh'),
     'utf8',
   );
-  // The rollback receipt function or inline block must reference BOTH
-  // the deploy-time health JSON (FAILED_HEALTH_JSON or HEALTH_JSON) and
-  // the rollback-time health JSON (ROLLBACK_HEALTH_JSON).
   assert.ok(
     src.includes('FAILED_HEALTH_JSON') || src.includes('deploy_health_json') ||
     (src.includes('HEALTH_JSON') && src.includes('ROLLBACK_HEALTH_JSON')),
@@ -450,5 +670,47 @@ test('B.2 structural: qc-cc.sh references b2-atomic-deploy.test.ts', () => {
   assert.ok(
     qcSrc.includes('cc-health-check.sh') && qcSrc.includes('atomic-deploy.sh'),
     'qc-cc.sh B.2 section must check both scripts',
+  );
+});
+
+/**
+ * Structural: mtime guard is implemented — rejects stale BUILD_ID.
+ * Verifies BUILD_START_TS is captured before the build, BUILD_ID mtime is
+ * compared against it, and stale artefacts are rejected.
+ */
+test('B.2 structural: mtime guard present — rejects stale BUILD_ID (BUILD_START_TS + mtime comparison)', () => {
+  const src = readFileSync(
+    path.join(process.cwd(), 'scripts', 'atomic-deploy.sh'),
+    'utf8',
+  );
+  // Must capture build start timestamp
+  assert.ok(
+    src.includes('BUILD_START_TS'),
+    'mtime guard must define BUILD_START_TS before npm run build',
+  );
+  // Must capture BUILD_ID mtime for comparison
+  assert.ok(
+    src.includes('BUILD_ID_MTIME') || src.includes('NEXT_BUILD_ID_MTIME'),
+    'mtime guard must capture BUILD_ID mtime for comparison',
+  );
+  // Comparison must use <= BUILD_START_TS to reject stale artefacts
+  assert.ok(
+    /BUILD_ID_MTIME.*<=.*BUILD_START_TS|NEXT_BUILD_ID_MTIME.*<=.*BUILD_START_TS/.test(src),
+    'mtime guard must reject BUILD_ID with mtime <= BUILD_START_TS',
+  );
+});
+
+/**
+ * Structural: CC_HEALTH_CHECK_PATH env override is present in atomic-deploy.sh.
+ * This is the wiring mechanism for fixture harnesses.
+ */
+test('B.2 structural: CC_HEALTH_CHECK_PATH env override supported for fixture harnesses', () => {
+  const src = readFileSync(
+    path.join(process.cwd(), 'scripts', 'atomic-deploy.sh'),
+    'utf8',
+  );
+  assert.ok(
+    src.includes('CC_HEALTH_CHECK_PATH') || src.includes('HEALTH_CHECK_PATH_OVERRIDE'),
+    'atomic-deploy.sh must support CC_HEALTH_CHECK_PATH env override for fixture harnesses',
   );
 });

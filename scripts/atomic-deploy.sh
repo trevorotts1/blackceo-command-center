@@ -19,6 +19,9 @@
 #   --canonical-dir DIR  Pass-through to cc-health-check.sh --canonical-dir
 #   --public-url URL     Pass-through to cc-health-check.sh --public-url
 #
+# ENVIRONMENT OVERRIDES
+#   CC_HEALTH_CHECK_PATH  Override the path to cc-health-check.sh (used by fixture harnesses)
+#
 # EXIT CODES
 #   0 — deploy succeeded; server is green on the new build
 #   1 — deploy failed; server was rolled back to prior build (health check confirmed rollback green)
@@ -60,6 +63,8 @@ HEALTH_RETRIES="${CC_HEALTH_RETRIES:-3}"
 HEALTH_RETRY_WAIT="${CC_HEALTH_RETRY_WAIT:-15}"
 CANONICAL_DIR_OVERRIDE="${CC_CANONICAL_DIR:-}"
 PUBLIC_URL_PROBE="${CC_PUBLIC_URL:-}"
+# Fixture harness override: if set, use this path for cc-health-check.sh instead of SCRIPT_DIR
+HEALTH_CHECK_PATH_OVERRIDE="${CC_HEALTH_CHECK_PATH:-}"
 
 ###############################################################################
 # Argument parsing
@@ -95,7 +100,14 @@ _banner() { printf '\n%s═══ %s ═══%s\n' "${BOLD}" "$*" "${RESET}" >&
 
 # Resolve the script's own directory so we can call cc-health-check.sh portably
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HEALTH_CHECK="${SCRIPT_DIR}/cc-health-check.sh"
+
+# CC_HEALTH_CHECK_PATH env var allows fixture harnesses to inject a stub
+# without needing to copy files into SCRIPT_DIR.
+if [[ -n "$HEALTH_CHECK_PATH_OVERRIDE" ]]; then
+  HEALTH_CHECK="$HEALTH_CHECK_PATH_OVERRIDE"
+else
+  HEALTH_CHECK="${SCRIPT_DIR}/cc-health-check.sh"
+fi
 
 if [[ ! -f "$HEALTH_CHECK" ]]; then
   _err "cc-health-check.sh not found at: $HEALTH_CHECK"
@@ -396,33 +408,70 @@ _banner "Phase 2 — Build (temp dir)"
 BUILD_TMP="${APP_DIR}/.next.tmp.$(date +%Y%m%d-%H%M%S)-$$"
 _log "Building into temp dir: ${BUILD_TMP}"
 
+# Record build start time (seconds since epoch) for mtime guard below.
+# We compare BUILD_ID mtime against this value to ensure the file was written
+# by THIS build invocation, not carried over from the Phase 1c snapshot.
+BUILD_START_TS=$(date +%s 2>/dev/null || echo 0)
+
 # Export NEXT output dir env var so Next.js writes to the temp dir instead of .next
-# This relies on Next.js respecting NEXT_OUTPUT_DIR or the --out-dir build flag where available.
-# For standard Next.js, we build normally and then move the result.
-# Approach: build normally (output goes to .next), then move .next to BUILD_TMP
-# BUT: that leaves a window where .next is gone before the swap. Instead:
-# 1. Build to a uniquely-named sibling dir by patching NEXT_DIST_DIR env var.
-# 2. On success, atomic-rename BUILD_TMP → .next.
-#
 # Next.js honours the NEXT_DIST_DIR env variable as the output directory.
 export NEXT_DIST_DIR="$BUILD_TMP"
 
 cd "$APP_DIR"
-BUILD_EXIT=0
-_log "Running: npm run build  (output: ${BUILD_TMP})"
-npm run build 2>&1 | while IFS= read -r line; do
-  printf '%s[build] %s%s\n' "${CYAN}" "${RESET}" "$line" >&2
-done || true
 
-# The pipe masks the exit code; check BUILD_TMP for BUILD_ID instead
+# ── Capture npm exit code before the pipe ────────────────────────────────────
+# IMPORTANT: piping npm run build through a while-read loop MASKS the exit
+# code because the pipe's last command (the loop) returns 0. We work around
+# this by writing npm's exit code to a temp file inside the subshell and
+# reading it back after the pipe drains. This is the only portable approach
+# that also preserves streaming build output.
+BUILD_EXIT_FILE=$(mktemp /tmp/atomic-build-exit-$$.txt)
+echo "2" > "$BUILD_EXIT_FILE"   # Pre-set to failure; overwritten only on clean exit
+
+export BUILD_EXIT_FILE
+
+_log "Running: npm run build  (output: ${BUILD_TMP})"
+(
+  npm run build 2>&1
+  echo $? > "$BUILD_EXIT_FILE"
+) | while IFS= read -r line; do
+  printf '%s[build] %s%s\n' "${CYAN}" "${RESET}" "$line" >&2
+done
+
+BUILD_EXIT=$(cat "$BUILD_EXIT_FILE" 2>/dev/null || echo 2)
+rm -f "$BUILD_EXIT_FILE"
+_log "  npm run build exited: ${BUILD_EXIT}"
+
+# ── Validate output: BUILD_ID must exist AND be fresh (mtime > BUILD_START_TS) ──
+# The mtime guard prevents the Phase 1c cp artefact (old BUILD_ID copied into
+# APP_DIR/.next) from being accepted as a fresh build result. A BUILD_ID whose
+# mtime is <= BUILD_START_TS was NOT written by this build invocation.
+#
+# Rule: treat any scenario where BUILD_TMP/BUILD_ID is absent (or stale) after
+# build as exit 2 unconditionally — regardless of APP_DIR/.next/BUILD_ID state.
 BUILD_ID_FILE="${BUILD_TMP}/BUILD_ID"
 
 # If NEXT_DIST_DIR is not respected (some Next.js versions ignore it), fall back:
 # build output may still have gone to .next. Detect which happened.
 if [[ ! -f "$BUILD_ID_FILE" && -f "${APP_DIR}/.next/BUILD_ID" ]]; then
   _warn "  NEXT_DIST_DIR not respected by this Next.js version — build went to .next directly."
-  _warn "  Moving ${APP_DIR}/.next to ${BUILD_TMP} as the temp build artifact."
-  # Check that .next was just rebuilt (BUILD_ID mtime is recent)
+
+  # Mtime guard: reject the BUILD_ID if it predates the build start.
+  # A stale BUILD_ID here means Phase 1c wrote it (it's the old build artefact);
+  # npm produced no new output at all — treat as build failure.
+  NEXT_BUILD_ID_MTIME=$(stat -c%Y "${APP_DIR}/.next/BUILD_ID" 2>/dev/null \
+    || stat -f%m "${APP_DIR}/.next/BUILD_ID" 2>/dev/null \
+    || echo 0)
+  if (( NEXT_BUILD_ID_MTIME <= BUILD_START_TS )); then
+    _err "  BUILD_ID mtime (${NEXT_BUILD_ID_MTIME}) predates build start (${BUILD_START_TS})."
+    _err "  This BUILD_ID is the Phase 1c snapshot copy, not a fresh build artefact."
+    _err "  Treating as build failure — live .next is untouched."
+    rm -rf "$BUILD_TMP" 2>/dev/null || true
+    _preflight_abort_receipt "Build failed: BUILD_ID in .next is stale (mtime predates build start). npm run build produced no new output."
+    exit 2
+  fi
+
+  _warn "  Moving ${APP_DIR}/.next to ${BUILD_TMP} as the temp build artifact (mtime guard passed)."
   mv "${APP_DIR}/.next" "$BUILD_TMP" 2>/dev/null || {
     _err "  Failed to move .next to temp dir. Aborting."
     # Restore rollback if we disturbed .next
@@ -435,19 +484,33 @@ if [[ ! -f "$BUILD_ID_FILE" && -f "${APP_DIR}/.next/BUILD_ID" ]]; then
   BUILD_ID_FILE="${BUILD_TMP}/BUILD_ID"
 fi
 
+# Final check: BUILD_ID must exist in BUILD_TMP AND be fresh.
+# No fallback to APP_DIR/.next/BUILD_ID — absent BUILD_ID in BUILD_TMP = exit 2.
 if [[ ! -f "$BUILD_ID_FILE" ]]; then
-  BUILD_EXIT=1
+  _err "Build FAILED — BUILD_ID not present in output directory (${BUILD_TMP})."
+  _err "No fallback accepted: live .next was NOT touched."
+  rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _preflight_abort_receipt "Build exited ${BUILD_EXIT} or BUILD_ID absent. Live .next was NOT swapped."
+  exit 2
 fi
 
-if [[ $BUILD_EXIT -ne 0 || ! -f "$BUILD_ID_FILE" ]]; then
-  _err "Build FAILED — BUILD_ID not present in output directory."
+# Mtime guard on the primary build path: BUILD_ID must be newer than build start.
+BUILD_ID_MTIME=$(stat -c%Y "$BUILD_ID_FILE" 2>/dev/null \
+  || stat -f%m "$BUILD_ID_FILE" 2>/dev/null \
+  || echo 0)
+if (( BUILD_ID_MTIME <= BUILD_START_TS )); then
+  _err "  BUILD_ID mtime (${BUILD_ID_MTIME}) <= build start (${BUILD_START_TS})."
+  _err "  This BUILD_ID predates the build — stale artefact in BUILD_TMP."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
-  # .next is untouched (or was already moved to BUILD_TMP which we removed) — restore
-  if [[ $ROLLBACK_EXISTS -eq 1 && ! -d "${APP_DIR}/.next" ]]; then
-    _warn "  Restoring .next from rollback artifact (build disturbed the live dir)."
-    cp -r "$ROLLBACK_DIR" "${APP_DIR}/.next" 2>/dev/null || true
-  fi
-  _preflight_abort_receipt "Build exited non-zero or BUILD_ID absent. Live .next was NOT swapped. Rollback artifact (.next.rollback) is preserved."
+  _preflight_abort_receipt "Build failed: BUILD_ID in BUILD_TMP is stale (mtime predates build start)."
+  exit 2
+fi
+
+# npm exit code must be 0 for a successful build.
+if [[ $BUILD_EXIT -ne 0 ]]; then
+  _err "Build FAILED — npm run build exited ${BUILD_EXIT}."
+  rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _preflight_abort_receipt "npm run build exited ${BUILD_EXIT}. Live .next was NOT swapped."
   exit 2
 fi
 
