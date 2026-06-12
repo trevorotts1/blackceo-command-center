@@ -10,6 +10,7 @@ import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { notifyOwner } from '@/lib/notify';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -245,6 +246,21 @@ export async function PATCH(
          VALUES (?, ?, ?, ?, ?)`,
         [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`, now]
       );
+
+      // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
+      // Guaranteed board-side action: fires synchronously after the DB write.
+      // Failure is logged and NEVER prevents the 200 response or any DB state.
+      if (validatedData.status === 'done' && existing.status !== 'done') {
+        try {
+          const deptLabel = (existing as Task & { department?: string | null }).department ?? 'your team';
+          notifyOwner(
+            `✅ Done: "${existing.title}" — completed by ${deptLabel}.`,
+          );
+        } catch (notifyErr) {
+          console.error('[tasks PATCH] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
+        }
+      }
+      // ── End OWNER NOTIFICATION (DONE — manual/QC-agent approval) ────────
 
       // Append to task_history (migration 027) so /api/performance can
       // compute durations + agent attribution per transition. Best-effort:

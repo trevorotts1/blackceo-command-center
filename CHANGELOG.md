@@ -1,3 +1,17 @@
+## [v4.40.0] — 2026-06-12 — feat(notify): guaranteed owner Telegram notification on task blocked + done
+
+### What changed
+
+**`src/lib/notify.ts`** (new) — shared owner-notification module: `resolveOwnerChatId` (reads OpenClaw sessions file), `notifyTelegram` (shells to `openclaw message send`), `notifyOwner` (convenience wrapper). Gated by `OWNER_NOTIFY_TELEGRAM_DISABLED=1` for tests. Never throws — always best-effort.
+
+**`src/lib/qc-scorer.ts`** — three guaranteed board-side notification points wired: (1) QC auto-approve DONE: notifyOwner after `status=done` write; (2) QC-BLOCKED after 3-strike cap: notifyOwner after `status=blocked` write with task title and gap reason; (3) `emitOwnerApprovalPending`: replaces dead `TODO(telegram)` seam with direct `notifyOwner` send (Approve/Redo PATCH URLs included). Notification failure is caught, logged, and never rolls back the DB transition.
+
+**`src/app/api/tasks/[id]/route.ts`** — DONE notify wired on manual/QC-agent approval path (PATCH `status=done`): notifyOwner after `task_completed` event is written. Same resilience contract.
+
+**`src/lib/sop-auto-replace.ts`** — refactored: `findClientChatId` and `notifyTelegram` now import from `@/lib/notify` (no logic duplication). Both re-exported for backward compat with `sop-authoring.ts`.
+
+**`tests/unit/owner-notify-blocked-done.test.ts`** (new) — 5 focused unit tests for the notify module; all pass.
+
 ## [v4.39.0] — 2026-06-11 — feat(self-service): CC button full-wire + live/re-seed dept-role-SOP + resync action
 
 ### What changed

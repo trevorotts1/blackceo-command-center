@@ -51,6 +51,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { getMissionControlUrl } from '@/lib/config';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
+import { notifyOwner } from '@/lib/notify';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1107,15 +1108,6 @@ export function emitOwnerApprovalPending(
 ): void {
   const now = new Date().toISOString();
 
-  // TODO(telegram): The OpenClaw gateway should subscribe to
-  // `qc_owner_approval_pending` events and send a Telegram message to the
-  // task's source owner with:
-  //   - The artifact image (inline) if artifactPath is an image
-  //   - Approve button → POST /api/tasks/<id> { status: 'done' }
-  //   - Redo button   → POST /api/tasks/<id> { status: 'in_progress' }
-  // Wire this in the OpenClaw event-bridge when the gateway is available.
-  // The event emitted here is the seam; the gateway reads it asynchronously.
-
   const approveUrl = `${missionControlUrl}/api/tasks/${taskId}`;
   const artifactNote = artifactPath ? `\nArtifact: ${artifactPath}` : '';
 
@@ -1143,6 +1135,20 @@ export function emitOwnerApprovalPending(
       now,
     ],
   );
+
+  // ── OWNER NOTIFICATION (OWNER-APPROVAL PENDING) ───────────────────────
+  // Guaranteed board-side send: replaces the old TODO(telegram) seam.
+  // The event above remains in the DB as the audit trail; this call is the
+  // actual push.  Failure is logged and NEVER blocks the board transition.
+  try {
+    const artifactLine = artifactPath ? `\nArtifact ready: ${artifactPath}` : '';
+    notifyOwner(
+      `👀 Review needed: "${taskTitle}" passed QC criteria and is waiting for your approval.${artifactLine}\n\nApprove: PATCH ${approveUrl} {"status":"done"}\nRedo: PATCH ${approveUrl} {"status":"in_progress"}`,
+    );
+  } catch (notifyErr) {
+    console.error('[QCScorer] owner-approval notify error (non-fatal):', (notifyErr as Error).message);
+  }
+  // ── End OWNER NOTIFICATION (OWNER-APPROVAL PENDING) ──────────────────
 }
 
 /**
@@ -1496,6 +1502,19 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       );
       console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
 
+      // ── OWNER NOTIFICATION (DONE — QC auto-approve) ────────────────────
+      // Guaranteed board-side action: always attempt after writing done state.
+      // Failure is logged and NEVER reverts the done transition.
+      try {
+        const deptLabel = task.department ?? 'your team';
+        notifyOwner(
+          `✅ Done: "${task.title}" — completed and QC-approved by ${deptLabel} (score ${result.score.toFixed(1)}/10).`,
+        );
+      } catch (notifyErr) {
+        console.error('[QCScorer] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
+      }
+      // ── End OWNER NOTIFICATION (DONE — QC auto-approve) ─────────────────
+
       // ── Persona completion feedback loop (PRD 1.4) ─────────────────────
       // Spawn record-completion async so persona_performance accumulates.
       // Skip when persona_id is null (task never had a persona assigned).
@@ -1606,6 +1625,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             now,
           ],
         );
+
+        // ── OWNER NOTIFICATION (BLOCKED) ───────────────────────────────────
+        // Guaranteed board-side action: always attempt the Telegram push after
+        // writing the DB state. Failure is logged and NEVER rolls back blocked.
+        try {
+          const blockReason = result.gaps.length > 0
+            ? result.gaps.join('; ')
+            : result.reason;
+          notifyOwner(
+            `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${blockReason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
+          );
+        } catch (notifyErr) {
+          console.error('[QCScorer] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+        }
+        // ── End OWNER NOTIFICATION (BLOCKED) ──────────────────────────────
 
         return result;
       }
