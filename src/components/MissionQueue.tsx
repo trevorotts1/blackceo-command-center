@@ -5,42 +5,67 @@ import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight } fro
 import { useMissionControl } from '@/lib/store';
 import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
-import type { Task, TaskStatus } from '@/lib/types';
+import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
 import { formatDistanceToNow } from 'date-fns';
 
+// Board kind: 'task' renders the existing 6-column task board (unchanged);
+// 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
+type BoardKind = 'task' | 'bug';
+
 interface MissionQueueProps {
   workspaceId?: string;
   departmentFilter?: string | null;
+  /** Selects the column preset. Defaults to 'task' so all existing workspaces are unaffected. */
+  boardKind?: BoardKind;
 }
 
 // ── Lean Kanban board model (Trevor-approved) ──────────────────────────────
 //
-// Columns:  Backlog → To-Do → In Progress → Review / QC → Done
-// Side-state: Blocked (not a stage in the flow — a transient exception)
+// Columns:  Backlog -> To-Do -> In Progress -> Review / QC -> Done
+// Side-state: Blocked (not a stage in the flow -- a transient exception)
 //
 // Internal pipeline statuses that are NOT separate board columns:
-//   assigned, pending_dispatch  → bucket into To-Do (routed-not-started)
-//   inbox, planning             → bucket into To-Do (groomed-but-not-started)
-//   testing                     → bucket into Review/QC (dev/web-dev sub-state)
+//   assigned, pending_dispatch  -> bucket into To-Do (routed-not-started)
+//   inbox, planning             -> bucket into To-Do (groomed-but-not-started)
+//   testing                     -> bucket into Review/QC (dev/web-dev sub-state)
 //
 // Gate rules:
-//   Backlog → To-Do: Triad Rule (description + SOP + persona required)
+//   Backlog -> To-Do: Triad Rule (description + SOP + persona required)
 //   Review / QC:     QC-agent auto-scorer fires on entry (src/lib/qc-scorer.ts)
-//                    ≥8.5 → auto-approve to Done; <8.5 → kick back to In Progress
+//                    >=8.5 -> auto-approve to Done; <8.5 -> kick back to In Progress
 //
 // TaskStatus enum still has all underlying statuses (inbox, planning, assigned,
-// pending_dispatch, testing) — they're just not visible as separate board columns.
+// pending_dispatch, testing) -- they're just not visible as separate board columns.
 // This is intentionally a UI/column-mapping change, not a schema change.
-const COLUMNS: { id: TaskStatus | 'todo'; label: string; gradient: string }[] = [
-  { id: 'backlog',     label: 'Backlog',     gradient: 'column-pill-backlog' },
-  { id: 'todo',        label: 'To-Do',       gradient: 'column-pill-backlog' },
-  { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress' },
-  { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review' },
-  { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked' },
-  { id: 'done',        label: 'Done',        gradient: 'column-pill-done' },
-];
+//
+// BOARD_PRESETS drives the config-driven column set (T3-001).
+// The 'task' preset is the original 6 columns verbatim.
+// The 'bug' preset renders the 7-lane Bugs Department board.
+// All existing task board code paths are gated behind boardKind === 'task' (the default).
+
+type ColumnDef = { id: string; label: string; gradient: string };
+
+const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
+  task: [
+    { id: 'backlog',     label: 'Backlog',     gradient: 'column-pill-backlog' },
+    { id: 'todo',        label: 'To-Do',       gradient: 'column-pill-backlog' },
+    { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress' },
+    { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review' },
+    { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked' },
+    { id: 'done',        label: 'Done',        gradient: 'column-pill-done' },
+  ],
+  bug: [
+    { id: 'REPORTED',         label: 'Reported',         gradient: 'column-pill-backlog' },
+    { id: 'TRIAGED',          label: 'Triaged',          gradient: 'column-pill-backlog' },
+    { id: 'HEALING',          label: 'Healing',          gradient: 'column-pill-progress' },
+    { id: 'VERIFYING',        label: 'Verifying',        gradient: 'column-pill-review' },
+    { id: 'HEALED',           label: 'Healed',           gradient: 'column-pill-done' },
+    { id: 'REGRESSION WATCH', label: 'Regression Watch', gradient: 'column-pill-review' },
+    { id: 'CLOSED',           label: 'Closed',           gradient: 'column-pill-done' },
+  ],
+};
 
 const departmentEmojis: Record<string, string> = {
   'ceo-com': '👔', 'ceo': '👔',
@@ -84,13 +109,30 @@ const departmentNames: Record<string, string> = {
   'general-task': 'General Task',
 };
 
-export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProps) {
+export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task' }: MissionQueueProps) {
   const { tasks, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
+
+  // ── Bug board state (boardKind === 'bug') ─────────────────────────────────
+  // Bug tickets live in their own table (/api/bugs), not in tasks.
+  // All bug board code paths are gated behind boardKind === 'bug'.
+  const [bugTickets, setBugTickets] = useState<BugTicket[]>([]);
+  const [bugLoading, setBugLoading] = useState(false);
+
+  useEffect(() => {
+    if (boardKind !== 'bug') return;
+    setBugLoading(true);
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '?workspace_id=bugs';
+    fetch(`/api/bugs${qs}`)
+      .then((r) => r.json())
+      .then((d) => setBugTickets(d.bugs ?? []))
+      .catch((e) => console.error('[MissionQueue] bug fetch error', e))
+      .finally(() => setBugLoading(false));
+  }, [boardKind, workspaceId]);
 
   // ── Horizontal scroll affordance state ────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -138,13 +180,18 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
     return true;
   };
 
+  // ── Bug board helpers (only used when boardKind === 'bug') ─────────────────
+  const getBugsByStatus = (statusId: string): BugTicket[] => {
+    return bugTickets.filter((bug) => bug.status === (statusId as BugStatus));
+  };
+
   const getTasksByStatus = (statusId: string) => {
     const filteredByDept = tasks.filter(matchesScope);
     const byColumn = filteredByDept.filter((task) => {
       // Six-column mapping:
-      //   backlog  → raw inbox (status === 'backlog')
-      //   todo     → groomed (inbox / planning / assigned / pending_dispatch)
-      //   review   → review/testing
+      //   backlog  -> raw inbox (status === 'backlog')
+      //   todo     -> groomed (inbox / planning / assigned / pending_dispatch)
+      //   review   -> review/testing
       //   anything else: 1:1 match with status
       if (statusId === 'backlog') {
         return task.status === 'backlog';
@@ -260,9 +307,16 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
   // chip count matches what the columns actually render.
   const filteredTasks = tasks.filter(matchesScope);
 
+  // Select the active column set from BOARD_PRESETS; default is 'task' (6 columns, unchanged).
+  const COLUMNS = BOARD_PRESETS[boardKind];
+
   const filters = [
     { id: 'status', label: 'By Status' },
-    { id: 'total', label: 'By Total Tasks', count: filteredTasks.length },
+    {
+      id: 'total',
+      label: 'By Total Tasks',
+      count: boardKind === 'bug' ? bugTickets.length : filteredTasks.length,
+    },
     { id: 'due', label: 'Tasks Due' },
     { id: 'agent', label: 'By Agent' },
     { id: 'completed', label: 'Completed' },
@@ -273,7 +327,9 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
       {/* Header */}
       <header className="bg-white h-auto lg:h-20 px-4 lg:px-8 py-3 lg:py-0 flex flex-col lg:flex-row items-start lg:items-center justify-between border-b border-gray-100 shrink-0 gap-3 lg:gap-0">
         <div className="flex items-center gap-3 w-full lg:w-auto">
-          <h1 className="text-xl lg:text-2xl font-bold text-gray-900 tracking-tight">Task Board</h1>
+          <h1 className="text-xl lg:text-2xl font-bold text-gray-900 tracking-tight">
+            {boardKind === 'bug' ? 'Bug Board' : 'Task Board'}
+          </h1>
           {effectiveDepartment && (
             <>
               <span className="hidden sm:block text-gray-300 mx-1">|</span>
@@ -378,45 +434,81 @@ export function MissionQueue({ workspaceId, departmentFilter }: MissionQueueProp
           tabIndex={0}
         >
           <div className="flex flex-col lg:flex-row gap-6 h-full min-w-0 lg:min-w-max pb-4">
-            {COLUMNS.map((column) => {
-              const columnTasks = getTasksByStatus(column.id);
-              return (
-                <div
-                  key={column.id}
-                  data-walkthrough={`column-${column.id}`}
-                  className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
-                  onDragOver={handleDragOver}
-                  onDrop={(e) => handleDrop(e, column.id)}
-                >
-                  {/* Column Header */}
-                  <div className="flex items-center justify-between shrink-0">
-                    <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
-                      <span className="text-badge font-bold bg-white/20 px-2 py-0.5 rounded-full">
-                        {columnTasks.length}
-                      </span>
-                      <span className="text-sm font-bold">{column.label}</span>
-                    </div>
-                    <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
-                      <Plus className="w-4 h-4" />
-                    </button>
-                  </div>
+            {boardKind === 'bug' ? (
+              /* Bug Board -- 7 lifecycle lanes, read from /api/bugs */
+              bugLoading ? (
+                <div className="flex items-center justify-center w-full py-12 text-gray-400 text-sm">Loading bug tickets...</div>
+              ) : (
+                COLUMNS.map((column) => {
+                  const columnBugs = getBugsByStatus(column.id);
+                  return (
+                    <div
+                      key={column.id}
+                      data-walkthrough={`bug-column-${column.id}`}
+                      className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                    >
+                      {/* Column Header */}
+                      <div className="flex items-center justify-between shrink-0">
+                        <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
+                          <span className="text-badge font-bold bg-white/20 px-2 py-0.5 rounded-full">
+                            {columnBugs.length}
+                          </span>
+                          <span className="text-sm font-bold">{column.label}</span>
+                        </div>
+                      </div>
 
-                  {/* Tasks */}
-                  <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
-                    {columnTasks.map((task) => (
-                      <TaskCard
-                        key={task.id}
-                        task={task}
-                        onDragStart={handleDragStart}
-                        onClick={() => setEditingTask(task)}
-                        isDragging={draggedTask?.id === task.id}
-                        isCompleted={column.id === 'done'}
-                      />
-                    ))}
+                      {/* Bug Cards */}
+                      <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
+                        {columnBugs.map((bug) => (
+                          <BugCard key={bug.id} bug={bug} />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })
+              )
+            ) : (
+              /* Task Board -- original 6 columns, unchanged */
+              COLUMNS.map((column) => {
+                const columnTasks = getTasksByStatus(column.id);
+                return (
+                  <div
+                    key={column.id}
+                    data-walkthrough={`column-${column.id}`}
+                    className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                    onDragOver={handleDragOver}
+                    onDrop={(e) => handleDrop(e, column.id as TaskStatus | 'todo')}
+                  >
+                    {/* Column Header */}
+                    <div className="flex items-center justify-between shrink-0">
+                      <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
+                        <span className="text-badge font-bold bg-white/20 px-2 py-0.5 rounded-full">
+                          {columnTasks.length}
+                        </span>
+                        <span className="text-sm font-bold">{column.label}</span>
+                      </div>
+                      <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
+                        <Plus className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Tasks */}
+                    <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
+                      {columnTasks.map((task) => (
+                        <TaskCard
+                          key={task.id}
+                          task={task}
+                          onDragStart={handleDragStart}
+                          onClick={() => setEditingTask(task)}
+                          isDragging={draggedTask?.id === task.id}
+                          isCompleted={column.id === 'done'}
+                        />
+                      ))}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
       </div>
@@ -681,5 +773,47 @@ function ModelPill({ task }: { task: Task }) {
     >
       🤖 {label}
     </a>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// BugCard -- minimal read-only card for Bug Board lanes (T3-001)
+// ---------------------------------------------------------------------------
+
+interface BugCardProps {
+  bug: BugTicket;
+}
+
+function BugCard({ bug }: BugCardProps) {
+  const severityPillStyles: Record<string, string> = {
+    'P0 run-dead':             'bg-red-100 text-red-700',
+    'P1 degraded':             'bg-amber-100 text-amber-700',
+    'P2 cosmetic or latent':   'bg-yellow-50 text-yellow-700',
+    'P3 improvement':          'bg-blue-50 text-blue-600',
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-3 lg:p-4 shadow-sm hover:shadow-md transition-shadow">
+      <div className="flex items-start gap-2 mb-2">
+        <span className="text-xs font-mono text-gray-400 shrink-0">{bug.id}</span>
+        <span
+          className={`text-xs font-semibold px-2 py-0.5 rounded-full shrink-0 ${severityPillStyles[bug.severity] ?? 'bg-gray-100 text-gray-600'}`}
+        >
+          {bug.severity}
+        </span>
+      </div>
+      <p className="text-sm font-medium text-gray-800 leading-snug mb-2 line-clamp-3">{bug.symptom}</p>
+      <div className="flex flex-wrap gap-1.5 text-xs text-gray-500">
+        <span className="bg-gray-50 px-2 py-0.5 rounded-md">{bug.reporter_department}</span>
+        {bug.client_slug && (
+          <span className="bg-gray-50 px-2 py-0.5 rounded-md">{bug.client_slug}</span>
+        )}
+      </div>
+      {bug.recurrence_count > 0 && (
+        <div className="mt-2 text-xs text-amber-600 font-medium">
+          Recurrence #{bug.recurrence_count}
+        </div>
+      )}
+    </div>
   );
 }

@@ -2594,6 +2594,60 @@ const migrations: Migration[] = [
       console.log('[Migration 070] task_events table + task_deliverables columns ready');
     },
   },
+
+  // T3-001 -- Bug Tickets (dedicated lifecycle table for the Bugs Department)
+  // CREATE TABLE IF NOT EXISTS is idempotent -- safe on fresh DBs that already
+  // ran schema.ts, and on existing DBs that haven't seen these tables yet.
+  {
+    id: '071',
+    name: 'add_bug_tickets',
+    up: (db) => {
+      console.log('[Migration 071] Creating bug_tickets + bug_ticket_events tables...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bug_tickets (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT DEFAULT 'bugs' REFERENCES workspaces(id),
+          reporter_department TEXT NOT NULL,
+          reporter_specialist TEXT,
+          reporter_run_id TEXT,
+          symptom TEXT NOT NULL,
+          severity TEXT DEFAULT 'P1 degraded' CHECK (severity IN ('P0 run-dead','P1 degraded','P2 cosmetic or latent','P3 improvement')),
+          suspected_layer TEXT,
+          client_slug TEXT,
+          status TEXT DEFAULT 'REPORTED' CHECK (status IN ('REPORTED','TRIAGED','HEALING','VERIFYING','HEALED','REGRESSION WATCH','CLOSED')),
+          assigned_healer_agent_id TEXT REFERENCES agents(id),
+          dedup_of TEXT,
+          recurrence_count INTEGER DEFAULT 0,
+          evidence_paths TEXT,
+          regression_watch_until TEXT,
+          root_cause TEXT,
+          fix_summary TEXT,
+          healing_report_path TEXT,
+          reported_at TEXT DEFAULT (datetime('now')),
+          closed_at TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bug_tickets_status ON bug_tickets(status);
+        CREATE INDEX IF NOT EXISTS idx_bug_tickets_workspace ON bug_tickets(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_bug_tickets_dedup ON bug_tickets(dedup_of);
+
+        CREATE TABLE IF NOT EXISTS bug_ticket_events (
+          id TEXT PRIMARY KEY,
+          bug_id TEXT NOT NULL REFERENCES bug_tickets(id) ON DELETE CASCADE,
+          from_status TEXT,
+          to_status TEXT NOT NULL,
+          actor TEXT,
+          reason TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bug_ticket_events_bug ON bug_ticket_events(bug_id, created_at);
+      `);
+
+      console.log('[Migration 071] bug_tickets + bug_ticket_events tables ready');
+    },
+  },
 ];
 
 /**

@@ -4,6 +4,70 @@ export type AgentStatus = 'standby' | 'working' | 'offline' | 'active';
 
 export type TaskStatus = 'backlog' | 'inbox' | 'planning' | 'in_progress' | 'assigned' | 'review' | 'testing' | 'blocked' | 'pending_dispatch' | 'done';
 
+// Bug ticket lifecycle (T3-001) -- dedicated 7-stage status for the Bugs Department.
+// These are SEPARATE from TaskStatus and live in the bug_tickets table, not tasks.
+export type BugStatus =
+  | 'REPORTED'
+  | 'TRIAGED'
+  | 'HEALING'
+  | 'VERIFYING'
+  | 'HEALED'
+  | 'REGRESSION WATCH'
+  | 'CLOSED';
+
+export type BugSeverity =
+  | 'P0 run-dead'
+  | 'P1 degraded'
+  | 'P2 cosmetic or latent'
+  | 'P3 improvement';
+
+export interface BugTicket {
+  id: string;                          // BUG-YYYYMMDD-NNN
+  workspace_id: string;                // defaults to 'bugs'
+  reporter_department: string;
+  reporter_specialist?: string;
+  reporter_run_id?: string;
+  symptom: string;
+  severity: BugSeverity;
+  suspected_layer?: string;
+  client_slug?: string;
+  status: BugStatus;
+  assigned_healer_agent_id?: string;
+  dedup_of?: string;                   // bug_id of the canonical ticket if this is a recurrence
+  recurrence_count: number;
+  evidence_paths?: string;             // JSON array
+  regression_watch_until?: string;
+  root_cause?: string;
+  fix_summary?: string;
+  healing_report_path?: string;
+  reported_at: string;
+  closed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BugTicketEvent {
+  id: string;
+  bug_id: string;
+  from_status?: string;
+  to_status: string;
+  actor?: string;
+  reason?: string;
+  created_at: string;
+}
+
+export interface CreateBugTicketRequest {
+  reporter_department: string;
+  symptom: string;
+  severity?: BugSeverity;
+  reporter_specialist?: string;
+  reporter_run_id?: string;
+  suspected_layer?: string;
+  client_slug?: string;
+  evidence_paths?: string;
+  workspace_id?: string;
+}
+
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
 
 export type MessageType = 'text' | 'system' | 'task_update' | 'file';
@@ -415,7 +479,9 @@ export type SSEEventType =
   | 'recommendation_updated'
   | 'execution_queue_updated'
   | 'recommendation_outcome_recorded'
-  | 'publish_queued';
+  | 'publish_queued'
+  | 'bug_updated'
+  | 'bug_created';
 
 export interface SSEEvent {
   type: SSEEventType;

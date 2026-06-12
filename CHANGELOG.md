@@ -1,3 +1,27 @@
+## [v4.41.0] — 2026-06-12 — feat(T3-001): dedicated Bugs Department board with 7-stage lifecycle lanes
+
+### What changed
+
+**`src/lib/db/schema.ts`** -- Added `bug_tickets` table with its own 7-state CHECK constraint (`REPORTED/TRIAGED/HEALING/VERIFYING/HEALED/REGRESSION WATCH/CLOSED`) and `bug_ticket_events` audit trail. Tasks table and its CHECK constraint are untouched.
+
+**`src/lib/db/migrations.ts`** -- Migration 071 (`add_bug_tickets`): idempotent `CREATE TABLE IF NOT EXISTS` for both tables + indexes. Safe on fresh DBs (schema.ts already ran) and existing DBs.
+
+**`src/lib/types.ts`** -- Added `BugStatus`, `BugSeverity`, `BugTicket`, `BugTicketEvent`, `CreateBugTicketRequest` types. `TaskStatus` is unchanged.
+
+**`src/lib/bug-lifecycle.ts`** (new) -- `BUG_LEGAL_TRANSITIONS` map + `transitionBug()` state machine helper. Mirrors shape of `task-lifecycle.ts` but for `bug_tickets` exclusively. Throws `BugTransitionError` on illegal moves.
+
+**`src/app/api/bugs/route.ts`** (new) -- `GET /api/bugs` (list, filtered by workspace_id/status) and `POST /api/bugs` (create; default status `REPORTED`; writes `bug_ticket_events` row; generates `BUG-YYYYMMDD-NNN` id).
+
+**`src/app/api/bugs/[id]/route.ts`** (new) -- `PATCH /api/bugs/[id]` lane transition via `transitionBug()`; returns 400 on illegal jumps (e.g. `REPORTED -> HEALED`), 404 on missing ticket.
+
+**`src/components/MissionQueue.tsx`** -- Replaced single `COLUMNS` constant with `BOARD_PRESETS` map keyed by `BoardKind` (`task` | `bug`). Added `boardKind` prop (default `task`). Bug board reads from `/api/bugs` and renders `BugCard` components. All task board code paths are gated behind `boardKind === 'task'` -- zero regression risk. Added `BugCard` component.
+
+**`src/app/workspace/[slug]/page.tsx`** -- Passes `boardKind="bug"` to `MissionQueue` when `workspace.slug === 'bugs'`; all other workspaces receive default `task`.
+
+**`tests/unit/t3-001-bug-board.test.ts`** (new) -- 12 unit tests covering: schema idempotency, migration 071, POST/GET/PATCH happy paths, illegal transition rejection, recurrence_count increment on reopen, BOARD_PRESETS shape.
+
+---
+
 ## [v4.40.0] — 2026-06-12 — feat(notify): guaranteed owner Telegram notification on task blocked + done
 
 ### What changed

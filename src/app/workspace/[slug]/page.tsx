@@ -350,7 +350,11 @@ export default function WorkspacePage() {
 
         {/* Main Content Area */}
         {showTaskBoard ? (
-          <MissionQueue workspaceId={workspace.id} departmentFilter={routeDepartment} />
+          <MissionQueue
+            workspaceId={workspace.id}
+            departmentFilter={routeDepartment}
+            boardKind={workspace.slug === 'bugs' ? 'bug' : 'task'}
+          />
         ) : (
           <CEODashboard workspace={workspace} />
         )}
