@@ -2768,6 +2768,100 @@ function autoSeedStarterSOPs(db: Database.Database) {
 }
 
 /**
+ * Re-seed workspaces from departments.json + build-state, without the
+ * first-boot guard. Idempotent: upserts each dept row, never deletes.
+ * Called by the converge endpoint (POST /api/system/converge) to re-sync
+ * after a new dept/role is added post-build.
+ *
+ * Returns counts of created + updated rows.
+ */
+export function reseedWorkspacesFromConfig(
+  db: Database.Database,
+  opts: { force: boolean } = { force: true }
+): { created: number; updated: number } {
+  let created = 0;
+  let updated = 0;
+
+  try {
+    const configPaths = [
+      path.join(process.cwd(), 'config', 'departments.json'),
+      path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', 'departments.json'),
+      path.join(os.homedir(), 'projects', 'mission-control', 'config', 'departments.json'),
+      path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'departments.json'),
+      path.join('/opt', 'mission-control', 'config', 'departments.json'),
+    ];
+
+    let configPath: string | null = null;
+    for (const p of configPaths) {
+      if (fs.existsSync(p)) {
+        configPath = p;
+        break;
+      }
+    }
+
+    if (!configPath) {
+      console.warn('[reseed] No departments.json found — skipping workspace reseed');
+      return { created, updated };
+    }
+
+    const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
+
+    // Ensure company row exists
+    const seedResult = seedCompanyGuarded(db);
+    if (seedResult.reason === 'partial-config') {
+      console.warn('[reseed] Aborting workspace reseed: partial company config');
+      return { created, updated };
+    }
+
+    const upsertStmt = db.prepare(`
+      INSERT INTO workspaces (id, name, slug, description, icon, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        slug = excluded.slug,
+        icon = excluded.icon,
+        sort_order = excluded.sort_order
+    `);
+
+    const existsCheck = db.prepare('SELECT id FROM workspaces WHERE id = ?');
+
+    for (const dept of depts) {
+      const slugLower = String(dept.slug || dept.id || '').toLowerCase();
+      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo';
+      const isGeneralTask = slugLower === 'general-task';
+      const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
+
+      const existing = existsCheck.get(dept.id);
+      upsertStmt.run(
+        dept.id,
+        dept.name,
+        dept.slug || dept.id,
+        dept.name + ' department workspace',
+        dept.emoji || '📁',
+        sortOrder
+      );
+      if (existing) {
+        updated++;
+      } else {
+        created++;
+      }
+    }
+
+    // Re-seed trio agents and starter SOPs (both idempotent)
+    autoSeedTrioAgents(db);
+    autoSeedStarterSOPs(db);
+
+    console.log(`[reseed] workspaces: created=${created} updated=${updated}`);
+  } catch (err) {
+    console.error('[reseed] Failed:', (err as Error).message);
+    throw err; // Re-throw so converge endpoint can FAIL LOUD
+  }
+
+  return { created, updated };
+}
+
+/**
  * Get migration status
  */
 export function getMigrationStatus(db: Database.Database): { applied: string[]; pending: string[] } {

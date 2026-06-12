@@ -1,3 +1,29 @@
+## [v4.39.0] — 2026-06-11 — feat(self-service): CC button full-wire + live/re-seed dept-role-SOP + resync action
+
+### What changed
+
+**`src/app/api/departments/route.ts`** — §2.4: kill silent degrade-to-unwired JS path. CREATE mode now FAILS LOUD (503/500) when `add-department.sh` is absent or fails — no bare row, no `success:true`, no `mode:'direct'` by default. `allow_unwired:true` is an explicit operator escape hatch. Slug derived from name when not provided (dashboard compatibility).
+
+**`src/app/api/system/converge/route.ts`** (new) — §2.3: idempotent converge endpoint (`POST /api/system/converge`). Bearer `MC_API_TOKEN` gated. Steps: reseed workspaces from `departments.json`, ingest role-library/SOPs via `importRoleLibrary`, read `needs-tags.json`. Called by box-side `sync-extensions.sh --converge` AND the dashboard "Rewire / Resync" button.
+
+**`src/app/api/departments/[id]/roles/route.ts`** (new) — §2.5: add-role sub-route (`POST /api/departments/[id]/roles`). FAILS LOUD when `add-role.sh` is absent — no JS-only role insert. Parses `---SUMMARY---` per §3.7 contract.
+
+**`src/lib/db/migrations.ts`** — §2.2: `reseedWorkspacesFromConfig(db, {force:true})` — idempotent upsert of workspaces from `departments.json`, never deletes, re-runs `autoSeedTrioAgents` + `autoSeedStarterSOPs`. Called by converge endpoint.
+
+**`src/lib/db/index.ts`** — export `reseedWorkspacesFromConfig` + `autoSeedTrioAgents` for converge endpoint use.
+
+**`src/app/api/personas/route.ts`** — §2.6: surface `needs_tags:true, routable:false` for personas with empty `domain[]` or `perspective[]`, cross-referenced against `needs-tags.json` written by box-side converge. Never silently omits untagged personas.
+
+**`src/components/WorkspaceDashboard.tsx`** — §2.1: "Create Department" button now POSTs to `/api/departments` (full-wire), not bare `/api/workspaces`. Treats `mode:'direct'` response as failure. Adds "Rewire / Resync" header button, "Add Role" + "Add SOP" section buttons with corresponding modals. Inline resync result banner.
+
+**`scripts/smoke-test-converge-and-dept.ts`** (new) — §4.2 smoke test: dept CREATE hits right route, missing script returns 503 not success:true, converge returns ok:true, role sub-route FAIL-LOUD, personas needs-tags flag.
+
+### cc-compat contract (§4.1)
+
+This release provides `POST /api/system/converge` (the HTTP contract box-side converge calls in §1.6 step 5). Onboarding repo `cc-compat.json` should pin `minVersion` / `pinnedTag` to `v4.39.0` when the onboarding side ships `v11.19.0`.
+
+---
+
 ## [v4.38.0] — 2026-06-11 — docs(skill44): crosslink convert-and-flow-agent how-to
 
 ## [v4.37.0] — 2026-06-11 — fix(b3+b4): branding seed guard (never Default over configured client) + DATABASE_PATH ecosystem template

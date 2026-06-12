@@ -85,9 +85,11 @@ function runAddDepartmentScript(args: {
   }
 }
 
-// JS-only fallback for steps 1-3 (workspace + head agent + starter task) when
-// the host add-department.sh isn't available. Mirrors the script's idempotent
-// shape — if the slug already exists, returns status:already_exists.
+// JS-only path for steps 1-3 (workspace + head agent + starter task).
+// Only used when allow_unwired=true is explicitly passed. Default behavior is
+// to FAIL LOUD when the host add-department.sh is absent or fails (§2.4).
+// Mirrors the script's idempotent shape — if the slug already exists, returns
+// status:already_exists.
 function createDepartmentInDbDirect(args: {
   slug: string;
   name: string;
@@ -151,12 +153,16 @@ function createDepartmentInDbDirect(args: {
 // POST /api/departments
 //
 // TWO modes (dispatched on body shape):
-//   1. CREATE  — body = { create: true, slug, name, icon?, headName?, description? }
+//   1. CREATE  — body = { create: true, name, slug?, icon?, headName?, description? }
 //                Adds a NEW department: workspace row + head agent + starter task
 //                + role-library upsert + openclaw.json binding placeholder
 //                + brand.css regen + persona-stale marker.
-//                Calls the host add-department.sh script when available; falls
-//                back to a JS-only path (steps 1-3) when not.
+//                Requires the host add-department.sh script (Skill 32). FAILS LOUD
+//                (409/500) if the script is absent or fails — no unwired JS fallback.
+//
+//                Optional: { allow_unwired: true } enables the legacy JS-only path
+//                (steps 1-3 only, role-library/openclaw.json/brand.css NOT updated).
+//                Off by default — only for explicit operator override.
 //
 //   2. UPDATE  — body = { id, name?, emoji?, headTitle? }
 //                Pre-existing behavior — edits an entry in config/departments.json.
@@ -175,21 +181,21 @@ export async function POST(request: NextRequest) {
   const b = body as Record<string, unknown>;
 
   // ─── CREATE mode ──────────────────────────────────────────────────────────
-  if (b.create === true || (typeof b.slug === 'string' && typeof b.name === 'string' && !b.id)) {
-    const rawSlug = (b.slug as string | undefined)?.trim() ?? '';
-    const name    = (b.name as string | undefined)?.trim() ?? '';
-    if (!rawSlug || !name) {
+  if (b.create === true || (typeof b.name === 'string' && !b.id && (b.create === true || typeof b.slug === 'string'))) {
+    const name = (b.name as string | undefined)?.trim() ?? '';
+    if (!name) {
       return NextResponse.json(
-        { success: false, message: 'CREATE mode requires both `slug` and `name`.' },
+        { success: false, message: 'CREATE mode requires `name`.' },
         { status: 400 }
       );
     }
 
-    // Normalize slug (mirror add-department.sh)
+    // Normalize slug — derive from name if not provided (mirror add-department.sh)
+    const rawSlug = ((b.slug as string | undefined)?.trim()) || name;
     const slug = rawSlug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     if (!slug) {
       return NextResponse.json(
-        { success: false, message: 'slug normalized to empty. Provide a valid slug.' },
+        { success: false, message: 'slug normalized to empty. Provide a valid name or slug.' },
         { status: 400 }
       );
     }
@@ -197,9 +203,9 @@ export async function POST(request: NextRequest) {
     const icon        = (typeof b.icon === 'string'        && b.icon)        || '📁';
     const headName    = (typeof b.headName === 'string'    && b.headName)    || `${name} Lead`;
     const description = (typeof b.description === 'string' && b.description) || `${name} department workspace`;
+    const allowUnwired = b.allow_unwired === true;
 
-    // Prefer the host script (does the full chain — role-library, openclaw.json,
-    // brand.css, persona-stale marker). Fall back to JS-only steps 1-3 if not.
+    // Require the host script (full-wire path). FAIL LOUD if absent.
     const scriptResult = runAddDepartmentScript({ slug, name, icon, headName, description });
 
     if (scriptResult && scriptResult.ok) {
@@ -209,9 +215,40 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fall back to direct DB writes (steps 1-3 only — role-library and
-    // openclaw.json binding aren't reachable from inside Next.js without the
-    // host script). This still yields a usable dashboard entry.
+    // Script absent or failed — FAIL LOUD unless allow_unwired is explicitly set.
+    if (!allowUnwired) {
+      if (!scriptResult) {
+        // Script not found at any candidate path
+        const candidates = [
+          '/data/.openclaw/skills/32-command-center-setup/scripts/add-department.sh',
+          `${process.env.HOME}/.openclaw/skills/32-command-center-setup/scripts/add-department.sh`,
+        ];
+        return NextResponse.json(
+          {
+            success: false,
+            mode: 'no-host-script',
+            message:
+              `add-department.sh not found at ${candidates.join(' or ')}. ` +
+              'A department cannot be created without the full-wire host script. ' +
+              'Run from the box agent or install Skill 32. ' +
+              'To bypass (not recommended), pass { allow_unwired: true } in the request body.',
+          },
+          { status: 503 }
+        );
+      } else {
+        // Script was found but exited non-zero
+        return NextResponse.json(
+          {
+            success: false,
+            mode: 'script-failed',
+            message: scriptResult.stderr ?? 'add-department.sh exited non-zero (no stderr captured).',
+          },
+          { status: 500 }
+        );
+      }
+    }
+
+    // allow_unwired=true: legacy JS-only path (explicit operator override only)
     try {
       const result = createDepartmentInDbDirect({ slug, name, icon, headName, description });
       return NextResponse.json(
@@ -220,8 +257,8 @@ export async function POST(request: NextRequest) {
           mode: 'direct',
           department: result,
           note: scriptResult
-            ? `host script present but failed: ${scriptResult.stderr ?? 'unknown'}. Fell back to JS-only path (steps 1-3 only; role-library / openclaw.json / brand.css NOT updated).`
-            : 'host add-department.sh not found at /data/.openclaw/skills/32-command-center-setup/scripts/add-department.sh. Fell back to JS-only path (steps 1-3 only).',
+            ? `host script present but failed: ${scriptResult.stderr ?? 'unknown'}. allow_unwired=true: fell back to JS-only path (steps 1-3 only; role-library / openclaw.json / brand.css NOT updated).`
+            : 'host add-department.sh not found. allow_unwired=true: fell back to JS-only path (steps 1-3 only).',
         },
         { status: 201 }
       );

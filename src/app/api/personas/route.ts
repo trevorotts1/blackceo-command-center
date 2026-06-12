@@ -3,6 +3,33 @@ import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import os from 'os';
 
+// ── needs-tags.json reader ────────────────────────────────────────────────
+// Written by box-side converge (sync-extensions.sh --converge) at
+//   <OC_ROOT>/extension-sync/needs-tags.json
+// Schema: { "generated_at": "ISO-8601", "untagged": ["<slug>", ...] }
+function loadUntaggedPersonaSlugs(): Set<string> {
+  const home = process.env.HOME || os.homedir();
+  const ocRoot = process.env.OPENCLAW_ROOT ||
+    (existsSync('/data/.openclaw') ? '/data/.openclaw' : join(home, '.openclaw'));
+
+  const candidates = [
+    join(ocRoot, 'extension-sync', 'needs-tags.json'),
+    join(process.cwd(), 'extension-sync', 'needs-tags.json'),
+  ];
+
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      try {
+        const raw = JSON.parse(readFileSync(p, 'utf-8')) as { untagged?: string[] };
+        if (Array.isArray(raw.untagged)) return new Set(raw.untagged);
+      } catch {
+        // Corrupt file — treat as empty
+      }
+    }
+  }
+  return new Set();
+}
+
 export const dynamic = 'force-dynamic';
 
 interface PersonaCategoryEntry {
@@ -22,6 +49,9 @@ interface PersonaResponseItem {
   custom: string[];
   category: string;
   blueprint_preview: string;
+  // Tag-gate fields (§2.6): set by converge when domain or perspective is empty.
+  needs_tags?: boolean;
+  routable?: boolean;
 }
 
 const DOMAIN_TO_CATEGORY: Record<string, string> = {
@@ -103,16 +133,30 @@ function blueprintPreview(entry: PersonaCategoryEntry): string {
 export async function GET() {
   try {
     const raw = loadPersonaCategoriesFile();
-    const personas: PersonaResponseItem[] = Object.entries(raw).map(([id, entry]) => ({
-      id,
-      author: entry.author,
-      book: entry.book,
-      domain: entry.domain || [],
-      perspective: entry.perspective || [],
-      custom: entry.custom || [],
-      category: categoryForEntry(entry),
-      blueprint_preview: blueprintPreview(entry),
-    }));
+    // Load converge-written needs-tags set (§2.6). A persona with empty domain
+    // or perspective is not routable — mark it visibly, never silently omit.
+    const untaggedSlugs = loadUntaggedPersonaSlugs();
+
+    const personas: PersonaResponseItem[] = Object.entries(raw).map(([id, entry]) => {
+      const hasDomain = Array.isArray(entry.domain) && entry.domain.length > 0;
+      const hasPerspective = Array.isArray(entry.perspective) && entry.perspective.length > 0;
+      // A persona needs tags if: the converge-written set says so, OR if the
+      // domain/perspective arrays are genuinely empty (catches the orchestrator's
+      // empty-tag stub before converge has run).
+      const needsTags = untaggedSlugs.has(id) || !hasDomain || !hasPerspective;
+      return {
+        id,
+        author: entry.author,
+        book: entry.book,
+        domain: entry.domain || [],
+        perspective: entry.perspective || [],
+        custom: entry.custom || [],
+        category: categoryForEntry(entry),
+        blueprint_preview: blueprintPreview(entry),
+        needs_tags: needsTags,
+        routable: !needsTags,
+      };
+    });
 
     // Stable sort: category then author surname.
     personas.sort((a, b) => {
