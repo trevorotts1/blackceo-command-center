@@ -104,43 +104,81 @@ mkdir -p /data/vault/studio
 mkdir -p /data/operator-scratch
 
 #
-# Step 8b: Write ecosystem.config.cjs template (Bug 7, v4.0.2)
+# Step 8b: Write ecosystem.config.cjs template (hardened launcher, v4.42.0)
 #
-# Hostinger containers inject PORT=<random> into the env. PM2 inherits that
-# and overrides whatever the project's .env says, so `next start` tries to
-# bind the random port, collides with the OpenClaw wrapper, dies in a
-# restart loop. Hardcode the port in BOTH the args and the env block.
+# Hostinger containers inject PORT=<random> into the env. The old template put
+# PORT: "4000" in the env block, which PM2 STILL inherited from the container
+# env BEFORE the app set it. The structural fix is cc-start.sh: it explicitly
+# unsets the inherited PORT and exports PORT=CC_PORT before exec-ing next start.
+# Setting CC_PORT (not PORT) in the env block means the bleed-path never fires.
+#
+# Idempotent-healing: always reconcile to the canonical config (not skip-if-exists).
+# Backs up the prior file to ecosystem.config.cjs.bak before overwriting so a
+# hand-tuned config is not silently lost.
+#
+# KEY CHANGES vs prior template:
+#   - name: "mission-control" (canonical; was "command-center" — converges app name)
+#   - script: "bash" + args: "scripts/cc-start.sh --port 4000" (hardened launcher)
+#     cc-start.sh: (1) unsets inherited PORT + exports PORT=CC_PORT (env-bleed strip)
+#                  (2) kills any orphan process on port 4000 (EADDRINUSE killer)
+#                  (3) exec npx next start (correct PM2 PID tracking)
+#   - CC_PORT: "4000" in env (never PORT: — prevents Hostinger injected-PORT bleed)
+#   - Circuit-breaker: min_uptime + exp_backoff_restart_delay + max_restarts=8 + kill_timeout
 #
 ECOSYSTEM_DIR="/data/projects/command-center"
 ECOSYSTEM_FILE="$ECOSYSTEM_DIR/ecosystem.config.cjs"
 mkdir -p "$ECOSYSTEM_DIR"
-if [ ! -f "$ECOSYSTEM_FILE" ]; then
-  echo "[8b/9] Writing PM2 ecosystem template to $ECOSYSTEM_FILE..."
-  # B.4 (PRD Addendum B): DATABASE_PATH is pinned to the canonical absolute path
-  # so a pm2 restart from any cwd always opens the same DB. B.1 check-4 enforces
-  # this; writing it here makes fresh VPS installs born compliant.
-  cat > "$ECOSYSTEM_FILE" <<'EOF'
+
+write_canonical_ecosystem() {
+  cat > "$ECOSYSTEM_FILE" <<'ECOFEOF'
 module.exports = {
   apps: [{
-    name: "command-center",
+    name: "mission-control",
     cwd: "/data/projects/command-center",
-    script: "npm",
-    args: "run start -- -p 4000 -H 0.0.0.0",
+    script: "bash",
+    args: "scripts/cc-start.sh --port 4000",
     env: {
-      PORT: "4000",
+      CC_PORT: "4000",
       NODE_ENV: "production",
       DATABASE_PATH: "/data/projects/command-center/mission-control.db"
     },
     instances: 1,
-    autorestart: true,
-    max_restarts: 5,
     exec_mode: "fork",
-    user: "node"
+    autorestart: true,
+    min_uptime: 30000,
+    max_restarts: 8,
+    exp_backoff_restart_delay: 2000,
+    kill_timeout: 10000,
+    watch: false,
+    max_memory_restart: "512M"
   }]
 };
-EOF
+ECOFEOF
+}
+
+if [ ! -f "$ECOSYSTEM_FILE" ]; then
+  echo "[8b/9] Writing PM2 ecosystem template to $ECOSYSTEM_FILE..."
+  # B.4 (PRD Addendum B): DATABASE_PATH is pinned to the canonical absolute path.
+  write_canonical_ecosystem
 else
-  echo "[8b/9] PM2 ecosystem already present at $ECOSYSTEM_FILE — leaving as-is"
+  # Idempotent-healing: check if the existing file matches canonical.
+  NEEDS_UPDATE=0
+  grep -q '"mission-control"' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'cc-start.sh' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'min_uptime' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'CC_PORT' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  # Also fail if old vulnerable pattern still present
+  grep -q '"command-center"' "$ECOSYSTEM_FILE" && NEEDS_UPDATE=1 || true
+  grep -q '"PORT"' "$ECOSYSTEM_FILE" && NEEDS_UPDATE=1 || true
+
+  if [ "$NEEDS_UPDATE" -eq 1 ]; then
+    echo "[8b/9] Reconciling stale/vulnerable PM2 ecosystem at $ECOSYSTEM_FILE (backing up to .bak)..."
+    cp "$ECOSYSTEM_FILE" "${ECOSYSTEM_FILE}.bak"
+    write_canonical_ecosystem
+    echo "[8b/9] Ecosystem reconciled to canonical (mission-control + cc-start.sh + circuit-breaker)"
+  else
+    echo "[8b/9] PM2 ecosystem already canonical at $ECOSYSTEM_FILE — no update needed"
+  fi
 fi
 
 #

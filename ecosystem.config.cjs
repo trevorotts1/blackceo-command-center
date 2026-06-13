@@ -6,6 +6,19 @@
  * B.1 check-4 enforces this at health-check time; this template makes fresh
  * installs born compliant.
  *
+ * PORT-PIN CONTRACT (v4.42.0+):
+ *   This config reads CC_PORT (never process.env.PORT) so an ambient OpenClaw
+ *   gateway PORT or a Hostinger-injected random PORT cannot bleed into the CC
+ *   start command.  scripts/cc-start.sh performs the env-bleed strip +
+ *   orphan-port kill before exec-ing `next start`, so EVERY start path is
+ *   hardened by a single canonical launcher.
+ *
+ * CIRCUIT-BREAKER:
+ *   min_uptime ensures PM2 actually trips max_restarts on a fast-failing
+ *   process instead of resetting the counter on every brief launch.
+ *   exp_backoff_restart_delay backs off the loop instead of hammering.
+ *   Together they prevent the 126K-restart loops (Cassandra/Monique/Sheila).
+ *
  * INSTALLER INSTRUCTIONS:
  *   Replace __INSTALL_DIR__ with the absolute path where the repo is checked
  *   out (e.g. /home/<user>/projects/command-center or
@@ -16,18 +29,24 @@
 
 const INSTALL_DIR = process.env.CC_INSTALL_DIR || process.cwd();
 const DB_PATH = process.env.DATABASE_PATH || `${INSTALL_DIR}/mission-control.db`;
+// Use CC_PORT ONLY — never read process.env.PORT to prevent env-bleed from
+// OpenClaw gateway or Hostinger container-injected PORT. qc-cc.sh enforces this.
+const CC_PORT = process.env.CC_PORT || '4000';
 
 module.exports = {
   apps: [{
     name: 'mission-control',
-    // Mac: /opt/homebrew/bin/npx | VPS/Docker: npx (from PATH, install via npm i -g)
-    // If npx not found, replace with full path: which npx
-    script: 'npx',
-    args: `next start -p ${process.env.PORT || 4000} -H 0.0.0.0`,
+    // Canonical hardened launcher — performs env-bleed strip + orphan-port kill
+    // before exec-ing `next start`. NEVER call `next start` directly from this
+    // config (qc-cc.sh port-pin-and-env-bleed-guard will FAIL the build).
+    script: 'bash',
+    args: `scripts/cc-start.sh --port ${CC_PORT}`,
     cwd: INSTALL_DIR,
     env: {
       NODE_ENV: 'production',
-      PORT: process.env.PORT || 4000,
+      // CC_PORT: canonical port variable; cc-start.sh reads this, strips PORT,
+      // then re-exports PORT=CC_PORT before exec. Never set PORT here directly.
+      CC_PORT: CC_PORT,
       // B.4: DATABASE_PATH pinned to the canonical absolute path so a restart
       // from a wrong cwd still serves the real DB. B.1 check-4 verifies this
       // is set; leaving it unset makes every health check report db_path_set=false.
@@ -50,9 +69,19 @@ module.exports = {
     },
     // PM2 settings
     instances: 1,
+    exec_mode: 'fork',
     autorestart: true,
-    max_restarts: 10,
-    restart_delay: 3000,
+    // CIRCUIT-BREAKER: min_uptime is the critical field — without it PM2 resets
+    // the restart counter on every brief launch and max_restarts never trips.
+    // With min_uptime:30000, a process that dies in <30s counts as a failed
+    // restart; after max_restarts=8 failures the app moves to `errored` state,
+    // stopping the loop and triggering the watchdog alert.
+    min_uptime: 30000,
+    max_restarts: 8,
+    // Exponential backoff (replaces fixed restart_delay) so rapid loops back off
+    // instead of hammering port/disk at full speed.
+    exp_backoff_restart_delay: 2000,
+    kill_timeout: 10000,
     watch: false,
     max_memory_restart: '512M'
   }]

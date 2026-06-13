@@ -273,6 +273,68 @@ jobs:
           # Set DUCK_E2E_ARTIFACT_QC=1 once PR #80 merges + QC_SCORER_MODEL configured.
           DUCK_E2E_ARTIFACT_QC: ""
 
+  port-pin-env-bleed-guard:
+    name: Port-pin and env-bleed guard (v4.42.0+)
+    # Prevents re-introduction of the CC crash-loop root causes:
+    #   - process.env.PORT in ecosystem → OpenClaw gateway PORT bleeds in
+    #   - PORT: in env block → Hostinger injected PORT bleeds in
+    #   - missing cc-start.sh → no orphan-port kill
+    #   - missing circuit-breaker fields → PM2 loops forever
+    # A planted fixture is used to PROVE the guard actually bites (self-test).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node (for package.json probe in check 11.10)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Self-test: the planted fixture MUST fail checks 11.1 and 11.2.
+      # If the grep pattern silently misses the fixture, the guard is broken.
+      - name: Self-test — bleeding-ecosystem.cjs MUST be detected by guard 11.1
+        run: |
+          FIXTURE="tests/fixtures/port-guard/bleeding-ecosystem.cjs"
+          if ! [ -f "$FIXTURE" ]; then
+            echo "ERROR: planted fixture $FIXTURE is missing — add it to the repo"
+            exit 1
+          fi
+          # Check 11.1 pattern: process.env.PORT in active (non-comment) code must be detected.
+          # The guard excludes comment lines (// and *) so the fixture must have an active-code hit.
+          if grep -E 'process\.env\.PORT' "$FIXTURE" | grep -vE '^\s*(//|\*)' | grep -q .; then
+            echo "OK: guard 11.1 correctly detects process.env.PORT in active code in planted fixture"
+          else
+            echo "ERROR: guard 11.1 pattern missed process.env.PORT in fixture active code — false PASS regression"
+            exit 1
+          fi
+          # Check 11.2 pattern: PORT: key in env block must be detected
+          if grep -qE '^\s+PORT:' "$FIXTURE"; then
+            echo "OK: guard 11.2 correctly detects PORT: key in planted fixture"
+          else
+            echo "ERROR: guard 11.2 pattern missed PORT: key in fixture — false PASS regression"
+            exit 1
+          fi
+          echo "Self-test PASSED — planted fixture is correctly detectable"
+
+      # Self-test: the REAL ecosystem.config.cjs must NOT trigger the guard
+      # (proves the canonical config is actually clean).
+      - name: Self-test — canonical ecosystem.config.cjs must NOT trigger guard 11.1
+        run: |
+          # Same non-comment filter as check 11.1: active-code lines only.
+          if grep -E 'process\.env\.PORT' ecosystem.config.cjs | grep -vE '^\s*(//|\*)' | grep -q .; then
+            echo "ERROR: canonical ecosystem.config.cjs still contains process.env.PORT in active code — env-bleed not fixed"
+            exit 1
+          else
+            echo "OK: canonical ecosystem.config.cjs correctly has no process.env.PORT in active code"
+          fi
+
+      - name: Run qc-cc.sh section 11 (port-pin-and-env-bleed-guard)
+        run: |
+          # Run the full qc-cc.sh; the job is named for section 11 but the full
+          # script must pass (no regressions in other sections).
+          bash scripts/qc-cc.sh
+
   build-smoke:
     name: Build smoke test
     runs-on: ubuntu-latest

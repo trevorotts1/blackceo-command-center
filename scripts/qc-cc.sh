@@ -441,6 +441,65 @@ check "10.15" "tests/unit/b2-atomic-deploy.test.ts fixture test exists" \
   "[ -f tests/unit/b2-atomic-deploy.test.ts ]"
 
 blue ""
+blue "── 11. Port-pin and env-bleed guard (v4.42.0+) ──"
+#
+# Prevents re-introduction of the crash-loop root causes:
+#   (a) process.env.PORT in ecosystem.config.cjs → OpenClaw gateway PORT bleeds in
+#   (b) PORT: key in ecosystem env block → Hostinger injected PORT bleeds in
+#   (c) cc-start.sh missing → no orphan-port kill, no env-bleed strip
+#   (d) circuit-breaker fields missing → PM2 loops forever (126K restarts)
+#   (e) start paths invoking next start directly → hardened launcher bypassed
+#
+# A planted fixture (tests/fixtures/port-guard/bleeding-ecosystem.cjs) contains
+# the vulnerable pattern and is used in CI to prove the guard actually bites.
+
+# 11.1: ecosystem.config.cjs must NOT read process.env.PORT in active (non-comment) code.
+# Exclude lines that are pure comments (start with optional whitespace + * or //).
+check "11.1" "ecosystem.config.cjs does NOT read process.env.PORT in active code (env-bleed guard)" \
+  '! grep -E "process\.env\.PORT" ecosystem.config.cjs | grep -vE "^\s*(//|\*)" | grep .'
+
+# 11.2: ecosystem env block must NOT contain a PORT: key (only CC_PORT: is allowed)
+check "11.2" "ecosystem.config.cjs env block has no PORT: key (only CC_PORT: allowed)" \
+  '! grep -E "^\s+PORT:" ecosystem.config.cjs | grep .'
+
+# 11.3: cc-start.sh must exist AND contain unset PORT (env-bleed strip)
+check "11.3" "scripts/cc-start.sh exists" \
+  '[ -f scripts/cc-start.sh ]'
+check "11.4" "scripts/cc-start.sh contains 'unset PORT' (env-bleed strip)" \
+  'grep -q "unset PORT" scripts/cc-start.sh'
+
+# 11.5: cc-start.sh must contain lsof or fuser (orphan-port kill)
+check "11.5" "scripts/cc-start.sh contains lsof/fuser (orphan-port killer)" \
+  'grep -qE "lsof|fuser" scripts/cc-start.sh'
+
+# 11.6-11.9: circuit-breaker completeness in ecosystem.config.cjs
+check "11.6" "ecosystem.config.cjs has min_uptime (circuit-breaker — makes max_restarts bite)" \
+  'grep -q "min_uptime" ecosystem.config.cjs'
+check "11.7" "ecosystem.config.cjs has exp_backoff_restart_delay (exponential backoff)" \
+  'grep -q "exp_backoff_restart_delay" ecosystem.config.cjs'
+check "11.8" "ecosystem.config.cjs has max_restarts (restart cap)" \
+  'grep -q "max_restarts" ecosystem.config.cjs'
+check "11.9" "ecosystem.config.cjs has kill_timeout (clean shutdown budget)" \
+  'grep -q "kill_timeout" ecosystem.config.cjs'
+
+# 11.10: package.json scripts.start must route through cc-start.sh (not bare next start)
+check "11.10" "package.json scripts.start invokes cc-start.sh (not bare next start)" \
+  'node -e "const s=require(\"./package.json\").scripts.start; if(s.includes(\"next start\")&&!s.includes(\"cc-start\")) process.exit(1)"'
+
+# 11.11: bootstrap templates must not invoke next start directly (check for cc-start.sh)
+check "11.11" "mac-mini-bootstrap.sh Step 8b uses cc-start.sh (not bare next start)" \
+  'grep -q "cc-start.sh" scripts/install/mac-mini-bootstrap.sh'
+check "11.12" "vps-docker-bootstrap.sh Step 8b uses cc-start.sh (not bare next start)" \
+  'grep -q "cc-start.sh" scripts/install/vps-docker-bootstrap.sh'
+
+# 11.13: planted fixture MUST be detectable by the guard (proves guard bites, not vacuous).
+# We run the SAME grep that check 11.1 uses against the fixture — it must MATCH (exit 0).
+# The fixture uses process.env.PORT in active code (not just comments), so the full
+# non-comment filter must still detect it.
+check "11.13" "planted fixture bleeding-ecosystem.cjs IS detectable by guard 11.1 (self-proof)" \
+  'grep -E "process\.env\.PORT" tests/fixtures/port-guard/bleeding-ecosystem.cjs | grep -vE "^\s*(//|\*)" | grep -q .'
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"
