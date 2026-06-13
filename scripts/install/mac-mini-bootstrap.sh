@@ -108,40 +108,75 @@ mkdir -p "$HOME/Documents/Obsidian Vault/studio"
 mkdir -p "$HOME/operator-scratch"
 
 #
-# Step 8b: Write ecosystem.config.cjs template (Bug 7, v4.0.2)
+# Step 8b: Write ecosystem.config.cjs template (hardened launcher, v4.42.0)
 #
-# Hardcode the port in BOTH the args and the env block so a stray PORT in
-# the shell env can't override the dashboard's listening port.
+# Idempotent-healing: always reconcile to the canonical config (not skip-if-exists).
+# Backs up the prior file to ecosystem.config.cjs.bak before overwriting so a
+# hand-tuned config is not silently lost.
+#
+# KEY CHANGES vs prior template:
+#   - name: "mission-control" (canonical; was "command-center" — converges app name)
+#   - script: "bash" + args: "scripts/cc-start.sh --port 4000" (hardened launcher)
+#     cc-start.sh performs env-bleed strip + orphan-port kill before exec-ing next.
+#   - CC_PORT: "4000" in env (never PORT: — prevents OpenClaw gateway PORT bleed)
+#   - Circuit-breaker: min_uptime + exp_backoff_restart_delay + max_restarts=8 + kill_timeout
+#
+# NOTE: Never call `openclaw gateway restart` from this script — cc-start.sh
+# manages ONLY the CC node process, not the OpenClaw gateway (Mac launchd rule).
 #
 ECOSYSTEM_DIR="$HOME/projects/command-center"
 ECOSYSTEM_FILE="$ECOSYSTEM_DIR/ecosystem.config.cjs"
 mkdir -p "$ECOSYSTEM_DIR"
+
+# Build the canonical ecosystem content (used for both fresh install and reconciliation).
+CANONICAL_ECOSYSTEM="module.exports = {
+  apps: [{
+    name: \"mission-control\",
+    cwd: \"$ECOSYSTEM_DIR\",
+    script: \"bash\",
+    args: \"scripts/cc-start.sh --port 4000\",
+    env: {
+      CC_PORT: \"4000\",
+      NODE_ENV: \"production\",
+      DATABASE_PATH: \"$ECOSYSTEM_DIR/mission-control.db\"
+    },
+    instances: 1,
+    exec_mode: \"fork\",
+    autorestart: true,
+    min_uptime: 30000,
+    max_restarts: 8,
+    exp_backoff_restart_delay: 2000,
+    kill_timeout: 10000,
+    watch: false,
+    max_memory_restart: \"512M\"
+  }]
+};"
+
 if [ ! -f "$ECOSYSTEM_FILE" ]; then
   echo "[8b/9] Writing PM2 ecosystem template to $ECOSYSTEM_FILE..."
   # B.4 (PRD Addendum B): DATABASE_PATH is pinned to the canonical absolute path
-  # so a pm2 restart from any cwd always opens the same DB. B.1 check-4 enforces
-  # this; writing it here makes fresh Mac installs born compliant.
-  cat > "$ECOSYSTEM_FILE" <<EOF
-module.exports = {
-  apps: [{
-    name: "command-center",
-    cwd: "$ECOSYSTEM_DIR",
-    script: "npm",
-    args: "run start -- -p 4000 -H 0.0.0.0",
-    env: {
-      PORT: "4000",
-      NODE_ENV: "production",
-      DATABASE_PATH: "$ECOSYSTEM_DIR/mission-control.db"
-    },
-    instances: 1,
-    autorestart: true,
-    max_restarts: 5,
-    exec_mode: "fork"
-  }]
-};
-EOF
+  # so a pm2 restart from any cwd always opens the same DB.
+  printf '%s\n' "$CANONICAL_ECOSYSTEM" > "$ECOSYSTEM_FILE"
 else
-  echo "[8b/9] PM2 ecosystem already present at $ECOSYSTEM_FILE — leaving as-is"
+  # Idempotent-healing: check if the existing file matches canonical.
+  # Compare the critical fields rather than byte-exact (comments may differ).
+  NEEDS_UPDATE=0
+  grep -q '"mission-control"' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'cc-start.sh' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'min_uptime' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'CC_PORT' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  # Also fail if old vulnerable pattern still present
+  grep -q '"command-center"' "$ECOSYSTEM_FILE" && NEEDS_UPDATE=1 || true
+  grep -q '"PORT"' "$ECOSYSTEM_FILE" && NEEDS_UPDATE=1 || true
+
+  if [ "$NEEDS_UPDATE" -eq 1 ]; then
+    echo "[8b/9] Reconciling stale/vulnerable PM2 ecosystem at $ECOSYSTEM_FILE (backing up to .bak)..."
+    cp "$ECOSYSTEM_FILE" "${ECOSYSTEM_FILE}.bak"
+    printf '%s\n' "$CANONICAL_ECOSYSTEM" > "$ECOSYSTEM_FILE"
+    echo "[8b/9] Ecosystem reconciled to canonical (mission-control + cc-start.sh + circuit-breaker)"
+  else
+    echo "[8b/9] PM2 ecosystem already canonical at $ECOSYSTEM_FILE — no update needed"
+  fi
 fi
 
 #

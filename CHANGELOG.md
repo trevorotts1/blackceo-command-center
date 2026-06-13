@@ -1,3 +1,25 @@
+## [v4.42.0] — 2026-06-13 — fix(cc-crashloop): permanent crash-loop guard — env-bleed strip, orphan-port killer, PM2 circuit-breaker, resurrection persistence, CI guard
+
+### What changed
+
+**`scripts/cc-start.sh`** (NEW) — Canonical hardened launcher. Every PM2/npm/bootstrap/onboarding start path now routes through this single script. Implements: (1) ENV-BLEED GUARD: strips any inherited `PORT` from the shell env and pins `PORT=CC_PORT` before invoking `next start`, preventing OpenClaw gateway PORT or Hostinger-injected PORT from bleeding into the CC listen port; (2) ORPHAN-PORT KILLER: uses `lsof`/`fuser` to detect and TERM/KILL any process LISTENing on the CC port before `next start` binds, breaking the EADDRINUSE loop (Cassandra 71,551 restarts + Monique 126,935 restarts); (3) `exec npx next start` so PM2 PID tracking is correct.
+
+**`ecosystem.config.cjs`** — Rewired to invoke `bash scripts/cc-start.sh --port CC_PORT` (never `next start` directly). Removed `process.env.PORT` reads entirely; uses `CC_PORT` only (enforced by new CI guard). Added PM2 circuit-breaker: `min_uptime: 30000`, `max_restarts: 8`, `exp_backoff_restart_delay: 2000`, `kill_timeout: 10000`. Without `min_uptime`, PM2 resets the restart counter on every brief launch so `max_restarts` never trips — this is the root cause of the 126K-restart loops. Name remains `mission-control`.
+
+**`package.json`** — `scripts.start` repointed to `bash scripts/cc-start.sh` so even a manual `npm start` or `pm2 start npm -- start` goes through the hardened launcher. Added `db:push` alias → `tsx src/lib/db/seed.ts` to fix the per-box deploy abort (onboarding Phase 6 was calling `npm run db:push` which did not exist, causing `set -u` failures that prevented the CC from ever starting on strict boxes).
+
+**`scripts/install/mac-mini-bootstrap.sh`** — Step 8b: ecosystem template now uses canonical `mission-control` name + `cc-start.sh` launcher + circuit-breaker fields. Template write is now idempotent-healing (always reconciles to canonical instead of skip-if-exists), backed up to `.bak` before overwrite. Preserves `pm2 startup launchd` + `pm2 save` for resurrection.
+
+**`scripts/install/vps-docker-bootstrap.sh`** — Identical Step 8b changes. Added comment that `cc-start.sh` env-strip is the structural cure for Hostinger's injected `PORT`. Preserves `pm2 startup systemd` + `pm2 save`.
+
+**`scripts/watchdog-cc.sh`** — Added opt-in `WATCHDOG_SELF_HEAL=1` mode: on a definitive RED that shows a zombie/orphan loop (app_count>1 or crash_looper or EADDRINUSE in logs), the watchdog kills legacy-named apps and restarts via the canonical ecosystem. Preserves the proven exit-3=no-action contract.
+
+**`scripts/qc-cc.sh`** — New section 11 `port-pin-and-env-bleed-guard`: 5 checks that FAIL the build if any start path re-introduces env-bleed, missing orphan-kill, or missing circuit-breaker fields.
+
+**`.github/workflows/qc-cc.yml`** — New `port-pin-env-bleed-guard` job that self-tests the CI guard against `tests/fixtures/port-guard/bleeding-ecosystem.cjs` (which MUST fail), then runs `qc-cc.sh` section 11.
+
+**`tests/fixtures/port-guard/bleeding-ecosystem.cjs`** (NEW) — Planted fixture containing the exact pattern that caused the crash-loop: `process.env.PORT` in args + `PORT:` in env block. The CI guard MUST detect and fail on this file.
+
 ## [v4.41.0] — 2026-06-12 — feat(T3-001): dedicated Bugs Department board with 7-stage lifecycle lanes
 
 ### What changed
