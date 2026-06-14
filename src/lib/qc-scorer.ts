@@ -1228,7 +1228,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         `SELECT id, title, path, deliverable_type FROM task_deliverables WHERE task_id = ?`,
         [taskId],
       );
-      const fileRows = delivRows.filter((d) => d.deliverable_type === 'file' && d.path);
+      // Accept every file-backed deliverable type the dispatcher actually
+      // registers. The auto-dispatch prompt (task-dispatcher.ts) tells agents to
+      // POST image/media deliverables as type 'artifact', not 'file', so filtering
+      // on 'file' alone dropped them — the manifest came back empty and QC fell
+      // back to the heuristic (capped at 8.0, never clears the 8.5 gate), parking
+      // every image/file task in `review` forever. 'image' is included defensively.
+      const FILE_BACKED_DELIVERABLE_TYPES = new Set(['file', 'artifact', 'image']);
+      const fileRows = delivRows.filter((d) => FILE_BACKED_DELIVERABLE_TYPES.has(d.deliverable_type) && d.path);
       if (fileRows.length > 0) {
         deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
           const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
