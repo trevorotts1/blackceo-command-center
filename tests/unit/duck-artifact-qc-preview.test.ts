@@ -340,3 +340,109 @@ test('[I] IMAGE_EXTENSIONS set contains common image extensions', () => {
   assert.ok(!IMAGE_EXTENSIONS.has('.html'), '.html must NOT be in IMAGE_EXTENSIONS');
   assert.ok(!IMAGE_EXTENSIONS.has('.txt'),  '.txt must NOT be in IMAGE_EXTENSIONS');
 });
+
+// ── J: Invariant A — artifact task with ZERO registered deliverables ──────────
+// Root-cause fix for design item #10: previously fell through to Mode-B
+// (description re-score), failed on terse briefs, looped → falsely blocked.
+// Now: returns-to-orchestrator immediately, does NOT increment qc_reroute_attempts.
+
+test('[J] runQCOnReview: artifact task + zero registered deliverables → return-to-orchestrator, NOT Mode-B', async () => {
+  const taskId = nextId('invariant-a-zero-deliv');
+  const now = new Date().toISOString();
+
+  // Artifact-sounding title: deriveAcceptanceCriteria will return non-empty criteria.
+  run(
+    `INSERT INTO tasks (id, title, description, status, priority, workspace_id, business_id, sop_id, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    [taskId, 'create a picture of a blue duck', null, 'review', 'medium', 'creative', null, DUCK_SOP_ID, now, now],
+  );
+  // NO rows inserted into task_deliverables — simulates the agent failing to register output.
+
+  delete process.env.QC_FIXTURE_JSON_PATH;
+
+  const result = await runQCOnReview(taskId);
+  assert.ok(result !== null, 'runQCOnReview must return a result');
+
+  // Must be a structured failure, not a quality score.
+  assert.ok(!result.pass, 'Zero-deliverable artifact task must not pass');
+  assert.ok(
+    result.gaps.some((g) => g.toLowerCase().includes('no artifact') || g.toLowerCase().includes('artifact registered')),
+    `gaps must mention 'no artifact registered', got: ${JSON.stringify(result.gaps)}`,
+  );
+  assert.ok(
+    result.reason.toLowerCase().includes('no artifact') || result.reason.toLowerCase().includes('registered'),
+    `reason must mention missing artifact, got: ${result.reason}`,
+  );
+
+  // Task must have left review status (moved to backlog by return-to-orchestrator).
+  const task = queryOne<{ status: string; qc_reroute_attempts: number | null }>(
+    'SELECT status, qc_reroute_attempts FROM tasks WHERE id = ?',
+    [taskId],
+  );
+  assert.ok(task, 'task must exist');
+  assert.notEqual(
+    task!.status,
+    'review',
+    `Invariant A: task must leave review (return-to-orchestrator), got status: ${task!.status}`,
+  );
+  // CRITICAL: qc_reroute_attempts must NOT be incremented (structural failure, not quality).
+  assert.equal(
+    task!.qc_reroute_attempts ?? 0,
+    0,
+    `Invariant A: qc_reroute_attempts must NOT increment on zero-deliverable return-to-orchestrator, got: ${task!.qc_reroute_attempts}`,
+  );
+  // Must have a qc_review event (not a reroute event).
+  const evt = queryOne<{ message: string }>(
+    `SELECT message FROM events WHERE task_id = ? AND message LIKE '%QC-NO-ARTIFACT%' LIMIT 1`,
+    [taskId],
+  );
+  assert.ok(evt, 'Invariant A: QC-NO-ARTIFACT event must be written in events table');
+});
+
+// ── K: Invariant B — artifact task WITH registered deliverable → artifact scoring, not Mode-B ──
+
+test('[K] runQCOnReview: artifact task WITH registered valid deliverable → artifact scoring path (not Mode-B description scoring)', async () => {
+  const taskId = nextId('invariant-b-with-deliv');
+  const now = new Date().toISOString();
+
+  run(
+    `INSERT INTO tasks (id, title, description, status, priority, workspace_id, business_id, sop_id, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    [taskId, 'create a picture of a blue duck', null, 'review', 'medium', 'creative', null, DUCK_SOP_ID, now, now],
+  );
+
+  // Register the valid PNG — this is the path that SHOULD be taken.
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?,?,?,?,?,?)`,
+    [nextId('deliv'), taskId, 'file', 'blue-duck.png', VALID_PNG_PATH, now],
+  );
+
+  // Use the pass fixture so the artifact scoring path returns pass=true.
+  process.env.QC_FIXTURE_JSON_PATH = QC_PASS_FIXTURE;
+  try {
+    const result = await runQCOnReview(taskId);
+    assert.ok(result !== null, 'runQCOnReview must return a result');
+    // With a valid PNG and the pass fixture, the artifact path must fire and pass.
+    assert.ok(result.pass, `Artifact task with registered deliverable + pass fixture must pass, got score=${result.score} pass=${result.pass}`);
+
+    // The task must move to done (artifact path → pass → done).
+    const task = queryOne<{ status: string }>(
+      'SELECT status FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    assert.ok(task, 'task must exist');
+    assert.equal(
+      task!.status,
+      'done',
+      `Invariant B: artifact task with registered deliverable + pass must be done, got: ${task!.status}`,
+    );
+    // Must NOT be description-scored: the result reason must NOT mention "description" as the scoring basis.
+    assert.ok(
+      !result.reason.toLowerCase().includes('description re-score'),
+      `Artifact scoring must not mention description re-score, got: ${result.reason}`,
+    );
+  } finally {
+    delete process.env.QC_FIXTURE_JSON_PATH;
+  }
+});
