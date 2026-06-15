@@ -2594,6 +2594,50 @@ const migrations: Migration[] = [
       console.log('[Migration 070] task_events table + task_deliverables columns ready');
     },
   },
+  {
+    id: '071',
+    name: 'blocked_fields_and_last_progress_at',
+    up: (db) => {
+      // Blocked-column gate (N36 / SOP-01-Blocked-vs-Return).
+      //
+      // Three new tasks columns enforce the doctrine that Blocked = human-only:
+      //   blocked_reason:     one of {decision,approval,credential,payment} -- the ONLY
+      //                       four qualifying human-only categories.
+      //   blocked_on_human:   "owner" or "operator" -- who is being waited on.
+      //   ask:                one-line string -- exactly what that human must do.
+      //
+      // A task PATCH to status=blocked is rejected by the API gate (400) unless
+      // all three are present AND the requesting agent is the master orchestrator.
+      //
+      // last_progress_at:    timestamp bumped on any status change, any logged
+      //                      event/activity, any deliverable added, or any human
+      //                      action on a Blocked card.  The stale-task sweep reads
+      //                      this column to decide when a card has gone stale.
+      //                      Backfilled to updated_at for all existing tasks.
+      console.log('[Migration 071] Adding blocked fields + last_progress_at to tasks...');
+
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+
+      if (!cols.includes('blocked_reason')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN blocked_reason TEXT CHECK (blocked_reason IN ('decision','approval','credential','payment') OR blocked_reason IS NULL)`);
+      }
+      if (!cols.includes('blocked_on_human')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN blocked_on_human TEXT CHECK (blocked_on_human IN ('owner','operator') OR blocked_on_human IS NULL)`);
+      }
+      if (!cols.includes('ask')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN ask TEXT`);
+      }
+      if (!cols.includes('last_progress_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN last_progress_at TEXT`);
+        // Backfill: set to updated_at for all existing rows so the stale sweep
+        // does not immediately flag every existing card as stale.
+        db.exec(`UPDATE tasks SET last_progress_at = updated_at WHERE last_progress_at IS NULL`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_last_progress ON tasks(last_progress_at)`);
+      }
+
+      console.log('[Migration 071] blocked fields + last_progress_at ready');
+    },
+  },
 ];
 
 /**

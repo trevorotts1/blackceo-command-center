@@ -33,6 +33,7 @@ import {
 } from './lss-control-review';
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
+import { runStaleTaskSweep, STALE_TASK_SWEEP_CRON } from './stale-task-sweep';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -278,6 +279,32 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // the right department (mostly relevant for tasks created before in-process
   // routing shipped).
   { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
+
+  // stale-task-sweep: every 10 minutes, return stale tasks to the orchestrator
+  // for re-routing (N36 / SOP-01-Blocked-vs-Return). Non-Blocked stale tasks
+  // are returned to backlog; Blocked stale tasks are re-pinged then returned.
+  // Disable with DISABLE_STALE_TASK_SWEEP=1.
+  {
+    name: 'stale-task-sweep',
+    expr: STALE_TASK_SWEEP_CRON,
+    fn: async () => {
+      if (
+        process.env.DISABLE_STALE_TASK_SWEEP === '1' ||
+        process.env.DISABLE_STALE_TASK_SWEEP === 'true'
+      ) {
+        console.log('[cron] stale-task-sweep: DISABLE_STALE_TASK_SWEEP set, skipping');
+        return;
+      }
+      const result = await runStaleTaskSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] stale-task-sweep: skipped -- ${result.skippedReason}`);
+      } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0) {
+        console.log(
+          `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, repinged ${result.repinged}`,
+        );
+      }
+    },
+  },
 
 
   // weekly-done-clear: Sunday 07:00 America/New_York — soft-archive all done

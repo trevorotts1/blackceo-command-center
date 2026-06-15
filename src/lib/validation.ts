@@ -46,6 +46,12 @@ export const UpdateTaskSchema = z.object({
   updated_by_agent_id: z.string().uuid().optional(),
   sop_id: z.string().uuid().optional().nullable(),
   sop_step_progress: z.string().optional().nullable(),
+  // Blocked-column gate fields (N36 / migration 071).
+  // All three MUST be present when status = 'blocked'; the API route enforces
+  // this -- Zod accepts them as optional so the gate can produce a descriptive 400.
+  blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),
+  blocked_on_human: z.enum(['owner', 'operator']).optional().nullable(),
+  ask: z.string().max(500).optional().nullable(),
 });
 
 // Activity validation schema

@@ -1,8 +1,8 @@
 {
-  "companyName": "",
-  "industry": "",
-  "commandCenterName": "Command Center",
-  "createdAt": "",
+  "companyName": "BlackCEO Demo",
+  "industry": "AI Workforce / Media",
+  "commandCenterName": "BlackCEO Demo Command Center",
+  "createdAt": "2026-06-10",
   "connectedSystems": {
     "payment": "none",
     "crm": "none",
@@ -16,5 +16,23 @@
     "daCompliance": 0.15,
     "recommendationFollowThrough": 0.15
   },
-  "departments": []
+  "departments": [
+    "dept-ceo",
+    "dept-operations",
+    "dept-appdev",
+    "dept-audio",
+    "dept-billing",
+    "dept-comms",
+    "dept-creative",
+    "dept-graphics",
+    "dept-hr",
+    "dept-it",
+    "dept-legal",
+    "dept-marketing",
+    "dept-research",
+    "dept-sales",
+    "dept-support",
+    "dept-video",
+    "dept-webdev"
+  ]
 }

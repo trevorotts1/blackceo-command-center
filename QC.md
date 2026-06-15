@@ -23,6 +23,7 @@ yourself honestly.
 | **8**   | 0.5    | No hardcoded Anthropic model id as an inference target in non-orchestrator business logic. Exempt: the orchestrator layer, `model-providers/anthropic.ts` (emits Claude family *labels* for the UI), and `web-agent/runner.ts` (built on the Anthropic Messages-API tool-use protocol; model id is env-overridable via `WEB_AGENT_MODEL`) |
 | **9**   | 0.5    | `npm run build` exits zero |
 | **10**  | 0.5    | `qc-cc.sh` exits zero |
+| **11**  | 1.0    | Blocked-column gate (N36): migration 071 present in `src/lib/db/migrations.ts`; `src/app/api/tasks/[id]/route.ts` PATCH rejects status=blocked without blocked_reason/blocked_on_human/ask (HTTP 400); `src/app/api/tasks/[id]/return-to-orchestrator/route.ts` exists; `stale-task-sweep` registered in `src/lib/jobs/scheduler.ts` JOBS[]. Auto-fail if any of the four is missing. |
 
 Total: 10.0
 
