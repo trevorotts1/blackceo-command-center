@@ -1211,11 +1211,27 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       ) ?? null;
     }
 
-    // ── Artifact-aware QC: build deliverable manifest (duck-fix) ─────────────
+    // ── Artifact-aware QC: build deliverable manifest (root-cause fix #10) ──────
+    // Artifact-fulfillment is MANDATORY for artifact tasks.
+    //
+    // Design item #10 root-cause: the OLD path treated zero registered deliverables
+    // as "no manifest → fall through to Mode-B (description text re-score)".
+    // Mode-B grades the task DESCRIPTION against success_criteria, and a terse
+    // brief ("create a picture of a blue duck") reliably scores below 8.5 → fail
+    // → reroute loop → blocked after QC_MAX_REROUTES attempts.  The delivered
+    // artifact was never inspected.
+    //
+    // THE FIX (two new invariants):
+    //   A. If a task is an artifact task (detected via deriveAcceptanceCriteria)
+    //      AND it reaches review with ZERO registered deliverables, that is a
+    //      structural failure ("no artifact registered") — the agent forgot to
+    //      register its output.  Return-to-orchestrator immediately; do NOT
+    //      score the description and do NOT park in Blocked.
+    //   B. If deliverables ARE registered, score the ARTIFACT against criteria.
+    //      Mode-B (description-text scoring) is only reached for confirmed
+    //      non-artifact (text/work) tasks.
+    //
     // Fetch all file deliverables for this task and probe each one.
-    // If we have valid file deliverables, pass the manifest to the scorer so it
-    // switches to fulfillment mode instead of brief-completeness mode.
-    // Text-tasks (no file deliverables) get a null manifest → unchanged behaviour.
     interface DeliverableRow {
       id: string;
       title: string;
@@ -1223,6 +1239,10 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       deliverable_type: string;
     }
     let deliverableManifest: DeliverableManifestItem[] | null = null;
+    // Detect artifact intent BEFORE manifest build so we can enforce invariant A.
+    const artifactCriteriaForTitle = deriveAcceptanceCriteria(task.title, task.description);
+    const isArtifactTask = artifactCriteriaForTitle.length > 0;
+
     try {
       const delivRows = queryAll<DeliverableRow>(
         `SELECT id, title, path, deliverable_type FROM task_deliverables WHERE task_id = ?`,
@@ -1236,6 +1256,82 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // every image/file task in `review` forever. 'image' is included defensively.
       const FILE_BACKED_DELIVERABLE_TYPES = new Set(['file', 'artifact', 'image']);
       const fileRows = delivRows.filter((d) => FILE_BACKED_DELIVERABLE_TYPES.has(d.deliverable_type) && d.path);
+
+      // ── Invariant A: artifact task with zero registered deliverables ─────────
+      // Return-to-orchestrator: the agent completed execution without registering
+      // any output file.  This is NOT a reroute loop increment — it is a
+      // structural handback so the orchestrator can re-assign or request
+      // artifact registration from the worker.
+      if (isArtifactTask && fileRows.length === 0) {
+        const noArtifactReason = 'No artifact registered: task reached review without any file deliverable in task_deliverables. The executing agent must register the output file before submitting for QC.';
+        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): artifact task with zero registered deliverables — return-to-orchestrator (NOT blocked)`);
+
+        const now = new Date().toISOString();
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            'qc_review',
+            taskId,
+            `[QC-NO-ARTIFACT] No artifact registered — returning task to orchestrator. ${noArtifactReason} [path:artifact-mandatory]`,
+            now,
+          ],
+        );
+
+        // Call return-to-orchestrator endpoint internally (mirrors what worker agents
+        // should call).  Sets status=backlog with structured handback note so the
+        // ceo-delegation-sweep re-assigns correctly.  Does NOT increment the
+        // QC reroute counter — this is an agent registration failure, not a
+        // quality failure.
+        const baseUrl = getMissionControlUrl();
+        try {
+          const handbackBody = {
+            problem: noArtifactReason,
+            what_i_tried: 'QC auto-scorer attempted to evaluate the artifact but found zero registered deliverables in task_deliverables.',
+            what_i_think_it_needs: 'The executing agent must register the output file via POST /api/tasks/[id]/deliverables before transitioning to review status.',
+            suggested_department: task.department ?? null,
+            returned_by_agent_id: null,
+          };
+          const returnResp = await fetch(`${baseUrl}/api/tasks/${taskId}/return-to-orchestrator`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(handbackBody),
+          });
+          if (!returnResp.ok) {
+            // Fallback: write backlog status directly if the endpoint is unavailable.
+            const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
+            run(
+              `UPDATE tasks SET status = 'backlog',
+                 description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
+                 updated_at = ?
+               WHERE id = ? AND status = 'review'`,
+              [handbackNote, handbackNote, now, taskId],
+            );
+            console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote backlog directly`);
+          }
+        } catch (returnErr) {
+          // Endpoint unreachable: write backlog directly.
+          const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
+          run(
+            `UPDATE tasks SET status = 'backlog',
+               description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
+               updated_at = ?
+             WHERE id = ? AND status = 'review'`,
+            [handbackNote, handbackNote, now, taskId],
+          );
+          console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal):', (returnErr as Error).message);
+        }
+
+        return {
+          score: 0,
+          pass: false,
+          reason: noArtifactReason,
+          gaps: ['no artifact registered'],
+          scoringPath: 'llm',
+        };
+      }
+      // ── End invariant A ──────────────────────────────────────────────────────
+
       if (fileRows.length > 0) {
         deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
           const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
@@ -1335,15 +1431,15 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     // ── End artifact manifest ─────────────────────────────────────────────────
 
     // §4 Criteria-based scoring for artifact tasks.
-    // If we have a deliverable manifest (artifact mode), derive acceptance
-    // criteria from the task request and evaluate them.  The 8.5 bar applies
-    // to the criteria checklist, NOT brief-completeness prose.
+    // Invariant B: if deliverableManifest is non-empty, score the ARTIFACT.
+    // Mode-B (description text re-score) is only reached for confirmed
+    // non-artifact (text/work) tasks where isArtifactTask=false.
     let result: QCResult;
     const now = new Date().toISOString();
 
     if (deliverableManifest && deliverableManifest.length > 0) {
-      // Artifact mode: derive criteria from the task title + description.
-      const criteria = deriveAcceptanceCriteria(task.title, task.description);
+      // Artifact mode: use the pre-computed criteria (derived above for invariant A).
+      const criteria = artifactCriteriaForTitle;
 
       if (criteria.length > 0) {
         // Evaluate criteria checklist
@@ -1366,7 +1462,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         console.log(`[QCScorer] Task "${task.title}" (${taskId}): artifact-mode criteria score ${criteriaResult.score.toFixed(1)}/10 (${criteriaResult.pass ? 'PASS' : 'FAIL'})`);
       } else {
         // Manifest present but no image criteria derived (non-image artifact)
-        // → fall through to standard scoring
+        // → score against SOP rubric with the manifest for context (Mode A prompt)
         const input: QCScorerInput = {
           taskId: task.id,
           taskTitle: task.title,
@@ -1383,7 +1479,10 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         result = await scoreTaskForQC(input);
       }
     } else {
-      // Document/work mode: use existing SOP rubric path
+      // ── Mode B: document/work task (confirmed non-artifact) ───────────────────
+      // Only reached when isArtifactTask=false (deriveAcceptanceCriteria returned
+      // empty).  Artifact tasks with zero deliverables were already handled above
+      // by invariant A (return-to-orchestrator) and never reach this branch.
       const input: QCScorerInput = {
         taskId: task.id,
         taskTitle: task.title,
