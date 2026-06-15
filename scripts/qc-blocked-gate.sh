@@ -127,6 +127,48 @@ if [[ "$ANTHROPIC_HIT" -eq 0 ]]; then
   check "no-anthropic-pins-in-new-files" "pass"
 fi
 
+# ── Assertion 7: Artifact-mandatory invariant A — zero-deliverable path ───────
+# Confirms that qc-scorer.ts contains:
+#   (a) the isArtifactTask guard that calls return-to-orchestrator when a task
+#       reaches review with zero registered deliverables, AND
+#   (b) that the return-to-orchestrator fetch call exists inside invariant A.
+# This is the root-cause fix for the false-done / false-blocked bug (design item #10).
+if [[ "${SKIP_ARTIFACT_INVARIANT:-0}" != "1" ]]; then
+  QC_SCORER="$REPO_ROOT/src/lib/qc-scorer.ts"
+  if [[ ! -f "$QC_SCORER" ]]; then
+    check "artifact-mandatory-invariant-a" "fail" "qc-scorer.ts not found: $QC_SCORER"
+  else
+    # Check for the isArtifactTask guard
+    if grep -q "isArtifactTask" "$QC_SCORER" && \
+       grep -q "no artifact registered" "$QC_SCORER" && \
+       grep -q "return-to-orchestrator" "$QC_SCORER" && \
+       grep -q "fileRows.length === 0" "$QC_SCORER"; then
+      check "artifact-mandatory-invariant-a" "pass"
+    else
+      check "artifact-mandatory-invariant-a" "fail" \
+        "qc-scorer.ts missing isArtifactTask guard / zero-deliverable return-to-orchestrator path. Root-cause fix #10 not applied."
+    fi
+  fi
+fi
+
+# ── Assertion 8: Mode-B is guarded to non-artifact tasks only ─────────────────
+# Confirms the Mode-B comment block explicitly documents that artifact tasks with
+# zero deliverables can no longer fall through to description re-scoring.
+if [[ "${SKIP_MODEB_GUARD:-0}" != "1" ]]; then
+  QC_SCORER="$REPO_ROOT/src/lib/qc-scorer.ts"
+  if [[ ! -f "$QC_SCORER" ]]; then
+    check "mode-b-non-artifact-only" "fail" "qc-scorer.ts not found: $QC_SCORER"
+  else
+    if grep -q "Mode B: document/work task (confirmed non-artifact)" "$QC_SCORER" && \
+       grep -q "isArtifactTask=false" "$QC_SCORER"; then
+      check "mode-b-non-artifact-only" "pass"
+    else
+      check "mode-b-non-artifact-only" "fail" \
+        "Mode-B guard comment missing from qc-scorer.ts — artifact tasks may still fall through to description re-scoring"
+    fi
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 printf '\n[qc-blocked-gate] %d passed, %d failed\n' "$PASS" "$FAIL"
 if [[ "$FAIL" -gt 0 ]]; then
