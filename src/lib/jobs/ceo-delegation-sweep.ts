@@ -68,18 +68,26 @@ export async function runCeoDelegationSweep(): Promise<void> {
     ceoTasks.push(...rows);
   }
 
-  // ── 2. QC-fail backlog tasks from ANY department (v4.12.0 addition) ──────
-  // These tasks were kicked back by the QC scorer: they have qc_reroute_attempts > 0
-  // and description containing '[QC-FAIL]'. They know their target department but
-  // the immediate auto-route POST may have failed (port 3000 bug, now fixed).
-  // This sweep is the reliable safety net for any that slipped through.
+  // ── 2. Returned and QC-fail backlog tasks from ANY department ─────────────
+  // Covers two sources:
+  //   (a) QC-fail tasks (original v4.12.0 addition): kicked back by the QC scorer.
+  //   (b) Worker handback tasks (N36 / SOP-01): returned via the
+  //       return-to-orchestrator endpoint (description contains '[HANDBACK' or
+  //       '[STALE-RETURN'). These have qc_reroute_attempts > 0 and a structured
+  //       problem note the re-router reads.
+  //
+  // Escalation cap: tasks with qc_reroute_attempts >= cap (default 3) are not
+  // re-routed -- they already carry a task_escalated event. We skip them here
+  // so they stay visible in Backlog for human triage and do not re-loop.
+  const cap = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
   const qcFailTasks = queryAll<CeoTaskRow>(
     `SELECT id, title, description, priority, workspace_id, department, qc_reroute_attempts
      FROM tasks
      WHERE status = 'backlog'
        AND qc_reroute_attempts > 0
+       AND qc_reroute_attempts < ?
        AND archived_at IS NULL`,
-    [],
+    [cap],
   );
 
   // Merge: de-duplicate by id (a CEO-workspace QC-fail task would appear in both).

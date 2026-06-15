@@ -67,7 +67,6 @@ module.exports = {
       ...(process.env.BCC_INSTALL_TYPE ? { BCC_INSTALL_TYPE: process.env.BCC_INSTALL_TYPE } : {}),
       ...(process.env.OPENCLAW_PLATFORM ? { OPENCLAW_PLATFORM: process.env.OPENCLAW_PLATFORM } : {})
     },
-    // PM2 settings
     instances: 1,
     exec_mode: 'fork',
     autorestart: true,
