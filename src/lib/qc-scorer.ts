@@ -136,6 +136,21 @@ function describesImageOrDeckDeliverable(title: string, description: string | nu
 }
 
 /**
+ * AF-PIPELINE-COMPLETE: detect whether a request describes a multi-slide DECK /
+ * PRESENTATION deliverable specifically (as opposed to a single image/logo).
+ *
+ * Narrower than describesImageOrDeckDeliverable on purpose: the pipeline-
+ * completeness gate only applies to deck/presentation builds (which must pass
+ * through the Presentations-department research → copy → image-QC → GHL-upload
+ * pipeline). A standalone logo/banner/photo request has no such pipeline and
+ * must NOT be blocked for missing a research brief or a media_library.json.
+ */
+export function describesDeckDeliverable(title: string, description: string | null): boolean {
+  const text = [title, description].filter(Boolean).join(' ').toLowerCase();
+  return /\b(presentation|deck|slide|slides|slideshow|keynote|powerpoint|pptx|webinar|pitch\s*deck)\b/.test(text);
+}
+
+/**
  * Read and concatenate all text content from an OpenClaw session .jsonl file.
  * Returns the raw (NOT lowercased) file contents so the caller can do both
  * structured JSON parsing of tool_use blocks AND a lowercased substring scan.
@@ -1086,8 +1101,20 @@ export interface AcceptanceCriterion {
    * spelling, a known acronym, or a common word. Catches the misspelled-acronym
    * failure mode where spec `ZHC` rendered as `ZCH` and AF-LANG passed it (the
    * glyphs were legible English). Fail-closed.
+   *
+   * pipeline_complete (AF-PIPELINE-COMPLETE, v4.48.0): for presentation/deck
+   * deliverables, the Presentations-department pipeline records that PROVE the
+   * deck went through research → copy → image QC → media-librarian GHL upload
+   * must EXIST on disk before the deck task can move review→Done. Catches the
+   * operator-shortcut failure mode (hand-fed slides.json → build_deck.py →
+   * .pptx) that skipped research, the copy/image QC gates, and the GHL media
+   * upload entirely. If those records are absent the deck is NOT done.
+   * Fail-closed: a missing/unreadable run dir blocks (it cannot be PROVEN
+   * complete). Required records: (1) a completed research brief, (2) a copy or
+   * image QC log, (3) a GHL media-upload record (ghl_media_id / ghl_folder_id in
+   * media_library.json).
    */
-  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'spelling_fidelity' | 'custom';
+  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'spelling_fidelity' | 'pipeline_complete' | 'custom';
   /** Extra params: resolution threshold, vision prompt, expected language, etc. */
   params?: Record<string, unknown>;
 }
@@ -1110,12 +1137,15 @@ export function deriveAcceptanceCriteria(
 ): AcceptanceCriterion[] {
   const text = [title, description].filter(Boolean).join(' ').toLowerCase();
 
-  // Detect image tasks
+  // Detect image / deck tasks. Decks/presentations are artifact tasks too — they
+  // ship rendered slide images + a .pptx and must carry the AF-LANG/AF-NUM/
+  // AF-SPELL render gates AND (deck-only) the AF-PIPELINE-COMPLETE gate.
   const isImageTask =
     /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
+  const isDeckTask = describesDeckDeliverable(title, description ?? null);
 
-  if (!isImageTask) {
-    // Non-image (document/work) task — no artifact criteria
+  if (!isImageTask && !isDeckTask) {
+    // Non-image / non-deck (document/work) task — no artifact criteria
     return [];
   }
 
@@ -1196,6 +1226,24 @@ export function deriveAcceptanceCriteria(
     type: 'spelling_fidelity',
     params: { specCopy },
   });
+
+  // AF-PIPELINE-COMPLETE pipeline-completeness gate (v4.48.0): for DECK /
+  // PRESENTATION deliverables only, require the Presentations-department
+  // pipeline records that PROVE the deck went through the real flow (research →
+  // copy → image QC → media-librarian GHL upload). This catches the operator
+  // shortcut (hand-fed slides.json → build_deck.py → .pptx) that bypassed the
+  // entire pipeline: no research brief, no copy/image QC log, and no GHL media
+  // upload. The required records are looked up on disk at evaluation time
+  // (the run dir is resolved from the deck artifact path); if any is absent the
+  // deck is NOT done. Fail-closed: an unreadable/missing run dir blocks too.
+  if (describesDeckDeliverable(title, description ?? null)) {
+    criteria.push({
+      id: 'pipeline_complete',
+      description:
+        'Deck pipeline records present on disk: a completed research brief, a copy/image QC log, and a GHL media-upload record (ghl_media_id / ghl_folder_id in media_library.json). Absent records ⇒ deck is NOT done',
+      type: 'pipeline_complete',
+    });
+  }
 
   return criteria;
 }
@@ -1441,6 +1489,200 @@ export function compareSpellingFidelity(renderText: string, specText: string): S
   return { pass, misspelled, renderTokens, explanation };
 }
 
+// ---------------------------------------------------------------------------
+// AF-PIPELINE-COMPLETE — deck pipeline-completeness gate (v4.48.0)
+// ---------------------------------------------------------------------------
+//
+// Closes the gap exposed by the operator shortcut: a deck was shipped by
+// hand-feeding a slides.json into build_deck.py, which is ONLY the Phase-4
+// renderer + a stripped Phase-8 assembler. That path bypassed essentially the
+// entire Presentations pipeline — no research, no copy/image QC gates, and no
+// media-librarian GHL upload — yet a technically-valid .pptx landed on disk and
+// could be moved review→Done. AF-LANG/AF-NUM/AF-SPELL inspect rendered PIXELS;
+// none of them prove the deck went through the pipeline. This gate does.
+//
+// RULE (fail-closed):
+//   - Resolve the run dir from the deck artifact path (the directory the .pptx /
+//     slide assets were written into, walking up to find the canonical workdir).
+//   - Require ALL THREE pipeline records to be present on disk:
+//       (1) a COMPLETED research brief — working/research/brief-*.md with a
+//           research_complete:true marker (Deep Research SOP 9.1/9.4;
+//           AF-RESEARCH-GATE).
+//       (2) a COPY or IMAGE QC log — working/qc/copy_qc_report.json OR
+//           working/qc/image_qc_report.json (QC SOP 9.1 / 9.3 gates).
+//       (3) a GHL MEDIA-UPLOAD record — media_library.json carrying a
+//           ghl_media_id and/or ghl_folder_id (Media Librarian SOP 9.2–9.4).
+//   - If the run dir cannot be located or read, or ANY record is absent, the
+//     deck is NOT done (block). A keyless install cannot bypass this — it is a
+//     pure filesystem-presence check, no vision/LLM call.
+
+export interface PipelineRecords {
+  /** A completed research brief exists (working/research/brief-*.md, research_complete:true). */
+  researchBriefComplete: boolean;
+  /** A copy or image QC log exists (working/qc/copy_qc_report.json | image_qc_report.json). */
+  qcLogPresent: boolean;
+  /** A GHL media-upload record exists (media_library.json with ghl_media_id / ghl_folder_id). */
+  ghlMediaUploadRecorded: boolean;
+}
+
+export interface PipelineCompletenessResult {
+  /** true = all three required pipeline records are present. */
+  pass: boolean;
+  /** The specific missing records (human-readable), empty when pass. */
+  missing: string[];
+  /** Human-readable verdict (used as the criterion reason). */
+  explanation: string;
+}
+
+/**
+ * Decide whether a deck's pipeline records prove it went through the real flow.
+ *
+ * PURE + deterministic (no I/O) so the gate is unit-provable: pass a
+ * fully-present record set ⇒ PASS; drop any one record ⇒ FAIL naming the gap.
+ * The fail-closed default (an all-false record set when the run dir is missing)
+ * therefore also fails here, which is the desired block.
+ */
+export function checkPipelineCompleteness(records: PipelineRecords): PipelineCompletenessResult {
+  const missing: string[] = [];
+  if (!records.researchBriefComplete) {
+    missing.push('a completed research brief (working/research/brief-*.md with research_complete:true)');
+  }
+  if (!records.qcLogPresent) {
+    missing.push('a copy/image QC log (working/qc/copy_qc_report.json or image_qc_report.json)');
+  }
+  if (!records.ghlMediaUploadRecorded) {
+    missing.push('a GHL media-upload record (ghl_media_id / ghl_folder_id in media_library.json)');
+  }
+
+  const pass = missing.length === 0;
+  const explanation = pass
+    ? 'AF-PIPELINE-COMPLETE: deck pipeline records present — research brief, copy/image QC log, and GHL media-upload record all found on disk'
+    : `AF-PIPELINE-COMPLETE FAIL: the deck is NOT done — missing ${missing.join('; ')}. ` +
+      'This is the build_deck.py shortcut failure mode (a .pptx assembled without going through research, the QC gates, and the media-librarian GHL upload). ' +
+      'Run the deck through the canonical Presentations pipeline (single entry point: the Director-orchestrated flow), do NOT hand-feed slides.json into build_deck.py.';
+  return { pass, missing, explanation };
+}
+
+/**
+ * Walk upward from a deck artifact path to find the canonical run/workdir, then
+ * collect the pipeline-completeness records from disk. Returns an all-false
+ * record set (which fails the gate) when no run dir can be located — fail-closed.
+ *
+ * A canonical run dir is recognised by containing a `working/` subtree (the
+ * Presentations workdir layout: working/research, working/qc, working/copy,
+ * working/checkpoints). We also accept the run dir itself directly holding
+ * `media_library.json` (its checkpoint), as some flows seed it at the root.
+ */
+export function collectPipelineRecords(deckArtifactPath: string): PipelineRecords {
+  const absent: PipelineRecords = {
+    researchBriefComplete: false,
+    qcLogPresent: false,
+    ghlMediaUploadRecorded: false,
+  };
+  if (!deckArtifactPath) return absent;
+
+  // Locate the run dir: walk up from the artifact's directory looking for a
+  // `working/` subtree (or a media_library.json) within a bounded number of
+  // parent hops, so we never escape to the filesystem root.
+  let dir = path.dirname(path.resolve(deckArtifactPath));
+  let runDir: string | null = null;
+  for (let hops = 0; hops < 6; hops++) {
+    try {
+      if (
+        existsSync(path.join(dir, 'working')) ||
+        existsSync(path.join(dir, 'media_library.json')) ||
+        existsSync(path.join(dir, 'working', 'checkpoints', 'media_library.json'))
+      ) {
+        runDir = dir;
+        break;
+      }
+    } catch {
+      /* ignore unreadable dir, keep walking up */
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // reached filesystem root
+    dir = parent;
+  }
+  if (!runDir) return absent;
+
+  const working = path.join(runDir, 'working');
+
+  // (1) Completed research brief: any working/research/brief-*.md whose content
+  //     carries a research_complete:true marker.
+  let researchBriefComplete = false;
+  try {
+    const researchDir = path.join(working, 'research');
+    if (existsSync(researchDir)) {
+      for (const f of readdirSync(researchDir)) {
+        if (/^brief-.*\.md$/i.test(f)) {
+          try {
+            const body = readFileSync(path.join(researchDir, f), 'utf8');
+            // tolerate whitespace / quoting variants: research_complete: true
+            if (/research_complete["']?\s*[:=]\s*true/i.test(body)) {
+              researchBriefComplete = true;
+              break;
+            }
+          } catch { /* unreadable file — keep scanning */ }
+        }
+      }
+    }
+  } catch { /* no research dir */ }
+
+  // (2) Copy or image QC log present.
+  let qcLogPresent = false;
+  try {
+    const qcDir = path.join(working, 'qc');
+    qcLogPresent =
+      existsSync(path.join(qcDir, 'copy_qc_report.json')) ||
+      existsSync(path.join(qcDir, 'image_qc_report.json'));
+  } catch { /* no qc dir */ }
+
+  // (3) GHL media-upload record: media_library.json carrying a non-null/non-empty
+  //     ghl_media_id and/or ghl_folder_id. Check both the checkpoint location and
+  //     the run-dir root.
+  let ghlMediaUploadRecorded = false;
+  const mediaLibCandidates = [
+    path.join(working, 'checkpoints', 'media_library.json'),
+    path.join(runDir, 'media_library.json'),
+  ];
+  for (const candidate of mediaLibCandidates) {
+    try {
+      if (!existsSync(candidate)) continue;
+      const raw = readFileSync(candidate, 'utf8');
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (hasGhlUpload(parsed)) {
+        ghlMediaUploadRecorded = true;
+        break;
+      }
+    } catch { /* missing/malformed media_library.json — treated as absent */ }
+  }
+
+  return { researchBriefComplete, qcLogPresent, ghlMediaUploadRecorded };
+}
+
+/**
+ * True when a parsed media_library.json proves a GHL upload happened: a
+ * top-level ghl_folder_id, or any ghl_media_id anywhere in the structure
+ * (including the per-slide records array). A seed value of null / "" does NOT
+ * count (that is the unset placeholder Media Librarian SOP 9.1 writes at Step 0).
+ */
+function hasGhlUpload(obj: unknown): boolean {
+  if (obj === null || typeof obj !== 'object') return false;
+  const rec = obj as Record<string, unknown>;
+  const nonEmpty = (v: unknown): boolean =>
+    v !== null && v !== undefined && v !== '' && !(typeof v === 'string' && v.trim() === '');
+  if (nonEmpty(rec.ghl_folder_id) || nonEmpty(rec.ghl_media_id)) return true;
+  // Recurse one level into arrays / nested objects (per-slide upload records).
+  for (const value of Object.values(rec)) {
+    if (Array.isArray(value)) {
+      if (value.some((item) => hasGhlUpload(item))) return true;
+    } else if (value !== null && typeof value === 'object') {
+      if (hasGhlUpload(value)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Evaluate acceptance criteria against actual file deliverables.
  *
@@ -1645,6 +1887,40 @@ export async function evaluateCriteria(
             reason: cmp.pass
               ? cmp.explanation
               : `${cmp.explanation} (slide(s) read: ${ocr.slidesRead}).`,
+          });
+        }
+        break;
+      }
+
+      case 'pipeline_complete': {
+        // AF-PIPELINE-COMPLETE pipeline-completeness gate (v4.48.0). FAIL-CLOSED,
+        // no vision call: a pure filesystem-presence check that the deck went
+        // through the real Presentations pipeline (research → copy/image QC →
+        // media-librarian GHL upload). Resolve the run dir from the FIRST deck
+        // artifact (.pptx/.pdf preferred, else any valid artifact) and collect
+        // the three required records. Absent records ⇒ the deck is NOT done.
+        const deckItem =
+          manifest.find(
+            (m) => m.valid && m.path && /\.(pptx|pdf|key)$/i.test(m.path),
+          ) ?? manifest.find((m) => m.valid && m.path);
+        if (!deckItem?.path) {
+          // No locatable artifact path to anchor the run-dir search → block.
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-PIPELINE-COMPLETE FAIL-CLOSED: no deck artifact path available to locate the pipeline run dir. ' +
+              'Cannot prove the deck went through research / QC / GHL-upload — the deck is NOT done.',
+          });
+        } else {
+          const records = collectPipelineRecords(deckItem.path);
+          const cmp = checkPipelineCompleteness(records);
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: cmp.pass,
+            reason: cmp.pass ? cmp.explanation : `${cmp.explanation} (run dir resolved from: ${deckItem.path}).`,
           });
         }
         break;
