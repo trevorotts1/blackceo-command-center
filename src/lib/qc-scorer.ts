@@ -45,13 +45,210 @@
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
-import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
+import * as path from 'path';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { getMissionControlUrl } from '@/lib/config';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { notifyOwner } from '@/lib/notify';
+
+// ---------------------------------------------------------------------------
+// AF-I14 — KIE.ai image-path guardrail for Presentations department
+//
+// Mandate: the dept-presentations runtime MUST generate all slide images via
+// scripts/kie_generate.py (KIE.ai gpt-image-2 endpoint). Using the native
+// image_generate tool (openai-image-gen skill, OpenAI DALL·E endpoint) is:
+//   (a) a sovereignty leak — uses the operator's OpenAI key instead of the
+//       client's KIE.ai key; and
+//   (b) a mandate violation — the dead endpoint /api/v1/image/gpt-image
+//       returns HTTP 404 and images are silently absent.
+//
+// This guardrail reads the exec trace (OpenClaw session .jsonl files) for the
+// task and auto-fails the image phase with a named violation gap if:
+//   VIOLATION-A: the native `image_generate` tool was called in any message
+//   VIOLATION-B: the dead endpoint `/api/v1/image/gpt-image` appears in any
+//                exec output, assistant text, or tool result
+//   VIOLATION-C: neither `kie_generate.py` nor `createTask` (KIE.ai submit
+//                endpoint) appear anywhere in the session trace — images were
+//                not generated via the mandated script at all
+//
+// Session trace lookup order:
+//   1. openclaw_sessions table: rows WHERE task_id = taskId AND agent_id
+//      resolves to 'dept-presentations', ordered by created_at DESC — pick
+//      the most recent openclaw_session_id.
+//   2. Filesystem: ~/.openclaw/agents/dept-presentations/sessions/<id>.jsonl
+//      Scan each line (JSON) for tool_use blocks, exec outputs, text content.
+//   3. If no session trace found: skip guardrail (cannot penalise absence of
+//      evidence; the deny config already blocks image_generate at the tool
+//      layer from this point forward).
+//
+// Auto-fail result carries scoringPath='llm' so the reroute loop fires and
+// the gap notes tell the agent exactly which violation to fix.
+// ---------------------------------------------------------------------------
+
+/** Departments where the AF-I14 guardrail applies. */
+const AF_I14_DEPTS = new Set(['presentations', 'dept-presentations']);
+
+/** Agent IDs that trigger the guardrail (canonical and full form). */
+const AF_I14_AGENT_IDS = new Set(['dept-presentations']);
+
+/**
+ * Read and concatenate all text content from an OpenClaw session .jsonl file.
+ * Returns the full concatenated text of all lines, lowercased.
+ * Returns empty string if the file does not exist or cannot be read.
+ */
+function readSessionTrace(sessionId: string): string {
+  const sessionDir = path.join(
+    process.env.HOME || '~',
+    '.openclaw',
+    'agents',
+    'dept-presentations',
+    'sessions',
+  );
+  const filePath = path.join(sessionDir, `${sessionId}.jsonl`);
+  if (!existsSync(filePath)) return '';
+  try {
+    return readFileSync(filePath, 'utf8').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * AF-I14 guardrail result.
+ * When `violated` is true, `violations` lists the specific AF-I14 sub-rules
+ * that were breached. The caller should auto-fail with these as gaps.
+ */
+export interface AF_I14Result {
+  violated: boolean;
+  violations: string[];
+  /** The session ID that was scanned (for audit trail). */
+  sessionId: string | null;
+  /** Whether a session trace was found and scanned. */
+  traceFound: boolean;
+}
+
+/**
+ * Run the AF-I14 guardrail for a Presentations department task.
+ *
+ * Looks up the most recent session trace for the task, scans it for
+ * VIOLATION-A (native image_generate tool used), VIOLATION-B (dead endpoint
+ * called), and VIOLATION-C (kie_generate.py never invoked).
+ *
+ * ONLY called when the task's department or assigned agent is presentations.
+ * Safe to call on any task — returns { violated: false } if not applicable.
+ */
+export function runAFI14Guardrail(taskId: string, agentId: string | null, department: string | null): AF_I14Result {
+  const notViolated: AF_I14Result = { violated: false, violations: [], sessionId: null, traceFound: false };
+
+  // Only apply to presentations department tasks
+  const dept = department ? canonicalDeptSlug(department) || department.toLowerCase() : null;
+  const isPresTask = dept ? AF_I14_DEPTS.has(dept) : false;
+  const isPresAgent = agentId ? AF_I14_AGENT_IDS.has(agentId) : false;
+  if (!isPresTask && !isPresAgent) return notViolated;
+
+  // Lookup most-recent session for this task
+  let sessionId: string | null = null;
+  try {
+    // Check if openclaw_sessions table exists
+    const tables = queryAll<{ name: string }>(`SELECT name FROM sqlite_master WHERE type='table' AND name='openclaw_sessions'`, []);
+    if (tables.length > 0) {
+      const row = queryOne<{ openclaw_session_id: string }>(
+        `SELECT openclaw_session_id FROM openclaw_sessions
+         WHERE task_id = ?
+         ORDER BY created_at DESC LIMIT 1`,
+        [taskId],
+      );
+      sessionId = row?.openclaw_session_id ?? null;
+    }
+  } catch {
+    // Table might not exist — fall through
+  }
+
+  // If no session found via DB, try scanning the sessions directory directly
+  // for any .jsonl file containing the taskId string (best-effort).
+  if (!sessionId) {
+    try {
+      const sessionDir = path.join(
+        process.env.HOME || '~',
+        '.openclaw',
+        'agents',
+        'dept-presentations',
+        'sessions',
+      );
+      if (existsSync(sessionDir)) {
+        const files = readdirSync(sessionDir).filter((f) => f.endsWith('.jsonl') && !f.includes('trajectory'));
+        for (const file of files) {
+          try {
+            const content = readFileSync(path.join(sessionDir, file), 'utf8');
+            if (content.includes(taskId)) {
+              sessionId = file.replace('.jsonl', '');
+              break;
+            }
+          } catch { /* skip unreadable */ }
+        }
+      }
+    } catch { /* skip directory scan error */ }
+  }
+
+  if (!sessionId) {
+    // No session trace found — cannot scan; skip guardrail.
+    // The tool-layer deny config (tools.deny:["image"]) blocks future violations.
+    return notViolated;
+  }
+
+  const trace = readSessionTrace(sessionId);
+  if (!trace) {
+    return { violated: false, violations: [], sessionId, traceFound: false };
+  }
+
+  const violations: string[] = [];
+
+  // VIOLATION-A: native image_generate tool was called
+  // In OpenClaw session .jsonl, tool calls appear as JSON objects with
+  // {"type":"tool_use","name":"image_generate",...} inside assistant message content.
+  if (trace.includes('"image_generate"') || trace.includes("'image_generate'") || trace.includes('image_generate')) {
+    violations.push(
+      'AF-I14 VIOLATION-A: native image_generate tool (openai-image-gen skill) was called. ' +
+      'This leaks the operator OpenAI key and bypasses the mandated KIE.ai pipeline. ' +
+      'Fix: use ONLY scripts/kie_generate.py for all image generation.',
+    );
+  }
+
+  // VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in trace
+  if (trace.includes('/api/v1/image/gpt-image')) {
+    violations.push(
+      'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in session trace. ' +
+      'This endpoint returns HTTP 404 — images were not generated. ' +
+      'Fix: use kie_generate.py which calls the live /api/v1/jobs/createTask endpoint.',
+    );
+  }
+
+  // VIOLATION-C: kie_generate.py was never invoked
+  // The script must appear via exec/shell calls. We check for both the script
+  // name and the live KIE.ai endpoint it calls.
+  const kiePresent =
+    trace.includes('kie_generate.py') ||
+    trace.includes('kie_generate') ||
+    trace.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
+    trace.includes('api.kie.ai');                   // KIE.ai domain
+  if (!kiePresent) {
+    violations.push(
+      'AF-I14 VIOLATION-C: kie_generate.py was not invoked and no KIE.ai API calls detected in session trace. ' +
+      'All presentation slide images MUST be generated via scripts/kie_generate.py. ' +
+      'Fix: shell out to python3 scripts/kie_generate.py <prompts.json> <renders_dir> for all slide images.',
+    );
+  }
+
+  return {
+    violated: violations.length > 0,
+    violations,
+    sessionId,
+    traceFound: true,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1210,6 +1407,53 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         [task.sop_id],
       ) ?? null;
     }
+
+    // ── AF-I14: KIE.ai image-path guardrail (Presentations department) ───────────
+    // Runs BEFORE artifact scoring. Auto-fails the image phase when the session
+    // trace shows the builder used the native image_generate tool (openai-image-gen
+    // skill) instead of the mandated kie_generate.py script, or called the dead
+    // endpoint /api/v1/image/gpt-image, or produced no KIE.ai API activity at all.
+    //
+    // This is a HARD FAIL with scoringPath='llm' so the reroute loop fires and
+    // the gaps tell the agent exactly which AF-I14 sub-rule was breached.
+    // The now-in-place tools.deny:["image"] on dept-presentations prevents
+    // VIOLATION-A going forward; this scorer catches historical violations that
+    // slipped through before the tool-layer fix was deployed.
+    const afi14 = runAFI14Guardrail(taskId, task.assigned_agent_id, task.department);
+    if (afi14.violated) {
+      const afi14Msg = `[QC-AF-I14] AF-I14 image-path guardrail FAIL — ${afi14.violations.length} violation(s) in session ${afi14.sessionId ?? 'unknown'}. Violations: ${afi14.violations.join(' | ')}`;
+      console.warn(`[QCScorer] Task "${task.title}" (${taskId}): AF-I14 violation — instant fail`);
+
+      const now = new Date().toISOString();
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+        [uuidv4(), 'qc_review', taskId, afi14Msg, now],
+      );
+
+      // Increment reroute counter and return task to backlog
+      const prevAttempts = task.qc_reroute_attempts ?? 0;
+      const newAttempts = prevAttempts + 1;
+      const kickbackNote = `[QC-AF-I14 FAIL] AF-I14 violations (attempt ${newAttempts}/${QC_MAX_REROUTES}): ${afi14.violations.join('; ')}`;
+      run(
+        `UPDATE tasks SET status = 'backlog',
+           description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
+           qc_reroute_attempts = ?, updated_at = ?
+         WHERE id = ? AND status = 'review'`,
+        [kickbackNote, kickbackNote, newAttempts, now, taskId],
+      );
+
+      return {
+        score: 1.0,
+        pass: false,
+        reason: `AF-I14 guardrail: ${afi14.violations.length} image-path mandate violation(s) detected in session trace.`,
+        gaps: afi14.violations,
+        scoringPath: 'llm',
+      };
+    }
+    if (afi14.traceFound) {
+      console.log(`[QCScorer] AF-I14 guardrail PASS for task "${task.title}" (session: ${afi14.sessionId ?? 'unknown'}) — KIE.ai path confirmed, no native image_generate calls detected`);
+    }
+    // ── End AF-I14 guardrail ──────────────────────────────────────────────────
 
     // ── Artifact-aware QC: build deliverable manifest (root-cause fix #10) ──────
     // Artifact-fulfillment is MANDATORY for artifact tasks.
