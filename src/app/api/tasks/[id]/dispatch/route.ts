@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import * as fs from 'fs';
+import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
@@ -9,6 +11,80 @@ import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
+
+const AGENTS_ROOT = path.join(
+  process.env.HOME ?? '/Users/blackceomacmini',
+  '.openclaw',
+  'agents',
+);
+
+/**
+ * FIX 1 — resolveSpecialistSessionKey (route handler copy)
+ *
+ * Maps an assigned specialist agent to its actual OpenClaw runtime key.
+ * Previously hardcoded to `agent:main:…`, which routes every dispatch to the
+ * CEO orchestrator (Stefanie) whose prompt forbids building — she re-ingests
+ * the task, causing an infinite loop.
+ *
+ * Resolution order:
+ *   1. workspace slug → ~/.openclaw/agents/<slug>/
+ *   2. role-derived slug → ~/.openclaw/agents/dept-<role>/
+ *   3. agent name slug → ~/.openclaw/agents/<name>/
+ *   4. Safe fallback: legacy agent:main key (logs a warning; no other dept breaks).
+ */
+function resolveSpecialistSessionKey(
+  agent: Agent,
+  openclawSessionId: string,
+  workspaceId: string | undefined,
+): string {
+  // Attempt 1: workspace slug.
+  if (workspaceId) {
+    try {
+      const ws = queryOne<{ slug: string }>(
+        'SELECT slug FROM workspaces WHERE id = ? LIMIT 1',
+        [workspaceId],
+      );
+      if (ws?.slug) {
+        const candidateSlug = ws.slug.toLowerCase();
+        if (fs.existsSync(path.join(AGENTS_ROOT, candidateSlug))) {
+          const key = `agent:${candidateSlug}:${openclawSessionId}`;
+          console.log(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → key ${key}`);
+          return key;
+        }
+        console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir — trying role slug`);
+      }
+    } catch (err) {
+      console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
+    }
+  }
+
+  // Attempt 2: role-derived slug.
+  if (agent.role) {
+    const roleSlug = `dept-${agent.role.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}`;
+    if (fs.existsSync(path.join(AGENTS_ROOT, roleSlug))) {
+      const key = `agent:${roleSlug}:${openclawSessionId}`;
+      console.log(`[Dispatch] resolveSpecialistSessionKey: role slug "${roleSlug}" → key ${key}`);
+      return key;
+    }
+  }
+
+  // Attempt 3: agent name slug.
+  const nameSlug = agent.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  if (nameSlug && fs.existsSync(path.join(AGENTS_ROOT, nameSlug))) {
+    const key = `agent:${nameSlug}:${openclawSessionId}`;
+    console.log(`[Dispatch] resolveSpecialistSessionKey: name slug "${nameSlug}" → key ${key}`);
+    return key;
+  }
+
+  // Safe fallback: keep legacy key; warn.
+  const fallbackKey = `agent:main:${openclawSessionId}`;
+  console.warn(
+    `[Dispatch] resolveSpecialistSessionKey: no specialist runtime found for agent "${agent.name}" ` +
+    `(workspace_id=${workspaceId ?? 'none'}) — falling back to ${fallbackKey}. ` +
+    `Add ~/.openclaw/agents/<dept-slug>/ to enable specialist routing.`,
+  );
+  return fallbackKey;
+}
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -111,10 +187,12 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       const sessionId = uuidv4();
       const openclawSessionId = `mission-control-${agent.name.toLowerCase().replace(/\s+/g, '-')}`;
       
+      // FIX 2: bind task_id so completion webhook / execution-reconcile can attribute the turn.
+      // The task_id column + idx_openclaw_sessions_task index already exist in schema.ts:213/360.
       run(
-        `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [sessionId, agent.id, openclawSessionId, 'mission-control', 'active', now, now]
+        `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, task_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, agent.id, openclawSessionId, 'mission-control', 'active', id, now, now]
       );
 
       session = queryOne<OpenClawSession>(
@@ -273,9 +351,11 @@ If you need help or clarification, ask the orchestrator.`;
     // as the INTENDED model (see the 🤖 pill relabel in MissionQueue). We do
     // NOT claim it is the model that actually ran.
     try {
-      // Use sessionKey for routing to the agent's session
-      // Format: agent:main:{openclaw_session_id}
-      const sessionKey = `agent:main:${session.openclaw_session_id}`;
+      // FIX 1: resolve the specialist's actual OpenClaw runtime key.
+      // Previously hardcoded to agent:main which always hit the CEO orchestrator
+      // (Stefanie), whose prompt forbids building — she re-ingested the task,
+      // causing an infinite CEO→ingest→CEO loop with zero artifacts produced.
+      const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id);
       await client.call('chat.send', {
         sessionKey,
         message: taskMessage,
