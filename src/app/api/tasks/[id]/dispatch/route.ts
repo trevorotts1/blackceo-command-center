@@ -5,6 +5,8 @@ import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
+import { listModels } from '@/lib/model-registry';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
@@ -141,7 +143,34 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
-    console.log(`[Dispatch] Task ${task.id} → Agent "${agent.name}" | model=${settings.model} (${settings.modelSource}) | persona=${settings.persona} (${settings.personaSource}) | specialist=${specialistType}`);
+    const dispatchInventory = listModels();
+    const dispatchModality = settings.required_modality ??
+      detectModality(task.title, task.description);
+    const sovereigntyViolation = checkModelSovereignty(settings.model, dispatchInventory, dispatchModality);
+    if (sovereigntyViolation) {
+      const blockMsg =
+        `AF-MODEL-SOVEREIGNTY: model=${sovereigntyViolation.model_id ?? 'null'} ` +
+        `reason=${sovereigntyViolation.reason} modality=${sovereigntyViolation.required_modality ?? 'unknown'}`;
+      console.warn(`[Dispatch] BLOCKED task ${task.id}: ${blockMsg}`);
+      run(
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(), task.id, agent.id, 'af_model_sovereignty_block', blockMsg,
+          JSON.stringify(sovereigntyViolation), new Date().toISOString(),
+        ],
+      );
+      return NextResponse.json(
+        {
+          error: 'AF-MODEL-SOVEREIGNTY: no valid model resolved',
+          detail: sovereigntyViolation,
+          message: 'Assign a valid model to this agent or department before dispatching.',
+        },
+        { status: 422 },
+      );
+    }
+
+    console.log(`[Dispatch] Task ${task.id} → Agent "${agent.name}" | model=${settings.model} (${settings.modelSource}) | modality=${dispatchModality} | persona=${settings.persona} (${settings.personaSource}) | specialist=${specialistType}`);
     // --- END INTELLIGENCE RESOLUTION ---
 
     // --- SOP PULL (RC-1) ---

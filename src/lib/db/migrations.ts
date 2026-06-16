@@ -2693,6 +2693,51 @@ const migrations: Migration[] = [
       console.log('[Migration 072] blocked fields + last_progress_at ready');
     },
   },
+  {
+    id: '072',
+    name: 'intelligent_model_selector',
+    up: (db) => {
+      // Intelligent Model Selector — AF-MODEL-SOVEREIGNTY (PLAN.md §5, §7)
+      //
+      // 1. sops.model_pin TEXT  — SOP author's explicit model pin; wins over
+      //    the task-time selector in the precedence cascade.
+      // 2. agent_settings.dept_selector_model TEXT  — the last model the
+      //    task-time selector chose for this dept default slot; informational,
+      //    updated on each successful selector resolution.
+      // 3. Backfill dept defaults: any agent_settings row whose value is
+      //    'openrouter/free' or null has its value set to NULL so the resolver
+      //    falls through to the task-time selector instead of the rejected literal.
+      console.log('[Migration 072] Intelligent Model Selector schema...');
+
+      const sopCols = (db.prepare('PRAGMA table_info(sops)').all() as { name: string }[]).map((c) => c.name);
+      if (!sopCols.includes('model_pin')) {
+        db.exec(`ALTER TABLE sops ADD COLUMN model_pin TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_model_pin ON sops(model_pin) WHERE model_pin IS NOT NULL`);
+      }
+
+      // Backfill: purge 'openrouter/free' defaults so the selector takes over
+      db.exec(
+        `UPDATE agent_settings
+         SET value = NULL
+         WHERE setting_type = 'model'
+           AND (value = 'openrouter/free' OR value = '' OR value IS NULL)`,
+      );
+      // Delete the NULL rows — a NULL model value row is useless and confusing
+      db.exec(
+        `DELETE FROM agent_settings
+         WHERE setting_type = 'model' AND (value IS NULL OR value = '')`,
+      );
+
+      // tasks.model_id: clear out any existing 'openrouter/free' pins so they
+      // are re-resolved by the selector on next dispatch.
+      const taskCols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (taskCols.includes('model_id')) {
+        db.exec(`UPDATE tasks SET model_id = NULL WHERE model_id = 'openrouter/free'`);
+      }
+
+      console.log('[Migration 072] Intelligent Model Selector schema ready');
+    },
+  },
 ];
 
 /**

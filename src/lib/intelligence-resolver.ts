@@ -3,10 +3,13 @@
  *
  * Resolves which model and persona should be used for a given agent + department.
  *
- * MODEL resolution order:
- *   1. Role-level override in agent_settings (role_id = agent.id)
- *   2. Department-level default in agent_settings (role_id IS NULL)
- *   3. Hardcoded default (DEFAULT_MODEL)
+ * MODEL resolution order (highest wins):
+ *   1. SOP pin — sops.model_pin for task.sop_id (explicit author intent)
+ *   2. Task-time selector — selectTaskModel() from model-selector.ts
+ *      (nature + difficulty + modality → cascade Ollama Cloud → OpenRouter OSS → Free)
+ *   3. Role-level override in agent_settings (role_id = agent.id)
+ *   4. Department-level default in agent_settings (role_id IS NULL)
+ *   5. needs_owner_input — NEVER 'openrouter/free'
  *
  * PERSONA resolution order (Hop 10 — bread-and-butter persona pipeline):
  *   1. Task-pinned persona (tasks.persona_id / tasks.persona_name written by
@@ -24,9 +27,20 @@
  * makes the choice at runtime based on task context.
  */
 
-import { queryOne, run } from '@/lib/db';
+import { queryOne, queryAll, run } from '@/lib/db';
+import { selectTaskModel, NEEDS_OWNER_INPUT, detectModality } from '@/lib/model-selector';
+import type { TaskModality } from '@/lib/model-selector';
+import type { ModelRegistryEntry } from '@/lib/model-registry-types';
 
-export const DEFAULT_MODEL = 'openrouter/free';
+/** Sentinel — returned when no valid model can be resolved without owner input. */
+export const NEEDS_OWNER_INPUT_SENTINEL = NEEDS_OWNER_INPUT;
+
+/**
+ * DEPRECATED SENTINEL — kept as a named constant so the AF-MODEL-SOVEREIGNTY gate
+ * can explicitly reject it. Never returned as a resolution result.
+ */
+export const REJECTED_FREE_DEFAULT = 'openrouter/free';
+
 export const DEFAULT_PERSONA = 'auto';
 
 export type PersonaSource =
@@ -36,17 +50,91 @@ export type PersonaSource =
   | 'department_default'
   | 'hardcoded_default';
 
+export type ModelSource =
+  | 'sop_pin'
+  | 'task_selector'
+  | 'role_override'
+  | 'department_default'
+  | 'needs_owner_input';
+
 export interface ResolvedSettings {
   model: string;
-  modelSource: 'role_override' | 'department_default' | 'hardcoded_default';
+  modelSource: ModelSource;
   persona: string;
   personaSource: PersonaSource;
   personaMode?: string | null;
   taskCategory?: string | null;
+  /** Modality the task-time selector determined for this dispatch. */
+  required_modality?: TaskModality | null;
+  /** Difficulty tier the selector classified. */
+  difficulty?: 'heavy' | 'mid' | 'fast' | null;
+  /** Selector tier that won (1=Ollama Cloud, 2=OpenRouter OSS, 3=Free). */
+  model_tier?: 1 | 2 | 3 | null;
 }
 
 interface AgentSettingRow {
   value: string;
+}
+
+interface SopPinRow {
+  model_pin: string | null;
+}
+
+interface TaskContextRow {
+  title: string;
+  description: string | null;
+  department: string | null;
+  sop_id: string | null;
+}
+
+interface ModelRegistryRow {
+  model_id: string;
+  provider: string;
+  family: string | null;
+  context_window: number | null;
+  input_cost_per_million: number | null;
+  output_cost_per_million: number | null;
+  pricing_model: string;
+  pricing_source: string;
+  capabilities: string;
+  status: string;
+  added_at: string;
+  last_seen_at: string;
+  raw_metadata: string;
+  label: string;
+  id: number;
+}
+
+function decodeRegistryRow(row: ModelRegistryRow): ModelRegistryEntry {
+  let capabilities: ModelRegistryEntry['capabilities'] = [];
+  try {
+    const parsed = JSON.parse(row.capabilities || '[]');
+    if (Array.isArray(parsed)) capabilities = parsed;
+  } catch { /* ignore */ }
+  let raw_metadata: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(row.raw_metadata || '{}');
+    if (parsed && typeof parsed === 'object') raw_metadata = parsed as Record<string, unknown>;
+  } catch { /* ignore */ }
+  return {
+    ...row,
+    pricing_model: row.pricing_model as ModelRegistryEntry['pricing_model'],
+    status: row.status as ModelRegistryEntry['status'],
+    capabilities,
+    raw_metadata,
+  };
+}
+
+/** Load all active models from the registry, available for selection. */
+function loadInventory(): ModelRegistryEntry[] {
+  try {
+    const rows = queryAll<ModelRegistryRow>(
+      `SELECT * FROM model_registry WHERE status = 'active' ORDER BY provider ASC, label ASC`,
+    );
+    return rows.map(decodeRegistryRow);
+  } catch {
+    return [];
+  }
 }
 
 interface TaskPersonaRow {
@@ -79,27 +167,89 @@ export function resolveSettings(
   departmentId: string,
   taskId?: string
 ): ResolvedSettings {
-  // --- MODEL RESOLUTION ---
-  // 1. Check role-level override
-  const roleModel = queryOne<AgentSettingRow>(
-    `SELECT value FROM agent_settings
-     WHERE department_id = ? AND role_id = ? AND setting_type = 'model'`,
-    [departmentId, agentId]
-  );
+  // ── MODEL RESOLUTION (5-layer precedence) ──────────────────────────────────
 
-  // 2. Check department-level default
-  const deptModel = queryOne<AgentSettingRow>(
-    `SELECT value FROM agent_settings
-     WHERE department_id = ? AND role_id IS NULL AND setting_type = 'model'`,
-    [departmentId]
-  );
+  // Load task context for selector and SOP-pin lookup.
+  let taskContext: TaskContextRow | null = null;
+  if (taskId) {
+    try {
+      taskContext = queryOne<TaskContextRow>(
+        `SELECT title, description, department, sop_id FROM tasks WHERE id = ?`,
+        [taskId],
+      ) ?? null;
+    } catch { /* tolerant of old DBs */ }
+  }
 
-  const model = roleModel?.value || deptModel?.value || DEFAULT_MODEL;
-  const modelSource = roleModel
-    ? 'role_override'
-    : deptModel
-      ? 'department_default'
-      : 'hardcoded_default';
+  let model: string = NEEDS_OWNER_INPUT;
+  let modelSource: ModelSource = 'needs_owner_input';
+  let required_modality: TaskModality | null = null;
+  let difficulty: 'heavy' | 'mid' | 'fast' | null = null;
+  let model_tier: 1 | 2 | 3 | null = null;
+
+  // Layer 1: SOP pin — sops.model_pin for task.sop_id (author intent wins)
+  const sopId = taskContext?.sop_id ?? null;
+  if (sopId) {
+    try {
+      const sopPin = queryOne<SopPinRow>(
+        `SELECT model_pin FROM sops WHERE id = ? AND deleted_at IS NULL`,
+        [sopId],
+      );
+      if (sopPin?.model_pin) {
+        model = sopPin.model_pin;
+        modelSource = 'sop_pin';
+      }
+    } catch { /* sops.model_pin column may not exist on older DBs yet */ }
+  }
+
+  // Layer 2: Task-time selector (skipped if SOP pin already won)
+  if (modelSource === 'needs_owner_input' && taskContext) {
+    const inventory = loadInventory();
+    if (inventory.length > 0) {
+      const sel = selectTaskModel({
+        title: taskContext.title,
+        description: taskContext.description,
+        department: taskContext.department,
+        inventory,
+      });
+      if (!sel.needs_owner_input && sel.model_id !== NEEDS_OWNER_INPUT) {
+        model = sel.model_id as string;
+        modelSource = 'task_selector';
+        required_modality = sel.required_modality;
+        difficulty = sel.difficulty;
+        model_tier = sel.tier;
+      }
+    }
+  } else if (modelSource === 'needs_owner_input' && taskId && !taskContext) {
+    // No task context available — fall through to role/dept overrides below.
+  }
+
+  // Layer 3: Role-level override in agent_settings
+  if (modelSource === 'needs_owner_input') {
+    const roleModel = queryOne<AgentSettingRow>(
+      `SELECT value FROM agent_settings
+       WHERE department_id = ? AND role_id = ? AND setting_type = 'model'`,
+      [departmentId, agentId],
+    );
+    if (roleModel?.value && roleModel.value !== REJECTED_FREE_DEFAULT) {
+      model = roleModel.value;
+      modelSource = 'role_override';
+    }
+  }
+
+  // Layer 4: Department-level default in agent_settings
+  if (modelSource === 'needs_owner_input') {
+    const deptModel = queryOne<AgentSettingRow>(
+      `SELECT value FROM agent_settings
+       WHERE department_id = ? AND role_id IS NULL AND setting_type = 'model'`,
+      [departmentId],
+    );
+    if (deptModel?.value && deptModel.value !== REJECTED_FREE_DEFAULT) {
+      model = deptModel.value;
+      modelSource = 'department_default';
+    }
+  }
+
+  // Layer 5: needs_owner_input (model stays NEEDS_OWNER_INPUT — NEVER openrouter/free)
 
   // --- PERSONA RESOLUTION ---
   // Hop 10 Step 1: task-pinned persona (written by persona-selector-v2.py to
@@ -124,6 +274,9 @@ export function resolveSettings(
       personaSource: 'task_pinned',
       personaMode: taskPin.persona_mode ?? null,
       taskCategory: null,
+      required_modality: required_modality ?? null,
+      difficulty: difficulty ?? null,
+      model_tier: model_tier ?? null,
     };
   }
 
@@ -170,6 +323,9 @@ export function resolveSettings(
       personaSource: 'sticky_assignment',
       personaMode: stickyAssignment.persona_mode ?? null,
       taskCategory: stickyCategory,
+      required_modality: required_modality ?? null,
+      difficulty: difficulty ?? null,
+      model_tier: model_tier ?? null,
     };
   }
 
@@ -193,7 +349,17 @@ export function resolveSettings(
       ? 'department_default'
       : 'hardcoded_default';
 
-  return { model, modelSource, persona, personaSource, personaMode: null, taskCategory: null };
+  return {
+    model,
+    modelSource,
+    persona,
+    personaSource,
+    personaMode: null,
+    taskCategory: null,
+    required_modality: required_modality ?? null,
+    difficulty: difficulty ?? null,
+    model_tier: model_tier ?? null,
+  };
 }
 
 /**
@@ -226,9 +392,19 @@ export function logDispatchResolution(
       ? 'auto-select (no explicit persona)'
       : settings.persona;
 
+  const tierLabel = settings.model_tier === 1
+    ? 'Tier1-OllamaCloud'
+    : settings.model_tier === 2
+      ? 'Tier2-OpenRouterOSS'
+      : settings.model_tier === 3
+        ? 'Tier3-Free'
+        : null;
+
   const message =
-    `Dispatch resolution: model=${settings.model} (${settings.modelSource}), ` +
-    `persona=${personaDesc} (${settings.personaSource})`;
+    `Dispatch resolution: model=${settings.model} (${settings.modelSource}${tierLabel ? '/' + tierLabel : ''}), ` +
+    `persona=${personaDesc} (${settings.personaSource})` +
+    (settings.required_modality ? `, modality=${settings.required_modality}` : '') +
+    (settings.difficulty ? `, difficulty=${settings.difficulty}` : '');
 
   run(
     `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata)
@@ -242,6 +418,9 @@ export function logDispatchResolution(
       JSON.stringify({
         model: settings.model,
         modelSource: settings.modelSource,
+        model_tier: settings.model_tier ?? null,
+        required_modality: settings.required_modality ?? null,
+        difficulty: settings.difficulty ?? null,
         persona: settings.persona,
         personaSource: settings.personaSource,
         personaMode: settings.personaMode ?? null,
