@@ -1,3 +1,16 @@
+## [v4.41.0] — 2026-06-15 — feat(model-sovereignty): AF-MODEL-SOVEREIGNTY gate + Intelligent Model Selector + unit tests
+
+Kills `openrouter/free` as the hardcoded DEFAULT_MODEL. Replaces with a 5-layer
+resolution cascade ending in `needs_owner_input` (fail-loud, never a free model).
+Adds checkModelSovereignty gate in task-dispatcher + dispatch/route. Adds
+migration 072 (sops.model_pin) and repair-model-defaults.ts script. Adds 15-test
+af-model-sovereignty.test.ts covering box-primary resolution, fail-loud on
+unresolved, and full gate coverage for null/free/forbidden/needs_owner_input cases.
+
+## [v4.40.0] — 2026-06-15 — fix(qc): artifact-mandatory invariant — zero-deliverable return-to-orchestrator
+
+## [v4.39.0] — 2026-06-15 — feat(blocked-gate): enforce Blocked=human-only via API gate + stale sweep
+
 ## [v4.38.0] — 2026-06-11 — docs(skill44): crosslink convert-and-flow-agent how-to
 
 ## [v4.37.0] — 2026-06-11 — fix(b3+b4): branding seed guard (never Default over configured client) + DATABASE_PATH ecosystem template
