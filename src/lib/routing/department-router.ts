@@ -148,11 +148,22 @@ function loadPenalty(activeTasks: number): number {
 
 /**
  * Stopword tokens that must NOT count as a department-name match — they are
- * too generic and appear in many department names (e.g. "Production",
- * "Management", "Team", "/"). A bare "production" in the task text should not
- * pull a task into "Video Production".
+ * too generic and appear in many department names or in ordinary task text.
+ *
+ * Three categories:
+ *   1. Generic dept-name suffixes ("Production", "Management", "Team", "/")
+ *      — a bare "production" in the task text must not pull a task into
+ *      "Video Production".
+ *   2. Words that recur across MULTIPLE canonical departments ("development"
+ *      is in both Web Development AND App Development → ambiguous tie).
+ *   3. Extremely common English words that double as a dept-name token but
+ *      appear constantly in unrelated task text ("client" is the name token
+ *      of "Client Coaches" yet shows up in "update the client records",
+ *      "send the client brief", etc. — without this guard a weight-2 bonus
+ *      would steal Sales/CRM tasks on thin keyword inputs).
  */
 const NAME_TOKEN_STOPWORDS = new Set([
+  // Category 1 — generic dept-name suffixes / connectors
   'production',
   'management',
   'team',
@@ -168,6 +179,14 @@ const NAME_TOKEN_STOPWORDS = new Set([
   'lab',
   'studio',
   'specialist',
+  // Category 2 — shared across multiple canonical departments
+  'development',
+  // Category 3 — too common in ordinary task text to be a reliable signal
+  'client',
+  'coaches',
+  'creator',
+  'support',
+  'service',
 ]);
 
 /**

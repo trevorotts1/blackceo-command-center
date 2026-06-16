@@ -66,6 +66,10 @@ const WS = {
   video: { id: `ws-video-${RUN_ID}`, slug: 'video', name: 'Video Production' },
   sales: { id: `ws-sales-${RUN_ID}`, slug: 'sales', name: 'Sales' },
   finance: { id: `ws-fin-${RUN_ID}`, slug: 'billing-finance', name: 'Billing / Finance' },
+  // Client Coaches is seeded specifically to guard against the name-token
+  // false positive: its name token "client" must NOT win on a Sales task that
+  // merely mentions "client" (stopword-protected).
+  clientCoaches: { id: `ws-cc-${RUN_ID}`, slug: 'client-coaches', name: 'Client Coaches' },
   general: { id: `ws-gen-${RUN_ID}`, slug: 'general-task', name: 'General Task' },
 };
 
@@ -106,6 +110,7 @@ test.before(async () => {
     { id: `ag-video-${RUN_ID}`, name: 'Editor', role: 'Video Editor', ws: WS.video.id, master: 0 },
     { id: `ag-sales-${RUN_ID}`, name: 'Closer', role: 'Sales Agent', ws: WS.sales.id, master: 0 },
     { id: `ag-fin-${RUN_ID}`, name: 'Biller', role: 'Billing Agent', ws: WS.finance.id, master: 0 },
+    { id: `ag-cc-${RUN_ID}`, name: 'Coach', role: 'Client Coach', ws: WS.clientCoaches.id, master: 0 },
     { id: `ag-gen-${RUN_ID}`, name: 'Generalist', role: 'Head of General Task', ws: WS.general.id, master: 0 },
   ];
   for (const a of agents) {
@@ -217,6 +222,26 @@ test('bare deck task with buggy workspace_id="default" scope still routes to Pre
     r!.department,
     'Presentations',
     `Expected Presentations even with default scope, got "${r!.department}" (reason: ${r!.reason})`,
+  );
+});
+
+// ── Test 7b: "client" name-token must NOT steal Sales/CRM tasks ───────────────
+// Regression guard for the name-bonus feature: "Client Coaches" produces the
+// name token "client", an extremely common English word. A bare task that
+// merely mentions "client" (a Sales keyword) must NOT be pulled into Client
+// Coaches by a weight-2 name bonus. "client" is stopword-protected.
+test('bare "Follow up with the client about closing the deal" routes to Sales, not Client Coaches', async () => {
+  const r = await routeBare('Follow up with the client about closing the deal');
+  assert.ok(r !== null, 'routeTask must not return null');
+  assert.notEqual(
+    r!.department,
+    'Client Coaches',
+    `name-token "client" must NOT steal this task to Client Coaches (reason: ${r!.reason})`,
+  );
+  assert.equal(
+    r!.department,
+    'Sales',
+    `Expected Sales (client/close/deal/follow up keywords), got "${r!.department}" (reason: ${r!.reason})`,
   );
 });
 
