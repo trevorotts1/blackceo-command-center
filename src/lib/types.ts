@@ -124,6 +124,13 @@ export interface Task {
   dependencies: string[];
   parallel_candidates: string[];
   block_reason?: string;
+  // Block transparency fields (migration 073 / v4.44.0).
+  // Populated by the QC scorer when it caps the reroute loop and sets the task
+  // to `blocked`. The board renders these on the blocked card so the owner or
+  // system operator immediately sees WHY the task is stuck and what is needed.
+  block_gaps?: string | null;        // JSON-encoded string[] of the specific QC failure reasons
+  block_needs?: string | null;       // The single resolving action (human-readable)
+  block_audience?: 'OWNER' | 'SYSTEM' | null;  // Who must act: 'OWNER' = human; 'SYSTEM' = operator/system fix
   sprint?: string;
   department?: string;
   // Planning fields
@@ -417,6 +424,9 @@ export interface CreateTaskRequest {
   dependencies?: string[];
   parallel_candidates?: string[];
   block_reason?: string;
+  block_gaps?: string | null;
+  block_needs?: string | null;
+  block_audience?: 'OWNER' | 'SYSTEM' | null;
   sprint?: string;
   department?: string;
   workspace_id?: string;
