@@ -96,11 +96,19 @@ export interface AgentWithLoad extends Agent {
 /**
  * Fetch all non-offline agents enriched with their active task count.
  * The count is used as a load-balancing tiebreaker.
+ *
+ * IMPORTANT — name-agnostic routing invariant:
+ *   When `workspaceId` is supplied it is used ONLY as a soft pre-filter and
+ *   ONLY when that workspace actually has agents. If the requested workspace
+ *   has zero agents (e.g. the synthetic `'default'` bucket, or the CEO
+ *   workspace before any dept agents are seeded), we fall back to the FULL
+ *   agent roster across all workspaces so `comDispatch()` can still run its
+ *   keyword/semantic department resolution over the whole universe instead of
+ *   bailing to null. The passed workspace is a hint, never a hard gate that
+ *   blanks out routing.
  */
 function fetchAgentsWithLoad(workspaceId?: string): AgentWithLoad[] {
-  const params: unknown[] = [];
-
-  let sql = `
+  const baseSql = `
     SELECT
       a.*,
       COUNT(t.id) AS active_tasks
@@ -110,15 +118,20 @@ function fetchAgentsWithLoad(workspaceId?: string): AgentWithLoad[] {
       AND t.status = 'in_progress'
     WHERE a.status != 'offline'
   `;
+  const groupOrder = " GROUP BY a.id ORDER BY a.is_master DESC, a.name ASC";
 
   if (workspaceId) {
-    sql += ' AND a.workspace_id = ?';
-    params.push(workspaceId);
+    const scoped = queryAll<AgentWithLoad>(
+      baseSql + ' AND a.workspace_id = ?' + groupOrder,
+      [workspaceId],
+    );
+    // Only honour the scoped pre-filter when it actually has agents. A
+    // zero-agent workspace must NOT short-circuit routing — fall through to
+    // the full roster so the engine routes across all departments.
+    if (scoped.length > 0) return scoped;
   }
 
-  sql += ' GROUP BY a.id ORDER BY a.is_master DESC, a.name ASC';
-
-  return queryAll<AgentWithLoad>(sql, params);
+  return queryAll<AgentWithLoad>(baseSql + groupOrder, []);
 }
 
 /**
@@ -134,14 +147,87 @@ function loadPenalty(activeTasks: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Score how well a text (title + description) matches a department's keywords.
- * Returns a raw count of keyword hits. Partial matches count (indexOf).
+ * Stopword tokens that must NOT count as a department-name match — they are
+ * too generic and appear in many department names or in ordinary task text.
+ *
+ * Three categories:
+ *   1. Generic dept-name suffixes ("Production", "Management", "Team", "/")
+ *      — a bare "production" in the task text must not pull a task into
+ *      "Video Production".
+ *   2. Words that recur across MULTIPLE canonical departments ("development"
+ *      is in both Web Development AND App Development → ambiguous tie).
+ *   3. Extremely common English words that double as a dept-name token but
+ *      appear constantly in unrelated task text ("client" is the name token
+ *      of "Client Coaches" yet shows up in "update the client records",
+ *      "send the client brief", etc. — without this guard a weight-2 bonus
+ *      would steal Sales/CRM tasks on thin keyword inputs).
  */
-function keywordScore(text: string, keywords: string[]): number {
+const NAME_TOKEN_STOPWORDS = new Set([
+  // Category 1 — generic dept-name suffixes / connectors
+  'production',
+  'management',
+  'team',
+  'department',
+  'dept',
+  'and',
+  'or',
+  'the',
+  'of',
+  'general',
+  'task',
+  'engine',
+  'lab',
+  'studio',
+  'specialist',
+  // Category 2 — shared across multiple canonical departments
+  'development',
+  // Category 3 — too common in ordinary task text to be a reliable signal
+  'client',
+  'coaches',
+  'creator',
+  'support',
+  'service',
+]);
+
+/**
+ * Score how well a text (title + description) matches a department.
+ *
+ * Two signals are combined:
+ *   1. Keyword hits — each configured keyword found in the text counts 1.
+ *   2. Department-NAME-token hits — when a meaningful token of the dept's own
+ *      display name (e.g. "sales", "video", "presentations") appears in the
+ *      text, that is the single strongest possible department signal, so it
+ *      counts 2 (stronger than a generic shared keyword). This resolves
+ *      keyword-overlap ambiguity: "cold SALES outreach email sequence" must
+ *      route to Sales even though it incidentally contains Marketing keywords
+ *      ("email", "outreach"). Stopword tokens are excluded so generic words
+ *      like "Production"/"Management" never pull a task in.
+ *
+ * Returns a raw weighted hit count. Partial substring matches count (includes).
+ */
+function keywordScore(text: string, keywords: string[], deptName?: string): number {
   const lower = text.toLowerCase();
-  return keywords.reduce((count, kw) => {
+
+  const kwHits = keywords.reduce((count, kw) => {
     return lower.includes(kw.toLowerCase()) ? count + 1 : count;
   }, 0);
+
+  let nameBonus = 0;
+  if (deptName) {
+    const nameTokens = deptName
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((tok) => tok.length >= 3 && !NAME_TOKEN_STOPWORDS.has(tok));
+    // Tokenize the task text on word boundaries and match whole words only, so
+    // a dept-name token like "some" does NOT match "something" (substring) —
+    // that false positive would wrongly pull unrelated tasks into a dept.
+    const textWords = new Set(lower.split(/[^a-z0-9]+/).filter(Boolean));
+    for (const tok of nameTokens) {
+      if (textWords.has(tok)) nameBonus += 2;
+    }
+  }
+
+  return kwHits + nameBonus;
 }
 
 /**
@@ -189,7 +275,7 @@ function rankDepartments(
   return departments
     .map((dept) => ({
       department: dept,
-      score: keywordScore(text, dept.keywords) * urgency * (dept.priority / 10),
+      score: keywordScore(text, dept.keywords, dept.name) * urgency * (dept.priority / 10),
     }))
     .filter((d) => d.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -492,7 +578,15 @@ export async function comDispatch(
   // General Task is priority-1 / empty-keywords so it NEVER wins in steps 2–3
   // on merit. This is the ONLY path that routes to it.
   const generalTaskDept = departments.find(
-    (d) => canonicalDeptSlug(d.id) === 'general-task' || d.id === 'general-task',
+    (d) =>
+      canonicalDeptSlug(d.id) === 'general-task' ||
+      d.id === 'general-task' ||
+      // Name-agnostic safety net: when departments are loaded from the
+      // workspaces table the dept `id` is the workspace's row id (which may be
+      // a UUID or a client-specific scheme that doesn't canonicalize to
+      // 'general-task'). The display name is the reliable signal, so also match
+      // on the canonical 'General Task' name.
+      d.name.trim().toLowerCase() === 'general task',
   );
   if (generalTaskDept) {
     const agent = pickBestAgent(agents, generalTaskDept);
@@ -552,10 +646,17 @@ export async function routeTask(
   },
 ): Promise<RoutingResult | null> {
   const departments = loadDepartments();
+  // The passed workspace_id is at most a HINT. fetchAgentsWithLoad() only
+  // honours it as a pre-filter when that workspace has agents; otherwise it
+  // returns the FULL roster so comDispatch can run keyword/semantic resolution
+  // across ALL departments. This is the fix for bare-task routing: a scoped
+  // workspace with zero agents (e.g. 'default' / unseeded CEO) must fall
+  // through to full routing, NOT short-circuit to null.
   const agents = fetchAgentsWithLoad(task.workspace_id ?? undefined);
 
   if (agents.length === 0) {
-    console.warn('[DepartmentRouter] No available agents found');
+    // Genuinely degenerate: the install has NO non-offline agents anywhere.
+    console.warn('[DepartmentRouter] No available agents found in any workspace');
     return null;
   }
 
