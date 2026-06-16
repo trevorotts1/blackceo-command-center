@@ -1,3 +1,12 @@
+## [v4.43.0] — 2026-06-15 — feat(model-sovereignty): AF-MODEL-SOVEREIGNTY gate + Intelligent Model Selector — kill openrouter/free default
+
+Kills `openrouter/free` as the hardcoded DEFAULT_MODEL. Replaces with a 5-layer
+resolution cascade: SOP pin → task-time selector → role override → dept default →
+needs_owner_input (fail-loud, never a free model). Adds checkModelSovereignty gate
+in dispatch/route blocking null/free/forbidden/wrong-modality. Migration 072 adds
+sops.model_pin. repair-model-defaults.ts repairs existing boxes. 15-test
+af-model-sovereignty unit suite covers box-primary resolution and fail-loud path.
+
 ## [v4.42.1] — 2026-06-15 — fix(routing): bare tasks no longer trapped in General Task — full-universe routing, zero-agent-workspace no longer short-circuits
 
 ### What changed
