@@ -8,7 +8,12 @@ import { openclawConfigPath } from '@/lib/platform';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const DEFAULT_MODEL = 'openrouter/free';
+/**
+ * No default model — model resolution must come from agent_settings or the
+ * task-time selector (AF-MODEL-SOVEREIGNTY). Returning null here forces the UI
+ * to show "not configured" rather than silently falling back to a free model.
+ */
+const DEFAULT_MODEL = null;
 const DEFAULT_PERSONA = 'auto';
 
 /**

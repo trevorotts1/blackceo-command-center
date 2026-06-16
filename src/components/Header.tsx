@@ -12,8 +12,10 @@ import type { Workspace } from '@/lib/types';
 import { SystemStatusPill } from './SystemStatusPill';
 
 // --- AI Settings model & persona options ---
+// openrouter/free intentionally removed — AF-MODEL-SOVEREIGNTY forbids it as a default.
+// Available models are loaded dynamically from the model_registry via the intelligence API.
 const MODEL_OPTIONS = [
-  { value: 'openrouter/free', label: 'Free Models Router' },
+  { value: '', label: '— select a model —' },
   { value: 'moonshot/kimi-k2.5', label: 'Kimi K2.5' },
   { value: 'openrouter/xiaomi/mimo-v2-pro', label: 'MiMo V2 Pro' },
   { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet' },
@@ -46,7 +48,8 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
   // --- AI Settings panel state ---
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
-  const [aiModel, setAiModel] = useState('openrouter/free');
+  // Empty string = no model configured (AF-MODEL-SOVEREIGNTY: never default to openrouter/free).
+  const [aiModel, setAiModel] = useState('');
   const [aiPersona, setAiPersona] = useState('auto');
   const [aiSaving, setAiSaving] = useState(false);
   const [aiSaved, setAiSaved] = useState(false);
@@ -164,7 +167,9 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
             (d: { slug: string; model: string; persona: string }) => d.slug === workspace.slug
           );
           if (dept) {
-            setAiModel(dept.model || data.defaults?.model || 'openrouter/free');
+            // AF-MODEL-SOVEREIGNTY: never fall back to openrouter/free.
+            // If no model is configured, leave empty so the UI shows "not configured".
+            setAiModel(dept.model || data.defaults?.model || '');
             setAiPersona(dept.persona || data.defaults?.persona || 'auto');
           }
           // Load dynamic persona list from API
