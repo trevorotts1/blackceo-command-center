@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createHmac } from 'crypto';
 import { queryOne } from '@/lib/db';
 import { createTaskCore } from '@/lib/tasks';
+import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
 // queryOne is still used for workspace resolution below.
 
@@ -169,7 +170,70 @@ export async function POST(request: NextRequest) {
     // AND checks it before inserting.
     const dedupeKey = idempotencyKey || sourceRef;
 
-    const { workspaceId, resolvedBy } = resolveWorkspaceId(departmentSlug, persona);
+    let { workspaceId, resolvedBy } = resolveWorkspaceId(departmentSlug, persona);
+
+    // ── Auto-route bare tasks (no department_slug) ────────────────────────────
+    // When the caller does not supply a department_slug, run the keyword +
+    // semantic resolver (routeTask / comDispatch) against the task title and
+    // description so the task lands in the right workspace rather than always
+    // falling through to the CEO / default bucket.
+    //
+    // If routeTask() cannot resolve with confidence it returns null, and the
+    // behaviour introduced above (CEO / default fallback) is preserved exactly.
+    // Tagged-task behaviour (department_slug present) is unchanged — we skip
+    // this block entirely.
+    let resolvedDepartment: string | undefined = departmentSlug;
+    if (!departmentSlug) {
+      try {
+        const routing = await routeTask({
+          title,
+          // Use the raw description (without provenance block) for semantic
+          // routing — provenance lines would skew keyword/embedding scores.
+          description: description ?? '',
+          priority: priority ?? 'medium',
+          workspace_id: workspaceId,
+        });
+        if (routing) {
+          // Override the CEO/default workspace with the resolved department
+          // workspace so the task lands on the right Kanban column.
+          const resolvedWs = queryOne<{ id: string }>(
+            `SELECT id FROM workspaces
+              WHERE lower(name) = ? OR lower(slug) = ?
+              LIMIT 1`,
+            [routing.department.toLowerCase(), routing.department.toLowerCase()],
+          );
+          if (resolvedWs) {
+            workspaceId = resolvedWs.id;
+            resolvedBy = `auto-route:${routing.department}`;
+          }
+          resolvedDepartment = routing.department;
+          console.log(
+            `[INGEST] Auto-routed "${title}" → department "${routing.department}" (${routing.reason})`,
+          );
+        } else {
+          // routeTask returned null — no confident match; fall back to
+          // 'general-task' slug so the task is never left unrouted in backlog.
+          const generalWs = queryOne<{ id: string }>(
+            `SELECT id FROM workspaces
+              WHERE lower(slug) IN ('general-task', 'dept-general-task')
+                 OR lower(name) IN ('general task', 'general')
+              LIMIT 1`,
+            [],
+          );
+          if (generalWs) {
+            workspaceId = generalWs.id;
+            resolvedBy = 'auto-route:general-task-fallback';
+            resolvedDepartment = 'general-task';
+            console.log(`[INGEST] Auto-route returned null for "${title}" — falling back to general-task`);
+          } else {
+            console.log(`[INGEST] Auto-route returned null for "${title}" — no general-task workspace; keeping CEO/default fallback`);
+          }
+        }
+      } catch (routeErr) {
+        // Non-fatal: log and continue with the CEO/default workspace already resolved above.
+        console.warn('[INGEST] Auto-route failed (non-fatal), keeping CEO/default workspace:', (routeErr as Error).message);
+      }
+    }
 
     // Build a provenance-rich description so the source survives even though we
     // intentionally leave the agent FK columns NULL.
@@ -198,7 +262,7 @@ export async function POST(request: NextRequest) {
         assigned_agent_id: null,
         created_by_agent_id: null,
         workspace_id: workspaceId,
-        department: departmentSlug ?? null,
+        department: resolvedDepartment ?? null,
         eventMessage,
         // Pass idempotency key through so createTaskCore embeds it in the
         // task_created event AND checks it before writing a new row.
