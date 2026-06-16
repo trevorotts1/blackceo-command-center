@@ -1080,8 +1080,14 @@ export interface AcceptanceCriterion {
    * consistent with) that deliverable's intended spec copy. Catches the slide-39
    * failure mode where a render fabricated per-line dollar figures ($1,197) that
    * are not in the spec copy and contradict other slides ($997). Fail-closed.
+   *
+   * spelling_fidelity (AF-SPELL, v4.47.0): for presentation/deck/image
+   * deliverables, every WORD/acronym the render SHOWS must match the spec copy
+   * spelling, a known acronym, or a common word. Catches the misspelled-acronym
+   * failure mode where spec `ZHC` rendered as `ZCH` and AF-LANG passed it (the
+   * glyphs were legible English). Fail-closed.
    */
-  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'custom';
+  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'spelling_fidelity' | 'custom';
   /** Extra params: resolution threshold, vision prompt, expected language, etc. */
   params?: Record<string, unknown>;
 }
@@ -1177,6 +1183,20 @@ export function deriveAcceptanceCriteria(
     params: { specCopy },
   });
 
+  // AF-SPELL spelling/acronym gate (v4.47.0): every WORD/acronym the render shows
+  // must match the spec copy spelling, a known acronym, or a common word. Catches
+  // the misspelled-acronym failure mode (spec ZHC rendered as ZCH) that AF-LANG
+  // passed because the glyphs were legible English and AF-NUM ignores non-money
+  // tokens. Carries the same spec copy as AF-NUM so the OCR'd render words can be
+  // diffed against the brief without extra plumbing.
+  criteria.push({
+    id: 'spelling_fidelity',
+    description:
+      'Every word/acronym shown in the render matches the intended spec copy spelling (case/emphasis-insensitive), a known acronym, or a common dictionary word; no misspelled or garbled words/acronyms',
+    type: 'spelling_fidelity',
+    params: { specCopy },
+  });
+
   return criteria;
 }
 
@@ -1268,6 +1288,157 @@ export function compareNumericFidelity(renderText: string, specText: string): Nu
     specMoney: Array.from(specSet),
     explanation,
   };
+}
+
+// ---------------------------------------------------------------------------
+// AF-SPELL — spelling / acronym copy-fidelity gate (v4.47.0)
+// ---------------------------------------------------------------------------
+//
+// Closes the gap exposed by a rendered deck slide that MISSPELLED an acronym
+// (spec `ZHC` rendered as `ZCH`) and still passed QC: AF-LANG only checks that
+// glyphs are legible English (ZCH is perfectly legible), and AF-NUM only gates
+// money. There was no gate asserting that the WORDS the render shows actually
+// match the words the spec asked for.
+//
+// RULE (fail-closed, mirrors AF-NUM):
+//   - OCR every slide's rendered overlay TEXT (reuse the AF-LANG vision path).
+//   - The slide's intended SPEC COPY (title + description) is the source of
+//     truth for spelling.
+//   - Every word/token the RENDER shows must EITHER (a) match a spec-copy token
+//     (case- and typographic-emphasis-insensitive), OR (b) be a real dictionary
+//     word, OR (c) be a known/real acronym on the allowlist.
+//   - A render token that is NONE of those is a HARD FAIL — this catches KIE
+//     garbling like spec `ZHC` rendered as `ZCH` (ZCH is not in the spec, not a
+//     dictionary word, and not a known acronym).
+//   - Proper nouns / brand names that ARE in the spec copy never fail (rule a).
+//   - Real acronyms (ZHC, ZHW, KIE, GHL, AI, CEO, SOP, CTA, VSL, ROI) never
+//     fail even if absent from the spec (rule c); but a MANGLED acronym that
+//     diverges from the spec still fails (it is not on the allowlist).
+
+/**
+ * Known, real acronyms that are valid even when not present verbatim in the
+ * spec copy. A MANGLED variant of one of these (e.g. ZCH for ZHC) is NOT on the
+ * list and therefore still fails — that is the slide-misspelled-acronym catch.
+ * Stored upper-cased; the comparison upper-cases render tokens before lookup.
+ */
+export const AF_SPELL_KNOWN_ACRONYMS = new Set<string>([
+  'ZHC', 'ZHW', 'KIE', 'GHL', 'AI', 'CEO', 'SOP', 'CTA', 'VSL', 'ROI',
+]);
+
+/**
+ * A small, high-frequency English stop/function-word + common-word list used to
+ * avoid flagging ordinary English the render legitimately shows but that may not
+ * appear verbatim in a terse spec brief (e.g. "the", "and", "your"). This is a
+ * deliberately conservative dictionary: AF-SPELL's PRIMARY source of truth is
+ * the spec copy; this list only prevents false positives on common connective
+ * words. It is NOT a full dictionary — an unknown garbled token (ZCH) is the
+ * failure we want, and it is not in here.
+ */
+const AF_SPELL_COMMON_WORDS = new Set<string>([
+  'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'for', 'to', 'of',
+  'in', 'on', 'at', 'by', 'with', 'from', 'as', 'is', 'are', 'was', 'were', 'be',
+  'been', 'being', 'this', 'that', 'these', 'those', 'it', 'its', 'we', 'you',
+  'your', 'our', 'their', 'they', 'he', 'she', 'his', 'her', 'i', 'me', 'my',
+  'us', 'them', 'all', 'any', 'each', 'every', 'no', 'not', 'so', 'than', 'too',
+  'very', 'can', 'will', 'just', 'do', 'does', 'did', 'has', 'have', 'had',
+  'how', 'what', 'when', 'where', 'who', 'why', 'which', 'get', 'got', 'more',
+  'most', 'less', 'least', 'one', 'two', 'three', 'first', 'second', 'third',
+  'new', 'now', 'here', 'there', 'up', 'down', 'out', 'over', 'under', 'into',
+  'about', 'after', 'before', 'per', 'via', 'plus', 'free', 'best', 'top',
+  'next', 'step', 'steps', 'page', 'slide', 'slides', 'yes', 'ok', 'okay',
+  'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years', 'time',
+  'team', 'work', 'plan', 'plans', 'price', 'prices', 'pricing', 'start',
+  'started', 'starter', 'pro', 'elite', 'annual', 'quarterly', 'monthly',
+  'total', 'save', 'now', 'today', 'call', 'book', 'click', 'learn', 'see',
+  'made', 'make', 'made', 'use', 'used', 'using', 'need', 'want', 'help',
+]);
+
+/**
+ * Split a block of text into normalised word/token comparison keys.
+ *
+ * Normalisation:
+ *   - lower-cased (case-insensitive comparison; AF-LANG already gates legibility)
+ *   - typographic emphasis stripped: surrounding *, _, `, and matched quotes
+ *   - trailing/leading punctuation removed (e.g. "ZHC." → "zhc", "(ROI)" → "roi")
+ *   - internal apostrophes/hyphens kept so "client's" / "co-pilot" stay one token
+ *   - purely numeric / money tokens are DROPPED (AF-NUM owns numbers)
+ *
+ * Tokens shorter than 2 characters (after normalisation) are dropped to avoid
+ * noise on stray single letters.
+ */
+export function tokenizeForSpelling(text: string): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  // Split on whitespace first, then strip emphasis/punctuation per token so we
+  // keep acronyms intact (ZHC) while dropping decoration.
+  for (const rawTok of text.split(/\s+/)) {
+    if (!rawTok) continue;
+    // Strip leading/trailing non-alphanumeric (quotes, parens, *, _, `, punctuation).
+    let t = rawTok.replace(/^[^A-Za-z0-9]+/, '').replace(/[^A-Za-z0-9]+$/, '');
+    // Drop emphasis markers anywhere they wrap the token.
+    t = t.replace(/^[*_`'"]+/, '').replace(/[*_`'"]+$/, '');
+    if (!t) continue;
+    // Skip money / pure-number tokens — AF-NUM owns numeric fidelity.
+    if (/^\$?\d[\d,.\-–]*$/.test(t)) continue;
+    // Must contain at least one letter to be a "word" we spell-check.
+    if (!/[A-Za-z]/.test(t)) continue;
+    const key = t.toLowerCase();
+    if (key.length < 2) continue;
+    out.push(key);
+  }
+  return out;
+}
+
+export interface SpellingFidelityResult {
+  /** true = every rendered word token is justified (spec / dictionary / acronym). */
+  pass: boolean;
+  /** Render tokens that match NONE of: spec copy, common-word list, known acronym. */
+  misspelled: string[];
+  /** All render tokens (normalised). */
+  renderTokens: string[];
+  /** Human-readable verdict (used as the criterion reason). */
+  explanation: string;
+}
+
+/**
+ * Compare the words a render SHOWS against the intended spec copy.
+ *
+ * A render token PASSES when it is one of:
+ *   (a) present in the spec copy tokens (case/emphasis-insensitive) — covers
+ *       proper nouns, brand names, and real acronyms the spec actually used;
+ *   (b) a known real acronym on AF_SPELL_KNOWN_ACRONYMS (case-insensitive);
+ *   (c) a common English word on AF_SPELL_COMMON_WORDS.
+ *
+ * Otherwise the token is a misspelling/garble (HARD FAIL). This is exactly the
+ * `ZHC`-rendered-as-`ZCH` case: ZCH is not in the spec, not a known acronym,
+ * and not a common word → flagged. The spec acronym ZHC (rule a) and the broader
+ * allowlist (rule b) ensure real acronyms are never false-flagged, while a
+ * MANGLED acronym that diverges from the spec is caught.
+ *
+ * Pure + deterministic (no I/O) so the gate is unit-provable with a render-
+ * misspells-vs-spec fixture (=> FAIL) and a clean fixture (=> PASS).
+ */
+export function compareSpellingFidelity(renderText: string, specText: string): SpellingFidelityResult {
+  const renderTokens = tokenizeForSpelling(renderText);
+  const specTokens = new Set(tokenizeForSpelling(specText));
+
+  const misspelled: string[] = [];
+  const seen = new Set<string>();
+  for (const tok of renderTokens) {
+    if (seen.has(tok)) continue;
+    seen.add(tok);
+    if (specTokens.has(tok)) continue;                 // (a) in the spec copy
+    if (AF_SPELL_KNOWN_ACRONYMS.has(tok.toUpperCase())) continue; // (b) known acronym
+    if (AF_SPELL_COMMON_WORDS.has(tok)) continue;      // (c) common English word
+    misspelled.push(tok);
+  }
+
+  const pass = misspelled.length === 0;
+  const explanation = pass
+    ? `AF-SPELL: every rendered word matches the spec copy, a known acronym, or a common word (render tokens: ${renderTokens.length}, spec tokens: ${specTokens.size})`
+    : `AF-SPELL FAIL: rendered token(s) ${misspelled.map((m) => `"${m}"`).join(', ')} do not match the spec copy spelling, any known acronym (${Array.from(AF_SPELL_KNOWN_ACRONYMS).join(', ')}), or a common word. This is a misspelled/garbled word or acronym (e.g. spec ZHC rendered as ZCH) — re-render using the EXACT spelling from the spec copy.`;
+
+  return { pass, misspelled, renderTokens, explanation };
 }
 
 /**
@@ -1431,6 +1602,42 @@ export async function evaluateCriteria(
           });
         } else {
           const cmp = compareNumericFidelity(ocr.renderText, specCopy);
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: cmp.pass,
+            reason: cmp.pass
+              ? cmp.explanation
+              : `${cmp.explanation} (slide(s) read: ${ocr.slidesRead}).`,
+          });
+        }
+        break;
+      }
+
+      case 'spelling_fidelity': {
+        // AF-SPELL spelling/acronym gate (v4.47.0). FAIL-CLOSED, like AF-LANG/AF-NUM:
+        //   - OCR every rendered slide and collect the literal overlay TEXT.
+        //   - Diff the words in it against the intended spec copy (in params)
+        //     via the pure compareSpellingFidelity(): any render word that is not
+        //     in the spec, not a known acronym, and not a common word is a HARD
+        //     FAIL (a misspelled/garbled word or acronym — the ZHC→ZCH case).
+        //   - If NO vision key is available or every OCR call errored, we do NOT
+        //     pass blind: the criterion fails (block) so a keyless install cannot
+        //     auto-advance a deck whose rendered text was never read.
+        const specCopy = typeof c.params?.specCopy === 'string' ? c.params.specCopy : '';
+        const ocr = await visionTextOCR(manifest);
+        if (ocr === null) {
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-SPELL FAIL-CLOSED: cannot read the rendered text to verify its spelling against the spec copy ' +
+              '(no vision key available, or every OCR call errored). Blocking until a vision pass can read ' +
+              'the rendered words. Configure a vision-capable LLM key (OPENAI_API_KEY / GOOGLE_API_KEY) for QC.',
+          });
+        } else {
+          const cmp = compareSpellingFidelity(ocr.renderText, specCopy);
           results.push({
             id: c.id,
             description: c.description,
@@ -1833,6 +2040,136 @@ Reply with ONLY this JSON (no other text):
 
   // No provider ever answered ⇒ fail-closed (null). Otherwise return the
   // concatenated amounts (may be empty string = render showed no money).
+  return anyAnswered ? { renderText: collected.join(' '), slidesRead } : null;
+}
+
+/**
+ * AF-SPELL text OCR (v4.47.0).
+ *
+ * Reads EVERY valid image in the manifest and asks the vision LLM to transcribe
+ * the literal overlay TEXT it can see on each slide, verbatim, including any
+ * acronyms. The transcribed text from all slides is concatenated and returned;
+ * the caller diffs the word tokens in it against the intended spec copy via
+ * compareSpellingFidelity().
+ *
+ * The prompt asks ONLY for verbatim transcription (not interpretation or
+ * correction) so the model behaves as an OCR pass, not a judge — critically it
+ * MUST transcribe a misspelling exactly as printed (ZCH, not "corrected" to ZHC),
+ * otherwise the gate could never see the garble. The pass/fail decision is made
+ * deterministically in compareSpellingFidelity().
+ *
+ * Reuses the same dual-provider vision path as AF-LANG / AF-NUM (OpenAI gpt-4o-mini
+ * vision first, Gemini fallback), detail:'high' for reliable small-text reads.
+ *
+ * Returns:
+ *   { renderText, slidesRead } — the concatenated transcribed text, OR
+ *   null — when NO vision key is available or every call errored. The caller
+ *          treats null as FAIL-CLOSED (block until verifiable), never as pass.
+ */
+async function visionTextOCR(
+  manifest: DeliverableManifestItem[],
+): Promise<{ renderText: string; slidesRead: number } | null> {
+  const openAiKey = process.env.OPENAI_API_KEY;
+  const googleKey =
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+    process.env.GEMINI_API_KEY;
+
+  if (!openAiKey && !googleKey) return null;
+
+  const imageItems = manifest.filter((m) => m.valid && m.type === 'image' && m.path);
+  if (imageItems.length === 0) return null;
+
+  const prompt = `Transcribe ALL text that is VISIBLE in this image (e.g. a presentation slide), EXACTLY as printed.
+Copy every word, heading, label, and acronym LETTER-FOR-LETTER. Do NOT correct spelling, do NOT expand or fix acronyms, do NOT paraphrase — if a word is misspelled on the slide, transcribe the misspelling verbatim.
+Reply with ONLY this JSON (no other text):
+{"text": "<all visible text, space-separated, verbatim>"}`;
+
+  let anyAnswered = false;
+  const collected: string[] = [];
+  let slidesRead = 0;
+
+  const parseText = (raw: string): string | null => {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    try {
+      const parsed = JSON.parse(cleaned) as { text?: unknown };
+      return typeof parsed.text === 'string' ? parsed.text : '';
+    } catch {
+      return null;
+    }
+  };
+
+  for (const imageItem of imageItems) {
+    if (!imageItem.path) continue;
+    let b64: string;
+    try {
+      b64 = readFileSync(imageItem.path).toString('base64');
+    } catch {
+      continue;
+    }
+    const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
+    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+
+    let text: string | null = null;
+
+    if (openAiKey) {
+      try {
+        const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiKey}` },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}`, detail: 'high' } },
+              ],
+            }],
+            max_tokens: 600,
+            temperature: 0,
+          }),
+        });
+        if (resp.ok) {
+          const data = (await resp.json()) as { choices?: { message?: { content?: string } }[] };
+          text = parseText(data.choices?.[0]?.message?.content?.trim() ?? '');
+        }
+      } catch { /* fall through to Google for this slide */ }
+    }
+
+    if (text === null && googleKey) {
+      try {
+        const model = process.env.QC_SCORER_MODEL || 'gemini-2.5-flash';
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${googleKey}`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inline_data: { mime_type: mime, data: b64 } },
+              ],
+            }],
+            generationConfig: { temperature: 0, maxOutputTokens: 800 },
+          }),
+        });
+        if (resp.ok) {
+          const data = (await resp.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+          text = parseText(data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '');
+        }
+      } catch { /* slide errored on both providers */ }
+    }
+
+    if (text !== null) {
+      anyAnswered = true;
+      slidesRead += 1;
+      if (text) collected.push(text);
+    }
+  }
+
+  // No provider ever answered ⇒ fail-closed (null). Otherwise return the
+  // concatenated text (may be empty string = render showed no text).
   return anyAnswered ? { renderText: collected.join(' '), slidesRead } : null;
 }
 
