@@ -1,3 +1,18 @@
+## [v4.44.1] — 2026-06-16 — feat(qc): AF-I14 KIE.ai image-path guardrail in runQCOnReview
+
+Promotes AF-I14 from template prose to a binding QC gate. `runQCOnReview` in
+`src/lib/qc-scorer.ts` now reads the OpenClaw session exec trace for
+Presentations department tasks and auto-fails (score 1.0, reroute fires) when
+the builder used the native `image_generate` tool (VIOLATION-A), called the
+dead `/api/v1/image/gpt-image` endpoint (VIOLATION-B), or produced no
+KIE.ai API activity at all (VIOLATION-C). Session lookup via `openclaw_sessions`
+table with filesystem fallback. Gap notes name the exact violation for the
+rework pass. Companion: `openclaw.json` `dept-presentations` entry gains
+`tools.deny:["image"]` + `skills:[]` blocking `image_generate` at the tool
+layer (config validate confirmed).
+
+---
+
 ## [v4.44.0] — 2026-06-15 — feat(board+qc+ingest): column tooltips, block-list transparency, bare-task ingest resilience
 
 Three board-quality improvements shipped together:
