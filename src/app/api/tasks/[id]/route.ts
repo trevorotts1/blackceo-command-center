@@ -89,6 +89,14 @@ export async function PATCH(
     //   2. Any master agent in the task's workspace (dept head approval)
     //   3. Any global master agent (last resort, keeps legacy behavior)
     //
+    // INDEPENDENT QC (v4.45.0): the builder may NEVER advance its own task out
+    // of `review`. The independent auto-scorer (runQCOnReview) is the sole
+    // authority that scores + advances review→done; it runs as the SYSTEM
+    // (no updated_by_agent_id), so it is never affected by this guard. A
+    // builder PATCHing its own task to `done` — even if it also holds
+    // role_type='qc' — is a self-grade conflict of interest and is rejected
+    // with 403. This kills the builder self-grade bypass at the gate.
+    //
     // User-initiated moves (no updated_by_agent_id) are always allowed so
     // human operators are never blocked.
     if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
@@ -103,6 +111,25 @@ export async function PATCH(
           { status: 403 }
         );
       }
+
+      // ── INDEPENDENT-QC GUARD: kill the builder self-grade ────────────────
+      // The task's own builder (assigned_agent_id OR created_by_agent_id)
+      // cannot grade its own work. Independent QC means a SEPARATE authority
+      // scores the deliverable. The system-run auto-scorer carries no
+      // updated_by_agent_id and is unaffected.
+      const isOwnBuilder =
+        validatedData.updated_by_agent_id === existing.assigned_agent_id ||
+        validatedData.updated_by_agent_id === existing.created_by_agent_id;
+      if (isOwnBuilder) {
+        return NextResponse.json(
+          {
+            error: 'Forbidden: the task\'s own builder cannot grade or approve its own work (self-grade bypass blocked)',
+            hint: 'review→done is decided ONLY by the independent QC auto-scorer (runQCOnReview) or a SEPARATE department QC Specialist / master agent. The builder must PATCH {"status":"review"} and let independent QC score it.',
+          },
+          { status: 403 }
+        );
+      }
+      // ── End INDEPENDENT-QC GUARD ─────────────────────────────────────────
 
       // Check if the updating agent is the dept's QC specialist (primary path)
       const isQCSpecialist = updatingAgent.role_type === 'qc';

@@ -1,3 +1,56 @@
+## [v4.45.0] — 2026-06-16 — feat(qc): AF-I14 fleet-wide runtime enforcement + AF-LANG language gate + independent-QC self-grade kill
+
+Three QC-integrity hardening fixes. All runtime-enforced (not prose), all in
+`src/lib/qc-scorer.ts` + `src/app/api/tasks/[id]/route.ts`.
+
+1. **AF-I14 RUNTIME ENFORCEMENT — broadened + structured + fail-closed**
+   (`qc-scorer.ts`). Closes the three holes in the old guardrail:
+   - **Scope** is no longer hard-pinned to Presentations. `runAFI14Guardrail`
+     now takes a `hasImageOrDeckDeliverable` flag; when the task request
+     describes an image/deck/slide deliverable from ANY department, the KIE.ai
+     mandate applies. New `af_i14SessionRoots()` scans every agent's session
+     dir (not just `dept-presentations/`).
+   - **VIOLATION-A is now a STRUCTURED tool-call detector**
+     (`af_i14NativeImageToolCalled`) — parses each JSONL line and matches a real
+     `tool_use`/`tool_call`/`function.name === image_generate` block instead of a
+     naive substring scan, so quoting `image_generate` in prose no longer
+     false-fails and an obfuscated call no longer evades. Substring fallback only
+     when no line parses as JSON (never weaker than before).
+   - **FAIL-CLOSED on missing trace**: if the task shipped an image/deck
+     deliverable but no session trace can prove the KIE.ai pipeline was used,
+     that is VIOLATION-C (auto-fail), not a silent skip. The old "no trace =
+     pass" hole remains only for legacy presentations tasks with no image
+     deliverable to police. VIOLATION-B (dead `/api/v1/image/gpt-image`) and
+     VIOLATION-C (no `kie_generate.py` / `api.kie.ai`) unchanged in spirit,
+     widened to all image/deck deliverables.
+
+2. **AF-LANG LANGUAGE GATE — new `language_match` criterion** (`qc-scorer.ts`).
+   `AcceptanceCriterion` gains a `language_match` type; `deriveAcceptanceCriteria`
+   emits it for every image task with the expected language inferred from the
+   request (defaults to English). `evaluateCriteria` runs a new
+   `visionLanguageCheck()` that reads the rendered text in EVERY slide/image
+   (detail:'high') and fails the whole deck if any slide has garbled/mojibake/
+   non-Latin/unintended-CJK text. **FAIL-CLOSED**: when no vision key is
+   available the criterion is BLOCKED (pass=false) with a re-render gap — a
+   keyless install can no longer auto-advance an image with garbled CJK text
+   (the previous `vision_match` blind-pass hole). Worst-slide-wins; short-circuits
+   on the first illegible slide.
+
+3. **INDEPENDENT QC — builder self-grade killed at the gate**
+   (`route.ts`). The review→done PATCH gate now rejects (403) any
+   `updated_by_agent_id` that equals the task's own `assigned_agent_id` or
+   `created_by_agent_id` — even a builder that also holds `role_type='qc'`
+   cannot grade its own work. The independent auto-scorer `runQCOnReview` runs
+   as the SYSTEM (no `updated_by_agent_id`) and is the SOLE authority that
+   advances review→done; it always re-scores from scratch and never reads or
+   trusts a builder-written self-score (none is even ingested — the PATCH schema
+   has no qc_score field; `task_qc_results` is analytics-only).
+
+**Files changed:** `src/lib/qc-scorer.ts`, `src/app/api/tasks/[id]/route.ts`
+**No migration.** `npx tsc --noEmit` passes clean.
+
+---
+
 ## [v4.44.1] — 2026-06-16 — feat(qc): AF-I14 KIE.ai image-path guardrail in runQCOnReview
 
 Promotes AF-I14 from template prose to a binding QC gate. `runQCOnReview` in
