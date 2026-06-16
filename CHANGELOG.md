@@ -1,3 +1,25 @@
+## [v4.46.0] — 2026-06-16 — feat(qc): AF-NUM numeric-fidelity gate — block invented/contradictory money figures
+
+Closes the gap exposed by the Corey e2e deck: slide 39 rendered fabricated
+per-line figures ($1,197 / $1,097) that were absent from the spec copy and
+contradicted slides 35/36/37 ($997/$997/$1,497) — yet QC passed. The AF-LANG
+language gate was solid; the numeric copy-fidelity gate was missing.
+
+- `extractMoneyTokens()` parses + normalizes dollar amounts ($1,197 == 1197,
+  ranges $150-$300, cents).
+- `compareNumericFidelity()` (pure): any money amount in the render absent
+  from that slide's spec copy = HARD FAIL with a named reason.
+- `visionMoneyOCR()` OCRs each slide via the same vision path as AF-LANG;
+  fail-closed if no vision key / all calls error.
+- `deriveAcceptanceCriteria()` emits `numeric_fidelity` for every image/deck
+  task (same path as AF-LANG); a failure caps the score below 8.5, blocking
+  review->Done.
+- Carve-out: gates the SET of MONEY amounts only — decorative digits (slide
+  numbers, counts, years) are not gated, to avoid false positives.
+- Tests: AF-NUM 6/6 (incl. slide-39 FAIL + clean PASS); AF-I14/AF-LANG
+  regression 9/9; tsc --noEmit 0 errors. Validated against the Corey currency
+  slides: slide 39 FAILs; slides 33/35/36/37/42/45/51/53 PASS.
+
 ## [v4.45.0] — 2026-06-16 — feat(qc): AF-I14 fleet-wide runtime enforcement + AF-LANG language gate + independent-QC self-grade kill
 
 Three QC-integrity hardening fixes. All runtime-enforced (not prose), all in
