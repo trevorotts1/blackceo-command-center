@@ -88,32 +88,139 @@ import { notifyOwner } from '@/lib/notify';
 // the gap notes tell the agent exactly which violation to fix.
 // ---------------------------------------------------------------------------
 
-/** Departments where the AF-I14 guardrail applies. */
+/** Departments where the AF-I14 guardrail ALWAYS applies (legacy hard scope). */
 const AF_I14_DEPTS = new Set(['presentations', 'dept-presentations']);
 
 /** Agent IDs that trigger the guardrail (canonical and full form). */
 const AF_I14_AGENT_IDS = new Set(['dept-presentations']);
 
 /**
+ * Session directory roots to scan for an agent's exec trace.
+ *
+ * Hole-fix (v4.45.0): the guardrail was hard-scoped to dept-presentations only.
+ * Any department that ships an image/deck deliverable must use the mandated
+ * KIE.ai pipeline, so we now scan EVERY agent session directory under
+ * ~/.openclaw/agents/<agentId>/sessions when the task carries an image/deck
+ * deliverable. The presentations dir stays first for backward compatibility.
+ */
+function af_i14SessionRoots(agentId: string | null): string[] {
+  const base = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  const roots: string[] = [];
+  // Most-specific first: the task's own assigned agent (any department).
+  if (agentId) roots.push(path.join(base, agentId, 'sessions'));
+  // Legacy presentations dir (kept first-class for AF-I14 history).
+  roots.push(path.join(base, 'dept-presentations', 'sessions'));
+  // Last resort: scan every agent's sessions dir so a misattributed task is
+  // still caught. De-duped by the caller.
+  try {
+    if (existsSync(base)) {
+      for (const entry of readdirSync(base)) {
+        const sessDir = path.join(base, entry, 'sessions');
+        if (existsSync(sessDir)) roots.push(sessDir);
+      }
+    }
+  } catch { /* ignore — best-effort enumeration */ }
+  // De-dup preserving order.
+  return Array.from(new Set(roots));
+}
+
+/**
+ * AF-I14 / AF-LANG: detect whether a free-text request describes a
+ * presentation, deck, slide, or image deliverable. Used to decide whether the
+ * KIE.ai image-path guardrail (and the AF-LANG language gate) must fail-closed
+ * for this task even when its department is not Presentations.
+ */
+function describesImageOrDeckDeliverable(title: string, description: string | null): boolean {
+  const text = [title, description].filter(Boolean).join(' ').toLowerCase();
+  return /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|draw|presentation|deck|slide|slides|slideshow|keynote|powerpoint|infographic|carousel|poster|flyer|cover\s*art|artwork)\b/.test(text);
+}
+
+/**
  * Read and concatenate all text content from an OpenClaw session .jsonl file.
- * Returns the full concatenated text of all lines, lowercased.
+ * Returns the raw (NOT lowercased) file contents so the caller can do both
+ * structured JSON parsing of tool_use blocks AND a lowercased substring scan.
+ * Searches every candidate session root for `${sessionId}.jsonl`.
  * Returns empty string if the file does not exist or cannot be read.
  */
-function readSessionTrace(sessionId: string): string {
-  const sessionDir = path.join(
-    process.env.HOME || '~',
-    '.openclaw',
-    'agents',
-    'dept-presentations',
-    'sessions',
-  );
-  const filePath = path.join(sessionDir, `${sessionId}.jsonl`);
-  if (!existsSync(filePath)) return '';
-  try {
-    return readFileSync(filePath, 'utf8').toLowerCase();
-  } catch {
-    return '';
+function readSessionTrace(sessionId: string, sessionRoots: string[]): string {
+  for (const dir of sessionRoots) {
+    const filePath = path.join(dir, `${sessionId}.jsonl`);
+    if (!existsSync(filePath)) continue;
+    try {
+      return readFileSync(filePath, 'utf8');
+    } catch {
+      /* try next root */
+    }
   }
+  return '';
+}
+
+/**
+ * AF-I14 VIOLATION-A — STRUCTURED detection of the native image_generate tool.
+ *
+ * Hole-fix (v4.45.0): the old check was a substring scan on a lowercased blob,
+ * so `image_generate` quoted anywhere in assistant prose produced a false
+ * VIOLATION-A, and an obfuscated call could evade it. We now parse each JSONL
+ * line and look for an actual tool-call block whose tool name is
+ * `image_generate` (covering the shapes OpenClaw / Anthropic / OpenAI emit:
+ * {type:'tool_use',name:'image_generate'}, {function:{name:'image_generate'}},
+ * {tool_name:'image_generate'}, {tool:'image_generate'}). Falls back to the
+ * substring scan ONLY if no line parses as JSON (robustness, never weaker).
+ *
+ * Returns true when a genuine native image_generate tool call is present.
+ */
+function af_i14NativeImageToolCalled(rawTrace: string): boolean {
+  const NAME_RE = /^image[_-]?generate$/i;
+
+  const nameFromNode = (node: unknown): string | null => {
+    if (!node || typeof node !== 'object') return null;
+    const o = node as Record<string, unknown>;
+    // Direct tool_use / tool_call shapes
+    if ((o.type === 'tool_use' || o.type === 'tool_call' || o.type === 'function_call') && typeof o.name === 'string') {
+      return o.name;
+    }
+    if (typeof o.tool_name === 'string') return o.tool_name;
+    if (typeof o.tool === 'string') return o.tool;
+    if (typeof o.name === 'string' && (o.input !== undefined || o.arguments !== undefined || o.parameters !== undefined)) {
+      return o.name;
+    }
+    if (o.function && typeof o.function === 'object') {
+      const fn = o.function as Record<string, unknown>;
+      if (typeof fn.name === 'string') return fn.name;
+    }
+    return null;
+  };
+
+  const walk = (node: unknown): boolean => {
+    if (Array.isArray(node)) return node.some(walk);
+    if (node && typeof node === 'object') {
+      const name = nameFromNode(node);
+      if (name && NAME_RE.test(name.trim())) return true;
+      return Object.values(node as Record<string, unknown>).some(walk);
+    }
+    return false;
+  };
+
+  let parsedAnyLine = false;
+  for (const line of rawTrace.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      parsedAnyLine = true;
+      if (walk(obj)) return true;
+    } catch {
+      /* non-JSON line — skip; substring fallback below covers it */
+    }
+  }
+
+  // Fallback: only when we could not parse ANY line as JSON, fall back to the
+  // legacy substring scan so we never become weaker than the prior behaviour.
+  if (!parsedAnyLine) {
+    const lower = rawTrace.toLowerCase();
+    return lower.includes('"image_generate"') || lower.includes("'image_generate'");
+  }
+  return false;
 }
 
 /**
@@ -137,17 +244,34 @@ export interface AF_I14Result {
  * VIOLATION-A (native image_generate tool used), VIOLATION-B (dead endpoint
  * called), and VIOLATION-C (kie_generate.py never invoked).
  *
- * ONLY called when the task's department or assigned agent is presentations.
+ * Applies when the task's department/agent is Presentations OR when the task
+ * carries an image/deck deliverable from ANY department (hasImageOrDeckDeliverable).
  * Safe to call on any task — returns { violated: false } if not applicable.
+ *
+ * FAIL-CLOSED (v4.45.0): when the task has an image/deck deliverable and we
+ * cannot prove (via the session trace) that the mandated KIE.ai pipeline was
+ * used, that is itself VIOLATION-C — we do NOT silently pass. The old "no
+ * trace = skip" hole only remains for legacy presentations tasks that have no
+ * image/deck deliverable to police.
  */
-export function runAFI14Guardrail(taskId: string, agentId: string | null, department: string | null): AF_I14Result {
+export function runAFI14Guardrail(
+  taskId: string,
+  agentId: string | null,
+  department: string | null,
+  hasImageOrDeckDeliverable: boolean = false,
+): AF_I14Result {
   const notViolated: AF_I14Result = { violated: false, violations: [], sessionId: null, traceFound: false };
 
-  // Only apply to presentations department tasks
+  // Apply to: (a) the presentations department/agent (legacy hard scope), OR
+  // (b) ANY department whose task ships an image/deck deliverable (hole-fix:
+  // the KIE.ai mandate is fleet-wide for image generation, not pres-only).
   const dept = department ? canonicalDeptSlug(department) || department.toLowerCase() : null;
   const isPresTask = dept ? AF_I14_DEPTS.has(dept) : false;
   const isPresAgent = agentId ? AF_I14_AGENT_IDS.has(agentId) : false;
-  if (!isPresTask && !isPresAgent) return notViolated;
+  const inScope = isPresTask || isPresAgent || hasImageOrDeckDeliverable;
+  if (!inScope) return notViolated;
+
+  const sessionRoots = af_i14SessionRoots(agentId);
 
   // Lookup most-recent session for this task
   let sessionId: string | null = null;
@@ -167,18 +291,12 @@ export function runAFI14Guardrail(taskId: string, agentId: string | null, depart
     // Table might not exist — fall through
   }
 
-  // If no session found via DB, try scanning the sessions directory directly
-  // for any .jsonl file containing the taskId string (best-effort).
+  // If no session found via DB, scan EVERY candidate sessions directory for any
+  // .jsonl file containing the taskId string (best-effort, fleet-wide).
   if (!sessionId) {
-    try {
-      const sessionDir = path.join(
-        process.env.HOME || '~',
-        '.openclaw',
-        'agents',
-        'dept-presentations',
-        'sessions',
-      );
-      if (existsSync(sessionDir)) {
+    for (const sessionDir of sessionRoots) {
+      try {
+        if (!existsSync(sessionDir)) continue;
         const files = readdirSync(sessionDir).filter((f) => f.endsWith('.jsonl') && !f.includes('trajectory'));
         for (const file of files) {
           try {
@@ -189,27 +307,56 @@ export function runAFI14Guardrail(taskId: string, agentId: string | null, depart
             }
           } catch { /* skip unreadable */ }
         }
-      }
-    } catch { /* skip directory scan error */ }
+        if (sessionId) break;
+      } catch { /* skip directory scan error */ }
+    }
   }
 
   if (!sessionId) {
-    // No session trace found — cannot scan; skip guardrail.
+    // No session trace found.
+    if (hasImageOrDeckDeliverable) {
+      // FAIL-CLOSED: an image/deck was delivered but we cannot prove the
+      // mandated KIE.ai pipeline produced it. Treat as VIOLATION-C.
+      return {
+        violated: true,
+        violations: [
+          'AF-I14 VIOLATION-C (fail-closed): the task shipped an image/deck deliverable but NO session exec trace ' +
+          'could be found to prove it was generated via the mandated KIE.ai pipeline (scripts/kie_generate.py / api.kie.ai). ' +
+          'Fix: generate all images via python3 scripts/kie_generate.py and ensure the agent session trace is recorded.',
+        ],
+        sessionId: null,
+        traceFound: false,
+      };
+    }
+    // Legacy presentations-without-deliverable: cannot scan; skip guardrail.
     // The tool-layer deny config (tools.deny:["image"]) blocks future violations.
     return notViolated;
   }
 
-  const trace = readSessionTrace(sessionId);
+  const trace = readSessionTrace(sessionId, sessionRoots);
   if (!trace) {
+    if (hasImageOrDeckDeliverable) {
+      return {
+        violated: true,
+        violations: [
+          'AF-I14 VIOLATION-C (fail-closed): an image/deck deliverable was shipped but the located session trace ' +
+          `(${sessionId}) was empty/unreadable, so KIE.ai usage could not be confirmed. ` +
+          'Fix: generate all images via scripts/kie_generate.py and ensure the session trace is recorded.',
+        ],
+        sessionId,
+        traceFound: false,
+      };
+    }
     return { violated: false, violations: [], sessionId, traceFound: false };
   }
 
+  const lower = trace.toLowerCase();
   const violations: string[] = [];
 
-  // VIOLATION-A: native image_generate tool was called
-  // In OpenClaw session .jsonl, tool calls appear as JSON objects with
-  // {"type":"tool_use","name":"image_generate",...} inside assistant message content.
-  if (trace.includes('"image_generate"') || trace.includes("'image_generate'") || trace.includes('image_generate')) {
+  // VIOLATION-A: native image_generate tool was called.
+  // STRUCTURED detection (parses tool_use blocks) — no longer a naive substring
+  // scan, so quoting `image_generate` in prose no longer false-fails.
+  if (af_i14NativeImageToolCalled(trace)) {
     violations.push(
       'AF-I14 VIOLATION-A: native image_generate tool (openai-image-gen skill) was called. ' +
       'This leaks the operator OpenAI key and bypasses the mandated KIE.ai pipeline. ' +
@@ -218,7 +365,7 @@ export function runAFI14Guardrail(taskId: string, agentId: string | null, depart
   }
 
   // VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in trace
-  if (trace.includes('/api/v1/image/gpt-image')) {
+  if (lower.includes('/api/v1/image/gpt-image')) {
     violations.push(
       'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in session trace. ' +
       'This endpoint returns HTTP 404 — images were not generated. ' +
@@ -230,15 +377,15 @@ export function runAFI14Guardrail(taskId: string, agentId: string | null, depart
   // The script must appear via exec/shell calls. We check for both the script
   // name and the live KIE.ai endpoint it calls.
   const kiePresent =
-    trace.includes('kie_generate.py') ||
-    trace.includes('kie_generate') ||
-    trace.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
-    trace.includes('api.kie.ai');                   // KIE.ai domain
+    lower.includes('kie_generate.py') ||
+    lower.includes('kie_generate') ||
+    lower.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
+    lower.includes('api.kie.ai');                   // KIE.ai domain
   if (!kiePresent) {
     violations.push(
       'AF-I14 VIOLATION-C: kie_generate.py was not invoked and no KIE.ai API calls detected in session trace. ' +
-      'All presentation slide images MUST be generated via scripts/kie_generate.py. ' +
-      'Fix: shell out to python3 scripts/kie_generate.py <prompts.json> <renders_dir> for all slide images.',
+      'All presentation/deck/image deliverables MUST be generated via scripts/kie_generate.py. ' +
+      'Fix: shell out to python3 scripts/kie_generate.py <prompts.json> <renders_dir> for all images.',
     );
   }
 
@@ -920,9 +1067,16 @@ export function getMissingTrioRoles(
 export interface AcceptanceCriterion {
   id: string;
   description: string;
-  /** 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'custom' */
-  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'custom';
-  /** Extra params: resolution threshold, vision prompt, etc. */
+  /**
+   * 'existence' | 'valid_image' | 'min_resolution' | 'vision_match'
+   * | 'language_match' | 'custom'
+   *
+   * language_match (AF-LANG, v4.45.0): for presentation/deck/image deliverables,
+   * the rendered text must be legible and in the expected (Latin/English) script.
+   * Auto-fails on non-Latin/CJK/garbled glyphs so the deck is re-rendered.
+   */
+  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'custom';
+  /** Extra params: resolution threshold, vision prompt, expected language, etc. */
   params?: Record<string, unknown>;
 }
 
@@ -983,6 +1137,19 @@ export function deriveAcceptanceCriteria(
     description: `Image depicts the requested subject: "${subjectText}"`,
     type: 'vision_match',
     params: { subject: subjectText },
+  });
+
+  // AF-LANG language gate (v4.45.0): rendered text must be legible and in the
+  // expected script (Latin/English unless the request asks otherwise). This
+  // catches the garbled-CJK / mojibake failure mode where an image "passes"
+  // vision_match on subject but renders unreadable text on the slide.
+  const langMatch = /\b(spanish|french|german|portuguese|italian|chinese|mandarin|japanese|korean|arabic|hebrew|russian|hindi|cyrillic|in\s+(?:[a-z]+ese|[a-z]+ian))\b/.exec(text);
+  const expectedLanguage = langMatch ? langMatch[0] : 'english';
+  criteria.push({
+    id: 'language_match',
+    description: `Rendered text is legible and in the expected language/script (${expectedLanguage}); no garbled, mojibake, or unintended non-Latin/CJK glyphs`,
+    type: 'language_match',
+    params: { expectedLanguage },
   });
 
   return criteria;
@@ -1085,6 +1252,42 @@ export async function evaluateCriteria(
             description: c.description,
             pass: visionResult.yes,
             reason: `Vision check: ${visionResult.yes ? 'YES' : 'NO'} (confidence ${(visionResult.confidence * 100).toFixed(0)}%) — ${visionResult.explanation}`,
+          });
+        }
+        break;
+      }
+
+      case 'language_match': {
+        // AF-LANG language gate (v4.45.0). FAIL-CLOSED, unlike vision_match:
+        //   - Strongest feasible check is a vision pass that reads the rendered
+        //     text and confirms it is legible + in the expected language/script.
+        //   - If NO vision key is available, we do NOT pass blind. We block the
+        //     criterion (pass=false) with a re-render gap so a keyless install
+        //     cannot auto-advance an image with garbled CJK/mojibake text.
+        const expectedLanguage =
+          typeof c.params?.expectedLanguage === 'string' ? c.params.expectedLanguage : 'english';
+        const langResult = await visionLanguageCheck(manifest, expectedLanguage);
+        if (langResult === null) {
+          // No vision key / vision error → FAIL CLOSED (block until a vision
+          // pass confirms legible expected-language text). This is the AF-LANG
+          // contract: never pass an unverifiable image-text deliverable.
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-LANG FAIL-CLOSED: cannot verify rendered text is legible/English ' +
+              `(no vision key available). Blocking until a vision pass confirms the ` +
+              `text is legible and in ${expectedLanguage}. Re-render the deck/image and ensure a vision-capable LLM key (OPENAI_API_KEY / GOOGLE_API_KEY) is configured for QC.`,
+          });
+        } else {
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: langResult.legible,
+            reason: langResult.legible
+              ? `AF-LANG: rendered text legible and in ${expectedLanguage} (confidence ${(langResult.confidence * 100).toFixed(0)}%) — ${langResult.explanation}`
+              : `AF-LANG FAIL: rendered text is NOT legible/expected-language (${langResult.explanation}). Re-render the deck/image with correct, legible ${expectedLanguage} text (no garbled glyphs, mojibake, or unintended CJK).`,
           });
         }
         break;
@@ -1216,6 +1419,143 @@ Reply with ONLY this JSON (no other text):
   }
 
   return null;
+}
+
+/**
+ * AF-LANG vision check (v4.45.0).
+ *
+ * Reads the rendered text in an image/deck deliverable and asks the vision LLM
+ * whether ALL visible text is (a) legible (not garbled, not mojibake, no broken
+ * glyphs / tofu boxes) and (b) in the expected language/script. Used for the
+ * `language_match` criterion.
+ *
+ * Checks EVERY valid image in the manifest (a deck has many slides); if ANY
+ * slide fails the legibility/language test, the whole criterion fails so the
+ * deck is re-rendered.
+ *
+ * Returns:
+ *   { legible: boolean, confidence, explanation }  — a real vision verdict, OR
+ *   null  — when NO vision key is available or every call errored. The caller
+ *           treats null as FAIL-CLOSED (block until verifiable), never as pass.
+ *
+ * Uses detail:'high' (OpenAI) / full-res inline data (Gemini) because reading
+ * small slide text reliably needs the high-detail path.
+ */
+async function visionLanguageCheck(
+  manifest: DeliverableManifestItem[],
+  expectedLanguage: string,
+): Promise<{ legible: boolean; confidence: number; explanation: string } | null> {
+  const openAiKey = process.env.OPENAI_API_KEY;
+  const googleKey =
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+    process.env.GEMINI_API_KEY;
+
+  if (!openAiKey && !googleKey) return null;
+
+  const imageItems = manifest.filter((m) => m.valid && m.type === 'image' && m.path);
+  if (imageItems.length === 0) return null;
+
+  const prompt = `You are checking the RENDERED TEXT in this image (e.g. a presentation slide).
+Expected language/script: ${expectedLanguage} (Latin script unless the expected language uses another script).
+Answer these questions about ALL visible text in the image:
+  1. Is every piece of visible text legible — NOT garbled, NOT mojibake, NO broken/placeholder glyphs (tofu boxes □), NO random Unicode noise?
+  2. Is the text in the expected language/script (no UNINTENDED Chinese/Japanese/Korean/other non-expected characters)?
+"legible" must be true ONLY if BOTH are satisfied.
+Reply with ONLY this JSON (no other text):
+{"legible": <boolean>, "confidence": <0.0-1.0>, "explanation": "<one sentence naming any garbled/wrong-script text you saw>"}`;
+
+  // Track whether at least one provider actually answered (so we can tell
+  // "all calls errored" (→ null, fail-closed) from "a slide genuinely failed".
+  let anyAnswered = false;
+  let worst: { legible: boolean; confidence: number; explanation: string } | null = null;
+
+  const recordVerdict = (v: { legible: boolean; confidence: number; explanation: string }) => {
+    anyAnswered = true;
+    // Worst-wins: any illegible slide fails the whole deck.
+    if (worst === null || (worst.legible && !v.legible)) worst = v;
+  };
+
+  for (const imageItem of imageItems) {
+    if (!imageItem.path) continue;
+    let b64: string;
+    try {
+      b64 = readFileSync(imageItem.path).toString('base64');
+    } catch {
+      continue;
+    }
+    const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
+    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+
+    let verdict: { legible: boolean; confidence: number; explanation: string } | null = null;
+
+    // Try OpenAI vision first (gpt-4o-mini supports vision).
+    if (openAiKey) {
+      try {
+        const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiKey}` },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}`, detail: 'high' } },
+              ],
+            }],
+            max_tokens: 120,
+            temperature: 0,
+          }),
+        });
+        if (resp.ok) {
+          const data = (await resp.json()) as { choices?: { message?: { content?: string } }[] };
+          const raw = data.choices?.[0]?.message?.content?.trim() ?? '';
+          const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+          const parsed = JSON.parse(cleaned) as { legible: boolean; confidence: number; explanation: string };
+          verdict = { legible: !!parsed.legible, confidence: Number(parsed.confidence) || 0.5, explanation: parsed.explanation ?? '' };
+        }
+      } catch { /* fall through to Google for this slide */ }
+    }
+
+    // Google Gemini vision fallback for this slide.
+    if (!verdict && googleKey) {
+      try {
+        const model = process.env.QC_SCORER_MODEL || 'gemini-2.5-flash';
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${googleKey}`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inline_data: { mime_type: mime, data: b64 } },
+              ],
+            }],
+            generationConfig: { temperature: 0, maxOutputTokens: 200 },
+          }),
+        });
+        if (resp.ok) {
+          const data = (await resp.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+          const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
+          const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+          const parsed = JSON.parse(cleaned) as { legible: boolean; confidence: number; explanation: string };
+          verdict = { legible: !!parsed.legible, confidence: Number(parsed.confidence) || 0.5, explanation: parsed.explanation ?? '' };
+        }
+      } catch { /* slide errored on both providers */ }
+    }
+
+    if (verdict) {
+      recordVerdict(verdict);
+      // Short-circuit: a single illegible slide fails the whole deck.
+      if (!verdict.legible) return verdict;
+    }
+  }
+
+  // If no provider ever answered, fail-closed (null). Otherwise return the
+  // worst verdict observed (all legible → legible:true).
+  return anyAnswered ? worst : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,6 +1701,15 @@ export function emitOwnerApprovalPending(
  *   - If PASS: moves task to `done` (writes another `task_completed` event)
  *   - If FAIL: moves task back to `in_progress` with gap notes
  *
+ * INDEPENDENT QC (v4.45.0): this function is the SOLE authority that scores a
+ * task and advances it review→done. It ALWAYS re-scores from scratch against the
+ * actual deliverables/criteria; it NEVER reads or trusts any builder-written
+ * "qc-report" / self-asserted score. (No self-score is even ingested: the task
+ * PATCH schema accepts no qc_score field, and task_qc_results is analytics-only,
+ * read solely by grading.ts — never to gate the advance.) The builder is gated
+ * out of the review→done transition at the PATCH route. So a builder that writes
+ * its own grade has zero effect: the independent pass below is what runs.
+ *
  * BEST-EFFORT: any error is logged; the task stays in `review` if we can't score.
  * Designed to be called fire-and-forget after the PATCH route responds.
  *
@@ -1408,18 +1757,24 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       ) ?? null;
     }
 
-    // ── AF-I14: KIE.ai image-path guardrail (Presentations department) ───────────
+    // ── AF-I14: KIE.ai image-path guardrail (fleet-wide for image/deck work) ─────
     // Runs BEFORE artifact scoring. Auto-fails the image phase when the session
     // trace shows the builder used the native image_generate tool (openai-image-gen
     // skill) instead of the mandated kie_generate.py script, or called the dead
     // endpoint /api/v1/image/gpt-image, or produced no KIE.ai API activity at all.
+    //
+    // Hole-fix (v4.45.0): scope is no longer hard-pinned to Presentations. When
+    // the task request describes an image/deck/slide deliverable from ANY
+    // department, the KIE.ai mandate applies and the guardrail FAILS CLOSED if
+    // no session trace proves the pipeline was used.
     //
     // This is a HARD FAIL with scoringPath='llm' so the reroute loop fires and
     // the gaps tell the agent exactly which AF-I14 sub-rule was breached.
     // The now-in-place tools.deny:["image"] on dept-presentations prevents
     // VIOLATION-A going forward; this scorer catches historical violations that
     // slipped through before the tool-layer fix was deployed.
-    const afi14 = runAFI14Guardrail(taskId, task.assigned_agent_id, task.department);
+    const hasImageOrDeckIntent = describesImageOrDeckDeliverable(task.title, task.description);
+    const afi14 = runAFI14Guardrail(taskId, task.assigned_agent_id, task.department, hasImageOrDeckIntent);
     if (afi14.violated) {
       const afi14Msg = `[QC-AF-I14] AF-I14 image-path guardrail FAIL — ${afi14.violations.length} violation(s) in session ${afi14.sessionId ?? 'unknown'}. Violations: ${afi14.violations.join(' | ')}`;
       console.warn(`[QCScorer] Task "${task.title}" (${taskId}): AF-I14 violation — instant fail`);
