@@ -57,6 +57,18 @@ interface IngestPayload {
   persona?: unknown;
   external_session_id?: unknown;
   idempotency_key?: unknown;
+  /**
+   * FIX 3 — re-ingest loop gate.
+   *
+   * If a caller (typically the main/CEO orchestrator forwarding a task it
+   * received) supplies an existing_task_id, and that task already exists AND
+   * is assigned to a non-main specialist agent, we reject the ingest with 409.
+   *
+   * This prevents the infinite loop:
+   *   dispatch(specialist) → main receives → main calls ingest → new task
+   *   → routes to main again → dispatch → main receives → ∞
+   */
+  existing_task_id?: unknown;
 }
 
 const VALID_PRIORITIES = new Set<TaskPriority>(['low', 'medium', 'high', 'critical']);
@@ -176,6 +188,76 @@ export async function POST(request: NextRequest) {
     }
     if (title.length > 500) {
       return NextResponse.json({ error: 'title must be 500 characters or less' }, { status: 400 });
+    }
+
+    // FIX 3 — re-ingest loop gate.
+    // When a caller passes existing_task_id and that task already exists with a
+    // non-master assigned agent, reject immediately.  This is the hard stop for
+    // the CEO/main orchestrator re-ingest loop: main receives a dispatch message
+    // that includes Task ID, tries to re-ingest it, and is blocked here.
+    const existingTaskId = typeof body.existing_task_id === 'string' ? body.existing_task_id.trim() : null;
+    if (existingTaskId) {
+      const existingTask = queryOne<{ id: string; assigned_agent_id: string | null; title: string }>(
+        `SELECT t.id, t.assigned_agent_id, t.title
+         FROM tasks t
+         WHERE t.id = ?
+         LIMIT 1`,
+        [existingTaskId],
+      );
+      if (existingTask) {
+        // If assigned to any agent (specialist or master), this task already exists —
+        // return the existing record instead of creating a duplicate.
+        console.warn(
+          `[INGEST] FIX3 re-ingest loop gate: existing_task_id="${existingTaskId}" already exists ` +
+          `(assigned_agent_id=${existingTask.assigned_agent_id ?? 'null'}) — rejecting ingest to prevent loop.`,
+        );
+        return NextResponse.json(
+          {
+            ok: true,
+            deduped: true,
+            loop_gate: true,
+            task_id: existingTask.id,
+            message: 'Task already exists — re-ingest rejected to prevent orchestrator loop.',
+          },
+          { status: 409 },
+        );
+      }
+    }
+
+    // Secondary loop guard: detect if the payload description contains the
+    // canonical dispatch marker "**Task ID:** <uuid>" and that uuid references an
+    // existing task assigned to a non-master agent.  This catches main forwarding
+    // the raw dispatch message body without setting existing_task_id explicitly.
+    const descriptionRaw = typeof body.description === 'string' ? body.description : '';
+    if (descriptionRaw) {
+      const taskIdMarkerMatch = descriptionRaw.match(/\*{0,2}Task ID:\*{0,2}\s*([0-9a-f-]{36})/i);
+      if (taskIdMarkerMatch?.[1]) {
+        const embeddedTaskId = taskIdMarkerMatch[1];
+        const embeddedTask = queryOne<{ id: string; assigned_agent_id: string | null }>(
+          `SELECT t.id, t.assigned_agent_id
+           FROM tasks t
+           LEFT JOIN agents a ON t.assigned_agent_id = a.id
+           WHERE t.id = ? AND a.is_master = 0
+           LIMIT 1`,
+          [embeddedTaskId],
+        );
+        if (embeddedTask) {
+          console.warn(
+            `[INGEST] FIX3 secondary loop gate: description embeds Task ID "${embeddedTaskId}" ` +
+            `which is already assigned to a specialist (agent=${embeddedTask.assigned_agent_id}) — rejecting re-ingest.`,
+          );
+          return NextResponse.json(
+            {
+              ok: true,
+              deduped: true,
+              loop_gate: true,
+              task_id: embeddedTask.id,
+              message: 'Task already assigned to specialist — re-ingest rejected to prevent orchestrator loop.',
+            },
+            { status: 409 },
+          );
+        }
+      }
     }
 
     const description = typeof body.description === 'string' ? body.description : undefined;

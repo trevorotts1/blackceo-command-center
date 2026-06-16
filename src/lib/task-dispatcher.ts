@@ -38,6 +38,8 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import * as fs from 'fs';
+import * as path from 'path';
 import { queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
@@ -54,6 +56,93 @@ import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
 // Statuses where dispatch must not re-fire.
 const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked', 'archived']);
+
+/**
+ * FIX 1 — resolveSpecialistSessionKey
+ *
+ * Every dispatch previously used the hardcoded prefix `agent:main:` which
+ * always routes to the CEO orchestrator runtime (Stefanie / "main"). That
+ * agent's prompt forbids building work — it re-ingests the task, creating an
+ * infinite loop with zero artifacts.
+ *
+ * This function maps an assigned specialist agent to the correct OpenClaw
+ * runtime key:
+ *   • It reads the agent's workspace slug from the DB (via workspace_id).
+ *   • It checks whether ~/.openclaw/agents/<slug>/ exists on disk — the
+ *     presence of that directory proves a builder runtime is configured.
+ *   • If found, returns `agent:<slug>:<openclaw_session_id>`.
+ *   • Safe fallback: if no specialist runtime resolves (unknown dept, fresh
+ *     install), keeps the legacy `agent:main:<id>` and logs a warning so
+ *     no other department breaks silently.
+ *
+ * The dept-presentations builder runtime is one concrete example:
+ *   ~/.openclaw/agents/dept-presentations/ → key agent:dept-presentations:<session>
+ */
+function resolveSpecialistSessionKey(
+  agent: Agent,
+  openclawSessionId: string,
+  workspaceId: string | undefined,
+  context: string,
+): string {
+  const AGENTS_ROOT = path.join(
+    process.env.HOME ?? '/Users/blackceomacmini',
+    '.openclaw',
+    'agents',
+  );
+
+  // Attempt 1: lookup workspace slug from DB.
+  if (workspaceId) {
+    try {
+      const ws = queryOne<{ slug: string }>(
+        'SELECT slug FROM workspaces WHERE id = ? LIMIT 1',
+        [workspaceId],
+      );
+      if (ws?.slug) {
+        const candidateSlug = ws.slug.toLowerCase();
+        const runtimeDir = path.join(AGENTS_ROOT, candidateSlug);
+        if (fs.existsSync(runtimeDir)) {
+          const key = `agent:${candidateSlug}:${openclawSessionId}`;
+          console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → runtime found → key ${key}`);
+          return key;
+        }
+        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir at ${runtimeDir} — trying agent role slug`);
+      }
+    } catch (err) {
+      console.warn(`[${context}] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
+    }
+  }
+
+  // Attempt 2: derive a slug from the agent's role field (e.g. "Presentations Lead" → "dept-presentations").
+  if (agent.role) {
+    const roleSlug = `dept-${agent.role.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}`;
+    const runtimeDir = path.join(AGENTS_ROOT, roleSlug);
+    if (fs.existsSync(runtimeDir)) {
+      const key = `agent:${roleSlug}:${openclawSessionId}`;
+      console.log(`[${context}] resolveSpecialistSessionKey: role slug "${roleSlug}" → runtime found → key ${key}`);
+      return key;
+    }
+  }
+
+  // Attempt 3: try agent name slug directly (e.g. agent named "dept-presentations").
+  const nameSlug = agent.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  if (nameSlug) {
+    const runtimeDir = path.join(AGENTS_ROOT, nameSlug);
+    if (fs.existsSync(runtimeDir)) {
+      const key = `agent:${nameSlug}:${openclawSessionId}`;
+      console.log(`[${context}] resolveSpecialistSessionKey: name slug "${nameSlug}" → runtime found → key ${key}`);
+      return key;
+    }
+  }
+
+  // Safe fallback: keep legacy agent:main key; log warning.
+  const fallbackKey = `agent:main:${openclawSessionId}`;
+  console.warn(
+    `[${context}] resolveSpecialistSessionKey: no specialist runtime found for agent "${agent.name}" ` +
+    `(workspace_id=${workspaceId ?? 'none'}) — falling back to legacy key ${fallbackKey}. ` +
+    `Add ~/.openclaw/agents/<dept-slug>/ to fix.`,
+  );
+  return fallbackKey;
+}
 
 /**
  * Auto-dispatch a newly-routed task to its assigned specialist via OpenClaw.
@@ -172,10 +261,12 @@ export async function autoDispatchTask(
       const sessionId = uuidv4();
       const openclawSessionId = `mission-control-${agent.name.toLowerCase().replace(/\s+/g, '-')}`;
 
+      // FIX 2: bind task_id so completion webhook / execution-reconcile can attribute the turn.
+      // The task_id column + idx_openclaw_sessions_task index already exist in schema.ts:213/360.
       run(
-        `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [sessionId, agent.id, openclawSessionId, 'mission-control', 'active', now, now],
+        `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, task_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, agent.id, openclawSessionId, 'mission-control', 'active', task.id, now, now],
       );
 
       session = queryOne<OpenClawSession>(
@@ -403,7 +494,17 @@ When complete, reply with:
 If you need help or clarification, ask the orchestrator.`;
 
     // ── chat.send (same contract as dispatch/route.ts) ──────────────────────
-    const sessionKey = `agent:main:${session.openclaw_session_id}`;
+    // FIX 1: resolve the specialist's actual OpenClaw runtime key instead of
+    // always targeting agent:main (the CEO/Stefanie orchestrator, whose prompt
+    // forbids building and re-ingests the task, causing infinite loops).
+    //
+    // Mapping logic:
+    //   1. If agent.workspace_id matches a known ~/.openclaw/agents/<slug>
+    //      directory we derive the runtime slug from the workspace slug and use
+    //      agent:<slug>:<openclaw_session_id>.
+    //   2. Fallback: if no specialist runtime is resolvable we keep the legacy
+    //      agent:main:… key and log a warning so other departments are not broken.
+    const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id, context);
     await client.call('chat.send', {
       sessionKey,
       message: taskMessage,
