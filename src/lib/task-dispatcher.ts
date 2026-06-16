@@ -43,6 +43,8 @@ import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
+import { listModels } from '@/lib/model-registry';
 import { getBestSOPForTask } from '@/lib/sops';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
@@ -198,8 +200,45 @@ export async function autoDispatchTask(
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
+    // ── AF-MODEL-SOVEREIGNTY gate ───────────────────────────────────────────
+    // Block dispatch if resolved model is null, free default, forbidden, or
+    // modality-wrong. Routes to needs_owner_input — never silently downgrades.
+    const inventory = listModels();
+    const required_modality = settings.required_modality ??
+      detectModality(task.title, task.description);
+    const sovereigntyViolation: ModelSovereigntyViolation | null = checkModelSovereignty(
+      settings.model,
+      inventory,
+      required_modality,
+    );
+    if (sovereigntyViolation) {
+      const blockMsg =
+        `[af_model_sovereignty] Task "${task.title}" (${task.id}) BLOCKED — ` +
+        `reason=${sovereigntyViolation.reason} model=${sovereigntyViolation.model_id ?? 'null'} ` +
+        `modality=${sovereigntyViolation.required_modality ?? 'unknown'} ` +
+        `agent=${agent.name}. Owner input required.`;
+      console.warn(`[${context}] ${blockMsg}`);
+      const now2 = new Date().toISOString();
+      run(
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(), task.id, agent.id, 'af_model_sovereignty_block', blockMsg,
+          JSON.stringify(sovereigntyViolation), now2,
+        ],
+      );
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'af_model_sovereignty_block', agent.id, task.id, blockMsg, now2],
+      );
+      // Leave task in backlog (no status change) so owner can assign a model.
+      return;
+    }
+    // ── End AF-MODEL-SOVEREIGNTY gate ──────────────────────────────────────
+
     console.log(
-      `[${context}] autoDispatchTask: Task "${task.title}" (${task.id}) → "${agent.name}" | model=${settings.model} | specialist=${specialistType}`,
+      `[${context}] autoDispatchTask: Task "${task.title}" (${task.id}) → "${agent.name}" | model=${settings.model} (${settings.modelSource}) | modality=${required_modality} | specialist=${specialistType}`,
     );
 
     // ── SOP pull ────────────────────────────────────────────────────────────
