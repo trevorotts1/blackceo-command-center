@@ -191,7 +191,15 @@ export async function POST(request: NextRequest) {
           // routing — provenance lines would skew keyword/embedding scores.
           description: description ?? '',
           priority: priority ?? 'medium',
-          workspace_id: workspaceId,
+          // Do NOT pass the resolved CEO/'default' workspace as a scope here.
+          // For a bare task the only correct routing universe is ALL
+          // departments — a scoped workspace would pre-filter the agent roster
+          // (and a zero-agent 'default'/unseeded-CEO workspace would blank out
+          // routing). routeTask treats workspace_id only as a hint, so leaving
+          // it undefined forces full keyword+semantic resolution over every
+          // department. (resolveWorkspaceId's value is still kept as the
+          // fallback for when routeTask returns null.)
+          workspace_id: undefined,
         });
         if (routing) {
           // Override the CEO/default workspace with the resolved department

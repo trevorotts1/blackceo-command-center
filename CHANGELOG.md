@@ -1,3 +1,24 @@
+## [v4.42.1] — 2026-06-15 — fix(routing): bare tasks no longer trapped in General Task — full-universe routing, zero-agent-workspace no longer short-circuits
+
+### What changed
+
+Second bug defeating bare-task auto-routing (post-PR #93). Bare tasks submitted to `POST /api/tasks/ingest` (no `department_slug`) were ALL landing in "General Task" via fallback, never reaching keyword/semantic department resolution.
+
+**Root cause** — `resolveWorkspaceId()` (ingest route) could not find the CEO workspace (real workspace is `slug='ai-ceo', name='AI CEO'`, not in the matched slug/name set) so it returned `workspace_id='default'`. Then `routeTask({workspace_id:'default'})` called `fetchAgentsWithLoad('default')`, which hard-filtered the agent roster to that one workspace. The `default` bucket has zero agents, so `routeTask` hit its `agents.length===0` guard and returned `null` BEFORE `comDispatch()` ever ran its keyword/semantic steps. Ingest caught the `null` and force-fit everything to the General Task fallback.
+
+**`src/lib/routing/department-router.ts`**
+- `fetchAgentsWithLoad()` — the passed `workspaceId` is now a SOFT hint, not a hard gate. The scoped pre-filter is honoured ONLY when that workspace actually has agents; a zero-agent workspace (e.g. `default`, or an unseeded CEO workspace) falls through to the FULL agent roster so `comDispatch()` runs keyword + semantic resolution across ALL departments instead of bailing to `null`. `routeTask()` only returns `null` when there are genuinely zero non-offline agents anywhere.
+- `keywordScore()` — added a department-NAME-token bonus (weight 2, vs 1 per keyword) matched on WORD BOUNDARIES (not substring, so "some" never matches "something"), with a stopword list (`production`, `management`, `team`, `general`, `task`, …). This resolves keyword-overlap ambiguity: "cold SALES outreach email sequence" routes to Sales even though it incidentally contains Marketing keywords ("email", "outreach"). `rankDepartments()` passes `dept.name` through.
+- `comDispatch()` Step 3.5 General-Task lookup — now also matches on the canonical display name `'General Task'`, not just `d.id` canonicalization. When departments are loaded from the workspaces table the dept `id` is the workspace row id (a UUID / client-specific scheme that may not canonicalize to `general-task`), so the name is the reliable name-agnostic signal for the catch-all.
+
+**`src/app/api/tasks/ingest/route.ts`** — for a bare task (no `department_slug`), `routeTask` is now called with `workspace_id: undefined` so the routing universe is ALL departments — the resolved CEO/`default` workspace is no longer passed as a scope. The `resolveWorkspaceId` value is still kept as the fallback for when `routeTask` returns `null`. Tagged-task behaviour (department_slug present) is unchanged.
+
+**`tests/unit/route-task-bare-full-universe.test.ts`** (NEW) — 7 DB-backed tests driving the real `routeTask()` against an isolated temp DB seeded with canonical department workspaces (each with one agent) plus the zero-agent `default` bucket: bare "Build a 10-slide investor pitch deck" → Presentations; "Edit this 60-second promo video" → Video Production; "Draft a cold sales outreach email sequence" → Sales; "Reconcile last month's invoices" → Billing / Finance; "Do something interesting" → General Task (genuine last resort); the exact bug path (buggy `workspace_id:'default'` scope) still routes to Presentations; and a populated workspace scope is still honoured as a soft hint.
+
+### QC
+
+QC Self-Assessment (writer): 9.0/10 — fix is minimal, targeted, fully tested against the real DB-backed `routeTask`, and preserves all existing routing invariants (tagged-task path, CEO-as-router-not-executor fallback, General-Task-never-wins-on-merit). Independent re-score pending (AF5 independent Sonnet QC agent to confirm before merge).
+
 ## [v4.42.0] — 2026-06-13 — fix(cc-crashloop): permanent crash-loop guard — env-bleed strip, orphan-port killer, PM2 circuit-breaker, resurrection persistence, CI guard
 
 ### What changed
