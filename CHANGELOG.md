@@ -1,11 +1,12 @@
-## [v4.47.0] — 2026-06-16 — feat(qc): AF-SPELL spelling/acronym fidelity gate
+## [v4.48.0] — 2026-06-16 — feat(qc): AF-PIPELINE-COMPLETE gate (no shortcut-bypass)
 
-Adds AF-SPELL, a fail-closed spelling/acronym QC criterion in qc-scorer.ts,
-closing the gap where a rendered slide misspelled an acronym ("ZHC" wrong) and
-QC passed it. OCRs each slide; every rendered token must match the slide's spec
-copy (case/emphasis-insensitive), be a known acronym (ZHC/ZHW/KIE/GHL/...), or a
-common English word — anything else is a HARD FAIL with a named reason. Money
-tokens are owned by AF-NUM. Fail-closed if no vision key. Caps score below 8.5,
-blocking review->Done, exactly like AF-LANG/AF-NUM. Tests: AF-SPELL 8/8;
-AF-NUM/AF-LANG/AF-I14 regressions still pass.
+Blocks review->Done for a deck unless the full-pipeline artifacts exist: a
+completed research brief (working/research/brief-*.md research_complete:true), a
+copy/image QC report, AND a real GHL media-upload record (ghl_media_id/folder_id
+in media_library.json; seed null = not uploaded). Closes the hole where a
+shortcut (hand-fed slides.json -> build_deck.py) could produce a "finished" deck
+with no research, no QC log, and no GHL upload. Fail-closed; caps score below
+8.5. Widened the deck/presentation task detector so decks reach the criteria
+block. Tests: AF-PIPELINE 7/7; AF-SPELL/AF-NUM/AF-LANG/AF-I14 regressions pass
+(21/21); tsc clean.
 
