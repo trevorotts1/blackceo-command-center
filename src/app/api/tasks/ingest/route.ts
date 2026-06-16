@@ -74,11 +74,21 @@ function verifyWebhookSignature(signature: string | null, rawBody: string): bool
  * then falls back to the CEO workspace — the CEO agent runs all other
  * departments, so it is the correct catch-all owner for unrouted work. Returns
  * { workspaceId, resolvedBy } so the caller can record how routing happened.
+ *
+ * BARE-TASK RESILIENCE (v4.44.0 — BARE-INGEST-001):
+ * When no slug is supplied and the CEO/master-orchestrator workspace is not yet
+ * seeded (fresh install), we used to return workspaceId='default' which is a
+ * sentinel string that has NO row in the workspaces table. createTaskCore would
+ * then fail the FK constraint and the whole ingest route would 500.
+ *
+ * The fix: resolve the first real workspace we can find from the DB so we always
+ * hand off a real workspace_id (or null, which createTaskCore handles gracefully).
+ * We NEVER return the bare 'default' literal unless it actually has a DB row.
  */
 function resolveWorkspaceId(
   departmentSlug: string | undefined,
   persona: string | undefined
-): { workspaceId: string; resolvedBy: string } {
+): { workspaceId: string | null; resolvedBy: string } {
   // 1. department_slug → workspaces.slug (or id).
   if (departmentSlug) {
     const slug = departmentSlug.toLowerCase();
@@ -114,9 +124,30 @@ function resolveWorkspaceId(
   );
   if (ceo) return { workspaceId: ceo.id, resolvedBy: 'ceo-fallback' };
 
-  // 4. Last resort: the default workspace bucket (universal install with no CEO
-  //    row seeded yet). createTaskCore also defaults workspace_id to 'default'.
-  return { workspaceId: 'default', resolvedBy: 'default-fallback' };
+  // 4. General-task workspace — the correct catch-all when no CEO is seeded.
+  //    Bare tasks that cannot be semantically routed land here rather than
+  //    erroring out.
+  const general = queryOne<{ id: string }>(
+    `SELECT id FROM workspaces
+      WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
+         OR lower(name) IN ('general task', 'general')
+      ORDER BY rowid ASC LIMIT 1`,
+    []
+  );
+  if (general) return { workspaceId: general.id, resolvedBy: 'general-task-fallback' };
+
+  // 5. ANY workspace — last real resort so we never pass a nonexistent sentinel.
+  //    A bare install with at least one workspace seeded will always reach this.
+  const anyWs = queryOne<{ id: string }>(
+    `SELECT id FROM workspaces ORDER BY rowid ASC LIMIT 1`,
+    []
+  );
+  if (anyWs) return { workspaceId: anyWs.id, resolvedBy: 'first-workspace-fallback' };
+
+  // 6. Truly empty install (no workspaces at all) — pass null so createTaskCore
+  //    inserts without a workspace FK rather than crashing on a nonexistent id.
+  //    The task will be visible in the All Tasks board view.
+  return { workspaceId: null, resolvedBy: 'no-workspace-fallback' };
 }
 
 export async function POST(request: NextRequest) {
@@ -170,7 +201,7 @@ export async function POST(request: NextRequest) {
     // AND checks it before inserting.
     const dedupeKey = idempotencyKey || sourceRef;
 
-    let { workspaceId, resolvedBy } = resolveWorkspaceId(departmentSlug, persona);
+    let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(departmentSlug, persona);
 
     // ── Auto-route bare tasks (no department_slug) ────────────────────────────
     // When the caller does not supply a department_slug, run the keyword +

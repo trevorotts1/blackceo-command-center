@@ -1682,8 +1682,45 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       const newAttempts = prevAttempts + 1;
 
       if (newAttempts > QC_MAX_REROUTES) {
-        // Cap reached → set task to `blocked` and stop the loop.
-        const blockedNote = `[QC-BLOCKED] Task failed QC ${newAttempts} time(s) (cap: ${QC_MAX_REROUTES}). Needs human review. Last score: ${result.score.toFixed(1)}/10. ${result.reason}`;
+        // Cap reached → classify the block and set task to `blocked`.
+        //
+        // BLOCK-TRANSPARENCY-001 (v4.44.0):
+        // Classify whether the root cause is something the OWNER must act on
+        // (needs approval, needs owner data) vs something the SYSTEM must fix
+        // (wrong SOP matched, missing builder, model misbind, mismatched rubric).
+        //
+        // SYSTEM signals:
+        //   - no-criteria path: SOP missing or rubric missing — operator must fix
+        //   - gap text mentions infra-level signals: "wrong sop", "no sop assigned",
+        //     "missing builder", "model", "rubric", "routing", "wrong department",
+        //     "no criteria", "schema", "config"
+        // All other blocks default to OWNER (needs human approval / data).
+        const gapText = [...result.gaps, result.reason].join(' ').toLowerCase();
+        const systemSignals = [
+          /no\s+sop\s+assign/,
+          /no\s+criteria/,
+          /missing\s+builder/,
+          /wrong\s+sop/,
+          /model\s+misbind/,
+          /mismatched\s+rubric/,
+          /wrong\s+department/,
+          /schema\s+error/,
+          /config\s+error/,
+          /routing\s+error/,
+          /rubric\s+mismatch/,
+          /\bno-criteria\b/,
+          /cannot\s+evaluate/,
+          /cannot\s+auto-score/,
+        ];
+        const isSystemBlock = result.scoringPath === 'no-criteria' || systemSignals.some((p) => p.test(gapText));
+        const blockAudience: 'OWNER' | 'SYSTEM' = isSystemBlock ? 'SYSTEM' : 'OWNER';
+
+        const blockGapsJson = JSON.stringify(result.gaps);
+        const blockNeeds: string = isSystemBlock
+          ? `System fix required: ${result.gaps.slice(0, 2).join('; ') || result.reason}. Route diagnosis to master orchestrator.`
+          : `Owner action required: ${result.gaps.slice(0, 2).join('; ') || result.reason}. Reply here to unblock or reassign.`;
+
+        const blockedNote = `[QC-BLOCKED] Task failed QC ${newAttempts} time(s) (cap: ${QC_MAX_REROUTES}). Last score: ${result.score.toFixed(1)}/10. Audience: ${blockAudience}. ${result.reason}`;
 
         run(
           `UPDATE tasks SET status = 'blocked',
@@ -1692,22 +1729,34 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
                ELSE description || char(10) || char(10) || ?
              END,
              qc_reroute_attempts = ?,
+             block_reason = ?,
+             block_gaps = ?,
+             block_needs = ?,
+             block_audience = ?,
              updated_at = ?
            WHERE id = ? AND status = 'review'`,
-          [blockedNote, blockedNote, newAttempts, now, taskId],
+          [
+            blockedNote, blockedNote, newAttempts,
+            `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
+            blockGapsJson,
+            blockNeeds,
+            blockAudience,
+            now,
+            taskId,
+          ],
         );
 
         run(
           `INSERT INTO events (id, type, task_id, message, created_at)
            VALUES (?, ?, ?, ?, ?)`,
           [uuidv4(), 'task_status_changed', taskId,
-            `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Human review required.`,
+            `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Audience: ${blockAudience}. ${isSystemBlock ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
             now],
         );
 
-        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): BLOCKED after ${newAttempts} QC-fail re-routes — CEO notified`);
+        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): BLOCKED after ${newAttempts} QC-fail re-routes — audience: ${blockAudience}`);
 
-        // Notify CEO via event so the Live Feed surfaces the block.
+        // Resolve master-orchestrator/CEO agent for the event author field.
         let ceoAgentIdBlocked: string | null = null;
         try {
           const row = queryOne<{ id: string }>(
@@ -1719,33 +1768,56 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           ceoAgentIdBlocked = row?.id ?? null;
         } catch { /* no CEO agent — still visible via task event */ }
 
-        run(
-          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [
-            uuidv4(),
-            'qc_review',
-            ceoAgentIdBlocked,
-            taskId,
-            `[QC-BLOCKED] "${task.title}" failed QC ${newAttempts} time(s) and has been blocked. Score: ${result.score.toFixed(1)}/10. Needs human attention.`,
-            now,
-          ],
-        );
-
-        // ── OWNER NOTIFICATION (BLOCKED) ───────────────────────────────────
-        // Guaranteed board-side action: always attempt the Telegram push after
-        // writing the DB state. Failure is logged and NEVER rolls back blocked.
-        try {
-          const blockReason = result.gaps.length > 0
-            ? result.gaps.join('; ')
-            : result.reason;
-          notifyOwner(
-            `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${blockReason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
+        if (isSystemBlock) {
+          // SYSTEM block: escalate to master orchestrator via event.
+          // This creates a qc_review event attributed to the CEO/master-orchestrator
+          // so the orchestrator's Live Feed picks it up and can re-route or fix the
+          // root cause (wrong SOP, missing builder, model misbind, etc.).
+          // We do NOT notify the owner — this is an internal system gap.
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'qc_escalation',
+              ceoAgentIdBlocked,
+              taskId,
+              `[QC-SYSTEM-BLOCK] "${task.title}" failed QC ${newAttempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${result.score.toFixed(1)}/10. Root cause gaps: ${result.gaps.join('; ')}. Action needed: ${blockNeeds}`,
+              now,
+            ],
           );
-        } catch (notifyErr) {
-          console.error('[QCScorer] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): SYSTEM block — escalated to master orchestrator (no owner Telegram)`);
+        } else {
+          // OWNER block: emit CEO event AND notify the owner via Telegram.
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'qc_review',
+              ceoAgentIdBlocked,
+              taskId,
+              `[QC-BLOCKED] "${task.title}" failed QC ${newAttempts} time(s) and has been blocked. Score: ${result.score.toFixed(1)}/10. Owner attention needed.`,
+              now,
+            ],
+          );
+
+          // ── OWNER NOTIFICATION (BLOCKED — audience=OWNER only) ─────────────
+          // Only fire Telegram for owner-actionable blocks, NOT system blocks.
+          // Firing for system blocks would flood the owner with noise about
+          // things they cannot resolve themselves.
+          try {
+            const blockReason = result.gaps.length > 0
+              ? result.gaps.join('; ')
+              : result.reason;
+            notifyOwner(
+              `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${blockReason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
+            );
+          } catch (notifyErr) {
+            console.error('[QCScorer] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+          }
+          // ── End OWNER NOTIFICATION (BLOCKED) ────────────────────────────
         }
-        // ── End OWNER NOTIFICATION (BLOCKED) ──────────────────────────────
 
         return result;
       }

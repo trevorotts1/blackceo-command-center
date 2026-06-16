@@ -2738,6 +2738,46 @@ const migrations: Migration[] = [
       console.log('[Migration 072] Intelligent Model Selector schema ready');
     },
   },
+  {
+    id: '073',
+    name: 'block_transparency_fields',
+    up: (db) => {
+      // Block transparency (v4.44.0 — BLOCK-TRANSPARENCY-001).
+      //
+      // Adds three columns to `tasks` so the QC scorer can populate WHY a task
+      // is blocked, what specific gaps caused the failure, what action resolves
+      // it, and whether the ball is in the owner's court or the system's court.
+      //
+      //   block_gaps     TEXT  — JSON-encoded string[] of specific QC failure reasons
+      //   block_needs    TEXT  — The single human-readable resolving action
+      //   block_audience TEXT  — 'OWNER' | 'SYSTEM' — who must act; CHECK constraint
+      //                          enforced at the DB layer.
+      //
+      // These columns are additive and nullable — existing blocked tasks will
+      // have NULL in all three until they next transition through the QC scorer.
+      console.log('[Migration 073] Adding block transparency columns to tasks...');
+
+      const taskCols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+
+      if (!taskCols.includes('block_gaps')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN block_gaps TEXT`);
+        console.log('[Migration 073] Added tasks.block_gaps');
+      }
+      if (!taskCols.includes('block_needs')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN block_needs TEXT`);
+        console.log('[Migration 073] Added tasks.block_needs');
+      }
+      if (!taskCols.includes('block_audience')) {
+        // SQLite does not enforce CHECK on ALTER TABLE ADD COLUMN in all versions,
+        // but the app layer validates the value before writing.
+        db.exec(`ALTER TABLE tasks ADD COLUMN block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM'))`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_block_audience ON tasks(block_audience) WHERE block_audience IS NOT NULL`);
+        console.log('[Migration 073] Added tasks.block_audience');
+      }
+
+      console.log('[Migration 073] Block transparency columns ready');
+    },
+  },
 ];
 
 /**

@@ -1,3 +1,19 @@
+## [v4.44.0] — 2026-06-15 — feat(board+qc+ingest): column tooltips, block-list transparency, bare-task ingest resilience
+
+Three board-quality improvements shipped together:
+
+1. **COLUMN TOOLTIPS** (`MissionQueue.tsx`) — every Kanban column header pill now carries a `title` attribute tooltip explaining what the column means, its gate rule, and what to do when work piles up there. Covers Backlog, To-Do, In Progress, Review/QC, Blocked, Done. Hover the pill to read.
+
+2. **BLOCK-LIST TRANSPARENCY** — adds DB columns `block_reason`, `block_gaps`, `block_needs`, `block_audience` to `tasks` (migration 073). The QC scorer now classifies every cap-hit block as `OWNER` or `SYSTEM`:
+   - `SYSTEM` blocks (wrong SOP, missing builder, model misbind, no-criteria path) escalate via a `qc_escalation` event to the master orchestrator — the owner's Telegram is NOT notified because they can't fix it.
+   - `OWNER` blocks (needs approval, needs data) fire Telegram as before.
+   The blocked card on the Kanban renders the block reason, gap list (up to 3), resolution action, and an OWNER/SYSTEM badge so the board is transparent about WHY the task is stuck.
+
+3. **BARE-TASK INGEST FIX** (`/api/tasks/ingest`) — `resolveWorkspaceId` no longer returns the sentinel literal `'default'` when no CEO/master-orchestrator workspace is seeded. It now walks through: CEO → general-task → first-any-workspace → null. `createTaskCore` handles a null workspace_id gracefully (no FK crash). Result: bare-task POSTs never 500 regardless of DB seeding state.
+
+**Files changed:** `src/components/MissionQueue.tsx`, `src/lib/types.ts`, `src/lib/db/migrations.ts`, `src/lib/qc-scorer.ts`, `src/app/api/tasks/ingest/route.ts`
+**Migration:** 073 — block_transparency_fields
+
 ## [v4.43.1] — 2026-06-15 — fix(tasks): permanent null-agent-name guard — task board no longer crashes on null assigned-agent name (AF-TASKBOARD-NULLNAME)
 
 Fixes the recurring client-side crash on `/tasks/all` (and the CEO dept boards):

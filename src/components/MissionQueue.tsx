@@ -45,16 +45,32 @@ interface MissionQueueProps {
 // The 'bug' preset renders the 7-lane Bugs Department board.
 // All existing task board code paths are gated behind boardKind === 'task' (the default).
 
-type ColumnDef = { id: string; label: string; gradient: string };
+type ColumnDef = { id: string; label: string; gradient: string; tooltip?: string };
+
+// ── Column tooltips (v4.44.0) ─────────────────────────────────────────────
+// Each column carries a tooltip string (rendered via the `title` attribute on
+// the column-header pill) that explains what the column means, what gate
+// controls entry, and what the owner should do when work piles up there.
+const COLUMN_TOOLTIPS: Record<string, string> = {
+  backlog:
+    'Just landed — not ready. Missing a description, SOP, or persona; can\'t start until it has all three (the Triad).',
+  todo:
+    'Groomed & ready — has description + SOP + persona and is assigned to an agent; queued but not started.',
+  in_progress: 'An agent is actively working this.',
+  review:      'Finished — being QC-checked before Done.',
+  blocked:
+    'Stuck, needs attention (a system fix or your input); should escalate to get fixed, not sit here.',
+  done: 'Completed and approved.',
+};
 
 const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
   task: [
-    { id: 'backlog',     label: 'Backlog',     gradient: 'column-pill-backlog' },
-    { id: 'todo',        label: 'To-Do',       gradient: 'column-pill-backlog' },
-    { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress' },
-    { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review' },
-    { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked' },
-    { id: 'done',        label: 'Done',        gradient: 'column-pill-done' },
+    { id: 'backlog',     label: 'Backlog',     gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.backlog },
+    { id: 'todo',        label: 'To-Do',       gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.todo },
+    { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress', tooltip: COLUMN_TOOLTIPS.in_progress },
+    { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review',   tooltip: COLUMN_TOOLTIPS.review },
+    { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked',  tooltip: COLUMN_TOOLTIPS.blocked },
+    { id: 'done',        label: 'Done',        gradient: 'column-pill-done',     tooltip: COLUMN_TOOLTIPS.done },
   ],
   bug: [
     { id: 'REPORTED',         label: 'Reported',         gradient: 'column-pill-backlog' },
@@ -481,7 +497,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                   >
                     {/* Column Header */}
                     <div className="flex items-center justify-between shrink-0">
-                      <div className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md ${column.gradient}`}>
+                      <div
+                        className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md cursor-help ${column.gradient}`}
+                        title={column.tooltip}
+                      >
                         <span className="text-badge font-bold bg-white/20 px-2 py-0.5 rounded-full">
                           {columnTasks.length}
                         </span>
@@ -679,6 +698,54 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         <p className={`text-sm line-clamp-2 leading-relaxed mb-4 ${isCompleted ? 'text-gray-400' : 'text-gray-500'}`}>
           {task.description}
         </p>
+      )}
+
+      {/* Block transparency panel — only rendered when the task is blocked and has block fields */}
+      {task.status === 'blocked' && (task.block_reason || task.block_needs || task.block_audience) && (
+        <div className="mb-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs space-y-1">
+          {/* Audience badge */}
+          {task.block_audience && (
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${
+                  task.block_audience === 'SYSTEM'
+                    ? 'bg-purple-100 text-purple-700'
+                    : 'bg-red-100 text-red-700'
+                }`}
+              >
+                {task.block_audience === 'SYSTEM' ? 'System fix needed' : 'Owner action needed'}
+              </span>
+            </div>
+          )}
+          {/* Block reason */}
+          {task.block_reason && (
+            <p className="text-red-700 font-medium leading-snug line-clamp-2">
+              {task.block_reason}
+            </p>
+          )}
+          {/* Gaps */}
+          {task.block_gaps && (() => {
+            try {
+              const gaps: string[] = JSON.parse(task.block_gaps as string);
+              if (gaps.length > 0) {
+                return (
+                  <ul className="list-disc list-inside text-red-600 space-y-0.5 pl-0.5">
+                    {gaps.slice(0, 3).map((g, i) => (
+                      <li key={i} className="line-clamp-1">{g}</li>
+                    ))}
+                  </ul>
+                );
+              }
+            } catch { /* malformed JSON — skip */ }
+            return null;
+          })()}
+          {/* Needs / resolution action */}
+          {task.block_needs && (
+            <p className="text-red-600 italic leading-snug line-clamp-2">
+              Next step: {task.block_needs}
+            </p>
+          )}
+        </div>
       )}
 
       {/* Footer */}
