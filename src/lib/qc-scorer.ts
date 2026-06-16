@@ -1069,13 +1069,19 @@ export interface AcceptanceCriterion {
   description: string;
   /**
    * 'existence' | 'valid_image' | 'min_resolution' | 'vision_match'
-   * | 'language_match' | 'custom'
+   * | 'language_match' | 'numeric_fidelity' | 'custom'
    *
    * language_match (AF-LANG, v4.45.0): for presentation/deck/image deliverables,
    * the rendered text must be legible and in the expected (Latin/English) script.
    * Auto-fails on non-Latin/CJK/garbled glyphs so the deck is re-rendered.
+   *
+   * numeric_fidelity (AF-NUM, v4.46.0): for presentation/deck/image deliverables,
+   * every money/currency amount that the render SHOWS must appear in (or be
+   * consistent with) that deliverable's intended spec copy. Catches the slide-39
+   * failure mode where a render fabricated per-line dollar figures ($1,197) that
+   * are not in the spec copy and contradict other slides ($997). Fail-closed.
    */
-  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'custom';
+  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'custom';
   /** Extra params: resolution threshold, vision prompt, expected language, etc. */
   params?: Record<string, unknown>;
 }
@@ -1152,7 +1158,116 @@ export function deriveAcceptanceCriteria(
     params: { expectedLanguage },
   });
 
+  // AF-NUM numeric-fidelity gate (v4.46.0): every money/currency amount that the
+  // RENDER shows must appear in (or be consistent with) the intended spec copy.
+  // This catches the slide-39 failure mode where a deck rendered fabricated
+  // per-line dollar figures ($1,197 / $1,197 / $1,097) that are NOT in the spec
+  // copy and CONTRADICT sibling slides ($997 / $997 / $1,497) — yet AF-LANG
+  // passed because the glyphs were perfectly legible English. The spec copy is
+  // the full intended brief for the deliverable (title + description); the OCR'd
+  // render money tokens are diffed against it. Any rendered money amount not in
+  // the spec is a HARD FAIL. Carries the spec copy so the comparison is
+  // self-contained (no extra plumbing through the manifest).
+  const specCopy = [title, description].filter(Boolean).join('\n');
+  criteria.push({
+    id: 'numeric_fidelity',
+    description:
+      'Every money/currency amount shown in the render appears in (or is consistent with) the intended spec copy; no fabricated or contradictory dollar figures',
+    type: 'numeric_fidelity',
+    params: { specCopy },
+  });
+
   return criteria;
+}
+
+// ---------------------------------------------------------------------------
+// AF-NUM — numeric / currency copy-fidelity gate (v4.46.0)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the SET of money/currency amounts from a block of text.
+ *
+ * Recognises `$1,197`, `$5,000`, `$5000`, `$2,500.00`, and the endpoints of a
+ * range like `$150-$300` / `$150–$300`. Normalises every match to a plain
+ * integer-or-decimal cents-free number string so that `$5,000`, `5000`, and
+ * `$5000` all collapse to the SAME canonical token `5000`. Trailing `.00` is
+ * dropped; genuine cents (e.g. `$2.50`) are preserved.
+ *
+ * Carve-out (documented): we compare the SET of MONEY amounts only — bare
+ * percentages, plain counts, and years are intentionally NOT gated here, because
+ * decks legitimately render structural/decorative digits (slide numbers, dates,
+ * "5 steps") that never appear verbatim in the brief. Money is the high-signal,
+ * high-blast-radius token class (it is what a client pays), so AF-NUM gates money
+ * and leaves the broader numeric classes to vision_match / human review. The
+ * helper is exported so the gate is unit-provable without a live vision call.
+ */
+export function extractMoneyTokens(text: string): Set<string> {
+  const out = new Set<string>();
+  if (!text) return out;
+  // $-prefixed amounts, with optional thousands separators and optional decimals.
+  const re = /\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const intPart = m[1].replace(/,/g, '');
+    const decPart = m[2];
+    out.add(normalizeMoney(intPart, decPart));
+  }
+  return out;
+}
+
+/** Canonicalise a money amount: strip commas, drop a trailing `.00`, keep real cents. */
+function normalizeMoney(intPart: string, decPart?: string): string {
+  const intNorm = String(parseInt(intPart, 10)); // strips leading zeros
+  if (!decPart) return intNorm;
+  const dec = decPart.replace(/0+$/, ''); // "00" -> "", "50" -> "5", "5" -> "5"
+  return dec.length === 0 ? intNorm : `${intNorm}.${dec}`;
+}
+
+export interface NumericFidelityResult {
+  /** true = every rendered money amount is present in the spec copy. */
+  pass: boolean;
+  /** Money amounts shown in the render that are ABSENT from the spec copy. */
+  fabricated: string[];
+  /** Money amounts found in the render (normalised). */
+  renderMoney: string[];
+  /** Money amounts found in the spec copy (normalised). */
+  specMoney: string[];
+  /** Human-readable verdict (used as the criterion reason). */
+  explanation: string;
+}
+
+/**
+ * Compare the money amounts a render SHOWS against the intended spec copy.
+ *
+ * RULE: every money amount in the render MUST appear in the spec copy. Any
+ * rendered money amount absent from the spec is a HARD FAIL (it was fabricated,
+ * or it contradicts the spec — e.g. render shows $1,197 while the spec says
+ * $997). Spec amounts the render omits are NOT a failure here (a slide need not
+ * show every price in the brief). False positives on legitimate spec numbers are
+ * avoided because a render amount that literally appears in the spec passes; and
+ * formatting differences ($5,000 == 5000 == $5000) are normalised away before
+ * the set comparison.
+ *
+ * Pure + deterministic (no I/O) so the gate is unit-testable with a slide-39
+ * style fixture (render has $1,197, spec has $997 ⇒ FAIL) and a clean fixture
+ * (every render amount present in spec ⇒ PASS).
+ */
+export function compareNumericFidelity(renderText: string, specText: string): NumericFidelityResult {
+  const renderSet = extractMoneyTokens(renderText);
+  const specSet = extractMoneyTokens(specText);
+  const fabricated = Array.from(renderSet).filter((amt) => !specSet.has(amt));
+  const pass = fabricated.length === 0;
+  const fmt = (s: Set<string>) => (s.size ? Array.from(s).map((a) => `$${a}`).join(', ') : '(none)');
+  const explanation = pass
+    ? `AF-NUM: all rendered money amounts present in spec copy (render: ${fmt(renderSet)}; spec: ${fmt(specSet)})`
+    : `AF-NUM FAIL: rendered money amount(s) ${fabricated.map((a) => `$${a}`).join(', ')} not present in spec copy (spec has: ${fmt(specSet)}). Fabricated or contradictory dollar figure on the render — re-render using ONLY the prices in the spec copy.`;
+  return {
+    pass,
+    fabricated,
+    renderMoney: Array.from(renderSet),
+    specMoney: Array.from(specSet),
+    explanation,
+  };
 }
 
 /**
@@ -1288,6 +1403,41 @@ export async function evaluateCriteria(
             reason: langResult.legible
               ? `AF-LANG: rendered text legible and in ${expectedLanguage} (confidence ${(langResult.confidence * 100).toFixed(0)}%) — ${langResult.explanation}`
               : `AF-LANG FAIL: rendered text is NOT legible/expected-language (${langResult.explanation}). Re-render the deck/image with correct, legible ${expectedLanguage} text (no garbled glyphs, mojibake, or unintended CJK).`,
+          });
+        }
+        break;
+      }
+
+      case 'numeric_fidelity': {
+        // AF-NUM numeric-fidelity gate (v4.46.0). FAIL-CLOSED, like AF-LANG:
+        //   - OCR every rendered slide and collect the money amounts shown.
+        //   - Diff that set against the intended spec copy (carried in params).
+        //   - Any rendered money amount NOT in the spec copy is a HARD FAIL
+        //     (fabricated/contradictory — the slide-39 failure mode).
+        //   - If NO vision key is available or every OCR call errored, we do NOT
+        //     pass blind: the criterion fails (block) so a keyless install cannot
+        //     auto-advance a deck whose numbers were never read.
+        const specCopy = typeof c.params?.specCopy === 'string' ? c.params.specCopy : '';
+        const ocr = await visionMoneyOCR(manifest);
+        if (ocr === null) {
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-NUM FAIL-CLOSED: cannot read the rendered numbers to verify them against the spec copy ' +
+              '(no vision key available, or every OCR call errored). Blocking until a vision pass can read ' +
+              'the rendered money amounts. Configure a vision-capable LLM key (OPENAI_API_KEY / GOOGLE_API_KEY) for QC.',
+          });
+        } else {
+          const cmp = compareNumericFidelity(ocr.renderText, specCopy);
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: cmp.pass,
+            reason: cmp.pass
+              ? cmp.explanation
+              : `${cmp.explanation} (slide(s) read: ${ocr.slidesRead}).`,
           });
         }
         break;
@@ -1556,6 +1706,134 @@ Reply with ONLY this JSON (no other text):
   // If no provider ever answered, fail-closed (null). Otherwise return the
   // worst verdict observed (all legible → legible:true).
   return anyAnswered ? worst : null;
+}
+
+/**
+ * AF-NUM money OCR (v4.46.0).
+ *
+ * Reads EVERY valid image in the manifest and asks the vision LLM to transcribe
+ * the literal currency/dollar amounts it can see on each slide. The transcribed
+ * text from all slides is concatenated and returned; the caller diffs the money
+ * tokens in it against the intended spec copy via compareNumericFidelity().
+ *
+ * The prompt asks ONLY for verbatim dollar amounts (not interpretation) so the
+ * model behaves as an OCR pass, not a judge — the pass/fail decision is made
+ * deterministically in compareNumericFidelity().
+ *
+ * Returns:
+ *   { renderText, slidesRead } — the concatenated dollar amounts read, OR
+ *   null — when NO vision key is available or every call errored. The caller
+ *          treats null as FAIL-CLOSED (block until verifiable), never as pass.
+ */
+async function visionMoneyOCR(
+  manifest: DeliverableManifestItem[],
+): Promise<{ renderText: string; slidesRead: number } | null> {
+  const openAiKey = process.env.OPENAI_API_KEY;
+  const googleKey =
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+    process.env.GEMINI_API_KEY;
+
+  if (!openAiKey && !googleKey) return null;
+
+  const imageItems = manifest.filter((m) => m.valid && m.type === 'image' && m.path);
+  if (imageItems.length === 0) return null;
+
+  const prompt = `Transcribe EVERY currency / dollar amount that is VISIBLE in this image (e.g. a presentation slide).
+List the amounts EXACTLY as printed (keep the $ sign, commas, decimals, and ranges like $150-$300).
+Do NOT infer, calculate, or add amounts that are not literally shown. If none are visible, reply with an empty list.
+Reply with ONLY this JSON (no other text):
+{"amounts": ["$1,197", "$997"]}`;
+
+  let anyAnswered = false;
+  const collected: string[] = [];
+  let slidesRead = 0;
+
+  const parseAmounts = (raw: string): string[] | null => {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    try {
+      const parsed = JSON.parse(cleaned) as { amounts?: unknown };
+      if (Array.isArray(parsed.amounts)) {
+        return parsed.amounts.filter((a): a is string => typeof a === 'string');
+      }
+      return [];
+    } catch {
+      return null;
+    }
+  };
+
+  for (const imageItem of imageItems) {
+    if (!imageItem.path) continue;
+    let b64: string;
+    try {
+      b64 = readFileSync(imageItem.path).toString('base64');
+    } catch {
+      continue;
+    }
+    const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
+    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+
+    let amounts: string[] | null = null;
+
+    if (openAiKey) {
+      try {
+        const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiKey}` },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}`, detail: 'high' } },
+              ],
+            }],
+            max_tokens: 200,
+            temperature: 0,
+          }),
+        });
+        if (resp.ok) {
+          const data = (await resp.json()) as { choices?: { message?: { content?: string } }[] };
+          amounts = parseAmounts(data.choices?.[0]?.message?.content?.trim() ?? '');
+        }
+      } catch { /* fall through to Google for this slide */ }
+    }
+
+    if (amounts === null && googleKey) {
+      try {
+        const model = process.env.QC_SCORER_MODEL || 'gemini-2.5-flash';
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${googleKey}`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inline_data: { mime_type: mime, data: b64 } },
+              ],
+            }],
+            generationConfig: { temperature: 0, maxOutputTokens: 256 },
+          }),
+        });
+        if (resp.ok) {
+          const data = (await resp.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+          amounts = parseAmounts(data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '');
+        }
+      } catch { /* slide errored on both providers */ }
+    }
+
+    if (amounts !== null) {
+      anyAnswered = true;
+      slidesRead += 1;
+      collected.push(...amounts);
+    }
+  }
+
+  // No provider ever answered ⇒ fail-closed (null). Otherwise return the
+  // concatenated amounts (may be empty string = render showed no money).
+  return anyAnswered ? { renderText: collected.join(' '), slidesRead } : null;
 }
 
 // ---------------------------------------------------------------------------
