@@ -1113,8 +1113,25 @@ export interface AcceptanceCriterion {
    * complete). Required records: (1) a completed research brief, (2) a copy or
    * image QC log, (3) a GHL media-upload record (ghl_media_id / ghl_folder_id in
    * media_library.json).
+   *
+   * coverage (AF-COVERAGE, v4.49.0): for presentation/deck deliverables, the
+   * assembled deck must NOT silently COMPRESS/cap the client's content. The
+   * Director derives a content-driven slide_count_target from the source
+   * (transcript/brief) and records it in the run dir's intake.json /
+   * mission_prd.json. AF-COVERAGE reads that target plus any
+   * client_requested_slide_cap and the deck's ACTUAL slide count, then:
+   *   - FAILS when the actual count is materially BELOW the target (< 90%) AND
+   *     no client_requested_slide_cap explains it (the builder under-produced).
+   *   - FAILS when the target itself is implausibly low for a LARGE source
+   *     (> ~1500 source lines and target < 20 slides) with NO cap on record
+   *     (suspected upstream compression of the target).
+   *   - PASSES when the deck meets/exceeds its content-driven target, OR when a
+   *     client_requested_slide_cap is on record and the count honors it (an
+   *     explicit client limit is allowed). Catches the failure mode where a
+   *     ~2800-line transcript that warranted ~30-62 slides was compressed into
+   *     12. Fail-closed: an unreadable/missing run dir or absent target blocks.
    */
-  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'spelling_fidelity' | 'pipeline_complete' | 'custom';
+  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'spelling_fidelity' | 'pipeline_complete' | 'coverage' | 'custom';
   /** Extra params: resolution threshold, vision prompt, expected language, etc. */
   params?: Record<string, unknown>;
 }
@@ -1242,6 +1259,22 @@ export function deriveAcceptanceCriteria(
       description:
         'Deck pipeline records present on disk: a completed research brief, a copy/image QC log, and a GHL media-upload record (ghl_media_id / ghl_folder_id in media_library.json). Absent records ⇒ deck is NOT done',
       type: 'pipeline_complete',
+    });
+
+    // AF-COVERAGE coverage gate (v4.49.0): for DECK / PRESENTATION deliverables
+    // only, the assembled deck must honor the Director's content-driven
+    // slide_count_target — it must NOT silently compress/cap the client's
+    // content. The target + any client_requested_slide_cap + the source size
+    // are read on disk at evaluation time (the run dir is resolved from the deck
+    // artifact path), and the deck's ACTUAL slide count is taken from the
+    // manifest. A materially-undersized deck with no client cap on record is a
+    // HARD FAIL. Fail-closed: an unreadable/missing run dir or absent target
+    // blocks (a compressed deck cannot be PROVEN complete).
+    criteria.push({
+      id: 'coverage',
+      description:
+        "Deck slide count honors the Director's content-driven slide_count_target (≥ 90% of target) — the deck does NOT silently compress/cap the client's content. An undersized deck with no client_requested_slide_cap on record ⇒ deck is NOT done",
+      type: 'coverage',
     });
   }
 
@@ -1683,6 +1716,315 @@ function hasGhlUpload(obj: unknown): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// AF-COVERAGE — deck coverage / anti-compression gate (v4.49.0)
+// ---------------------------------------------------------------------------
+//
+// Closes the gap exposed by a silently-COMPRESSED deck: a ~2800-line transcript
+// that warranted ~30-62 slides was shortened to 12, yet the .pptx was
+// technically valid, went through the pipeline, and rendered legible/correct
+// text — so AF-LANG/AF-NUM/AF-SPELL/AF-PIPELINE-COMPLETE all passed and the deck
+// could be moved review→Done. None of those gates count slides against the
+// client's content. This gate does: it proves the deck did NOT under-cover the
+// client's content versus the Director's content-driven target.
+//
+// RULE (fail-closed, objective, low-false-positive):
+//   - Read the run dir's intake.json / mission_prd.json for the content-driven
+//     `slide_count_target` and any `client_requested_slide_cap`.
+//   - FAIL when the deck's ACTUAL slide count is materially BELOW the target
+//     (< 90% of target) AND no client cap explains it (builder under-produced).
+//   - FAIL when the target ITSELF is implausibly low for a LARGE source
+//     (source > ~1500 lines AND target < 20 slides) with NO client cap on
+//     record (suspected upstream compression of the target).
+//   - PASS when actual ≥ 90% of target, OR when a client_requested_slide_cap is
+//     on record and the actual count honors it (cap ≥ actual — an explicit
+//     client limit is allowed).
+//   - Fail-closed: an unreadable/missing run dir, or no target on record, blocks
+//     (a compressed deck cannot be PROVEN to cover the content). No vision/LLM
+//     call — a pure read of run-dir JSON + the manifest slide count.
+
+/** Coverage inputs read from the run dir (Director's targets) + the deck. */
+export interface CoverageInputs {
+  /** Director's content-driven slide_count_target (intake/mission_prd). null = absent. */
+  slideCountTarget: number | null;
+  /** Explicit client_requested_slide_cap, when the client set one. null = none on record. */
+  clientRequestedSlideCap: number | null;
+  /** Source size signal (transcript/extract/brief line count). null = unknown. */
+  sourceLineCount: number | null;
+  /** The assembled deck's ACTUAL slide count. null = unknown (fail-closed). */
+  actualSlideCount: number | null;
+}
+
+export interface CoverageResult {
+  /** true = the deck honors its content-driven target (or an explicit client cap). */
+  pass: boolean;
+  /** Human-readable verdict (used as the criterion reason). */
+  explanation: string;
+}
+
+/** Fraction of the target a deck must reach to NOT be a compression failure. */
+export const AF_COVERAGE_MIN_RATIO = 0.9;
+/** A source larger than this (lines) is treated as "long" for the implausible-target check. */
+export const AF_COVERAGE_LARGE_SOURCE_LINES = 1500;
+/** A content-driven target below this for a long source is suspected compression. */
+export const AF_COVERAGE_MIN_PLAUSIBLE_TARGET = 20;
+
+/**
+ * Decide whether a deck's slide count honors the Director's content-driven
+ * target (or an explicit client cap). PURE + deterministic (no I/O) so the gate
+ * is unit-provable: a compressed deck (actual far below target, no cap) ⇒ FAIL;
+ * a full-coverage deck (actual ≥ 90% of target) ⇒ PASS; a client-cap-honored
+ * deck ⇒ PASS. Fail-closed when the target or actual count is unknown.
+ */
+export function checkCoverage(inputs: CoverageInputs): CoverageResult {
+  const { slideCountTarget, clientRequestedSlideCap, sourceLineCount, actualSlideCount } = inputs;
+
+  // Fail-closed: we cannot prove coverage without the deck's actual slide count.
+  if (actualSlideCount === null || !Number.isFinite(actualSlideCount) || actualSlideCount <= 0) {
+    return {
+      pass: false,
+      explanation:
+        'AF-COVERAGE FAIL-CLOSED: cannot determine the assembled deck\'s actual slide count — ' +
+        'the deck is NOT done (a compressed deck cannot be proven to cover the content).',
+    };
+  }
+
+  // Explicit client cap on record: an intentional client limit is ALWAYS allowed,
+  // provided the deck does not somehow exceed it. This is the sanctioned way a
+  // deck may be smaller than its content-driven target.
+  if (clientRequestedSlideCap !== null && Number.isFinite(clientRequestedSlideCap) && clientRequestedSlideCap > 0) {
+    if (actualSlideCount <= clientRequestedSlideCap) {
+      return {
+        pass: true,
+        explanation:
+          `AF-COVERAGE: deck honors the client_requested_slide_cap (${actualSlideCount} slide(s) ≤ cap ${clientRequestedSlideCap}). ` +
+          'Explicit client limit on record — allowed.',
+      };
+    }
+    return {
+      pass: false,
+      explanation:
+        `AF-COVERAGE FAIL: deck has ${actualSlideCount} slide(s), EXCEEDING the client_requested_slide_cap of ${clientRequestedSlideCap}. ` +
+        'Rebuild to honor the client cap.',
+    };
+  }
+
+  // Fail-closed: no content-driven target on record and no client cap ⇒ we cannot
+  // prove the deck is not compressed. Block.
+  if (slideCountTarget === null || !Number.isFinite(slideCountTarget) || slideCountTarget <= 0) {
+    return {
+      pass: false,
+      explanation:
+        'AF-COVERAGE FAIL-CLOSED: no content-driven slide_count_target on record (intake.json / mission_prd.json) ' +
+        'and no client_requested_slide_cap — cannot prove the deck covers the client\'s content. The deck is NOT done.',
+    };
+  }
+
+  // Suspected upstream compression of the TARGET: a long source but an
+  // implausibly low content-driven target, with no client cap to explain it.
+  if (
+    sourceLineCount !== null &&
+    Number.isFinite(sourceLineCount) &&
+    sourceLineCount > AF_COVERAGE_LARGE_SOURCE_LINES &&
+    slideCountTarget < AF_COVERAGE_MIN_PLAUSIBLE_TARGET
+  ) {
+    return {
+      pass: false,
+      explanation:
+        `AF-COVERAGE FAIL: suspected compression — the source is large (${sourceLineCount} lines) yet the ` +
+        `content-driven slide_count_target is only ${slideCountTarget} (< ${AF_COVERAGE_MIN_PLAUSIBLE_TARGET}) with no client_requested_slide_cap on record. ` +
+        'A long transcript/brief warrants many more slides; re-derive the target from the full source and rebuild.',
+    };
+  }
+
+  // Core anti-compression check: actual must be ≥ 90% of the content-driven target.
+  const minRequired = Math.ceil(slideCountTarget * AF_COVERAGE_MIN_RATIO);
+  if (actualSlideCount < minRequired) {
+    const pct = ((actualSlideCount / slideCountTarget) * 100).toFixed(0);
+    return {
+      pass: false,
+      explanation:
+        `AF-COVERAGE FAIL: deck has ${actualSlideCount} slide(s) vs a content-driven slide_count_target of ${slideCountTarget} ` +
+        `(${pct}% of target, below the ${(AF_COVERAGE_MIN_RATIO * 100).toFixed(0)}% floor of ${minRequired}) and NO client_requested_slide_cap on record. ` +
+        "The builder silently compressed the client's content — rebuild to cover the full content-driven target " +
+        '(or record an explicit client_requested_slide_cap if the client asked for fewer slides).',
+    };
+  }
+
+  return {
+    pass: true,
+    explanation:
+      `AF-COVERAGE: deck has ${actualSlideCount} slide(s), meeting/exceeding the content-driven slide_count_target of ${slideCountTarget} ` +
+      `(≥ ${(AF_COVERAGE_MIN_RATIO * 100).toFixed(0)}% floor of ${minRequired}). No compression detected.`,
+  };
+}
+
+/**
+ * Resolve the canonical run dir from a deck artifact path and read the
+ * coverage inputs (slide_count_target, client_requested_slide_cap, source size)
+ * from intake.json / mission_prd.json. The actual slide count is supplied by the
+ * caller (derived from the deck manifest). Returns all-null targets (which fail
+ * the gate when no client cap is found) when no run dir can be located —
+ * fail-closed.
+ *
+ * The target keys are looked up case-/style-tolerantly under several aliases so
+ * a Director that writes `slide_count_target`, `slideCountTarget`, or a nested
+ * `targets.slide_count_target` is all honored.
+ */
+export function collectCoverageInputs(
+  deckArtifactPath: string,
+  actualSlideCount: number | null,
+): CoverageInputs {
+  const absent: CoverageInputs = {
+    slideCountTarget: null,
+    clientRequestedSlideCap: null,
+    sourceLineCount: null,
+    actualSlideCount,
+  };
+  if (!deckArtifactPath) return absent;
+
+  // Locate the run dir: walk up from the artifact's directory looking for a
+  // run-dir marker (intake.json / mission_prd.json / a working/ subtree) within
+  // a bounded number of parent hops, so we never escape to the filesystem root.
+  let dir = path.dirname(path.resolve(deckArtifactPath));
+  let runDir: string | null = null;
+  for (let hops = 0; hops < 6; hops++) {
+    try {
+      if (
+        existsSync(path.join(dir, 'intake.json')) ||
+        existsSync(path.join(dir, 'mission_prd.json')) ||
+        existsSync(path.join(dir, 'working'))
+      ) {
+        runDir = dir;
+        break;
+      }
+    } catch {
+      /* ignore unreadable dir, keep walking up */
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // reached filesystem root
+    dir = parent;
+  }
+  if (!runDir) return absent;
+
+  // Read intake.json + mission_prd.json (mission_prd overrides/augments intake).
+  let slideCountTarget: number | null = null;
+  let clientRequestedSlideCap: number | null = null;
+  let sourceLineCount: number | null = null;
+
+  for (const fname of ['intake.json', 'mission_prd.json']) {
+    const candidate = path.join(runDir, fname);
+    try {
+      if (!existsSync(candidate)) continue;
+      const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as Record<string, unknown>;
+      const t = readNumericKey(parsed, ['slide_count_target', 'slideCountTarget', 'target_slide_count']);
+      if (t !== null) slideCountTarget = t;
+      const cap = readNumericKey(parsed, [
+        'client_requested_slide_cap',
+        'clientRequestedSlideCap',
+        'slide_cap',
+        'requested_slide_cap',
+      ]);
+      if (cap !== null) clientRequestedSlideCap = cap;
+      const src = readNumericKey(parsed, [
+        'source_line_count',
+        'sourceLineCount',
+        'transcript_line_count',
+        'source_lines',
+      ]);
+      if (src !== null) sourceLineCount = src;
+    } catch {
+      /* missing/malformed file — treat its keys as absent */
+    }
+  }
+
+  // Fallback source-size signal: measure a source transcript/extract on disk if
+  // the JSON did not carry an explicit count. Best-effort, bounded to the run dir.
+  if (sourceLineCount === null) {
+    sourceLineCount = measureSourceLineCount(runDir);
+  }
+
+  return { slideCountTarget, clientRequestedSlideCap, sourceLineCount, actualSlideCount };
+}
+
+/**
+ * Read the first present key from `parsed` (top-level OR nested one level under a
+ * `targets`/`slides` object) that parses to a positive finite number. Tolerates
+ * numeric strings ("30"). Returns null when no alias is present/usable.
+ */
+function readNumericKey(parsed: Record<string, unknown>, aliases: string[]): number | null {
+  const toNum = (v: unknown): number | null => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+    return null;
+  };
+  for (const key of aliases) {
+    if (key in parsed) {
+      const n = toNum(parsed[key]);
+      if (n !== null) return n;
+    }
+  }
+  // Look one level under common nesting containers.
+  for (const container of ['targets', 'slides', 'plan', 'director']) {
+    const nested = parsed[container];
+    if (nested !== null && typeof nested === 'object' && !Array.isArray(nested)) {
+      const rec = nested as Record<string, unknown>;
+      for (const key of aliases) {
+        if (key in rec) {
+          const n = toNum(rec[key]);
+          if (n !== null) return n;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort source-size signal: find the largest plausible source artifact in
+ * the run dir (a transcript/extract/brief) and return its line count. Bounded to
+ * a handful of well-known locations so it is cheap and never escapes the run dir.
+ * Returns null when no source artifact is found/readable.
+ */
+function measureSourceLineCount(runDir: string): number | null {
+  const candidates = [
+    path.join(runDir, 'transcript.txt'),
+    path.join(runDir, 'transcript.md'),
+    path.join(runDir, 'source.txt'),
+    path.join(runDir, 'extract.txt'),
+    path.join(runDir, 'working', 'transcript.txt'),
+    path.join(runDir, 'working', 'extract.txt'),
+    path.join(runDir, 'working', 'research', 'transcript.txt'),
+    path.join(runDir, 'working', 'source', 'transcript.txt'),
+  ];
+  let maxLines: number | null = null;
+  for (const candidate of candidates) {
+    try {
+      if (!existsSync(candidate)) continue;
+      const body = readFileSync(candidate, 'utf8');
+      const lines = body.split('\n').length;
+      if (maxLines === null || lines > maxLines) maxLines = lines;
+    } catch {
+      /* unreadable — skip */
+    }
+  }
+  return maxLines;
+}
+
+/**
+ * Count the slides an assembled deck actually contains, from the deliverable
+ * manifest. Heuristic + deterministic (no decode): each valid slide IMAGE in the
+ * manifest counts as one slide; if no per-slide images are present we cannot
+ * count (returns null → the gate fails closed). The .pptx itself is not a slide.
+ */
+export function countDeckSlides(manifest: DeliverableManifestItem[]): number | null {
+  const slideImages = manifest.filter(
+    (m) => m.valid && m.type === 'image' && m.path && /\.(png|jpe?g|webp)$/i.test(m.path),
+  );
+  if (slideImages.length > 0) return slideImages.length;
+  return null;
+}
+
 /**
  * Evaluate acceptance criteria against actual file deliverables.
  *
@@ -1916,6 +2258,42 @@ export async function evaluateCriteria(
         } else {
           const records = collectPipelineRecords(deckItem.path);
           const cmp = checkPipelineCompleteness(records);
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: cmp.pass,
+            reason: cmp.pass ? cmp.explanation : `${cmp.explanation} (run dir resolved from: ${deckItem.path}).`,
+          });
+        }
+        break;
+      }
+
+      case 'coverage': {
+        // AF-COVERAGE coverage / anti-compression gate (v4.49.0). FAIL-CLOSED,
+        // no vision call: a pure read of the run-dir targets (intake.json /
+        // mission_prd.json) + the deck's actual slide count from the manifest.
+        // The deck must honor the Director's content-driven slide_count_target
+        // (≥ 90%) OR an explicit client_requested_slide_cap; an undersized deck
+        // with no cap on record is the silent-compression failure mode. Resolve
+        // the run dir from the FIRST deck artifact (.pptx/.pdf preferred, else
+        // any valid artifact). An absent target / unreadable run dir blocks.
+        const deckItem =
+          manifest.find(
+            (m) => m.valid && m.path && /\.(pptx|pdf|key)$/i.test(m.path),
+          ) ?? manifest.find((m) => m.valid && m.path);
+        if (!deckItem?.path) {
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-COVERAGE FAIL-CLOSED: no deck artifact path available to locate the pipeline run dir / read the ' +
+              'slide_count_target. Cannot prove the deck covers the client\'s content — the deck is NOT done.',
+          });
+        } else {
+          const actualSlideCount = countDeckSlides(manifest);
+          const inputs = collectCoverageInputs(deckItem.path, actualSlideCount);
+          const cmp = checkCoverage(inputs);
           results.push({
             id: c.id,
             description: c.description,
