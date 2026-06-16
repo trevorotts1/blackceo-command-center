@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, ArrowRight, Folder, Users, CheckSquare, Trash2, AlertTriangle, Sparkles, Zap } from 'lucide-react';
+import { Plus, ArrowRight, Folder, Users, CheckSquare, Trash2, AlertTriangle, Sparkles, Zap, RefreshCw, UserPlus, FileText } from 'lucide-react';
 import Link from 'next/link';
 import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -11,10 +11,52 @@ export function WorkspaceDashboard() {
   const [workspaces, setWorkspaces] = useState<WorkspaceStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showAddRoleModal, setShowAddRoleModal] = useState(false);
+  const [showAddSopModal, setShowAddSopModal] = useState(false);
+  const [resyncing, setResyncing] = useState(false);
+  const [resyncResult, setResyncResult] = useState<string | null>(null);
   // PRD 3.7 white-label: company name comes from /api/company, empty until loaded.
   const [companyName, setCompanyName] = useState('');
   const [companyLoaded, setCompanyLoaded] = useState(false);
   const logoUrl = useLogoUrl();
+
+  const handleResync = async () => {
+    setResyncing(true);
+    setResyncResult(null);
+    try {
+      // MC_API_TOKEN is not available client-side; converge also accepts an
+      // unauthenticated request when MC_API_TOKEN is unset (local dev mode).
+      // For authenticated deployments the operator must have an active session
+      // (Cloudflare Access) — same as the bootstrap drawer.
+      const res = await fetch('/api/system/converge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: 'all' }),
+      });
+      const data = await res.json() as {
+        ok?: boolean;
+        workspaces?: { created: number; updated: number };
+        sops?: { imported: number; updated: number };
+        untagged_personas?: string[];
+        error?: string;
+      };
+      if (res.ok && data.ok) {
+        const ws = data.workspaces ? `workspaces: +${data.workspaces.created} / ~${data.workspaces.updated}` : '';
+        const sops = data.sops ? `SOPs: +${data.sops.imported} / ~${data.sops.updated}` : '';
+        const untagged = data.untagged_personas?.length
+          ? `untagged personas: ${data.untagged_personas.length}`
+          : '';
+        setResyncResult(`Resync complete. ${[ws, sops, untagged].filter(Boolean).join(', ')}`);
+        loadWorkspaces();
+      } else {
+        setResyncResult(`Resync failed: ${data.error || 'unknown error'}`);
+      }
+    } catch (err) {
+      setResyncResult(`Resync failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setResyncing(false);
+    }
+  };
 
   useEffect(() => {
     loadWorkspaces();
@@ -89,16 +131,42 @@ export function WorkspaceDashboard() {
               </div>
               {/* PRD 3.7 white-label: Live Demo badge removed. */}
             </div>
-            <button
-              onClick={() => setShowCreateModal(true)}
-              className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 hover:shadow-xl hover:shadow-indigo-200"
-            >
-              <Plus className="w-4 h-4" />
-              New Department
-            </button>
+            <div className="flex items-center gap-2">
+              {/* Rewire / Resync — re-seeds workspaces + ingests role library from box */}
+              <button
+                onClick={handleResync}
+                disabled={resyncing}
+                title="Rewire / Resync workforce — re-reads departments.json + role library from the box and refreshes this dashboard"
+                className="flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 text-gray-600 rounded-xl font-medium hover:bg-gray-50 hover:border-gray-300 transition-all disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${resyncing ? 'animate-spin' : ''}`} />
+                {resyncing ? 'Resyncing...' : 'Rewire / Resync'}
+              </button>
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 hover:shadow-xl hover:shadow-indigo-200"
+              >
+                <Plus className="w-4 h-4" />
+                New Department
+              </button>
+            </div>
           </div>
         </div>
       </header>
+
+      {/* Resync result banner */}
+      {resyncResult && (
+        <div className={`max-w-7xl mx-auto px-6 pt-4`}>
+          <div className={`rounded-lg px-4 py-3 text-sm flex items-center justify-between ${
+            resyncResult.startsWith('Resync complete')
+              ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+              : 'bg-red-50 border border-red-200 text-red-800'
+          }`}>
+            <span>{resyncResult}</span>
+            <button onClick={() => setResyncResult(null)} className="ml-4 text-current opacity-60 hover:opacity-100">&times;</button>
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-10">
@@ -153,16 +221,34 @@ export function WorkspaceDashboard() {
           <div>
             <h2 className="text-xl font-bold text-gray-900">Your Departments</h2>
             <p className="text-gray-500 text-sm mt-0.5">
-              {workspaces.length === 0 
+              {workspaces.length === 0
                 ? 'Get started by creating your first department'
                 : `Select a department to view tasks and agents`
               }
             </p>
           </div>
           {workspaces.length > 0 && (
-            <div className="flex items-center gap-2 text-sm text-gray-400">
-              <span>Sorted by:</span>
-              <span className="font-medium text-gray-600">Recently updated</span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setShowAddRoleModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 hover:border-gray-300 transition-all"
+                title="Add a role to an existing department"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                Add Role
+              </button>
+              <button
+                onClick={() => setShowAddSopModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 hover:border-gray-300 transition-all"
+                title="Add an SOP to an existing department"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                Add SOP
+              </button>
+              <div className="flex items-center gap-2 text-sm text-gray-400 ml-2">
+                <span>Sorted by:</span>
+                <span className="font-medium text-gray-600">Recently updated</span>
+              </div>
             </div>
           )}
         </div>
@@ -197,13 +283,36 @@ export function WorkspaceDashboard() {
         )}
       </main>
 
-      {/* Create Modal */}
+      {/* Create Department Modal */}
       {showCreateModal && (
-        <CreateWorkspaceModal 
+        <CreateWorkspaceModal
           onClose={() => setShowCreateModal(false)}
           onCreated={() => {
             setShowCreateModal(false);
             loadWorkspaces();
+          }}
+        />
+      )}
+
+      {/* Add Role Modal */}
+      {showAddRoleModal && (
+        <AddRoleModal
+          workspaces={workspaces}
+          onClose={() => setShowAddRoleModal(false)}
+          onCreated={() => {
+            setShowAddRoleModal(false);
+            loadWorkspaces();
+          }}
+        />
+      )}
+
+      {/* Add SOP Modal */}
+      {showAddSopModal && (
+        <AddSopModal
+          workspaces={workspaces}
+          onClose={() => setShowAddSopModal(false)}
+          onCreated={() => {
+            setShowAddSopModal(false);
           }}
         />
       )}
@@ -454,17 +563,28 @@ function CreateWorkspaceModal({ onClose, onCreated }: { onClose: () => void; onC
     setError(null);
 
     try {
-      const res = await fetch('/api/workspaces', {
+      // POST to the full-wire /api/departments (not bare /api/workspaces).
+      // The route calls add-department.sh on the box, which writes _index.json,
+      // openclaw.json, brand.css, and the persona-stale marker — the complete
+      // wiring, not just a DB row.
+      const res = await fetch('/api/departments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), icon }),
+        body: JSON.stringify({ create: true, name: name.trim(), icon }),
       });
 
-      if (res.ok) {
+      const data = await res.json() as { success?: boolean; mode?: string; message?: string; note?: string; error?: string };
+
+      if (res.ok && data.success) {
+        // If the route fell back to the JS-only path (mode:'direct'), treat it
+        // as a failure — the department is not fully wired.
+        if (data.mode === 'direct') {
+          setError(data.note || 'Department created without full wiring (host script unavailable). Check the box installation.');
+          return;
+        }
         onCreated();
       } else {
-        const data = await res.json();
-        setError(data.error || 'Failed to create department');
+        setError(data.message || data.error || 'Failed to create department');
       }
     } catch {
       setError('Failed to create department');
@@ -533,6 +653,263 @@ function CreateWorkspaceModal({ onClose, onCreated }: { onClose: () => void; onC
               className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
             >
               {isSubmitting ? 'Creating...' : 'Create Department'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Add Role Modal ──────────────────────────────────────────────────────────
+// Calls POST /api/departments/[id]/roles which invokes add-role.sh on the box.
+// FAILS LOUD if the script is absent (no JS-only role insert).
+
+function AddRoleModal({
+  workspaces,
+  onClose,
+  onCreated,
+}: {
+  workspaces: WorkspaceStats[];
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [deptId, setDeptId] = useState(workspaces[0]?.id ?? '');
+  const [role, setRole] = useState('');
+  const [description, setDescription] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!role.trim() || !deptId) return;
+
+    setIsSubmitting(true);
+    setError(null);
+
+    try {
+      const res = await fetch(`/api/departments/${encodeURIComponent(deptId)}/roles`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: role.trim(), description: description.trim() || undefined }),
+      });
+
+      const data = await res.json() as { success?: boolean; message?: string; error?: string; status?: string };
+
+      if (res.ok && data.success) {
+        onCreated();
+      } else {
+        setError(data.message || data.error || 'Failed to add role');
+      }
+    } catch {
+      setError('Failed to add role');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-md shadow-xl">
+        <div className="p-6 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">Add Role to Department</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Invokes add-role.sh on the box — updates _index.json and wires the role into the workforce.
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Department</label>
+            <select
+              value={deptId}
+              onChange={(e) => setDeptId(e.target.value)}
+              className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {workspaces.map((w) => (
+                <option key={w.id} value={w.id}>{w.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Role Name</label>
+            <input
+              type="text"
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              placeholder="e.g., Audio Editor"
+              className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Description (optional)</label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Brief description of this role"
+              className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            />
+          </div>
+
+          {error && <div className="text-red-600 text-sm">{error}</div>}
+
+          <div className="flex justify-end gap-3 pt-4">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-gray-600 hover:text-gray-900 font-medium transition-colors">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!role.trim() || !deptId || isSubmitting}
+              className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            >
+              {isSubmitting ? 'Adding Role...' : 'Add Role'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Add SOP Modal ───────────────────────────────────────────────────────────
+// Writes to the CC `sops` table via POST /api/sops.
+// On-disk markdown + 00-INDEX.md regeneration happens when the agent runs
+// add-sop.sh on the box; both paths converge via the converge endpoint.
+
+function AddSopModal({
+  workspaces,
+  onClose,
+  onCreated,
+}: {
+  workspaces: WorkspaceStats[];
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [deptId, setDeptId] = useState(workspaces[0]?.id ?? '');
+  const [title, setTitle] = useState('');
+  const [steps, setSteps] = useState('');
+  const [keywords, setKeywords] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim() || !deptId) return;
+
+    setIsSubmitting(true);
+    setError(null);
+
+    // Build steps array from newline-separated text
+    const stepsArr = steps
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((step, i) => ({ order: i + 1, description: step }));
+
+    const slugBase = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const slug = `manual:${deptId}/${slugBase}`;
+
+    try {
+      const res = await fetch('/api/sops', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: title.trim(),
+          slug,
+          department: deptId,
+          steps: stepsArr,
+          task_keywords: keywords.split(',').map((k) => k.trim()).filter(Boolean),
+        }),
+      });
+
+      const data = await res.json() as { success?: boolean; id?: string; error?: string; message?: string };
+
+      if (res.ok && (data.success || data.id)) {
+        onCreated();
+      } else {
+        setError(data.error || data.message || 'Failed to add SOP');
+      }
+    } catch {
+      setError('Failed to add SOP');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-lg shadow-xl">
+        <div className="p-6 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">Add SOP</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Adds to the CC SOP table. For full on-disk wiring, run add-sop.sh on the box then converge.
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Department</label>
+            <select
+              value={deptId}
+              onChange={(e) => setDeptId(e.target.value)}
+              className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {workspaces.map((w) => (
+                <option key={w.id} value={w.id}>{w.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">SOP Title</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g., Edit a Raw Episode"
+              className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Steps (one per line)</label>
+            <textarea
+              value={steps}
+              onChange={(e) => setSteps(e.target.value)}
+              rows={4}
+              placeholder={"1. Import the raw audio file\n2. Remove silence and filler words\n3. Export as MP3 320kbps"}
+              className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Keywords (comma-separated, optional)</label>
+            <input
+              type="text"
+              value={keywords}
+              onChange={(e) => setKeywords(e.target.value)}
+              placeholder="e.g., edit, episode, audio"
+              className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+
+          {error && <div className="text-red-600 text-sm">{error}</div>}
+
+          <div className="flex justify-end gap-3 pt-4">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-gray-600 hover:text-gray-900 font-medium transition-colors">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!title.trim() || !deptId || isSubmitting}
+              className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            >
+              {isSubmitting ? 'Adding SOP...' : 'Add SOP'}
             </button>
           </div>
         </form>

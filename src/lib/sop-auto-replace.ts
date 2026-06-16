@@ -233,49 +233,18 @@ function countImpactedTasks(sopId: string): number {
   return row?.n ?? 0;
 }
 
-export function findClientChatId(): string | null {
-  // Per MEMORY.md: source of truth for paired Telegram chat IDs is
-  // agents/main/sessions/sessions.json under `agent:main:telegram:direct:<id>`.
-  const sessionsPath = path.join(WORKSPACE_BASE, 'agents/main/sessions/sessions.json');
-  try {
-    let raw = '';
-    if (fs.existsSync(sessionsPath)) {
-      raw = fs.readFileSync(sessionsPath, 'utf8');
-    } else {
-      raw = execFileSync('cat', [sessionsPath], { encoding: 'utf8', timeout: 5_000 });
-    }
-    const data = JSON.parse(raw) as Record<string, unknown>;
-    const keys = Object.keys(data).filter((k) => k.startsWith('agent:main:telegram:direct:'));
-    // Skip Trevor's known operator ID — we want the client's ID.
-    const TREVOR_ID = '5252140759';
-    for (const k of keys) {
-      const id = k.split(':').pop();
-      if (id && id !== TREVOR_ID) return id;
-    }
-    return keys[0]?.split(':').pop() || null;
-  } catch {
-    return null;
-  }
-}
+// ---------------------------------------------------------------------------
+// Telegram helpers — implementations live in @/lib/notify (shared module).
+// Imported for local use AND re-exported for backward compatibility with
+// sop-authoring.ts (which does `import { notifyTelegram } from sop-auto-replace`).
+// ---------------------------------------------------------------------------
 
-export function notifyTelegram(opts: { chatId: string; message: string }): boolean {
-  // Per MEMORY.md, never bypass OpenClaw's gateway. Always shell to
-  // `openclaw message send`. Honor a disable flag for tests.
-  if (process.env.SOP_AUTO_REPLACE_TELEGRAM_DISABLED === '1') {
-    return false;
-  }
-  try {
-    execFileSync(
-      'openclaw',
-      ['message', 'send', '--channel', 'telegram', '--to', opts.chatId, '--text', opts.message],
-      { stdio: 'pipe', timeout: 10_000 }
-    );
-    return true;
-  } catch (err) {
-    console.error('[sop-auto-replace] Telegram send failed:', (err as Error).message);
-    return false;
-  }
-}
+import {
+  resolveOwnerChatId as findClientChatId,
+  notifyTelegram,
+} from '@/lib/notify';
+
+export { findClientChatId, notifyTelegram };
 
 export interface EnqueueAutoReplaceOptions {
   /** Override impacted-task count (the DELETE handler usually already has it). */

@@ -2594,6 +2594,105 @@ const migrations: Migration[] = [
       console.log('[Migration 070] task_events table + task_deliverables columns ready');
     },
   },
+
+  // T3-001 -- Bug Tickets (dedicated lifecycle table for the Bugs Department)
+  // CREATE TABLE IF NOT EXISTS is idempotent -- safe on fresh DBs that already
+  // ran schema.ts, and on existing DBs that haven't seen these tables yet.
+  {
+    id: '071',
+    name: 'add_bug_tickets',
+    up: (db) => {
+      console.log('[Migration 071] Creating bug_tickets + bug_ticket_events tables...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bug_tickets (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT DEFAULT 'bugs' REFERENCES workspaces(id),
+          reporter_department TEXT NOT NULL,
+          reporter_specialist TEXT,
+          reporter_run_id TEXT,
+          symptom TEXT NOT NULL,
+          severity TEXT DEFAULT 'P1 degraded' CHECK (severity IN ('P0 run-dead','P1 degraded','P2 cosmetic or latent','P3 improvement')),
+          suspected_layer TEXT,
+          client_slug TEXT,
+          status TEXT DEFAULT 'REPORTED' CHECK (status IN ('REPORTED','TRIAGED','HEALING','VERIFYING','HEALED','REGRESSION WATCH','CLOSED')),
+          assigned_healer_agent_id TEXT REFERENCES agents(id),
+          dedup_of TEXT,
+          recurrence_count INTEGER DEFAULT 0,
+          evidence_paths TEXT,
+          regression_watch_until TEXT,
+          root_cause TEXT,
+          fix_summary TEXT,
+          healing_report_path TEXT,
+          reported_at TEXT DEFAULT (datetime('now')),
+          closed_at TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bug_tickets_status ON bug_tickets(status);
+        CREATE INDEX IF NOT EXISTS idx_bug_tickets_workspace ON bug_tickets(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_bug_tickets_dedup ON bug_tickets(dedup_of);
+
+        CREATE TABLE IF NOT EXISTS bug_ticket_events (
+          id TEXT PRIMARY KEY,
+          bug_id TEXT NOT NULL REFERENCES bug_tickets(id) ON DELETE CASCADE,
+          from_status TEXT,
+          to_status TEXT NOT NULL,
+          actor TEXT,
+          reason TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bug_ticket_events_bug ON bug_ticket_events(bug_id, created_at);
+      `);
+
+      console.log('[Migration 071] bug_tickets + bug_ticket_events tables ready');
+    },
+  },
+
+  {
+    id: '072',
+    name: 'blocked_fields_and_last_progress_at',
+    up: (db) => {
+      // Blocked-column gate (N36 / SOP-01-Blocked-vs-Return).
+      //
+      // Three new tasks columns enforce the doctrine that Blocked = human-only:
+      //   blocked_reason:     one of {decision,approval,credential,payment} -- the ONLY
+      //                       four qualifying human-only categories.
+      //   blocked_on_human:   "owner" or "operator" -- who is being waited on.
+      //   ask:                one-line string -- exactly what that human must do.
+      //
+      // A task PATCH to status=blocked is rejected by the API gate (400) unless
+      // all three are present AND the requesting agent is the master orchestrator.
+      //
+      // last_progress_at:    timestamp bumped on any status change, any logged
+      //                      event/activity, any deliverable added, or any human
+      //                      action on a Blocked card.  The stale-task sweep reads
+      //                      this column to decide when a card has gone stale.
+      //                      Backfilled to updated_at for all existing tasks.
+      console.log('[Migration 072] Adding blocked fields + last_progress_at to tasks...');
+
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+
+      if (!cols.includes('blocked_reason')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN blocked_reason TEXT CHECK (blocked_reason IN ('decision','approval','credential','payment') OR blocked_reason IS NULL)`);
+      }
+      if (!cols.includes('blocked_on_human')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN blocked_on_human TEXT CHECK (blocked_on_human IN ('owner','operator') OR blocked_on_human IS NULL)`);
+      }
+      if (!cols.includes('ask')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN ask TEXT`);
+      }
+      if (!cols.includes('last_progress_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN last_progress_at TEXT`);
+        // Backfill: set to updated_at for all existing rows so the stale sweep
+        // does not immediately flag every existing card as stale.
+        db.exec(`UPDATE tasks SET last_progress_at = updated_at WHERE last_progress_at IS NULL`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_last_progress ON tasks(last_progress_at)`);
+      }
+
+      console.log('[Migration 072] blocked fields + last_progress_at ready');
+    },
+  },
 ];
 
 /**
@@ -2765,6 +2864,100 @@ function autoSeedStarterSOPs(db: Database.Database) {
   } catch (err) {
     console.log('[Auto-seed SOPs] Skipped:', (err as Error).message);
   }
+}
+
+/**
+ * Re-seed workspaces from departments.json + build-state, without the
+ * first-boot guard. Idempotent: upserts each dept row, never deletes.
+ * Called by the converge endpoint (POST /api/system/converge) to re-sync
+ * after a new dept/role is added post-build.
+ *
+ * Returns counts of created + updated rows.
+ */
+export function reseedWorkspacesFromConfig(
+  db: Database.Database,
+  opts: { force: boolean } = { force: true }
+): { created: number; updated: number } {
+  let created = 0;
+  let updated = 0;
+
+  try {
+    const configPaths = [
+      path.join(process.cwd(), 'config', 'departments.json'),
+      path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', 'departments.json'),
+      path.join(os.homedir(), 'projects', 'mission-control', 'config', 'departments.json'),
+      path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'departments.json'),
+      path.join('/opt', 'mission-control', 'config', 'departments.json'),
+    ];
+
+    let configPath: string | null = null;
+    for (const p of configPaths) {
+      if (fs.existsSync(p)) {
+        configPath = p;
+        break;
+      }
+    }
+
+    if (!configPath) {
+      console.warn('[reseed] No departments.json found — skipping workspace reseed');
+      return { created, updated };
+    }
+
+    const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
+
+    // Ensure company row exists
+    const seedResult = seedCompanyGuarded(db);
+    if (seedResult.reason === 'partial-config') {
+      console.warn('[reseed] Aborting workspace reseed: partial company config');
+      return { created, updated };
+    }
+
+    const upsertStmt = db.prepare(`
+      INSERT INTO workspaces (id, name, slug, description, icon, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        slug = excluded.slug,
+        icon = excluded.icon,
+        sort_order = excluded.sort_order
+    `);
+
+    const existsCheck = db.prepare('SELECT id FROM workspaces WHERE id = ?');
+
+    for (const dept of depts) {
+      const slugLower = String(dept.slug || dept.id || '').toLowerCase();
+      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo';
+      const isGeneralTask = slugLower === 'general-task';
+      const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
+
+      const existing = existsCheck.get(dept.id);
+      upsertStmt.run(
+        dept.id,
+        dept.name,
+        dept.slug || dept.id,
+        dept.name + ' department workspace',
+        dept.emoji || '📁',
+        sortOrder
+      );
+      if (existing) {
+        updated++;
+      } else {
+        created++;
+      }
+    }
+
+    // Re-seed trio agents and starter SOPs (both idempotent)
+    autoSeedTrioAgents(db);
+    autoSeedStarterSOPs(db);
+
+    console.log(`[reseed] workspaces: created=${created} updated=${updated}`);
+  } catch (err) {
+    console.error('[reseed] Failed:', (err as Error).message);
+    throw err; // Re-throw so converge endpoint can FAIL LOUD
+  }
+
+  return { created, updated };
 }
 
 /**

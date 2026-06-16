@@ -1,3 +1,89 @@
+## [v4.42.0] — 2026-06-13 — fix(cc-crashloop): permanent crash-loop guard — env-bleed strip, orphan-port killer, PM2 circuit-breaker, resurrection persistence, CI guard
+
+### What changed
+
+**`scripts/cc-start.sh`** (NEW) — Canonical hardened launcher. Every PM2/npm/bootstrap/onboarding start path now routes through this single script. Implements: (1) ENV-BLEED GUARD: strips any inherited `PORT` from the shell env and pins `PORT=CC_PORT` before invoking `next start`, preventing OpenClaw gateway PORT or Hostinger-injected PORT from bleeding into the CC listen port; (2) ORPHAN-PORT KILLER: uses `lsof`/`fuser` to detect and TERM/KILL any process LISTENing on the CC port before `next start` binds, breaking the EADDRINUSE loop (Cassandra 71,551 restarts + Monique 126,935 restarts); (3) `exec npx next start` so PM2 PID tracking is correct.
+
+**`ecosystem.config.cjs`** — Rewired to invoke `bash scripts/cc-start.sh --port CC_PORT` (never `next start` directly). Removed `process.env.PORT` reads entirely; uses `CC_PORT` only (enforced by new CI guard). Added PM2 circuit-breaker: `min_uptime: 30000`, `max_restarts: 8`, `exp_backoff_restart_delay: 2000`, `kill_timeout: 10000`. Without `min_uptime`, PM2 resets the restart counter on every brief launch so `max_restarts` never trips — this is the root cause of the 126K-restart loops. Name remains `mission-control`.
+
+**`package.json`** — `scripts.start` repointed to `bash scripts/cc-start.sh` so even a manual `npm start` or `pm2 start npm -- start` goes through the hardened launcher. Added `db:push` alias → `tsx src/lib/db/seed.ts` to fix the per-box deploy abort (onboarding Phase 6 was calling `npm run db:push` which did not exist, causing `set -u` failures that prevented the CC from ever starting on strict boxes).
+
+**`scripts/install/mac-mini-bootstrap.sh`** — Step 8b: ecosystem template now uses canonical `mission-control` name + `cc-start.sh` launcher + circuit-breaker fields. Template write is now idempotent-healing (always reconciles to canonical instead of skip-if-exists), backed up to `.bak` before overwrite. Preserves `pm2 startup launchd` + `pm2 save` for resurrection.
+
+**`scripts/install/vps-docker-bootstrap.sh`** — Identical Step 8b changes. Added comment that `cc-start.sh` env-strip is the structural cure for Hostinger's injected `PORT`. Preserves `pm2 startup systemd` + `pm2 save`.
+
+**`scripts/watchdog-cc.sh`** — Added opt-in `WATCHDOG_SELF_HEAL=1` mode: on a definitive RED that shows a zombie/orphan loop (app_count>1 or crash_looper or EADDRINUSE in logs), the watchdog kills legacy-named apps and restarts via the canonical ecosystem. Preserves the proven exit-3=no-action contract.
+
+**`scripts/qc-cc.sh`** — New section 11 `port-pin-and-env-bleed-guard`: 5 checks that FAIL the build if any start path re-introduces env-bleed, missing orphan-kill, or missing circuit-breaker fields.
+
+**`.github/workflows/qc-cc.yml`** — New `port-pin-env-bleed-guard` job that self-tests the CI guard against `tests/fixtures/port-guard/bleeding-ecosystem.cjs` (which MUST fail), then runs `qc-cc.sh` section 11.
+
+**`tests/fixtures/port-guard/bleeding-ecosystem.cjs`** (NEW) — Planted fixture containing the exact pattern that caused the crash-loop: `process.env.PORT` in args + `PORT:` in env block. The CI guard MUST detect and fail on this file.
+
+## [v4.41.0] — 2026-06-12 — feat(T3-001): dedicated Bugs Department board with 7-stage lifecycle lanes
+
+### What changed
+
+**`src/lib/db/schema.ts`** -- Added `bug_tickets` table with its own 7-state CHECK constraint (`REPORTED/TRIAGED/HEALING/VERIFYING/HEALED/REGRESSION WATCH/CLOSED`) and `bug_ticket_events` audit trail. Tasks table and its CHECK constraint are untouched.
+
+**`src/lib/db/migrations.ts`** -- Migration 071 (`add_bug_tickets`): idempotent `CREATE TABLE IF NOT EXISTS` for both tables + indexes. Safe on fresh DBs (schema.ts already ran) and existing DBs.
+
+**`src/lib/types.ts`** -- Added `BugStatus`, `BugSeverity`, `BugTicket`, `BugTicketEvent`, `CreateBugTicketRequest` types. `TaskStatus` is unchanged.
+
+**`src/lib/bug-lifecycle.ts`** (new) -- `BUG_LEGAL_TRANSITIONS` map + `transitionBug()` state machine helper. Mirrors shape of `task-lifecycle.ts` but for `bug_tickets` exclusively. Throws `BugTransitionError` on illegal moves.
+
+**`src/app/api/bugs/route.ts`** (new) -- `GET /api/bugs` (list, filtered by workspace_id/status) and `POST /api/bugs` (create; default status `REPORTED`; writes `bug_ticket_events` row; generates `BUG-YYYYMMDD-NNN` id).
+
+**`src/app/api/bugs/[id]/route.ts`** (new) -- `PATCH /api/bugs/[id]` lane transition via `transitionBug()`; returns 400 on illegal jumps (e.g. `REPORTED -> HEALED`), 404 on missing ticket.
+
+**`src/components/MissionQueue.tsx`** -- Replaced single `COLUMNS` constant with `BOARD_PRESETS` map keyed by `BoardKind` (`task` | `bug`). Added `boardKind` prop (default `task`). Bug board reads from `/api/bugs` and renders `BugCard` components. All task board code paths are gated behind `boardKind === 'task'` -- zero regression risk. Added `BugCard` component.
+
+**`src/app/workspace/[slug]/page.tsx`** -- Passes `boardKind="bug"` to `MissionQueue` when `workspace.slug === 'bugs'`; all other workspaces receive default `task`.
+
+**`tests/unit/t3-001-bug-board.test.ts`** (new) -- 12 unit tests covering: schema idempotency, migration 071, POST/GET/PATCH happy paths, illegal transition rejection, recurrence_count increment on reopen, BOARD_PRESETS shape.
+
+---
+
+## [v4.40.0] — 2026-06-12 — feat(notify): guaranteed owner Telegram notification on task blocked + done
+
+### What changed
+
+**`src/lib/notify.ts`** (new) — shared owner-notification module: `resolveOwnerChatId` (reads OpenClaw sessions file), `notifyTelegram` (shells to `openclaw message send`), `notifyOwner` (convenience wrapper). Gated by `OWNER_NOTIFY_TELEGRAM_DISABLED=1` for tests. Never throws — always best-effort.
+
+**`src/lib/qc-scorer.ts`** — three guaranteed board-side notification points wired: (1) QC auto-approve DONE: notifyOwner after `status=done` write; (2) QC-BLOCKED after 3-strike cap: notifyOwner after `status=blocked` write with task title and gap reason; (3) `emitOwnerApprovalPending`: replaces dead `TODO(telegram)` seam with direct `notifyOwner` send (Approve/Redo PATCH URLs included). Notification failure is caught, logged, and never rolls back the DB transition.
+
+**`src/app/api/tasks/[id]/route.ts`** — DONE notify wired on manual/QC-agent approval path (PATCH `status=done`): notifyOwner after `task_completed` event is written. Same resilience contract.
+
+**`src/lib/sop-auto-replace.ts`** — refactored: `findClientChatId` and `notifyTelegram` now import from `@/lib/notify` (no logic duplication). Both re-exported for backward compat with `sop-authoring.ts`.
+
+**`tests/unit/owner-notify-blocked-done.test.ts`** (new) — 5 focused unit tests for the notify module; all pass.
+
+## [v4.39.0] — 2026-06-11 — feat(self-service): CC button full-wire + live/re-seed dept-role-SOP + resync action
+
+### What changed
+
+**`src/app/api/departments/route.ts`** — §2.4: kill silent degrade-to-unwired JS path. CREATE mode now FAILS LOUD (503/500) when `add-department.sh` is absent or fails — no bare row, no `success:true`, no `mode:'direct'` by default. `allow_unwired:true` is an explicit operator escape hatch. Slug derived from name when not provided (dashboard compatibility).
+
+**`src/app/api/system/converge/route.ts`** (new) — §2.3: idempotent converge endpoint (`POST /api/system/converge`). Bearer `MC_API_TOKEN` gated. Steps: reseed workspaces from `departments.json`, ingest role-library/SOPs via `importRoleLibrary`, read `needs-tags.json`. Called by box-side `sync-extensions.sh --converge` AND the dashboard "Rewire / Resync" button.
+
+**`src/app/api/departments/[id]/roles/route.ts`** (new) — §2.5: add-role sub-route (`POST /api/departments/[id]/roles`). FAILS LOUD when `add-role.sh` is absent — no JS-only role insert. Parses `---SUMMARY---` per §3.7 contract.
+
+**`src/lib/db/migrations.ts`** — §2.2: `reseedWorkspacesFromConfig(db, {force:true})` — idempotent upsert of workspaces from `departments.json`, never deletes, re-runs `autoSeedTrioAgents` + `autoSeedStarterSOPs`. Called by converge endpoint.
+
+**`src/lib/db/index.ts`** — export `reseedWorkspacesFromConfig` + `autoSeedTrioAgents` for converge endpoint use.
+
+**`src/app/api/personas/route.ts`** — §2.6: surface `needs_tags:true, routable:false` for personas with empty `domain[]` or `perspective[]`, cross-referenced against `needs-tags.json` written by box-side converge. Never silently omits untagged personas.
+
+**`src/components/WorkspaceDashboard.tsx`** — §2.1: "Create Department" button now POSTs to `/api/departments` (full-wire), not bare `/api/workspaces`. Treats `mode:'direct'` response as failure. Adds "Rewire / Resync" header button, "Add Role" + "Add SOP" section buttons with corresponding modals. Inline resync result banner.
+
+**`scripts/smoke-test-converge-and-dept.ts`** (new) — §4.2 smoke test: dept CREATE hits right route, missing script returns 503 not success:true, converge returns ok:true, role sub-route FAIL-LOUD, personas needs-tags flag.
+
+### cc-compat contract (§4.1)
+
+This release provides `POST /api/system/converge` (the HTTP contract box-side converge calls in §1.6 step 5). Onboarding repo `cc-compat.json` should pin `minVersion` / `pinnedTag` to `v4.39.0` when the onboarding side ships `v11.19.0`.
+
+---
+
 ## [v4.38.0] — 2026-06-11 — docs(skill44): crosslink convert-and-flow-agent how-to
 
 ## [v4.37.0] — 2026-06-11 — fix(b3+b4): branding seed guard (never Default over configured client) + DATABASE_PATH ecosystem template

@@ -10,6 +10,7 @@ import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { notifyOwner } from '@/lib/notify';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -155,6 +156,62 @@ export async function PATCH(
       }
     }
 
+    // ── Blocked-column gate (N36 / SOP-01-Blocked-vs-Return) ─────────────────
+    // Parallel to the Triad gate (backlog → out) and QC-authority gate (review → done).
+    // When an agent tries to set status=blocked, ALL conditions must hold:
+    //   1. blocked_reason is one of {decision,approval,credential,payment}
+    //   2. blocked_on_human is "owner" or "operator"
+    //   3. ask is a non-empty string
+    //   4. The requesting agent is the master orchestrator (is_master = 1)
+    //
+    // User-initiated moves (no updated_by_agent_id) are allowed so operators can
+    // manually park a card -- but they MUST still supply the three required fields.
+    //
+    // Worker agents must call POST /api/tasks/[id]/return-to-orchestrator instead.
+    if (validatedData.status === 'blocked') {
+      const { blocked_reason, blocked_on_human, ask } = validatedData as typeof validatedData & {
+        blocked_reason?: string | null;
+        blocked_on_human?: string | null;
+        ask?: string | null;
+      };
+      const missingBlockedFields: string[] = [];
+      if (!blocked_reason) missingBlockedFields.push('blocked_reason');
+      if (!blocked_on_human) missingBlockedFields.push('blocked_on_human');
+      if (!ask || ask.trim().length === 0) missingBlockedFields.push('ask');
+
+      if (missingBlockedFields.length > 0) {
+        return NextResponse.json(
+          {
+            error: 'Blocked requires a human-only reason',
+            missing: missingBlockedFields,
+            message: `Cannot set status=blocked without: ${missingBlockedFields.join(', ')}. ` +
+              `The Blocked column is ONLY for tasks waiting on a human action (decision, approval, credential, or payment). ` +
+              `If your task hit an error or needs re-routing, call POST /api/tasks/${id}/return-to-orchestrator instead.`,
+            hint: 'blocked_reason must be one of: decision, approval, credential, payment. blocked_on_human must be "owner" or "operator". ask must be a one-line string stating exactly what the human must do.',
+          },
+          { status: 400 },
+        );
+      }
+
+      // Authority check: only master agents may set blocked via the API.
+      // Human operators (UI drag-drop) bypass this by not supplying updated_by_agent_id.
+      if (validatedData.updated_by_agent_id) {
+        const blockingAgent = queryOne<Pick<Agent, 'id' | 'is_master'>>(
+          'SELECT id, is_master FROM agents WHERE id = ?',
+          [validatedData.updated_by_agent_id],
+        );
+        if (!blockingAgent?.is_master) {
+          return NextResponse.json(
+            {
+              error: 'Forbidden: only the Master Orchestrator may set status=blocked',
+              hint: 'Worker agents must call POST /api/tasks/{id}/return-to-orchestrator with a structured handback instead of setting status=blocked directly.',
+            },
+            { status: 403 },
+          );
+        }
+      }
+    }
+
     if (validatedData.title !== undefined) {
       updates.push('title = ?');
       values.push(validatedData.title);
@@ -178,6 +235,36 @@ export async function PATCH(
     if (validatedData.sop_step_progress !== undefined) {
       updates.push('sop_step_progress = ?');
       values.push(validatedData.sop_step_progress);
+    }
+
+    // Blocked fields (migration 071): persist when setting status=blocked.
+    // Clear them when leaving blocked (transitioning to any other status).
+    const newStatus = validatedData.status;
+    const leavingBlocked = existing.status === 'blocked' && newStatus !== undefined && newStatus !== 'blocked';
+    const enteringBlocked = newStatus === 'blocked';
+
+    const blockedPayload = validatedData as typeof validatedData & {
+      blocked_reason?: string | null;
+      blocked_on_human?: string | null;
+      ask?: string | null;
+    };
+    if (enteringBlocked) {
+      if (blockedPayload.blocked_reason !== undefined) {
+        updates.push('blocked_reason = ?');
+        values.push(blockedPayload.blocked_reason);
+      }
+      if (blockedPayload.blocked_on_human !== undefined) {
+        updates.push('blocked_on_human = ?');
+        values.push(blockedPayload.blocked_on_human);
+      }
+      if (blockedPayload.ask !== undefined) {
+        updates.push('ask = ?');
+        values.push(blockedPayload.ask);
+      }
+    } else if (leavingBlocked) {
+      // Clear blocked fields when the card moves out of Blocked.
+      updates.push('blocked_reason = ?', 'blocked_on_human = ?', 'ask = ?');
+      values.push(null, null, null);
     }
 
     // Track if we need to dispatch task
@@ -246,6 +333,21 @@ export async function PATCH(
         [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`, now]
       );
 
+      // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
+      // Guaranteed board-side action: fires synchronously after the DB write.
+      // Failure is logged and NEVER prevents the 200 response or any DB state.
+      if (validatedData.status === 'done' && existing.status !== 'done') {
+        try {
+          const deptLabel = (existing as Task & { department?: string | null }).department ?? 'your team';
+          notifyOwner(
+            `✅ Done: "${existing.title}" — completed by ${deptLabel}.`,
+          );
+        } catch (notifyErr) {
+          console.error('[tasks PATCH] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
+        }
+      }
+      // ── End OWNER NOTIFICATION (DONE — manual/QC-agent approval) ────────
+
       // Append to task_history (migration 027) so /api/performance can
       // compute durations + agent attribution per transition. Best-effort:
       // older DBs without the table won't have this row.
@@ -295,6 +397,17 @@ export async function PATCH(
 
     updates.push('updated_at = ?');
     values.push(now);
+    // Bump last_progress_at on any status change (migration 071 / stale-task-sweep).
+    // This covers: status transitions, assignment changes, and explicit field updates.
+    // The stale sweep reads last_progress_at to determine when a card has gone stale.
+    if (validatedData.status !== undefined || validatedData.assigned_agent_id !== undefined) {
+      try {
+        updates.push('last_progress_at = ?');
+        values.push(now);
+      } catch {
+        // Pre-migration-071 DB: column missing -- silently skip rather than crash.
+      }
+    }
     values.push(id);
 
     run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);

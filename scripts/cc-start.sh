@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# cc-start.sh — Canonical hardened launcher for the BlackCEO Command Center.
+#
+# Every start path (ecosystem.config.cjs, bootstrap, atomic-deploy, onboarding
+# Phase 6) MUST invoke this script rather than calling `next start` directly.
+# It provides three critical guarantees:
+#
+#   1. ENV-BLEED GUARD   — pins CC_PORT and strips any inherited PORT from the
+#                          shell env so an OpenClaw gateway PORT (or a
+#                          Hostinger-injected random PORT) can never override the
+#                          CC's listen port.
+#   2. ORPHAN-PORT KILLER — frees the CC port before next binds it, breaking the
+#                           EADDRINUSE crash-loop that caused Cassandra's 71,551
+#                           restarts. Works on Mac (lsof) and Linux (lsof/fuser).
+#   3. CLEAN EXEC         — uses exec so PM2's PID tracking stays correct (the
+#                           bash wrapper never hides the real node child).
+#
+# Usage:
+#   bash scripts/cc-start.sh [--port PORT]
+#   CC_PORT=4000 bash scripts/cc-start.sh
+#
+# The script is meant to run as the PM2 `script` + `args` target (see
+# ecosystem.config.cjs).  Under PM2: PM2 passes CC_PORT via the env block.
+#
+# NOTE: Never call `openclaw gateway restart` from this script — it manages
+# ONLY the Next.js CC process, not the OpenClaw gateway (Mac launchd rule).
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── CLI flag parsing ───────────────────────────────────────────────────────────
+ARG_PORT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --port)
+      ARG_PORT="$2"; shift 2 ;;
+    --port=*)
+      ARG_PORT="${1#--port=}"; shift ;;
+    *)
+      shift ;;
+  esac
+done
+
+# ── 1. ENV-BLEED GUARD ────────────────────────────────────────────────────────
+# Resolve the canonical CC port: CLI flag → CC_PORT env var → default 4000.
+# Then strip the inherited PORT entirely and re-export only our own port so no
+# ambient OpenClaw gateway PORT or Hostinger injected PORT can reach next start.
+CC_PORT="${ARG_PORT:-${CC_PORT:-4000}}"
+
+# Unset ambient PORT before setting ours; also clear HOSTNAME stray if present.
+unset PORT 2>/dev/null || true
+export PORT="$CC_PORT"
+export CC_PORT="$CC_PORT"
+# Preserve NODE_ENV (default to production if unset).
+export NODE_ENV="${NODE_ENV:-production}"
+
+printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "$NODE_ENV" >&2
+
+# ── 2. ORPHAN-PORT KILLER ─────────────────────────────────────────────────────
+# Find any process currently LISTENing on the CC port and kill it before next
+# tries to bind.  Uses lsof (Mac + most Linux); falls back to fuser (Linux).
+# If neither tool is available, fails loudly so the PM2 circuit-breaker (not an
+# infinite EADDRINUSE loop) takes over.
+#
+# Safety: only LISTEN sockets on the exact port are targeted — never a kill-by-name.
+
+free_port() {
+  local port="$1"
+  local pids=""
+
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  elif command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
+  else
+    printf '[cc-start] FATAL: neither lsof nor fuser found — cannot check port %s for orphans\n' "$port" >&2
+    printf '[cc-start] Install lsof (apt install lsof / brew install lsof) and retry\n' >&2
+    exit 1
+  fi
+
+  if [[ -z "$pids" ]]; then
+    printf '[cc-start] ORPHAN-PORT KILLER: port %s is free\n' "$port" >&2
+    return 0
+  fi
+
+  printf '[cc-start] ORPHAN-PORT KILLER: port %s held by pid(s): %s\n' "$port" "$pids" >&2
+  for pid in $pids; do
+    # Print cmdline so the log shows WHAT process was killed.
+    local cmd
+    cmd="$(ps -p "$pid" -o comm= 2>/dev/null || echo '<unknown>')"
+    printf '[cc-start]   TERM -> pid %s (%s)\n' "$pid" "$cmd" >&2
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+
+  # Wait up to 5s for the port to be freed.
+  local waited=0
+  while [[ $waited -lt 5 ]]; do
+    sleep 1
+    waited=$((waited+1))
+    local remaining=""
+    if command -v lsof >/dev/null 2>&1; then
+      remaining="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+    else
+      remaining="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
+    fi
+    if [[ -z "$remaining" ]]; then
+      printf '[cc-start]   port %s freed after %ss\n' "$port" "$waited" >&2
+      return 0
+    fi
+    # Force-kill after 3s of TERM
+    if [[ $waited -ge 3 ]]; then
+      for pid in $remaining; do
+        printf '[cc-start]   KILL -> pid %s (still holding port after TERM)\n' "$pid" >&2
+        kill -KILL "$pid" 2>/dev/null || true
+      done
+    fi
+  done
+
+  # Final re-probe — if still occupied, abort to let the PM2 circuit-breaker handle it.
+  local final_check=""
+  if command -v lsof >/dev/null 2>&1; then
+    final_check="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  else
+    final_check="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
+  fi
+  if [[ -n "$final_check" ]]; then
+    printf '[cc-start] FATAL: port %s still occupied after TERM+KILL — pid(s): %s\n' "$port" "$final_check" >&2
+    printf '[cc-start] Aborting so the PM2 circuit-breaker (not an infinite EADDRINUSE loop) takes over\n' >&2
+    exit 1
+  fi
+}
+
+free_port "$CC_PORT"
+
+# ── 3. EXEC next start ────────────────────────────────────────────────────────
+# exec replaces this bash process so PM2's PID tracking points at the real node
+# child — cc-health-check.sh pm2-analyze-cc.py regex `(--port|-p)\s+PORT` still
+# matches because we pass --port explicitly.
+printf '[cc-start] Launching: next start -p %s -H 0.0.0.0 (cwd: %s)\n' "$CC_PORT" "$CC_DIR" >&2
+
+cd "$CC_DIR"
+exec npx next start -p "$CC_PORT" -H 0.0.0.0

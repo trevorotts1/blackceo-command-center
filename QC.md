@@ -23,10 +23,12 @@ yourself honestly.
 | **8**   | 0.5    | No hardcoded Anthropic model id as an inference target in non-orchestrator business logic. Exempt: the orchestrator layer, `model-providers/anthropic.ts` (emits Claude family *labels* for the UI), and `web-agent/runner.ts` (built on the Anthropic Messages-API tool-use protocol; model id is env-overridable via `WEB_AGENT_MODEL`) |
 | **9**   | 0.5    | `npm run build` exits zero |
 | **10**  | 0.5    | `qc-cc.sh` exits zero |
+| **11**  | 1.0    | Blocked-column gate (N36): migration 071 present in `src/lib/db/migrations.ts`; `src/app/api/tasks/[id]/route.ts` PATCH rejects status=blocked without blocked_reason/blocked_on_human/ask (HTTP 400); `src/app/api/tasks/[id]/return-to-orchestrator/route.ts` exists; `stale-task-sweep` registered in `src/lib/jobs/scheduler.ts` JOBS[]. Auto-fail if any of the four is missing. |
+| **12**  | 1.0    | Artifact-mandatory invariant (design item #10 root-cause fix): `src/lib/qc-scorer.ts` detects artifact tasks via `isArtifactTask`; when zero deliverables are registered the scorer calls return-to-orchestrator (NOT Mode-B description re-score, NOT blocked); Mode-B is explicitly guarded to confirmed non-artifact tasks only. `qc-blocked-gate.sh` assertions 7 and 8 enforce both invariants. Auto-fail if `isArtifactTask`, `no artifact registered`, `fileRows.length === 0`, or `Mode B: document/work task (confirmed non-artifact)` are absent from qc-scorer.ts. |
 
-Total: 10.0
+Total: 11.0
 
-Gate: **≥ 8.5 to ship**. Below 8.5 → list failures and retry.
+Gate: **≥ 9.35 to ship** (same ≥8.5/10 fractional threshold, now denominator 11). Below 9.35 → list failures and retry.
 
 ---
 
@@ -69,3 +71,5 @@ fail and bring the total below 8.5:
 | Migration 008 gap reappears | #7 | DB schema drift |
 | New hardcoded `claude-*` / `anthropic/*` model id in non-exempt `src/lib` business logic | #8 | Cost policy |
 | Build fails after dep upgrade | #9 | Smoke check |
+| Artifact task with zero deliverables falls through to Mode-B description re-score | #12 | Root-cause of false-blocked bug (design item #10) |
+| `isArtifactTask` guard removed from qc-scorer.ts | #12 | Reverts fix #10, re-enables false-done loop |

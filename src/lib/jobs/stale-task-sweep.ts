@@ -1,0 +1,277 @@
+/**
+ * Stale Task Sweep (N36 / SOP-01-Blocked-vs-Return).
+ *
+ * Detects tasks that have made no progress past their column threshold and
+ * returns them to the orchestrator for re-routing. Nothing rots silently.
+ *
+ * Per-column thresholds (configurable via env, defaults in STALE_THRESHOLDS):
+ *   in_progress:   24h
+ *   review:        12h
+ *   to-do/backlog: 48h
+ *   blocked:       72h (re-ping first; +72h to return to orchestrator)
+ *
+ * What happens:
+ *   - Non-Blocked stale tasks: synthesize a broken-but-agent-could handback
+ *     and call the return-to-orchestrator logic directly (sets status=backlog,
+ *     writes task_returned event, broadcasts task_updated).
+ *   - Blocked stale tasks: re-ping the named blocked_on_human once (Telegram
+ *     for owner / Rescue Rangers webhook for operator). After a second
+ *     threshold (STALE_BLOCKED_REPINGED_THRESHOLD_HOURS), return to the
+ *     orchestrator to re-classify.
+ *
+ * Reads last_progress_at (migration 071). Falls back to updated_at when
+ * last_progress_at is NULL (pre-migration-071 DB).
+ *
+ * Disable with DISABLE_STALE_TASK_SWEEP=1.
+ */
+
+import { queryAll, run } from '@/lib/db';
+import { broadcast } from '@/lib/events';
+import { getMissionControlUrl } from '@/lib/config';
+import { v4 as uuidv4 } from 'uuid';
+
+export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
+
+// Per-column stale thresholds in hours.
+const STALE_THRESHOLDS: Record<string, number> = {
+  in_progress: parseFloat(process.env.STALE_IN_PROGRESS_HOURS || '24'),
+  review: parseFloat(process.env.STALE_REVIEW_HOURS || '12'),
+  backlog: parseFloat(process.env.STALE_BACKLOG_HOURS || '48'),
+  todo: parseFloat(process.env.STALE_TODO_HOURS || '48'),
+  // Blocked: first threshold = re-ping; second threshold = return to orchestrator.
+  blocked_repinged: parseFloat(process.env.STALE_BLOCKED_REPINGED_HOURS || '144'), // 72+72
+};
+
+interface StaleTaskRow {
+  id: string;
+  title: string;
+  status: string;
+  description: string | null;
+  department: string | null;
+  workspace_id: string | null;
+  assigned_agent_id: string | null;
+  blocked_reason: string | null;
+  blocked_on_human: string | null;
+  ask: string | null;
+  last_progress_at: string | null;
+  updated_at: string;
+  qc_reroute_attempts: number | null;
+}
+
+export interface StaleSweepResult {
+  scanned: number;
+  returned: number;
+  repinged: number;
+  skippedReason?: string;
+}
+
+function hoursAgo(hours: number): string {
+  const d = new Date(Date.now() - hours * 60 * 60 * 1000);
+  return d.toISOString();
+}
+
+function progressTimestamp(row: StaleTaskRow): string {
+  return row.last_progress_at ?? row.updated_at;
+}
+
+/**
+ * Attempt to notify the blocked_on_human via the available channels.
+ * Best-effort: failure here must never crash the sweep.
+ */
+async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
+  const who = task.blocked_on_human ?? 'owner';
+  const message =
+    `[STALE-BLOCKED] Task "${task.title}" (id: ${task.id}) has been waiting in Blocked for over ` +
+    `${STALE_THRESHOLDS['blocked_repinged'] / 2}h without a response. ` +
+    `Reminder: ${task.ask ?? '(no ask specified)'}`;
+
+  if (who === 'operator') {
+    // Notify via Rescue Rangers webhook (per AGENTS.md Rescue Rangers section).
+    const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
+    if (webhookUrl) {
+      try {
+        await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'escalate',
+            agent: 'stale-task-sweep',
+            message,
+          }),
+        });
+      } catch (err) {
+        console.warn('[stale-task-sweep] Rescue Rangers re-ping failed:', (err as Error).message);
+      }
+    }
+  } else {
+    // Owner: notify via the Command Center's internal message route (which
+    // triggers Telegram if wired). Best-effort -- no throw on failure.
+    const ccUrl = getMissionControlUrl();
+    try {
+      await fetch(`${ccUrl}/api/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'stale_blocked_repinged',
+          payload: { task_id: task.id, message },
+        }),
+      });
+    } catch (err) {
+      console.warn('[stale-task-sweep] Owner re-ping notification failed:', (err as Error).message);
+    }
+  }
+}
+
+/**
+ * Return a stale non-Blocked task to the orchestrator.
+ * Mirrors the POST /api/tasks/[id]/return-to-orchestrator logic inline
+ * so the sweep does not depend on an HTTP round-trip to itself.
+ */
+function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
+  const now = new Date().toISOString();
+  const currentAttempts = task.qc_reroute_attempts ?? 0;
+  const newAttempts = currentAttempts + 1;
+
+  const handbackNote = [
+    `[STALE-RETURN #${newAttempts}] ${now}`,
+    `Problem: ${reason}`,
+    `Tried: stale sweep detected no progress`,
+    `Needs: orchestrator re-route or human triage`,
+  ].join('\n');
+
+  const updatedDescription = task.description
+    ? `${handbackNote}\n\n---\n\n${task.description}`
+    : handbackNote;
+
+  try {
+    run(
+      `UPDATE tasks SET
+        status = 'backlog',
+        description = ?,
+        qc_reroute_attempts = ?,
+        last_progress_at = ?,
+        updated_at = ?
+       WHERE id = ?`,
+      [updatedDescription, newAttempts, now, now, task.id],
+    );
+
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at)
+       VALUES (?, 'task_returned', ?, ?, ?)`,
+      [uuidv4(), task.id, `[STALE-RETURN] ${reason}`, now],
+    );
+
+    broadcast({ type: 'task_updated', payload: { id: task.id, status: 'backlog' } });
+  } catch (err) {
+    console.warn(`[stale-task-sweep] returnToOrchestrator failed for ${task.id}:`, (err as Error).message);
+  }
+}
+
+export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
+  if (
+    process.env.DISABLE_STALE_TASK_SWEEP === '1' ||
+    process.env.DISABLE_STALE_TASK_SWEEP === 'true'
+  ) {
+    return { scanned: 0, returned: 0, repinged: 0, skippedReason: 'DISABLE_STALE_TASK_SWEEP set' };
+  }
+
+  // Guard: last_progress_at column must exist (migration 071).
+  let hasLastProgressAt = false;
+  try {
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    hasLastProgressAt = cols.some((c) => c.name === 'last_progress_at');
+  } catch {
+    return { scanned: 0, returned: 0, repinged: 0, skippedReason: 'Cannot read tasks schema' };
+  }
+
+  if (!hasLastProgressAt) {
+    return { scanned: 0, returned: 0, repinged: 0, skippedReason: 'Migration 071 not applied yet (no last_progress_at column)' };
+  }
+
+  const progressCol = 'COALESCE(last_progress_at, updated_at)';
+
+  // Select all non-done, non-archived tasks whose progress timestamp is old enough
+  // for ANY column threshold. We filter in-process below.
+  const oldestThreshold = Math.max(
+    STALE_THRESHOLDS.in_progress,
+    STALE_THRESHOLDS.review,
+    STALE_THRESHOLDS.backlog,
+    STALE_THRESHOLDS.todo,
+    STALE_THRESHOLDS.blocked_repinged,
+  );
+
+  let candidates: StaleTaskRow[];
+  try {
+    candidates = queryAll<StaleTaskRow>(
+      `SELECT id, title, status, description, department, workspace_id,
+              assigned_agent_id, blocked_reason, blocked_on_human, ask,
+              last_progress_at, updated_at, qc_reroute_attempts
+       FROM tasks
+       WHERE archived_at IS NULL
+         AND status NOT IN ('done')
+         AND ${progressCol} < ?
+       ORDER BY ${progressCol} ASC
+       LIMIT 100`,
+      [hoursAgo(Math.min(STALE_THRESHOLDS.review, oldestThreshold))],
+    );
+  } catch (err) {
+    return { scanned: 0, returned: 0, repinged: 0, skippedReason: `Query failed: ${(err as Error).message}` };
+  }
+
+  let returned = 0;
+  let repinged = 0;
+
+  for (const task of candidates) {
+    try {
+      const progressTs = progressTimestamp(task);
+      const progressDate = new Date(progressTs).getTime();
+      const ageHours = (Date.now() - progressDate) / (1000 * 60 * 60);
+
+      if (task.status === 'blocked') {
+        // Blocked tasks: re-ping first threshold, return after second.
+        const repingThreshold = STALE_THRESHOLDS.blocked_repinged / 2; // default 72h
+        const returnThreshold = STALE_THRESHOLDS.blocked_repinged; // default 144h total
+
+        if (ageHours >= returnThreshold) {
+          // Second threshold passed: return to orchestrator.
+          returnToOrchestrator(task, `Blocked task stale for ${Math.round(ageHours)}h with no human response to: "${task.ask ?? '(no ask)'}"`);
+          returned++;
+        } else if (ageHours >= repingThreshold) {
+          // First threshold: re-ping the named human.
+          await repingBlockedHuman(task);
+          // Write stale_returned event for audit trail.
+          const now = new Date().toISOString();
+          try {
+            run(
+              `INSERT INTO events (id, type, task_id, message, created_at)
+               VALUES (?, 'stale_repinged', ?, ?, ?)`,
+              [uuidv4(), task.id, `Re-pinged ${task.blocked_on_human ?? 'owner'} on blocked task (stale ${Math.round(ageHours)}h)`, now],
+            );
+          } catch {
+            // events table issue -- non-fatal
+          }
+          repinged++;
+        }
+        continue;
+      }
+
+      // Non-Blocked tasks: check per-column threshold.
+      const thresholdHours =
+        task.status === 'in_progress' ? STALE_THRESHOLDS.in_progress :
+        task.status === 'review' ? STALE_THRESHOLDS.review :
+        STALE_THRESHOLDS.backlog;
+
+      if (ageHours >= thresholdHours) {
+        returnToOrchestrator(
+          task,
+          `Task stale in '${task.status}' for ${Math.round(ageHours)}h (threshold: ${thresholdHours}h) with no progress`,
+        );
+        returned++;
+      }
+    } catch (err) {
+      console.warn(`[stale-task-sweep] Processing task ${task.id} failed:`, (err as Error).message);
+    }
+  }
+
+  return { scanned: candidates.length, returned, repinged };
+}
