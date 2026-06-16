@@ -1,12 +1,4 @@
-## [v4.48.0] — 2026-06-16 — feat(qc): AF-PIPELINE-COMPLETE gate (no shortcut-bypass)
+## [v4.49.0] — 2026-06-16 — feat(qc): AF-COVERAGE anti-compression gate
 
-Blocks review->Done for a deck unless the full-pipeline artifacts exist: a
-completed research brief (working/research/brief-*.md research_complete:true), a
-copy/image QC report, AND a real GHL media-upload record (ghl_media_id/folder_id
-in media_library.json; seed null = not uploaded). Closes the hole where a
-shortcut (hand-fed slides.json -> build_deck.py) could produce a "finished" deck
-with no research, no QC log, and no GHL upload. Fail-closed; caps score below
-8.5. Widened the deck/presentation task detector so decks reach the criteria
-block. Tests: AF-PIPELINE 7/7; AF-SPELL/AF-NUM/AF-LANG/AF-I14 regressions pass
-(21/21); tsc clean.
+Blocks a deck whose slide count is materially below what its source warrants (auto-fail) UNLESS a client_requested_slide_cap is on record. Closes the hole where a rich transcript (~2800 lines, warranting ~30-62 slides) got silently compressed to a 12-slide summary. Pure checkCoverage(): FAIL if actual < 90% of slide_count_target with no cap; FAIL if large source (>1500 lines) + target <20 with no cap; PASS at >=90% of target or when an explicit client cap is honored; fail-closed on unknown. Emitted for deck tasks. Tests: AF-COVERAGE 14/14; AF-PIPELINE/SPELL/NUM/LANG/I14 regressions pass; tsc clean.
 
