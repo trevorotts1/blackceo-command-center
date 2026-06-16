@@ -1,3 +1,30 @@
+## [v4.43.1] — 2026-06-15 — fix(tasks): permanent null-agent-name guard — task board no longer crashes on null assigned-agent name (AF-TASKBOARD-NULLNAME)
+
+Fixes the recurring client-side crash on `/tasks/all` (and the CEO dept boards):
+`TypeError: Cannot read properties of null (reading 'charAt')`. A v4.43.0 deploy
+(pull + rebuild) had reverted an UNCOMMITTED component guard, so the shipped
+bundle again ran `assigned_agent.name.charAt(0)` on a null name. This makes the
+fix PERMANENT (committed to main, survives future deploys) and ROBUST
+(defense-in-depth across every consumer).
+
+**Root cause** — `GET /api/tasks` (`src/app/api/tasks/route.ts`) built the nested
+`assigned_agent` object whenever `task.assigned_agent_id` was truthy, even if the
+LEFT-JOINed `assigned_agent_name` was NULL (deleted agent row / null name). That
+produced a truthy `{ id, name: null, avatar_emoji }`. Every board consumer gates
+on `task.assigned_agent ?` being truthy, so the null-name object slipped through
+and `.name.charAt(0)` crashed React.
+
+**`src/app/api/tasks/route.ts`** (PRIMARY) — the nested object is now emitted only
+when BOTH `task.assigned_agent_id` AND `task.assigned_agent_name` are present;
+otherwise `assigned_agent` is `undefined`. This removes the null-name object at
+the source for ALL consumers (MissionQueue avatar + pill, DepartmentBrowser, the
+dept focus view, TaskModal).
+
+**`src/components/MissionQueue.tsx`** (belt-and-suspenders) — avatar initial keeps
+its `(name ?? '?').charAt(0)` guard (line ~690), and the agent pill (line ~649)
+now also requires a non-empty `name` before rendering. These hold even if a
+null-name object ever reaches the component by another path.
+
 ## [v4.43.0] — 2026-06-15 — feat(model-sovereignty): AF-MODEL-SOVEREIGNTY gate + Intelligent Model Selector — kill openrouter/free default
 
 Kills `openrouter/free` as the hardcoded DEFAULT_MODEL. Replaces with a 5-layer

@@ -643,8 +643,9 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
           </span>
         )}
 
-        {/* Agent Pill */}
-        {task.assigned_agent && (
+        {/* Agent Pill — guard against a null/empty agent name (belt-and-suspenders;
+            the API now drops null-name agent objects at the source). */}
+        {task.assigned_agent && (task.assigned_agent as { name: string | null }).name && (
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700">
             {(task.assigned_agent as { name: string }).name}
           </span>
@@ -687,7 +688,7 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
           {task.assigned_agent ? (
             <>
               <div className={`w-8 h-8 rounded-full border-2 border-white ${getAvatarGradient(0)} flex items-center justify-center text-white text-xs font-bold`}>
-                {(task.assigned_agent as { name: string }).name.charAt(0).toUpperCase()}
+                {((task.assigned_agent as { name: string | null }).name ?? '?').charAt(0).toUpperCase()}
               </div>
             </>
           ) : ['backlog', 'inbox', 'planning'].includes(task.status) ? (

@@ -82,16 +82,28 @@ export async function GET(request: NextRequest) {
 
     const tasks = queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; created_by_agent_name?: string }>(sql, params);
 
-    // Transform to include nested agent info
+    // Transform to include nested agent info.
+    // ROBUST null-name guard (AF-TASKBOARD-NULLNAME): only emit the nested
+    // assigned_agent object when BOTH the id AND a non-empty name are present.
+    // A LEFT JOIN can return an agent_id whose joined agent row was deleted /
+    // has a NULL name, which previously produced a truthy { name: null } object.
+    // Every board consumer (MissionQueue avatar `.name.charAt`, the agent pill,
+    // DepartmentBrowser, the dept focus view, TaskModal) gates on
+    // `task.assigned_agent ?` being truthy, so a null-name object slipped past
+    // the gate and crashed the client with "Cannot read properties of null
+    // (reading 'charAt')". Returning `undefined` here eliminates the crash at
+    // the source for ALL consumers. Component-level guards remain as
+    // belt-and-suspenders.
     const transformedTasks = tasks.map((task) => ({
       ...task,
-      assigned_agent: task.assigned_agent_id
-        ? {
-            id: task.assigned_agent_id,
-            name: task.assigned_agent_name,
-            avatar_emoji: task.assigned_agent_emoji,
-          }
-        : undefined,
+      assigned_agent:
+        task.assigned_agent_id && task.assigned_agent_name
+          ? {
+              id: task.assigned_agent_id,
+              name: task.assigned_agent_name,
+              avatar_emoji: task.assigned_agent_emoji,
+            }
+          : undefined,
     }));
 
     return NextResponse.json(transformedTasks);
