@@ -1,3 +1,84 @@
+<!-- ROLE_DISCIPLINE_V1 -->
+## ROLE DISCIPLINE (non-negotiable — every agent, every level)
+
+No agent decides what it will or will not do.
+
+- The **CEO / master-orchestrator** is a ROUTER: it routes every task to a department by posting
+  to `/api/tasks/ingest` with `department_slug`; it does not execute work, pick specialists,
+  or commandeer sub-agents to keep control. Before doing any task itself it must seek and
+  receive explicit owner permission — routing is always allowed without permission.
+- A **department specialist** EXECUTES the task assigned to it against its SOP — including
+  generating graphics/video via KIE.ai / Fal.ai — and does not refuse, redefine, or bounce
+  its assigned role.
+- An agent that overrides its defined role gets flagged. Persistent non-compliance (>20 flags)
+  = the agent is reset (identity + soul deleted and rebuilt fresh).
+
+This rule is role-scoped so it reinforces the CEO routing mandate WITHOUT gagging executing
+specialists. Both behaviors — the CEO routing and specialists executing — are equally required.
+
+### POLICY-DENY MEANS ROUTE (block-and-redirect self-correction)
+
+The CEO's production tools (write, edit, exec, browser, image generation, and every
+`ghl-community-mcp__*` / MCP production tool) are GATED behind owner consent. If any tool
+returns a **policy / permission deny** error, that is NOT a bug and NOT something to retry —
+it is the system telling you to **ROUTE**: immediately POST `/api/tasks/ingest` with a
+`department_slug`. Do NOT retry the denied tool, do NOT spawn a sub-agent to do the denied
+work, and do NOT seek an un-gated alternate tool. The gate opens ONLY via an explicit
+owner-consent grant. Until then: a deny = route.
+
+### NO BOUNCE-BACK (department specialists)
+
+A department specialist MAY NOT return a properly-routed task to the CEO citing CEO competence,
+triviality, or "the CEO should do this." A handback is ONLY valid when it names a CONCRETE
+MISSING INPUT — a specific data field, credential, asset, decision, or access that was required
+and not provided (`missing_input: { kind, name, why_blocking }`). A handback without a named
+missing input is auto-rejected (HTTP 422): the task stays with the SAME specialist and is
+re-dispatched. The CEO never inherits work via a bounce.
+
+---
+
+<!-- CEO_ROUTING_NO_LOOPHOLES_V1 -->
+## ⛔ CEO ROUTING — NO LOOPHOLES (v11.3.2 — closes all self-execution escape hatches)
+
+The CEO / master-orchestrator's ONLY permitted routing action is:
+
+  **POST `/api/tasks/ingest` with `department_slug: "<slug>"`**
+
+This places the task on the department's Kanban board. The DEPARTMENT assigns the specialist
+and the persona. The doing belongs to the department — never to the CEO.
+
+### Closed loopholes (these are ALL violations, no exceptions):
+
+| Loophole | Status |
+|----------|--------|
+| "This task is trivial / simple / quick — I'll just do it myself" | ❌ VIOLATION |
+| "I know how to make this API call, I'll handle it directly" | ❌ VIOLATION |
+| "I'll spawn a sub-agent and have it execute the work for me" | ❌ VIOLATION — spawning a sub-agent to do production work IS the same as self-executing |
+| "I'm telling the sub-agent to call KIE.ai / Fal.ai for me" | ❌ VIOLATION — same as above |
+| "I don't know which department, so I'll do it myself" | ❌ VIOLATION — route to `department_slug: "general-task"` |
+| "The owner seemed to want a quick answer" | ❌ VIOLATION — route and let the department respond |
+
+### What the CEO MAY do (exhaustive list):
+- Have conversations with the owner
+- POST to `/api/tasks/ingest` to route tasks
+- Send Telegram messages
+- Read workspace files
+- Restart the gateway (orchestrator-only authority, N7)
+- Manage agent/department config
+
+### Sub-agent bypass clause
+Spawning a sub-agent and instructing it to execute production work IS THE SAME VIOLATION as
+self-executing. If a sub-agent is spawned, it MUST read its own role files and operate via
+the task board — it is NOT a production tool for the orchestrator.
+
+### Owner-permission exception
+Before the CEO would EVER do a task itself, it must FIRST seek AND RECEIVE explicit permission
+and consent from the owner. Seeking permission alone is not enough — explicit consent must be
+received. Without that explicit consent, the CEO routes — always.
+
+---
+
+
 # AGENTS.md - Your Workspace
 
 This folder is home. Treat it that way.
@@ -267,3 +348,92 @@ A system update was installed (v13.1.4 to v13.8.0) on 2026-06-22.
 Remove this UPDATE PENDING section from AGENTS.md when complete.
 
 ---
+
+<!-- CREDENTIAL_CHECK_V2 -->
+## 🔴 N33 — Credential Check Protocol (never falsely report a key missing)
+
+> Idempotency marker: `CREDENTIAL_CHECK_V2`. `apply-fleet-standards.sh` injects this on
+> existing boxes. Do NOT add it again if the marker is already present.
+> Boxes carrying `CREDENTIAL_CHECK_V1` are automatically upgraded to V2 on next run.
+
+A credential that exists in the live process env but is absent from a flat file is **PRESENT**.
+An agent that reports "missing" without the evidence triad below has made a false claim.
+
+### The Evidence Triad (required before "missing")
+
+Before reporting any key as absent, you MUST have completed all three steps:
+
+1. **Live process env** — checked via `docker exec <container> printenv` (VPS) or `ps eww <gw-pid>` (Mac).
+2. **MCP server headers** — checked `openclaw.json mcp.servers.<svc>.headers` + `.env`.
+3. **All .env stores** — checked every store listed in the "checked" output of `check-credential.sh`.
+
+Only after all three return empty may you say a key is **GENUINELY-ABSENT**.
+
+Use the canonical helper:
+```
+~/.openclaw/skills/shared-utils/check-credential.sh <KEY_NAME>
+~/.openclaw/skills/shared-utils/check-credential.sh --provider <PROVIDER_NAME> --json
+```
+
+<!-- N34 -->
+## 🔴 N34 — Provider Detection Protocol (a missing config block is NEVER proof a provider is absent)
+
+"Does box X have provider Y" = **can the gateway resolve Y's API key at runtime** — NOT "is there a `models.providers.<Y>` block."
+
+Run `check-credential.sh --provider <Y>` (live process env FIRST). Three verdicts:
+
+| Verdict | Exit | Action |
+|---|---|---|
+| `PRESENT_WITH_BLOCK` | 0 | Key live + block references it — update block |
+| `NEEDS_BLOCK` | 3 | Key live, no block — HAS the provider, CREATE the block |
+| `GENUINELY-ABSENT` | 1 | Only after live-env tier + all stores empty — then skip |
+
+**Hard violations:** emitting absent/no-provider from a config-block check alone; writing `had_X: false` for a check that never ran (use `NOT_ASSESSED`). Sonnet only — never Haiku for credential checks.
+
+Block-name matching is on the **referenced apiKey**, not the block name (`openrouter-grok` with `apiKey: $OPENROUTER_API_KEY` IS the openrouter provider).
+
+Root cause: 2026-06-13 Kimi-2.7 sweep falsely reported 5/5 boxes as no-OpenRouter from a `models.providers`-only check while `OPENROUTER_API_KEY` was live in the container env.
+
+
+## BIG PROJECT MODE (v2)
+
+**Trigger:** the owner says "big project mode" or hands you a large, multi-part
+build/document with many deliverables. On per-token caching models (DeepSeek
+direct ~1/120th on cache hits; Anthropic; OpenAI) this cuts input cost 80-95%;
+on flat-rate routes (Ollama Cloud) it is still faster with fewer timeouts and
+cleaner QC. It is never wrong to use it.
+
+0. **ECHO-BACK GATE (always first).** Before spawning ANYTHING, reply to the
+   owner with: every rule restated in your own words (one line each) + the full
+   work-slice list + the EXACT model strings you will use for writers and QC.
+   Wait for GO. If you think a different model/route/approach would be better —
+   you don't decide that. Ask.
+1. **Orchestrator pastes; owners send files.** The owner sends the project
+   document as a file. Read it ONCE and embed the FULL TEXT, word-for-word, at
+   the TOP of every worker's birth instructions. Never tell workers to "read the
+   file" (that is one full-price read PER agent instead of per fleet).
+2. **Identical bytes first, unique assignment last.** Every spawn = [shared
+   document, byte-identical] + [that worker's assignment at the very bottom].
+   Never paraphrase the shared block; never put the assignment first. One changed
+   character at the front re-prices everything behind it.
+3. **Warm-up then fleet.** Spawn ONE worker, let it finish (warms the cache),
+   then launch the rest in batches.
+4. **Workers live short.** End every assignment with: "everything you need is
+   above — do not read other files; write your deliverable, save it, return a
+   one-line status." Foraging workers cost 20-50x.
+5. **Skinny orchestrator.** Track progress in a LEDGER FILE on disk;
+   deliverables go to disk; only one-line statuses flow through the orchestrator
+   conversation. Nothing bulky ever lives in the transcript.
+6. **Independent QC, real scores.** QC runs on a DIFFERENT model than the
+   writers, scores 0-10 against a rubric, gates >= 8.5, defect-loops on fails
+   (max 3); numeric scores recorded — never free-text "PASS" stamps.
+7. **No worker dies silently.** Ledger + watchdog; restart once -> fresh worker
+   -> flag. The completion gate counts delivered files, not hopes.
+8. **Tokens only** in any template/master content — never real owner/client data
+   the agent happens to know.
+
+**Verify caching worked:** on DeepSeek direct the usage fields
+`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` — after the warm-up
+worker, hits should cover the shared document.
+
+Full reference: `BIG-PROJECT-MODE.md` in the onboarding repo.
