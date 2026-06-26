@@ -38,6 +38,7 @@
  */
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import type { SOPStep, SOP } from '@/lib/sops';
@@ -49,17 +50,83 @@ export const ROLE_LIBRARY_SOURCE = 'role-library';
 const WORKSPACE_BASE = process.env.OPENCLAW_WORKSPACE_PATH || '/data/.openclaw/workspace';
 
 /**
+ * Parent roots the Skill-23 floor materializes per-company ZHC folders under,
+ * each holding a `<slug>/departments/` tree of role how-to.md files. Coordinated
+ * with build-workforce.py (MASTER_FILES_DIR / the canonical zero-human-company
+ * roots). Used ONLY to fill the default when nothing explicit is provided.
+ */
+function zeroHumanCompanyRoots(): string[] {
+  const roots: string[] = [];
+  const masterFiles = (process.env.MASTER_FILES_DIR || '').trim();
+  if (masterFiles) roots.push(path.join(masterFiles, 'zero-human-company'));
+  roots.push(
+    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'zero-human-company'),
+    '/data/openclaw-master-files/zero-human-company',
+    path.join(os.homedir(), 'clawd', 'zero-human-company')
+  );
+  return roots;
+}
+
+/** Newest <root>/<slug>/departments tree across all ZHC roots, or null. */
+function newestZhcDepartmentsTree(): string | null {
+  let best: { p: string; mtime: number } | null = null;
+  for (const root of zeroHumanCompanyRoots()) {
+    let slugs: string[];
+    try {
+      slugs = fs.readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const slug of slugs) {
+      const tree = path.join(root, slug, 'departments');
+      if (!isDir(tree)) continue;
+      let mtime = 0;
+      try {
+        mtime = fs.statSync(tree).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (!best || mtime > best.mtime) best = { p: tree, mtime };
+    }
+  }
+  return best ? best.p : null;
+}
+
+/**
  * Resolve the departments/ tree to scan. Order of precedence:
- *   1. explicit `departmentsPath` argument
- *   2. ROLE_LIBRARY_PATH env var
- *   3. <OPENCLAW_WORKSPACE_PATH>/departments
+ *   1. explicit `departmentsPath` argument           (honored verbatim)
+ *   2. ROLE_LIBRARY_PATH env var                      (honored verbatim)
+ *   3. existence-aware default — the FIRST tree that actually exists among:
+ *        a. $ZERO_HUMAN_COMPANY_DIR/departments       (explicit company folder)
+ *        b. <OPENCLAW_WORKSPACE_PATH>/departments      (the historic default —
+ *           keeps every box that already works untouched)
+ *        c. the newest zero-human-company/<slug>/departments the floor wrote
+ *   4. else the historic default string verbatim, so the reported path and the
+ *      tolerant "missing dir → []" behavior are unchanged.
+ *
+ * Branches 1 and 2 are returned verbatim WITHOUT an existence check (tests and
+ * operator overrides may legitimately point at a not-yet-populated path). Only
+ * the DEFAULT is existence-aware, and only via NEW candidates that are unset on
+ * existing boxes — so this is additive and cannot regress a working install.
  */
 export function resolveDepartmentsPath(departmentsPath?: string | null): string {
   if (departmentsPath && departmentsPath.trim()) return departmentsPath.trim();
   if (process.env.ROLE_LIBRARY_PATH && process.env.ROLE_LIBRARY_PATH.trim()) {
     return process.env.ROLE_LIBRARY_PATH.trim();
   }
-  return path.join(WORKSPACE_BASE, 'departments');
+
+  const workspaceDefault = path.join(WORKSPACE_BASE, 'departments');
+  const candidates: string[] = [];
+  const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
+  if (explicitCompany) candidates.push(path.join(explicitCompany, 'departments'));
+  candidates.push(workspaceDefault);
+  const newest = newestZhcDepartmentsTree();
+  if (newest) candidates.push(newest);
+
+  for (const cand of candidates) {
+    if (isDir(cand)) return cand;
+  }
+  return workspaceDefault;
 }
 
 export interface RoleHowTo {

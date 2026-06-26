@@ -2826,6 +2826,115 @@ const migrations: Migration[] = [
       console.log('[Migration 074] tasks.stage_slug ready');
     },
   },
+  {
+    id: '076',
+    name: 'widen_tasks_status_check_to_10_board_statuses',
+    // LOCKSTEP FIX (VERIFY-B / kanban push-through): the base tasks table CHECK
+    // (schema.ts) only permits 5 statuses — backlog, in_progress, review,
+    // blocked, done. The 10-status board model (TaskStatus in src/lib/types.ts,
+    // LEGAL_TRANSITIONS in task-lifecycle.ts, TaskStatus z.enum in validation.ts)
+    // adds inbox, planning, pending_dispatch, assigned, testing. WITHOUT this
+    // migration, any write of one of those 5 new statuses throws
+    // SQLITE_CONSTRAINT at runtime (tsc is clean — a CHECK is a runtime gate, not
+    // a compile-time one). Real, exercised write paths hit exactly this:
+    //   • MissionQueue drag-to-todo  → UPDATE tasks SET status='assigned'  (FAILS)
+    //   • planning poll / retry      → UPDATE tasks SET status='pending_dispatch'
+    //   • recommendation intake      → status='inbox'
+    // i.e. cards COULD NOT leave backlog — the exact "cards stall at the start"
+    // failure. This brings the DB CHECK into lockstep with the type/validation
+    // layer so jobs actually move backlog→…→done.
+    //
+    // SQLite cannot ALTER a CHECK, so we run the official 12-step table rebuild.
+    // It is column-set-agnostic: it reads the LIVE CREATE TABLE sql from
+    // sqlite_master and string-replaces ONLY the CHECK clause, so every column
+    // added by earlier migrations (workspace_id, planning_*, campaign_id,
+    // stage_slug, qc_reroute_attempts, …) is preserved automatically. Data is
+    // copied via a dynamic column list (PRAGMA table_info) so old==new shape.
+    // PRAGMA foreign_keys must be toggled OUTSIDE a transaction → no outer txn.
+    useOuterTransaction: false,
+    up: (db) => {
+      const LEGACY_CHECK =
+        "CHECK (status IN ('backlog', 'in_progress', 'review', 'blocked', 'done'))";
+      const WIDENED_CHECK =
+        "CHECK (status IN ('backlog', 'inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'review', 'testing', 'blocked', 'done'))";
+
+      const liveSql =
+        (
+          db
+            .prepare(
+              "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'",
+            )
+            .get() as { sql: string } | undefined
+        )?.sql || '';
+
+      // Idempotent + defensive: nothing to do if the legacy CHECK is already gone
+      // (e.g. a future schema.ts ships the widened CHECK, or this already ran).
+      if (!liveSql.includes(LEGACY_CHECK)) {
+        console.log(
+          '[Migration 076] tasks CHECK already widened (or table absent) — skip',
+        );
+        return;
+      }
+
+      console.log(
+        '[Migration 076] Widening tasks.status CHECK to the 10 board statuses (12-step rebuild)...',
+      );
+
+      // Build the new table SQL: rename target to tasks_new in the header, widen
+      // the CHECK. Both `CREATE TABLE tasks (` and `CREATE TABLE IF NOT EXISTS
+      // tasks (` are handled.
+      const newTableSql = liveSql
+        .replace(/CREATE TABLE (IF NOT EXISTS )?tasks\b/, 'CREATE TABLE $1tasks_new')
+        .replace(LEGACY_CHECK, WIDENED_CHECK);
+
+      // Capture explicit indexes (named, with sql) + triggers so we can recreate
+      // them on the rebuilt table. Auto-indexes (PK/UNIQUE) come back with the
+      // CREATE TABLE itself.
+      const indexes = (
+        db
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND sql IS NOT NULL",
+          )
+          .all() as { sql: string }[]
+      ).map((r) => r.sql);
+      const triggers = (
+        db
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name='tasks' AND sql IS NOT NULL",
+          )
+          .all() as { sql: string }[]
+      ).map((r) => r.sql);
+
+      const cols = (
+        db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]
+      ).map((c) => `"${c.name}"`);
+      const colList = cols.join(', ');
+
+      // 12-step ALTER (https://sqlite.org/lang_altertable.html#otheralter):
+      db.exec('PRAGMA foreign_keys=OFF;');
+      const tx = db.transaction(() => {
+        db.exec(newTableSql);
+        db.exec(`INSERT INTO tasks_new (${colList}) SELECT ${colList} FROM tasks;`);
+        db.exec('DROP TABLE tasks;');
+        db.exec('ALTER TABLE tasks_new RENAME TO tasks;');
+        for (const sql of indexes) db.exec(sql + ';');
+        for (const sql of triggers) db.exec(sql + ';');
+        // foreign_key_check must pass before we re-enable enforcement.
+        const violations = db.prepare('PRAGMA foreign_key_check').all();
+        if (violations.length > 0) {
+          throw new Error(
+            `[Migration 076] foreign_key_check found ${violations.length} violation(s) after tasks rebuild — aborting`,
+          );
+        }
+      });
+      tx();
+      db.exec('PRAGMA foreign_keys=ON;');
+
+      console.log(
+        '[Migration 076] tasks.status CHECK widened to 10 statuses; all columns + indexes preserved',
+      );
+    },
+  },
 ];
 
 /**
@@ -2999,6 +3108,157 @@ function autoSeedStarterSOPs(db: Database.Database) {
   }
 }
 
+// ── departments.json / departments-tree resolution (G12-FLOOR-CC-SEED) ───────
+// The historic reader path-list (below) only checked a handful of hard-coded
+// install locations and EXCLUDED (a) the running Command Center's own root and
+// (b) the canonical Zero-Human-Company company folder the floor materializes to
+// (~/clawd/zero-human-company/<slug>/ and the master_files mirror). On a freshly
+// built client box that meant converge found NO departments.json, seeded ZERO
+// workspaces, and every job stalled on the CEO in backlog (no depts → routeTask
+// had nothing to route to). These resolvers add a robust, ADDITIVE candidate set
+// so converge finds whatever the writer (Skill-23 build-workforce.py) dropped.
+//
+// The env-var names below are coordinated with the writer:
+//   BLACKCEO_COMMAND_CENTER_ROOT — the writer's copy_departments_to_command_center()
+//                                  drops departments.json into <root>/config.
+//   ZERO_HUMAN_COMPANY_DIR        — absolute path to the active company's ZHC
+//                                  folder (<…>/zero-human-company/<slug>).
+//   MASTER_FILES_DIR              — the writer's canonical master-files root.
+
+const DEPARTMENTS_JSON = 'departments.json';
+
+function isExistingFile(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isExistingDir(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Legacy hard-coded install locations (preserved verbatim, additive). */
+function legacyConfigCandidates(): string[] {
+  return [
+    path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', DEPARTMENTS_JSON),
+    path.join(os.homedir(), 'projects', 'mission-control', 'config', DEPARTMENTS_JSON),
+    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', DEPARTMENTS_JSON),
+    path.join('/opt', 'mission-control', 'config', DEPARTMENTS_JSON),
+  ];
+}
+
+/** Parent roots the writer materializes per-company ZHC folders under. */
+export function zeroHumanCompanyRoots(): string[] {
+  const roots: string[] = [];
+  const masterFiles = (process.env.MASTER_FILES_DIR || '').trim();
+  if (masterFiles) roots.push(path.join(masterFiles, 'zero-human-company'));
+  roots.push(
+    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'zero-human-company'),
+    '/data/openclaw-master-files/zero-human-company',
+    path.join(os.homedir(), 'clawd', 'zero-human-company')
+  );
+  return roots;
+}
+
+/**
+ * Find the newest <root>/<slug>/<rel> across every ZHC root (by mtime). This is
+ * what lets a freshly-built client box converge even when the writer could not
+ * reach the CC config dir — the company folder is always written.
+ */
+function newestZhcChild(rel: string): string | null {
+  let best: { p: string; mtime: number } | null = null;
+  for (const root of zeroHumanCompanyRoots()) {
+    let slugs: string[];
+    try {
+      slugs = fs.readdirSync(root);
+    } catch {
+      continue; // root absent
+    }
+    for (const slug of slugs) {
+      const candidate = path.join(root, slug, rel);
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(candidate);
+      } catch {
+        continue;
+      }
+      if (!best || st.mtimeMs > best.mtime) best = { p: candidate, mtime: st.mtimeMs };
+    }
+  }
+  return best ? best.p : null;
+}
+
+/**
+ * Resolve the active departments.json from the robust candidate set. Returns the
+ * first existing file, else the newest ZHC company departments.json the writer
+ * materialized, else null. Order keeps the legacy/repo paths FIRST so boxes that
+ * already work are untouched; new env/cwd/ZHC candidates only fill the gap.
+ */
+export function resolveDepartmentsConfigPath(): string | null {
+  const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
+  const ccRoot = (process.env.BLACKCEO_COMMAND_CENTER_ROOT || '').trim();
+  const candidates: string[] = [];
+
+  // 1. Explicit active-company folder — the strongest signal of the live client.
+  //    Wins over a possibly-stale repo-committed config/departments.json so a
+  //    freshly-built client never seeds generic defaults.
+  if (explicitCompany) candidates.push(path.join(explicitCompany, DEPARTMENTS_JSON));
+  // 2. Explicit Command Center root (same env the writer's CC copy honors).
+  if (ccRoot) {
+    candidates.push(
+      path.join(ccRoot, 'config', DEPARTMENTS_JSON),
+      path.join(ccRoot, 'data', DEPARTMENTS_JSON),
+      path.join(ccRoot, DEPARTMENTS_JSON)
+    );
+  }
+  // 3. The running Command Center itself (process.cwd() === CC root in prod).
+  candidates.push(
+    path.join(process.cwd(), 'config', DEPARTMENTS_JSON),
+    path.join(process.cwd(), 'data', DEPARTMENTS_JSON)
+  );
+  // 4. Legacy hard-coded install locations (preserved verbatim).
+  candidates.push(...legacyConfigCandidates());
+
+  for (const p of candidates) {
+    if (isExistingFile(p)) return p;
+  }
+  // 5. Last resort: whatever the writer most-recently dropped into a ZHC company
+  //    folder — the guaranteed write location on every build.
+  return newestZhcChild(DEPARTMENTS_JSON);
+}
+
+/**
+ * The on-disk departments/ TREE (role how-to.md files) that pairs with the
+ * resolved departments.json, so converge imports SOPs from the SAME company the
+ * workspaces seed from (keeps Gap C workspaces and Gap D SOPs in lockstep).
+ * Returns null when no tree is found (the caller then falls back to the
+ * role-library importer's own OPENCLAW_WORKSPACE_PATH default — never throws).
+ */
+export function resolveDepartmentsTreePath(): string | null {
+  const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
+  if (explicitCompany) {
+    const tree = path.join(explicitCompany, 'departments');
+    if (isExistingDir(tree)) return tree;
+  }
+  // Sibling of the resolved departments.json: <company>/departments.json →
+  // <company>/departments. (For CC-config / company-discovery locations the
+  // sibling won't exist, so this falls through harmlessly.)
+  const cfg = resolveDepartmentsConfigPath();
+  if (cfg) {
+    const sibling = path.join(path.dirname(cfg), 'departments');
+    if (isExistingDir(sibling)) return sibling;
+  }
+  const newest = newestZhcChild('departments');
+  if (newest && isExistingDir(newest)) return newest;
+  return null;
+}
+
 /**
  * Re-seed workspaces from departments.json + build-state, without the
  * first-boot guard. Idempotent: upserts each dept row, never deletes.
@@ -3015,26 +3275,13 @@ export function reseedWorkspacesFromConfig(
   let updated = 0;
 
   try {
-    const configPaths = [
-      path.join(process.cwd(), 'config', 'departments.json'),
-      path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', 'departments.json'),
-      path.join(os.homedir(), 'projects', 'mission-control', 'config', 'departments.json'),
-      path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'departments.json'),
-      path.join('/opt', 'mission-control', 'config', 'departments.json'),
-    ];
-
-    let configPath: string | null = null;
-    for (const p of configPaths) {
-      if (fs.existsSync(p)) {
-        configPath = p;
-        break;
-      }
-    }
+    const configPath = resolveDepartmentsConfigPath();
 
     if (!configPath) {
       console.warn('[reseed] No departments.json found — skipping workspace reseed');
       return { created, updated };
     }
+    console.log('[reseed] Using departments.json:', configPath);
 
     const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
@@ -3115,24 +3362,11 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
     const count = db.prepare('SELECT COUNT(*) as c FROM workspaces').get() as { c: number } | undefined;
     if (count && count.c > 0) return; // Already has data
 
-    // Look for departments.json
-    const configPaths = [
-      path.join(process.cwd(), 'config', 'departments.json'),
-      path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', 'departments.json'),
-      path.join(os.homedir(), 'projects', 'mission-control', 'config', 'departments.json'),
-      path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'departments.json'),
-      path.join('/opt', 'mission-control', 'config', 'departments.json'),
-    ];
-    
-    let configPath: string | null = null;
-    for (const p of configPaths) {
-      if (fs.existsSync(p)) {
-        configPath = p;
-        break;
-      }
-    }
-    
+    // Look for departments.json across the robust candidate set (CC root + env
+    // override + legacy installs + the ZHC company folder the floor wrote to).
+    const configPath = resolveDepartmentsConfigPath();
     if (!configPath) return;
+    console.log('[Auto-seed] Using departments.json:', configPath);
 
     const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     if (!Array.isArray(depts) || depts.length === 0) return;

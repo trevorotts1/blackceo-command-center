@@ -506,7 +506,13 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                         </span>
                         <span className="text-sm font-bold">{column.label}</span>
                       </div>
-                      <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all">
+                      <button
+                        type="button"
+                        onClick={() => setShowCreateModal(true)}
+                        title={`Add a task to ${column.label}`}
+                        aria-label={`Add a task to ${column.label}`}
+                        className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all"
+                      >
                         <Plus className="w-4 h-4" />
                       </button>
                     </div>

@@ -207,6 +207,12 @@ async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
     SKIP_DEMO_SEED:          'true',
     DISABLE_QC_AUTO_SCORER:  '0', // leave QC scorer ON — we want to observe it
     NODE_ENV: 'test',
+    // The fail-closed middleware (v4.52.0 AUTH HARDEN) rejects external /api/*
+    // with 503 when MC_API_TOKEN/WEBHOOK_SECRET are unset. This pipeline e2e
+    // drives the board via unauthenticated server-to-server fetches and is NOT
+    // testing the auth surface, so use the documented escape hatch to restore
+    // legacy open behavior for THIS test server only (production never sets it).
+    ALLOW_INSECURE_OPEN_API: 'true',
   };
 
   // Use the same node binary, run next via node_modules

@@ -34,6 +34,7 @@ import {
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
 import { runStaleTaskSweep, STALE_TASK_SWEEP_CRON } from './stale-task-sweep';
+import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -279,6 +280,30 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // the right department (mostly relevant for tasks created before in-process
   // routing shipped).
   { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
+
+  // backlog-redispatch: every 2 minutes, rescue tasks that were ASSIGNED a
+  // specialist but never left backlog because their single autoDispatchTask
+  // attempt aborted (gateway down / model sovereignty / SOP hold). Selects
+  // status='backlog' AND assigned_agent_id IS NOT NULL under the QC re-route cap
+  // and re-fires autoDispatchTask. Self-limiting: a task drops out the instant
+  // it flips to in_progress (SKIP_STATUSES), and the failing path burns no
+  // tokens (guards return before chat.send). A 120s grace window + batch cap
+  // prevent a re-dispatch storm / double-invocation of just-assigned tasks.
+  // Disable with BACKLOG_REDISPATCH_SWEEP_ENABLED=0.
+  {
+    name: 'backlog-redispatch',
+    expr: '*/2 * * * *',
+    fn: async () => {
+      const result = await runBacklogRedispatchSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] backlog-redispatch: skipped — ${result.skippedReason}`);
+      } else if (result.scanned > 0) {
+        console.log(
+          `[cron] backlog-redispatch: scanned ${result.scanned} stuck task(s), re-dispatched ${result.dispatched}`,
+        );
+      }
+    },
+  },
 
   // stale-task-sweep: every 10 minutes, return stale tasks to the orchestrator
   // for re-routing (N36 / SOP-01-Blocked-vs-Return). Non-Blocked stale tasks

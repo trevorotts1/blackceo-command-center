@@ -23,8 +23,17 @@ import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
  * Bypass routes:
  *   - `/api/health` (Cloudflare health checks) bypasses both layers.
  *
- * Local dev (no Cloudflare in front, no MC_API_TOKEN set) is fully open with
- * a startup warning so the operator notices.
+ * Fail-closed posture (G15-AUTH-HARDEN):
+ *   - When MC_API_TOKEN is unset, EXTERNAL (non-same-origin) /api/* callers
+ *     are REJECTED with a 503 misconfiguration error instead of being let
+ *     through. Same-origin browser requests still work because Cloudflare
+ *     Access (layer 1) gates them.
+ *   - The webhook routes in WEBHOOK_SECRET_ROUTES (ingest + agent-completion)
+ *     are REJECTED with a 503 when WEBHOOK_SECRET is unset, because their
+ *     route-level HMAC check authenticates nothing without the secret.
+ *   - An operator may set ALLOW_INSECURE_OPEN_API=true to restore the legacy
+ *     open behavior on a not-yet-provisioned box. This is logged loudly and
+ *     is a temporary bridge, not a supported production mode.
  *
  * Production misconfiguration (Cloudflare Access not enabled on the
  * subdomain) returns 401 with a clear error message so the operator knows
@@ -32,17 +41,61 @@ import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
  */
 
 const MC_API_TOKEN = process.env.MC_API_TOKEN;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 const REQUIRE_CF_ACCESS = process.env.REQUIRE_CF_ACCESS === 'true';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
-if (!MC_API_TOKEN && !DEMO_MODE) {
-  console.warn('[SECURITY WARNING] MC_API_TOKEN not set, external API auth is DISABLED (local dev mode)');
+/**
+ * Escape hatch for fail-closed auth (G15-AUTH-HARDEN).
+ *
+ * The legacy behavior silently allowed ALL external /api/* traffic when
+ * MC_API_TOKEN was unset, and skipped webhook HMAC when WEBHOOK_SECRET was
+ * unset. A client box missing both env vars plus any Cloudflare Access
+ * misconfiguration = a fully open ingest/completion surface. We now fail
+ * CLOSED by default: missing secrets reject external callers with a clear
+ * 503 misconfiguration error.
+ *
+ * To avoid locking out a box that genuinely still relies on the old open
+ * default, an operator may set ALLOW_INSECURE_OPEN_API=true to restore the
+ * legacy open behavior. This is logged loudly at startup and is NOT
+ * recommended — it exists only as a documented, reversible bridge.
+ */
+const ALLOW_INSECURE_OPEN_API = process.env.ALLOW_INSECURE_OPEN_API === 'true';
+
+/**
+ * Routes that accept EXTERNAL (non-Cloudflare-Access) webhook callers and
+ * authenticate purely via HMAC-SHA256 over WEBHOOK_SECRET. If the secret is
+ * absent the route-level HMAC check authenticates nothing, so these routes
+ * must be refused at the gate unless the operator has opted into open mode.
+ */
+const WEBHOOK_SECRET_ROUTES = ['/api/tasks/ingest', '/api/webhooks/agent-completion'];
+
+function matchesRoute(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(prefix + '/');
 }
-if (!REQUIRE_CF_ACCESS && !DEMO_MODE) {
-  console.warn('[SECURITY WARNING] REQUIRE_CF_ACCESS not set, Cloudflare Access enforcement is OFF (local dev mode). Set REQUIRE_CF_ACCESS=true in production.');
-}
+
 if (DEMO_MODE) {
   console.log('[DEMO] Running in demo mode, all write operations are blocked');
+} else {
+  // MC_API_TOKEN — external /api/* bearer auth.
+  if (!MC_API_TOKEN) {
+    if (ALLOW_INSECURE_OPEN_API) {
+      console.warn('[SECURITY WARNING] MC_API_TOKEN not set AND ALLOW_INSECURE_OPEN_API=true — external /api/* auth is DISABLED. Provision MC_API_TOKEN and remove ALLOW_INSECURE_OPEN_API.');
+    } else {
+      console.error('[SECURITY ERROR] MC_API_TOKEN not set — external /api/* callers will be REJECTED (fail-closed). Set MC_API_TOKEN in production, or set ALLOW_INSECURE_OPEN_API=true to restore the legacy open behavior (NOT recommended).');
+    }
+  }
+  // WEBHOOK_SECRET — ingest + agent-completion HMAC.
+  if (!WEBHOOK_SECRET) {
+    if (ALLOW_INSECURE_OPEN_API) {
+      console.warn('[SECURITY WARNING] WEBHOOK_SECRET not set AND ALLOW_INSECURE_OPEN_API=true — ingest/agent-completion webhook HMAC is DISABLED.');
+    } else {
+      console.error('[SECURITY ERROR] WEBHOOK_SECRET not set — ingest + agent-completion webhooks will be REJECTED (fail-closed). Set WEBHOOK_SECRET in production, or set ALLOW_INSECURE_OPEN_API=true to restore the legacy open behavior (NOT recommended).');
+    }
+  }
+  if (!REQUIRE_CF_ACCESS) {
+    console.warn('[SECURITY WARNING] REQUIRE_CF_ACCESS not set, Cloudflare Access enforcement is OFF. Set REQUIRE_CF_ACCESS=true in production.');
+  }
 }
 
 function isSameOriginRequest(request: NextRequest): boolean {
@@ -80,8 +133,11 @@ function unauthorized(message: string, status = 401): NextResponse {
 export function middleware(request: NextRequest): NextResponse {
   const { pathname } = request.nextUrl;
 
-  // Cloudflare health checks must bypass everything.
-  if (pathname === '/api/health' || pathname === '/api/health/') {
+  // Cloudflare health checks + liveness/deep probes must bypass everything.
+  // NOTE: this is a SUBTREE match (`/api/health`, `/api/health/`,
+  // `/api/health/deep`, …) — the CI thin-probe and CF health checks hit
+  // `/api/health/deep`, which must stay reachable with no MC_API_TOKEN set.
+  if (matchesRoute(pathname, '/api/health')) {
     return NextResponse.next();
   }
 
@@ -120,19 +176,43 @@ export function middleware(request: NextRequest): NextResponse {
 
   // Layer 2: MC_API_TOKEN for /api/* external callers.
   if (pathname.startsWith('/api/')) {
-    // If MC_API_TOKEN is not configured, skip API token enforcement (dev mode).
-    if (!MC_API_TOKEN) {
+    // Gate A — webhook routes require WEBHOOK_SECRET to exist at all. Without
+    // it the route-level HMAC check authenticates nothing, so the route is an
+    // open write surface. Fail closed (503) unless explicitly overridden.
+    if (
+      !WEBHOOK_SECRET &&
+      !ALLOW_INSECURE_OPEN_API &&
+      WEBHOOK_SECRET_ROUTES.some((r) => matchesRoute(pathname, r))
+    ) {
+      return unauthorized(
+        'This deployment is misconfigured: WEBHOOK_SECRET is not set, so webhook authentication is disabled. Set WEBHOOK_SECRET (or ALLOW_INSECURE_OPEN_API=true to override). Contact the operator.',
+        503
+      );
+    }
+
+    // Same-origin browser requests are already gated by CF Access (layer 1)
+    // so they don't need the bearer token. Checked BEFORE the MC_API_TOKEN
+    // gate so the operator UI keeps working whether or not the token is set.
+    if (isSameOriginRequest(request)) {
       const passthrough = NextResponse.next();
       if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;
     }
 
-    // Same-origin browser requests are already gated by CF Access (layer 1)
-    // so they don't need the bearer token.
-    if (isSameOriginRequest(request)) {
-      const passthrough = NextResponse.next();
-      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
-      return passthrough;
+    // Gate B — MC_API_TOKEN must exist to authenticate EXTERNAL /api/* callers.
+    // Legacy behavior silently passed everything through when the token was
+    // unset; that is the open-default vulnerability (G15-AUTH-HARDEN). Fail
+    // closed (503) unless the operator explicitly opted into the open mode.
+    if (!MC_API_TOKEN) {
+      if (ALLOW_INSECURE_OPEN_API) {
+        const passthrough = NextResponse.next();
+        if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+        return passthrough;
+      }
+      return unauthorized(
+        'This deployment is misconfigured: MC_API_TOKEN is not set, so external API authentication is disabled. Set MC_API_TOKEN (or ALLOW_INSECURE_OPEN_API=true to override). Contact the operator.',
+        503
+      );
     }
 
     // Special case: /api/events/stream (SSE) accepts the token as a query
