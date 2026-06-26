@@ -103,6 +103,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- is the "Author SOP" sub-task for the referenced original task. The fast-loop
   -- recursion guard skips SOP authoring for any task with this column set.
   sop_authoring_for_task_id TEXT,
+  -- Ad-campaign assembly-line stage slug (migration 074). Identifies each stage
+  -- card within an ad-run campaign; NULL for all non-ad tasks. The supporting
+  -- partial indexes live ONLY in migration 074 because they reference
+  -- campaign_id, which is added by migration 017 (not present in this base
+  -- CREATE on a fresh DB before migrations run).
+  stage_slug TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
