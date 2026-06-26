@@ -158,6 +158,7 @@ Box `203382836` @ `109.205.179.254` (16 vCPU / 64 GB / 600 GB, Ubuntu 24.04) —
 
 When Trevor says "set up / onboard new client `<Name>`", tell him the WHOLE path up front (do not discover blockers one at a time), then do these IN ORDER. (Infra facts, ports, tunnel id, cert, secrets: TOOLS.md "Contabo VPS" + "Client provisioning infrastructure".)
 1. **CONTAINER:** create `oc-<slug>` on the Contabo host (`ssh contabo-host`), Control UI on the next free host port (currently `18804`). Gym caps: `mem_limit 16g`, `mem_reservation 1g`, `cpu_shares 1024`, `pids_limit 1024` (host already has the 16 GB swapfile + a sparse 100 GB/client loopback ext4 quota — see RUNBOOK §0).
+1b. **CONTAINER RUNTIME TOOLS — MANDATORY at provision (verified 2026-06-25):** the `ghcr.io/openclaw/openclaw:2026.6.8` image is Debian 12 (bookworm) and ships WITHOUT `jq`, `unzip`, and `python3-pip` (`pip3`) — but the onboarding skills require them. **Missing `jq` SILENTLY freezes the AI-workforce interview (Skill 23):** `scripts/update-interview-state.sh` patches `$HOME/.openclaw/workspace/.workforce-build-state.json` via a `jq` filter — no `jq`, the state never advances and the interview stalls. Install all three as root the moment the container is up: `docker exec -u root oc-<slug> apt-get update && docker exec -u root oc-<slug> apt-get install -y jq unzip python3-pip`, then VERIFY as `node`: `docker exec -u node oc-<slug> jq --version` / `unzip -v | head -1` / `pip3 --version`. (Both LIVE boxes hardened 2026-06-25 — image drift had left trevor without `jq`, Beverly without `pip3`.)
 2. **DNS + TUNNEL:** CNAME `<slug>.agents.zerohumanworkforce.com → 8c4c8006-c29d-43c8-a36f-f1cf40200cdf.cfargotunnel.com`, PROXIED (orange-cloud), in zone `a9ecc0a067f52eaa4c59dc9b11d9dd55` (NOT `$CLOUDFLARE_ZONE_ID`); add a cloudflared ingress entry `<slug>.agents.zerohumanworkforce.com → http://127.0.0.1:<port>` ABOVE the catch-all 404 in `/etc/cloudflared/config.yml`, then restart the cloudflared service. The wildcard Advanced cert already covers it — NO new cert.
 3. **AGENT IDENTITY:** rename the agent to the client's CHOSEN name (confirm it with Trevor — never assume from a PDF). Telegram bot with `dmPolicy: pairing` (NOT allowlist + empty allowFrom — that silently blocks ALL DMs). Client pairs by messaging the bot → approve the pairing code.
 4. **KEYS:** load the CLIENT's OWN funded keys into THEIR container env (`/opt/clients/<slug>/.env`). NEVER put operator/Trevor keys on a client box; never share a `.env` or volume between clients.
@@ -181,6 +182,7 @@ When Trevor says "set up / onboard new client `<Name>`", tell him the WHOLE path
 - Use `companyId` for agency calls and `locationId` for sub-account calls — never substitute. Never print/echo/log either token. Pass BOTH self-verification paths (direct REST + the community MCP — BusyBee3333 fork at `http://localhost:8765`) before any write; before any destructive call confirm the exact target ID against a fresh read. Don't invent endpoints/fields/scopes — verify against official docs. Full endpoint list: TOOLS.md.
 - **GHL auth = TOKEN-ONLY [CRITICAL]:** funnel/website/page builds (Skill 06) mint a Firebase id_token from `GOHIGHLEVEL_FIREBASE_REFRESH_TOKEN` and reconstruct the SPA session headlessly. NEVER ask for / type / fall back to a GHL login, email, password, or 2FA. On token failure → STOP and report; fix = re-grab a fresh refresh token via the Convert and Flow Token Grabber Chrome extension. `GHL_AGENCY_EMAIL`/`GHL_AGENCY_PASSWORD` are a manual human-operator last resort, never auto-invoked.
 - **Tag search:** always query by tag server-side (`GET /contacts/?tag=<tag>&locationId=...`) — find the tag ID first; NEVER pull the full contact list and filter client-side (burns rate limits, misses contacts).
+- **SEND A CLIENT AN SMS/EMAIL — use the CLIENT'S OWN box + their LOCATION PIT (verified 2026-06-25):** to message a client via GoHighLevel, run from the client's container with the client's location-scoped Private Integration Token (`GHL_API_KEY` / `PRIVATE_INTEGRATION_TOKEN` in their `.env` — it carries the contacts + conversations.write scopes), via `POST https://services.leadconnectorhq.com/conversations/messages` (`type` = `SMS` or `Email`, header `Version: 2021-07-28`). **DO NOT use the operator agency PIT (`GOHIGHLEVEL_AGENCY_PIT`) for client messaging** — it authenticates but LACKS contacts/conversations scopes → `401 "not authorized for this scope"`. The operator Gmail path (`gws`, Skill 14) needs re-auth (`gws auth login` — currently logged out). **Contact-split gotcha:** a client may have TWO contact records in their location — one with the phone, one with the email; SMS resolves to the phone-record, Email needs the email-record (Emailing the phone-record fails `CONVERSATIONS_MSG_INVALID_EMAIL`). Look the client up by BOTH phone and email, and merge duplicate records when found. (Full detail: TOOLS.md GHL client-messaging.)
 
 ### Dr. Stephanie Brown — private Hostinger VPS [do not confuse people]
 
@@ -188,7 +190,22 @@ Key `STEPHANIE_BROWN_HOSTINGER_API_KEY` is **her own** Hostinger account, NOT Bl
 
 ### Timezones — default America/New_York (Eastern) for Trevor [CRITICAL]
 
-Convert every API timestamp (Zoom/Google/Stripe/GHL/…) to ET before showing Trevor — say "1:05 PM ET", never raw UTC / "Z" / +00:00. Exception: he explicitly asks for another zone. For non-ET sources in past-meeting summaries, append a "(UTC: …)" parenthetical so the offset isn't silently dropped. "ET" is always safe (EDT = UTC-4 ~Mar–Nov, EST = UTC-5 otherwise). Applies to ALL fleet agents; propagate to every client agent's `AGENTS.md` (VPS `/data/.openclaw/workspace/AGENTS.md` or Mac `~/clawd/AGENTS.md`) + `openclaw gateway restart`. (Caught 2026-06-17 reporting Zoom times as UTC.)
+Convert every API timestamp (Zoom/Google/Stripe/GHL/…) to ET before showing Trevor
+
+### Zoom Recording & Transcript Downloads — ALWAYS check MEMORY.md / guide first
+
+**Before attempting any Zoom recording or transcript download, check these sources in order:**
+1. **MEMORY.md** — search for "Zoom Staff Recording Access Guide" — has the access email, confirmed file classes, and guide pointer.
+2. **Zoom Recording Access Guide v3** (Google Doc `1LsZAxqp5YrJn0yiECVAVDwXpnJAPCoF_J42YClSCAP0`) — has the exact working Python script using `urllib` with `?access_token=***}` query param on the download URL.
+3. **TOOLS.md** → Zoom section — has env vars and API base.
+
+**Key rules (earned 2026-06-25 — wasted 15+ minutes trying curl instead of checking MEMORY.md):**
+- **Access email:** `trevorotts@brokesystems.com` (NOT `trevor@blackceo.com`).
+- **Transcript files exist** as `file_type=TRANSCRIPT` in the recording files list — download them directly, do NOT download audio and transcribe with Whisper.
+- **Download method:** Append `?access_token=***}` (or `&access_token=***}` if URL already has query params) to the `download_url`. Use Python `urllib` (the guide's script works; `curl` returns Forbidden).
+- **Never try to transcribe audio when a transcript file is already available** — Zoom generates VTT transcripts automatically for cloud recordings.
+- **File classification:** Check `file_type`, `file_extension`, AND `recording_type` — don't rely on just one field.
+ — say "1:05 PM ET", never raw UTC / "Z" / +00:00. Exception: he explicitly asks for another zone. For non-ET sources in past-meeting summaries, append a "(UTC: …)" parenthetical so the offset isn't silently dropped. "ET" is always safe (EDT = UTC-4 ~Mar–Nov, EST = UTC-5 otherwise). Applies to ALL fleet agents; propagate to every client agent's `AGENTS.md` (VPS `/data/.openclaw/workspace/AGENTS.md` or Mac `~/clawd/AGENTS.md`) + `openclaw gateway restart`. (Caught 2026-06-17 reporting Zoom times as UTC.)
 
 ### Rescue Rangers — client onboarding playbook
 
