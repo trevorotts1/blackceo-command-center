@@ -190,8 +190,13 @@ check_claude_literals() {
 }
 check "5.1" "no hardcoded claude-* model id in src/lib (excl. orchestrat(or|ion) + anthropic connector + web-agent runner)" \
   "check_claude_literals"
-check "5.2" "no 'anthropic/' provider id in src/lib" \
-  "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep ."
+# 5.2 detects an 'anthropic/' provider-id literal being USED as a value. The one
+# legitimate occurrence is the FORBIDDEN_PREFIXES negative-list in model-selector.ts
+# (the guard that BANS Anthropic) — exclude that declaration so the check does not
+# flag its own definition. Real usage (e.g. model: 'anthropic/claude-…') has no
+# FORBIDDEN_PREFIXES on the line and is still caught.
+check "5.2" "no 'anthropic/' provider id in src/lib (excl. FORBIDDEN_PREFIXES guard decl)" \
+  "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v 'FORBIDDEN_PREFIXES' | grep ."
 
 blue ""
 blue "── 5b. Embedding model hygiene (PRD 1.8c) ──"
