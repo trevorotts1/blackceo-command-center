@@ -27,17 +27,24 @@ const AGENTS_ROOT = path.join(
  * the task, causing an infinite loop.
  *
  * Resolution order:
- *   1. workspace slug → ~/.openclaw/agents/<slug>/
+ *   1. workspace slug → ~/.openclaw/agents/dept-<slug>/ THEN ~/.openclaw/agents/<slug>/
+ *      (live box dirs are dept-funnels / dept-web-development; bare dirs do NOT exist)
  *   2. role-derived slug → ~/.openclaw/agents/dept-<role>/
  *   3. agent name slug → ~/.openclaw/agents/<name>/
- *   4. Safe fallback: legacy agent:main key (logs a warning; no other dept breaks).
+ *   4. No runtime found → return null (HOLD; do NOT fall back to agent:main).
+ *      The caller must NOT flip status to in_progress — log routed_but_not_dispatched instead.
+ *
+ * Kept byte-for-byte equivalent with the task-dispatcher.ts copy in Attempt 1
+ * dept-prefix logic to satisfy the CC QC lockstep check.
  */
 function resolveSpecialistSessionKey(
   agent: Agent,
   openclawSessionId: string,
   workspaceId: string | undefined,
-): string {
-  // Attempt 1: workspace slug.
+): string | null {
+  // Attempt 1: workspace slug — probe dept-prefixed dir FIRST, then bare.
+  // On live boxes the runtime dirs are dept-funnels / dept-web-development;
+  // bare workspace-slug dirs do NOT exist, so the dept- probe must come first.
   if (workspaceId) {
     try {
       const ws = queryOne<{ slug: string }>(
@@ -46,12 +53,21 @@ function resolveSpecialistSessionKey(
       );
       if (ws?.slug) {
         const candidateSlug = ws.slug.toLowerCase();
-        if (fs.existsSync(path.join(AGENTS_ROOT, candidateSlug))) {
-          const key = `agent:${candidateSlug}:${openclawSessionId}`;
-          console.log(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → key ${key}`);
+        // Check BOTH the bare slug dir AND the dept- prefixed dir.
+        const deptPrefixedSlug = `dept-${candidateSlug}`;
+        const deptPrefixedDir = path.join(AGENTS_ROOT, deptPrefixedSlug);
+        const bareDir = path.join(AGENTS_ROOT, candidateSlug);
+        if (fs.existsSync(deptPrefixedDir)) {
+          const key = `agent:${deptPrefixedSlug}:${openclawSessionId}`;
+          console.log(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → dept-prefixed runtime found → key ${key}`);
           return key;
         }
-        console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir — trying role slug`);
+        if (fs.existsSync(bareDir)) {
+          const key = `agent:${candidateSlug}:${openclawSessionId}`;
+          console.log(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → bare runtime found → key ${key}`);
+          return key;
+        }
+        console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying role slug`);
       }
     } catch (err) {
       console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
@@ -76,14 +92,20 @@ function resolveSpecialistSessionKey(
     return key;
   }
 
-  // Safe fallback: keep legacy key; warn.
-  const fallbackKey = `agent:main:${openclawSessionId}`;
-  console.warn(
-    `[Dispatch] resolveSpecialistSessionKey: no specialist runtime found for agent "${agent.name}" ` +
-    `(workspace_id=${workspaceId ?? 'none'}) — falling back to ${fallbackKey}. ` +
-    `Add ~/.openclaw/agents/<dept-slug>/ to enable specialist routing.`,
+  // RESOLVER-DISPATCH FIX: NO per-department runtime resolved.
+  //
+  // Refuse the agent:main fallback — the CEO/Stefanie orchestrator's prompt
+  // FORBIDS building; routing there re-ingests the task, burns turns, and
+  // produces ZERO artifacts. Return null so the caller can HOLD the task
+  // (visible as routed_but_not_dispatched) rather than feed the CEO loop.
+  // Matches the hardened null-return in task-dispatcher.ts:139-153.
+  console.error(
+    `[Dispatch] resolveSpecialistSessionKey: NO specialist runtime for agent "${agent.name}" ` +
+    `(workspace_id=${workspaceId ?? 'none'}, role=${agent.role ?? 'none'}). ` +
+    `REFUSING silent agent:main fallback — task will be held as 'routed_but_not_dispatched'. ` +
+    `Add ~/.openclaw/agents/<dept-slug>/ to wire this department.`,
   );
-  return fallbackKey;
+  return null;
 }
 
 export const dynamic = 'force-dynamic';
@@ -333,29 +355,69 @@ When complete, reply with:
 
 If you need help or clarification, ask the orchestrator.`;
 
-    // Send message to agent's session using chat.send.
-    //
-    // GATEWAY CONTRACT (verified against installed OpenClaw 2026.5.28 source,
-    // dist `ChatSendParamsSchema`): chat.send accepts ONLY
-    //   { sessionKey, sessionId?, message, thinking?, fastMode?, deliver?,
-    //     originating*?, attachments?, timeoutMs?, system*?, idempotencyKey }
-    // with `additionalProperties: false`. It does NOT accept `model` or
-    // `persona`; passing them makes the gateway REJECT the whole call with
-    // INVALID_REQUEST. There is also no operator-callable `sessions.create`
-    // RPC on this version that would let us set the model per session. So the
-    // CC has no supported path to override the model per dispatch — the agent
-    // runs on whatever model its own openclaw.json/agent config selects.
-    //
-    // The resolved model is therefore communicated to the agent in the task
-    // message body (Agent Model / Agent Persona above) and pinned on the task
-    // as the INTENDED model (see the 🤖 pill relabel in MissionQueue). We do
-    // NOT claim it is the model that actually ran.
+    // FIX 1 (cont.): resolve the specialist's actual OpenClaw runtime key.
+    // Returns null when no dept runtime dir exists — see resolveSpecialistSessionKey above.
+    // Previously hardcoded to agent:main which always hit the CEO orchestrator
+    // (Stefanie), whose prompt forbids building — she re-ingested the task,
+    // causing an infinite CEO→ingest→CEO loop with zero artifacts produced.
+    const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id);
+
+    // ── RESOLVER-DISPATCH gate (Gap E) — matches task-dispatcher.ts:518-553 ──
+    // No per-department OpenClaw runtime → HOLD the task; do NOT flip to
+    // in_progress; do NOT call agent:main. Emit a loud, queryable
+    // 'routed_but_not_dispatched' event so the misroute is visible on the board.
+    if (!sessionKey) {
+      const holdMsg =
+        `[routed_but_not_dispatched] Task "${task.title}" (${task.id}) routed to "${agent.name}" ` +
+        `but NO per-department OpenClaw runtime exists (~/.openclaw/agents/<dept-slug>/ missing; ` +
+        `workspace_id=${task.workspace_id ?? 'none'}, role=${agent.role ?? 'none'}). ` +
+        `Dispatch HELD to avoid the agent:main re-ingest loop. Wire the department runtime to release.`;
+      console.error(`[Dispatch] ${holdMsg}`);
+      const nowHold = new Date().toISOString();
+      run(
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(), task.id, agent.id, 'routed_but_not_dispatched', holdMsg,
+          JSON.stringify({ workspace_id: task.workspace_id ?? null, role: agent.role ?? null, reason: 'no_specialist_runtime' }),
+          nowHold,
+        ],
+      );
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
+      );
+      // Leave task in backlog (no status change) so the misroute is visible on the board.
+      return NextResponse.json(
+        {
+          success: false,
+          held: true,
+          reason: 'routed_but_not_dispatched',
+          message: holdMsg,
+        },
+        { status: 202 },
+      );
+    }
+
     try {
-      // FIX 1: resolve the specialist's actual OpenClaw runtime key.
-      // Previously hardcoded to agent:main which always hit the CEO orchestrator
-      // (Stefanie), whose prompt forbids building — she re-ingested the task,
-      // causing an infinite CEO→ingest→CEO loop with zero artifacts produced.
-      const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id);
+      // Send message to agent's session using chat.send.
+      //
+      // GATEWAY CONTRACT (verified against installed OpenClaw 2026.5.28 source,
+      // dist `ChatSendParamsSchema`): chat.send accepts ONLY
+      //   { sessionKey, sessionId?, message, thinking?, fastMode?, deliver?,
+      //     originating*?, attachments?, timeoutMs?, system*?, idempotencyKey }
+      // with `additionalProperties: false`. It does NOT accept `model` or
+      // `persona`; passing them makes the gateway REJECT the whole call with
+      // INVALID_REQUEST. There is also no operator-callable `sessions.create`
+      // RPC on this version that would let us set the model per session. So the
+      // CC has no supported path to override the model per dispatch — the agent
+      // runs on whatever model its own openclaw.json/agent config selects.
+      //
+      // The resolved model is therefore communicated to the agent in the task
+      // message body (Agent Model / Agent Persona above) and pinned on the task
+      // as the INTENDED model (see the 🤖 pill relabel in MissionQueue). We do
+      // NOT claim it is the model that actually ran.
       await client.call('chat.send', {
         sessionKey,
         message: taskMessage,

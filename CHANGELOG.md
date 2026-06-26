@@ -1,3 +1,20 @@
+## [v4.53.0] — 2026-06-26 — fix(dispatch): dispatch/route.ts null-fallback + dept-prefix resolver for Skill-6 Kanban flow
+
+Closes the last gap in the Skill-6 (funnel/website) → Kanban demo path. Two files edited; no other files touched.
+
+**dispatch/route.ts — `resolveSpecialistSessionKey` null-fallback (FG1):**
+The route handler's copy of `resolveSpecialistSessionKey` still returned `agent:main:<session>` when no specialist runtime was found, sending every manual "Send to Agent" click to the CEO/Stefanie orchestrator whose prompt forbids building — she re-ingests the task (loop). Return type changed from `string` to `string | null`. On Attempt-1 (workspace-slug) the function now probes `~/.openclaw/agents/dept-<slug>/` BEFORE `~/.openclaw/agents/<slug>/` so live boxes (whose runtime dirs are `dept-funnels` / `dept-web-development`, not bare slugs) resolve on the first probe. When no runtime resolves, returns `null` — the caller writes a durable `routed_but_not_dispatched` row to `task_activities` + `events`, leaves the task in `backlog` (visible on board), and returns HTTP 202 `{success:false, held:true}` instead of feeding the CEO loop. Matches the hardened null-return that `task-dispatcher.ts` already had (v4.52.0, G8).
+
+**task-dispatcher.ts — Attempt-1 dept-prefix probe (FG1):**
+Same dept-prefix-first probe added to the `autoDispatchTask` path for consistency. The null-fallback refusal was already correct; only the probe order was wrong (bare-slug-first missed `dept-funnels` / `dept-web-development`).
+
+Proof harness (5/5 pass, cited below):
+- T1: funnels workspace slug → `agent:dept-funnels:<session>`
+- T2: web-development workspace slug → `agent:dept-web-development:<session>`
+- T3: unknown dept → null (`routed_but_not_dispatched`, NOT `agent:main`)
+- T4: funnels role slug → `agent:dept-funnels:<session>`
+- T5: bare 'funnels' dir absent → fix correctly probes dept-prefix first
+
 ## [v4.52.0] — 2026-06-26 — feat(workforce-engine): kanban push-through wiring + persona/SOP resolve + auth hardening
 
 Command-Center half of the end-to-end AI-workforce ENGINE hardening (companion to openclaw-onboarding v14.3.3). Additive and separate from the concurrent ad-campaigns (v4.50.0), column-tooltips, and CEO/board workflows. Fixes Trevor's core worry that cards "sit at the very beginning and never move/assign/progress," plus persona/SOP wiring and a fail-closed auth posture.

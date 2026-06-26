@@ -99,13 +99,23 @@ function resolveSpecialistSessionKey(
       );
       if (ws?.slug) {
         const candidateSlug = ws.slug.toLowerCase();
-        const runtimeDir = path.join(AGENTS_ROOT, candidateSlug);
-        if (fs.existsSync(runtimeDir)) {
-          const key = `agent:${candidateSlug}:${openclawSessionId}`;
-          console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → runtime found → key ${key}`);
+        // Check BOTH the bare slug dir AND the dept- prefixed dir.
+        // On live boxes the runtime dirs are dept-funnels / dept-web-development
+        // (bare ones do NOT exist), so we must probe the dept- prefix first.
+        const deptPrefixedSlug = `dept-${candidateSlug}`;
+        const deptPrefixedDir = path.join(AGENTS_ROOT, deptPrefixedSlug);
+        const bareDir = path.join(AGENTS_ROOT, candidateSlug);
+        if (fs.existsSync(deptPrefixedDir)) {
+          const key = `agent:${deptPrefixedSlug}:${openclawSessionId}`;
+          console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → dept-prefixed runtime found → key ${key}`);
           return key;
         }
-        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir at ${runtimeDir} — trying agent role slug`);
+        if (fs.existsSync(bareDir)) {
+          const key = `agent:${candidateSlug}:${openclawSessionId}`;
+          console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → bare runtime found → key ${key}`);
+          return key;
+        }
+        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug`);
       }
     } catch (err) {
       console.warn(`[${context}] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
