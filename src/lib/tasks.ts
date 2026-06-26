@@ -95,6 +95,112 @@ export const SENTINEL_IDS = new Set([
   'personas',
 ]);
 
+// ─── PERSONA PIN (G10-TRIAD-PERSONA-RESOLVE) ────────────────────────────────
+// The persona pick is async (spawns persona-selector-v2.py). Historically it ran
+// as a single fire-and-forget block AFTER autoDispatchTask, so first-of-(dept,
+// category) tasks dispatched while tasks.persona_id was still NULL — the dispatcher
+// (intelligence-resolver.resolveAndLog reads tasks.persona_id at send time) then
+// fell back to 'auto' self-select, so the persona the BOARD showed != the persona
+// the RUNTIME used (Cause A). It was also one-shot: a transient selector failure
+// left the task permanently unpinned, which then 400'd the Triad gate on the first
+// move out of backlog (human drag silently reverted).
+//
+// resolvePersonaAndPin() centralises the selection + pin + SSE re-broadcast with a
+// BOUNDED retry (no cron, no self-resurrect, no furnace): at most
+// PERSONA_PIN_MAX_ATTEMPTS python spawns with capped linear backoff. createTaskCore
+// kicks this off concurrently, then gates autoDispatchTask on it for a bounded
+// budget so board persona == runtime persona without blocking the API response.
+export const PERSONA_PIN_MAX_ATTEMPTS = 3;
+export const PERSONA_PIN_RETRY_BASE_MS = 1500;
+// Max time auto-dispatch waits for the pin before proceeding (degraded to 'auto').
+// The retry promise still lands the pin + re-broadcasts after dispatch if it times out.
+export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
+
+/**
+ * Select a persona for a task, persist it (tasks.persona_*), and re-broadcast the
+ * updated task over SSE so the board chip lands. Retry-backed and bounded.
+ *
+ * @returns the pinned persona_id, or null when no persona was required / selection
+ *          exhausted its attempts (the Triad gate auto-resolves on move in that case).
+ */
+export async function resolvePersonaAndPin(
+  taskId: string,
+  taskDescription: string,
+  departmentForSelector: string,
+): Promise<string | null> {
+  for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
+    try {
+      const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector);
+
+      // PRD 3.4 SENTINEL GUARD: loudly flag bad ids from a stale selector install.
+      if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
+        console.warn(
+          `[resolvePersonaAndPin] ⚠️  STALE INSTALL: selector returned sentinel id ` +
+          `"${persona.persona_id}" (skill ${getInstalledSkillVersion()}, task_id=${taskId}). ` +
+          `Update onboarding skills on this box.`,
+        );
+      }
+
+      // Explicit "no persona required" is terminal — not a failure, do not retry.
+      if (persona && persona.no_persona_required) {
+        return null;
+      }
+
+      if (persona && persona.persona_id && !SENTINEL_IDS.has(persona.persona_id)) {
+        const personaSelectedAt = new Date().toISOString();
+        run(
+          `UPDATE tasks
+              SET persona_id = ?,
+                  persona_name = ?,
+                  persona_mode = ?,
+                  persona_score = ?,
+                  persona_version = ?,
+                  persona_selected_at = ?
+            WHERE id = ?`,
+          [
+            persona.persona_id,
+            persona.persona_name,
+            persona.interaction_mode,
+            persona.score ?? null,
+            persona.persona_version ?? 1,
+            personaSelectedAt,
+            taskId,
+          ],
+        );
+
+        const updatedTask = queryOne<Task>(
+          `SELECT t.*,
+            aa.name as assigned_agent_name,
+            aa.avatar_emoji as assigned_agent_emoji,
+            ca.name as created_by_agent_name,
+            ca.avatar_emoji as created_by_agent_emoji
+           FROM tasks t
+           LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+           LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+           WHERE t.id = ?`,
+          [taskId],
+        );
+        if (updatedTask) {
+          broadcast({ type: 'task_updated', payload: updatedTask });
+          console.log(`[resolvePersonaAndPin] Persona landed for task ${taskId}: ${persona.persona_id}`);
+        }
+        return persona.persona_id;
+      }
+      // null / sentinel-only result — transient; fall through to retry with backoff.
+    } catch (err) {
+      console.error(`[resolvePersonaAndPin] attempt ${attempt}/${PERSONA_PIN_MAX_ATTEMPTS} threw for task ${taskId}:`, err);
+    }
+    if (attempt < PERSONA_PIN_MAX_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, PERSONA_PIN_RETRY_BASE_MS * attempt));
+    }
+  }
+  console.warn(
+    `[resolvePersonaAndPin] exhausted ${PERSONA_PIN_MAX_ATTEMPTS} attempts for task ${taskId} — ` +
+    `left unpinned (Triad gate auto-resolves on the first move out of backlog).`,
+  );
+  return null;
+}
+
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
 
 /**
@@ -434,12 +540,43 @@ export async function createTaskCore(
   }
   // --- END INSTANT ROUTING ---
 
+  // --- PERSONA PIN KICK-OFF (G10-TRIAD-PERSONA-RESOLVE) ---
+  // Start persona resolution NOW (concurrently with the rest of createTaskCore) so
+  // the pin can land in tasks.persona_id BEFORE auto-dispatch reads it. Retry-backed
+  // + bounded inside resolvePersonaAndPin (no cron, no self-resurrect, no furnace).
+  // PRD 1.5: pass the canonical workspace slug, never the raw UUID.
+  const personaTaskDescription =
+    `${input.title}${input.description ? `. ${input.description}` : ''}`.trim();
+  const personaDepartment =
+    canonicalDeptSlug(workspaceSlug) ||
+    (input.department ? canonicalDeptSlug(input.department) : null) ||
+    'general';
+  const personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment);
+  // Swallow at the source so a background failure never becomes an unhandled
+  // rejection — resolvePersonaAndPin logs internally and never throws to callers.
+  void personaPinPromise.catch(() => null);
+
   // --- AUTO-DISPATCH (v4.14.0) ---
   // If routing assigned a non-master specialist, fire the OpenClaw invocation
   // immediately so the specialist actually runs without a manual UI click.
   // Fire-and-forget: routing must not fail if OpenClaw is temporarily down.
+  //
+  // G10-TRIAD-PERSONA-RESOLVE: gate dispatch on the persona pin so the persona the
+  // BOARD shows (tasks.persona_id) is the SAME one the dispatcher sends — the
+  // dispatcher's resolveAndLog reads tasks.persona_id at send time, so the pin MUST
+  // land first or the runtime falls back to 'auto' self-select (board chip != runtime
+  // persona, Cause A). Bounded: if the pin doesn't land within the budget, dispatch
+  // proceeds (degraded to 'auto') and the retry promise still lands + re-broadcasts
+  // the pin afterwards. The await lives inside a detached task so the API still
+  // responds immediately (dispatch was already fire-and-forget).
   if (resolvedAgentId) {
-    void autoDispatchTask(id, 'createTaskCore');
+    void (async () => {
+      await Promise.race([
+        personaPinPromise.catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), PERSONA_PIN_DISPATCH_BUDGET_MS)),
+      ]);
+      await autoDispatchTask(id, 'createTaskCore');
+    })();
   }
   // --- END AUTO-DISPATCH ---
 
@@ -517,96 +654,15 @@ export async function createTaskCore(
     })();
   }
 
-  // ── ASYNC PERSONA SELECTION (PRD 1.6) ────────────────────────────────────────
-  // Run persona selection as a detached async block so the API responds instantly
-  // (task already inserted + broadcast above).  When the selector resolves, the
-  // task row is UPDATEd and a task_updated SSE event delivers the persona chip to
-  // every connected board.  Skips known sentinel IDs from stale selectors.
-  //
-  // selectPersonaForTask uses async execFile internally (never execFileSync) so
-  // this block never freezes the Node event loop even when the Python script runs
-  // semantic embed + LLM scoring calls.
-  void (async () => {
-    try {
-      const taskDescription =
-        `${input.title}${input.description ? `. ${input.description}` : ''}`.trim();
-
-      // PRD 1.5: Pass the workspace slug (canonicalized), never the raw UUID.
-      // workspaceSlug is populated above by resolving the workspaces row.
-      // Fallback order: workspace slug → input.department slug → 'general'.
-      const departmentForSelector =
-        canonicalDeptSlug(workspaceSlug) ||
-        (input.department ? canonicalDeptSlug(input.department) : null) ||
-        'general';
-
-      const persona = await selectPersonaForTask(id, taskDescription, departmentForSelector);
-
-      // PRD 3.4 — SENTINEL GUARD: keep filtering bad persona ids emitted by the
-      // old, buggy list_available_personas(), but NOW log a LOUD warning with
-      // the installed skill version so stale installs are identified and updated
-      // instead of silently tolerated.
-      if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
-        const skillVer = getInstalledSkillVersion();
-        console.warn(
-          `[createTaskCore] ⚠️  STALE INSTALL DETECTED: persona selector returned sentinel id` +
-          ` "${persona.persona_id}" instead of a real persona id.` +
-          ` This is caused by an outdated list_available_personas() bug that was fixed in the` +
-          ` persona-selector.  Installed skill version: ${skillVer}.` +
-          ` Please update the onboarding skills on this box to the latest version.` +
-          ` (task_id=${id}, sentinel_id=${persona.persona_id})`,
-        );
-      }
-
-      if (
-        persona &&
-        persona.persona_id &&
-        !SENTINEL_IDS.has(persona.persona_id) &&
-        !persona.no_persona_required
-      ) {
-        const personaSelectedAt = new Date().toISOString();
-        run(
-          `UPDATE tasks
-              SET persona_id = ?,
-                  persona_name = ?,
-                  persona_mode = ?,
-                  persona_score = ?,
-                  persona_version = ?,
-                  persona_selected_at = ?
-            WHERE id = ?`,
-          [
-            persona.persona_id,
-            persona.persona_name,
-            persona.interaction_mode,
-            persona.score ?? null,
-            persona.persona_version ?? 1,
-            personaSelectedAt,
-            id,
-          ]
-        );
-
-        // Re-fetch with joined agent fields so the SSE payload is complete.
-        const updatedTask = queryOne<Task>(
-          `SELECT t.*,
-            aa.name as assigned_agent_name,
-            aa.avatar_emoji as assigned_agent_emoji,
-            ca.name as created_by_agent_name,
-            ca.avatar_emoji as created_by_agent_emoji
-           FROM tasks t
-           LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-           LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-           WHERE t.id = ?`,
-          [id]
-        );
-        if (updatedTask) {
-          broadcast({ type: 'task_updated', payload: updatedTask });
-          console.log(`[createTaskCore] Persona landed for task ${id}: ${persona.persona_id}`);
-        }
-      }
-    } catch (personaError) {
-      // Never fail task creation on persona-selector errors — already returned above.
-      console.error(`[createTaskCore] Async persona selection threw for task ${id}:`, personaError);
-    }
-  })();
+  // ── ASYNC PERSONA SELECTION (PRD 1.6 / G10-TRIAD-PERSONA-RESOLVE) ─────────────
+  // Persona selection + pin + task_updated SSE re-broadcast are owned by
+  // resolvePersonaAndPin(), kicked off above as `personaPinPromise` (BEFORE the
+  // auto-dispatch gate so board persona == runtime persona). For the no-dispatch
+  // path it completes in the background; for the dispatch path the gate already
+  // awaited it (bounded). The task row was inserted + broadcast (task_created)
+  // above, so the persona chip lands via a follow-up task_updated event. Nothing
+  // further to do here — the promise is already running and its rejection is
+  // swallowed at the source.
 
   return { task, deduped: false };
 }

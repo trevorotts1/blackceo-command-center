@@ -67,25 +67,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Assign the agent and advance the task out of backlog → in_progress so
-    // the re-dispatched task is visible to the specialist and leaves the backlog.
-    // Only move from backlog; tasks already in_progress/review/done are left alone.
+    // Assign the agent ONLY — leave status at backlog. autoDispatchTask is the
+    // single authority that flips backlog → in_progress, and it only does so
+    // AFTER chat.send actually reaches the specialist (see task-dispatcher.ts).
+    //
+    // G8-KANBAN fix: the previous code pre-set status='in_progress' here, which
+    // tripped autoDispatchTask GUARD 3 (SKIP_STATUSES includes 'in_progress'),
+    // so the OpenClaw invocation returned before chat.send — the card showed
+    // "In Progress" but the agent was never actually invoked. Mirroring
+    // createTaskCore (assign → leave backlog → let autoDispatchTask flip) is the
+    // only correct pattern. If dispatch aborts (gateway down / sovereignty / SOP
+    // hold) the task stays assigned-in-backlog and the backlog-redispatch sweep
+    // rescues it.
     const now = new Date().toISOString();
     run(
       `UPDATE tasks
        SET assigned_agent_id = ?,
-           status = CASE WHEN status = 'backlog' THEN 'in_progress' ELSE status END,
            updated_at = ?
        WHERE id = ?`,
       [result.agentId, now, taskId],
     );
 
     console.log(
-      `[AutoRoute] Task "${task.title}" (${taskId}) assigned to ${result.agentName} via ${result.department} → in_progress`,
+      `[AutoRoute] Task "${task.title}" (${taskId}) assigned to ${result.agentName} via ${result.department} → backlog (awaiting auto-dispatch)`,
     );
 
     // AUTO-DISPATCH (v4.14.0): fire OpenClaw invocation immediately after routing.
-    // autoDispatchTask guards against master/CEO agents and terminal statuses.
+    // autoDispatchTask guards against master/CEO agents and terminal statuses and
+    // performs the backlog → in_progress flip itself once chat.send succeeds.
     // Fire-and-forget so routing response is not blocked by OpenClaw latency.
     void autoDispatchTask(taskId, 'auto-route');
 

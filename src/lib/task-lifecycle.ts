@@ -1,30 +1,55 @@
 /**
- * task-lifecycle.ts — ONE state machine, ONE transition function.
+ * task-lifecycle.ts — ADVISORY transition helper (NOT the sole status gate).
  *
- * §3 of DUCK-PIPELINE-GUIDANCE.md: every status change in the codebase routes
- * through `transition(taskId, to, evidence)`. That function:
+ * ⚠️ ADOPTION REALITY (read before trusting the "one state machine" framing):
+ * `transition()` is an OPTIONAL, opt-in helper. It is NOT enforced as the only
+ * path a task's status can change. As of this writing it has a single real
+ * caller (task-dispatcher.ts → 'in_progress'), and that caller falls back to a
+ * raw `UPDATE tasks SET status = ?` if `transition()` throws. The remaining
+ * status changes across the app (~20+ raw `UPDATE tasks SET … status` paths in
+ * `src/`, plus more in scripts) write the column directly and DO NOT route
+ * through here. Consequences you must not assume away:
+ *   - The `task_events` structured audit trail is written ONLY when a status
+ *     change goes through `transition()`. It is therefore PARTIAL, not a
+ *     complete history. Do not treat task_events as a source of truth for "every
+ *     transition that ever happened."
+ *   - The legal-transition guard + preconditions below only gate the few callers
+ *     that opt in. They cannot prevent an illegal status anywhere else.
+ * A full migration (route every status write through `transition()` and retire
+ * the raw UPDATEs) is a separate, coordinated effort — see DUCK-PIPELINE-
+ * GUIDANCE.md §3, which describes the TARGET design, not current behavior.
+ *
+ * What `transition(taskId, to, evidence)` does when a caller DOES opt in:
  *   1. Validates the transition is legal (legal-transitions map + preconditions).
  *   2. Updates the tasks row.
  *   3. Writes a task_events row (structured audit trail, distinct from the
  *      legacy `events` table which stays for backwards compat).
  *   4. Broadcasts the SSE event atomically with the DB write.
  *
- * States: backlog → assigned → in_progress → review → done | blocked
- *         Any state ← blocked (unblock), any → blocked
+ * States (the full TaskStatus set — see src/lib/types.ts):
+ *   intake/grooming : backlog → inbox → planning
+ *   ready/dispatch  : pending_dispatch / assigned
+ *   working         : in_progress
+ *   verify          : review → testing
+ *   terminal        : done
+ *   safety valve    : blocked (reachable from any state; unblocks back to the
+ *                     queue or to in_progress)
+ * The LEGAL_TRANSITIONS map below covers all 10 statuses so that opt-in callers
+ * moving a task through the intake/dispatch/verify lanes are not rejected with a
+ * spurious ILLEGAL_TRANSITION. The edge set is permissive (additive): every edge
+ * that was legal before is still legal; the new statuses only widen it.
  *
- * Preconditions:
- *   assigned    : task.assigned_agent_id AND task.model_id AND task.specialist_type
+ * Preconditions (enforced only for opt-in callers, skippable via operatorOverride):
+ *   assigned    : task.assigned_agent_id (specialist_type soft-required, warn only)
  *   in_progress : task.assigned_agent_id (model may be resolved at dispatch time)
- *   review      : task has ≥1 deliverable row (for artifact tasks); or non-artifact
- *                 tasks are allowed through unconditionally (SOP text tasks have
- *                 no required file deliverable)
- *   done        : task.status === 'review' (QC gate) OR human operator override
- *   blocked     : always allowed (safety valve)
+ *   review      : no blocking precondition here — QC layer does artifact gating
+ *   done        : no blocking precondition here — the PATCH route enforces the
+ *                 QC gate; agent-initiated 'done' is blocked there, not here
+ *   blocked / backlog / inbox / planning / pending_dispatch / testing : always
+ *                 allowed (no precondition)
  *
- * `transition()` is exported; all callers should import it and stop issuing raw
- * `UPDATE tasks SET status = ?` queries.  Existing callers that have not yet
- * been migrated continue to work — this function does NOT break them; it is
- * additive.
+ * `transition()` is exported and additive: it does NOT break the existing raw-SQL
+ * callers, and adopting it is encouraged but not currently mandatory.
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -40,27 +65,59 @@ import type { Task } from '@/lib/types';
 // State machine definition
 // ---------------------------------------------------------------------------
 
+/**
+ * The full task-status set. This is intentionally kept in lockstep with
+ * `TaskStatus` in src/lib/types.ts (the 10 statuses the board, API routes, and
+ * DB actually use). Keeping LifecycleState a strict subset (the old 6 states)
+ * caused legitimate intake/dispatch/verify transitions (inbox, planning,
+ * pending_dispatch, testing) to be rejected as ILLEGAL_TRANSITION by any caller
+ * that opted into transition(). All 10 are listed so the guard reflects reality.
+ */
 export type LifecycleState =
   | 'backlog'
+  | 'inbox'
+  | 'planning'
+  | 'pending_dispatch'
   | 'assigned'
   | 'in_progress'
   | 'review'
+  | 'testing'
   | 'done'
   | 'blocked';
 
 /**
  * Legal transitions: from → Set<to>
  *
- * NOTE: 'blocked' can be reached from any state (safety valve).
- * 'blocked' can transition to 'backlog' (unblock) or 'in_progress' (resume).
+ * Pipeline (intake → done):
+ *   backlog → inbox → planning → pending_dispatch/assigned → in_progress
+ *           → review → testing → done
+ *
+ * NOTE: 'blocked' can be reached from any state (safety valve) and unblocks back
+ * to the queue (backlog/inbox/planning/pending_dispatch) or resumes work
+ * (in_progress/assigned). 'done' re-opens only to 'backlog'.
+ *
+ * ADDITIVE GUARANTEE: every edge that was legal in the original 6-state map is
+ * preserved here. The four new statuses (inbox, planning, pending_dispatch,
+ * testing) only WIDEN the legal set — no previously-legal transition became
+ * illegal, so no existing opt-in caller can break from this change.
  */
 const LEGAL_TRANSITIONS: Record<LifecycleState, Set<LifecycleState>> = {
-  backlog:     new Set<LifecycleState>(['assigned', 'in_progress', 'blocked']),
-  assigned:    new Set<LifecycleState>(['in_progress', 'backlog', 'blocked']),
-  in_progress: new Set<LifecycleState>(['review', 'blocked', 'backlog']),
-  review:      new Set<LifecycleState>(['done', 'in_progress', 'blocked', 'backlog']),
-  done:        new Set<LifecycleState>(['backlog']), // re-open only
-  blocked:     new Set<LifecycleState>(['backlog', 'in_progress', 'assigned']),
+  // ── intake / grooming ──
+  backlog:          new Set<LifecycleState>(['inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'blocked']),
+  inbox:            new Set<LifecycleState>(['planning', 'pending_dispatch', 'assigned', 'in_progress', 'backlog', 'blocked']),
+  planning:         new Set<LifecycleState>(['pending_dispatch', 'assigned', 'in_progress', 'backlog', 'blocked']),
+  // ── ready / dispatch ──
+  pending_dispatch: new Set<LifecycleState>(['assigned', 'in_progress', 'backlog', 'blocked']),
+  assigned:         new Set<LifecycleState>(['in_progress', 'pending_dispatch', 'backlog', 'blocked']),
+  // ── working ──
+  in_progress:      new Set<LifecycleState>(['review', 'testing', 'blocked', 'backlog']),
+  // ── verify ──
+  review:           new Set<LifecycleState>(['done', 'testing', 'in_progress', 'blocked', 'backlog']),
+  testing:          new Set<LifecycleState>(['done', 'review', 'in_progress', 'blocked', 'backlog']),
+  // ── terminal ──
+  done:             new Set<LifecycleState>(['backlog']), // re-open only
+  // ── safety valve ──
+  blocked:          new Set<LifecycleState>(['backlog', 'inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress']),
 };
 
 /**
@@ -198,7 +255,11 @@ function checkPreconditions(
 
     case 'blocked':
     case 'backlog':
-      break; // always legal
+    case 'inbox':
+    case 'planning':
+    case 'pending_dispatch':
+    case 'testing':
+      break; // no blocking precondition — always allowed
   }
 }
 

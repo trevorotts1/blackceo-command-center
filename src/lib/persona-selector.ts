@@ -28,12 +28,42 @@
  */
 import { promisify } from "util";
 import { execFile, spawn } from "child_process";
+import fs from "fs";
 import path from "path";
 import os from "os";
 import { DB_PATH } from "@/lib/db";
 
 // Promisified async version — never blocks the event loop.
 const execFileAsync = promisify(execFile);
+
+/**
+ * Resolve the company-config.json path to hand the python selector as a grounding
+ * hint (G10-TRIAD-PERSONA-RESOLVE / Gap A/B). Without company-config the selector's
+ * grounding layers neutralize to a flat 0.6 score. We forward the path via the
+ * OPENCLAW_COMPANY_CONFIG env var.
+ *
+ * IMPORTANT: persona-selector-v2.py uses a STRICT argparse (parser.parse_args()),
+ * which has NO `--company-config` flag — passing it as a CLI argument would crash
+ * the script (SystemExit) and break selection entirely. So the hint is passed via
+ * ENV (additive / non-breaking), never as a flag. The script resolves company-config
+ * through get_openclaw_paths()/OPENCLAW_COMPANY_SLUG today; OPENCLAW_COMPANY_CONFIG is
+ * forward-compatible for when the script is taught to honour an explicit path.
+ *
+ * Resolution order: explicit env override → command-center's config/company-config.json.
+ * Returns undefined when no readable file is found (selector falls back to its own
+ * path resolution — no behaviour change).
+ */
+function resolveCompanyConfigHint(): string | undefined {
+  const explicit = process.env.OPENCLAW_COMPANY_CONFIG;
+  if (explicit && fs.existsSync(explicit)) return explicit;
+  try {
+    const appConfig = path.join(process.cwd(), "config", "company-config.json");
+    if (fs.existsSync(appConfig)) return appConfig;
+  } catch {
+    /* non-fatal — fall through to undefined */
+  }
+  return undefined;
+}
 
 export type PersonaInteractionMode = "leadership" | "coaching" | "hybrid";
 
@@ -122,13 +152,30 @@ export async function selectPersonaForTask(
     //
     // PRD 1.6: use async execFile (promisified) — never execFileSync which freezes the
     // Node event loop for up to 30s during semantic embed + LLM scoring calls.
+    //
+    // G10-TRIAD-PERSONA-RESOLVE:
+    //  - `--task-id` is forwarded so the script can attribute the selection (argparse
+    //    accepts it; harmless in select mode). It is ALSO set as OPENCLAW_TASK_ID in
+    //    the env because the select-mode persona_selection_log reads task_id from
+    //    os.environ["OPENCLAW_TASK_ID"] (script line ~758), defaulting to
+    //    "(no-task-id)" — the env is the actual fix for the (no-task-id) log rows.
+    //  - OPENCLAW_COMPANY_CONFIG is forwarded as the company-config grounding hint
+    //    (so grounding doesn't neutralize to 0.6). It is passed via ENV, NOT as a
+    //    `--company-config` flag: the script's strict argparse has no such flag and
+    //    would crash on it.
+    const companyConfigHint = resolveCompanyConfigHint();
     const { stdout: output } = await execFileAsync(
       "python3",
-      [scriptPath, "--task", taskDescription, "--department", dept, "--format", "json"],
+      [scriptPath, "--task", taskDescription, "--department", dept, "--task-id", taskId, "--format", "json"],
       {
         encoding: "utf-8",
         timeout: 30_000,
-        env: { ...process.env, DASHBOARD_DB_PATH: DB_PATH },
+        env: {
+          ...process.env,
+          DASHBOARD_DB_PATH: DB_PATH,
+          OPENCLAW_TASK_ID: taskId,
+          ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
+        },
       }
     );
 

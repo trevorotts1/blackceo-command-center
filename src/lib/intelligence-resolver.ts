@@ -151,6 +151,65 @@ interface PersonaAssignmentRow {
 }
 
 /**
+ * Category keyword map — PORTED VERBATIM from
+ * openclaw-onboarding/23-ai-workforce-blueprint/scripts/infer-task-category.py
+ * (CATEGORY_KEYWORDS).
+ *
+ * MUST stay in LOCKSTEP with that file. The persona selector
+ * (persona-selector-v2.py) keys the persona_assignment table by the
+ * (department_id, task_category) pair this categorizer produces; any drift here
+ * re-introduces the RESOLVER-CATEGORY misroute (Gap E) where an unpinned task
+ * inherits the wrong category's persona.
+ */
+const CATEGORY_KEYWORDS: Record<string, string[]> = {
+  'email-outreach':   ['email', 'outreach', 'follow-up', 'follow up', 'cold email', 'send to', 'newsletter'],
+  'social-post':      ['social', 'instagram', 'linkedin', 'facebook', 'twitter', 'tiktok', 'pinterest', 'post on', 'reel', 'story'],
+  'content-write':    ['article', 'blog', 'essay', 'long form', 'long-form', 'story', 'write a', 'writeup'],
+  'video-script':     ['script', 'video', 'reel script', 'ad creative', 'vsl', 'ad copy'],
+  'research':         ['research', 'analyze', 'study', 'investigate', 'compile', 'find out', 'look into'],
+  'strategy':         ['strategy', 'plan', 'roadmap', 'vision', 'framework', 'approach'],
+  'design':           ['design', 'graphic', 'logo', 'layout', 'mockup', 'visual', 'illustrate'],
+  'ops':              ['sop', 'process', 'workflow', 'automation', 'operations', 'procedure'],
+  'finance':          ['budget', 'p&l', 'cashflow', 'forecast', 'pricing', 'invoice', 'payment'],
+  'legal':            ['contract', 'nda', 'terms', 'policy', 'compliance', 'agreement'],
+  'hr':               ['hire', 'fire', 'onboard', 'review performance', 'recruit'],
+  'customer-service': ['refund', 'ticket', 'support', 'complaint', 'service issue', 'customer issue'],
+  'coaching-prompt':  ['stuck', 'decide', 'advice', 'help me think', 'help me decide', 'what should i'],
+  'review-feedback':  ['review my', 'feedback on my', 'critique my', 'edit my'],
+};
+
+/**
+ * Faithful TS port of infer_task_category() (Python). Word-boundary match for
+ * single-word keywords, substring match for multi-word keywords; highest score
+ * wins; defaults to 'general'. Determinism is REQUIRED — this must reproduce the
+ * exact category the selector computed so the sticky (department_id,
+ * task_category) lookup hits the right persona_assignment row.
+ */
+function inferTaskCategory(taskText: string | null | undefined): string {
+  const text = (taskText || '').toLowerCase();
+  let bestCat = 'general';
+  let bestScore = 0;
+  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
+    let score = 0;
+    for (const kw of kws) {
+      if (kw.includes(' ')) {
+        if (text.includes(kw)) score += 1;
+      } else {
+        // \b...\b — escape regex-special chars (mirrors Python re.escape; '-'
+        // and '&' are literal outside a char class in both engines).
+        const pattern = new RegExp('\\b' + kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b');
+        if (pattern.test(text)) score += 1;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestCat = cat;
+    }
+  }
+  return bestCat;
+}
+
+/**
  * Resolve the effective model and persona for an agent in a department.
  *
  * @param agentId - The agent's ID (used as role_id in agent_settings)
@@ -186,9 +245,30 @@ export function resolveSettings(
   let difficulty: 'heavy' | 'mid' | 'fast' | null = null;
   let model_tier: 1 | 2 | 3 | null = null;
 
-  // Layer 1: SOP pin — sops.model_pin for task.sop_id (author intent wins)
+  // Layer 0: CEO model choice (GOAL-5 Item 5). The CEO is gated from EXECUTING
+  // work but PRESERVES the right to pick which model a department runs the task
+  // on. That choice is persisted onto `tasks.model_id` by the ingest route
+  // (requested_model) and survives re-emit/re-dispatch. When a non-empty
+  // `tasks.model_id` is already set BEFORE dispatch resolution runs, it is an
+  // explicit, owner-/CEO-sanctioned model and outranks every other source.
+  if (taskId) {
+    try {
+      const pinned = queryOne<{ model_id: string | null }>(
+        `SELECT model_id FROM tasks WHERE id = ?`,
+        [taskId],
+      );
+      if (pinned?.model_id && pinned.model_id !== NEEDS_OWNER_INPUT) {
+        model = pinned.model_id;
+        modelSource = 'role_override'; // explicit pin; treated as a hard override
+      }
+    } catch { /* tasks.model_id may be absent on very old DBs — tolerant */ }
+  }
+
+  // Layer 1: SOP pin — sops.model_pin for task.sop_id (author intent wins).
+  // Guarded on needs_owner_input so a Layer-0 CEO model pin (GOAL-5 Item 5) is
+  // never clobbered by an SOP pin.
   const sopId = taskContext?.sop_id ?? null;
-  if (sopId) {
+  if (modelSource === 'needs_owner_input' && sopId) {
     try {
       const sopPin = queryOne<SopPinRow>(
         `SELECT model_pin FROM sops WHERE id = ? AND deleted_at IS NULL`,
@@ -281,38 +361,61 @@ export function resolveSettings(
   }
 
   // Hop 10 Step 2: sticky (department_id, task_category) from persona_assignment.
-  // task_category isn't on the tasks table directly; derive it from
-  // persona_selection_log for this task (if it ran), then look up the
-  // sticky row. Tolerant of missing tables on older DBs.
+  //
+  // RESOLVER-CATEGORY FIX (Gap E): persona_assignment has a UNIQUE
+  // (department_id, task_category) key and the selector upserts/reads it by that
+  // pair (persona-selector-v2.py check_sticky_assignment). The previous lookup
+  // keyed on department_id ALONE and grabbed the most-recently-assigned row of
+  // ANY category — so an unpinned task inherited the WRONG category's persona.
+  // We now derive THIS task's category and require an EXACT (department_id,
+  // task_category) match, mirroring the selector's key.
+  //
+  // task_category is derived in priority order:
+  //   1. The category the selector actually recorded for this task, embedded as
+  //      "task_category" inside persona_selection_log.layer_scores (authoritative).
+  //   2. inferTaskCategory(title + description) — a verbatim port of the
+  //      selector's infer_task_category(), so an unscored task still resolves to
+  //      the SAME category the selector would compute.
+  // If no category is derivable AND no exact sticky row exists, we fall through
+  // to the agent_settings cascade rather than guessing a wrong persona.
   let stickyCategory: string | null = null;
   let stickyAssignment: PersonaAssignmentRow | null = null;
   if (taskId) {
+    // (1) Authoritative: the category the selector recorded for this task.
     try {
-      const logRow = queryOne<{ mode: string | null; task_category?: string | null }>(
-        `SELECT mode FROM persona_selection_log WHERE task_id = ? ORDER BY selected_at DESC LIMIT 1`,
+      const logRow = queryOne<{ layer_scores: string | null }>(
+        `SELECT layer_scores FROM persona_selection_log
+         WHERE task_id = ? ORDER BY selected_at DESC LIMIT 1`,
         [taskId]
       );
-      // task_category is the dispatch input the selector uses to key
-      // persona_assignment. The log doesn't store it, but the v2 selector
-      // upserts persona_assignment using the same department_id, so we can
-      // pull the most-recently-assigned row for this department as the sticky
-      // default when no exact category match is available.
-      void logRow;
+      if (logRow?.layer_scores) {
+        const parsed = JSON.parse(logRow.layer_scores) as Record<string, unknown>;
+        const cat = parsed?.task_category;
+        if (typeof cat === 'string' && cat) stickyCategory = cat;
+      }
     } catch {
-      // No log table — fine.
+      // No log table / unparseable layer_scores — fall through to inference.
     }
 
-    try {
-      stickyAssignment = queryOne<PersonaAssignmentRow>(
-        `SELECT persona_id, persona_name, persona_mode, task_category
-         FROM persona_assignment
-         WHERE department_id = ?
-         ORDER BY last_assigned_at DESC LIMIT 1`,
-        [departmentId]
-      ) ?? null;
-      stickyCategory = stickyAssignment?.task_category ?? null;
-    } catch {
-      stickyAssignment = null;
+    // (2) Derive the category from task text the same way the selector does.
+    if (!stickyCategory) {
+      const catText = `${taskContext?.title ?? ''} ${taskContext?.description ?? ''}`.trim();
+      if (catText) stickyCategory = inferTaskCategory(catText);
+    }
+
+    // EXACT (department_id, task_category) match — the selector's UNIQUE key.
+    if (stickyCategory) {
+      try {
+        stickyAssignment = queryOne<PersonaAssignmentRow>(
+          `SELECT persona_id, persona_name, persona_mode, task_category
+           FROM persona_assignment
+           WHERE department_id = ? AND task_category = ?
+           ORDER BY last_assigned_at DESC LIMIT 1`,
+          [departmentId, stickyCategory]
+        ) ?? null;
+      } catch {
+        stickyAssignment = null;
+      }
     }
   }
   if (stickyAssignment && stickyAssignment.persona_name) {

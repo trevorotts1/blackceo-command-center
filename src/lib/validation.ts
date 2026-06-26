@@ -1,11 +1,28 @@
 import { z } from 'zod';
 
-// Task status and priority enums from types
+// Task status and priority enums.
+// LOCKSTEP: this enum is the request-validation ENFORCER for TaskStatus and MUST
+// stay in exact lockstep with the manifest in src/lib/types.ts:5 (the canonical
+// 10-status TaskStatus union). If they drift, a status the board/agents
+// legitimately set is rejected with a 400 at the gate -- e.g. dragging a card to
+// the synthetic "To-Do" column PATCHes status='assigned' (MissionQueue.tsx:262),
+// which an out-of-lockstep enum silently blocked, so a card could not enter To-Do.
+//
+// This enum ONLY validates that a status value is a real member of the manifest.
+// It does NOT grant transitions: the Triad gate (backlog -> !backlog), the
+// blocked gate, and the QC review->done gate are all enforced separately in
+// src/app/api/tasks/[id]/route.ts and remain authoritative regardless of which
+// values appear here. Adding the real statuses below does not open any gate.
 const TaskStatus = z.enum([
   'backlog',
+  'inbox',
+  'planning',
   'in_progress',
+  'assigned',
   'review',
+  'testing',
   'blocked',
+  'pending_dispatch',
   'done'
 ]);
 
@@ -164,9 +181,18 @@ export const CreateAdCampaignSchema = z.object({
     .optional(),
 });
 
+// LOCKSTEP: ad-campaign stage cards have their OWN narrower status set
+// (AdCardStatus in src/lib/ad-campaigns.ts) — NOT the full 10-status board
+// TaskStatus. Originally this schema reused TaskStatus because the two happened
+// to coincide at 5 values; once TaskStatus widened to the 10-status board
+// manifest, reusing it would let an ad card be set to a board-only status
+// (inbox/planning/assigned/testing/pending_dispatch) that moveAdStage() cannot
+// accept. Pin to the AdCardStatus values to keep schema↔moveAdStage in lockstep.
+const AdCardStatus = z.enum(['backlog', 'in_progress', 'review', 'blocked', 'done']);
+
 export const UpdateAdCampaignStageSchema = z.object({
   stage_slug: AdStageSlug,
-  status: TaskStatus, // backlog | in_progress | review | blocked | done
+  status: AdCardStatus, // backlog | in_progress | review | blocked | done
   reason: z.string().max(2000).optional(),
   actor: z.string().max(200).optional(),
   blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),

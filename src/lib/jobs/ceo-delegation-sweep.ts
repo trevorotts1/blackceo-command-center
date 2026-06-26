@@ -127,8 +127,16 @@ export async function runCeoDelegationSweep(): Promise<void> {
       if (!isQcFail && /ceo|com/i.test(routing.department)) continue; // CEO/COM — leave for human
 
       const now = new Date().toISOString();
+      // G8-KANBAN fix: assign agent + department but LEAVE status at backlog.
+      // Pre-setting status='in_progress' here tripped autoDispatchTask GUARD 3
+      // (SKIP_STATUSES includes 'in_progress'), so the OpenClaw invocation below
+      // returned before chat.send — card moved but the agent never ran.
+      // autoDispatchTask is the sole authority for the backlog → in_progress flip
+      // and only flips after chat.send succeeds (mirrors createTaskCore). If
+      // dispatch aborts, the task stays assigned-in-backlog and the
+      // backlog-redispatch sweep retries it.
       run(
-        `UPDATE tasks SET assigned_agent_id = ?, department = ?, status = 'in_progress', updated_at = ? WHERE id = ?`,
+        `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
         [routing.agentId, routing.department, now, task.id],
       );
       run(

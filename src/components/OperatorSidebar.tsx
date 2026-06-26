@@ -38,8 +38,8 @@ export const OPERATOR_NAV: OperatorNavItem[] = [
   { href: '/operator/journal', label: 'Journal', icon: <BookOpen size={16} />, accent: '#A3E635' },
   { href: '/operator/memory', label: 'Memory', icon: <Brain size={16} />, accent: '#22D3EE' },
   { href: '/operator/research', label: 'Research', icon: <Search size={16} />, accent: '#06B6D4' },
-  { href: '/operator/call', label: 'Call Mode', icon: <Phone size={16} />, accent: '#10B981', placeholder: true },
-  { href: '/operator/web-agent', label: 'Web Agent', icon: <Globe size={16} />, accent: '#6366F1', placeholder: true },
+  { href: '/operator/call', label: 'Call Mode', icon: <Phone size={16} />, accent: '#10B981' },
+  { href: '/operator/web-agent', label: 'Web Agent', icon: <Globe size={16} />, accent: '#6366F1' },
 ];
 
 export default function OperatorSidebar() {

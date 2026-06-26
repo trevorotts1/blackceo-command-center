@@ -113,19 +113,17 @@ export const ONBOARDING_CARDS: OnboardingCard[] = [
   {
     id: 'call',
     title: 'Call Mode',
-    summary: 'Hands-free voice chat (coming soon).',
-    body: 'Soon you will be able to just talk to your AI tools out loud, like a phone call, instead of typing.',
+    summary: 'Hands-free voice chat.',
+    body: 'Just talk to your AI tools out loud, like a phone call, instead of typing.',
     accent: '#10B981',
-    soon: true,
     target: 'call',
   },
   {
     id: 'web-agent',
     title: 'Web Agent',
-    summary: 'Let the AI use a web browser (coming soon).',
-    body: 'Soon the AI will be able to click around websites and fill in forms for you, all on its own.',
+    summary: 'Let the AI use a web browser.',
+    body: 'The AI can click around websites and fill in forms for you, all on its own.',
     accent: '#6366F1',
-    soon: true,
     target: 'web-agent',
   },
 ];

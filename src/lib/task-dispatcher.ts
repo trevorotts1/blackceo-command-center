@@ -83,7 +83,7 @@ function resolveSpecialistSessionKey(
   openclawSessionId: string,
   workspaceId: string | undefined,
   context: string,
-): string {
+): string | null {
   const AGENTS_ROOT = path.join(
     process.env.HOME ?? '/Users/blackceomacmini',
     '.openclaw',
@@ -134,14 +134,23 @@ function resolveSpecialistSessionKey(
     }
   }
 
-  // Safe fallback: keep legacy agent:main key; log warning.
-  const fallbackKey = `agent:main:${openclawSessionId}`;
-  console.warn(
-    `[${context}] resolveSpecialistSessionKey: no specialist runtime found for agent "${agent.name}" ` +
-    `(workspace_id=${workspaceId ?? 'none'}) — falling back to legacy key ${fallbackKey}. ` +
-    `Add ~/.openclaw/agents/<dept-slug>/ to fix.`,
+  // RESOLVER-DISPATCH FIX (Gap E): NO per-department runtime resolved.
+  //
+  // The legacy behavior silently returned `agent:main:<id>` — the CEO/Stefanie
+  // orchestrator, whose prompt FORBIDS building. That key re-ingests the task
+  // into the loop-gate, burns turns, and produces ZERO artifacts; worse, the
+  // silent fallback HIDES the misroute (the card looks dispatched but nothing
+  // is built). We refuse the agent:main fallback and return null so the caller
+  // can emit a loud, queryable 'routed but not dispatched' signal and HOLD the
+  // task (visible) instead of feeding the loop. This changes the loop-gate's
+  // VISIBILITY/AVOIDANCE only — not the loop-gate behavior itself.
+  console.error(
+    `[${context}] resolveSpecialistSessionKey: NO specialist runtime for agent "${agent.name}" ` +
+    `(workspace_id=${workspaceId ?? 'none'}, role=${agent.role ?? 'none'}). ` +
+    `REFUSING silent agent:main fallback — task will be held as 'routed but not dispatched'. ` +
+    `Add ~/.openclaw/agents/<dept-slug>/ to wire this department.`,
   );
-  return fallbackKey;
+  return null;
 }
 
 /**
@@ -505,6 +514,44 @@ If you need help or clarification, ask the orchestrator.`;
     //   2. Fallback: if no specialist runtime is resolvable we keep the legacy
     //      agent:main:… key and log a warning so other departments are not broken.
     const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id, context);
+
+    // ── RESOLVER-DISPATCH gate (Gap E) ─────────────────────────────────────
+    // No per-department OpenClaw runtime → do NOT silently dispatch to
+    // agent:main (the CEO orchestrator), which re-ingests the task into the
+    // loop-gate and builds nothing. Instead HOLD the task in backlog and emit a
+    // loud, queryable 'routed_but_not_dispatched' signal so the misroute is
+    // visible (pairs with the wiring-gate assertion). Same hold pattern as the
+    // AF-MODEL-SOVEREIGNTY block above: no status change, durable events.
+    if (!sessionKey) {
+      const holdMsg =
+        `[routed_but_not_dispatched] Task "${task.title}" (${task.id}) routed to "${agent.name}" ` +
+        `but NO per-department OpenClaw runtime exists (~/.openclaw/agents/<dept-slug>/ missing; ` +
+        `workspace_id=${task.workspace_id ?? 'none'}, role=${agent.role ?? 'none'}). ` +
+        `Dispatch HELD to avoid the agent:main re-ingest loop. Wire the department runtime to release.`;
+      console.error(`[${context}] ${holdMsg}`);
+      const nowHold = new Date().toISOString();
+      run(
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(), task.id, agent.id, 'routed_but_not_dispatched', holdMsg,
+          JSON.stringify({
+            workspace_id: task.workspace_id ?? null,
+            role: agent.role ?? null,
+            reason: 'no_specialist_runtime',
+          }),
+          nowHold,
+        ],
+      );
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
+      );
+      // Leave task in backlog (no status change) so the misroute is visible.
+      return;
+    }
+
     await client.call('chat.send', {
       sessionKey,
       message: taskMessage,

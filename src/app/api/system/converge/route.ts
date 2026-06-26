@@ -28,6 +28,10 @@ import { existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import os from 'os';
 import { getDb, reseedWorkspacesFromConfig } from '@/lib/db';
+// Direct module import (not re-exported via @/lib/db): resolve the departments/
+// tree that pairs with the seeded departments.json so SOP import reads the SAME
+// company the workspaces came from (Gap C ↔ Gap D lockstep, G12-FLOOR-CC-SEED).
+import { resolveDepartmentsTreePath } from '@/lib/db/migrations';
 import { importRoleLibrary } from '@/lib/role-library-import';
 
 export const dynamic = 'force-dynamic';
@@ -140,7 +144,11 @@ export async function POST(req: NextRequest): Promise<Response> {
   // ── Step 2: Ingest role-library / SOPs ────────────────────────────────────
   if (scope === 'all' || scope === 'sops') {
     try {
-      const sopResult = importRoleLibrary({ pruneMissing: false });
+      // Prefer the departments/ tree that pairs with the resolved
+      // departments.json; fall back (undefined) to the importer's own
+      // OPENCLAW_WORKSPACE_PATH default when no ZHC company tree is present.
+      const departmentsPath = resolveDepartmentsTreePath() ?? undefined;
+      const sopResult = importRoleLibrary({ pruneMissing: false, departmentsPath });
       // ImportResult has inserted + updated + skipped. Map:
       //   inserted → imported (new rows created)
       //   updated  → updated  (existing rows refreshed)

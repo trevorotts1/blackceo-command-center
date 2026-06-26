@@ -5,10 +5,10 @@ import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
 import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/types';
-import { checkTriad } from '@/lib/sops';
+import { checkTriad, getBestSOPForTask } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { spawnRecordCompletion } from '@/lib/persona-selector';
+import { spawnRecordCompletion, selectPersonaForTask } from '@/lib/persona-selector';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
 
@@ -307,7 +307,72 @@ export async function PATCH(
           sop_id: validatedData.sop_id !== undefined ? validatedData.sop_id : (existing as Task).sop_id,
           persona_id: (existing as Task).persona_id,
         };
-        const { missing } = checkTriad(merged);
+        let missing = checkTriad(merged).missing;
+
+        // G10-TRIAD-PERSONA-RESOLVE: persona/SOP are async best-effort at create
+        // time; if the pin had not landed yet, a NULL persona_id/sop_id here would
+        // hard-bounce a 400 and the human drag would silently revert. Instead of
+        // bouncing, AUTO-RESOLVE the missing piece in-band (trigger SOP match +
+        // persona selection), persist it, then re-check. Bounded single attempt
+        // each — one in-process SOP match + at most one python selector spawn (its
+        // own 30s timeout); no retry storm, no cron, no furnace.
+        if (missing.length > 0) {
+          const triadNow = new Date().toISOString();
+          const triadDept =
+            canonicalDeptSlug((existing as Task).department || '') ||
+            (existing as Task).department ||
+            null;
+
+          if (missing.includes('sop_id')) {
+            try {
+              const best = await getBestSOPForTask({
+                title: validatedData.title !== undefined ? validatedData.title : existing.title,
+                description: merged.description ?? undefined,
+                department: triadDept ?? undefined,
+                workspace_id: (existing as Task).workspace_id ?? undefined,
+              });
+              if (best) {
+                run('UPDATE tasks SET sop_id = ?, updated_at = ? WHERE id = ?', [best.id, triadNow, id]);
+                merged.sop_id = best.id;
+              }
+            } catch (err) {
+              console.warn('[tasks PATCH] Triad SOP auto-resolve failed (non-fatal):', (err as Error).message);
+            }
+          }
+
+          if (missing.includes('persona_id')) {
+            try {
+              const personaTitle = validatedData.title !== undefined ? validatedData.title : existing.title;
+              const personaDesc = `${personaTitle}${merged.description ? `. ${merged.description}` : ''}`.trim();
+              const persona = await selectPersonaForTask(id, personaDesc, triadDept);
+              if (persona && persona.persona_id && !persona.no_persona_required) {
+                run(
+                  `UPDATE tasks
+                      SET persona_id = ?, persona_name = ?, persona_mode = ?,
+                          persona_score = ?, persona_version = ?, persona_selected_at = ?, updated_at = ?
+                    WHERE id = ?`,
+                  [
+                    persona.persona_id,
+                    persona.persona_name,
+                    persona.interaction_mode,
+                    persona.score ?? null,
+                    persona.persona_version ?? 1,
+                    triadNow,
+                    triadNow,
+                    id,
+                  ],
+                );
+                merged.persona_id = persona.persona_id;
+              }
+            } catch (err) {
+              console.warn('[tasks PATCH] Triad persona auto-resolve failed (non-fatal):', (err as Error).message);
+            }
+          }
+
+          // Re-evaluate against the freshly-resolved state.
+          missing = checkTriad(merged).missing;
+        }
+
         if (missing.length > 0) {
           // Auto-draft: when the ONLY/also-missing piece is the SOP, turn the
           // block into a pre-filled DRAFT proposal the dept head can approve,
