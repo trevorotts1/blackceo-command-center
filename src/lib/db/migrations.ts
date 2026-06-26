@@ -2778,6 +2778,36 @@ const migrations: Migration[] = [
       console.log('[Migration 073] Block transparency columns ready');
     },
   },
+  {
+    id: '074',
+    name: 'add_tasks_stage_slug_for_ad_campaigns',
+    up: (db) => {
+      // Ad-campaign assembly-line cards (Skill 48 → board): stage_slug identifies
+      // each stage card within a campaign. campaign_id ALREADY EXISTS from
+      // migration 017 (REFERENCES campaigns(id)); the ONLY net-new column here is
+      // stage_slug. Additive + nullable — non-ad tasks keep stage_slug NULL, so
+      // this never touches existing rows or routes.
+      //
+      // REVERSIBILITY (this framework has no auto-down; it is purely additive so
+      // leaving it in place is always safe). Manual rollback if ever required:
+      //   DROP INDEX IF EXISTS idx_tasks_campaign_stage;
+      //   DROP INDEX IF EXISTS idx_tasks_stage_slug;
+      //   ALTER TABLE tasks DROP COLUMN stage_slug;   -- SQLite >= 3.35 (better-sqlite3 12.x bundles >= 3.45)
+      //   DELETE FROM _migrations WHERE id = '074';
+      console.log('[Migration 074] Adding tasks.stage_slug + ad-campaign indexes...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('stage_slug')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN stage_slug TEXT`);
+      }
+      // One card per (campaign_id, stage_slug); NULLs excluded so normal tasks never collide.
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_campaign_stage
+               ON tasks(campaign_id, stage_slug)
+               WHERE campaign_id IS NOT NULL AND stage_slug IS NOT NULL`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_stage_slug
+               ON tasks(stage_slug) WHERE stage_slug IS NOT NULL`);
+      console.log('[Migration 074] tasks.stage_slug ready');
+    },
+  },
 ];
 
 /**

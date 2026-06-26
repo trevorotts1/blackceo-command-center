@@ -141,3 +141,35 @@ export function validateLogoUrl(url: string): { valid: boolean; error?: string }
 
   return { valid: true };
 }
+
+// ---------------------------------------------------------------------------
+// Ad-campaign schemas (Skill 48 facebook-ad-generator → board)
+// ---------------------------------------------------------------------------
+
+const AdStageSlug = z.string().min(1).max(64);
+
+export const CreateAdCampaignSchema = z.object({
+  job_id: z.string().min(1).max(128),
+  show_name: z.string().min(1).max(500),
+  owner: z.string().max(200).optional(),
+  department: z.string().max(100).optional(),
+  workspace: z.string().max(200).optional(),
+  agent_id: z.string().max(200).optional(), // OpenClaw id; provenance ONLY — never assigned_agent_id
+  money_ceiling_usd: z.number().nonnegative().optional(),
+  estimated_cost_usd: z.number().nonnegative().optional(),
+  show_date: z.string().max(100).optional(),
+  stages: z
+    .array(z.object({ slug: AdStageSlug, title: z.string().max(500).optional() }))
+    .max(50)
+    .optional(),
+});
+
+export const UpdateAdCampaignStageSchema = z.object({
+  stage_slug: AdStageSlug,
+  status: TaskStatus, // backlog | in_progress | review | blocked | done
+  reason: z.string().max(2000).optional(),
+  actor: z.string().max(200).optional(),
+  blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),
+  blocked_on_human: z.enum(['owner', 'operator']).optional().nullable(),
+  ask: z.string().max(500).optional().nullable(),
+});
