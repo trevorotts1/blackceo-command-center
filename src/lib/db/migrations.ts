@@ -2694,7 +2694,23 @@ const migrations: Migration[] = [
     },
   },
   {
-    id: '072',
+    // RENUMBERED 072 → 075: the id '072' collided with
+    // 'blocked_fields_and_last_progress_at' above. The runner builds its
+    // in-memory applied-set ONCE (runMigrations, top of loop), so on a fresh DB
+    // the second '072' still passed the applied.has() guard, ran, and its
+    // `INSERT INTO _migrations (id, ...)` hit the PRIMARY KEY →
+    // "UNIQUE constraint failed: _migrations.id" (crashed seed before 074).
+    // In production whichever 072 ran first claimed the id, so THIS migration's
+    // schema change never applied; id 075 (> current max 074) makes it apply.
+    //
+    // REVERSIBILITY — this framework has no auto-down field; documented manual
+    // rollback, mirroring the migration-074 convention:
+    //   DROP INDEX IF EXISTS idx_sops_model_pin;
+    //   ALTER TABLE sops DROP COLUMN model_pin;   -- SQLite >= 3.35 (better-sqlite3 12.x bundles >= 3.45)
+    //   DELETE FROM _migrations WHERE id = '075';
+    //   (the agent_settings / tasks.model_id NULL-backfills below are data-only
+    //    and not auto-reversible; re-pin via the task-time selector if required.)
+    id: '075',
     name: 'intelligent_model_selector',
     up: (db) => {
       // Intelligent Model Selector — AF-MODEL-SOVEREIGNTY (PLAN.md §5, §7)
@@ -2707,13 +2723,15 @@ const migrations: Migration[] = [
       // 3. Backfill dept defaults: any agent_settings row whose value is
       //    'openrouter/free' or null has its value set to NULL so the resolver
       //    falls through to the task-time selector instead of the rejected literal.
-      console.log('[Migration 072] Intelligent Model Selector schema...');
+      console.log('[Migration 075] Intelligent Model Selector schema...');
 
       const sopCols = (db.prepare('PRAGMA table_info(sops)').all() as { name: string }[]).map((c) => c.name);
       if (!sopCols.includes('model_pin')) {
         db.exec(`ALTER TABLE sops ADD COLUMN model_pin TEXT`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_model_pin ON sops(model_pin) WHERE model_pin IS NOT NULL`);
       }
+      // Ensure the partial index whether the column was just added or already
+      // existed (idempotent: IF NOT EXISTS). model_pin is guaranteed present here.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sops_model_pin ON sops(model_pin) WHERE model_pin IS NOT NULL`);
 
       // Backfill: purge 'openrouter/free' defaults so the selector takes over
       db.exec(
@@ -2735,7 +2753,7 @@ const migrations: Migration[] = [
         db.exec(`UPDATE tasks SET model_id = NULL WHERE model_id = 'openrouter/free'`);
       }
 
-      console.log('[Migration 072] Intelligent Model Selector schema ready');
+      console.log('[Migration 075] Intelligent Model Selector schema ready');
     },
   },
   {
