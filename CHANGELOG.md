@@ -1,3 +1,20 @@
+## [v4.54.0] — 2026-06-27 — feat: Command Center harmony — config template, embedding-contract pin, config-guard CI, resolver reorder
+
+Consolidates the Command Center "harmony" fixes so a freshly-built box renders the REAL departments, never the 17-demo defaults, and the SOP semantic-suggest store uses a single canonical embedding contract.
+
+**Config template (no demo/client data on main):**
+- `config/departments.json` emptied to `[]` and `config/company-config.json` reset to the generic "Your Company" template with `departments: []`, fixing the v4.0.3 regression that resurrected 17 demo departments. (PR #109)
+
+**Departments-path resolver reorder (`src/lib/db/migrations.ts`):**
+- `resolveDepartmentsConfigPath()` now probes the newest real ZHC company build on disk BEFORE the repo-committed `config/departments.json` template, so a built client never seeds the generic 17-demo defaults.
+
+**Embedding contract pin + backfill (`src/lib/sop-embeddings.ts`, `scripts/backfill-sop-embeddings.ts`):**
+- Pin Google (gemini-embedding) as the single embedding contract; the backfill script now PURGES any non-active-model rows so only one canonical embedding per SOP remains.
+- Added `db:embed:sops` npm script.
+
+**Cross-store guard CI (`.github/workflows/config-guard.yml`, `scripts/qc-cc.sh`):**
+- New config-guard workflow blocks demo/client data from shipping on main; qc-cc.sh gains the cross-store embedding-contract and config-template checks.
+
 ## [v4.53.2] — 2026-06-27 — fix: verified low-severity hygiene (FilePreview useEffect, chart guards, dead imports, LIKE escaping, any-types)
 
 Applies five verified low-severity hygiene fixes. Two CRITICALs flagged in the QC report (auth-dead, SQL-injection) were independently verified as FALSE POSITIVES and intentionally NOT applied. ALLOW_INSECURE_OPEN_API was NOT set.
