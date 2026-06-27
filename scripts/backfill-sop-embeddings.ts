@@ -150,6 +150,26 @@ async function main(): Promise<void> {
     );
   }
 
+  // ----- purge non-active-model rows -----
+  // Delete any sop_embeddings rows that are NOT for the current active model
+  // (e.g. text-embedding-3-small @ 1536-dim and gemini-embedding-001 rows).
+  // This ensures only one canonical embedding per SOP exists after the run.
+  const staleRows = queryAll<{ embedding_model: string; cnt: number }>(
+    'SELECT embedding_model, COUNT(*) AS cnt FROM sop_embeddings WHERE embedding_model != ? GROUP BY embedding_model',
+    [provider.model]
+  );
+  if (staleRows.length > 0) {
+    const totalStale = staleRows.reduce((s, r) => s + r.cnt, 0);
+    console.log(`[backfill-sop-embeddings] PURGE: deleting ${totalStale} non-active-model rows:`);
+    for (const r of staleRows) {
+      console.log(`  - ${r.embedding_model}: ${r.cnt} row(s)`);
+    }
+    run('DELETE FROM sop_embeddings WHERE embedding_model != ?', [provider.model]);
+    console.log('[backfill-sop-embeddings] Purge complete. Only active-model rows remain.');
+  } else {
+    console.log('[backfill-sop-embeddings] Purge: no non-active-model rows found (already clean).');
+  }
+
   // ----- discover work -----
   const allSOPs = queryAll<SOP>('SELECT * FROM sops WHERE deleted_at IS NULL', []);
 
