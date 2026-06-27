@@ -527,8 +527,15 @@ check "12.2" "sop-embeddings.ts: OpenAI demoted to OPTIONAL FALLBACK (not defaul
   "grep -q 'OPTIONAL FALLBACK' src/lib/sop-embeddings.ts"
 
 # 12.3: ENV store — .env.local pins SOP_EMBEDDING_PROVIDER=google
-check "12.3" ".env.local pins SOP_EMBEDDING_PROVIDER=google (single contract env)" \
-  'grep -q "^SOP_EMBEDDING_PROVIDER=google" .env.local'
+# Skip gracefully when .env.local is absent (CI / fresh clone) — it is a
+# gitignored runtime file that only exists on a provisioned box.
+if [ -f .env.local ]; then
+  check "12.3" ".env.local pins SOP_EMBEDDING_PROVIDER=google (single contract env)" \
+    'grep -q "^SOP_EMBEDDING_PROVIDER=google" .env.local'
+else
+  yellow "  ! 12.3  .env.local pins SOP_EMBEDDING_PROVIDER=google (skip — .env.local absent in CI/fresh clone)"
+  WARN=$((WARN+1))
+fi
 
 # 12.4: CODE + ENV agree — forced-google override is the first override branch
 check "12.4" "sop-embeddings.ts: SOP_EMBEDDING_PROVIDER=google is the FIRST override branch (CONTRACT path)" \
