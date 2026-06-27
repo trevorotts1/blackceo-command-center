@@ -354,9 +354,16 @@ export async function createTaskCore(
   // ── DEDUP LAYER 1: idempotency_key ────────────────────────────────────────
   // Check for a prior task_created event carrying the [ingest:<key>] marker.
   if (input.idempotency_key) {
+    // Escape LIKE metacharacters (% and _) — and the escape character itself (\)
+    // — so an idempotency_key that contains them cannot false-match unrelated
+    // events.  The outer %…% wildcards are intentional and must NOT be escaped.
+    const escapedKey = input.idempotency_key
+      .replace(/\\/g, '\\\\')
+      .replace(/%/g, '\\%')
+      .replace(/_/g, '\\_');
     const existing = queryOne<{ task_id: string }>(
-      "SELECT task_id FROM events WHERE type = 'task_created' AND message LIKE ? AND task_id IS NOT NULL ORDER BY created_at ASC LIMIT 1",
-      [`%[ingest:${input.idempotency_key}]%`],
+      "SELECT task_id FROM events WHERE type = 'task_created' AND message LIKE ? ESCAPE '\\' AND task_id IS NOT NULL ORDER BY created_at ASC LIMIT 1",
+      [`%[ingest:${escapedKey}]%`],
     );
     if (existing?.task_id) {
       const priorTask = queryOne<Task>(

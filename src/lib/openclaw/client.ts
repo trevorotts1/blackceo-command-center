@@ -56,6 +56,18 @@ type SocketLike = {
   close: () => void;
 };
 
+/**
+ * Minimal structural shape of an inbound gateway WebSocket frame, used only
+ * by generateEventId() for content-hash deduplication. The full message shape
+ * is OpenClawMessage; this covers only the fields the hash function reads.
+ */
+interface GatewayFrame {
+  type?: unknown;
+  seq?: unknown;
+  payload?: Record<string, unknown> | null;
+  event?: unknown;
+}
+
 export class OpenClawClient extends EventEmitter {
   private ws: SocketLike | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -90,7 +102,7 @@ export class OpenClawClient extends EventEmitter {
    * This prevents collision from Date.now() and ensures events with same
    * structure but different content are not incorrectly deduplicated.
    */
-  private generateEventId(data: any): string {
+  private generateEventId(data: GatewayFrame): string {
     // Create a canonical string representation of the event
     const canonical = JSON.stringify({
       type: data.type,
