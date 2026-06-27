@@ -3196,9 +3196,18 @@ function newestZhcChild(rel: string): string | null {
 
 /**
  * Resolve the active departments.json from the robust candidate set. Returns the
- * first existing file, else the newest ZHC company departments.json the writer
- * materialized, else null. Order keeps the legacy/repo paths FIRST so boxes that
- * already work are untouched; new env/cwd/ZHC candidates only fill the gap.
+ * first existing file from the ordered candidate list, else null.
+ *
+ * Priority order (highest → lowest):
+ *   1. ZERO_HUMAN_COMPANY_DIR env — explicit active-company folder.
+ *   2. BLACKCEO_COMMAND_CENTER_ROOT env — explicit CC root.
+ *   3. Newest ZHC company build discovered on disk — a real client's
+ *      departments.json written by the build process; preferred over the
+ *      repo-committed template so a freshly-built client never seeds the
+ *      17-demo generic defaults.
+ *   4. process.cwd()/config (or /data) — the repo-committed template; only
+ *      wins when no real company build exists on disk.
+ *   5. Legacy hard-coded install locations (preserved verbatim).
  */
 export function resolveDepartmentsConfigPath(): string | null {
   const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
@@ -3206,8 +3215,6 @@ export function resolveDepartmentsConfigPath(): string | null {
   const candidates: string[] = [];
 
   // 1. Explicit active-company folder — the strongest signal of the live client.
-  //    Wins over a possibly-stale repo-committed config/departments.json so a
-  //    freshly-built client never seeds generic defaults.
   if (explicitCompany) candidates.push(path.join(explicitCompany, DEPARTMENTS_JSON));
   // 2. Explicit Command Center root (same env the writer's CC copy honors).
   if (ccRoot) {
@@ -3217,20 +3224,25 @@ export function resolveDepartmentsConfigPath(): string | null {
       path.join(ccRoot, DEPARTMENTS_JSON)
     );
   }
-  // 3. The running Command Center itself (process.cwd() === CC root in prod).
+  // 3. Discovered real ZHC company build — probed BEFORE the repo-committed
+  //    template so the newest client departments.json takes precedence over
+  //    the 17-demo config/departments.json checked into the repo.
+  const zhcBuild = newestZhcChild(DEPARTMENTS_JSON);
+  if (zhcBuild) candidates.push(zhcBuild);
+  // 4. The running Command Center itself (process.cwd() === CC root in prod).
+  //    Falls AFTER the real company build so the repo template is only a
+  //    last-resort fallback, never shadowing a real client's departments.json.
   candidates.push(
     path.join(process.cwd(), 'config', DEPARTMENTS_JSON),
     path.join(process.cwd(), 'data', DEPARTMENTS_JSON)
   );
-  // 4. Legacy hard-coded install locations (preserved verbatim).
+  // 5. Legacy hard-coded install locations (preserved verbatim).
   candidates.push(...legacyConfigCandidates());
 
   for (const p of candidates) {
     if (isExistingFile(p)) return p;
   }
-  // 5. Last resort: whatever the writer most-recently dropped into a ZHC company
-  //    folder — the guaranteed write location on every build.
-  return newestZhcChild(DEPARTMENTS_JSON);
+  return null;
 }
 
 /**

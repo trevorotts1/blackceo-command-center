@@ -505,6 +505,60 @@ check "11.13" "planted fixture bleeding-ecosystem.cjs IS detectable by guard 11.
   'grep -E "process\.env\.PORT" tests/fixtures/port-guard/bleeding-ecosystem.cjs | grep -vE "^\s*(//|\*)" | grep -q .'
 
 blue ""
+blue "── 12. Cross-store embedding contract validate (SOP_EMBEDDING_PROVIDER=google / gemini-embedding-2 / 3072) ──"
+#
+# CONTRACT: SOP_EMBEDDING_PROVIDER=google is the SINGLE embedding contract for
+# this installation. gemini-embedding-2 at 3072 dims must be consistent across:
+#   (a) the CODE contract  — sop-embeddings.ts auto-detect puts Google first
+#   (b) the ENV store      — .env.local pins SOP_EMBEDDING_PROVIDER=google
+#   (c) the DB persona-index — sop_embeddings table has ONLY gemini-embedding-2 rows
+#
+# Any drift between these three stores means the routing layer is silently using
+# a different embedding space than the stored index, corrupting cosine similarity.
+# This gate must pass before every deploy.
+
+# 12.1: CODE contract — auto-detect in resolveEmbeddingProvider() puts Google FIRST
+#   (OpenAI is demoted to explicit optional fallback, never auto-selected over Google)
+check "12.1" "sop-embeddings.ts: Google auto-detect runs BEFORE OpenAI (single-contract order)" \
+  'awk "/Auto-detect/,/OPTIONAL FALLBACK/" src/lib/sop-embeddings.ts | grep -q "googleKey = resolveGoogleKey"'
+
+# 12.2: CODE contract — OpenAI is labelled as OPTIONAL FALLBACK, not default
+check "12.2" "sop-embeddings.ts: OpenAI demoted to OPTIONAL FALLBACK (not default auto-detect)" \
+  "grep -q 'OPTIONAL FALLBACK' src/lib/sop-embeddings.ts"
+
+# 12.3: ENV store — .env.local pins SOP_EMBEDDING_PROVIDER=google
+# Skip gracefully when .env.local is absent (CI / fresh clone) — it is a
+# gitignored runtime file that only exists on a provisioned box.
+if [ -f .env.local ]; then
+  check "12.3" ".env.local pins SOP_EMBEDDING_PROVIDER=google (single contract env)" \
+    'grep -q "^SOP_EMBEDDING_PROVIDER=google" .env.local'
+else
+  yellow "  ! 12.3  .env.local pins SOP_EMBEDDING_PROVIDER=google (skip — .env.local absent in CI/fresh clone)"
+  WARN=$((WARN+1))
+fi
+
+# 12.4: CODE + ENV agree — forced-google override is the first override branch
+check "12.4" "sop-embeddings.ts: SOP_EMBEDDING_PROVIDER=google is the FIRST override branch (CONTRACT path)" \
+  "grep -n \"override === 'google'\" src/lib/sop-embeddings.ts | head -1 | grep -q ."
+
+# 12.5: DB persona-index — sop_embeddings table has no OpenAI (text-embedding-3-small) rows
+# Skip gracefully when sqlite3 is absent or DB doesn't exist yet (CI / fresh clone).
+DB_PATH="$(dirname "$ROOT")/data/mission-control.db"
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$DB_PATH" ]; then
+  check "12.5" "DB sop_embeddings: zero OpenAI (text-embedding-3-small) rows (cross-store provider agreement)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_model='text-embedding-3-small';\" 2>/dev/null)\" = \"0\" ]"
+  check "12.6" "DB sop_embeddings: all rows use gemini-embedding-2 model (persona-index == CC active provider)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_model != 'gemini-embedding-2';\" 2>/dev/null)\" = \"0\" ]"
+  check "12.7" "DB sop_embeddings: all rows have dims=3072 (gemini-embedding-2 output dimensionality)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_dims != 3072;\" 2>/dev/null)\" = \"0\" ]"
+else
+  yellow "  ! 12.5  DB sop_embeddings OpenAI-row count (skip — sqlite3 not found or DB absent)"
+  yellow "  ! 12.6  DB sop_embeddings gemini-embedding-2 model agreement (skip — sqlite3 not found or DB absent)"
+  yellow "  ! 12.7  DB sop_embeddings dims=3072 agreement (skip — sqlite3 not found or DB absent)"
+  WARN=$((WARN+3))
+fi
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"

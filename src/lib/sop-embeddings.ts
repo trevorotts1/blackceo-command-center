@@ -25,13 +25,18 @@
  *    - PINNED_GOOGLE_MODEL      — the ONE canonical Google embedding model (gemini-embedding-2)
  *    - PINNED_GOOGLE_DIMS       — the canonical output dim (3072)
  *
+ * PROVIDER CONTRACT — SOP_EMBEDDING_PROVIDER=google is the SINGLE CONTRACT.
+ *   It must be set in .env.local. OpenAI is an EXPLICIT OPTIONAL FALLBACK only —
+ *   it must never be auto-selected when a Google key is present. The QC cross-store
+ *   validate gate (qc-cc.sh section 12) enforces this at every deploy.
+ *
  * PROVIDER RESOLUTION ORDER (configurable via SOP_EMBEDDING_PROVIDER env):
- *   1. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim)
- *   2. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-2 @3072-dim)
+ *   1. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-2 @3072-dim) [CONTRACT]
+ *   2. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim) [EXPLICIT OPTIONAL FALLBACK]
  *   3. SOP_EMBEDDING_PROVIDER absent → auto-detect:
- *        OPENAI_API_KEY present  → openai
- *        ELSE Google key present → google (gemini-embedding-2)
- *        ELSE                   → none (keyword fallback)
+ *        Google key present       → google (gemini-embedding-2) [PRIMARY]
+ *        ELSE OPENAI_API_KEY present → openai [OPTIONAL FALLBACK]
+ *        ELSE                     → none (keyword fallback)
  *
  * PINNED GOOGLE MODEL — gemini-embedding-2 (GA as of 2025; output_dimensionality=3072):
  *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=<KEY>
@@ -58,8 +63,8 @@
  *   GOOGLE_API_KEY            — enables Google embeddings (gemini-embedding-2, 3072-dim)
  *   GOOGLE_AI_STUDIO_API_KEY  — alternate Google key name
  *   GEMINI_API_KEY            — alternate Google key name
- *   SOP_EMBEDDING_PROVIDER    — optional override: "openai" | "google"
- *   When absent: all semantic paths degrade gracefully to keyword-only.
+ *   SOP_EMBEDDING_PROVIDER    — PINNED to "google" (single contract); "openai" is explicit optional fallback only
+ *   When absent: auto-detect selects Google first, OpenAI as optional fallback, then keyword-only.
  */
 
 import { queryAll, queryOne, run, getDb } from '@/lib/db';
@@ -149,27 +154,33 @@ export function resolveEmbeddingProvider(): EmbeddingProvider {
   const override = process.env.SOP_EMBEDDING_PROVIDER?.toLowerCase().trim();
 
   // ── Forced override ────────────────────────────────────────────────────────
-  if (override === 'openai') {
-    const key = process.env.OPENAI_API_KEY?.trim() || null;
-    return { name: 'openai', apiKey: key, model: OPENAI_MODEL, dims: OPENAI_DIMS };
-  }
+  // CONTRACT: SOP_EMBEDDING_PROVIDER=google is the pinned single contract.
+  // google is checked first so the contract path is unambiguous.
   if (override === 'google') {
     const key = resolveGoogleKey();
     return { name: 'google', apiKey: key, model: GOOGLE_MODEL, dims: GOOGLE_DIMS };
   }
-
-  // ── Auto-detect ────────────────────────────────────────────────────────────
-  // 1. OpenAI takes precedence when its key is present (existing clients
-  //    already have OpenAI indexes; don't switch them silently).
-  const openaiKey = process.env.OPENAI_API_KEY?.trim();
-  if (openaiKey && openaiKey.length > 10) {
-    return { name: 'openai', apiKey: openaiKey, model: OPENAI_MODEL, dims: OPENAI_DIMS };
+  // EXPLICIT OPTIONAL FALLBACK: openai is only reached when operator explicitly
+  // sets SOP_EMBEDDING_PROVIDER=openai. Never auto-selected when Google key present.
+  if (override === 'openai') {
+    const key = process.env.OPENAI_API_KEY?.trim() || null;
+    return { name: 'openai', apiKey: key, model: OPENAI_MODEL, dims: OPENAI_DIMS };
   }
 
-  // 2. Google key present (Google-only clients: Sheila, Corey, Kofi)
+  // ── Auto-detect (no SOP_EMBEDDING_PROVIDER set) ────────────────────────────
+  // PRIMARY: Google (gemini-embedding-2 @3072-dim) — the pinned single contract.
+  // In production SOP_EMBEDDING_PROVIDER=google is always set; this path is a
+  // safety net only.
   const googleKey = resolveGoogleKey();
   if (googleKey) {
     return { name: 'google', apiKey: googleKey, model: GOOGLE_MODEL, dims: GOOGLE_DIMS };
+  }
+
+  // OPTIONAL FALLBACK: OpenAI — only reached when no Google key is present.
+  // This is an explicit optional fallback, not the default path.
+  const openaiKey = process.env.OPENAI_API_KEY?.trim();
+  if (openaiKey && openaiKey.length > 10) {
+    return { name: 'openai', apiKey: openaiKey, model: OPENAI_MODEL, dims: OPENAI_DIMS };
   }
 
   // 3. No key → keyword-only fallback
