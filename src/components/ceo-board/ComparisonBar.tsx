@@ -19,14 +19,14 @@ export function ComparisonBar({
   unit = '',
   format = 'percentage',
 }: ComparisonBarProps) {
-  // Calculate delta percentage
-  const delta = Math.round(((yourValue - industryValue) / industryValue) * 100);
+  // Calculate delta percentage (guard against industryValue === 0)
+  const delta = industryValue === 0 ? 0 : Math.round(((yourValue - industryValue) / industryValue) * 100);
   const isPositive = delta >= 0;
 
   // Calculate bar positions (as percentage of the chart width)
-  // Use bestValue as the max for scaling
-  const yourPercent = Math.min((yourValue / bestValue) * 100, 100);
-  const industryPercent = Math.min((industryValue / bestValue) * 100, 100);
+  // Use bestValue as the max for scaling (guard against bestValue === 0)
+  const yourPercent = bestValue === 0 ? 0 : Math.min((yourValue / bestValue) * 100, 100);
+  const industryPercent = bestValue === 0 ? 0 : Math.min((industryValue / bestValue) * 100, 100);
 
   // Format values for display
   const formatValue = (value: number) => {

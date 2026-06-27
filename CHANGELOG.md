@@ -1,3 +1,20 @@
+## [v4.53.2] — 2026-06-27 — fix: verified low-severity hygiene (FilePreview useEffect, chart guards, dead imports, LIKE escaping, any-types)
+
+Applies five verified low-severity hygiene fixes. Two CRITICALs flagged in the QC report (auth-dead, SQL-injection) were independently verified as FALSE POSITIVES and intentionally NOT applied. ALLOW_INSECURE_OPEN_API was NOT set.
+
+**Lane A — operator/FilePreview.tsx:** Replaced bare render-phase `fetchContent()` call with a `useEffect(() => { void fetchContent(); }, [src])` to comply with React's rules-of-hooks and stop the double-fetch on re-render.
+
+**Lane B — ceo-board:**
+- `ComparisonBar.tsx`: Added zero-division guards for `industryValue === 0` and `bestValue === 0` so the delta/percent calculations return 0 instead of NaN/Infinity on empty data.
+- `LiveLogsSection.tsx`: Removed unused `useEffect, useState, useRef` imports that were flagged as dead code.
+- `health/ScoreSparkline.tsx`: Deleted unused file (no import site found anywhere in the project).
+- `health/index.ts`: Removed the corresponding re-export of the deleted `ScoreSparkline`.
+
+**Lane C — lib:**
+- `tasks.ts`: Escaped LIKE metacharacters (`%`, `_`, `\`) in the idempotency_key dedup query, using SQLite's `ESCAPE '\\'` clause, so keys containing those characters cannot false-match unrelated events.
+- `openclaw/client.ts`: Replaced `any` parameter type on `generateEventId()` with a typed `GatewayFrame` interface covering only the fields the function reads.
+- `routing/departments.config.ts`: Replaced two `any`-typed `db` parameters with `Database.Database` from `better-sqlite3`, removing the suppression comments.
+
 ## [v4.53.1] — 2026-06-27 — fix(fleet-heartbeat): jq/recreate-order bug in propagate-rescue-webhook.sh VPS secret block
 
 Adds `fleet-heartbeat/scripts/propagate-rescue-webhook.sh` to origin/main for the first time and ships the jq/recreate-order bug fix flagged as a HANDOFF residual after the 2026-06-26 Rescue Rangers full-fleet propagation run.

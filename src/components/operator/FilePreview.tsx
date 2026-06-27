@@ -18,7 +18,7 @@
  * Binary / pdf / unknown kinds get a download link.
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Download, Eye, FileCode, Loader2, RefreshCw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -148,11 +148,13 @@ function TextPreview(props: TextPreviewProps) {
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<TextMode>(supportsToggle ? 'preview' : 'source');
 
-  if (loading && !content && !error) {
-    // Trigger one fetch on first render. We avoid useEffect to keep this
-    // component tree minimal; the fetch runs in microtask order.
-    fetchContent();
-  }
+  useEffect(() => {
+    if (!initialContent) {
+      void fetchContent();
+    }
+    // fetchContent closes over `src`; re-run whenever the URL changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src]);
 
   async function fetchContent() {
     setLoading(true);
