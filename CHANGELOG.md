@@ -1,3 +1,20 @@
+## [v4.53.1] — 2026-06-27 — fix(fleet-heartbeat): jq/recreate-order bug in propagate-rescue-webhook.sh VPS secret block
+
+Adds `fleet-heartbeat/scripts/propagate-rescue-webhook.sh` to origin/main for the first time and ships the jq/recreate-order bug fix flagged as a HANDOFF residual after the 2026-06-26 Rescue Rangers full-fleet propagation run.
+
+**The bug (before):** In the VPS box loop the secret block (`RESCUE_RANGERS_WEBHOOK_SECRET` propagation) ran AFTER the `force-recreate` decision point. On any run where the webhook URL was already correct but the secret was new, `HOST_CHANGED` would be set to 1 AFTER the force-recreate check had already fired -- so the container was (re)created without the secret env var. The secret landed in the host `.env` file but the running container would not pick it up until the next manually triggered recreate.
+
+**The fix (after):** The secret block now runs BEFORE the `force-recreate` check so `HOST_CHANGED` accumulates both the URL and secret deltas. A single `docker compose up -d --force-recreate` fires at the end and picks up both from the host `.env`.
+
+**Additional fixes in the same file:**
+- jq quoting hardened: replaced `docker exec sh -c "..."` (double-quoted body where shell expands `$k`/`$v` before jq sees them) with `docker exec -u node -e SK=... -e SV=... sh -c '...'` (single-quoted body; variables passed as env vars named SK/SV, never touched by the shell before jq).
+- Idempotent "already correct" guard added for the secret in host `.env` to suppress spurious `HOST_CHANGED` on re-runs.
+- `make_section()` upgraded to v2 structured-form: takes `box_name` and `box_type` args and emits a 9-field escalation payload (`person`, `clientName`, `agentName`, `boxName`, `boxType`, `openclawVersion`, `problem`, `alreadyTried`, `returnTo`) instead of the flat one-liner. Old v1 sections are detected and replaced in-place.
+- Jill Bulluck entry commented out (opted out of fleet-heartbeat propagation).
+- Verify block extended: now also prints the `RESCUE_RANGERS_WEBHOOK_SECRET` presence and the `X-Rescue-Secret` header count in AGENTS.md.
+
+**Files changed:** `fleet-heartbeat/scripts/propagate-rescue-webhook.sh` (new on origin/main).
+
 ## [v4.53.0] — 2026-06-26 — fix(dispatch): dispatch/route.ts null-fallback + dept-prefix resolver for Skill-6 Kanban flow
 
 Closes the last gap in the Skill-6 (funnel/website) → Kanban demo path. Two files edited; no other files touched.
