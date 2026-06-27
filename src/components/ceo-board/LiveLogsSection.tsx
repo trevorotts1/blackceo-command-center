@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
 import { Terminal } from 'lucide-react';
 
 interface LogEntry {

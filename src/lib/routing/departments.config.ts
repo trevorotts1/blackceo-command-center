@@ -18,6 +18,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import type Database from 'better-sqlite3';
 import { canonicalDeptSlug } from './canonical-slug';
 
 export interface DepartmentConfig {
@@ -959,8 +960,7 @@ function buildDefaultMap(): Map<string, DepartmentConfig> {
  */
 function derivePurpose(
   ws: { id: string; slug: string; name: string; description: string | null },
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  db: any,
+  db: Database.Database,
   defaultMap: Map<string, DepartmentConfig>,
 ): string {
   if (ws.description && ws.description.trim().length > 0) {
@@ -1008,8 +1008,7 @@ function derivePurpose(
  */
 function workspaceToDept(
   ws: { id: string; slug: string; name: string; description: string | null },
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  db: any,
+  db: Database.Database,
   defaultMap: Map<string, DepartmentConfig>,
 ): DepartmentConfig {
   const canon = canonicalDeptSlug(ws.id) || canonicalDeptSlug(ws.slug);
