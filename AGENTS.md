@@ -213,6 +213,24 @@ Onboards a client for remote SSH via the `trevorotts1/rescue-rangers` two-paste 
 - **Registration REQUIRES the client's phone AND email** — the record is incomplete without both. If the operator didn't supply them, ASK before registering; never invent or guess them.
 - **Gotcha:** SSH failing `Connection closed by UNKNOWN port 65535` (rc255) while the tunnel shows healthy = the Access app policy is missing that client's service-token id in its include list. Fix = PATCH the policy include list (operator-level — flag, don't auto-apply), then re-run install. Healthy tunnel ≠ reachable.
 
+#### SSH CONFIG — EXACT WORKING PATTERN (do not improvise the service-token flags)
+
+When you add a client's `~/.ssh/config` entry, the cloudflared ProxyCommand MUST pass the Access service token using the SEPARATE flags with env-var expansion, exactly like this (this is the version-correct format that works on our fleet; the combined `--service-token id:secret` flag does NOT exist and will fail):
+
+```
+Host rescue-<slug>
+    HostName rescue-<slug>.zerohumanworkforce.com
+    User <ssh-username>
+    ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h --service-token-id ${CF_ACCESS_<CLIENT>_SVC_CLIENT_ID} --service-token-secret ${CF_ACCESS_<CLIENT>_SVC_CLIENT_SECRET}
+    IdentityFile ~/.ssh/id_ed25519
+    UserKnownHostsFile ~/.ssh/known_hosts_<slug>
+```
+
+Rules:
+- Never use a single combined `--service-token` flag. Always the two separate flags above.
+- The env vars must match the `CF_ACCESS_<CLIENT>_SVC_*` names saved for that client in `~/.openclaw/secrets/.env`.
+- This is the only approved SSH config pattern. Match every new client to it. Never invent a different flag format.
+
 ### Trevor's standing preferences
 
 - **Broad access is intentional — stop re-raising it.** Service account `clawdbot@n8nbceo.iam.gserviceaccount.com` impersonates trevor@blackceo.com via DWD with `cloud-platform`/owner on project `n8nbceo`. Don't keep flagging blast-radius — he's heard it and decided. **Gotcha:** Calendar reads via this DWD require the `calendar` scope — `calendar.readonly` fails (caught 2026-06-22).
@@ -476,3 +494,7 @@ cleaner QC. It is never wrong to use it.
 worker, hits should cover the shared document.
 
 Full reference: `BIG-PROJECT-MODE.md` in the onboarding repo.
+
+## ⛔ LANGUAGE — ENGLISH ONLY (ABSOLUTE, NON-NEGOTIABLE — added 2026-06-26 per Trevor)
+ALWAYS respond to Trevor in ENGLISH. NEVER output Chinese — or any non-English language — not one word, not ever, under any circumstance. This applies to EVERY agent and sub-agent, including the rescue-rangers / DeepSeek agent. If the underlying model tends to emit Chinese, you MUST force/translate to English BEFORE sending. A non-English reply to Trevor is a HARD FAILURE.
+
