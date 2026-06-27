@@ -1,0 +1,145 @@
+name: Config guard — no demo/client data on main
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Prevents the v4.0.3 regression where demo department data and a real company
+# name were shipped inside config/departments.json and config/company-config.json.
+# Both files must remain at their empty/template state in the repository.
+# Client-specific data is always generated at runtime (Skill 23) and must never
+# be committed to the repo.
+
+jobs:
+  check-config-template-state:
+    name: Verify config files are empty/template (no client data)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check config/departments.json is empty array
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="config/departments.json"
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: $FILE is missing from the repository."
+            exit 1
+          fi
+
+          # Parse and count entries
+          ENTRY_COUNT=$(python3 -c "
+          import json, sys
+          with open('$FILE') as f:
+              data = json.load(f)
+          if not isinstance(data, list):
+              print('NOT_LIST')
+              sys.exit(1)
+          print(len(data))
+          ")
+
+          echo "departments.json entry count: $ENTRY_COUNT"
+
+          if [ "$ENTRY_COUNT" != "0" ]; then
+            echo ""
+            echo "FAIL: config/departments.json contains $ENTRY_COUNT department(s)."
+            echo "      This file must be an empty array ([]) in the repository."
+            echo "      Client-specific department data is generated at runtime by Skill 23"
+            echo "      and must NEVER be committed to the repo."
+            echo ""
+            echo "      This guard exists to prevent the v4.0.3 demo-departments regression,"
+            echo "      where demo department data was accidentally shipped in the repo."
+            echo ""
+            echo "FIX:  echo '[]' > config/departments.json && git add config/departments.json"
+            exit 1
+          fi
+
+          echo "OK: config/departments.json is empty array."
+
+      - name: Check config/company-config.json is template (companyName = 'Your Company')
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="config/company-config.json"
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: $FILE is missing from the repository."
+            exit 1
+          fi
+
+          COMPANY_NAME=$(python3 -c "
+          import json
+          with open('$FILE') as f:
+              data = json.load(f)
+          print(data.get('companyName', ''))
+          ")
+
+          echo "company-config.json companyName: '$COMPANY_NAME'"
+
+          TEMPLATE_NAME="Your Company"
+
+          if [ "$COMPANY_NAME" != "$TEMPLATE_NAME" ]; then
+            echo ""
+            echo "FAIL: config/company-config.json has companyName='$COMPANY_NAME'."
+            echo "      The repository template value must be 'Your Company'."
+            echo "      Real client/company names must NEVER be committed to this repo."
+            echo ""
+            echo "      This guard exists to prevent the v4.0.3 demo-departments regression,"
+            echo "      where 'BlackCEO Demo' company config was accidentally shipped in the repo."
+            echo ""
+            echo "FIX:  Reset companyName to 'Your Company' and clear industry/commandCenterName:"
+            echo "        python3 -c \""
+            echo "          import json; f='config/company-config.json'"
+            echo "          d=json.load(open(f)); d['companyName']='Your Company'"
+            echo "          d['industry']=''; d['commandCenterName']='Command Center'"
+            echo "          d['departments']=[]; json.dump(d,open(f,'w'),indent=2)"
+            echo "        \""
+            echo "      Then: git add config/company-config.json"
+            exit 1
+          fi
+
+          # Also fail if industry or commandCenterName contain real-looking client data.
+          # A non-empty industry combined with a template company name is a half-reset state.
+          INDUSTRY=$(python3 -c "
+          import json
+          with open('$FILE') as f:
+              data = json.load(f)
+          print(data.get('industry', ''))
+          ")
+
+          if [ -n "$INDUSTRY" ]; then
+            echo ""
+            echo "FAIL: config/company-config.json has a non-empty industry='$INDUSTRY'."
+            echo "      The repository template must have industry='' (empty string)."
+            echo "      Reset: set industry to '' and commit the cleaned file."
+            exit 1
+          fi
+
+          # Check departments array inside company-config is also empty
+          DEPT_COUNT=$(python3 -c "
+          import json
+          with open('$FILE') as f:
+              data = json.load(f)
+          print(len(data.get('departments', [])))
+          ")
+
+          if [ "$DEPT_COUNT" != "0" ]; then
+            echo ""
+            echo "FAIL: config/company-config.json has $DEPT_COUNT department reference(s) in its"
+            echo "      departments[] array. This must be empty ([]) in the repo template."
+            echo "      Reset: set departments to [] and commit the cleaned file."
+            exit 1
+          fi
+
+          echo "OK: config/company-config.json is at template state."
+
+      - name: Summary
+        if: success()
+        run: |
+          echo ""
+          echo "All config guard checks passed:"
+          echo "  config/departments.json   — empty array (no client departments committed)"
+          echo "  config/company-config.json — template state (companyName='Your Company')"
