@@ -53,6 +53,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { getMissionControlUrl } from '@/lib/config';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { notifyOwner } from '@/lib/notify';
+import { notifyOwnerDone } from '@/lib/owner-reports';
 
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
@@ -3477,13 +3478,10 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
 
       // ── OWNER NOTIFICATION (DONE — QC auto-approve) ────────────────────
-      // Guaranteed board-side action: always attempt after writing done state.
-      // Failure is logged and NEVER reverts the done transition.
+      // W5.4: replaced bare 2-field string with notifyOwnerDone (all 5 fields:
+      // who/role + where + SOP + persona). Best-effort; gateway-routed.
       try {
-        const deptLabel = task.department ?? 'your team';
-        notifyOwner(
-          `✅ Done: "${task.title}" — completed and QC-approved by ${deptLabel} (score ${result.score.toFixed(1)}/10).`,
-        );
+        notifyOwnerDone(taskId);
       } catch (notifyErr) {
         console.error('[QCScorer] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
       }

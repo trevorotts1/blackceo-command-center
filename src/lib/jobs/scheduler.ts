@@ -35,6 +35,7 @@ import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
 import { runStaleTaskSweep, STALE_TASK_SWEEP_CRON } from './stale-task-sweep';
 import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
+import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -280,6 +281,30 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // the right department (mostly relevant for tasks created before in-process
   // routing shipped).
   { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
+
+  // intake-advance: every 2 minutes — THE single board-advancement authority
+  // (W8.1). Drains every intake lane (inbox/backlog/planning/pending_dispatch/
+  // assigned): routes unassigned tasks, feeds the campaign board, and fires
+  // autoDispatchTask so cards actually move instead of freezing in `inbox`.
+  // Furnace-proof by construction — it only selects tasks under the QC cap, under
+  // the dispatch attempt cap, and past their backoff window. This REPLACES the
+  // backlog-redispatch + ceo-delegation sweeps as the live advancer (those two
+  // stay paused via *_ENABLED=0 until this consumer is verified).
+  // Disable with INTAKE_ADVANCE_SWEEP_ENABLED=0.
+  {
+    name: 'intake-advance',
+    expr: '*/2 * * * *',
+    fn: async () => {
+      const result = await runIntakeAdvanceSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] intake-advance: skipped — ${result.skippedReason}`);
+      } else if (result.scanned > 0) {
+        console.log(
+          `[cron] intake-advance: scanned ${result.scanned}, routed ${result.routed}, dispatched ${result.dispatched}`,
+        );
+      }
+    },
+  },
 
   // backlog-redispatch: every 2 minutes, rescue tasks that were ASSIGNED a
   // specialist but never left backlog because their single autoDispatchTask

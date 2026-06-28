@@ -4,6 +4,8 @@ import { queryOne } from '@/lib/db';
 import { createTaskCore } from '@/lib/tasks';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
+import { notifyOwnerAssigned } from '@/lib/owner-reports';
+import { getSelfClient } from '@/lib/clients';
 // queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
@@ -19,8 +21,10 @@ export const revalidate = 0;
  * SAME canonical write path (`createTaskCore`) the operator UI uses.
  *
  * Auth: identical HMAC-SHA256 scheme to /api/webhooks/agent-completion —
- * `x-webhook-signature` = HMAC(WEBHOOK_SECRET, rawBody). When WEBHOOK_SECRET is
- * unset we run in dev mode and skip verification (matches the existing webhook).
+ * `x-webhook-signature` = HMAC(WEBHOOK_SECRET, rawBody). WEBHOOK_SECRET is
+ * REQUIRED in production (W3.5): when unset in production the route fail-loud
+ * 503s rather than accepting unauthenticated writes. Only in development is the
+ * signature check skipped (zero-config dev path).
  *
  * Agent-FK safety: `assigned_agent_id` / `created_by_agent_id` are `.uuid()` +
  * FK columns into `agents`. An external OpenClaw payload cannot carry a CC
@@ -42,6 +46,7 @@ export const revalidate = 0;
  *   "source_ref": "telegram:msg:12345",                     // optional provenance / dedupe fallback
  *   "department_slug": "sales",                              // optional; resolves the workspace
  *   "persona": "Candace",                                    // optional; resolves the workspace by name
+ *   "target_agent": "Candace",                               // optional; owner-direct specialist pin (alias: specialist)
  *   "external_session_id": "agent:main:telegram:direct:123",// optional provenance
  *   "idempotency_key": "sha256(...)"                         // optional; primary dedupe key
  * }
@@ -69,6 +74,26 @@ interface IngestPayload {
    *   → routes to main again → dispatch → main receives → ∞
    */
   existing_task_id?: unknown;
+  /**
+   * W4.1 — optional doc-pointer references the CEO/caller attaches so the
+   * receiving specialist knows where specific docs live. Accepted as a JSON
+   * array of strings or a single string; passed through to the ContextPack
+   * assembler at dispatch time.
+   */
+  context_refs?: unknown;
+  /**
+   * W3.2 — owner-direct specialist pin (spec §3 owner-direct exception).
+   *
+   * When the OWNER names a specific AI/agent, the CEO routes STRAIGHT to it:
+   * we resolve this name (or id/persona) to a real CC agent, pin
+   * `assigned_agent_id`, and BYPASS pickBestAgent + all department
+   * classification. `specialist` is accepted as an alias. The value is an
+   * agent NAME/persona the owner typed — we resolve it internally to the CC
+   * agent UUID, so this never violates the agent-FK safety rule (external ids
+   * are still never written into the FK columns).
+   */
+  target_agent?: unknown;
+  specialist?: unknown;
 }
 
 const VALID_PRIORITIES = new Set<TaskPriority>(['low', 'medium', 'high', 'critical']);
@@ -79,6 +104,66 @@ function verifyWebhookSignature(signature: string | null, rawBody: string): bool
   if (!signature) return false;
   const expected = createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
   return signature === expected;
+}
+
+/**
+ * W3.1 — INTERVIEW-COMPLETED ROUTING GATE (spec §3).
+ *
+ * "Task routing applies ONLY to owners who COMPLETED the interview (have a
+ * Zero Human Company with roles+SOPs). Not-completed = exempt (no routing
+ * obligation)." A box is "workforce-provisioned" when it has BOTH:
+ *
+ *   1. A completed AI-Workforce interview (DB-backed self-client flag), AND
+ *   2. Materialized, non-shell departments (per N37): at least one department
+ *      workspace — not the CEO/master or the general catch-all — that has a
+ *      live, non-master agent. A fresh/shell install has only the CEO shell and
+ *      no specialist roster, so it is exempt: there is nowhere to route into.
+ *
+ * Fail-safe on the interview flag: when the self-client row is ABSENT (a legacy
+ * box that predates the clients table) we cannot read the flag, so we defer to
+ * the materialized-departments signal alone rather than wrongly exempting a box
+ * that is clearly built out. When the row EXISTS we honour its flag exactly.
+ *
+ * When NOT provisioned, the CEO answers directly with NO routing obligation —
+ * the ingest still captures the task (nothing is lost) but does NOT force it
+ * through automatic department classification.
+ */
+function isWorkforceProvisioned(): { provisioned: boolean; reason: string } {
+  // (2) Materialized, non-shell departments with a live specialist agent.
+  const materialized = queryOne<{ n: number }>(
+    `SELECT COUNT(DISTINCT w.id) AS n
+       FROM workspaces w
+       JOIN agents a
+         ON a.workspace_id = w.id
+        AND a.is_master = 0
+        AND a.status != 'offline'
+      WHERE lower(w.slug) NOT IN
+              ('master-orchestrator', 'ceo', 'dept-ceo',
+               'general-task', 'dept-general-task', 'general')
+        AND lower(w.name) NOT IN
+              ('ceo', 'master orchestrator', 'general task', 'general')`,
+    [],
+  );
+  const hasMaterializedDepts = (materialized?.n ?? 0) > 0;
+
+  // (1) Interview completion — DB-backed self-client flag (null when no row).
+  let interviewComplete: boolean | null = null;
+  try {
+    const self = getSelfClient();
+    interviewComplete = self ? self.interview_complete : null;
+  } catch {
+    // clients table absent / unreadable on a legacy box — treat as unknown.
+    interviewComplete = null;
+  }
+
+  // Unknown interview flag → defer to the materialized-departments signal.
+  const interviewOk = interviewComplete === null ? hasMaterializedDepts : interviewComplete;
+  const provisioned = hasMaterializedDepts && interviewOk;
+
+  const reason =
+    `interview=${interviewComplete === null ? 'unknown' : interviewComplete}, ` +
+    `materialized_depts=${hasMaterializedDepts}`;
+  return { provisioned, reason };
 }
 
 /**
@@ -167,7 +252,45 @@ export async function POST(request: NextRequest) {
     const rawBody = await request.text();
 
     // Auth — HMAC-SHA256, same scheme as /api/webhooks/agent-completion.
-    if (process.env.WEBHOOK_SECRET) {
+    //
+    // W3.5 — WEBHOOK_SECRET is REQUIRED to authenticate the CEO-only routing
+    // front door. An unset secret leaves ingest unauthenticated, so in
+    // PRODUCTION we fail-loud (503) rather than silently accepting unsigned
+    // writes — the CEO-only routing invariant is then cryptographically
+    // enforced at the HTTP layer. In development we keep the zero-config path
+    // but warn loudly so it never ships unset.
+    const webhookSecret = process.env.WEBHOOK_SECRET;
+    // ALLOW_INSECURE_OPEN_API=true restores legacy open behavior for e2e test
+    // environments. The middleware already enforces the WEBHOOK_SECRET gate at
+    // the HTTP layer (src/middleware.ts WEBHOOK_SECRET_ROUTES) and only lets
+    // requests reach here when either: (a) the secret IS set (normal case), or
+    // (b) ALLOW_INSECURE_OPEN_API=true is explicitly set by the operator (test
+    // harness escape hatch). We honour that escape hatch here so the route-level
+    // redundant 503 does not fire when the middleware already passed the request.
+    const allowInsecure = process.env.ALLOW_INSECURE_OPEN_API === 'true';
+    if (!webhookSecret) {
+      if (process.env.NODE_ENV === 'production' && !allowInsecure) {
+        console.error(
+          '[INGEST] WEBHOOK_SECRET is not set — refusing UNAUTHENTICATED ingest in production. ' +
+            'Set WEBHOOK_SECRET on this box to enable the task front door.',
+        );
+        return NextResponse.json(
+          { error: 'WEBHOOK_SECRET not configured — ingest is disabled until this box sets it.' },
+          { status: 503 },
+        );
+      }
+      if (allowInsecure) {
+        console.warn(
+          '[INGEST] WEBHOOK_SECRET unset + ALLOW_INSECURE_OPEN_API=true — signature check skipped ' +
+            '(test/dev escape hatch). Do NOT set this in production.',
+        );
+      } else {
+        console.warn(
+          '[INGEST] WEBHOOK_SECRET unset — DEV mode, signature check skipped. ' +
+            'Set WEBHOOK_SECRET before production.',
+        );
+      }
+    } else {
       const signature = request.headers.get('x-webhook-signature');
       if (!verifyWebhookSignature(signature, rawBody)) {
         console.warn('[INGEST] Invalid signature attempt');
@@ -266,6 +389,12 @@ export async function POST(request: NextRequest) {
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
     const persona = typeof body.persona === 'string' ? body.persona.trim() : undefined;
+    // W3.2 — owner-direct specialist pin. `target_agent` wins; `specialist` is
+    // an accepted alias. Empty strings collapse to undefined.
+    const targetAgent =
+      (typeof body.target_agent === 'string' && body.target_agent.trim()) ||
+      (typeof body.specialist === 'string' && body.specialist.trim()) ||
+      undefined;
     const externalSessionId =
       typeof body.external_session_id === 'string' ? body.external_session_id.trim() : undefined;
     const idempotencyKey =
@@ -284,6 +413,66 @@ export async function POST(request: NextRequest) {
     const dedupeKey = idempotencyKey || sourceRef;
 
     let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(departmentSlug, persona);
+    let resolvedDepartment: string | undefined = departmentSlug;
+
+    // ── W3.2: Owner-direct specialist pin (spec §3 owner-direct exception) ─────
+    // When the OWNER names a specific AI/agent, the CEO routes STRAIGHT to it —
+    // bypassing department classification + pickBestAgent. We resolve the named
+    // specialist (name/persona/id) to a real CC agent and pin assigned_agent_id;
+    // createTaskCore then skips its own in-process routing because the agent is
+    // already set. This honours the named specialist regardless of whether the
+    // box is provisioned (it is an explicit owner instruction, not forced
+    // routing) and regardless of any department_slug.
+    let pinnedAgentId: string | null = null;
+    if (targetAgent) {
+      try {
+        const pin = await routeTask({
+          title,
+          description: description ?? '',
+          priority: priority ?? 'medium',
+          target_agent: targetAgent,
+          workspace_id: undefined,
+        });
+        if (pin) {
+          pinnedAgentId = pin.agentId;
+          resolvedDepartment = pin.department;
+          resolvedBy = `owner-direct-specialist:${targetAgent}`;
+          // Land the card in the pinned specialist's own workspace/lane.
+          const pinnedWs = queryOne<{ workspace_id: string }>(
+            `SELECT workspace_id FROM agents WHERE id = ? LIMIT 1`,
+            [pin.agentId],
+          );
+          if (pinnedWs?.workspace_id) workspaceId = pinnedWs.workspace_id;
+          console.log(
+            `[INGEST] Owner-direct specialist pin "${targetAgent}" → agent ${pin.agentName} ` +
+              `(${pin.department}); bypassing department routing.`,
+          );
+        } else {
+          console.warn(
+            `[INGEST] Owner named specialist "${targetAgent}" but no matching agent was ` +
+              `found — falling back to normal routing.`,
+          );
+        }
+      } catch (pinErr) {
+        console.warn(
+          '[INGEST] Specialist-pin resolution failed (non-fatal), continuing with normal routing:',
+          (pinErr as Error).message,
+        );
+      }
+    }
+
+    // ── W3.1: INTERVIEW-COMPLETED routing gate (spec §3) ──────────────────────
+    // Automatic department routing is an obligation ONLY for a provisioned
+    // zero-human company (completed interview + materialized departments).
+    // An interview-incomplete / shell box is EXEMPT: the task is still captured,
+    // but we do NOT force it through department classification.
+    const provisioning = isWorkforceProvisioned();
+    if (!provisioning.provisioned) {
+      console.log(
+        `[INGEST] Routing gate: box NOT workforce-provisioned (${provisioning.reason}) — ` +
+          `EXEMPT from forced routing. Capturing "${title}" without department classification.`,
+      );
+    }
 
     // ── Auto-route bare tasks (no department_slug) ────────────────────────────
     // When the caller does not supply a department_slug, run the keyword +
@@ -291,12 +480,13 @@ export async function POST(request: NextRequest) {
     // description so the task lands in the right workspace rather than always
     // falling through to the CEO / default bucket.
     //
+    // Gated by W3.1 (only provisioned boxes carry the routing obligation) and
+    // skipped when an owner-direct specialist pin already resolved the target.
     // If routeTask() cannot resolve with confidence it returns null, and the
     // behaviour introduced above (CEO / default fallback) is preserved exactly.
     // Tagged-task behaviour (department_slug present) is unchanged — we skip
     // this block entirely.
-    let resolvedDepartment: string | undefined = departmentSlug;
-    if (!departmentSlug) {
+    if (!departmentSlug && !pinnedAgentId && provisioning.provisioned) {
       try {
         const routing = await routeTask({
           title,
@@ -380,7 +570,11 @@ export async function POST(request: NextRequest) {
         status: 'backlog',
         priority,
         // Agent FKs intentionally NULL — external ids are not CC agent UUIDs.
-        assigned_agent_id: null,
+        // EXCEPTION (W3.2): the owner-direct specialist pin resolves the owner's
+        // named specialist to a REAL CC agent UUID above, so it is FK-safe to
+        // pin here. A non-null assigned_agent_id also makes createTaskCore skip
+        // its own in-process routing, preserving the owner's explicit choice.
+        assigned_agent_id: pinnedAgentId,
         created_by_agent_id: null,
         workspace_id: workspaceId,
         department: resolvedDepartment ?? null,
@@ -397,6 +591,13 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
+
+    // W5.2 — ASSIGNMENT owner notification (spec §5): fires when a department was
+    // resolved, so the owner knows "I'm sending this task to the [Dept] department."
+    // Best-effort; gateway-routed; deduped tasks skip since they were already notified.
+    if (!deduped && resolvedDepartment) {
+      try { notifyOwnerAssigned(task.id, { department: resolvedDepartment }); } catch { /* non-fatal */ }
+    }
 
     // Deduped tasks are returned as 200 (not 201) so callers can distinguish.
     if (deduped) {
@@ -437,7 +638,7 @@ export async function GET() {
   return NextResponse.json({
     endpoint: '/api/tasks/ingest',
     method: 'POST',
-    auth: 'x-webhook-signature: HMAC-SHA256(WEBHOOK_SECRET, rawBody) — skipped when WEBHOOK_SECRET unset',
+    auth: 'x-webhook-signature: HMAC-SHA256(WEBHOOK_SECRET, rawBody) — REQUIRED in production (503 when unset); skipped only in development',
     accepts: {
       title: 'string (required)',
       description: 'string (optional)',
@@ -446,6 +647,7 @@ export async function GET() {
       source_ref: 'string (optional provenance / dedupe fallback)',
       department_slug: 'string (optional; resolves workspace, default CEO)',
       persona: 'string (optional; resolves workspace by name)',
+      target_agent: 'string (optional; owner-direct specialist pin — routes straight to the named AI, alias: specialist)',
       external_session_id: 'string (optional provenance)',
       idempotency_key: 'string (optional; primary dedupe key)',
     },

@@ -11,6 +11,7 @@ import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
+import { notifyOwnerStarted } from '@/lib/owner-reports';
 
 const AGENTS_ROOT = path.join(
   process.env.HOME ?? '/Users/blackceomacmini',
@@ -277,12 +278,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // JOIN sops on task.sop_id and embed name + steps + success_criteria so the
     // specialist has actionable instructions, not just raw task metadata.
     let sopBlock = '';
+    let resolvedSopName: string | null = null; // W5.3: captured for START notification
     if (task.sop_id) {
       const sop = queryOne<SOP>(
         `SELECT id, name, steps, success_criteria, department, role FROM sops WHERE id = ? AND deleted_at IS NULL`,
         [task.sop_id]
       );
       if (sop) {
+        resolvedSopName = sop.name;
         let parsedSteps: SOPStep[] = [];
         try {
           parsedSteps = typeof sop.steps === 'string' ? JSON.parse(sop.steps) : (sop.steps as unknown as SOPStep[]);
@@ -443,6 +446,18 @@ If you need help or clarification, ask the orchestrator.`;
           payload: updatedTask,
         });
       }
+
+      // W5.3 — START owner notification (spec §5): persona + dept + specialist + SOP + role.
+      // All five values are in local scope. Best-effort; gateway-routed; never blocks response.
+      try {
+        notifyOwnerStarted(id, {
+          persona: settings.persona !== 'auto' ? settings.persona : null,
+          department: task.department ?? null,
+          specialist: agent.name,
+          role: agent.role ?? null,
+          sop: resolvedSopName,
+        });
+      } catch { /* non-fatal */ }
 
       // Update agent status to working
       run(

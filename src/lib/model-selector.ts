@@ -315,6 +315,56 @@ export interface ModelSovereigntyViolation {
 }
 
 /**
+ * W8.5 — Sovereign DEFAULT model.
+ *
+ * Guarantees a non-null, sovereign (never free, never Anthropic, modality-fit)
+ * model so dispatch's `model_id` is never NULL when nothing else resolved (the
+ * 172/183-null-model_id root cause). This is a DEFAULT only — it is applied by
+ * the resolver strictly AFTER every express source (CEO/owner pin, SOP pin,
+ * task selector, role/dept override) has declined. It NEVER substitutes an
+ * owner's express model (model sovereignty preserved).
+ *
+ * Resolution order:
+ *   1. SOVEREIGN_DEFAULT_MODEL env — owner-configured house default. Honoured
+ *      only if it passes the sovereignty gate for the task's modality.
+ *   2. Best sovereign model already in the client's inventory (non-free,
+ *      non-forbidden, modality-fit) walking tier 1 → 2 → 3.
+ *
+ * Returns null when no sovereign model exists for the modality — the caller
+ * then keeps needs_owner_input (correct: a vision task with no vision model must
+ * still ask the owner, never silently run on a text model).
+ */
+export function resolveSovereignDefault(
+  inventory: ModelRegistryEntry[],
+  required_modality: TaskModality = 'text',
+): string | null {
+  const envDefault = (process.env.SOVEREIGN_DEFAULT_MODEL || '').trim();
+  if (envDefault && !checkModelSovereignty(envDefault, inventory, required_modality)) {
+    return envDefault;
+  }
+
+  const eligible = inventory.filter(
+    (m) =>
+      !isForbidden(m.model_id) &&
+      !isFree(m.model_id, m) &&
+      m.model_id !== NEEDS_OWNER_INPUT &&
+      m.model_id !== 'openrouter/free' &&
+      (required_modality === 'text' ||
+        m.capabilities.includes(required_modality as ModelCapability)),
+  );
+  if (eligible.length === 0) return null;
+
+  for (const tier of [1, 2, 3] as ModelTier[]) {
+    const inTier = eligible.filter((m) => tierOf(m.model_id) === tier);
+    if (inTier.length > 0) {
+      const best = pickBest(inTier, 'mid', required_modality, null);
+      if (best) return best.model_id;
+    }
+  }
+  return eligible[0].model_id;
+}
+
+/**
  * Gate assertion: throws a structured violation if the resolved model is
  * null, the openrouter/free default, forbidden (Anthropic), or modality-wrong.
  * Returns null when the model passes all checks.

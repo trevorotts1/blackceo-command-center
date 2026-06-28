@@ -1,3 +1,37 @@
+## [v4.55.0] — 2026-06-28 — feat: W8 board-liveness + furnace-safe guards, W4 full-context handoff, W5 owner notifications, W3 routing gate + general fallback + owner-direct
+
+Ships the four Work items that close the "nothing sticks" board-liveness failure:
+**W8** (board-liveness + furnace-safe advancement), **W4** (full-context handoff), **W5** (owner notifications), and **W3** (routing gate + general fallback + owner-direct specialist pin).
+
+**W8 — Board-liveness + furnace-safe guards (migration 077, new job, model-selector, sweeps):**
+- Migration 077 adds `dispatch_attempts`, `last_dispatch_attempt_at`, `next_dispatch_eligible_at` columns to `tasks` (idempotent `ALTER TABLE` + partial index). Enables per-task backoff accounting without touching any existing row.
+- `src/lib/jobs/intake-advance-sweep.ts` (new): THE single board-advancement authority. Every 2 min it drains every intake lane (`inbox`/`backlog`/`planning`/`pending_dispatch`/`assigned`): routes unassigned tasks, feeds campaign boards (W8.4), and fires `autoDispatchTask`. Furnace-proof by construction: selects only tasks under the QC re-route cap, under the dispatch-attempt cap, and past their exponential-backoff window — so an unadvanceable task drops out instead of being re-fired forever. Registered in scheduler JOBS[] as `intake-advance`. Disable with `INTAKE_ADVANCE_SWEEP_ENABLED=0`.
+- `src/lib/task-dispatcher.ts`: `recordDispatchFailure()` + `recordDispatchSuccess()` helpers stamp attempt-accounting on every failed/successful advance, backing off exponentially (default 120 s base, 2× per attempt, cap 3600 s). After `MAX_DISPATCH_ATTEMPTS` (default 5) the task is hard-blocked (visible on board) and the owner is notified — silent re-looping is structurally impossible. Guard 6 (backoff window check) added to `autoDispatchTask` so even mid-tick re-selections are cheap no-ops.
+- `src/lib/model-selector.ts`: `resolveSovereignDefault()` (new) guarantees a non-null, sovereign, modality-fit model as the dispatch last resort, eliminating the 172/183 null-`model_id` root cause. Respects `SOVEREIGN_DEFAULT_MODEL` env, then walks the client's inventory tier 1→2→3. Never substitutes an owner's express model.
+- `src/lib/jobs/backlog-redispatch-sweep.ts` + `src/lib/jobs/ceo-delegation-sweep.ts`: Both sweeps now honour the `dispatch_attempts` cap and `next_dispatch_eligible_at` backoff window in their SELECT query — a blocked or backed-off task cannot re-enter the fire queue from either sweep either. Both sweeps remain PAUSED (`*_ENABLED=0`) pending `intake-advance` verification.
+- `src/lib/campaigns.ts` (new): `ensureCampaignForTask()` — creates or attaches a task to its department's live campaign board (W8.4). Called by `intake-advance-sweep`.
+
+**W4 — Full-context handoff (`src/lib/context-pack.ts` new, `src/lib/task-dispatcher.ts`):**
+- `src/lib/context-pack.ts` (new): Assembles a typed `ContextPack` for every dispatched task. Includes task-targeted excerpts of the receiving specialist's core files (`AGENTS.md`/`TOOLS.md`/`MEMORY.md`), pointer references to `how-to-use-this-department.md`, OpenClaw master files, the SOP, and per-domain research sources. Also threads optional `context_refs` from the ingest payload (W4.1) so the CEO can pass explicit doc pointers.
+- `autoDispatchTask` splices the rendered context pack into the task message before dispatch — the receiving specialist never starts blind.
+
+**W5 — Owner notifications (`src/lib/owner-reports.ts` new, dispatcher + ingest):**
+- `src/lib/owner-reports.ts` (new): Thin funnel for the three owner messages spec §5 requires: `notifyOwnerAssigned` ("I'm sending this to [Dept]"), `notifyOwnerStarted` (persona + dept + specialist + SOP + role), `notifyOwnerDone` (who + where-to-find-it). Each helper self-resolves all fields from the live DB given only a `taskId`. `notifyOwnerHeld` covers the held-task edge case.
+- `notifyOwnerAssigned` called from `/api/tasks/ingest` on every successful routing result.
+- `notifyOwnerStarted` called from `autoDispatchTask` immediately after dispatch write.
+- `recordDispatchFailure` calls `notifyOwner` when a task hits the block cap.
+
+**W3 — Routing gate + general fallback + owner-direct specialist pin:**
+- `/api/tasks/ingest`: `isWorkforceProvisioned()` gate (W3.1) — routing applies only to boxes with a completed Zero Human Company interview AND materialized non-shell departments (spec §3). Shell/legacy boxes are exempt; tasks are still captured but not forced through department classification. Fail-safe: when the self-client row is absent, the gate defers to the materialized-departments signal alone.
+- `WEBHOOK_SECRET` now required in production (W3.5): ingest returns 503 when unset in `NODE_ENV=production` instead of silently accepting unauthenticated writes.
+- `src/lib/routing/department-router.ts`: `resolveSpecialistPin()` (new, W3.2) — owner-named specialist bypass. When the owner names a specific AI, the CEO routes STRAIGHT to it (id → exact name → exact persona → unique substring), bypassing `pickBestAgent` and department classification entirely. Falls through to normal routing when the named agent is not found. Wired as Step 0 in `comDispatch`.
+- Ingest payload extended: `target_agent` / `specialist` accepted as specialist-pin aliases; `context_refs` for doc-pointer references.
+- `src/lib/routing/canonical-slug.ts`: General fallback slug added — tasks with no resolvable department now fall into the `general-task` workspace rather than being dropped.
+
+**NOTE: The furnace flags (`BACKLOG_REDISPATCH_SWEEP_ENABLED`, `CEO_DELEGATION_SWEEP_ENABLED`) REMAIN set to 0. Re-enable is a separate verified step once the `intake-advance` worker is confirmed draining the board.**
+
+**Migrations note:** Migration 077 is idempotent (`PRAGMA table_info` guards on each `ALTER TABLE`; `CREATE INDEX IF NOT EXISTS`). Safe to apply to the live mission-control.db via a controlled `npm run db:migrate` — no destructive SQL. The live DB was NOT touched during this PR.
+
 ## [v4.54.0] — 2026-06-27 — feat: Command Center harmony — config template, embedding-contract pin, config-guard CI, resolver reorder
 
 Consolidates the Command Center "harmony" fixes so a freshly-built box renders the REAL departments, never the 17-demo defaults, and the SOP semantic-suggest store uses a single canonical embedding contract.

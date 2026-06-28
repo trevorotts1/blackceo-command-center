@@ -3,6 +3,7 @@ import { run, queryOne } from '@/lib/db';
 import { routeTask } from '@/lib/routing/department-router';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import type { Task } from '@/lib/types';
+import { notifyOwnerAssigned } from '@/lib/owner-reports';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -91,6 +92,10 @@ export async function POST(request: NextRequest) {
     console.log(
       `[AutoRoute] Task "${task.title}" (${taskId}) assigned to ${result.agentName} via ${result.department} → backlog (awaiting auto-dispatch)`,
     );
+
+    // W5.2 — ASSIGNMENT owner notification (spec §5): "I'm sending this task to the [Dept] department."
+    // Best-effort; gateway-routed; never blocks response or rolls back DB state.
+    try { notifyOwnerAssigned(taskId, { department: result.department }); } catch { /* non-fatal */ }
 
     // AUTO-DISPATCH (v4.14.0): fire OpenClaw invocation immediately after routing.
     // autoDispatchTask guards against master/CEO agents and terminal statuses and

@@ -436,6 +436,69 @@ function pickBestAgent(
 }
 
 // ---------------------------------------------------------------------------
+// W3.2 — Owner-direct specialist pin (spec §3 owner-direct exception)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve an owner-named specialist directly to a RoutingResult, BYPASSING
+ * `pickBestAgent` and all department classification.
+ *
+ * Spec §3: "The ONLY time the CEO does NOT route to a department: the owner
+ * specifically requests a specific AI/agent do it." When the owner names a
+ * specialist, the CEO routes STRAIGHT to that agent — no role-fit scoring, no
+ * least-loaded tiebreak, no semantic/keyword department resolution.
+ *
+ * Matching is name-agnostic and tolerant (the owner types a human name, not a
+ * UUID): exact agent id → exact agent name → exact persona → unique substring
+ * of the agent name. Offline agents are excluded (a pin can't wake a dead box).
+ *
+ * Returns null when no agent matches, so the caller can fall back to normal
+ * department routing rather than dropping the task.
+ */
+function resolveSpecialistPin(
+  agents: AgentWithLoad[],
+  targetAgent: string,
+  departments: DepartmentConfig[],
+): RoutingResult | null {
+  const needle = targetAgent.trim().toLowerCase();
+  if (!needle) return null;
+
+  const available = agents.filter((a) => a.status !== 'offline');
+
+  // Resolution precedence: id → exact name → exact persona → unique substring.
+  let pinned =
+    available.find((a) => a.id.toLowerCase() === needle) ??
+    available.find((a) => a.name.toLowerCase() === needle) ??
+    available.find((a) => (a.persona ?? '').toLowerCase() === needle);
+
+  if (!pinned && needle.length >= 3) {
+    const partial = available.filter((a) => a.name.toLowerCase().includes(needle));
+    // Only accept a substring match when it is unambiguous (exactly one agent),
+    // otherwise we'd silently pin the wrong specialist.
+    if (partial.length === 1) pinned = partial[0];
+  }
+
+  if (!pinned) return null;
+
+  // Resolve the agent's department label for the owner-facing report.
+  const pinnedWsCanon = canonicalDeptSlug(pinned.workspace_id);
+  const dept = departments.find(
+    (d) => d.id === pinned!.workspace_id || canonicalDeptSlug(d.id) === pinnedWsCanon,
+  );
+  const departmentName = dept?.name ?? pinned.role ?? 'Owner-Direct';
+
+  return {
+    agentId: pinned.id,
+    agentName: pinned.name,
+    department: departmentName,
+    score: 1,
+    reason:
+      `Owner-direct specialist pin: owner named "${targetAgent}" → routed straight to ` +
+      `${pinned.name} (${departmentName}), bypassing department classification and pickBestAgent.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // COM Dispatcher — intelligent name-agnostic routing
 // ---------------------------------------------------------------------------
 
@@ -460,6 +523,12 @@ export async function comDispatch(
   task: Pick<Task, 'title' | 'description' | 'priority'> & {
     workspace_id?: string | null;
     department?: string;
+    /**
+     * W3.2 — owner-direct specialist pin. When the OWNER names a specific
+     * AI/agent, this carries that name (or id/persona) and the dispatcher routes
+     * straight to it, bypassing department classification + pickBestAgent.
+     */
+    target_agent?: string | null;
   },
   agents: AgentWithLoad[],
   departments: DepartmentConfig[],
@@ -468,6 +537,23 @@ export async function comDispatch(
   const description = task.description || '';
   const priority = (task.priority as TaskPriority) || 'medium';
   const taskText = [title, description].filter(Boolean).join(' — ');
+
+  // ── Step 0: Owner-direct specialist pin (W3.2 / spec §3) ──────────────────
+  // The ONE exception to CEO → department → specialist: when the owner names a
+  // specific AI, route straight to it. This precedes every classification step
+  // and bypasses pickBestAgent entirely. If the named specialist can't be
+  // resolved we fall through to normal routing rather than dropping the task.
+  if (task.target_agent) {
+    const pinned = resolveSpecialistPin(agents, String(task.target_agent), departments);
+    if (pinned) {
+      console.log(`[DepartmentRouter] ${pinned.reason}`);
+      return pinned;
+    }
+    console.warn(
+      `[DepartmentRouter] Owner named specialist "${task.target_agent}" but no matching ` +
+        `agent was found — falling back to department routing.`,
+    );
+  }
 
   // ── Step 1: Explicit department tag ───────────────────────────────────────
   // Match by exact name (client's actual dept name) OR canonical slug
@@ -643,6 +729,8 @@ export async function routeTask(
   task: Pick<Task, 'title' | 'description' | 'priority'> & {
     workspace_id?: string | null;
     department?: string;
+    /** W3.2 — owner-direct specialist pin; routed straight to the named AI. */
+    target_agent?: string | null;
   },
 ): Promise<RoutingResult | null> {
   const departments = loadDepartments();

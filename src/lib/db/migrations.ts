@@ -2935,6 +2935,38 @@ const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '077',
+    name: 'add_dispatch_attempt_accounting',
+    up: (db) => {
+      // W8.2 anti-furnace: per-task dispatch attempt-accounting so an
+      // unadvanceable task is NEVER re-fired every 2-5 min forever.
+      //   dispatch_attempts        — incremented on every FAILED advance attempt
+      //                              (gateway down / sovereignty / no-runtime);
+      //                              reset to 0 on a successful advance.
+      //   last_dispatch_attempt_at — wall-clock of the most recent attempt.
+      //   next_dispatch_eligible_at — exponential-backoff gate; a task is not
+      //                              re-selected/re-fired until now >= this.
+      // All additive + nullable; non-dispatch rows keep them NULL. The
+      // intake-advance / backlog-redispatch sweeps filter on these so the
+      // furnace can't reignite.
+      console.log('[Migration 077] Adding tasks dispatch attempt-accounting columns...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('dispatch_attempts')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN dispatch_attempts INTEGER DEFAULT 0`);
+      }
+      if (!cols.includes('last_dispatch_attempt_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN last_dispatch_attempt_at TEXT`);
+      }
+      if (!cols.includes('next_dispatch_eligible_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN next_dispatch_eligible_at TEXT`);
+      }
+      // Partial index so the sweeps' "eligible now" scan stays cheap.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_next_dispatch_eligible
+               ON tasks(next_dispatch_eligible_at) WHERE next_dispatch_eligible_at IS NOT NULL`);
+      console.log('[Migration 077] dispatch attempt-accounting columns ready');
+    },
+  },
 ];
 
 /**

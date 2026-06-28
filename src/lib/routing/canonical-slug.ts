@@ -49,6 +49,8 @@ export const CANONICAL_SLUGS = new Set([
   // Reached only via the confidence-floor fallback in comDispatch(); never
   // wins keyword / semantic routing on merit (priority 1, empty keywords).
   'general-task',
+  // Engineering — promoted to CORE/FLOOR dept (UNIT ENG — 2026-06-28).
+  'engineering',
 ]);
 
 /**
@@ -71,10 +73,15 @@ const ALIAS_MAP: Record<string, string> = {
   'web-dev':           'web-development',
   'web':               'web-development',
 
-  // app-dev variants
-  'appdev':            'app-development',
-  'app-dev':           'app-development',
-  'mobile':            'app-development',
+  // app-dev / engineering variants (UNIT ENG — 2026-06-28: engineering is now CORE/FLOOR)
+  'appdev':             'app-development',
+  'app-dev':            'app-development',
+  'mobile':             'app-development',
+  // engineering aliases → engineering (canonical CORE slug)
+  'software-development': 'engineering',
+  'software-dev':         'engineering',
+  'app-development':      'engineering',
+  'apps':                 'engineering',
 
   // video variants
   'video-production':  'video',

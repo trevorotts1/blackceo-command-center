@@ -60,6 +60,7 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath } from '@/lib/config';
 import type { Task } from '@/lib/types';
+import { notifyOwnerDone } from '@/lib/owner-reports';
 
 // ---------------------------------------------------------------------------
 // State machine definition
@@ -401,6 +402,13 @@ export async function transition(
 
   // ── SSE broadcast ────────────────────────────────────────────────────────
   broadcast({ type: 'task_updated', payload: updated });
+
+  // W5.1/W5.4 — DONE owner notification: the single lifecycle funnel so every
+  // path that eventually calls transition(…,'done') reports the full 5 fields.
+  // Best-effort; gateway-routed; never throws; never blocks the return value.
+  if (to === 'done') {
+    try { notifyOwnerDone(taskId); } catch { /* non-fatal */ }
+  }
 
   return updated;
 }

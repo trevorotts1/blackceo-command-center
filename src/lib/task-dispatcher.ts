@@ -43,6 +43,7 @@ import * as path from 'path';
 import { queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
+import { notifyOwner } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
@@ -53,9 +54,113 @@ import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@
 import { artifactDispatchPayload } from '@/lib/task-lifecycle';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
+import { buildContextPack, renderContextPackSection } from '@/lib/context-pack';
+import { notifyOwnerStarted } from '@/lib/owner-reports';
 
 // Statuses where dispatch must not re-fire.
 const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked', 'archived']);
+
+// ── W8.2 ANTI-FURNACE: dispatch attempt-accounting + backoff + block-on-N ─────
+// The furnace was: a task that can't advance (gateway down / no sovereign model /
+// no per-dept runtime) got re-fired every 2-5 min forever. We now record EVERY
+// failed advance attempt, back off exponentially, and after MAX_DISPATCH_ATTEMPTS
+// hard-block the task (visible + reported) so it is NEVER silently re-looped.
+const MAX_DISPATCH_ATTEMPTS = Math.max(
+  1,
+  parseInt(process.env.MAX_DISPATCH_ATTEMPTS || '5', 10),
+);
+const DISPATCH_BACKOFF_BASE_SECONDS = Math.max(
+  30,
+  parseInt(process.env.DISPATCH_BACKOFF_BASE_SECONDS || '120', 10),
+);
+const DISPATCH_BACKOFF_MAX_SECONDS = Math.max(
+  60,
+  parseInt(process.env.DISPATCH_BACKOFF_MAX_SECONDS || '3600', 10),
+);
+
+type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
+
+/**
+ * Record a FAILED advance attempt for a task. Increments dispatch_attempts,
+ * stamps an exponential-backoff `next_dispatch_eligible_at` so the sweeps cannot
+ * re-fire it before the window elapses, and — once the attempt count reaches
+ * MAX_DISPATCH_ATTEMPTS — transitions the task to `blocked` with a classified
+ * audience + an owner/operator report. Never silent, never furnaces, never throws.
+ */
+function recordDispatchFailure(
+  taskId: string,
+  agentId: string | null,
+  opts: { reason: string; audience: DispatchBlockAudience; needs: string; context: string },
+): void {
+  try {
+    const row = queryOne<{ dispatch_attempts: number | null; title: string }>(
+      'SELECT dispatch_attempts, title FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    const attempts = (row?.dispatch_attempts ?? 0) + 1;
+    const now = new Date().toISOString();
+    const backoffSeconds = Math.min(
+      DISPATCH_BACKOFF_MAX_SECONDS,
+      DISPATCH_BACKOFF_BASE_SECONDS * Math.pow(2, Math.max(0, attempts - 1)),
+    );
+    const nextEligible = new Date(Date.now() + backoffSeconds * 1000).toISOString();
+
+    if (attempts >= MAX_DISPATCH_ATTEMPTS) {
+      // Cap reached → BLOCK (visible on the board + reported). No re-loop.
+      const blockNote =
+        `[dispatch-blocked] ${opts.reason} after ${attempts} failed advance attempt(s) ` +
+        `(cap ${MAX_DISPATCH_ATTEMPTS}). ${opts.needs}`;
+      run(
+        `UPDATE tasks SET status = 'blocked', dispatch_attempts = ?, last_dispatch_attempt_at = ?,
+           next_dispatch_eligible_at = NULL, block_reason = ?, block_needs = ?, block_audience = ?, updated_at = ?
+         WHERE id = ? AND status NOT IN ('done','archived')`,
+        [attempts, now, opts.reason, opts.needs, opts.audience, now, taskId],
+      );
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'task_blocked', agentId, taskId, blockNote, now],
+      );
+      try {
+        const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+        if (updated) broadcast({ type: 'task_updated', payload: updated });
+      } catch { /* broadcast best-effort */ }
+      try {
+        notifyOwner(`🚫 Task blocked: "${row?.title ?? taskId}" — ${opts.needs}`);
+      } catch { /* owner notify best-effort */ }
+      console.warn(`[${opts.context}] recordDispatchFailure: task ${taskId} BLOCKED (${opts.reason})`);
+    } else {
+      run(
+        `UPDATE tasks SET dispatch_attempts = ?, last_dispatch_attempt_at = ?, next_dispatch_eligible_at = ? WHERE id = ?`,
+        [attempts, now, nextEligible, taskId],
+      );
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(), 'task_dispatch_deferred', agentId, taskId,
+          `[${opts.context}] advance attempt ${attempts}/${MAX_DISPATCH_ATTEMPTS} failed (${opts.reason}); backing off ${backoffSeconds}s`,
+          now,
+        ],
+      );
+      console.warn(
+        `[${opts.context}] recordDispatchFailure: task ${taskId} attempt ${attempts}/${MAX_DISPATCH_ATTEMPTS} (${opts.reason}), backoff ${backoffSeconds}s`,
+      );
+    }
+  } catch (err) {
+    // Pre-migration DB (no attempt-accounting columns) or any other failure —
+    // never throw on the fire-and-forget dispatch path.
+    console.warn(`[${opts.context}] recordDispatchFailure non-fatal:`, (err as Error).message);
+  }
+}
+
+/** Clear attempt-accounting after a task successfully advances to in_progress. */
+function recordDispatchSuccess(taskId: string): void {
+  try {
+    run(
+      `UPDATE tasks SET dispatch_attempts = 0, next_dispatch_eligible_at = NULL, last_dispatch_attempt_at = ? WHERE id = ?`,
+      [new Date().toISOString(), taskId],
+    );
+  } catch { /* pre-migration tolerant */ }
+}
 
 /**
  * FIX 1 — resolveSpecialistSessionKey
@@ -256,16 +361,41 @@ export async function autoDispatchTask(
 
     const now = new Date().toISOString();
 
+    // GUARD 6 (W8.2 anti-furnace backoff): if a prior advance attempt failed and
+    // set a backoff window, do NOT re-fire until it elapses. A task that has hit
+    // the attempt cap is already status='blocked' (caught by GUARD 3); this guard
+    // covers the pre-cap backoff so the sweeps cheaply skip a still-deferred task
+    // instead of hammering it every tick.
+    const nextEligibleAt = (task as Task & { next_dispatch_eligible_at?: string | null })
+      .next_dispatch_eligible_at;
+    if (nextEligibleAt && nextEligibleAt > now) {
+      console.log(
+        `[${context}] autoDispatchTask: task ${taskId} in dispatch backoff until ${nextEligibleAt} — skip`,
+      );
+      return;
+    }
+
     // ── OpenClaw connection ─────────────────────────────────────────────────
     const client = getOpenClawClient();
     if (!client.isConnected()) {
       try {
         await client.connect();
       } catch (connectErr) {
+        // W8.5: gateway down is NO LONGER a silent return. Record the failed
+        // attempt (visible event), back off, and block+report once the cap is hit
+        // so the owner/operator sees a stuck task instead of an invisible re-loop.
         console.error(
           `[${context}] autoDispatchTask: OpenClaw connect failed for task ${taskId}:`,
           connectErr,
         );
+        recordDispatchFailure(task.id, agent.id, {
+          reason: 'gateway_down',
+          audience: 'SYSTEM',
+          needs:
+            'OpenClaw gateway unreachable at dispatch. Restore the gateway to release this task ' +
+            '(it retries with backoff and stays visible until then).',
+          context,
+        });
         return;
       }
     }
@@ -342,7 +472,18 @@ export async function autoDispatchTask(
          VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), 'af_model_sovereignty_block', agent.id, task.id, blockMsg, now2],
       );
-      // Leave task in backlog (no status change) so owner can assign a model.
+      // W8.2/W8.5: account for the failed advance + back off so the sweeps don't
+      // re-fire a model-less task every tick; block+report once the cap is hit.
+      // With the sovereign-default (W8.5) this gate should now only trip on a
+      // genuine modality gap (e.g. a vision task with no vision model).
+      recordDispatchFailure(task.id, agent.id, {
+        reason: `model_sovereignty_${sovereigntyViolation.reason}`,
+        audience: 'OWNER',
+        needs:
+          'No sovereign model resolved for this task. Assign/approve a model ' +
+          '(Settings → Models) to release it.',
+        context,
+      });
       return;
     }
     // ── End AF-MODEL-SOVEREIGNTY gate ──────────────────────────────────────
@@ -425,6 +566,7 @@ export async function autoDispatchTask(
     // ── End PRD 2.12-cc fast loop ──────────────────────────────────────────────
 
     let sopBlock = '';
+    let resolvedSopName: string | null = null; // W5.3: captured for START notification
     if (resolvedSopId) {
       const sop = queryOne<SOP>(
         `SELECT id, name, steps, success_criteria, department, role
@@ -432,6 +574,7 @@ export async function autoDispatchTask(
         [resolvedSopId],
       );
       if (sop) {
+        resolvedSopName = sop.name;
         let parsedSteps: SOPStep[] = [];
         try {
           parsedSteps =
@@ -455,6 +598,47 @@ ${stepLines.join('\n')}
 `;
       }
     }
+
+    // ── W4.2: Full-context handoff — build ContextPack (never throws) ──────
+    // Resolved SOP is available at this point (resolvedSopId + sop local).
+    // We look it up again (or reuse the already-queried row) for the pack.
+    let resolvedSopForPack: Parameters<typeof buildContextPack>[0]['sop'] | null = null;
+    if (resolvedSopId) {
+      try {
+        resolvedSopForPack = queryOne<SOP & { references?: string | null; doc_index?: string | null }>(
+          `SELECT id, name, department, role FROM sops WHERE id = ? AND deleted_at IS NULL`,
+          [resolvedSopId],
+        ) ?? null;
+      } catch {
+        /* non-fatal — pack degrades gracefully */
+      }
+    }
+    const contextPack = (() => {
+      try {
+        return buildContextPack({
+          task: {
+            id: task.id,
+            title: task.title,
+            description: task.description,
+            department: task.department,
+            workspace_id: task.workspace_id,
+          },
+          agent: {
+            id: agent.id,
+            name: agent.name,
+            role: agent.role ?? undefined,
+            agents_md: (agent as Agent & { agents_md?: string }).agents_md,
+            tools_md: (agent as Agent & { tools_md?: string }).tools_md,
+            memory_md: (agent as Agent & { memory_md?: string }).memory_md,
+            workspace_id: agent.workspace_id,
+          },
+          specialistType,
+          sop: resolvedSopForPack,
+        });
+      } catch {
+        return null;
+      }
+    })();
 
     // ── Build task message (identical spec to dispatch/route.ts) ───────────
     const priorityEmoji =
@@ -498,7 +682,7 @@ After selecting, log your choice to persona-selection-log.md:
     : ''
 }
 **Specialist Type:** ${specialistType}
-${artifactFragment}
+${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
 **IMPORTANT:** After completing work, you MUST call these APIs:
 1. Log activity: POST ${missionControlUrl}/api/tasks/${task.id}/activities
    Body: {"activity_type": "completed", "message": "Description of what was done"}
@@ -558,7 +742,15 @@ If you need help or clarification, ask the orchestrator.`;
          VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
       );
-      // Leave task in backlog (no status change) so the misroute is visible.
+      // W8.2: account for the failed advance + back off so the sweeps don't
+      // re-select this un-wireable task every tick; block+report (SYSTEM — wire
+      // the dept runtime) once the cap is hit instead of re-looping forever.
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'no_specialist_runtime',
+        audience: 'SYSTEM',
+        needs: `No OpenClaw runtime for "${agent.name}". Wire ~/.openclaw/agents/<dept-slug>/ to release this department.`,
+        context,
+      });
       return;
     }
 
@@ -585,6 +777,22 @@ If you need help or clarification, ask the orchestrator.`;
       const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
       if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
     }
+
+    // W8.2: task advanced — clear attempt-accounting so a future re-queue starts
+    // from a clean slate (only CONSECUTIVE failures accumulate toward the cap).
+    recordDispatchSuccess(task.id);
+
+    // W5.3 — START owner notification (spec §5): persona + dept + specialist + SOP + role.
+    // All five values are in local scope at this point. Best-effort; gateway-routed; never throws.
+    try {
+      notifyOwnerStarted(task.id, {
+        persona: settings.persona !== 'auto' ? settings.persona : null,
+        department: task.department ?? null,
+        specialist: agent.name,
+        role: agent.role ?? null,
+        sop: resolvedSopName,
+      });
+    } catch { /* non-fatal */ }
 
     // ── Agent status → working ──────────────────────────────────────────────
     run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['working', now, agent.id]);
