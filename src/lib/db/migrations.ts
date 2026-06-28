@@ -2967,6 +2967,32 @@ const migrations: Migration[] = [
       console.log('[Migration 077] dispatch attempt-accounting columns ready');
     },
   },
+  {
+    id: '078',
+    name: 'add_block_reason',
+    up: (db) => {
+      // W8 fix (v4.55.1): recordDispatchFailure's block-on-N UPDATE path and the
+      // QC-scorer's QC-BLOCKED UPDATE path both write `block_reason = ?`. Migration
+      // 077 added the three dispatch-attempt-accounting columns but omitted
+      // block_reason. Without this column the UPDATE throws SQLITE_ERROR "no such
+      // column: block_reason"; the throw is caught and swallowed → the task is
+      // NEVER transitioned to 'blocked', NEVER notifies the owner, and the attempt
+      // counter stalls at MAX_DISPATCH_ATTEMPTS - 1 causing an infinite re-loop on
+      // every backoff window.
+      //
+      // Idempotent: PRAGMA table_info guard before ALTER so this is safe on fresh
+      // installs (schema.ts may pre-create the column in future) AND on existing
+      // DBs that already ran migration 077.
+      console.log('[Migration 078] Adding tasks.block_reason column...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('block_reason')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN block_reason TEXT`);
+        console.log('[Migration 078] block_reason column added');
+      } else {
+        console.log('[Migration 078] block_reason already present — skipping');
+      }
+    },
+  },
 ];
 
 /**
