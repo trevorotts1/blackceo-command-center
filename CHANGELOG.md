@@ -1,3 +1,10 @@
+## [v4.55.1] — 2026-06-28 — fix(W8): add block_reason column so gateway-down/stuck tasks actually transition to blocked + notify owner
+
+- Migration 078 (idempotent `PRAGMA table_info` guard): `ALTER TABLE tasks ADD COLUMN block_reason TEXT`.
+- Without this column the block-on-N UPDATE in `recordDispatchFailure` (task-dispatcher.ts) and the QC-BLOCKED UPDATE in `qc-scorer.ts` threw SQLITE_ERROR "no such column: block_reason"; the throw was caught and swallowed, leaving tasks stuck in backoff forever and owner notifications never firing.
+- After this migration: a task reaching `MAX_DISPATCH_ATTEMPTS` correctly transitions to `status='blocked'`, increments `dispatch_attempts` to the cap, sets `next_dispatch_eligible_at = NULL`, and fires `notifyOwner`. The re-loop-on-backoff path is structurally eliminated.
+- Removed stale `.bak` siblings under `src/lib/` and `src/app/api/`.
+
 ## [v4.55.0] — 2026-06-28 — feat: W8 board-liveness + furnace-safe guards, W4 full-context handoff, W5 owner notifications, W3 routing gate + general fallback + owner-direct
 
 Ships the four Work items that close the "nothing sticks" board-liveness failure:
