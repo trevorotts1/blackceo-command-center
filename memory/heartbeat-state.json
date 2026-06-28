@@ -1,0 +1,81 @@
+{
+  "lastChecks": {
+    "email": 1782306136,
+    "calendar": 1782306136,
+    "weather": 1782306136,
+    "missionControl": 1782663328
+  },
+  "lastSummary": {
+    "calendarEvents24h": 9,
+    "unreadEmails": 20,
+    "weather": "DC: 72\u00b0F, a few clouds. High 81. Thursday 86, slight shower chance."
+  },
+  "missionControl": {
+    "inboxTotal": 171,
+    "staleWelcome": 0,
+    "productionActionable": 0,
+    "byDepartment": {
+      "Marketing": 6,
+      "Customer Support": 1,
+      "Presentations": 6,
+      "OpenClaw Maintenance": 5,
+      "Communications": 1,
+      "Funnels": 1,
+      "operations": 2,
+      "it": 2,
+      "Video": 1,
+      "null": 1,
+      "executive-assistant": 1,
+      "webdev": 1,
+      "Web Development": 1
+    },
+    "topTasks": [
+      {
+        "id": "5dd2d4d7-a2ee-4a5a-a90e-cec37a71a3d7",
+        "title": "Explore Growth Webinar Deck Rebuild \u2014 Corey Sams",
+        "priority": "high",
+        "department": "Presentations"
+      },
+      {
+        "id": "8d287a30-a7d2-493c-8a5a-7c17a6199e52",
+        "title": "Create Facebook ad campaign for Corey Sams webinar",
+        "priority": "high",
+        "department": "Marketing"
+      },
+      {
+        "id": "b309c039-...",
+        "title": "PAID ADS: Corey Sams webinar Facebook campaign \u2014 10 headlines + 10 texts + 10 images",
+        "priority": "medium",
+        "department": "Marketing"
+      },
+      {
+        "id": "8f24f70e-61eb-4114-b4d7-0f49f2906363",
+        "title": "Status check: Dr. Stephanie Brown private Hostinger VPS",
+        "priority": "high",
+        "department": "Customer Support"
+      },
+      {
+        "id": "56ad5fa0-ddcc-4f9d-a7b8-a5fcabeb7779",
+        "title": "SSH connectivity check: Sheila Reynolds box",
+        "priority": "high",
+        "department": "OpenClaw Maintenance"
+      }
+    ],
+    "statusCounts": {
+      "inbox": 171,
+      "testing": 0,
+      "in_progress": 8,
+      "assigned": 0,
+      "review": 2,
+      "done": 9,
+      "backlog": 1,
+      "blocked": 0
+    },
+    "notes": [
+      "Blocked queue cleared by adding missing agent/ runtime dirs to dept-marketing, dept-openclaw-maintenance, dept-communications, dept-customer-support, dept-web-development.",
+      "Calendar check failing: unauthorized_client DWD/scope issue.",
+      "Gmail batch script missing; Stripe digest used instead.",
+      "Presentations inbox has 44 tasks, mostly E2E/routing tests."
+    ]
+  }
+}
