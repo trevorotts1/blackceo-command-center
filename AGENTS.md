@@ -327,7 +327,6 @@ Concise pointers — full content lives ONLY in `~/Downloads/openclaw-master-fil
 <!-- skill:19-humanizer:core-update-applied -->
 <!-- skill:20-youtube-watcher:core-update-applied -->
 <!-- skill:21-tavily-search:core-update-applied -->
-<!-- skill:22-book-to-persona-coaching-leadership-system:core-update-applied -->
 <!-- skill:23-ai-workforce-blueprint:core-update-applied -->
 <!-- skill:24-storyboard-writer:core-update-applied -->
 <!-- skill:25-video-creator:core-update-applied -->
@@ -498,3 +497,62 @@ Full reference: `BIG-PROJECT-MODE.md` in the onboarding repo.
 ## ⛔ LANGUAGE — ENGLISH ONLY (ABSOLUTE, NON-NEGOTIABLE — added 2026-06-26 per Trevor)
 ALWAYS respond to Trevor in ENGLISH. NEVER output Chinese — or any non-English language — not one word, not ever, under any circumstance. This applies to EVERY agent and sub-agent, including the rescue-rangers / DeepSeek agent. If the underlying model tends to emit Chinese, you MUST force/translate to English BEFORE sending. A non-English reply to Trevor is a HARD FAILURE.
 
+
+
+<!-- BEGIN skill:22-book-to-persona-coaching-leadership-system:agents -->
+**Where:** Add a new section at the bottom of AGENTS.md titled `## Book-to-Persona Skill (Installed)`
+
+**Exact text to add:**
+```
+## Book-to-Persona Skill (Installed)
+Converts any book (PDF/EPUB/MOBI/AZW3) into a dual-purpose persona blueprint.
+Pre-built personas already included. Run: python3 ~/.openclaw/scripts/gemini-indexer.py --status to see total count. Pipeline runs on new books only.
+
+Pipeline (model selection is DYNAMIC via shared-utils/select_model.py — Anthropic FORBIDDEN):
+- Phase 1: Latest Kimi (Ollama Cloud preferred) → OpenRouter Kimi → OAuth GPT → DeepSeek V4+ → ask owner. Temperature 1.0. → extraction-notes.md
+- Phase 2: Same Kimi-first chain as Phase 1 (was hardcoded deepseek/deepseek-v3.2 prior to v9.5.0). → analysis-notes.md
+- Phase 3: OAuth GPT preferred → latest Kimi fallback. → persona-blueprint.md (all 14 sections)
+- Runtime fallback: selector re-runs with failed model excluded, walks down tier list. Never selects Anthropic.
+
+Persona Reflex (MANDATORY for every professional / non-mechanical task — not optional):
+A persona blueprint is DUAL-PURPOSE. The Coaching half guides conversation; the LEADERSHIP / Task-Mode
+half (Section 4 "Agent Governance Framework" + Section 7B Task-Mode Triggers) GOVERNS HOW WORK IS BUILT.
+At task time you MUST load and APPLY the leadership/Task-Mode half — naming the persona is NOT enough.
+
+1. SEARCH — run: python3 ~/.openclaw/scripts/gemini-search.py "<task keywords>"
+   For the governance/standard (not the coaching voice), add: --mode leadership
+2. LOAD THE TASK MODE — open the matched persona's persona-blueprint.md and read its Section 4
+   (4A Execution Standard + Decision Logic Table, 4B Quality Control Protocol + Definition of Done,
+   4C Failure Pattern Recognition, 4D Task Mode Activation Language) AND Section 7B Task-Mode Triggers.
+   The persona NAME alone does not load the Task Mode — the Section-4 governance is what you build to.
+3. EXECUTE TO STANDARD — perform the task THROUGH that methodology: apply the decision-logic rules,
+   meet the Definition of Done, and steer clear of the documented failure patterns. Build to standard,
+   do not merely echo the persona's voice.
+4. VERIFY — before reporting done, self-check the output against the persona's Definition of Done and
+   failure-pattern table (per persona-matching-protocol.md "Post-Task Persona Verification").
+Skip ONLY if the user explicitly says so, or for purely mechanical tasks (no judgment/build involved).
+
+Key paths:
+- Skill: ~/.openclaw/skills/22-book-to-persona-coaching-leadership-system/
+- Personas: ~/.openclaw/workspace/data/coaching-personas/personas/
+- Router: ~/.openclaw/skills/22-book-to-persona-coaching-leadership-system/PERSONA-ROUTER.md
+- Orchestrator: ~/.openclaw/skills/22-book-to-persona-coaching-leadership-system/pipeline/orchestrator.py
+- Gemini Vector Database: coaching-personas [run: python3 ~/.openclaw/scripts/gemini-indexer.py --status to get current counts]
+
+To add a new book: follow SOP in MEMORY.md under "Add New Book to Coaching Personas Matrix"
+
+Re-indexing trigger (MANDATORY after adding any new persona):
+When a new book persona is added to ~/.openclaw/workspace/data/coaching-personas/personas/:
+Run: python3 ~/.openclaw/scripts/gemini-indexer.py
+This updates the Gemini embedding index with the new persona.
+Do NOT skip this step -- the search will not find the new persona until re-indexed.
+```
+
+---
+<!-- END skill:22-book-to-persona-coaching-leadership-system:agents -->
+
+<!-- skill:22-book-to-persona-coaching-leadership-system:core-update-applied -->
+
+<!-- skill:47-movie-producer:core-update-applied -->
+
+<!-- skill:48-facebook-ad-generator:core-update-applied -->
