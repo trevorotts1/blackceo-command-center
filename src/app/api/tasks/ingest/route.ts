@@ -260,8 +260,16 @@ export async function POST(request: NextRequest) {
     // enforced at the HTTP layer. In development we keep the zero-config path
     // but warn loudly so it never ships unset.
     const webhookSecret = process.env.WEBHOOK_SECRET;
+    // ALLOW_INSECURE_OPEN_API=true restores legacy open behavior for e2e test
+    // environments. The middleware already enforces the WEBHOOK_SECRET gate at
+    // the HTTP layer (src/middleware.ts WEBHOOK_SECRET_ROUTES) and only lets
+    // requests reach here when either: (a) the secret IS set (normal case), or
+    // (b) ALLOW_INSECURE_OPEN_API=true is explicitly set by the operator (test
+    // harness escape hatch). We honour that escape hatch here so the route-level
+    // redundant 503 does not fire when the middleware already passed the request.
+    const allowInsecure = process.env.ALLOW_INSECURE_OPEN_API === 'true';
     if (!webhookSecret) {
-      if (process.env.NODE_ENV === 'production') {
+      if (process.env.NODE_ENV === 'production' && !allowInsecure) {
         console.error(
           '[INGEST] WEBHOOK_SECRET is not set — refusing UNAUTHENTICATED ingest in production. ' +
             'Set WEBHOOK_SECRET on this box to enable the task front door.',
@@ -271,10 +279,17 @@ export async function POST(request: NextRequest) {
           { status: 503 },
         );
       }
-      console.warn(
-        '[INGEST] WEBHOOK_SECRET unset — DEV mode, signature check skipped. ' +
-          'Set WEBHOOK_SECRET before production.',
-      );
+      if (allowInsecure) {
+        console.warn(
+          '[INGEST] WEBHOOK_SECRET unset + ALLOW_INSECURE_OPEN_API=true — signature check skipped ' +
+            '(test/dev escape hatch). Do NOT set this in production.',
+        );
+      } else {
+        console.warn(
+          '[INGEST] WEBHOOK_SECRET unset — DEV mode, signature check skipped. ' +
+            'Set WEBHOOK_SECRET before production.',
+        );
+      }
     } else {
       const signature = request.headers.get('x-webhook-signature');
       if (!verifyWebhookSignature(signature, rawBody)) {
