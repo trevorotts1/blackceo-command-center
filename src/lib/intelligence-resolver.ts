@@ -28,7 +28,7 @@
  */
 
 import { queryOne, queryAll, run } from '@/lib/db';
-import { selectTaskModel, NEEDS_OWNER_INPUT, detectModality } from '@/lib/model-selector';
+import { selectTaskModel, NEEDS_OWNER_INPUT, detectModality, resolveSovereignDefault } from '@/lib/model-selector';
 import type { TaskModality } from '@/lib/model-selector';
 import type { ModelRegistryEntry } from '@/lib/model-registry-types';
 
@@ -55,6 +55,7 @@ export type ModelSource =
   | 'task_selector'
   | 'role_override'
   | 'department_default'
+  | 'sovereign_default'
   | 'needs_owner_input';
 
 export interface ResolvedSettings {
@@ -326,6 +327,27 @@ export function resolveSettings(
     if (deptModel?.value && deptModel.value !== REJECTED_FREE_DEFAULT) {
       model = deptModel.value;
       modelSource = 'department_default';
+    }
+  }
+
+  // Layer 4b: Sovereign DEFAULT (W8.5). Applied ONLY when every express source
+  // above declined (modelSource still needs_owner_input) so dispatch's model_id
+  // is never NULL — the 172/183-null-model_id board-stall root cause. Sovereignty
+  // is preserved: this is a default, never a substitution of an owner/CEO/SOP
+  // express model (those already won at Layers 0-1). Modality is respected — a
+  // generic text default is only applied to text tasks; an image/video/audio task
+  // with no matching model stays needs_owner_input so the owner adds the right
+  // modality model rather than running on a wrong-modality default.
+  if (modelSource === 'needs_owner_input') {
+    const inv = loadInventory();
+    const mod: TaskModality =
+      required_modality ??
+      (taskContext ? detectModality(taskContext.title, taskContext.description) : 'text');
+    const sovereignDefault = resolveSovereignDefault(inv, mod);
+    if (sovereignDefault) {
+      model = sovereignDefault;
+      modelSource = 'sovereign_default';
+      if (!required_modality) required_modality = mod;
     }
   }
 

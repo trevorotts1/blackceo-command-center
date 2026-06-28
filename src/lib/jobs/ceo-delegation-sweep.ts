@@ -28,6 +28,7 @@ import { queryAll, run, queryOne } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { routeTask } from '@/lib/routing/department-router';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { ensureCampaignForTask } from '@/lib/campaigns';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 
@@ -49,6 +50,12 @@ interface CeoTaskRow {
 export async function runCeoDelegationSweep(): Promise<void> {
   if (process.env.CEO_DELEGATION_SWEEP_ENABLED === '0') return;
 
+  // W8.2 anti-furnace: never re-select a task that has hit the dispatch attempt
+  // cap or is still inside its exponential-backoff window. Pairs with the same
+  // guards in autoDispatchTask + the intake-advance/backlog sweeps.
+  const dispatchCap = Math.max(1, parseInt(process.env.MAX_DISPATCH_ATTEMPTS || '5', 10));
+  const nowIso = new Date().toISOString();
+
   // ── 1. CEO-workspace stranded tasks (original behavior) ─────────────────
   const ceoWorkspaceIds = (queryAll<{ id: string }>(
     `SELECT id FROM workspaces WHERE LOWER(slug) IN ('ceo','dept-ceo') OR id = 'dept-ceo' OR id = 'ceo'`
@@ -62,8 +69,10 @@ export async function runCeoDelegationSweep(): Promise<void> {
        FROM tasks
        WHERE workspace_id IN (${placeholders})
          AND status = 'backlog'
-         AND assigned_agent_id IS NULL`,
-      ceoWorkspaceIds,
+         AND assigned_agent_id IS NULL
+         AND (dispatch_attempts IS NULL OR dispatch_attempts < ?)
+         AND (next_dispatch_eligible_at IS NULL OR next_dispatch_eligible_at <= ?)`,
+      [...ceoWorkspaceIds, dispatchCap, nowIso],
     );
     ceoTasks.push(...rows);
   }
@@ -86,8 +95,10 @@ export async function runCeoDelegationSweep(): Promise<void> {
      WHERE status = 'backlog'
        AND qc_reroute_attempts > 0
        AND qc_reroute_attempts < ?
-       AND archived_at IS NULL`,
-    [cap],
+       AND archived_at IS NULL
+       AND (dispatch_attempts IS NULL OR dispatch_attempts < ?)
+       AND (next_dispatch_eligible_at IS NULL OR next_dispatch_eligible_at <= ?)`,
+    [cap, dispatchCap, nowIso],
   );
 
   // Merge: de-duplicate by id (a CEO-workspace QC-fail task would appear in both).
@@ -152,6 +163,13 @@ export async function runCeoDelegationSweep(): Promise<void> {
           now,
         ],
       );
+      // W8.4: feed the re-homed card onto its department's campaign board.
+      ensureCampaignForTask(task.id, {
+        workspaceId: task.workspace_id,
+        department: routing.department,
+        title: task.title,
+      });
+
       const updated = queryOne<Task>(
         `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji
          FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = ?`,

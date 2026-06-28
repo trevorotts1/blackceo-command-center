@@ -162,6 +162,17 @@ export interface Task {
   // this task to backlog after a FAIL. Capped at QC_MAX_REROUTES (default 3)
   // before the task is set to `blocked` for human review.
   qc_reroute_attempts?: number | null;
+  // Dispatch attempt-accounting (migration 077 / W8 anti-furnace). Incremented on
+  // EVERY failed advance attempt (gateway down / sovereignty / no-runtime). Drives
+  // exponential backoff (next_dispatch_eligible_at) and the block-on-N cap so an
+  // unadvanceable task can never become a re-dispatch furnace. Reset to 0 on a
+  // successful advance to in_progress.
+  dispatch_attempts?: number | null;
+  last_dispatch_attempt_at?: string | null;
+  next_dispatch_eligible_at?: string | null;
+  // Campaign board feed (migration 017 column; wired by W8.4). Groups the task
+  // onto its department's live campaign Kanban so routed work shows + moves.
+  campaign_id?: string | null;
   // PRD 2.12-cc: when set, this task IS the "Author SOP" sub-task for the
   // referenced originalTaskId. The dispatch fast-loop recursion guard skips
   // SOP authoring for any task with this field set. (migration 066)

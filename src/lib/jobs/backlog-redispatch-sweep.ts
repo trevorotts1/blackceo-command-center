@@ -66,13 +66,21 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
   }
 
   const cap = parseInt(process.env.QC_MAX_REROUTES || String(QC_MAX_REROUTES), 10);
+  const dispatchCap = Math.max(1, parseInt(process.env.MAX_DISPATCH_ATTEMPTS || '5', 10));
   const batch = parseInt(process.env.BACKLOG_REDISPATCH_BATCH || '25', 10);
   const graceSeconds = parseInt(process.env.BACKLOG_REDISPATCH_GRACE_SECONDS || '120', 10);
+  const now = new Date().toISOString();
   const graceCutoff = new Date(Date.now() - graceSeconds * 1000).toISOString();
 
   // Assigned, still-backlog, not-archived, under the re-route cap, not on a
   // master/CEO agent, and last touched before the grace window. Oldest first so
   // the most-stuck cards drain first.
+  //
+  // W8.2 anti-furnace: ALSO require the task to be under the dispatch-attempt cap
+  // and past its exponential-backoff window. Without these, a task that can't
+  // advance (gateway down / no sovereign model / no per-dept runtime) was
+  // re-fired every 2 min forever — the exact furnace this guard kills. A blocked
+  // or backed-off task now drops out of selection instead of re-looping.
   const rows = queryAll<BacklogTaskRow>(
     `SELECT t.id AS id, t.qc_reroute_attempts AS qc_reroute_attempts
        FROM tasks t
@@ -81,11 +89,13 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
         AND t.assigned_agent_id IS NOT NULL
         AND t.archived_at IS NULL
         AND (t.qc_reroute_attempts IS NULL OR t.qc_reroute_attempts < ?)
+        AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
+        AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
         AND (a.is_master IS NULL OR a.is_master = 0)
         AND t.updated_at <= ?
       ORDER BY t.updated_at ASC
       LIMIT ?`,
-    [cap, graceCutoff, batch],
+    [cap, dispatchCap, now, graceCutoff, batch],
   );
 
   if (rows.length === 0) {

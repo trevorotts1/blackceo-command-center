@@ -41,6 +41,7 @@ import { getBestSOPForTask } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { ensureCampaignForTask } from '@/lib/campaigns';
 import type { Task, TaskPriority, Agent } from '@/lib/types';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
@@ -546,6 +547,18 @@ export async function createTaskCore(
     }
   }
   // --- END INSTANT ROUTING ---
+
+  // --- CAMPAIGN BOARD FEED (W8.4) ---
+  // Attach the new card to its department's live campaign board so routed work
+  // actually shows + advances on the Kanban (the board had 0 rows / campaign_id
+  // NULL on every task before this). Idempotent + best-effort; does NOT bump
+  // updated_at, so the dispatcher's grace/backoff windows are untouched.
+  ensureCampaignForTask(id, {
+    workspaceId: workspaceId,
+    department: routedDepartment || input.department || null,
+    title: input.title,
+  });
+  // --- END CAMPAIGN BOARD FEED ---
 
   // --- PERSONA PIN KICK-OFF (G10-TRIAD-PERSONA-RESOLVE) ---
   // Start persona resolution NOW (concurrently with the rest of createTaskCore) so

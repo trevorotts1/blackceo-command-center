@@ -11,6 +11,7 @@ import { runQCOnReview } from '@/lib/qc-scorer';
 import { spawnRecordCompletion, selectPersonaForTask } from '@/lib/persona-selector';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
+import { notifyOwnerDone } from '@/lib/owner-reports';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -426,14 +427,11 @@ export async function PATCH(
       );
 
       // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
-      // Guaranteed board-side action: fires synchronously after the DB write.
-      // Failure is logged and NEVER prevents the 200 response or any DB state.
+      // W5.4: replaced bare 2-field string with notifyOwnerDone (all 5 fields:
+      // who/role + where + SOP + persona). Best-effort; gateway-routed.
       if (validatedData.status === 'done' && existing.status !== 'done') {
         try {
-          const deptLabel = (existing as Task & { department?: string | null }).department ?? 'your team';
-          notifyOwner(
-            `✅ Done: "${existing.title}" — completed by ${deptLabel}.`,
-          );
+          notifyOwnerDone(id);
         } catch (notifyErr) {
           console.error('[tasks PATCH] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
         }
