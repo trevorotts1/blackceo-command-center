@@ -197,6 +197,30 @@ function capabilityScore(
   return score;
 }
 
+// ─── Text-serviceability (FM-6c) ─────────────────────────────────────────────
+// A pure media-I/O model — e.g. a TTS endpoint like `gpt-4o-mini-tts` whose only
+// capability is `audio_generation` — cannot produce the text/reasoning output a
+// text task needs. The old `required_modality === 'text' → accept ANY model` rule
+// let exactly such a model win a presentations/text task, pinning a TTS model as
+// the task's reasoning `model_id` (the wrong-field symptom on the affected box).
+// A model serves a text task only when it has at least one LANGUAGE capability
+// (anything that is NOT a pure media-output or embeddings kind). Models with NO
+// declared capabilities are treated as text-capable for back-compat with untyped
+// registries.
+const NON_LANGUAGE_OUTPUT_CAPS = new Set<ModelCapability>([
+  'image_generation',
+  'video_generation',
+  'audio_generation',
+  'audio_transcription',
+  'embeddings',
+]);
+
+export function canServeTextTask(entry: ModelRegistryEntry): boolean {
+  const caps = entry.capabilities ?? [];
+  if (caps.length === 0) return true; // untyped/generic LLM — assume chat-capable
+  return caps.some((c) => !NON_LANGUAGE_OUTPUT_CAPS.has(c));
+}
+
 // ─── Main selector ────────────────────────────────────────────────────────────
 
 export interface TaskModelSelection {
@@ -228,7 +252,9 @@ export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection
   const modalityFiltered = input.inventory.filter((m) => {
     if (isForbidden(m.model_id)) return false;
     if (m.model_id === 'openrouter/free' || m.model_id === NEEDS_OWNER_INPUT) return false;
-    if (required_modality === 'text') return true; // any model handles text
+    // FM-6c: a text task accepts any LANGUAGE model, but NOT a pure media/TTS
+    // model (e.g. gpt-4o-mini-tts) that cannot produce text/reasoning output.
+    if (required_modality === 'text') return canServeTextTask(m);
     return m.capabilities.includes(modalityCapability);
   });
 
@@ -349,8 +375,12 @@ export function resolveSovereignDefault(
       !isFree(m.model_id, m) &&
       m.model_id !== NEEDS_OWNER_INPUT &&
       m.model_id !== 'openrouter/free' &&
-      (required_modality === 'text' ||
-        m.capabilities.includes(required_modality as ModelCapability)),
+      // FM-6c: for a text task accept any LANGUAGE model but NOT a pure media/TTS
+      // model (mirrors selectTaskModel) so the sovereign default never pins a TTS
+      // model as the reasoning model_id.
+      (required_modality === 'text'
+        ? canServeTextTask(m)
+        : m.capabilities.includes(required_modality as ModelCapability)),
   );
   if (eligible.length === 0) return null;
 

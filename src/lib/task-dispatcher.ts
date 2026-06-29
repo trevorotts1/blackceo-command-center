@@ -51,6 +51,7 @@ import { listModels } from '@/lib/model-registry';
 import { getBestSOPForTask } from '@/lib/sops';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload } from '@/lib/task-lifecycle';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
@@ -183,7 +184,7 @@ function recordDispatchSuccess(taskId: string): void {
  * The dept-presentations builder runtime is one concrete example:
  *   ~/.openclaw/agents/dept-presentations/ → key agent:dept-presentations:<session>
  */
-function resolveSpecialistSessionKey(
+export function resolveSpecialistSessionKey(
   agent: Agent,
   openclawSessionId: string,
   workspaceId: string | undefined,
@@ -220,7 +221,27 @@ function resolveSpecialistSessionKey(
           console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → bare runtime found → key ${key}`);
           return key;
         }
-        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug`);
+        // Attempt 1b — legacy/aliased slug → CANONICAL runtime. A workspace slug
+        // like `ceo` or `app-development` has its runtime dir under the canonical
+        // name (`master-orchestrator`, `engineering`). Probe the canonical slug
+        // before giving up so an aliased department DISPATCHES instead of falsely
+        // reporting no_specialist_runtime and looping in the W8 backoff.
+        const canonicalSlug = canonicalDeptSlug(candidateSlug);
+        if (canonicalSlug && canonicalSlug !== candidateSlug) {
+          const canonDeptDir = path.join(AGENTS_ROOT, `dept-${canonicalSlug}`);
+          const canonBareDir = path.join(AGENTS_ROOT, canonicalSlug);
+          if (fs.existsSync(canonDeptDir)) {
+            const key = `agent:dept-${canonicalSlug}:${openclawSessionId}`;
+            console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → dept-prefixed runtime → key ${key}`);
+            return key;
+          }
+          if (fs.existsSync(canonBareDir)) {
+            const key = `agent:${canonicalSlug}:${openclawSessionId}`;
+            console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → bare runtime → key ${key}`);
+            return key;
+          }
+        }
+        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalDeptSlug(candidateSlug)}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug`);
       }
     } catch (err) {
       console.warn(`[${context}] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);

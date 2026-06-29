@@ -133,6 +133,10 @@ export interface Task {
   block_audience?: 'OWNER' | 'SYSTEM' | null;  // Who must act: 'OWNER' = human; 'SYSTEM' = operator/system fix
   sprint?: string;
   department?: string;
+  // FIX C — Presentations no-skip proof certificate sha (migration 080). Set when
+  // a deck run registers its prove-deck.py PROCESS-CERTIFICATE; the done/delivered
+  // gate in PATCH /api/tasks/[id] requires a presentations task to carry/match it.
+  process_certificate_sha?: string | null;
   // Planning fields
   planning_session_key?: string;
   planning_messages?: string;

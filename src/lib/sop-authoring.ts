@@ -73,6 +73,7 @@ export interface CanonicalContextResult {
 
 export type AuthorStatus =
   | 'authored'
+  | 'deduped'
   | 'refused-canonical'
   | 'escalated'
   | 'no-research-specialist'
@@ -364,6 +365,37 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
         });
       }
       return { status: 'no-research-specialist', reason: msg };
+    }
+
+    // ── FM-6b — IDEMPOTENCY GUARD (no duplicate open authoring sub-tasks) ──────
+    // The dispatch sweep re-enters authorSOPForTask every ~2 min for an
+    // un-authored backlog task. Without this guard each pass INSERTED a fresh
+    // "Author SOP: X" sub-task, flooding the board with stuck `in_progress`
+    // clones (300+ on the affected box). If an OPEN authoring sub-task already
+    // exists for this original task (or an identical title+department), reuse it
+    // instead of creating another. Migration 082 reaps any pre-existing clones.
+    const authorTitle = `Author SOP: ${input.title}`;
+    const existingAuthoring = queryOne<{ id: string }>(
+      `SELECT id FROM tasks
+        WHERE status != 'done' AND (archived_at IS NULL OR archived_at = '')
+          AND (
+            sop_authoring_for_task_id = ?
+            OR (title = ? AND COALESCE(department, '') = COALESCE(?, ''))
+          )
+        ORDER BY created_at ASC, rowid ASC
+        LIMIT 1`,
+      [input.originalTaskId, authorTitle, deptSlug],
+    );
+    if (existingAuthoring) {
+      console.log(
+        `[sop-authoring] Idempotency guard: open authoring sub-task ${existingAuthoring.id} already exists ` +
+          `for "${input.title}" (dept ${deptSlug}) — NOT creating a duplicate.`,
+      );
+      return {
+        status: 'deduped',
+        sub_task_id: existingAuthoring.id,
+        reason: 'reused existing open authoring sub-task (idempotency guard)',
+      };
     }
 
     // §2: Create the linked authoring sub-task.
