@@ -55,7 +55,7 @@ That's it. The script handles everything: backup, build, restart, health check, 
 2. **Backs up database** — Copies `mission-control.db` to `mission-control.db.backup`
 3. **Cleans old build** — Removes `.next/` to prevent cache corruption
 4. **Builds the app** — Runs `npm run build`
-5. **Restarts PM2** — Restarts the `mission-control` process
+5. **Restarts PM2** — Restarts the `blackceo-command-center` process
 6. **Health checks** — Verifies the site returns HTTP 200
 7. **Auto-rollback** — If health check fails, restores backups and restarts
 
@@ -67,7 +67,7 @@ That's it. The script handles everything: backup, build, restart, health check, 
 
 ```bash
 # 1. Stop the current process
-pm2 stop mission-control
+pm2 stop blackceo-command-center
 
 # 2. Restore the build backup
 cd ~/projects/mission-control
@@ -78,7 +78,7 @@ cp -r .next-backup .next
 cp mission-control.db.backup mission-control.db
 
 # 4. Restart PM2
-pm2 restart mission-control
+pm2 restart blackceo-command-center
 
 # 5. Verify the site
 sleep 5
@@ -94,7 +94,7 @@ If backups are corrupted or missing:
 cd ~/projects/mission-control
 
 # Stop PM2
-pm2 stop mission-control
+pm2 stop blackceo-command-center
 
 # Clean everything
 rm -rf .next
@@ -106,7 +106,7 @@ npm install
 npm run build
 
 # Restart
-pm2 restart mission-control
+pm2 restart blackceo-command-center
 
 # Verify
 sleep 5
@@ -143,7 +143,7 @@ This creates a macOS LaunchAgent that auto-restarts the tunnel if it dies.
 - **Symptom:** Site returns 502 Bad Gateway immediately after restart
 - **Cause:** PM2 crashes or Next.js app fails to start
 - **Fix:** The deploy script health-checks and auto-rolls back if this happens
-- **Manual check:** `pm2 logs mission-control` to see startup errors
+- **Manual check:** `pm2 logs blackceo-command-center` to see startup errors
 
 ### Database Locked During Backup
 - **Symptom:** Backup step hangs or fails
@@ -180,12 +180,12 @@ export NODE_OPTIONS="--max-old-space-size=4096"
 pm2 list
 
 # If missing, recreate:
-pm2 start npm --name "mission-control" -- start
+pm2 start npm --name "blackceo-command-center" -- start
 ```
 
 ### Health check returns 000 (no response)
 - Check Cloudflare tunnel status (Mac only — VPS users skip this)
-- Check PM2 logs: `pm2 logs mission-control`
+- Check PM2 logs: `pm2 logs blackceo-command-center`
 - Verify DNS resolves: `nslookup trevor.zerohumanworkforce.com`
 
 ### Rollback loop (keeps rolling back)
@@ -201,11 +201,11 @@ pm2 start npm --name "mission-control" -- start
 | Command | Purpose |
 |---------|---------|
 | `pm2 list` | Show all processes |
-| `pm2 logs mission-control` | View app logs |
-| `pm2 logs mission-control --lines 100` | View last 100 lines |
-| `pm2 stop mission-control` | Stop the process |
-| `pm2 restart mission-control` | Restart (use deploy.sh instead) |
-| `pm2 delete mission-control` | Remove from PM2 |
+| `pm2 logs blackceo-command-center` | View app logs |
+| `pm2 logs blackceo-command-center --lines 100` | View last 100 lines |
+| `pm2 stop blackceo-command-center` | Stop the process |
+| `pm2 restart blackceo-command-center` | Restart (use deploy.sh instead) |
+| `pm2 delete blackceo-command-center` | Remove from PM2 |
 
 ---
 
@@ -214,7 +214,7 @@ pm2 start npm --name "mission-control" -- start
 | Property | Value |
 |----------|-------|
 | **App Directory** | `~/projects/mission-control` |
-| **PM2 Process Name** | `mission-control` |
+| **PM2 Process Name** | `blackceo-command-center` |
 | **Production URL** | https://trevor.zerohumanworkforce.com |
 | **Database File** | `mission-control.db` |
 | **Build Output** | `.next/` |

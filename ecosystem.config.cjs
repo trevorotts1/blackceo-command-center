@@ -38,12 +38,16 @@ module.exports = {
     // FLEET-CANONICAL PM2 APP NAME — do not rename without updating every other
     // tool that (re)starts the CC, or a box will end up with two apps fighting
     // over :4000 (a proven multi-hour gateway-outage root cause on a client
-    // box). "mission-control" is the
-    // single name shared by: this config (what `pm2 resurrect` restores at
-    // boot), scripts/watchdog-cc.sh self-heal, scripts/install/*-bootstrap.sh,
-    // package.json, and the openclaw-onboarding installer Phase 6 (v16.1.6+,
-    // which now reconciles away every legacy alias before starting this name).
-    name: 'mission-control',
+    // box). "blackceo-command-center" is the single canonical name the whole
+    // fleet standardizes on: the openclaw-onboarding installer Phase 6, every
+    // per-box dedup, scripts/deploy.sh, the scripts/install/*-bootstrap.sh
+    // ecosystem templates, and scripts/watchdog-cc.sh self-heal (which restarts
+    // via `pm2 start ecosystem.config.cjs`, so this name is what it resurrects).
+    // `mission-control` is a LEGACY alias that earlier revisions of this repo
+    // used; it is reconciled away (pm2 delete) by the installer and the
+    // watchdog. The DATABASE_PATH file is still mission-control.db — that is the
+    // on-disk DB filename, intentionally unchanged, NOT the pm2 app name.
+    name: 'blackceo-command-center',
     // Canonical hardened launcher — performs env-bleed strip + orphan-port kill
     // before exec-ing `next start`. NEVER call `next start` directly from this
     // config (qc-cc.sh port-pin-and-env-bleed-guard will FAIL the build).
@@ -68,7 +72,7 @@ module.exports = {
       // still default at the app layer when unset — OPENCLAW_GATEWAY_URL
       // defaults to ws://127.0.0.1:18789. Set the real values in the
       // container/host .env (Hostinger /docker/<project>/.env) or app .env.local
-      // and run `pm2 restart mission-control --update-env`.
+      // and run `pm2 restart blackceo-command-center --update-env`.
       ...(process.env.OPENCLAW_GATEWAY_URL ? { OPENCLAW_GATEWAY_URL: process.env.OPENCLAW_GATEWAY_URL } : {}),
       ...(process.env.OPENCLAW_GATEWAY_TOKEN ? { OPENCLAW_GATEWAY_TOKEN: process.env.OPENCLAW_GATEWAY_TOKEN } : {}),
       ...(process.env.BCC_DEVICE_IDENTITY_DIR ? { BCC_DEVICE_IDENTITY_DIR: process.env.BCC_DEVICE_IDENTITY_DIR } : {}),

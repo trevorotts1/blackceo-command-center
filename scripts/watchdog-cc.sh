@@ -14,9 +14,15 @@
 # SELF-HEAL MODE (WATCHDOG_SELF_HEAL=1):
 #   On a definitive RED where the PM2 topology shows a zombie (app_count>1),
 #   a crash_looper, or EADDRINUSE in recent pm2 logs, the watchdog:
-#     1. Kills all legacy-named CC apps (blackceo-command-center, command-center)
-#     2. Invokes the canonical cc-start.sh orphan-port killer (via ecosystem restart)
-#     3. Restarts via pm2 start ecosystem.config.cjs
+#     1. Clears EVERY CC pm2 app name — the fleet-canonical "blackceo-command-center"
+#        AND the legacy aliases "command-center"/"mission-control" — so a zombie
+#        duplicate or a stray legacy app cannot survive.
+#     2. Restarts via `pm2 start ecosystem.config.cjs`, which names the app
+#        "blackceo-command-center" (the canonical) and delegates to cc-start.sh
+#        for the orphan-port kill + env-bleed strip.
+#   The end state is ALWAYS exactly one canonical "blackceo-command-center"; the
+#   legacy "mission-control" alias is deleted and never resurrected (this is why
+#   ecosystem.config.cjs MUST declare the canonical name — see that file).
 #   NEVER acts on exit 3 (UNKNOWN) — preserves the exit-3=no-action contract.
 #   NOTE: Never calls `openclaw gateway restart` — manages ONLY the CC process.
 
@@ -97,7 +103,11 @@ else
       if [[ -z "$CC_DIR" || ! -f "$CC_DIR/ecosystem.config.cjs" ]]; then
         printf '[watchdog-cc] SELF-HEAL skipped: cannot locate ecosystem.config.cjs\n' >&2
       else
-        # Kill all legacy-named CC apps so duplicate/orphan names are cleared.
+        # Clear EVERY CC pm2 app name (canonical + legacy aliases) so a zombie
+        # duplicate or a stray legacy "mission-control" cannot survive; the
+        # ecosystem start below then recreates the single canonical
+        # "blackceo-command-center". The canonical is only transiently removed
+        # here and is always re-created — never permanently killed.
         for name in blackceo-command-center command-center mission-control; do
           pm2 delete "$name" >/dev/null 2>&1 && \
             printf '[watchdog-cc] SELF-HEAL: deleted pm2 app "%s"\n' "$name" >&2 || true
