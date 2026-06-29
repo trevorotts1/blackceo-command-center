@@ -1,3 +1,11 @@
+## [v4.55.2] — 2026-06-28 — fix(db): self-heal `tasks.stage_slug` (migration-ID-074 collision) so ad-campaign card-create stops 500ing
+
+- Migration 079 (`ensure_tasks_stage_slug`, idempotent `PRAGMA table_info` guard + `CREATE INDEX IF NOT EXISTS` ×2): `ALTER TABLE tasks ADD COLUMN stage_slug TEXT` plus the two ad-campaign indexes. Mirrors migration 074's body exactly; additive + nullable, never touches existing rows or routes.
+- **Root cause:** the migration runner keys applied-state on `id` alone (`_migrations.id`). An earlier source revision numbered a since-removed migration as id `074`; current source assigns id `074` to `add_tasks_stage_slug_for_ad_campaigns`. Any DB that recorded the OLD `074` silently SKIPS the current `074` forever, so `tasks.stage_slug` is never created on those DBs.
+- **Symptom (same class as migration 056 `sop_id` and 078 `block_reason`):** the ad-campaign assembly-line INSERT in `src/lib/ad-campaigns.ts` writes `stage_slug`, so on an affected DB it throws `SQLITE_ERROR: table tasks has no column named stage_slug` and the ad-run card-create path returns HTTP 500. Reproduced and verified against a live DB carrying the `074` collision.
+- A NEW migration id (`079`) is used so it always runs on affected DBs; idempotent so it is a no-op where `074` already added the column. `schema.ts` already declares `stage_slug` in the base `CREATE TABLE tasks`, so fresh installs were never affected.
+- **Audit note:** the canonical task ingest/create path (`createTaskCore`, used by `POST /api/tasks` and `POST /api/tasks/ingest`) writes `sop_id`, which is already covered by migration 056 + `schema.ts`; a full column-drift audit confirmed `stage_slug` was the only code-written `tasks` column missing on a live DB.
+
 ## [v4.55.1] — 2026-06-28 — fix(W8): add block_reason column so gateway-down/stuck tasks actually transition to blocked + notify owner
 
 - Migration 078 (idempotent `PRAGMA table_info` guard): `ALTER TABLE tasks ADD COLUMN block_reason TEXT`.
