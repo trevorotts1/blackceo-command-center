@@ -69,6 +69,11 @@ export const UpdateTaskSchema = z.object({
   blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),
   blocked_on_human: z.enum(['owner', 'operator']).optional().nullable(),
   ask: z.string().max(500).optional().nullable(),
+  // Presentations done-gate (v4.56.0 / no-skip proof).
+  // Required when transitioning a `presentations` department task to `done`.
+  // The API route enforces presence; Zod accepts it as optional so other
+  // departments are completely unaffected by this field.
+  process_certificate_sha: z.string().optional(),
 });
 
 // Activity validation schema

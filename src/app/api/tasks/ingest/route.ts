@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHmac } from 'crypto';
-import { queryOne } from '@/lib/db';
+import { queryOne, getDb } from '@/lib/db';
+import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore } from '@/lib/tasks';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
-import { notifyOwnerAssigned } from '@/lib/owner-reports';
+import { notifyOwnerAssigned, notifyOwnerSchemaError } from '@/lib/owner-reports';
 import { getSelfClient } from '@/lib/clients';
 // queryOne is still used for workspace resolution below.
 
@@ -626,8 +627,56 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
     console.error('[INGEST] Failed to ingest task:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+
+    // RESILIENCE (F6): a "no column named <x>" / "no such table" SqliteError means
+    // this box's schema is behind — migrations have not run, or ran partially. The
+    // canonical example is "table tasks has no column named sop_id" (fixed by
+    // migration 056). Instead of an opaque 500 we (a) attempt to self-heal by
+    // running pending migrations once (so future requests succeed), (b) escalate
+    // to the owner via gateway so a human knows the box needs attention, and
+    // (c) return a CLEAR, actionable 503 so the caller knows to retry after
+    // migrations run. We never silently drop work.
+    //
+    // BUILD-SAFE NOTE: task-field variables (title, finalDescription, priority, etc.)
+    // are declared INSIDE the try block and are NOT in scope here — a full
+    // createTaskCore retry cannot compile. Self-heal only brings the schema current
+    // for future requests; the caller must retry.
+    const isSchemaError = /SqliteError|no column named|no such column|no such table/i.test(msg);
+    if (isSchemaError) {
+      console.error(`[INGEST] SCHEMA error detected ("${msg}") — attempting one-shot self-heal migrate.`);
+      try {
+        runMigrations(getDb());
+        console.warn(
+          '[INGEST] Self-heal migrate succeeded — future requests should clear. ' +
+            'Returning 503 for this request so the caller can retry.',
+        );
+      } catch (migrateErr) {
+        console.error(
+          '[INGEST] Self-heal migrate FAILED:',
+          migrateErr instanceof Error ? migrateErr.message : String(migrateErr),
+        );
+      }
+      try {
+        notifyOwnerSchemaError(msg);
+      } catch {
+        /* non-fatal — the clear 503 below is still returned to the caller */
+      }
+      return NextResponse.json(
+        {
+          error: 'Command Center schema is out of date on this box — task NOT captured.',
+          detail: msg,
+          remediation:
+            'Run database migrations on this box (restart the app, or `npm run db:seed`) and retry. ' +
+            'The owner has been notified.',
+          schema_error: true,
+        },
+        { status: 503 },
+      );
+    }
+
+    return NextResponse.json({ error: 'Internal server error', detail: msg }, { status: 500 });
   }
 }
 

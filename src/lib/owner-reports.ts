@@ -299,6 +299,31 @@ export function notifyOwnerDone(
 }
 
 /**
+ * SCHEMA-ERROR ESCALATION: best-effort owner notification when an ingest write fails
+ * because this box's schema is behind pending migrations. Tells the owner the box
+ * needs `npm run db:seed` / a redeploy so work is not silently lost.
+ *
+ * Same gateway-routed, fail-soft contract as notifyOwnerAssigned — never throws into
+ * the request path.
+ *
+ * @returns true if a Telegram send was attempted+succeeded, false otherwise.
+ */
+export function notifyOwnerSchemaError(detail: string): boolean {
+  try {
+    const msg =
+      `⚠️ Command Center ingest failed on this box: schema out of date (${detail}). ` +
+      `A task was NOT captured. Restart the app / run migrations (npm run db:seed) and retry.`;
+    return notifyOwner(msg);
+  } catch (err) {
+    console.error(
+      '[owner-reports] notifyOwnerSchemaError error (non-fatal): %s',
+      (err as Error).message,
+    );
+    return false;
+  }
+}
+
+/**
  * HELD (W5 edge case): when a routed task is held (e.g. `routed_but_not_dispatched`)
  * and START will NOT fire, tell the owner so they aren't left with an assignment
  * and no follow-up. Optional; not one of the three required §5 messages.
