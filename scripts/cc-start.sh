@@ -65,10 +65,33 @@ printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "
 # infinite EADDRINUSE loop) takes over.
 #
 # Safety: only LISTEN sockets on the exact port are targeted — never a kill-by-name.
+#
+# SELF-PID SAFETY (v4.55.3): now that the whole fleet runs the CC under ONE
+# canonical pm2 app name ("mission-control" — see ecosystem.config.cjs and the
+# onboarding installer's Phase 6 reconcile), there is no sibling CC process to
+# mutually kill, so this killer can no longer cause the two-process fight that
+# amplified the :4000 crash loop. As defence-in-depth we ALSO hard-exclude this
+# launcher's own pid ($$) and its pm2/npm supervisor ($PPID) from the kill list
+# so cc-start.sh can never SIGTERM the very process tree supervising the
+# canonical CC. Any LISTENer that remains after that exclusion is, by
+# definition, a stale orphan from a prior boot/restart and is safe to reclaim.
+
+# _cc_strip_protected — echo the input pid list ($3) with the protected pids
+# (self $1, parent $2) removed.
+_cc_strip_protected() {
+  local self="$1" parent="$2" list="$3" out="" p
+  for p in $list; do
+    [[ "$p" == "$self" || "$p" == "$parent" ]] && continue
+    out="${out:+$out }$p"
+  done
+  printf '%s' "$out"
+}
 
 free_port() {
   local port="$1"
   local pids=""
+  local self_pid=$$
+  local parent_pid="${PPID:-0}"
 
   if command -v lsof >/dev/null 2>&1; then
     pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
@@ -79,6 +102,9 @@ free_port() {
     printf '[cc-start] Install lsof (apt install lsof / brew install lsof) and retry\n' >&2
     exit 1
   fi
+
+  # Never signal ourselves or our pm2/npm supervisor.
+  pids="$(_cc_strip_protected "$self_pid" "$parent_pid" "$pids")"
 
   if [[ -z "$pids" ]]; then
     printf '[cc-start] ORPHAN-PORT KILLER: port %s is free\n' "$port" >&2
@@ -105,6 +131,7 @@ free_port() {
     else
       remaining="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
     fi
+    remaining="$(_cc_strip_protected "$self_pid" "$parent_pid" "$remaining")"
     if [[ -z "$remaining" ]]; then
       printf '[cc-start]   port %s freed after %ss\n' "$port" "$waited" >&2
       return 0
@@ -125,6 +152,7 @@ free_port() {
   else
     final_check="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
   fi
+  final_check="$(_cc_strip_protected "$self_pid" "$parent_pid" "$final_check")"
   if [[ -n "$final_check" ]]; then
     printf '[cc-start] FATAL: port %s still occupied after TERM+KILL — pid(s): %s\n' "$port" "$final_check" >&2
     printf '[cc-start] Aborting so the PM2 circuit-breaker (not an infinite EADDRINUSE loop) takes over\n' >&2

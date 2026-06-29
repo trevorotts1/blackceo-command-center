@@ -35,6 +35,14 @@ const CC_PORT = process.env.CC_PORT || '4000';
 
 module.exports = {
   apps: [{
+    // FLEET-CANONICAL PM2 APP NAME — do not rename without updating every other
+    // tool that (re)starts the CC, or a box will end up with two apps fighting
+    // over :4000 (a proven multi-hour gateway-outage root cause on a client
+    // box). "mission-control" is the
+    // single name shared by: this config (what `pm2 resurrect` restores at
+    // boot), scripts/watchdog-cc.sh self-heal, scripts/install/*-bootstrap.sh,
+    // package.json, and the openclaw-onboarding installer Phase 6 (v16.1.6+,
+    // which now reconciles away every legacy alias before starting this name).
     name: 'mission-control',
     // Canonical hardened launcher — performs env-bleed strip + orphan-port kill
     // before exec-ing `next start`. NEVER call `next start` directly from this
