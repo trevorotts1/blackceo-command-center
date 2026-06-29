@@ -2993,6 +2993,45 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '079',
+    name: 'ensure_tasks_stage_slug',
+    up: (db) => {
+      // Self-heal for a migration-ID-074 collision. An earlier source revision
+      // numbered a now-removed migration as id '074'; the current source assigns
+      // id '074' to `add_tasks_stage_slug_for_ad_campaigns`. Because the runner
+      // keys applied-state on id alone (`_migrations.id`), any DB that recorded
+      // the OLD 074 will SKIP the current 074 forever — so `tasks.stage_slug`
+      // (and its two indexes) never get created on those DBs.
+      //
+      // The visible failure is identical in class to migration 056 (sop_id) and
+      // 078 (block_reason): the ad-campaign assembly-line INSERT in
+      // `src/lib/ad-campaigns.ts` writes `stage_slug`, so on an affected DB it
+      // throws SQLITE_ERROR "table tasks has no column named stage_slug" → the
+      // ad-run card-create path 500s.
+      //
+      // This migration carries a NEW id (079) so it always runs on the affected
+      // DBs, and is fully idempotent (PRAGMA table_info guard + IF NOT EXISTS on
+      // both indexes) so it is a no-op on DBs that already have the column from
+      // migration 074. Additive + nullable — never touches existing rows/routes.
+      // Mirrors migration 074's body exactly.
+      console.log('[Migration 079] Ensuring tasks.stage_slug column + ad-campaign indexes exist...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('stage_slug')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN stage_slug TEXT`);
+        console.log('[Migration 079] tasks.stage_slug column added (074 id-collision repaired)');
+      } else {
+        console.log('[Migration 079] tasks.stage_slug already present — ensuring indexes only');
+      }
+      // One card per (campaign_id, stage_slug); NULLs excluded so normal tasks never collide.
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_campaign_stage
+               ON tasks(campaign_id, stage_slug)
+               WHERE campaign_id IS NOT NULL AND stage_slug IS NOT NULL`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_stage_slug
+               ON tasks(stage_slug) WHERE stage_slug IS NOT NULL`);
+      console.log('[Migration 079] tasks.stage_slug ready');
+    },
+  },
 ];
 
 /**
