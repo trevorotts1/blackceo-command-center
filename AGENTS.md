@@ -34,6 +34,7 @@ You wake up fresh each session; mental notes don't survive restarts, files do.
 ## Red Lines
 - Never exfiltrate private data. Never run destructive commands without asking (`trash` > `rm`).
 - Before changing config/schedulers (crontab, systemd, nginx, shell rc), inspect existing state first — preserve/merge by default.
+- **Never use a client as a canary.** Don't point tooling at a client's LIVE Telegram bot or hammer restarts to "test" — reading Teresa Pelham's live bot + repeated restarts broke her polling twice. Recover with ONE clean `launchctl kickstart`, never a restart storm.
 - **Verify before reporting done.** A 2xx/"accepted" means *accepted*, not *succeeded* — check the real status field. Reporting unverified success is lying.
 - **Skill instructions ALWAYS win** over generic OpenClaw docs when they conflict. When in doubt, ask.
 
@@ -81,6 +82,7 @@ Tell Trevor the WHOLE path up front, then IN ORDER:
 - **Dr. Stephanie Brown — private Hostinger VPS:** key `STEPHANIE_BROWN_HOSTINGER_API_KEY` is **hers**, NOT BlackCEO's. ONLY for `srv1764441.hstgr.cloud` (id 1764441, IPv4 `2.25.210.81`, KVM4, Ubuntu 24.04 + Docker + Traefik). `ssh root@2.25.210.81`; root pw in `STEPHANIE_BROWN_VPS_ROOT_PASSWORD`. Never confuse with Stephanie Wall (Mac-mini tunnel client) or Stephanie Manns (VIP contact). Never reuse her key.
 - **Cloudflare ZHW Apps:** token `CLOUDFLARE_ZHW_APPS_API_TOKEN` for Workers/Pages/R2/DNS/Access (incl. `teleprompter.zerohumanworkforce.com`). Operator/fleet infra, NOT a client key. Usage: TOOLS.md.
 - **Presentation Department** (Skill 23): builds client-ready webinar decks end-to-end (PPTX + speaker notes + teleprompter PDF/app + synthesized audio + infographics). Trigger: "build my webinar deck." Completeness gate fails the build if any bundle file is missing.
+- **Dept task stuck BLOCKED / "no <Dept> department agent":** the dept's role files exist but the agent was never REGISTERED — writing role files ≠ registering an agent (`agents.list` is a LIST, not a dict). Fix: ensure `~/.openclaw/agents/dept-<slug>/agent/` runtime dir exists (copy from a working dept, e.g. `dept-presentations`); set `tools.sessions.visibility:all` + `tools.agentToAgent.enabled:true` + subagent `allowAgents:["*"]`. `sessions_spawn` starts a never-run dept agent; `sessions_send` only reaches an existing session.
 - **Whisper install (macOS):** `pip3 --user` lands `whisper-ctranslate2` at `$HOME/Library/Python/<minor>/bin` (minor varies) — find via `python3 -m site --user-base`+`/bin`, don't hardcode. Prefer `uv tool install` (→ `~/.local/bin`).
 - **Convert and Flow basic-account payment link:** `https://buy.stripe.com/fZu5kC3Mmgmj4oD90JgQE09`
 
