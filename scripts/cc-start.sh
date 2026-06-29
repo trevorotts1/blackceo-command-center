@@ -67,8 +67,8 @@ printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "
 # Safety: only LISTEN sockets on the exact port are targeted — never a kill-by-name.
 #
 # SELF-PID SAFETY (v4.55.3): now that the whole fleet runs the CC under ONE
-# canonical pm2 app name ("mission-control" — see ecosystem.config.cjs and the
-# onboarding installer's Phase 6 reconcile), there is no sibling CC process to
+# canonical pm2 app name ("blackceo-command-center" — see ecosystem.config.cjs
+# and the onboarding installer's Phase 6 reconcile), there is no sibling CC to
 # mutually kill, so this killer can no longer cause the two-process fight that
 # amplified the :4000 crash loop. As defence-in-depth we ALSO hard-exclude this
 # launcher's own pid ($$) and its pm2/npm supervisor ($PPID) from the kill list

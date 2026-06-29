@@ -16,7 +16,10 @@ set -e
 
 APP_DIR=~/projects/mission-control
 BACKUP_DIR=$APP_DIR/.next-backup
-PM2_NAME="mission-control"
+# Fleet-canonical pm2 app name (matches ecosystem.config.cjs + the onboarding
+# installer + watchdog-cc.sh). `mission-control` is a legacy alias. The APP_DIR
+# above is a directory path (NOT the pm2 app name) and is intentionally left as-is.
+PM2_NAME="blackceo-command-center"
 HEALTH_SCRIPT="$APP_DIR/scripts/cc-health-check.sh"
 
 # Retry config for exit-3 (indeterminate) health checks

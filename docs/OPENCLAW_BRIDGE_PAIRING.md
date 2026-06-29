@@ -31,7 +31,7 @@ Applies to **v4.1.2+**.
    - `OPENCLAW_GATEWAY_TOKEN` — set when the gateway requires a token.
    - These must be set where pm2 actually inherits them: the container/host
      `.env` (`/docker/<project>/.env` on Hostinger) and/or the app-cwd
-     `.env.local`. After editing, `pm2 restart mission-control --update-env`
+     `.env.local`. After editing, `pm2 restart blackceo-command-center --update-env`
      (plain `restart` does NOT reload env_file changes) or recreate the
      container.
 
@@ -79,7 +79,7 @@ set `OPENCLAW_GATEWAY_URL` + `OPENCLAW_GATEWAY_TOKEN` in
 git pull   # or your deploy step
 npm ci
 npm run build
-pm2 restart mission-control --update-env
+pm2 restart blackceo-command-center --update-env
 curl -s http://127.0.0.1:4000/api/openclaw/status | jq
 ```
 
@@ -145,4 +145,4 @@ else `mac-mini`.
 | `connected: false`, `pairing_pending: false` | gateway unreachable | check the gateway is up; verify `OPENCLAW_GATEWAY_URL`; for remote, confirm the CF Tunnel hostname |
 | Re-prompts to pair after every redeploy | identity not on the persistent volume | confirm `device.json` is under `/data/...` (VPS); set `BCC_DEVICE_IDENTITY_DIR` if using a custom mount |
 | `Refusing to regenerate` error in logs | `device.json` is corrupt | inspect it; if truly unrecoverable, delete it deliberately and re-pair |
-| env vars not taking effect | pm2 didn't reload env | `pm2 restart mission-control --update-env`, or recreate the container |
+| env vars not taking effect | pm2 didn't reload env | `pm2 restart blackceo-command-center --update-env`, or recreate the container |
