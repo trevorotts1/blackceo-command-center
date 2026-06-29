@@ -13,6 +13,11 @@ import path from 'path';
 import os from 'os';
 import { seedStarterSOPs } from '../sops-seed';
 import { seedCompanyGuarded } from './branding-seed';
+import {
+  dedupeCanonicalWorkspaces,
+  reapDuplicateOpenAuthoringTasks,
+  findCanonicalWorkspaceId,
+} from './task-dedup';
 
 interface Migration {
   id: string;
@@ -3032,6 +3037,63 @@ const migrations: Migration[] = [
       console.log('[Migration 079] tasks.stage_slug ready');
     },
   },
+  {
+    id: '080',
+    name: 'add_tasks_process_certificate_sha',
+    up: (db) => {
+      // FIX C (CC done-gate): the Presentations no-skip proof certificate
+      // (`prove-deck.py` → PROCESS-CERTIFICATE.json) is enforced at the board by
+      // requiring a matching `process_certificate_sha` before a presentations
+      // task may move to done/delivered (see src/app/api/tasks/[id]/route.ts).
+      // This column STORES the certificate sha registered with the deck run so
+      // the gate can both require it and verify the mover presents the same one.
+      //
+      // Additive + nullable: every non-presentations task and every legacy row
+      // keeps NULL and is unaffected. Idempotent PRAGMA guard so it is a no-op on
+      // fresh installs and on DBs that already have it.
+      console.log('[Migration 080] Adding tasks.process_certificate_sha column...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('process_certificate_sha')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN process_certificate_sha TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_process_cert
+                 ON tasks(process_certificate_sha) WHERE process_certificate_sha IS NOT NULL`);
+        console.log('[Migration 080] process_certificate_sha column added');
+      } else {
+        console.log('[Migration 080] process_certificate_sha already present — skipping');
+      }
+    },
+  },
+  {
+    id: '081',
+    name: 'dedupe_canonical_workspaces',
+    up: (db) => {
+      // FM-6 (board single-source): de-dup workspace rows that canonicalize to the
+      // SAME department (e.g. `ceo` + `master-orchestrator`, `app-development` +
+      // `engineering`). Each duplicate split one department across two Kanban
+      // columns and two agent rosters. The keeper is the canonical-slug row;
+      // agents/tasks/all workspace_id-bearing rows are reassigned to it and the
+      // duplicate rows are deleted. Idempotent — a clean board is left untouched.
+      console.log('[Migration 081] De-duplicating canonical workspace rows...');
+      const r = dedupeCanonicalWorkspaces(db);
+      console.log(
+        `[Migration 081] merged ${r.groups_merged} group(s), deleted ${r.rows_deleted} duplicate row(s), reassigned ${r.rows_reassigned} referencing row(s)`,
+      );
+    },
+  },
+  {
+    id: '082',
+    name: 'reap_duplicate_open_authoring_tasks',
+    up: (db) => {
+      // FM-6b (furnace heal): collapse the duplicate open "Author SOP: …" sub-tasks
+      // the SOP-authoring fast loop re-created on every dispatch sweep (300+ stuck
+      // in_progress on the affected box). Keeps the oldest of each group and
+      // FK-safely deletes the spurious clones. The matching RUNTIME idempotency
+      // guard (src/lib/sop-authoring.ts) prevents new duplicates from forming.
+      console.log('[Migration 082] Reaping duplicate open "Author SOP" tasks...');
+      const r = reapDuplicateOpenAuthoringTasks(db);
+      console.log(`[Migration 082] reaped ${r.deleted} duplicate task(s) across ${r.groups} group(s)`);
+    },
+  },
 ];
 
 /**
@@ -3420,6 +3482,16 @@ export function reseedWorkspacesFromConfig(
       const isGeneralTask = slugLower === 'general-task';
       const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
 
+      // Slug-uniqueness guard (FM-6): never (re)create a SECOND workspace whose
+      // slug canonicalizes to a department a DIFFERENT row already represents
+      // (e.g. seeding `ceo` when `master-orchestrator` exists). Skip the dupe so
+      // converge can't re-split a department across two Kanban columns.
+      const canonOwner = findCanonicalWorkspaceId(db, dept.slug || dept.id);
+      if (canonOwner && canonOwner !== dept.id) {
+        console.log(`[reseed] Skipping "${dept.id}" — department already represented by workspace "${canonOwner}"`);
+        continue;
+      }
+
       const existing = existsCheck.get(dept.id);
       upsertStmt.run(
         dept.id,
@@ -3508,6 +3580,17 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
       const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
       const isGeneralTask = slugLower === 'general-task';
       const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
+
+      // Slug-uniqueness guard (FM-6): skip a dept whose slug canonicalizes to one
+      // a DIFFERENT row already seeded in this loop (e.g. both `ceo` and
+      // `master-orchestrator` present in departments.json) — single canonical
+      // department list, never two rows for one Kanban column.
+      const canonOwner = findCanonicalWorkspaceId(db, dept.slug || dept.id);
+      if (canonOwner && canonOwner !== dept.id) {
+        console.log(`[Auto-seed] Skipping "${dept.id}" — department already represented by workspace "${canonOwner}"`);
+        continue;
+      }
+
       db.prepare(
         'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(

@@ -5,6 +5,7 @@ import { execFileSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { getDb } from '@/lib/db';
+import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -99,10 +100,18 @@ function createDepartmentInDbDirect(args: {
 }): { status: 'created' | 'already_exists'; workspace_id: string; head_agent_id?: string; starter_task_id?: string } {
   const db = getDb();
 
-  // Idempotency check
+  // Idempotency check (exact slug/id).
   const existing = db.prepare('SELECT id FROM workspaces WHERE slug = ? OR id = ?').get(args.slug, args.slug) as { id: string } | undefined;
   if (existing) {
     return { status: 'already_exists', workspace_id: existing.id };
+  }
+  // Slug-uniqueness guard (FM-6): also treat a slug that CANONICALIZES to an
+  // existing department as already-present (e.g. creating `ceo` when
+  // `master-orchestrator` exists), so even the operator override path can never
+  // split one department across two Kanban columns.
+  const canonOwner = findCanonicalWorkspaceId(db, args.slug);
+  if (canonOwner) {
+    return { status: 'already_exists', workspace_id: canonOwner };
   }
 
   const wsId = args.slug;

@@ -12,6 +12,7 @@ import { spawnRecordCompletion, selectPersonaForTask } from '@/lib/persona-selec
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
+import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -410,29 +411,41 @@ export async function PATCH(
         }
       }
 
-      // ── Presentations done-gate (process_certificate, v1 board enforcement) ────────────
-      // When a task in the `presentations` department transitions to `done`, the caller
-      // MUST supply a non-empty `process_certificate_sha` from prove-deck.py (no-skip
-      // proof). v1 gate: presence is enforced; verification against a stored certificate
-      // hash is a planned v2 addition (see CHANGELOG). All other departments are
-      // completely unaffected — this check is scoped to presentations only.
-      if (validatedData.status === 'done') {
-        const deptNow = canonicalDeptSlug(existing.department || '') || (existing.department ?? '');
-        if (deptNow === 'presentations') {
-          const certSha = validatedData.process_certificate_sha;
-          if (!certSha || !certSha.trim()) {
-            return NextResponse.json(
-              {
-                error:
-                  'A presentations deck cannot be marked done without a process certificate (no-skip proof). Provide process_certificate_sha from prove-deck.py.',
-                requires_process_certificate: true,
-              },
-              { status: 422 },
-            );
-          }
+      // ── FIX C v2 — PRESENTATIONS NO-SKIP PROOF GATE (matching; supersedes v4.56.0 v1) ──
+      // v4.56.0 shipped a v1 PRESENCE-only check and explicitly deferred
+      // "verification against a stored certificate hash" to v2. This IS that v2:
+      // the presented cert is MATCHED against the one registered on the task
+      // (tasks.process_certificate_sha, migration 080) — anti-spoof — and a newly
+      // presented cert is persisted as the certificate of record. Presence is still
+      // required (no regression vs v1). The decision is the pure, unit-tested
+      // evaluatePresentationsDoneGate(); failures keep the v1 422 + requires_* contract.
+      {
+        const certGate = evaluatePresentationsDoneGate({
+          department: (existing as Task).department,
+          currentStatus: existing.status,
+          targetStatus: validatedData.status,
+          storedCert: (existing as Task).process_certificate_sha,
+          providedCert: (validatedData as typeof validatedData & {
+            process_certificate_sha?: string | null;
+          }).process_certificate_sha,
+        });
+        if (certGate.applies && !certGate.ok) {
+          return NextResponse.json(
+            {
+              error: certGate.error,
+              code: certGate.code,
+              requires_process_certificate: true,
+              remediation: certGate.remediation,
+            },
+            { status: 422 },
+          );
+        }
+        if (certGate.applies && certGate.ok && certGate.persistCert) {
+          updates.push('process_certificate_sha = ?');
+          values.push(certGate.persistCert);
         }
       }
-      // ── End presentations done-gate ─────────────────────────────────────────────────────
+      // ── End presentations no-skip proof gate ────────────────────────────────────────────
 
       updates.push('status = ?');
       values.push(validatedData.status);
