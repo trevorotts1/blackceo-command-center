@@ -1,3 +1,35 @@
+## [v4.56.0]  —  2026-06-29  —  feat(resilience+presentations): ingest schema-error self-heal + owner escalation; presentations done-gate (no-skip proof at the board)
+
+Two additive, low-risk hardening items for the task capture pipeline and the presentations department gate.
+
+**EDIT 1 — Ingest catch block: schema-error self-heal + clear 503 + owner escalation (`src/app/api/tasks/ingest/route.ts`)**
+
+The existing catch block returned a blind `500 Internal server error` with no distinction between a generic crash and a schema problem. The canonical failure mode is a box whose migrations have not yet run or ran partially (e.g. `SQLITE_ERROR: table tasks has no column named sop_id` — the historical migration 056 case, or `stage_slug` for 079). The new block:
+
+- Detects schema errors via `/SqliteError|no column named|no such column|no such table/i`.
+- Attempts a one-shot self-heal: `runMigrations(getDb())` runs pending migrations in-process so future requests succeed (best-effort, own try/catch).
+- Escalates: calls `notifyOwnerSchemaError(msg)` (best-effort, gateway-routed via `notifyOwner`) so the owner is told the box needs `npm run db:seed` / a redeploy.
+- Returns a CLEAR 503 with `{ error, detail, remediation, schema_error: true }` instead of an opaque 500. The caller can distinguish a schema problem and retry.
+- BUILD-SAFE: task-field variables (`title`, `finalDescription`, etc.) are declared inside the try block and are NOT in scope in the catch — no `createTaskCore` retry is attempted. The self-heal brings the schema current for the next request; the caller must retry.
+- Non-schema failures still return a 500 with `detail: msg` added.
+
+New imports: `getDb` added to the existing `@/lib/db` import; `runMigrations` from `@/lib/db/migrations`; `notifyOwnerSchemaError` added to the existing `@/lib/owner-reports` import.
+
+**EDIT 1b — `notifyOwnerSchemaError` (`src/lib/owner-reports.ts`)**
+
+New export, modeled on `notifyOwnerAssigned`. Gateway-routed via `notifyOwner`; fail-soft; returns boolean; never throws into the request path.
+
+**Presentations done-gate — `process_certificate_sha` required at the board (`src/app/api/tasks/[id]/route.ts`, `src/lib/validation.ts`)**
+
+Any PATCH that transitions a task whose department canonical-slug is `presentations` to `status: 'done'` now REQUIRES a non-empty `process_certificate_sha` in the request body. If missing or empty the endpoint rejects with 422 `{ error: '...', requires_process_certificate: true }` before the status commit — the board cannot be marked done without proof the no-skip floor script ran. Other departments are completely unaffected (slug check is scoped to `presentations` only; the gate is inside the existing status-transition block after the Triad gate and before `updates.push('status = ?')`).
+
+`UpdateTaskSchema` in `src/lib/validation.ts` gains an optional `process_certificate_sha: z.string().optional()` field so the Zod parse accepts the field from the body; the API route enforces presence for presentations specifically.
+
+v1 note: presence of the hash is the gate; verification of the hash value against a stored certificate is a planned v2 addition. This ships the board-side enforcement that prevents any path — agent or human drag — from closing a presentations task without the prove-deck.py proof token.
+
+- No migration, no schema column change. No client names. Box user, not root.
+- **PROOF** — `npm run build` (next build / typecheck) green; `npx vitest run` green. No client names in changed files.
+
 ## [v4.55.4] — 2026-06-29 — fix(pm2): reconcile the WHOLE repo to the fleet-canonical app name `blackceo-command-center` (supersedes v4.55.3's interim direction)
 
 The fleet-canonical pm2 app name is **`blackceo-command-center`** — the name the openclaw-onboarding installer, every per-box fleet dedup, and `scripts/deploy.sh` standardize on. Earlier revisions of THIS repo diverged to `mission-control` across `ecosystem.config.cjs`, the `scripts/install/*-bootstrap.sh` ecosystem templates, `scripts/deploy.sh`, and `scripts/watchdog-cc.sh` self-heal. On a box already running `blackceo-command-center`, that divergence meant `pm2 resurrect` / a bootstrap re-run / a watchdog self-heal would (re)create a SECOND app named `mission-control` on :4000 — the two-process mutual-kill loop that wedged a client box. (v4.55.3 documented the contract but pointed the comment at the wrong name; this release corrects every file.)
@@ -113,7 +145,7 @@ Adds `fleet-heartbeat/scripts/propagate-rescue-webhook.sh` to origin/main for th
 - jq quoting hardened: replaced `docker exec sh -c "..."` (double-quoted body where shell expands `$k`/`$v` before jq sees them) with `docker exec -u node -e SK=... -e SV=... sh -c '...'` (single-quoted body; variables passed as env vars named SK/SV, never touched by the shell before jq).
 - Idempotent "already correct" guard added for the secret in host `.env` to suppress spurious `HOST_CHANGED` on re-runs.
 - `make_section()` upgraded to v2 structured-form: takes `box_name` and `box_type` args and emits a 9-field escalation payload (`person`, `clientName`, `agentName`, `boxName`, `boxType`, `openclawVersion`, `problem`, `alreadyTried`, `returnTo`) instead of the flat one-liner. Old v1 sections are detected and replaced in-place.
-- Jill Bulluck entry commented out (opted out of fleet-heartbeat propagation).
+- An opted-out client's entry commented out (opted out of fleet-heartbeat propagation).
 - Verify block extended: now also prints the `RESCUE_RANGERS_WEBHOOK_SECRET` presence and the `X-Rescue-Secret` header count in AGENTS.md.
 
 **Files changed:** `fleet-heartbeat/scripts/propagate-rescue-webhook.sh` (new on origin/main).

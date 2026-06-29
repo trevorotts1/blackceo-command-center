@@ -410,6 +410,30 @@ export async function PATCH(
         }
       }
 
+      // ── Presentations done-gate (process_certificate, v1 board enforcement) ────────────
+      // When a task in the `presentations` department transitions to `done`, the caller
+      // MUST supply a non-empty `process_certificate_sha` from prove-deck.py (no-skip
+      // proof). v1 gate: presence is enforced; verification against a stored certificate
+      // hash is a planned v2 addition (see CHANGELOG). All other departments are
+      // completely unaffected — this check is scoped to presentations only.
+      if (validatedData.status === 'done') {
+        const deptNow = canonicalDeptSlug(existing.department || '') || (existing.department ?? '');
+        if (deptNow === 'presentations') {
+          const certSha = validatedData.process_certificate_sha;
+          if (!certSha || !certSha.trim()) {
+            return NextResponse.json(
+              {
+                error:
+                  'A presentations deck cannot be marked done without a process certificate (no-skip proof). Provide process_certificate_sha from prove-deck.py.',
+                requires_process_certificate: true,
+              },
+              { status: 422 },
+            );
+          }
+        }
+      }
+      // ── End presentations done-gate ─────────────────────────────────────────────────────
+
       updates.push('status = ?');
       values.push(validatedData.status);
 
