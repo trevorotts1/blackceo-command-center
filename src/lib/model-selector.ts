@@ -366,7 +366,21 @@ export function resolveSovereignDefault(
 ): string | null {
   const envDefault = (process.env.SOVEREIGN_DEFAULT_MODEL || '').trim();
   if (envDefault && !checkModelSovereignty(envDefault, inventory, required_modality)) {
-    return envDefault;
+    // FM-6c (env-default path): for text tasks, also guard against a pure TTS/media
+    // SOVEREIGN_DEFAULT_MODEL. checkModelSovereignty skips the modality check when
+    // required_modality === 'text' (it only checks wrong-modality for non-text), so
+    // without this guard a TTS model set as the env default would win any text task —
+    // including presentations tasks — and be pinned as the reasoning model_id.
+    // Mirrors the canServeTextTask filter applied to the eligible-inventory scan below.
+    if (required_modality === 'text') {
+      const envEntry = inventory.find((m) => m.model_id === envDefault);
+      if (!envEntry || canServeTextTask(envEntry)) {
+        return envDefault;
+      }
+      // envDefault is a pure TTS/media model — fall through to inventory scan.
+    } else {
+      return envDefault;
+    }
   }
 
   const eligible = inventory.filter(
