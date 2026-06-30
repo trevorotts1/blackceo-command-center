@@ -121,6 +121,8 @@ function createDepartmentInDbDirect(args: {
   const maxOrder = (db.prepare('SELECT MAX(sort_order) as max_order FROM workspaces').get() as { max_order: number | null }).max_order;
   const nextOrder = (maxOrder || 0) + 10;
 
+  let starterTaskId = taskId;
+
   const tx = db.transaction(() => {
     db.prepare(`
       INSERT INTO workspaces (id, name, slug, description, icon, sort_order)
@@ -144,19 +146,31 @@ function createDepartmentInDbDirect(args: {
       isMasterOrchestrator ? 1 : 0,
     );
 
-    db.prepare(`
-      INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id)
-      VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?)
-    `).run(
-      taskId, wsId, args.slug,
-      `Welcome to ${args.name}`,
-      `This is your ${args.name} department's first task. Click to edit. Your AI workforce will populate real tasks as work comes in.`,
-      headAgentId, headAgentId,
-    );
+    // FM-6: idempotency guard — skip the INSERT if a starter task already exists
+    // for this workspace (e.g. a parallel request, an external script, or a
+    // previous transaction that rolled back after the workspace was committed).
+    // Matches on the deterministic title + workspace_id pair — the natural key
+    // without requiring a schema change.
+    const existingStarterTask = db.prepare(
+      `SELECT id FROM tasks WHERE workspace_id = ? AND title = ? LIMIT 1`
+    ).get(wsId, `Welcome to ${args.name}`) as { id: string } | undefined;
+    if (existingStarterTask) {
+      starterTaskId = existingStarterTask.id;
+    } else {
+      db.prepare(`
+        INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id)
+        VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?)
+      `).run(
+        taskId, wsId, args.slug,
+        `Welcome to ${args.name}`,
+        `This is your ${args.name} department's first task. Click to edit. Your AI workforce will populate real tasks as work comes in.`,
+        headAgentId, headAgentId,
+      );
+    }
   });
   tx();
 
-  return { status: 'created', workspace_id: wsId, head_agent_id: headAgentId, starter_task_id: taskId };
+  return { status: 'created', workspace_id: wsId, head_agent_id: headAgentId, starter_task_id: starterTaskId };
 }
 
 // POST /api/departments
