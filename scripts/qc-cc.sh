@@ -177,6 +177,16 @@ blue "── 5. No Anthropic models in non-orchestrator code (QC.md #8 cost poli
 # FIX (Issue 6): exclusion widened from '-i orchestrator' to
 # '-iE orchestrat(or|ion)' to cover sibling file names / module paths that
 # contain "orchestration" rather than just "orchestrator".
+#
+# FIX (sovereignty parity): model-selector.ts's FORBIDDEN_PREFIXES is the
+# ban-list that ENFORCES "no Anthropic" — its bare `claude-*` family PREFIXES
+# (and the doc-comments that explain them) are the guard's own declaration, not
+# hardcoded inference targets. Mirror 5.2's declaration-exclusion idiom, but
+# NARROWLY: exclude only (a) bare denylist array elements
+# (`^\s*'claude-…',$`) and (b) the explanatory comment lines, BOTH scoped to
+# model-selector.ts. A genuine assignment (`const m = 'claude-…'`) — even inside
+# model-selector.ts — has an `=`/`:` before the literal, is not a bare element,
+# and is NOT a comment, so it is still caught. The whole file is NOT excluded.
 check_claude_literals() {
   local pat='claude-'
   local results
@@ -185,6 +195,8 @@ check_claude_literals() {
     | grep -vEi 'orchestrat(or|ion)' \
     | grep -v 'model-providers/anthropic.ts' \
     | grep -v 'web-agent/runner.ts' \
+    | grep -vE "model-selector\.ts:[0-9]+:[[:space:]]*'claude-[a-z0-9-]+',[[:space:]]*\$" \
+    | grep -vE "model-selector\.ts:[0-9]+:[[:space:]]*(\*|//)" \
     || true)
   [[ -z "$results" ]]  # exit 0 (pass) when no matches; exit 1 (fail) when matches found
 }
@@ -193,10 +205,14 @@ check "5.1" "no hardcoded claude-* model id in src/lib (excl. orchestrat(or|ion)
 # 5.2 detects an 'anthropic/' provider-id literal being USED as a value. The one
 # legitimate occurrence is the FORBIDDEN_PREFIXES negative-list in model-selector.ts
 # (the guard that BANS Anthropic) — exclude that declaration so the check does not
-# flag its own definition. Real usage (e.g. model: 'anthropic/claude-…') has no
-# FORBIDDEN_PREFIXES on the line and is still caught.
+# flag its own definition. The bare denylist element is `  'anthropic/',` (a quoted
+# string immediately followed by a comma); we exclude exactly that element in
+# model-selector.ts. Real usage (e.g. model: 'anthropic/claude-…') has extra chars
+# after 'anthropic/' before the closing quote, is not the bare element, and is
+# still caught. (The legacy `grep -v FORBIDDEN_PREFIXES` line filter is kept for
+# any same-line declaration idiom.)
 check "5.2" "no 'anthropic/' provider id in src/lib (excl. FORBIDDEN_PREFIXES guard decl)" \
-  "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v 'FORBIDDEN_PREFIXES' | grep ."
+  "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v 'FORBIDDEN_PREFIXES' | grep -vE \"model-selector\.ts:[[:space:]]*'anthropic/',\" | grep ."
 
 blue ""
 blue "── 5b. Embedding model hygiene (PRD 1.8c) ──"
