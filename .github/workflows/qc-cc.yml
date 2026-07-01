@@ -75,7 +75,7 @@ jobs:
             exit 1
           fi
           # Also verify a normal 200 app body does NOT trigger the guard
-          NORMAL_BODY='<!DOCTYPE html><html><head><title>Karen Vaughn Enterprises</title></head><body><div id="root"></div></body></html>'
+          NORMAL_BODY='<!DOCTYPE html><html><head><title>Summit Retail Enterprises</title></head><body><div id="root"></div></body></html>'
           if printf '%s' "$NORMAL_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
             echo "ERROR: normal app body falsely triggered the CF-challenge guard — false UNKNOWN"
             exit 1
@@ -351,3 +351,64 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+
+  # ── Authoritative client-name scan (PRD P0-3 / P2-5) ──────────────────────
+  # qc-blocked-gate.sh Assertion 5 only scans the git DIFF, so client names that
+  # were ALREADY committed never trip it. This job runs the tracked-file gate
+  # (scripts/qc-assert-no-client-names.sh) which walks EVERY tracked file on
+  # disk — the authoritative scan. A planted-fixture self-test proves the gate
+  # actually bites before the real scan runs.
+  no-client-names:
+    name: No client names in tracked files (authoritative scan)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Self-test — planted client name MUST fail the gate
+        run: |
+          # Hermetic: copy the planted fixture (which holds a denylisted name +
+          # operator path) into an isolated temp repo-root under a NON-excluded
+          # name and confirm the gate exits 1. The denylisted literal lives only
+          # in the self-excluded fixture, never inline in this workflow.
+          TMP="$(mktemp -d)"
+          cp tests/fixtures/no-client-names/planted-client-name.txt "$TMP/leak.ts"
+          if bash scripts/qc-assert-no-client-names.sh --repo-root "$TMP"; then
+            echo "ERROR: gate passed on a planted client name — the check is broken"
+            rm -rf "$TMP"
+            exit 1
+          fi
+          echo "OK: gate correctly failed (exit 1) on the planted fixture"
+          rm -rf "$TMP"
+
+      - name: Assert no client names / operator paths in any tracked file
+        run: bash scripts/qc-assert-no-client-names.sh
+
+  # ── Shell script syntax guard (PRD P0-1 regression guard) ─────────────────
+  # bash -n every shell script so a broken heredoc / quoting error can never
+  # ship. Covers scripts/*.sh and every nested scripts dir (install/, cloudflare/,
+  # integration-tests/, conversational-ai/, fleet-heartbeat/scripts/, .claude/).
+  shell-syntax:
+    name: Shell script syntax (bash -n) guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: bash -n every tracked shell script
+        run: |
+          FAIL=0
+          while IFS= read -r f; do
+            if bash -n "$f"; then
+              echo "OK   $f"
+            else
+              echo "FAIL $f"
+              FAIL=1
+            fi
+          done < <(find . -type d \( -name node_modules -o -name .git \) -prune \
+                     -o -type f -name '*.sh' -print)
+          if [ "$FAIL" -ne 0 ]; then
+            echo "One or more shell scripts failed bash -n"
+            exit 1
+          fi
+          echo "All shell scripts parsed cleanly."

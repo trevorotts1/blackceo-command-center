@@ -82,7 +82,7 @@ pm2 restart blackceo-command-center
 
 # 5. Verify the site
 sleep 5
-curl -s -o /dev/null -w "%{http_code}" https://trevor.zerohumanworkforce.com
+curl -s -o /dev/null -w "%{http_code}" https://<your-subdomain>.zerohumanworkforce.com
 # Should return: 200
 ```
 
@@ -110,7 +110,7 @@ pm2 restart blackceo-command-center
 
 # Verify
 sleep 5
-curl -s -o /dev/null -w "%{http_code}" https://trevor.zerohumanworkforce.com
+curl -s -o /dev/null -w "%{http_code}" https://<your-subdomain>.zerohumanworkforce.com
 ```
 
 ---
@@ -186,7 +186,7 @@ pm2 start npm --name "blackceo-command-center" -- start
 ### Health check returns 000 (no response)
 - Check Cloudflare tunnel status (Mac only — VPS users skip this)
 - Check PM2 logs: `pm2 logs blackceo-command-center`
-- Verify DNS resolves: `nslookup trevor.zerohumanworkforce.com`
+- Verify DNS resolves: `nslookup <your-subdomain>.zerohumanworkforce.com`
 
 ### Rollback loop (keeps rolling back)
 1. Check if issue is with new code (build succeeds but app crashes)
@@ -215,7 +215,7 @@ pm2 start npm --name "blackceo-command-center" -- start
 |----------|-------|
 | **App Directory** | `~/projects/mission-control` |
 | **PM2 Process Name** | `blackceo-command-center` |
-| **Production URL** | https://trevor.zerohumanworkforce.com |
+| **Production URL** | https://<your-subdomain>.zerohumanworkforce.com |
 | **Database File** | `mission-control.db` |
 | **Build Output** | `.next/` |
 | **Backup Location** | `.next-backup/` |

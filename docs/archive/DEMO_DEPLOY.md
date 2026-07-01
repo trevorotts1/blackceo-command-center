@@ -1,10 +1,10 @@
 # Demo Deployment Guide
 
-Deploy Mission Control as a live, read-only demo at `missioncontrol.ghray.com`.
+Deploy Mission Control as a live, read-only demo at `missioncontrol.example.com`.
 
-## Server: small-sites (Proxmox VM)
+## Server: <demo-host> (Proxmox VM)
 
-**SSH:** `ssh small-sites` (or `ssh root@178.156.199.255 -p 10100`)
+**SSH:** `ssh <demo-host>` (or `ssh root@<demo-server-ip> -p <ssh-port>`)
 
 ---
 
@@ -79,7 +79,7 @@ pm2 startup  # Follow the output command
 
 ## Step 8: Set up Cloudflare tunnel
 
-In the Cloudflare dashboard for `ghray.com`:
+In the Cloudflare dashboard for `example.com`:
 
 1. Go to **DNS** → Add a CNAME record:
    - **Name:** `missioncontrol`
@@ -88,16 +88,16 @@ In the Cloudflare dashboard for `ghray.com`:
 
 2. Or if using `cloudflared`:
 ```bash
-cloudflared tunnel route dns <tunnel-id> missioncontrol.ghray.com
+cloudflared tunnel route dns <tunnel-id> missioncontrol.example.com
 ```
 
-3. Add the tunnel config to route `missioncontrol.ghray.com` → `http://localhost:4000`
+3. Add the tunnel config to route `missioncontrol.example.com` → `http://localhost:4000`
 
 ---
 
 ## Verify
 
-- Visit `https://missioncontrol.ghray.com`
+- Visit `https://missioncontrol.example.com`
 - You should see the demo banner at the top
 - Tasks should be moving through the kanban board
 - Live feed should show agent activity

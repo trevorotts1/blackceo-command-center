@@ -8,6 +8,15 @@
  *   3. bad token (wrong bearer, valid HMAC)      → 401 (no mutation)
  *   4. unknown id (valid auth, valid status)     → 404
  *   5. invalid status value (valid auth)         → 400
+ *   6. status=done (valid auth, Skill-6 card)     → 403, always forbidden
+ *   7. status=blocked, Skill-6-marked card        → 200 (human-escalation, P2-3 follow-up)
+ *   8. unmarked card (no Skill-6 source marker)   → 403, non-Skill-6 scope rejection
+ *   9. status=blocked on an unmarked card         → 403, scope gates blocked too
+ *
+ * The fixture card's description carries the Skill-6 source marker
+ * ("Source: funnel") so it exercises the intended in-scope transitions;
+ * cases 8-9 seed a second, unmarked card to prove the scope check still
+ * 403s cards the Skill-6 producer didn't create — including for 'blocked'.
  *
  * Runs via the Node built-in test runner under tsx (`npm run test:unit`).
  *
@@ -39,6 +48,7 @@ process.env.WEBHOOK_SECRET = WEBHOOK_SECRET;
 
 const RUN_ID = Math.random().toString(36).slice(2, 10);
 const TASK_ID = `task-status-${RUN_ID}`;
+const UNMARKED_TASK_ID = `task-status-unmarked-${RUN_ID}`;
 const WS_ID = `ws-status-${RUN_ID}`;
 
 type DbModule = typeof import('../../src/lib/db');
@@ -109,11 +119,22 @@ test.before(async () => {
     [WS_ID, `status-test-${RUN_ID}`, now, now],
   );
 
-  // The one card under test, starting in backlog with a seed description.
+  // The one card under test, starting in backlog. Description carries the
+  // Skill-6 source marker ("Source: funnel") that /api/tasks/ingest writes
+  // for cc_board.py ingest_task() cards — this route only acts on cards
+  // that carry it, so the fixture must too.
   run(
     `INSERT INTO tasks (id, title, description, status, priority, workspace_id, business_id, created_at, updated_at)
-     VALUES (?, 'Skill6 funnel build card', 'Initial brief.', 'backlog', 'high', ?, 'default', ?, ?)`,
+     VALUES (?, 'Skill6 funnel build card', 'Initial brief.\n\nSource: funnel', 'backlog', 'high', ?, 'default', ?, ?)`,
     [TASK_ID, WS_ID, now, now],
+  );
+
+  // A second card with NO Skill-6 source marker, to prove the scope check
+  // still 403s cards the Skill-6 producer didn't create.
+  run(
+    `INSERT INTO tasks (id, title, description, status, priority, workspace_id, business_id, created_at, updated_at)
+     VALUES (?, 'Unmarked board card', 'Initial brief.', 'backlog', 'high', ?, 'default', ?, ?)`,
+    [UNMARKED_TASK_ID, WS_ID, now, now],
   );
 
   const route = (await import('../../src/app/api/tasks/[id]/status/route')) as RouteModule;
@@ -212,4 +233,86 @@ test('invalid status value (valid auth) → 400', async () => {
   assert.equal(res.status, 400, 'an out-of-enum status must return 400');
   // The card must remain untouched by the rejected request.
   assert.equal(currentStatus(TASK_ID), 'in_progress', 'status must NOT change on a 400');
+});
+
+// ── 6. status=done → 403, always forbidden (P2-3 follow-up) ─────────────────
+test('status=done (valid auth, Skill-6-marked card) → 403 and no mutation', async () => {
+  const before = currentStatus(TASK_ID); // 'in_progress' from test 1
+  const rawBody = JSON.stringify({ status: 'done' });
+  const res = await callRoute(TASK_ID, rawBody, {
+    authorization: `Bearer ${MC_API_TOKEN}`,
+    signature: sign(rawBody),
+  });
+
+  assert.equal(res.status, 403, "status='done' must always return 403");
+  const body = (await res.json()) as { error: string; hint: string };
+  assert.match(body.hint, /QC auto-scorer/, 'hint must explain done is QC/master-agent gated');
+  assert.doesNotMatch(
+    body.hint,
+    /blocked_reason/,
+    "the done hint must not reference blocked's old human-context fields",
+  );
+  assert.equal(currentStatus(TASK_ID), before, 'status must NOT change when done is rejected');
+});
+
+// ── 7. status=blocked on a Skill-6-marked card → 200 (P2-3 follow-up) ───────
+// The Skill-6 producer (cc_board.py BuildPhaseDriver.fail(human_required=True))
+// legitimately escalates its own cards to 'blocked' for human sign-off; this
+// is allowed for marked cards only, gated by the same hasSkill6Marker check
+// as every other status.
+test('status=blocked on a Skill-6-marked card → 200, task moved + audit rows written', async () => {
+  const rawBody = JSON.stringify({ status: 'blocked', note: 'Build failed — needs human sign-off.' });
+  const res = await callRoute(TASK_ID, rawBody, {
+    authorization: `Bearer ${MC_API_TOKEN}`,
+    signature: sign(rawBody),
+  });
+
+  assert.equal(res.status, 200, 'blocked on a Skill-6-marked card must return 200');
+  const body = (await res.json()) as { id: string; status: string; description: string };
+  assert.equal(body.id, TASK_ID, 'response must be the updated task');
+  assert.equal(body.status, 'blocked', 'status must be updated to blocked');
+  assert.match(body.description, /needs human sign-off/, 'note must be appended to description');
+
+  assert.equal(currentStatus(TASK_ID), 'blocked', 'DB row status must be persisted as blocked');
+
+  const evt = queryOne<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'task_status_changed'",
+    [TASK_ID],
+  );
+  assert.ok((evt?.n ?? 0) >= 1, 'a task_status_changed event must be written for the blocked transition');
+
+  const hist = queryOne<{ status_from: string; status_to: string }>(
+    'SELECT status_from, status_to FROM task_history WHERE task_id = ? ORDER BY changed_at DESC LIMIT 1',
+    [TASK_ID],
+  );
+  assert.equal(hist?.status_from, 'in_progress', 'task_history must record the previous status');
+  assert.equal(hist?.status_to, 'blocked', 'task_history must record the new status');
+});
+
+// ── 8. non-Skill-6 (unmarked) card → 403, regardless of status ──────────────
+test('unmarked card (no Skill-6 source marker) → 403 and no mutation', async () => {
+  const before = currentStatus(UNMARKED_TASK_ID);
+  const rawBody = JSON.stringify({ status: 'in_progress' });
+  const res = await callRoute(UNMARKED_TASK_ID, rawBody, {
+    authorization: `Bearer ${MC_API_TOKEN}`,
+    signature: sign(rawBody),
+  });
+
+  assert.equal(res.status, 403, 'a card without the Skill-6 source marker must return 403');
+  const body = (await res.json()) as { error: string; hint: string };
+  assert.match(body.error, /not a Skill-6 producer card/, 'error must explain the scope rejection');
+  assert.equal(currentStatus(UNMARKED_TASK_ID), before, 'status must NOT change on a non-Skill-6 card');
+});
+
+// ── 9. status=blocked on an unmarked card → 403 (scope gates blocked too) ───
+test('status=blocked on an unmarked card → 403 and no mutation', async () => {
+  const before = currentStatus(UNMARKED_TASK_ID);
+  const rawBody = JSON.stringify({ status: 'blocked' });
+  const res = await callRoute(UNMARKED_TASK_ID, rawBody, {
+    authorization: `Bearer ${MC_API_TOKEN}`,
+    signature: sign(rawBody),
+  });
+
+  assert.equal(res.status, 403, 'blocked on an unmarked card must still 403 — scope gates it');
+  assert.equal(currentStatus(UNMARKED_TASK_ID), before, 'status must NOT change on a non-Skill-6 card');
 });

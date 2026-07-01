@@ -12,7 +12,7 @@
  *                          creates a session, calls chat.send, advances to in_progress.
  *   Step 2 only fired on a manual "Send to Agent" click. Every auto-routed specialist
  *   task silently stalled — Curtis routed purple-duck to Graphics Lead → Graphics Lead
- *   stayed standby, no image generated, no QC. (Proven on Sheila's box.)
+ *   stayed standby, no image generated, no QC. (Proven on a client box.)
  *
  * FIX:
  *   autoDispatchTask() replicates the Step 2 logic in-process (same code path
@@ -40,11 +40,13 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as path from 'path';
+import os from 'node:os';
 import { queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { notifyOwner } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
+import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
@@ -190,11 +192,16 @@ export function resolveSpecialistSessionKey(
   workspaceId: string | undefined,
   context: string,
 ): string | null {
-  const AGENTS_ROOT = path.join(
-    process.env.HOME ?? '/Users/blackceomacmini',
-    '.openclaw',
-    'agents',
-  );
+  // P1-5 FIX — no hardcoded operator home. Was `process.env.HOME ?? <hardcoded operator
+  // absolute path>`: on a box where HOME is unset (PM2/systemd/container contexts), a
+  // CLIENT box silently resolved the OPERATOR's own home path. Mirrors
+  // src/lib/context-pack.ts agentsRoot() / src/lib/platform.ts detectPlatform(): VPS
+  // Docker keeps the `/data/.openclaw` persistent-volume marker; any home-relative
+  // fallback goes through `os.homedir()`.
+  const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  const AGENTS_ROOT = detectPlatform() === 'vps-docker'
+    ? '/data/.openclaw/agents'
+    : path.join(homeDir, '.openclaw', 'agents');
 
   // Attempt 1: lookup workspace slug from DB.
   if (workspaceId) {

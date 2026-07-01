@@ -249,7 +249,7 @@ describe('company_branding — config file rules', () => {
         prepare: (sql: string) => ({
           get: () => {
             if (sql.includes('sqlite_master')) return { name: 'companies' };
-            if (sql.includes('SELECT name FROM companies')) return { name: 'Karen Vaughn Enterprises' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Summit Retail Enterprises' };
             return undefined;
           },
           all: () => [],
@@ -385,7 +385,7 @@ describe('company_branding — config file rules', () => {
   // Implementation: deep-checks.ts falls through all guards with dbRowAbsent=true,
   // configExists=true, configName set — reaches the full happy-path return.
   it('row 36: config present with valid companyName + DB row absent (not empty, truly absent) → pass=true', async () => {
-    writeCompanyConfig(tmpDir, { companyName: 'Karen Vaughn Enterprises' });
+    writeCompanyConfig(tmpDir, { companyName: 'Summit Retail Enterprises' });
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
@@ -520,7 +520,7 @@ describe('company_branding — DB branding checks', () => {
         prepare: (sql: string) => ({
           get: () => {
             if (sql.includes('sqlite_master')) return { name: 'companies' };
-            if (sql.includes('SELECT name FROM companies')) return { name: 'Karen Vaughn Enterprises' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Summit Retail Enterprises' };
             return undefined;
           },
           all: () => [],
@@ -817,7 +817,7 @@ describe('disk_headroom', () => {
   // Row 35: wrong-mount false-green — /data exists on a SEPARATE high-capacity
   // filesystem; the CC app runs from process.cwd() on a LOW-space partition.
   //
-  // The Sheila-class false-green: a previous Docker install left an empty /data
+  // The wrong-mount-class false-green: a previous Docker install left an empty /data
   // directory on the root filesystem (root has 80 GB free). The CC app is
   // installed at ~/blackceo-command-center on a separate /home partition with
   // only 300 MB free. An old _resolve_disk_path() heuristic that picks /data
@@ -1069,11 +1069,11 @@ describe('html_title', () => {
 
   // Row 8: HTML title contains client brand name → PASS
   it('row 8: branded HTML title → pass=true', async () => {
-    writeServerHtml(tmpDir, 'Karen Vaughn Enterprises');
+    writeServerHtml(tmpDir, 'Summit Retail Enterprises');
     const { checkHtmlTitle } = await loadChecks();
     const result = checkHtmlTitle();
     expect(result.pass).toBe(true);
-    expect((result as { title?: string }).title).toBe('Karen Vaughn Enterprises');
+    expect((result as { title?: string }).title).toBe('Summit Retail Enterprises');
     expect(result.detail).toMatch(/row 8.*PASS|PASS.*row 8/i);
   });
 
@@ -1160,8 +1160,8 @@ describe('next_public_app_url', () => {
   // the hostname in NEXT_PUBLIC_APP_URL.  Without CC_PUBLIC_URL, a non-localhost
   // URL cannot be verified and returns FAIL (Row 32 false-green fix).
   it('row 31: NEXT_PUBLIC_APP_URL set to valid absolute URL + CC_PUBLIC_URL matches → pass=true', async () => {
-    process.env.NEXT_PUBLIC_APP_URL = 'https://karen.zerohumanworkforce.com';
-    process.env.CC_PUBLIC_URL = 'https://karen.zerohumanworkforce.com';
+    process.env.NEXT_PUBLIC_APP_URL = 'https://acme.zerohumanworkforce.com';
+    process.env.CC_PUBLIC_URL = 'https://acme.zerohumanworkforce.com';
     const { checkNextPublicAppUrl } = await loadChecks();
     const result = checkNextPublicAppUrl();
     expect(result.pass).toBe(true);
@@ -1178,7 +1178,7 @@ describe('next_public_app_url', () => {
   // Row 32: NEXT_PUBLIC_APP_URL set to localhost but CC_PUBLIC_URL is a real domain → FAIL
   it('row 32: NEXT_PUBLIC_APP_URL=localhost but CC_PUBLIC_URL is remote domain → pass=false', async () => {
     process.env.NEXT_PUBLIC_APP_URL = 'http://localhost:4000';
-    process.env.CC_PUBLIC_URL = 'https://karen.zerohumanworkforce.com';
+    process.env.CC_PUBLIC_URL = 'https://acme.zerohumanworkforce.com';
     const { checkNextPublicAppUrl } = await loadChecks();
     const result = checkNextPublicAppUrl();
     expect(result.pass).toBe(false);
@@ -1310,7 +1310,7 @@ describe('next_public_app_url', () => {
   // (IPv6 loopback + remote CC_PUBLIC_URL = same mismatch as 127.0.0.1 + remote CC_PUBLIC_URL)
   it('Round-4 Item 9 mismatch: NEXT_PUBLIC_APP_URL=[::1] + CC_PUBLIC_URL=real domain → pass=false (IPv6 localhost mismatch)', async () => {
     process.env.NEXT_PUBLIC_APP_URL = 'http://[::1]:3000';
-    process.env.CC_PUBLIC_URL = 'https://karen.zerohumanworkforce.com';
+    process.env.CC_PUBLIC_URL = 'https://acme.zerohumanworkforce.com';
     const { checkNextPublicAppUrl } = await loadChecks();
     const result = checkNextPublicAppUrl();
     // Must FAIL: IPv6 localhost + remote CC_PUBLIC_URL = localhost mismatch

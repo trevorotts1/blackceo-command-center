@@ -52,8 +52,8 @@
 #     the Mac roster from ~/.ssh/config rescue-* aliases. Keep both in sync with
 #     ~/clawd/accounts/accounts.md when the fleet changes.
 #
-# This script does NOT touch Trevor's own Mac gateway (blackceomacmini) and does
-# NOT touch any client's own off-limits Cloudflare account (Track B clients).
+# This script does NOT touch the operator's own Mac gateway and does NOT touch
+# any client's own off-limits Cloudflare account (Track B clients).
 
 set -u
 set -o pipefail
@@ -91,8 +91,8 @@ fi
 
 TS=$(date -u +%Y%m%d-%H%M%S)
 KEY_NAME="RESCUE_RANGERS_WEBHOOK_URL"
-SSH_KEY="${SSH_KEY:-/Users/blackceomacmini/.ssh/id_ed25519}"
-SSH_OPTS=(-i "${SSH_KEY}" -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/Users/blackceomacmini/.ssh/known_hosts)
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/id_ed25519}"
+SSH_OPTS=(-i "${SSH_KEY}" -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${HOME}/.ssh/known_hosts")
 # Mac-tunnel SSH uses the ~/.ssh/config aliases directly (ProxyCommand handles
 # cloudflared). BatchMode + accept-new keep it non-interactive; the per-host
 # service-token env vars must already be exported (sourced from the secrets .env).
@@ -102,59 +102,61 @@ SECRETS_ENV="${HOME}/.openclaw/secrets/.env"
 log() { printf '%s %s\n' "[$(date -u +%H:%M:%SZ)]" "$*"; }
 
 # Source the operator secrets so CF Access service-token env vars are available
-# to the Mac-tunnel ProxyCommands (sonatta/jocelyn/etc. inject them inline).
+# to the Mac-tunnel ProxyCommands (per-host aliases inject them inline).
 if [[ -f "${SECRETS_ENV}" ]]; then
   set -a; # shellcheck disable=SC1090
   source "${SECRETS_ENV}"; set +a
 fi
 
-# ------------------------------------------------------------- VPS roster ----
-# client_label|ip|container|compose_project_dir|agent_name
-# Keep in sync with propagate-rescue-chat-id.sh ROSTER + accounts.md.
+# ------------------------------------------------------------- Fleet roster ----
+# The fleet roster (client box labels, IPs, container names, SSH aliases, and
+# per-box agent display names) is CLIENT-SPECIFIC and MUST NOT be committed to
+# this fleet-wide repo. It is loaded at runtime from operator-local roster files
+# that are never checked in. Override the paths with the env vars below.
+#
+#   Default dir:  ${CLAWD_HOME:-$HOME/clawd}/accounts/
+#   VPS roster:   RESCUE_VPS_ROSTER_FILE  (default: <dir>/rescue-vps-roster.txt)
+#   Mac roster:   RESCUE_MAC_ROSTER_FILE  (default: <dir>/rescue-mac-roster.txt)
+#
+# Line formats (pipe-delimited, one box per line):
+#   VPS:  client_label|ip|container|compose_project_dir|agent_name
+#   Mac:  client_label|ssh_alias|agent_name
+#         ssh_alias resolves through ~/.ssh/config (ProxyCommand = cloudflared
+#         access ssh). Bare-Mac OpenClaw lives under ~/.openclaw on the remote home.
+#
 # agent_name is the display name the local agent uses in the escalation payload.
-VPS_ROSTER=(
-  "corey|187.77.204.227|openclaw-hy5t-openclaw-1|/docker/openclaw-hy5t|Stefanie"
-  "maria-anderson|187.77.10.144|openclaw-qxqt-openclaw-1|/docker/openclaw-qxqt|Sir Jordan"
-  "beverly-sanders|72.62.170.43|openclaw-0ht9-openclaw-1|/docker/openclaw-0ht9|Benjamin"
-  "evelyn-bethune|2.24.85.21|openclaw-c54p-openclaw-1|/docker/openclaw-c54p|Temperance"
-  "angela-t|187.77.9.130|openclaw-prji-openclaw-1|/docker/openclaw-prji|DoraMilaje"
-  "angeleen|187.77.223.62|openclaw-lydh-openclaw-1|/docker/openclaw-lydh|Ava"
-  "monique-tucker|177.7.42.223|openclaw-jdbv-openclaw-1|/docker/openclaw-jdbv|Lia"
-  "lyric-hawkins|187.127.251.97|openclaw-4pkz-openclaw-1|/docker/openclaw-4pkz|NEXORA"
-)
+# Blank lines and lines starting with '#' are ignored; omit or comment out any
+# opted-out box in the roster file. Keep both files in sync with the operator's
+# accounts ledger. The operator's own Mac gateway is intentionally NOT rostered.
+CLAWD_HOME="${CLAWD_HOME:-${HOME}/clawd}"
+VPS_ROSTER_FILE="${RESCUE_VPS_ROSTER_FILE:-${CLAWD_HOME}/accounts/rescue-vps-roster.txt}"
+MAC_ROSTER_FILE="${RESCUE_MAC_ROSTER_FILE:-${CLAWD_HOME}/accounts/rescue-mac-roster.txt}"
 
-# ------------------------------------------------- Mac-tunnel roster ----------
-# client_label|ssh_alias|agent_name
-# ssh_alias resolves through ~/.ssh/config (ProxyCommand = cloudflared access ssh).
-# Bare-Mac OpenClaw lives under ~/.openclaw on the remote user's home.
-# (Trevor's own Mac is intentionally NOT in this list.)
-MAC_ROSTER=(
-  "teresa-pelham|rescue-teresa-pelham|Keez"
-  "kofi-bryant|rescue-kofi-bryant|Kofi-agent"
-  "cassandra-henriquez|rescue-cassandra-henriquez|LoveBot"
-  "karen-vaughn|rescue-karen-vaughn|Lennox"
-  # "jill-bulluck|rescue-jill-bulluck|Jill-agent"  # OPTED OUT -- excluded per fleet-heartbeat exclusion rule
-  "sheila-reynolds|rescue-sheila-reynolds|Curtis"
-  "aurelia-gardner|rescue-aurelia-gardner|Neil"
-  "lyric-hawkins-mac|rescue-lyric-hawkins|NEXORA"
-  "leanne-dolce|rescue-leanne-dolce|LeAnne-agent"
-  "sonatta-camara|rescue-sonatta-camara|Sonatta-agent"
-  "talaya-kelley|rescue-talaya-kelley|Talaya-agent"
-  "stephanie-wall|rescue-stephanie-wall|Stephanie-agent"
-  "jocelyn-mcclure|rescue-jocelyn-mcclure|Jocelyn-agent"
-  # Added 2026-06-26 (RR-roster gap closure):
-  "barret-matthews|rescue-barret-matthews|Barret-agent"
-  "barret-matthews-mini-2026|rescue-barrett-matthews-mini-2026|Barret-agent-2"
-  "christy-staples|rescue-christy-staples|Christy-agent"
-  "erin-garrett|rescue-erin-garrett|Erin-agent"
-  "jennifer-allen|rescue-jennifer-allen|Jennifer-agent"
-  "star-bobatoon|rescue-star-bobatoon|Star-agent"
-  # NOTE: Maria Anderson Mac (rescue-maria-anderson) is INTENTIONALLY omitted here.
-  # She already has a VPS entry (187.77.10.144) in VPS_ROSTER. Adding her Mac alias
-  # without confirming which box is her primary would double-escalate. Trevor must
-  # confirm whether rescue-maria-anderson is her Mac or a stale tunnel before adding.
-  # rescue-maria-anderson-cm also exists but was OFFLINE in the probe. Both are pending.
-)
+_load_roster() {
+  # Emit non-blank, non-comment lines from a roster file (empty if absent).
+  local file="$1"
+  [ -f "${file}" ] || return 0
+  grep -vE '^[[:space:]]*(#|$)' "${file}" || true
+}
+
+VPS_ROSTER=()
+while IFS= read -r _line; do
+  [ -n "${_line}" ] && VPS_ROSTER+=("${_line}")
+done < <(_load_roster "${VPS_ROSTER_FILE}")
+
+MAC_ROSTER=()
+while IFS= read -r _line; do
+  [ -n "${_line}" ] && MAC_ROSTER+=("${_line}")
+done < <(_load_roster "${MAC_ROSTER_FILE}")
+
+# Warn loudly (never silently no-op) when the in-scope roster is empty: the most
+# likely cause is a missing operator-local roster file, not an empty fleet.
+if [[ "${MAC_ONLY}" != "1" && "${#VPS_ROSTER[@]}" -eq 0 ]]; then
+  echo "WARN: VPS roster empty. Create ${VPS_ROSTER_FILE} (client_label|ip|container|compose_project_dir|agent_name per line) or set RESCUE_VPS_ROSTER_FILE."
+fi
+if [[ "${VPS_ONLY}" != "1" && "${#MAC_ROSTER[@]}" -eq 0 ]]; then
+  echo "WARN: Mac roster empty. Create ${MAC_ROSTER_FILE} (client_label|ssh_alias|agent_name per line) or set RESCUE_MAC_ROSTER_FILE."
+fi
 
 # --------------------------------------------- AGENTS.md section builder ------
 # Emits the canonical "Escalate to Rescue Rangers" markdown block for a box.
@@ -347,11 +349,11 @@ failures=()
 ok=()
 
 # ============================================================ VPS BOXES =======
-if [[ "${MAC_ONLY}" != "1" ]]; then
+if [[ "${MAC_ONLY}" != "1" && "${#VPS_ROSTER[@]}" -gt 0 ]]; then
   for entry in "${VPS_ROSTER[@]}"; do
     IFS='|' read -r client ip container compose_dir agent <<< "${entry}"
     log "VPS ${client} (${ip}): starting."
-    # box_name = container label (e.g. openclaw-hy5t-openclaw-1 -> openclaw-hy5t)
+    # box_name = container label (e.g. openclaw-xxxx-openclaw-1 -> openclaw-xxxx)
     box_name="${container%%-openclaw-1}"
     section_b64=$(make_section "${client}" "${agent}" "${box_name}" "VPS" | base64 | tr -d '\n')
 
@@ -484,11 +486,11 @@ REMOTE
 fi
 
 # ===================================================== MAC-TUNNEL BOXES ========
-if [[ "${VPS_ONLY}" != "1" ]]; then
+if [[ "${VPS_ONLY}" != "1" && "${#MAC_ROSTER[@]}" -gt 0 ]]; then
   for entry in "${MAC_ROSTER[@]}"; do
     IFS='|' read -r client alias agent <<< "${entry}"
     log "MAC ${client} (${alias}): starting."
-    # box_name = alias without the "rescue-" prefix (e.g. rescue-karen-vaughn -> karen-vaughn)
+    # box_name = alias without the "rescue-" prefix (e.g. rescue-<client-slug> -> <client-slug>)
     box_name="${alias#rescue-}"
     # All fleet Mac clients are Mac Mini; update roster entry if a client has a MacBook Pro.
     box_type="Mac Mini"

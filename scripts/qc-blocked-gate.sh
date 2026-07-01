@@ -91,6 +91,15 @@ if [[ "${SKIP_SCHEDULER:-0}" != "1" ]]; then
 fi
 
 # ── Assertion 5: No client names in changed files (fleet-wide guard) ──────────
+# SCOPE: DIFF-ONLY fast-path. This assertion greps only the uncommitted git diff
+# (added `+` lines), so it catches a client name being introduced in the CURRENT
+# change set but CANNOT catch names that were ALREADY committed to tracked files.
+#
+# AUTHORITATIVE SCAN: scripts/qc-assert-no-client-names.sh walks EVERY tracked
+# file on disk (not just the diff) and is the source of truth for the fleet-wide
+# "no client names" invariant (wired into CI as the `no-client-names` job). This
+# diff check is kept only as a fast local pre-commit signal; a green result here
+# does NOT imply the tree is clean — run qc-assert-no-client-names.sh for that.
 if command -v git &>/dev/null && git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null; then
   # Only scan the diff if we're in a git repo.
   DIFF_FILES=$(git -C "$REPO_ROOT" diff --name-only HEAD 2>/dev/null || true)
@@ -103,10 +112,10 @@ if command -v git &>/dev/null && git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/
       HITS=$(echo "$DIFF_ADDED" | grep -E "$CLIENT_NAMES_PATTERN" | head -3)
       check "no-client-names-in-diff" "fail" "Client name in new diff lines: $HITS"
     else
-      check "no-client-names-in-diff" "pass"
+      check "no-client-names-in-diff (diff-scope; authoritative scan = qc-assert-no-client-names.sh)" "pass"
     fi
   else
-    check "no-client-names-in-diff" "pass" "(no diff to scan)"
+    check "no-client-names-in-diff (diff-scope; authoritative scan = qc-assert-no-client-names.sh)" "pass" "(no diff to scan)"
   fi
 fi
 

@@ -17,7 +17,7 @@
  *   min_uptime ensures PM2 actually trips max_restarts on a fast-failing
  *   process instead of resetting the counter on every brief launch.
  *   exp_backoff_restart_delay backs off the loop instead of hammering.
- *   Together they prevent the 126K-restart loops (Cassandra/Monique/Sheila).
+ *   Together they prevent the 126K-restart loops seen on the worst-hit boxes.
  *
  * INSTALLER INSTRUCTIONS:
  *   Replace __INSTALL_DIR__ with the absolute path where the repo is checked

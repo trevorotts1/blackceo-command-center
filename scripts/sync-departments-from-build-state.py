@@ -15,10 +15,19 @@ WHY THIS EXISTS:
   client dashboard showed the same 17 departments regardless of their interview.
 
 SOURCE OF TRUTH (priority order):
-  1. Build-state companySlug -> ~/clawd/zero-human-company/<slug>/departments.json
-  2. Most-recently-modified ~/clawd/zero-human-company/<slug>/departments.json
-  3. ~/clawd/zhc/<slug>/departments.json (short-alias)
-  4. $COMPANY_SLUG env override of (1)
+  Canonical master-files roots (where build-workforce.py actually writes, PRD 1.9
+  resolve_company_paths / detect_platform.py get_openclaw_paths()['company_root']):
+    - $MASTER_FILES_DIR/zero-human-company/<slug>/departments.json (env override)
+    - VPS:  /data/openclaw-master-files/zero-human-company/<slug>/departments.json
+    - Mac:  ~/Downloads/openclaw-master-files/zero-human-company/<slug>/departments.json
+  Legacy roots (backward-compat READS only, never written):
+    - ~/clawd/zero-human-company/<slug>/departments.json
+    - ~/clawd/zhc/<slug>/departments.json (short alias)
+    - /data/clawd/zero-human-company/<slug>/departments.json (VPS legacy)
+  Company selection within the resolved roots:
+    1. --company-slug / $COMPANY_SLUG
+    2. build-state companySlug (fallback: clientSlug)
+    3. Most-recently-modified departments.json (last resort; emits a loud warning)
 
 USAGE:
   python3 sync-departments-from-build-state.py
@@ -59,10 +68,48 @@ def _load_build_state():
 
 
 def _zhc_roots():
-    return [
-        Path.home() / "clawd" / "zero-human-company",
-        Path.home() / "clawd" / "zhc",
-    ]
+    """Zero-Human-Company roots to scan for <slug>/departments.json, priority order.
+
+    SOURCE OF TRUTH: onboarding/shared-utils/detect_platform.py
+      get_openclaw_paths()['company_root'] (canonical) + get_legacy_company_roots()
+      (backward-compat). This CC-repo script CANNOT import that module at runtime
+      (different install trees), so the resolution is REPLICATED inline here.
+      KEEP IN SYNC with detect_platform.py.
+
+    Canonical master-files roots FIRST -- this is where build-workforce.py
+    (PRD 1.9 resolve_company_paths) actually writes the client's real build:
+      1. $MASTER_FILES_DIR/zero-human-company  (same override the resolver honors)
+      2. VPS:  /data/openclaw-master-files/zero-human-company
+      3. Mac:  ~/Downloads/openclaw-master-files/zero-human-company
+    Both platform defaults are always listed; only the root that exists on this
+    box is scanned, so a single list works on Mac and VPS alike.
+
+    THEN legacy roots (READ-ONLY backward-compat; never written by new builds):
+      4. ~/clawd/zero-human-company        (v9.6.0+ canonical, legacy)
+      5. ~/clawd/zhc                       (short alias, legacy)
+      6. /data/clawd/zero-human-company    (VPS pre-master-files workforces)
+    """
+    roots = []
+    # 1. Canonical: honor MASTER_FILES_DIR before any default (matches resolver).
+    env_master = os.environ.get("MASTER_FILES_DIR", "").strip()
+    if env_master:
+        roots.append(Path(env_master) / "zero-human-company")
+    # 2-3. Canonical platform defaults (VPS + Mac).
+    roots.append(Path("/data/openclaw-master-files") / "zero-human-company")
+    roots.append(Path.home() / "Downloads" / "openclaw-master-files" / "zero-human-company")
+    # 4-6. Legacy read-only roots (backward-compat).
+    roots.append(Path.home() / "clawd" / "zero-human-company")
+    roots.append(Path.home() / "clawd" / "zhc")
+    roots.append(Path("/data/clawd") / "zero-human-company")
+
+    # De-dup while preserving priority order (MASTER_FILES_DIR may equal a default).
+    seen = set()
+    deduped = []
+    for r in roots:
+        if r not in seen:
+            seen.add(r)
+            deduped.append(r)
+    return deduped
 
 
 def _scan_zhc_companies():
@@ -82,19 +129,26 @@ def find_departments(company_slug=None):
     """Locate the client's real ZHC departments.json. Returns (data, path) or (None, None)."""
     target = company_slug or os.environ.get("COMPANY_SLUG", "").strip()
     if not target:
-        target = _load_build_state().get("companySlug", "").strip()
+        # Honor build-state companySlug; fall back to clientSlug. Onboarding is
+        # standardizing on companySlug, but older build-states only wrote
+        # clientSlug -- support both during the transition.
+        state = _load_build_state()
+        target = (state.get("companySlug") or state.get("clientSlug") or "").strip()
 
     companies = _scan_zhc_companies()
 
-    # 1. Exact slug match
+    # 1. Exact slug match (deterministic, preferred).
     if target:
         for slug, dj in companies:
             if slug == target:
                 data = _read_json(dj)
                 if data:
                     return data, str(dj)
+        print(f"  [sync] WARNING: build-state slug '{target}' not found under any ZHC "
+              f"root; falling back to the most-recently-modified departments.json.",
+              file=sys.stderr)
 
-    # 2. Most-recently-modified ZHC departments.json
+    # 2. Most-recently-modified ZHC departments.json (last-resort fallback).
     with_mtime = sorted(
         ((dj.stat().st_mtime, dj) for _, dj in companies),
         reverse=True,
@@ -102,6 +156,11 @@ def find_departments(company_slug=None):
     for _, dj in with_mtime:
         data = _read_json(dj)
         if data:
+            if not target:
+                print("  [sync] WARNING: no companySlug/clientSlug in build-state and no "
+                      "--company-slug/$COMPANY_SLUG override; using most-recently-modified "
+                      f"departments.json ({dj}). Set companySlug for deterministic sync.",
+                      file=sys.stderr)
             return data, str(dj)
 
     return None, None
@@ -125,6 +184,11 @@ def find_db(explicit=None):
     candidates = [
         Path.cwd() / "mission-control.db",
         Path.home() / "projects" / "command-center" / "mission-control.db",
+        # VPS canonical: vps-docker-bootstrap.sh pins DATABASE_PATH here and
+        # watchdog-cc.sh / atomic-deploy.sh resolve the /data install dir. Placed
+        # right after the Mac ~/projects/command-center path (mirrors watchdog-cc.sh
+        # which checks $HOME/projects/command-center then /data/projects/command-center).
+        Path("/data/projects/command-center") / "mission-control.db",
         Path.home() / "projects" / "mission-control" / "mission-control.db",
         Path("/opt/mission-control/mission-control.db"),
         Path("/app/mission-control.db"),

@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs';
 import * as path from 'path';
+import os from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
+import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
@@ -13,11 +15,26 @@ import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
 
-const AGENTS_ROOT = path.join(
-  process.env.HOME ?? '/Users/blackceomacmini',
-  '.openclaw',
-  'agents',
-);
+/**
+ * P1-5 FIX — no hardcoded operator home.
+ *
+ * Was `process.env.HOME ?? <hardcoded operator absolute path>`: when HOME is
+ * unset (PM2/systemd/container contexts), a CLIENT box silently resolved the
+ * OPERATOR's own home path — wrong runtime dir AND an operator-identifying
+ * string baked into a fleet-wide repo.
+ *
+ * Mirrors the established platform convention (src/lib/platform.ts
+ * detectPlatform() + src/lib/context-pack.ts agentsRoot()): VPS Docker
+ * installs keep `/data/.openclaw` as the persistent-volume marker, and any
+ * home-relative fallback resolves via `os.homedir()`, never a literal path.
+ */
+function homeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || os.homedir();
+}
+
+const AGENTS_ROOT = detectPlatform() === 'vps-docker'
+  ? '/data/.openclaw/agents'
+  : path.join(homeDir(), '.openclaw', 'agents');
 
 /**
  * FIX 1 — resolveSpecialistSessionKey (route handler copy)

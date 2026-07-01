@@ -32,7 +32,7 @@ test('deriveProductName: non-empty company name produces "<Name> Command Center"
   }
   assert.equal(deriveProductName('Wake-Up Rise-Up Live-Up'), 'Wake-Up Rise-Up Live-Up Command Center');
   assert.equal(deriveProductName('Acme Industries'), 'Acme Industries Command Center');
-  assert.equal(deriveProductName('  Karen Vaughn Enterprises  '), 'Karen Vaughn Enterprises Command Center');
+  assert.equal(deriveProductName('  Summit Retail Enterprises  '), 'Summit Retail Enterprises Command Center');
   assert.equal(deriveProductName(''), '');
   assert.equal(deriveProductName('  '), '');
 });
