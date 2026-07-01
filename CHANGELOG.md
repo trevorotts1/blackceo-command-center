@@ -1,3 +1,9 @@
+## [v4.57.0] — 2026-07-01 — feat: task status-transition consumer endpoint (Skill-6 Kanban)
+
+- **New consumer endpoint `POST /api/tasks/[id]/status` (`src/app/api/tasks/[id]/status/route.ts`).** Applies a board task's status transition delivered by the `cc_board.py` producer. Authenticates via `Authorization: Bearer <MC_API_TOKEN>` and verifies `x-webhook-signature` = HMAC-SHA256(raw body, `WEBHOOK_SECRET`) as lowercase hex — both constant-time. On a valid transition it mutates the task status, emits a `task_status_changed` event, and writes a `task_history` row; rejects bad signature/token (401), unknown id (404), invalid status (400).
+- **Verified end-to-end** against the already-committed `cc_board.py` producer: producer HMAC equals consumer HMAC over identical raw bytes; a tampered body is rejected (401) while the untampered control passes (200). Unit suite `tests/unit/task-status-transition.test.ts` (5/5) + `tsc --noEmit` clean.
+- No migration, no schema change. Additive. No client names in changed files.
+
 ## [v4.56.2] — 2026-06-29 — fix: FM-6 dedupe welcome task rows + correct presentations model_id env-default path
 
 - **FM-6 dedupe fix — `src/app/api/departments/route.ts`:** `createDepartmentInDbDirect` had no idempotency on the "Welcome to …" starter-task INSERT. Every call that bypassed the outer workspace-exists check (parallel requests, external scripts, aborted transactions) could insert a second row with the same title and workspace_id. Added a check-before-insert guard inside the transaction: `SELECT id FROM tasks WHERE workspace_id = ? AND title = ? LIMIT 1` — if a row already exists, its id is reused and the INSERT is skipped. Minimal, schema-free, consistent with the codebase's existing check-before-insert pattern.
