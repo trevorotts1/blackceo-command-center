@@ -30,16 +30,30 @@ import ollamaCloudProvider from './ollama-cloud';
 import ollamaLocalProvider from './ollama-local';
 
 /**
+ * Model-sovereignty gate (P2-2). The Anthropic connector is registered ONLY on
+ * operator boxes that explicitly opt in via `ALLOW_ANTHROPIC_PROVIDER=true`.
+ * On client boxes the flag is unset (default OFF), so `anthropicProvider` is
+ * NEVER added to `ALL_PROVIDERS` — and because the weekly `refresh-models` job
+ * defaults to `ALL_PROVIDERS`, it therefore skips the connector entirely and
+ * cannot populate Anthropic `model_registry` rows even when an
+ * `ANTHROPIC_API_KEY` happens to be present on the box. This is the
+ * source-level enforcement of "Anthropic is forbidden for all client
+ * dispatches" (see model-selector `FORBIDDEN_PREFIXES`).
+ */
+const ALLOW_ANTHROPIC_PROVIDER = process.env.ALLOW_ANTHROPIC_PROVIDER === 'true';
+
+/**
  * Every provider connector available in the registry. Iteration order is the
  * default refresh order for the weekly cron, so high-traffic providers come
- * first (Ollama Cloud, OpenAI, Anthropic, Google, xAI) and the long-tail
- * generation providers come last.
+ * first (Ollama Cloud, OpenAI, [Anthropic — operator-only], Google, xAI) and
+ * the long-tail generation providers come last.
  */
 export const ALL_PROVIDERS: ModelProvider[] = [
   ollamaCloudProvider,
   ollamaLocalProvider,
   openaiProvider,
-  anthropicProvider,
+  // Operator-only (default OFF on client boxes): see ALLOW_ANTHROPIC_PROVIDER.
+  ...(ALLOW_ANTHROPIC_PROVIDER ? [anthropicProvider] : []),
   googleProvider,
   xaiProvider,
   openrouterProvider,

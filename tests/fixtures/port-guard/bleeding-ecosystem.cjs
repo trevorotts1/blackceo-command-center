@@ -2,8 +2,8 @@
  * PLANTED FIXTURE — must FAIL the port-pin-and-env-bleed-guard CI check.
  *
  * This file replicates the EXACT vulnerable pattern that caused the CC
- * crash-loop on 13+ client boxes (Cassandra 71,551 restarts / Monique
- * 126,935 restarts / Sheila 2,191 restarts):
+ * crash-loop on 13+ client boxes (observed restart counts of 71,551 /
+ * 126,935 / 2,191 on the three worst-hit boxes):
  *
  *   1. process.env.PORT read in args  — OpenClaw gateway PORT bleeds in
  *   2. PORT: key in the env block     — Hostinger injected PORT bleeds in

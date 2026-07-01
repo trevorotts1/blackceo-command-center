@@ -1444,7 +1444,7 @@ const migrations: Migration[] = [
     up: (db) => {
       // Bug 3 cleanup (v4.0.2): deletes orphan rows in persona_selection_log
       // whose task_id is null/empty/sentinel/no-longer-exists. These rows
-      // were the trigger for the migration-034 FK breakage on the Evelyn
+      // were the trigger for the migration-034 FK breakage on a client
       // canary deploy.
       console.log('[Migration 045] Cleaning persona_selection_log orphans...');
       const info = db.prepare(`SELECT COUNT(*) as c FROM persona_selection_log`).get() as { c: number } | undefined;
@@ -2113,11 +2113,16 @@ const migrations: Migration[] = [
       const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
       if (!cols.includes('archived_at')) {
         db.exec(`ALTER TABLE tasks ADD COLUMN archived_at TEXT`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at)`);
-        console.log('[Migration 058] tasks.archived_at + index added');
+        console.log('[Migration 058] tasks.archived_at column added');
       } else {
-        console.log('[Migration 058] tasks.archived_at already present, skipping');
+        console.log('[Migration 058] tasks.archived_at already present, skipping column add');
       }
+      // Index must be created unconditionally (outside the column-absence guard):
+      // schema.ts already defines archived_at on fresh installs, so the ALTER TABLE
+      // branch above is skipped there — but the index still needs to exist.
+      // IF NOT EXISTS makes this safe/idempotent on every database, old or new.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at)`);
+      console.log('[Migration 058] idx_tasks_archived_at index ready');
     },
   },
 

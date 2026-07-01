@@ -95,7 +95,7 @@ function normalizeWorkspace(ws: Record<string, unknown>): DepartmentResolution {
 
   // head_agent_name is populated by the agents LEFT JOIN in /api/workspaces/[id]
   // and /api/workspaces (list). When present it is the real per-client agent
-  // identity (e.g. "Candace", "Sir Jordan") rather than a generic role label.
+  // identity (e.g. "Nova", "Orion") rather than a generic role label.
   const headAgentName = (ws.head_agent_name as string | null | undefined) ?? null;
   const headTitle = headAgentName || `Head of ${name}`;
 

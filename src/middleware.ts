@@ -28,8 +28,9 @@ import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
  *     are REJECTED with a 503 misconfiguration error instead of being let
  *     through. Same-origin browser requests still work because Cloudflare
  *     Access (layer 1) gates them.
- *   - The webhook routes in WEBHOOK_SECRET_ROUTES (ingest + agent-completion)
- *     are REJECTED with a 503 when WEBHOOK_SECRET is unset, because their
+ *   - The webhook routes in WEBHOOK_SECRET_ROUTES (ingest, agent-completion,
+ *     and the Skill-6 per-task status consumer /api/tasks/[id]/status) are
+ *     REJECTED with a 503 when WEBHOOK_SECRET is unset, because their
  *     route-level HMAC check authenticates nothing without the secret.
  *   - An operator may set ALLOW_INSECURE_OPEN_API=true to restore the legacy
  *     open behavior on a not-yet-provisioned box. This is logged loudly and
@@ -70,8 +71,29 @@ const ALLOW_INSECURE_OPEN_API = process.env.ALLOW_INSECURE_OPEN_API === 'true';
  */
 const WEBHOOK_SECRET_ROUTES = ['/api/tasks/ingest', '/api/webhooks/agent-completion'];
 
+/**
+ * Same family as WEBHOOK_SECRET_ROUTES, but for routes with a dynamic `[id]`
+ * segment in the middle of the path (e.g. `/api/tasks/{id}/status`, the
+ * Skill-6 status-transition consumer route). `matchesRoute`'s prefix match
+ * can't express "one dynamic segment then a fixed suffix", so those routes
+ * get a regex matcher instead. Keep in sync with the route's own auth
+ * comment (src/app/api/tasks/[id]/status/route.ts) — it self-authenticates
+ * with the identical Bearer + HMAC scheme, so it belongs in the same
+ * fail-closed family as the static WEBHOOK_SECRET_ROUTES entries.
+ */
+const WEBHOOK_SECRET_DYNAMIC_ROUTES: RegExp[] = [
+  /^\/api\/tasks\/[^/]+\/status$/, // /api/tasks/{id}/status
+];
+
 function matchesRoute(pathname: string, prefix: string): boolean {
   return pathname === prefix || pathname.startsWith(prefix + '/');
+}
+
+function isWebhookSecretRoute(pathname: string): boolean {
+  return (
+    WEBHOOK_SECRET_ROUTES.some((r) => matchesRoute(pathname, r)) ||
+    WEBHOOK_SECRET_DYNAMIC_ROUTES.some((r) => r.test(pathname))
+  );
 }
 
 if (DEMO_MODE) {
@@ -182,7 +204,7 @@ export function middleware(request: NextRequest): NextResponse {
     if (
       !WEBHOOK_SECRET &&
       !ALLOW_INSECURE_OPEN_API &&
-      WEBHOOK_SECRET_ROUTES.some((r) => matchesRoute(pathname, r))
+      isWebhookSecretRoute(pathname)
     ) {
       return unauthorized(
         'This deployment is misconfigured: WEBHOOK_SECRET is not set, so webhook authentication is disabled. Set WEBHOOK_SECRET (or ALLOW_INSECURE_OPEN_API=true to override). Contact the operator.',

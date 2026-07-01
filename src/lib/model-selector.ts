@@ -20,8 +20,25 @@ import type { ModelCapability, ModelRegistryEntry } from './model-registry-types
 
 export const NEEDS_OWNER_INPUT = 'needs_owner_input' as const;
 
-/** Anthropic is forbidden for all client dispatches. */
-const FORBIDDEN_PREFIXES = ['anthropic/', 'openrouter/anthropic/'];
+/**
+ * Anthropic is forbidden for all client dispatches — including BARE `claude-*`
+ * slugs (e.g. `claude-sonnet-4-5`, `claude-opus-4-1`) that carry no
+ * `anthropic/` provider prefix, plus any nested `openrouter/anthropic/…` route.
+ *
+ * Kept at full parity with the onboarding Python selector's FORBIDDEN_PREFIXES
+ * (shared-utils/select_model.py). `isForbidden` matches any of these appearing
+ * ANYWHERE in the lower-cased model_id (substring, not just prefix) — mirroring
+ * the Python `mid.startswith(p) or p in mid`.
+ */
+const FORBIDDEN_PREFIXES = [
+  'anthropic/',
+  'openrouter/anthropic/',
+  'claude-opus',
+  'claude-sonnet',
+  'claude-haiku',
+  'claude-3',
+  'claude-4',
+];
 
 /**
  * OpenRouter open-source vendor prefixes (Tier 2).
@@ -59,7 +76,12 @@ function tierOf(modelId: string): ModelTier {
 }
 
 function isForbidden(modelId: string): boolean {
-  return FORBIDDEN_PREFIXES.some((p) => modelId.startsWith(p));
+  // Substring (case-insensitive) match — catches bare `claude-*` families and
+  // any nested `anthropic/` route, mirroring Python `_is_forbidden`
+  // (`mid.startswith(p) or p in mid`). Prefix-only matching missed bare slugs
+  // like `claude-sonnet-4-5` that carry no `anthropic/` provider prefix.
+  const mid = modelId.toLowerCase();
+  return FORBIDDEN_PREFIXES.some((p) => mid.includes(p));
 }
 
 function isFree(modelId: string, entry?: ModelRegistryEntry): boolean {

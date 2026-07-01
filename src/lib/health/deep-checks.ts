@@ -752,7 +752,7 @@ export function checkMigrations(): CheckResult {
 // Truth-table rows 23-24. Threshold: 500 MB.
 
 // Well-known large bind-mount paths that must NOT be used as the disk check
-// target (Sheila-class wrong-mount false-green: /data is a separate large
+// target (wrong-mount-class false-green: /data is a separate large
 // mount; probing it returns 80 GB free while the CC partition has <500 MB).
 // When DATABASE_PATH resolves into one of these mounts, fall back to
 // process.cwd() instead.
@@ -802,7 +802,7 @@ export async function checkDiskHeadroom(): Promise<CheckResult> {
   try {
     // Resolve check path — NEVER from /data presence alone.
     // resolveCheckPath() returns null when both DATABASE_PATH dir and
-    // process.cwd() resolve into a WRONG_MOUNT_PREFIXES path (Sheila-class
+    // process.cwd() resolve into a WRONG_MOUNT_PREFIXES path (wrong-mount-class
     // false-green, truth-table Row 35, incl. CWD variant from REDO-REDO fix).
     const checkPath = resolveCheckPath();
     if (checkPath === null) {

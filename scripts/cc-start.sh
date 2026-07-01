@@ -10,8 +10,8 @@
 #                          Hostinger-injected random PORT) can never override the
 #                          CC's listen port.
 #   2. ORPHAN-PORT KILLER — frees the CC port before next binds it, breaking the
-#                           EADDRINUSE crash-loop that caused Cassandra's 71,551
-#                           restarts. Works on Mac (lsof) and Linux (lsof/fuser).
+#                           EADDRINUSE crash-loop that caused a client box's
+#                           71,551 restarts. Works on Mac (lsof) and Linux (lsof/fuser).
 #   3. CLEAN EXEC         — uses exec so PM2's PID tracking stays correct (the
 #                           bash wrapper never hides the real node child).
 #

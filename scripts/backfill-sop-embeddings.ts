@@ -19,7 +19,7 @@
  *                                                  GEMINI_API_KEY
  *   SOP_EMBEDDING_PROVIDER=openai|google        — force a specific provider
  *
- * Google-only clients (Sheila, Corey, Kofi) need NO OPENAI_API_KEY.
+ * Google-only clients need NO OPENAI_API_KEY.
  * Set any Google key and the script uses gemini-embedding-2 automatically.
  *
  * QUOTA / PACING (Google free tier):

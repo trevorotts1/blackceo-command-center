@@ -58,3 +58,4 @@ test-results/
 
 # graphify (knowledge-graph map) — generated output, never committed
 graphify-out/
+__pycache__/

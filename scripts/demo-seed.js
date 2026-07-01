@@ -33,11 +33,11 @@ console.log(`[Demo Seed] Workspace: ${wsId} (${wsSlug})`);
 
 // --- Agents ---
 const agents = [
-  { name: 'Charlie', role: 'orchestrator', status: 'working', avatar: '🦞', model: 'claude-sonnet-4-5' },
-  { name: 'Builder', role: 'builder', status: 'working', avatar: '🔨', model: 'claude-sonnet-4-5' },
-  { name: 'Tester', role: 'tester', status: 'standby', avatar: '🧪', model: 'claude-sonnet-4-5' },
-  { name: 'Reviewer', role: 'reviewer', status: 'standby', avatar: '👁️', model: 'claude-sonnet-4-5' },
-  { name: 'Researcher', role: 'researcher', status: 'standby', avatar: '🔍', model: 'claude-sonnet-4-5' },
+  { name: 'Charlie', role: 'orchestrator', status: 'working', avatar: '🦞', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Builder', role: 'builder', status: 'working', avatar: '🔨', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Tester', role: 'tester', status: 'standby', avatar: '🧪', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Reviewer', role: 'reviewer', status: 'standby', avatar: '👁️', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Researcher', role: 'researcher', status: 'standby', avatar: '🔍', model: 'ollama/deepseek-v4-pro:cloud' },
 ];
 
 const agentIds = {};

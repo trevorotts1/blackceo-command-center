@@ -73,8 +73,8 @@ test('empty env yields zero discovered rows', () => {
   });
 });
 
-// 3) Evelyn's real env shape (KIE/OPENAI/FISH/GEMINI/GOOGLE) lights up all three.
-test('Evelyn env (KIE/OPENAI/FISH/GEMINI/GOOGLE) covers all three tabs', () => {
+// 3) A representative full client env shape (KIE/OPENAI/FISH/GEMINI/GOOGLE) lights up all three.
+test('full client env (KIE/OPENAI/FISH/GEMINI/GOOGLE) covers all three tabs', () => {
   withEnv(
     {
       KIE_API_KEY: 'x',

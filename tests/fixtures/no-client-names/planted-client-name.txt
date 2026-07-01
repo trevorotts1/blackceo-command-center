@@ -1,0 +1,13 @@
+PLANTED FIXTURE — do not "fix" this file.
+
+Sole purpose: the CI self-test for scripts/qc-assert-no-client-names.sh copies
+this file into an isolated temp repo-root and confirms the gate exits 1. It
+deliberately contains a denylisted client name AND the operator machine path so
+the self-test proves the gate actually bites on BOTH categories.
+
+This exact path is path-anchored-excluded from the gate's own scan (see the
+_is_excluded predicate) because it holds the tokens as detection TEST DATA, not
+as a real leak.
+
+  const owner = "Karen Vaughn";
+  const key   = "/Users/blackceomacmini/.ssh/id_ed25519";
