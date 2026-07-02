@@ -3099,6 +3099,37 @@ const migrations: Migration[] = [
       console.log(`[Migration 082] reaped ${r.deleted} duplicate task(s) across ${r.groups} group(s)`);
     },
   },
+  {
+    id: '083',
+    name: 'add_task_persona_fallback',
+    up: (db) => {
+      // Point 10 fix 1: resolvePersonaAndPin now pins a deterministic
+      // department-default persona when the selector exhausts its attempts, so
+      // no task is ever personaless. This boolean flags those defaulted pins for
+      // audit (vs a genuine matched persona). Idempotent ADD COLUMN.
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!tasksInfo.find((c) => c.name === 'persona_fallback')) {
+        db.prepare('ALTER TABLE tasks ADD COLUMN persona_fallback INTEGER DEFAULT 0').run();
+      }
+      console.log('[Migration 083] tasks.persona_fallback audit column ready');
+    },
+  },
+  {
+    id: '084',
+    name: 'add_task_redispatch_count',
+    up: (db) => {
+      // Point 6 fix 2: backlog-redispatch-sweep counts its own cheap retries here
+      // so a permanently-stuck-in-backlog task (config problem / SOP-authoring hold
+      // that never clears — paths that never go through recordDispatchFailure) is
+      // eventually escalated to `blocked` after REDISPATCH_MAX_ATTEMPTS retries over
+      // REDISPATCH_ESCALATE_HOURS, instead of re-looping forever. Idempotent.
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!tasksInfo.find((c) => c.name === 'redispatch_count')) {
+        db.prepare('ALTER TABLE tasks ADD COLUMN redispatch_count INTEGER DEFAULT 0').run();
+      }
+      console.log('[Migration 084] tasks.redispatch_count accounting column ready');
+    },
+  },
 ];
 
 /**
