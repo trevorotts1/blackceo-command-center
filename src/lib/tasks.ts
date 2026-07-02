@@ -117,12 +117,163 @@ export const PERSONA_PIN_RETRY_BASE_MS = 1500;
 // The retry promise still lands the pin + re-broadcasts after dispatch if it times out.
 export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
 
+// ─── DEPARTMENT-DEFAULT PERSONA FALLBACK (POINT 10 fix 1) ────────────────────
+// The founder's board invariant: EVERY task carries a persona. Historically,
+// resolvePersonaAndPin() left a task personaless after PERSONA_PIN_MAX_ATTEMPTS
+// failed selector spawns, so a card could sit in backlog with no persona chip
+// until it was moved (the Triad gate auto-resolved on the first move). On a box
+// whose selector is degraded, that is a silent, board-wide gap. On exhaustion we
+// now pin a DETERMINISTIC department-default persona and flag it
+// `persona_fallback=1` for audit. `no_persona_required` (intentional) is handled
+// earlier and stays personaless.
+
+/** Collapse a persona id / slug to a human-readable display name. */
+function humanizeSlug(slug: string): string {
+  return slug
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+}
+
+/** Whether the tasks table carries the persona_fallback audit column (migration 083). */
+function tasksHasPersonaFallbackColumn(): boolean {
+  try {
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    return cols.some((c) => c.name === 'persona_fallback');
+  } catch {
+    return false;
+  }
+}
+
+export interface DepartmentDefaultPersona {
+  persona_id: string;
+  persona_name: string;
+  persona_mode: string;
+  /** How the default was derived — for audit + observability. */
+  source: 'department-sticky' | 'department-synthetic';
+}
+
+/**
+ * Derive a deterministic department-default persona for the exhaustion path.
+ *
+ * Tier 1 — the department's current sticky "lead" persona from
+ *   `persona_assignment` (the genuine, selector-recorded stickiness state per
+ *   department/category). The most-recently-assigned, highest-switch row is the
+ *   closest thing the board has to a department-head persona. This table is
+ *   written ONLY by the real selector — never by this fallback path — so it can
+ *   never feed on itself.
+ * Tier 2 — a stable, department-tagged synthetic default (`dept-default-<slug>`).
+ *   Deterministic from the canonical slug, so a brand-new department with zero
+ *   history still gets the SAME default every time and the board invariant holds.
+ *
+ * Never throws for a caller: any DB error degrades to the Tier-2 synthetic id.
+ */
+export function deriveDepartmentDefaultPersona(
+  department: string | null | undefined,
+): DepartmentDefaultPersona {
+  const canon = canonicalDeptSlug(department || '') || 'general-task';
+
+  try {
+    const sticky = queryOne<{
+      persona_id: string;
+      persona_name: string | null;
+      persona_mode: string | null;
+    }>(
+      `SELECT persona_id, persona_name, persona_mode
+         FROM persona_assignment
+        WHERE department_id = ?
+          AND persona_id IS NOT NULL AND persona_id != ''
+        ORDER BY last_assigned_at DESC, switch_count DESC, persona_id ASC
+        LIMIT 1`,
+      [canon],
+    );
+    if (sticky && sticky.persona_id && !SENTINEL_IDS.has(sticky.persona_id)) {
+      return {
+        persona_id: sticky.persona_id,
+        persona_name: sticky.persona_name || humanizeSlug(sticky.persona_id),
+        persona_mode: sticky.persona_mode || 'leadership',
+        source: 'department-sticky',
+      };
+    }
+  } catch {
+    // persona_assignment absent (pre-migration-019) — fall through to synthetic.
+  }
+
+  return {
+    persona_id: `dept-default-${canon}`,
+    persona_name: `${humanizeSlug(canon)} Department Default`,
+    persona_mode: 'leadership',
+    source: 'department-synthetic',
+  };
+}
+
+/**
+ * Pin a department-default persona onto a task and mark it persona_fallback=true.
+ * Writes a queryable `persona_fallback` audit event (independent of the column so
+ * the record exists even on a pre-migration DB) and re-broadcasts the row.
+ */
+function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPersona): void {
+  const now = new Date().toISOString();
+
+  if (tasksHasPersonaFallbackColumn()) {
+    run(
+      `UPDATE tasks
+          SET persona_id = ?, persona_name = ?, persona_mode = ?,
+              persona_score = NULL, persona_version = 1,
+              persona_selected_at = ?, persona_fallback = 1
+        WHERE id = ?`,
+      [fb.persona_id, fb.persona_name, fb.persona_mode, now, taskId],
+    );
+  } else {
+    run(
+      `UPDATE tasks
+          SET persona_id = ?, persona_name = ?, persona_mode = ?,
+              persona_score = NULL, persona_version = 1,
+              persona_selected_at = ?
+        WHERE id = ?`,
+      [fb.persona_id, fb.persona_name, fb.persona_mode, now, taskId],
+    );
+  }
+
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [
+      uuidv4(),
+      'persona_fallback',
+      taskId,
+      `[PERSONA-FALLBACK] Selector exhausted after ${PERSONA_PIN_MAX_ATTEMPTS} attempts — pinned ${fb.source} ` +
+        `department-default persona "${fb.persona_id}" (${fb.persona_name}). persona_fallback=true.`,
+      now,
+    ],
+  );
+
+  const updatedTask = queryOne<Task>(
+    `SELECT t.*,
+        aa.name as assigned_agent_name,
+        aa.avatar_emoji as assigned_agent_emoji,
+        ca.name as created_by_agent_name,
+        ca.avatar_emoji as created_by_agent_emoji
+       FROM tasks t
+       LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+       LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+      WHERE t.id = ?`,
+    [taskId],
+  );
+  if (updatedTask) {
+    broadcast({ type: 'task_updated', payload: updatedTask });
+    console.log(
+      `[resolvePersonaAndPin] department-default persona pinned for task ${taskId}: ${fb.persona_id} (persona_fallback=true)`,
+    );
+  }
+}
+
 /**
  * Select a persona for a task, persist it (tasks.persona_*), and re-broadcast the
  * updated task over SSE so the board chip lands. Retry-backed and bounded.
  *
- * @returns the pinned persona_id, or null when no persona was required / selection
- *          exhausted its attempts (the Triad gate auto-resolves on move in that case).
+ * @returns the pinned persona_id (a matched persona OR, on selector exhaustion, a
+ *          deterministic department-default flagged persona_fallback=true), or null
+ *          ONLY when the selector explicitly returned no_persona_required.
  */
 export async function resolvePersonaAndPin(
   taskId: string,
@@ -195,11 +346,26 @@ export async function resolvePersonaAndPin(
       await new Promise((resolve) => setTimeout(resolve, PERSONA_PIN_RETRY_BASE_MS * attempt));
     }
   }
-  console.warn(
-    `[resolvePersonaAndPin] exhausted ${PERSONA_PIN_MAX_ATTEMPTS} attempts for task ${taskId} — ` +
-    `left unpinned (Triad gate auto-resolves on the first move out of backlog).`,
-  );
-  return null;
+  // EXHAUSTION FALLBACK (Point 10 fix 1): the selector failed every attempt.
+  // Never leave a task personaless — pin a deterministic department-default and
+  // flag it persona_fallback=true for audit so the board invariant ("EVERY task
+  // carries a persona") holds. `no_persona_required` is handled ABOVE (returns
+  // null early) and is intentionally left personaless.
+  try {
+    const fallback = deriveDepartmentDefaultPersona(departmentForSelector);
+    pinDepartmentDefaultPersona(taskId, fallback);
+    console.warn(
+      `[resolvePersonaAndPin] exhausted ${PERSONA_PIN_MAX_ATTEMPTS} attempts for task ${taskId} — ` +
+      `pinned ${fallback.source} department-default persona "${fallback.persona_id}" (persona_fallback=true).`,
+    );
+    return fallback.persona_id;
+  } catch (fbErr) {
+    console.error(
+      `[resolvePersonaAndPin] department-default fallback pin FAILED for task ${taskId} — left unpinned:`,
+      fbErr,
+    );
+    return null;
+  }
 }
 
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────

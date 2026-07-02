@@ -22,11 +22,18 @@
  *   2. Heuristic fallback (no API key / LLM error): structural checks on the
  *      deliverable meta (description non-empty, SOP assigned, persona assigned,
  *      title non-trivial). Returns a conservative score in [6.0, 8.0].
- *      IMPORTANT: heuristic mode NEVER triggers the auto-reroute loop. The task
- *      stays in `review` with a "QC ran in heuristic mode (no LLM key); human
- *      review required" event. Reroutes are ONLY triggered by a real LLM score
- *      below the 8.5 gate. This prevents keyless installs from spinning every
- *      task through 3 reroutes and into `blocked` (PRD 2.4).
+ *      IMPORTANT: heuristic mode NEVER triggers the auto-reroute loop. Reroutes
+ *      are ONLY triggered by a real LLM score below the 8.5 gate. This prevents
+ *      keyless installs from spinning every task through 3 reroutes and into
+ *      `blocked` (PRD 2.4). The heuristic fallback splits by `heuristicReason`:
+ *        - 'no-key'        → keyless install by design: task stays in `review`
+ *                            with a "[QC-HEURISTIC] … human review required" event.
+ *        - 'provider-down' → a key exists but every LLM call failed (outage/blip):
+ *                            task is DEFERRED in `review` with a distinct
+ *                            "[QC-DEFERRED-PROVIDER-DOWN]" marker and auto-rescored
+ *                            by qc-review-sweep when the provider returns, so a
+ *                            provider blip does NOT storm the board into human
+ *                            review (Point 6 fix 1).
  *
  * Artifact-aware QC (duck-fix):
  *   When a task has file deliverables, the QC scorer shifts from "did the brief
@@ -540,6 +547,16 @@ export interface QCResult {
   reason: string; // human-readable explanation (shown in event)
   gaps: string[]; // specific gaps when !pass
   scoringPath: 'llm' | 'heuristic' | 'no-criteria'; // which path was used
+  /**
+   * When scoringPath === 'heuristic', WHY the heuristic fallback ran (Point 6 fix 1):
+   *   - 'no-key':        no scoring API key is configured (keyless install by design)
+   *                      → genuine human-review fallback (task stays in review).
+   *   - 'provider-down': a key IS configured but every LLM call failed (outage /
+   *                      network blip) → DEFER and auto-rescore when the provider
+   *                      returns, rather than presenting as human-required.
+   * Undefined for the 'llm' / 'no-criteria' paths.
+   */
+  heuristicReason?: 'no-key' | 'provider-down';
 }
 
 // ---------------------------------------------------------------------------
@@ -874,9 +891,22 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
   // let the env-var defaults handle provider routing.
   const agentModel = input.qcAgentModel || null;
 
+  // PROVIDER-DOWN vs NO-KEY (Point 6 fix 1): a heuristic fallback means one of two
+  // very different things. If NO scoring key is configured, this box is keyless by
+  // design → genuine human-review fallback (unchanged). If a key IS configured but
+  // every LLM call failed (provider outage / network blip), the heuristic result
+  // must be DEFERRED and auto-rescored when the provider returns — not presented as
+  // human-required, which on a fleet-wide blip storms the entire board into review.
+  //
+  // QC_SIMULATE_PROVIDER_DOWN forces the provider-down branch (when a key is present)
+  // for a known outage window or deterministic tests — mirrors QC_FIXTURE_JSON_PATH.
+  const simulateProviderDown =
+    process.env.QC_SIMULATE_PROVIDER_DOWN === '1' ||
+    process.env.QC_SIMULATE_PROVIDER_DOWN === 'true';
+
   // Try LLM paths
   const openAiKey = process.env.OPENAI_API_KEY;
-  if (openAiKey) {
+  if (openAiKey && !simulateProviderDown) {
     const result = await llmScoreViaOpenAI(prompt, openAiKey, agentModel);
     if (result) return result;
   }
@@ -885,13 +915,18 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
     process.env.GOOGLE_API_KEY ||
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
     process.env.GEMINI_API_KEY;
-  if (googleKey) {
+  if (googleKey && !simulateProviderDown) {
     const result = await llmScoreViaGoogle(prompt, googleKey, agentModel);
     if (result) return result;
   }
 
-  // Fallback: heuristic
-  return heuristicScore(input);
+  // Fallback: heuristic. Record WHY so runQCOnReview can DEFER (provider-down: a
+  // key exists but every call failed / a simulated outage) vs ESCALATE to human
+  // review (no-key: keyless install by design).
+  const hadAnyKey = Boolean(openAiKey) || Boolean(googleKey);
+  const heuristic = heuristicScore(input);
+  heuristic.heuristicReason = hadAnyKey ? 'provider-down' : 'no-key';
+  return heuristic;
 }
 
 // ---------------------------------------------------------------------------
@@ -3420,6 +3455,34 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     if (result.scoringPath === 'heuristic') {
       const scoredBy = qcAgent ? ` [scorer:${qcAgent.name}]` : ' [scorer:global-heuristic]';
       const gapNote = result.gaps.length > 0 ? ` Gaps: ${result.gaps.join('; ')}` : '';
+
+      // ── Provider-down deferral (Point 6 fix 1) ────────────────────────────
+      // A scoring key IS configured but every LLM scorer failed → transient
+      // provider outage, NOT a keyless install. Hold in `review` with a DISTINCT
+      // [QC-DEFERRED-PROVIDER-DOWN] marker (never [QC-HEURISTIC]) so the task is
+      // NOT presented as human-required. The qc-review-sweep retries deferred
+      // tasks on a short cadence and auto-rescores them the moment the provider
+      // returns (an `llm` score then drives the normal pass / fail / reroute
+      // path). This is what prevents a human-escalation storm on a provider blip.
+      if (result.heuristicReason === 'provider-down') {
+        const deferredMsg =
+          `[QC-DEFERRED-PROVIDER-DOWN] Score: ${result.score.toFixed(1)}/10 | QC scorer provider is down — ` +
+          `holding in review and auto-rescoring when it returns (NOT human-required). ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'qc_review', taskId, deferredMsg, now],
+        );
+
+        console.log(
+          `[QCScorer] Task "${task.title}" (${taskId}): provider-down — DEFERRED in review, will auto-rescore when the scorer returns (qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
+        );
+
+        return result;
+      }
+      // ── End provider-down deferral ────────────────────────────────────────
+
       const heuristicEventMsg =
         `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
 
