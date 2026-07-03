@@ -3130,6 +3130,196 @@ const migrations: Migration[] = [
       console.log('[Migration 084] tasks.redispatch_count accounting column ready');
     },
   },
+  {
+    id: '085',
+    name: 'create_sop_feedback',
+    up: (db) => {
+      // ISSUE #5 (audit 2026-07-03): the SOP feedback/learning loop was dead on
+      // arrival — src/app/api/sops/feedback/route.ts and src/lib/sop-learning.ts
+      // read/write `sop_feedback`, but no CREATE TABLE existed anywhere, so the
+      // endpoint 500'd with "no such table: sop_feedback" and recordFeedback ->
+      // detectPatternsAndPropose never fired.
+      //
+      // Columns are the EXACT set the code touches:
+      //   recordFeedback INSERT (sop-learning.ts:110): id, sop_id, task_id, rating, notes, agent_id
+      //   SOPFeedbackRow (sop-learning.ts:20-28):      + created_at
+      //   route.ts:27 validates rating in [1, -1, 0]  -> rating is an INTEGER
+      //     (1 = thumbs up, -1 = thumbs down, 0 = skip), NOT a text enum.
+      // created_at is not written by recordFeedback, so it carries a DEFAULT.
+      // Idempotent: IF NOT EXISTS so this is safe on fresh installs and re-runs.
+      console.log('[Migration 085] Creating sop_feedback table...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sop_feedback (
+          id TEXT PRIMARY KEY,
+          sop_id TEXT NOT NULL REFERENCES sops(id) ON DELETE CASCADE,
+          task_id TEXT,
+          agent_id TEXT,
+          rating INTEGER NOT NULL CHECK (rating IN (1, -1, 0)),
+          notes TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      // computePerformance() filters `WHERE sop_id = ? AND created_at >= ?` and
+      // the GET route orders by created_at DESC — a (sop_id, created_at) index
+      // covers both. task_id is filtered alone by the GET dedupe check.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_sop ON sop_feedback(sop_id, created_at DESC)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_task ON sop_feedback(task_id)`);
+      console.log('[Migration 085] sop_feedback table + indexes ready');
+    },
+  },
+  {
+    id: '086',
+    name: 'remove_demo_seed_rows',
+    up: (db) => {
+      // ISSUE #1 (audit 2026-07-03): older installs (and every pre-fix
+      // `--update-only` pass) ran the unguarded seed which (a) inserted a NEW
+      // master Orchestrator every time and (b) defaulted to demo agents/tasks/
+      // conversations on the client's real board. seed.ts is now guarded +
+      // demo-opt-in, but boxes provisioned before the fix already carry the
+      // contamination. This migration cleans it up idempotently.
+      //
+      // Safe to re-run: after the first pass there is exactly one master and no
+      // demo rows, so every subsequent run is a no-op. Wrapped section-by-section
+      // in try/catch (mirrors migration 030) so an edge case can never brick
+      // app startup.
+      console.log('[Migration 086] De-duping masters + removing legacy demo seed rows...');
+
+      // Discover every column that FK-references agents(id), with its ON DELETE
+      // action, so we can repoint/detach robustly instead of hardcoding a list
+      // that drifts as the schema grows.
+      const agentRefs: { table: string; column: string; onDelete: string }[] = [];
+      try {
+        const tables = db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+          .all() as { name: string }[];
+        for (const t of tables) {
+          const fks = db.prepare(`PRAGMA foreign_key_list("${t.name}")`).all() as {
+            table: string;
+            from: string;
+            on_delete: string;
+          }[];
+          for (const fk of fks) {
+            if (fk.table === 'agents') {
+              agentRefs.push({ table: t.name, column: fk.from, onDelete: (fk.on_delete || '').toUpperCase() });
+            }
+          }
+        }
+      } catch (e) {
+        console.log('[Migration 086] FK discovery skipped:', (e as Error).message);
+      }
+
+      // Repoint every reference to `fromId` onto `toId`. OR IGNORE survives the
+      // handful of refs with a UNIQUE/PK on the agent column (e.g.
+      // conversation_participants PK, agent_memory_logs UNIQUE); any row that
+      // could not be repointed still points at fromId and is cleaned up by the
+      // subsequent DELETE (those refs are ON DELETE CASCADE).
+      const repointAgent = (fromId: string, toId: string) => {
+        for (const r of agentRefs) {
+          db.prepare(`UPDATE OR IGNORE "${r.table}" SET "${r.column}" = ? WHERE "${r.column}" = ?`).run(toId, fromId);
+        }
+      };
+
+      // Detach an agent about to be deleted: NULL out only the RESTRICT/NO ACTION
+      // refs (those columns are all nullable). CASCADE / SET NULL / SET DEFAULT
+      // refs are handled by the DB on DELETE.
+      const detachAgent = (id: string) => {
+        for (const r of agentRefs) {
+          if (r.onDelete === 'CASCADE' || r.onDelete === 'SET NULL' || r.onDelete === 'SET DEFAULT') continue;
+          db.prepare(`UPDATE "${r.table}" SET "${r.column}" = NULL WHERE "${r.column}" = ?`).run(id);
+        }
+      };
+
+      // 1) De-dupe masters — keep the OLDEST is_master=1 'Orchestrator', re-point
+      //    every FK from the duplicates onto the keeper, then delete the dupes.
+      try {
+        const masters = db
+          .prepare(
+            "SELECT id FROM agents WHERE is_master = 1 AND name = 'Orchestrator' ORDER BY datetime(created_at) ASC, id ASC"
+          )
+          .all() as { id: string }[];
+        if (masters.length > 1) {
+          const keeper = masters[0].id;
+          for (const dup of masters.slice(1)) {
+            repointAgent(dup.id, keeper);
+            db.prepare('DELETE FROM agents WHERE id = ?').run(dup.id);
+          }
+          console.log(`[Migration 086] Collapsed ${masters.length} masters -> 1 (kept ${keeper})`);
+        } else {
+          console.log('[Migration 086] Master orchestrator already unique — nothing to de-dupe');
+        }
+      } catch (e) {
+        console.log('[Migration 086] Master de-dupe skipped:', (e as Error).message);
+      }
+
+      // 2) Remove demo content — ONLY when a real (non-placeholder) company row
+      //    exists, so a genuine demo deployment is left untouched. Same
+      //    real-company predicate as migration 030.
+      try {
+        const real = db
+          .prepare(
+            "SELECT COUNT(*) AS c FROM companies WHERE slug NOT IN ('default','command-center') AND slug NOT LIKE 'acme-%'"
+          )
+          .get() as { c: number };
+        if (real.c > 0) {
+          // 2a) Demo agents (Developer/Researcher/Writer/Designer, on-call,
+          //     non-master) that never did real work (no completed tasks).
+          const demoAgentNames = ['Developer', 'Researcher', 'Writer', 'Designer'];
+          let removedAgents = 0;
+          for (const name of demoAgentNames) {
+            const rows = db
+              .prepare("SELECT id FROM agents WHERE name = ? AND specialist_type = 'on-call' AND is_master = 0")
+              .all(name) as { id: string }[];
+            for (const row of rows) {
+              const done = db
+                .prepare("SELECT COUNT(*) AS c FROM tasks WHERE assigned_agent_id = ? AND status = 'done'")
+                .get(row.id) as { c: number };
+              if (done.c > 0) continue; // has real completed work — keep it
+              detachAgent(row.id);
+              db.prepare('DELETE FROM agents WHERE id = ?').run(row.id);
+              removedAgents++;
+            }
+          }
+
+          // 2b) The 4 seeded demo tasks — scoped to the demo business_id so a
+          //     real client task that happens to share a title is never touched.
+          const demoTaskTitles = [
+            'Set up development environment',
+            'Create project documentation',
+            'Research competitor features',
+            'Design new dashboard layout',
+          ];
+          let removedTasks = 0;
+          for (const title of demoTaskTitles) {
+            const res = db
+              .prepare("DELETE FROM tasks WHERE title = ? AND business_id = 'default'")
+              .run(title);
+            removedTasks += res.changes;
+          }
+
+          // 2c) The demo "Team Chat" group conversation (+ its messages and
+          //     participant rows).
+          let removedConvos = 0;
+          const convos = db
+            .prepare("SELECT id FROM conversations WHERE title = 'Team Chat' AND type = 'group'")
+            .all() as { id: string }[];
+          for (const c of convos) {
+            db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(c.id);
+            db.prepare('DELETE FROM conversation_participants WHERE conversation_id = ?').run(c.id);
+            db.prepare('DELETE FROM conversations WHERE id = ?').run(c.id);
+            removedConvos++;
+          }
+
+          console.log(
+            `[Migration 086] Real company present — removed ${removedAgents} demo agent(s), ${removedTasks} demo task(s), ${removedConvos} demo conversation(s)`
+          );
+        } else {
+          console.log('[Migration 086] No real company yet — leaving any demo content in place');
+        }
+      } catch (e) {
+        console.log('[Migration 086] Demo cleanup skipped:', (e as Error).message);
+      }
+    },
+  },
 ];
 
 /**
