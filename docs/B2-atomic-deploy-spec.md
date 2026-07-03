@@ -1,6 +1,6 @@
 # B.2 — Atomic Self-Verifying Deploy + Auto-Rollback
 
-**Status:** Scaffold — implementation pending via Addendum-B workflow on `feat/b2-atomic-deploy`.
+**Status:** Implemented and shipped on `main`. `scripts/atomic-deploy.sh` fully implements this spec (all five phases below), with dependencies `scripts/cc-health-check.sh` and `scripts/weekly-cleanup.sh` present; QC gate 10.1 (`scripts/qc-cc.sh`) and `tests/unit/b2-atomic-deploy.test.ts` assert it is no longer a stub.
 
 ---
 
@@ -79,4 +79,4 @@
 
 ---
 
-*Added as scaffold commit on branch `feat/b2-atomic-deploy`. Full implementation lands via the Addendum-B workflow on this same branch.*
+*Originally added as a scaffold commit on branch `feat/b2-atomic-deploy`. The full implementation has since landed on `main` — `scripts/atomic-deploy.sh` is the live deploy entry-point.*

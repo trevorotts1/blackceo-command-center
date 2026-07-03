@@ -154,11 +154,13 @@ OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
 
 No token required for local connections.
 
-### Remote Connection (Tailscale)
+### Remote Connection (Cloudflare Tunnel)
+
+Reach a gateway on a different host over the Cloudflare Tunnel (this stack is Cloudflare-Tunnel only — Tailscale is not used):
 
 ```bash
 # .env.local
-OPENCLAW_GATEWAY_URL=wss://your-machine.tail12345.ts.net
+OPENCLAW_GATEWAY_URL=wss://gateway.your-subdomain.example.com
 OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)
 ```
 

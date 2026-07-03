@@ -20,7 +20,7 @@ BlackCEO Command Center is Trevor's AI agent orchestration dashboard. A Next.js 
 
 - Local: http://localhost:4000 (Mac: 3000 | VPS: 4000)
 - Network: http://YOUR_IP:4000
-- Tailscale: http://YOUR_TAILSCALE_IP:4000
+- Remote: via the per-client Cloudflare Tunnel subdomain (Cloudflare-Tunnel only — Tailscale is not used in this stack)
 
 ---
 
