@@ -3,9 +3,18 @@
  *
  * The onboarding-side prove-deck.py emits a PROCESS-CERTIFICATE (a sha256) for a
  * deck run. This pure decision function is what makes that proof ENFORCED: a
- * presentations task can reach a terminal state (done / delivered) ONLY with a
- * matching `process_certificate_sha`. Extracted from the PATCH /api/tasks/[id]
- * route so it is unit-testable without spinning the full Next.js handler.
+ * presentations task can reach its terminal state (`done`) ONLY with a matching
+ * `process_certificate_sha`. Extracted from the PATCH /api/tasks/[id] route so
+ * it is unit-testable without spinning the full Next.js handler.
+ *
+ * CONTRACT (single-valued, self-consistent): a completed deck closes via task
+ * `status='done'` + a matching `process_certificate_sha`. `'delivered'` is a
+ * NOTE the onboarding caller may record, NOT a task status — it is deliberately
+ * NOT a terminal status here, because it is NOT a member of the authoritative
+ * TaskStatus enum in src/lib/validation.ts (a PATCH of status='delivered' is
+ * rejected with a 400 by the schema before it ever reaches this gate). The
+ * terminal-status set below MUST stay a SUBSET of that enum — enforced by
+ * tests/unit/presentations-cert-contract.test.ts so no orphan can recur.
  *
  * Decision matrix (only when the task is presentations AND moving to a terminal
  * state it is not already in):
@@ -19,7 +28,17 @@
 
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
-const TERMINAL_STATUSES = new Set(['done', 'delivered']);
+/**
+ * The terminal status(es) a presentations task may transition INTO under the
+ * no-skip proof rule. SINGLE-VALUED by contract: a completed deck closes via
+ * `status='done'` + a matching `process_certificate_sha`. This set MUST remain
+ * a SUBSET of the authoritative TaskStatus enum in src/lib/validation.ts — the
+ * subset invariant is asserted by tests/unit/presentations-cert-contract.test.ts
+ * so an orphan status (e.g. the removed `'delivered'`, which the schema rejects
+ * with a 400) can never recur and silently strand a card off any terminal state.
+ * Exported for that contract test.
+ */
+export const PRESENTATIONS_TERMINAL_STATUSES = new Set(['done']);
 
 export interface PresentationsGateInput {
   /** task.department (canonical or label) — canonicalized internally. */
@@ -60,7 +79,7 @@ export function evaluatePresentationsDoneGate(
   input: PresentationsGateInput,
 ): PresentationsGateResult {
   const target = (input.targetStatus ?? '').toString();
-  const isTerminal = TERMINAL_STATUSES.has(target);
+  const isTerminal = PRESENTATIONS_TERMINAL_STATUSES.has(target);
   const changing = input.currentStatus !== target;
   if (!isTerminal || !changing) return { applies: false, ok: true };
 

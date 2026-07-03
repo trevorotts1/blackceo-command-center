@@ -1,3 +1,7 @@
+## [v4.59.1] — 2026-07-03 — fix(status-contract): reconcile presentations terminal-status contract (drop orphan 'delivered', single 'done'+cert terminal)
+
+Reconciles an internal contract inconsistency surfaced by the July-3 verification pass. `src/lib/validation.ts` `UpdateTaskSchema` TaskStatus enum has no `'delivered'` (a PATCH carrying it 400s at the schema), yet `src/lib/presentations-cert-gate.ts` listed `'delivered'` as a terminal status — the two files disagreed, so a presentations card could never reach a terminal closed state through the contract. The onboarding presentations rail now closes a completed deck via `status='done'` + a matching `process_certificate_sha` (`'delivered'` is a note, not a status). Fix: removed the orphan `'delivered'` from the cert-gate terminal set (now `{'done'}`); exported `TaskStatus` (values unchanged, 10) + `PRESENTATIONS_TERMINAL_STATUSES` for a new contract test `tests/unit/presentations-cert-contract.test.ts` that pins terminal-statuses ⊆ the schema enum, accepts `done`+valid-cert, and rejects `delivered`. The anti-spoof stored-cert MATCH check is untouched (no gate weakened). Additive/idempotent; no client names (repo is fleet-wide); box user, not root.
+
 ## [v4.59.0] — 2026-07-01 — fix(final-review-hardening): persona-exhaustion department-default pin, QC provider-down deferral, backlog-redispatch escalation cap
 
 Closes three board-liveness gaps surfaced during the final review pass. All additive/idempotent; no client names in any changed file (repo is fleet-wide); box user, not root.
