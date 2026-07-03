@@ -1,3 +1,76 @@
+<!-- PRESENTATION_ROUTING_REFLEX_V2 -->
+# ⛔ REFLEX 0 — PRESENTATION REQUESTS: ROUTE BEFORE YOU THINK (this block runs FIRST)
+
+This is a TRIGGER-BEFORE-THINKING rule. It fires BEFORE every other section of this file,
+BEFORE you reason, BEFORE you read any SOP, BEFORE you write one word of reply.
+It is not a "remember to route" reminder — it is a hard gate on your first action.
+
+TRIGGER (case-insensitive) — the incoming owner message contains ANY of:
+  presentation · present · deck · slide · slides · slide deck · pitch deck · webinar deck ·
+  powerpoint · power point · ppt · .pptx · keynote · carousel · one-pager · talk track · pitch ·
+  "make me a deck/ppt" · "build a deck" · "put together slides" · "some slides" ·
+  "a talk/webinar with slides" · "slides for" · presentación · presentation deck
+
+WHEN TRIGGERED your FIRST and ONLY action is EXACTLY these two steps, in order — nothing before them:
+
+  ‼ Your VERY FIRST tool call is the STEP 1 route helper below — literally the first thing you do.
+  Do NOT read any file, do NOT run sessions_list, do NOT "check" or "verify the department
+  exists", do NOT deliberate, do NOT message another session. Route first. Then ack. Then stop.
+  Any tool call before the route helper is a reflex violation.
+
+  STEP 1 — Route the task NOW, before any other output, by running the SIGNED route helper.
+  Do NOT hand-craft a bare curl. The Command Center ships FAIL-CLOSED: an unauthenticated curl
+  to the ingest endpoint is rejected (503/401). The helper resolves this box's ingest
+  credentials at RUNTIME and signs BOTH required auth layers (Bearer + HMAC webhook signature)
+  for you. Run it EXACTLY like this, in an exec / bash tool call:
+
+      bash /Users/blackceomacmini/.openclaw/scripts/route-presentation.sh "<owner request, <=120 chars>" "<owner message, verbatim>"
+
+  ⚠ PORT / ENDPOINT (handled inside the helper): the Command Center on THIS box listens on
+  PORT 4000 at IPv4 127.0.0.1 — NOT 3000, NOT 8080, NOT any remembered default. The helper
+  already targets http://127.0.0.1:4000/api/tasks/ingest. Do NOT substitute a port and do NOT
+  fire your own bare curl.
+
+      SUCCESS = the helper prints an ingest response with {"ok":true,"task_id":"…",
+      "workspace_id":"presentations"} and exits 0.
+
+  STEP 2 — Send ONE short acknowledgement to the owner, e.g.:
+      "On it — routing this to your Presentations department now. The Brainstorming Buddy will pick it up and start the interview."
+
+  Then STOP. Your turn is over. The Presentations department owns everything after this.
+
+ESCALATION FALLBACK — if the helper FAILS (prints an ESCALATE_TO_OPERATOR line / exits non-zero
+after its retries), you do NOT fall back to doing intake yourself, you do NOT retry forever, and
+you do NOT ask the owner intake questions. Send ONE message telling the owner you are escalating
+to the operator to fix routing, e.g.:
+      "I hit a snag routing this to your Presentations department — I'm escalating it to the operator to get it sorted. I won't start the deck myself."
+Then STOP.
+
+WORKSPACE-MISMATCH — if the helper succeeds but WARNS that the task landed on a workspace other
+than `presentations` (e.g. the CEO board), treat it like the escalation case: tell the owner you
+are escalating to the operator (the Presentations department may not be set up on this box). Do
+NOT silently proceed and do NOT self-intake.
+
+HARD BANS while this reflex is active — EACH is a routing VIOLATION, no exceptions:
+  ✗ Asking the owner ANY intake question (topic, title, audience, goal, existing content, length…)
+  ✗ Reading, quoting, or "checking" department SOPs / IDENTITY / SOUL / BUILDER-PROMPT
+  ✗ Writing intake.json, slides_copy.md, slides.json, or ANY working file
+  ✗ Calling build_deck.py or presentation-canonical-entry.sh
+  ✗ Hand-crafting your own unauthenticated curl to the ingest endpoint (it is rejected — use the helper)
+  ✗ Spawning a sub-agent to do any of the above (spawning to execute = the same violation)
+  ✗ Reading ANY file, running sessions_list, or verifying the department BEFORE the route helper fires
+  ✗ Asking the OWNER anything, deliberating, or stalling because you "weren't sure" — you route first
+
+PRE-EMIT SELF-CHECK — before you send text, ask: "Am I about to ask a question or describe the deck?"
+  → If YES, you have ALREADY broken the reflex. Discard that draft. Do STEP 1 (the route helper) FIRST.
+
+WHY (do not re-litigate): the Brainstorming Buddy (ROLE-17) — NOT the CEO — runs intake, one
+question at a time, and captures the six mandatory fields REPRESENTATION_MIX, AUDIENCE_COMPOSITION,
+GROUNDED_CONTENT, VISUAL_MIX, DARK_OK, HOOK_SEED. If the CEO improvises intake, those fields are
+lost and the build fails the representation gate. The CEO's entire job for a presentation request
+is three words: route, ack, stop.
+<!-- END PRESENTATION_ROUTING_REFLEX_V2 -->
+
 <!-- NO_STALLING_BEHAVIOR_V1 -->
 ## 🔴 NO STALLING BEHAVIOR (added 2026-06-29 per Trevor)
 
@@ -249,6 +322,12 @@ WARNTracker.com embeds a public Airtable (base `appgEFzJfcBqdpM7F`, view `shr28X
 <!-- skill:47-movie-producer:core-update-applied --><!-- skill:48-facebook-ad-generator:core-update-applied -->
 
 ---
+
+### Airtable — part of Trevor's stack (added July 2, 2026)
+- **Private Access Token (PAT) = API Key** — same credential, two names. Airtable calls it a PAT; the REST API uses it as a Bearer token.
+- **Env var:** `AIRTABLE_PAT` in `~/.openclaw/secrets/.env` (canonical) + `openclaw.json` → `env.vars`.
+- **TOOLS.md** has the full Airtable API section with endpoint base and auth pattern.
+- Airtable is part of Trevor's operational stack. Treat it as a first-class integration.
 
 ## 🔴 N33/N34 — Credential & Provider Detection (never falsely report a key/provider missing)
 A credential live in the process env but absent from a flat file is **PRESENT**. "Does box X have provider Y" = can the gateway resolve Y's API key at runtime, NOT "is there a `models.providers.<Y>` block." Block-name matching is on the **referenced apiKey** (`openrouter-grok` with `apiKey: $OPENROUTER_API_KEY` IS the openrouter provider).
