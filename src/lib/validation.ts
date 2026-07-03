@@ -13,7 +13,14 @@ import { z } from 'zod';
 // blocked gate, and the QC review->done gate are all enforced separately in
 // src/app/api/tasks/[id]/route.ts and remain authoritative regardless of which
 // values appear here. Adding the real statuses below does not open any gate.
-const TaskStatus = z.enum([
+//
+// AUTHORITATIVE terminal transition: a presentations deck closes via 'done'
+// (with a matching process_certificate_sha, enforced by the cert gate) — NOT
+// 'delivered'. 'delivered' is intentionally absent: it is a note, not a status,
+// so a status='delivered' PATCH is rejected here with a 400. Exported so the
+// presentations cert-gate contract test can assert the gate's terminal-status
+// set is a SUBSET of these values (see presentations-cert-gate.ts).
+export const TaskStatus = z.enum([
   'backlog',
   'inbox',
   'planning',
