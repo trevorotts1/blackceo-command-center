@@ -4,6 +4,7 @@ import { Inter, JetBrains_Mono } from 'next/font/google';
 import CommandPalette from '@/components/CommandPalette';
 import AppWalkthrough from '@/components/walkthrough/AppWalkthrough';
 import BrandTheme from '@/components/BrandTheme';
+import InterviewGateSync from '@/components/interview/InterviewGateSync';
 // DemoBanner removed by Track A1 (Wave 1 cleanup). Top header + breadcrumbs
 // handle navigation; AppShell sidebar import also retired.
 // import AppShell from '@/components/AppShell';
@@ -47,6 +48,10 @@ export default function RootLayout({
             variables from the selected client's primary color (BlackCEO green
             fallback). Mounted first so its :root vars are in the cascade. */}
         <BrandTheme />
+        {/* P0-5: keeps the Edge-readable mc_interview_complete cookie warm so
+            the middleware shell lock (WG-9) can gate the dashboard without
+            reading fs/DB from the Edge runtime. Renders nothing. */}
+        <InterviewGateSync />
         {children}
         <CommandPalette />
         {/* App-wide interactive walkthrough; mounts once and selects the deck

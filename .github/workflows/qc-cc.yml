@@ -420,3 +420,42 @@ jobs:
             exit 1
           fi
           echo "All shell scripts parsed cleanly."
+
+  prove-zhe-web-e2e:
+    name: prove-zhe web e2e + interview ZHE gates (P3-8)
+    runs-on: ubuntu-latest
+    # Proves a completed interview through THIS app produces a Zero-Human-Everything
+    # -compliant build state, and FAILS loudly if any ZHE gate (consent/exit-87,
+    # decision-coverage/exit-88, provenanced-decline, expected-set equality) is
+    # bypassable from the web path. Runs the harness against a SANDBOXED throwaway
+    # HOME so the real Skill-23 enforcers never touch a live workspace.
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The gate proof drives the REAL Skill-23 enforcers (build-workforce.py,
+      # department-floor.py, list-canonical-departments.py, prove-zhe.py). Point
+      # OPENCLAW_SKILL23_SCRIPTS at an onboarding-skill checkout to run the FULL
+      # gate; without it the harness SKIPS loudly (never a false pass). Example:
+      #   - uses: actions/checkout@v4
+      #     with:
+      #       repository: ${{ vars.ONBOARDING_REPO }}
+      #       path: _onboarding
+      #   then set OPENCLAW_SKILL23_SCRIPTS below to
+      #   ${{ github.workspace }}/_onboarding/23-ai-workforce-blueprint/scripts
+      - name: Run prove-zhe web e2e (interview -> ZHE gate proof)
+        run: npm run test:prove-zhe-web
+        timeout-minutes: 6
+        env:
+          # Empty -> harness resolves the default skill path; if the enforcers are
+          # not installed on the runner the suite SKIPS loudly rather than fake-pass.
+          OPENCLAW_SKILL23_SCRIPTS: ${{ vars.OPENCLAW_SKILL23_SCRIPTS || '' }}

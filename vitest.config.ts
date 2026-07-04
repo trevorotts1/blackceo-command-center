@@ -17,6 +17,10 @@ export default defineConfig({
     include: [
       'tests/unit/deep-health.test.ts',
       'tests/unit/cc-probe-pm2.test.ts',
+      // P3-7: seam <-> onboarding-Python parity harness. Lives under src/ (not
+      // tests/unit/) so `npm run test:unit` (tsx --test glob) does NOT also pick it
+      // up — it uses vitest globals and only runs here via `npm run test:vitest`.
+      'src/lib/interview/__tests__/seam-parity.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
