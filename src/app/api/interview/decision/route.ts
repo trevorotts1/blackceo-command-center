@@ -45,6 +45,7 @@ import {
   InterviewScriptError,
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
+import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { getClientContext } from '@/lib/clients';
 
 export const runtime = 'nodejs';
@@ -176,6 +177,18 @@ export async function POST(req: NextRequest) {
       },
       { status: 502 },
     );
+  }
+
+  // 3b) READ-MIRROR refresh (P2-2). Re-sync the interview index FROM the canonical
+  //     files the script just wrote. Best-effort and READ-ONLY on the files:
+  //     refreshInterviewMirror never throws and never gates — a mirror failure
+  //     NEVER fails this request (the decision already landed in build-state). The
+  //     mirror caches NO decision authority; the board reads coverage from the
+  //     files via /api/interview/state.
+  try {
+    refreshInterviewMirror({ sessionId, ownerId: decidedBy });
+  } catch {
+    // swallow — mirror is non-authoritative and must never affect the response.
   }
 
   // 4) Success. The provenanced object now lives in build-state; echo the shape

@@ -186,6 +186,22 @@ export function upsertAnswer(input: UpsertAnswerInput): InterviewAnswerRow {
   return row as InterviewAnswerRow;
 }
 
+/**
+ * Prune a session's answer mirror rows so the mirror stays an EXACT reflection of
+ * the transcript: deletes any row whose question_number is NULL or greater than
+ * `maxQuestionNumber` (the current block count). Used by the mirror-on-write sync
+ * (P2-2) after upserting the live blocks. Best-effort / files-win — pruning the
+ * mirror never touches a canonical file. Returns the number of rows removed.
+ */
+export function pruneAnswersBeyond(sessionId: string, maxQuestionNumber: number): number {
+  const res = run(
+    `DELETE FROM interview_answers
+     WHERE session_id = ? AND (question_number IS NULL OR question_number > ?)`,
+    [sessionId, maxQuestionNumber],
+  );
+  return res.changes;
+}
+
 /** List a session's answer mirror rows in question order (NULL-numbered last). */
 export function listAnswers(sessionId: string): InterviewAnswerRow[] {
   return queryAll<InterviewAnswerRow>(
@@ -203,14 +219,28 @@ export function listAnswers(sessionId: string): InterviewAnswerRow[] {
  * answers in one transaction. A convenience for the mirror-on-write routes (P2-2).
  * Callers wrap this in try/catch — a mirror failure NEVER blocks the canonical
  * file write.
+ *
+ * When `opts.pruneToAnswers` is set AND at least one answer is supplied, any
+ * pre-existing answer rows beyond the supplied set (NULL-numbered, or a
+ * question_number past the highest supplied) are deleted in the SAME transaction,
+ * so the mirror ends up an exact reflection of the transcript. Pruning is skipped
+ * when `answers` is empty so a transient empty/failed parse never wipes the mirror.
  */
 export function mirrorSession(
   session: UpsertSessionInput,
   answers: UpsertAnswerInput[] = [],
+  opts: { pruneToAnswers?: boolean } = {},
 ): InterviewSessionRow {
   return transaction(() => {
     const row = upsertSession(session);
     for (const a of answers) upsertAnswer(a);
+    if (opts.pruneToAnswers && answers.length > 0) {
+      const maxQ = answers.reduce(
+        (m, a) => (typeof a.questionNumber === 'number' && a.questionNumber > m ? a.questionNumber : m),
+        0,
+      );
+      pruneAnswersBeyond(session.id, maxQ);
+    }
     return row;
   });
 }

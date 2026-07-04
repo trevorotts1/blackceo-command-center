@@ -35,6 +35,7 @@ import {
   getInterviewGateSnapshot,
   type GateFlags,
 } from '@/lib/interview/seam';
+import { refreshInterviewMirror } from '@/lib/interview/mirror';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -64,6 +65,12 @@ export async function GET(request: NextRequest) {
 
   try {
     const snap = await getInterviewGateSnapshot({ customDeptIds, implicitYesCustomIds });
+
+    // READ-MIRROR refresh (P2-2). Re-sync the interview_sessions/interview_answers
+    // index FROM the canonical files this GET just read. READ-ONLY on the session
+    // id (never mints one on a GET) and best-effort: refreshInterviewMirror never
+    // throws and the state response is returned regardless of the mirror outcome.
+    refreshInterviewMirror();
 
     // Rail's "current question": prefer the live progress stamp, fall back to the
     // handoff tracker. Used only for display + the derived percent.

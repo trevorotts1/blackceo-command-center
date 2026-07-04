@@ -47,9 +47,11 @@ import fs from 'fs';
 import path from 'path';
 import {
   updateInterviewState,
+  getOrCreateInterviewSessionId,
   InterviewScriptError,
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
+import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { answersFilePath } from '@/lib/interview/paths';
 import { INTERVIEW_QUESTIONS, type InterviewQuestion } from '@/lib/interview-questions';
 import { resolveBrandColor } from '@/lib/branding';
@@ -333,7 +335,22 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 7) Success. Canonical writes landed; mirror reported (may be a soft warning).
+  // 7) READ-MIRROR refresh (P2-2). Re-sync the interview_sessions/interview_answers
+  //    index FROM the canonical files just written. Best-effort and READ-ONLY on
+  //    the files: refreshInterviewMirror never throws and never gates — a mirror
+  //    failure NEVER fails this request (the canonical writes already landed).
+  //    getOrCreateInterviewSessionId gives the sync a stable key (the seam's sole
+  //    benign build-state write; it touches no gate field).
+  let dbMirror: { ok: boolean; answers?: number; skipped?: string } | null = null;
+  try {
+    const sessionId = getOrCreateInterviewSessionId();
+    const res = refreshInterviewMirror({ sessionId, ownerId: askedBy });
+    dbMirror = { ok: res.ok, answers: res.answersMirrored, skipped: res.skipped };
+  } catch {
+    dbMirror = { ok: false };
+  }
+
+  // 8) Success. Canonical writes landed; mirror reported (may be a soft warning).
   return NextResponse.json({
     ok: true,
     questionId: body.questionId ?? null,
@@ -342,5 +359,6 @@ export async function POST(req: NextRequest) {
     stateStamped: true,
     transcriptPath,
     mirror,
+    dbMirror,
   });
 }
