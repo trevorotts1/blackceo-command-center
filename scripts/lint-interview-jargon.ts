@@ -277,6 +277,28 @@ function isNonUiStringPosition(node: ts.StringLiteral | ts.NoSubstitutionTemplat
   return false;
 }
 
+/**
+ * True when a string literal is a CSS class-name list rather than owner-facing
+ * copy — e.g. the interview theme map's `bubbleAgent: 'iv-bubble iv-bubble-agent'`.
+ * Such a value is developer-only styling data (BEM/kebab class tokens under a
+ * semantic key like `bubbleAgent`, which the NON_TEXT_JSX_ATTRS key-skip does not
+ * catch), never prose the owner reads — the '-agent' inside `iv-bubble-agent` is a
+ * class token, not the word "agent" in a sentence.
+ *
+ * Rule (deliberately conservative to avoid false NEGATIVES on real copy): skip
+ * ONLY when every whitespace-separated token is a lowercase kebab identifier AND
+ * at least one token contains a hyphen. So a bare word ("agent"), a Title-Case
+ * label ("Departments") or a real sentence is still scanned — the exemption is
+ * limited to strings that can only be class names.
+ */
+function looksLikeCssClassList(text: string): boolean {
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return false;
+  const kebab = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+  if (!tokens.every((t) => kebab.test(t))) return false;
+  return tokens.some((t) => t.includes('-'));
+}
+
 function extractFromFile(file: string, compiled: CompiledTerm[], hits: Hit[]): void {
   const text = fs.readFileSync(file, 'utf-8');
   const rel = path.relative(REPO_ROOT, file);
@@ -287,7 +309,7 @@ function extractFromFile(file: string, compiled: CompiledTerm[], hits: Hit[]): v
 
   const visit = (node: ts.Node): void => {
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-      if (!isNonUiStringPosition(node)) {
+      if (!isNonUiStringPosition(node) && !looksLikeCssClassList(node.text)) {
         // content starts one char after the opening quote/backtick
         scanString(node.text, compiled, rel, lineOf(node.getStart(sf) + 1), hits);
       }
