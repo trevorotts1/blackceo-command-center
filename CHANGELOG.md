@@ -1,3 +1,11 @@
+## [v4.59.6] — 2026-07-03 — chore(security): archive legacy root-level demo seed SQL out of the executable path (#15) — Big July 3rd Update Wave 4
+
+Wave 4 of The Big July 3rd Update. Built by subagents, independently verified (fresh Opus, PASS on #15). Housekeeping/hardening only; no application logic/routes/schemas changed; repo is fleet-wide (no client names in any changed file); box user, not root.
+
+- **#15 — legacy demo seed SQL archived off every code path (`seed-departments.sql`, `seed-departments-fixed.sql` → `docs/archive/legacy-demo-sql/`).** The two root-level demo `.sql` files — which an operator running them manually could use to inject ~17 fabricated demo tasks (e.g. "Define quarterly vision", "Approve marketing budget") plus a demo Live Feed event into a client database — are moved (pure `git mv`, content unchanged) into `docs/archive/legacy-demo-sql/`, where they sit off every automated path (migrations, `db:seed`, `db:reset`, `update.sh`). A new DO-NOT-RUN `README.md` in that folder documents why they are dangerous and points to the real, supported path.
+- **`update.sh` Step 4 no longer suggests running them manually.** The old warning ("Skipping auto-apply — run manually if your schema has changed") is replaced with an explicit DEMO-ONLY / do-NOT-run-on-a-client-box warning that points at the app's automatic migration runner.
+- **Real schema/data path unchanged.** The supported path — `src/lib/db/migrate.ts` → `runMigrations()`, migrations `085`/`086`, and `npm run db:seed` — is untouched; migration `086` still removes any legacy demo seed rows once a real company row exists. No migration, no schema change.
+
 ## [v4.59.5] — 2026-07-03 — chore(security): externalize the client roster out of the anti-leak gates (names, chat IDs, GHL location IDs off GitHub) + scrub residual client names — client-name hardening
 
 Security/hardening pass. The real client roster (client names, Telegram chat IDs, GHL location IDs) no longer lives inline in the anti-leak gates — it is externalized to an operator-local, gitignored file and loaded at runtime, so client-identifying data is now 100% off GitHub while the gates still bite (fail-closed) in both modes. All additive; no application logic/routes/schemas changed; repo is fleet-wide; box user, not root.
