@@ -107,10 +107,16 @@ success "Dependencies installed"
 # Run any database migrations (if seed files changed)
 # ----------------------------------------------------------
 step "Step 4: Database migrations (if applicable)"
+# Schema/data migrations are applied automatically and idempotently by the
+# TypeScript migration runner (src/lib/db/migrate.ts -> runMigrations) on start;
+# there is nothing to apply here. The legacy seed-departments*.sql files are
+# demo-only artifacts and now live (non-executed) under docs/archive/legacy-demo-sql/.
 if [ -f "seed-departments-fixed.sql" ] || [ -f "seed-departments.sql" ]; then
-  warn "Seed SQL detected — Command Center may need manual database migration."
-  warn "  Files: $(ls *.sql 2>/dev/null | tr '\n' ' ')"
-  warn "  Skipping auto-apply — run manually if your schema has changed."
+  warn "Legacy demo seed SQL found at repo root — this is DEMO-ONLY data."
+  warn "  Files: $(ls seed-departments*.sql 2>/dev/null | tr '\n' ' ')"
+  warn "  Do NOT run these on a client/production box: they inject fake demo tasks."
+  warn "  Real migrations run automatically via the app's migration runner."
+  warn "  These files belong in docs/archive/legacy-demo-sql/ — move them there."
 fi
 
 # ----------------------------------------------------------
