@@ -1,6 +1,6 @@
 {
   "name": "mission-control",
-  "version": "4.60.0",
+  "version": "4.60.1",
   "private": true,
   "engines": {
     "node": ">=20.0.0"
@@ -14,6 +14,7 @@
     "test:deep-health": "vitest run tests/unit/deep-health.test.ts",
     "test:vitest": "vitest run",
     "test:prove-zhe-web": "node --import tsx --test tests/e2e/prove-zhe-web.e2e.mjs",
+    "test:e2e:interview-lock": "playwright test --config=playwright.interview-lock.config.ts",
     "test:prove-zhe-web:local": "node --experimental-strip-types --import ./tests/e2e/ts-register.mjs --test tests/e2e/prove-zhe-web.e2e.mjs",
     "test:sync:branding": "npx tsx scripts/sync-branding-questions-test.ts",
     "lint:interview-jargon": "npx tsx scripts/lint-interview-jargon.ts",
