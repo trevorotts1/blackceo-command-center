@@ -3,6 +3,9 @@
 @tailwind utilities;
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+/* Wave 5 · P3-6 — serif/display face for the interview question (the focal
+   point of each screen). Fraunces: a calm, premium variable serif. */
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap');
 
 :root {
   /* Light Theme Colors */
@@ -363,4 +366,366 @@ body {
     0 0 0 8px rgba(67, 160, 71, 0.18),
     0 8px 32px rgba(0, 0, 0, 0.22);
   transition: outline-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Wave 5 · P3-6 — THE ONE interview aesthetic (.iv-* layer)
+   ────────────────────────────────────────────────────────────────────────────
+   Reconciles the /onboarding/building light-indigo look and the bcc-* / mc-*
+   token systems into a single calm, premium, single-focus language for the
+   seven interview screens. Consumed via src/components/interview/interview-theme.ts
+   (import { iv, ivcx, ... }). Never edit class names here without updating that
+   module — it is the typed API components use.
+
+   Accent tokens intentionally point at the SAME --brand-* variables that
+   <BrandTheme/> rewrites per client, so the whole interview re-themes to the
+   owner's brand color the instant they answer the brand question (P2-7) with
+   zero per-component work.
+
+   .iv-dark re-declares the surface/ink/line/accent variables, so any nested
+   .iv-card, .iv-badge, .iv-btn etc. flips to the closeout dark-panel look with
+   no separate dark class — the department board and milestone screens just wrap
+   their subtree in .iv-dark and flow straight into the Skill-37 closeout reveal.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Type */
+  --iv-font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --iv-font-display: 'Fraunces', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+
+  /* Shape */
+  --iv-radius: 20px;
+  --iv-radius-sm: 12px;
+  --iv-measure: 40rem; /* one comfortable single-focus reading column */
+
+  /* Motion */
+  --iv-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --iv-dur: 280ms;
+  --iv-dur-fast: 160ms;
+
+  /* ── Light (calm paper) palette — the default interview surface ─────────── */
+  --iv-canvas: #FAFAF7;       /* warm paper, no cold indigo */
+  --iv-surface: #FFFFFF;
+  --iv-surface-2: #F4F4EF;
+  --iv-line: #ECEBE4;
+  --iv-line-strong: #DEDCD3;
+  --iv-ink: #1A1D26;
+  --iv-ink-soft: #61646E;
+  --iv-ink-faint: #9A9CA4;
+  --iv-shadow: 0 1px 2px rgba(20, 22, 26, 0.04), 0 12px 32px rgba(20, 22, 26, 0.06);
+
+  /* ── Accent — rides the live per-client --brand-* scale (BrandTheme) ─────── */
+  --iv-accent: var(--brand-600, #43A047);
+  --iv-accent-strong: var(--brand-700, #388E3C);
+  --iv-accent-ring: var(--brand-400, #66BB6A);
+  --iv-accent-wash: var(--brand-50, #E8F5E9);
+  --iv-on-accent: #0B0C0F; /* near-black reads premium on a brand fill */
+}
+
+/* Dark-panel scope: closeout continuity. Overrides the palette variables so the
+   same component classes render dark. Accent shifts a couple steps lighter for
+   contrast on near-black. */
+.iv-dark,
+.iv-panel-card {
+  --iv-canvas: #14161A;
+  --iv-surface: #191C22;
+  --iv-surface-2: #21252C;
+  --iv-line: #2A2E36;
+  --iv-line-strong: #363B45;
+  --iv-ink: #F4F5F7;
+  --iv-ink-soft: #A2A7B2;
+  --iv-ink-faint: #6C717C;
+  --iv-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 48px rgba(0, 0, 0, 0.5);
+  --iv-accent: var(--brand-500, #4CAF50);
+  --iv-accent-strong: var(--brand-400, #66BB6A);
+  --iv-accent-ring: var(--brand-500, #4CAF50);
+  --iv-accent-wash: color-mix(in srgb, var(--brand-500, #4CAF50) 16%, transparent);
+}
+
+/* ── Scopes ─────────────────────────────────────────────────────────────────*/
+.iv-root {
+  background: var(--iv-canvas);
+  color: var(--iv-ink);
+  font-family: var(--iv-font-sans);
+  min-height: 100vh;
+}
+.iv-dark {
+  background: var(--iv-canvas);
+  color: var(--iv-ink);
+  font-family: var(--iv-font-sans);
+  min-height: 100vh;
+}
+
+/* ── Layout ─────────────────────────────────────────────────────────────────*/
+.iv-stage {
+  width: 100%;
+  max-width: var(--iv-measure);
+  margin-inline: auto;
+  padding: clamp(1.5rem, 1rem + 4vw, 3.5rem) 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ── Typography ─────────────────────────────────────────────────────────────*/
+.iv-eyebrow {
+  font-family: var(--iv-font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--iv-accent-strong);
+  margin: 0;
+}
+.iv-question {
+  font-family: var(--iv-font-display);
+  font-optical-sizing: auto;
+  font-weight: 500;
+  font-size: clamp(1.9rem, 1.2rem + 2.6vw, 3rem);
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+  color: var(--iv-ink);
+  text-wrap: balance;
+  margin: 0;
+}
+.iv-lede {
+  font-family: var(--iv-font-sans);
+  font-size: 1.05rem;
+  line-height: 1.6;
+  color: var(--iv-ink-soft);
+  margin: 0;
+}
+
+/* ── Cards ──────────────────────────────────────────────────────────────────*/
+.iv-card,
+.iv-panel-card {
+  background: var(--iv-surface);
+  border: 1px solid var(--iv-line);
+  border-radius: var(--iv-radius);
+  box-shadow: var(--iv-shadow);
+  padding: 1.5rem;
+  color: var(--iv-ink);
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────────*/
+.iv-btn {
+  font-family: var(--iv-font-sans);
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.72rem 1.4rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color var(--iv-dur-fast) var(--iv-ease),
+    border-color var(--iv-dur-fast) var(--iv-ease),
+    transform var(--iv-dur-fast) var(--iv-ease),
+    box-shadow var(--iv-dur-fast) var(--iv-ease), opacity var(--iv-dur-fast) var(--iv-ease);
+}
+.iv-btn:disabled,
+.iv-btn.is-busy {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+.iv-btn-primary {
+  background: var(--iv-accent);
+  color: var(--iv-on-accent);
+  box-shadow: 0 1px 2px rgba(20, 22, 26, 0.12), 0 8px 20px color-mix(in srgb, var(--iv-accent) 26%, transparent);
+}
+.iv-btn-primary:hover:not(:disabled):not(.is-busy) {
+  background: var(--iv-accent-strong);
+  transform: translateY(-1px);
+}
+.iv-btn-ghost {
+  background: transparent;
+  border-color: var(--iv-line-strong);
+  color: var(--iv-ink);
+}
+.iv-btn-ghost:hover:not(:disabled):not(.is-busy) {
+  background: var(--iv-surface-2);
+  border-color: var(--iv-accent-ring);
+}
+.iv-btn-quiet {
+  background: transparent;
+  color: var(--iv-ink-soft);
+  padding: 0.5rem 0.8rem;
+}
+.iv-btn-quiet:hover:not(:disabled):not(.is-busy) {
+  color: var(--iv-ink);
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────────────*/
+.iv-input,
+.iv-field {
+  width: 100%;
+  background: var(--iv-surface);
+  border: 1px solid var(--iv-line-strong);
+  border-radius: var(--iv-radius-sm);
+  padding: 0.8rem 1rem;
+  font-family: var(--iv-font-sans);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--iv-ink);
+  transition: border-color var(--iv-dur-fast) var(--iv-ease), box-shadow var(--iv-dur-fast) var(--iv-ease);
+}
+.iv-input::placeholder,
+.iv-field::placeholder {
+  color: var(--iv-ink-faint);
+}
+.iv-input:focus,
+.iv-field:focus {
+  outline: none;
+  border-color: var(--iv-accent);
+  box-shadow: 0 0 0 3px var(--iv-accent-wash);
+}
+
+/* ── Conversation bubbles ───────────────────────────────────────────────────*/
+.iv-bubble {
+  max-width: 88%;
+  padding: 0.85rem 1.1rem;
+  border-radius: var(--iv-radius);
+  font-size: 1rem;
+  line-height: 1.55;
+}
+.iv-bubble-agent {
+  align-self: flex-start;
+  background: var(--iv-surface-2);
+  color: var(--iv-ink);
+  border: 1px solid var(--iv-line);
+  border-top-left-radius: 6px;
+}
+.iv-bubble-owner {
+  align-self: flex-end;
+  background: var(--iv-accent-wash);
+  color: var(--iv-ink);
+  border: 1px solid var(--iv-accent-ring);
+  border-top-right-radius: 6px;
+}
+
+/* ── Progress rail (phase stepper) ──────────────────────────────────────────*/
+.iv-rail {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.iv-rail-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--iv-font-sans);
+  font-size: 0.8rem;
+  color: var(--iv-ink-faint);
+  transition: color var(--iv-dur) var(--iv-ease);
+}
+.iv-rail-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: var(--iv-line-strong);
+  transition: background-color var(--iv-dur) var(--iv-ease), box-shadow var(--iv-dur) var(--iv-ease);
+}
+.iv-rail-step.is-done {
+  color: var(--iv-ink-soft);
+}
+.iv-rail-step.is-done .iv-rail-dot {
+  background: var(--iv-accent);
+}
+.iv-rail-step.is-active {
+  color: var(--iv-ink);
+  font-weight: 600;
+}
+.iv-rail-step.is-active .iv-rail-dot {
+  background: var(--iv-accent);
+  box-shadow: 0 0 0 4px var(--iv-accent-wash);
+}
+
+/* Derived-percent bar (progress rail summary + the build-progress screen). */
+.iv-progress-track {
+  width: 100%;
+  height: 0.5rem;
+  background: var(--iv-line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.iv-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--iv-accent), var(--iv-accent-strong));
+  transition: width var(--iv-dur) var(--iv-ease);
+}
+
+/* ── Coverage badges (decision board) ───────────────────────────────────────*/
+.iv-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--iv-font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.iv-badge-covered {
+  background: var(--iv-accent-wash);
+  color: var(--iv-accent-strong);
+  border-color: var(--iv-accent-ring);
+}
+.iv-badge-pending {
+  background: var(--iv-surface-2);
+  color: var(--iv-ink-soft);
+  border-color: var(--iv-line-strong);
+}
+.iv-badge-declined {
+  background: transparent;
+  color: var(--iv-ink-faint);
+  border-color: var(--iv-line-strong);
+}
+
+/* ── Welcome / consent option (A/B/C) — NEVER auto-selected ──────────────────*/
+.iv-choice {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--iv-surface);
+  border: 1.5px solid var(--iv-line-strong);
+  border-radius: var(--iv-radius);
+  padding: 1.25rem 1.4rem;
+  color: var(--iv-ink);
+  cursor: pointer;
+  transition: border-color var(--iv-dur-fast) var(--iv-ease), transform var(--iv-dur-fast) var(--iv-ease),
+    box-shadow var(--iv-dur-fast) var(--iv-ease);
+}
+.iv-choice:hover {
+  border-color: var(--iv-accent-ring);
+  transform: translateY(-1px);
+  box-shadow: var(--iv-shadow);
+}
+.iv-choice.is-selected {
+  border-color: var(--iv-accent);
+  box-shadow: 0 0 0 3px var(--iv-accent-wash);
+}
+
+/* ── Respect reduced-motion ─────────────────────────────────────────────────*/
+@media (prefers-reduced-motion: reduce) {
+  .iv-btn,
+  .iv-choice,
+  .iv-rail-dot,
+  .iv-progress-fill,
+  .iv-input,
+  .iv-field {
+    transition: none;
+  }
+  .iv-btn-primary:hover:not(:disabled):not(.is-busy),
+  .iv-choice:hover {
+    transform: none;
+  }
 }
