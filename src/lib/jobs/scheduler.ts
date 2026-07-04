@@ -34,6 +34,7 @@ import {
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
 import { runStaleTaskSweep, STALE_TASK_SWEEP_CRON } from './stale-task-sweep';
+import { runInterviewNudgeSweep, INTERVIEW_NUDGE_SWEEP_CRON } from './interview-nudge-sweep';
 import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
 import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
@@ -356,6 +357,30 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
     },
   },
 
+
+  // interview-nudge: hourly (:23) — re-engage an owner who STARTED the Skill-23
+  // interview and went quiet, with ONE Telegram resume link matching the P0-7
+  // slug contract (${OPENCLAW_DASHBOARD_URL}/onboarding/resume/<slug>). Reads
+  // interview progress from the canonical files only (never writes
+  // interviewComplete); idempotent per (session, tier) via an events ledger row;
+  // silent/operator-safe (owner-only send). OPT-IN: dormant unless
+  // INTERVIEW_NUDGE_SWEEP_ENABLED=1 (repo-only until fleet rollout is released).
+  // Disable outright with DISABLE_INTERVIEW_NUDGE_SWEEP=1.
+  {
+    name: 'interview-nudge',
+    expr: INTERVIEW_NUDGE_SWEEP_CRON,
+    fn: async () => {
+      const result = await runInterviewNudgeSweep();
+      if (result.skippedReason) {
+        // Quiet by design — only log the interesting (would-have-sent) skips.
+        if (result.tier) {
+          console.log(`[cron] interview-nudge: skipped — ${result.skippedReason}`);
+        }
+      } else if (result.nudged > 0) {
+        console.log(`[cron] interview-nudge: sent tier ${result.tier}h resume nudge`);
+      }
+    },
+  },
 
   // weekly-done-clear: Sunday 07:00 America/New_York — soft-archive all done
   // tasks (sets archived_at, never hard-deletes). Idempotent: a second run in
