@@ -250,3 +250,224 @@ def test_find_db_explicit_and_env_take_priority(_clean_env, monkeypatch, tmp_pat
     assert mod.find_db(explicit="/x/y.db") == "/x/y.db"
     monkeypatch.setenv("DATABASE_PATH", "/env/db.sqlite")
     assert mod.find_db() == "/env/db.sqlite"
+
+
+# ---------------------------------------------------------------------------
+# reseed_workspaces — Issue #13 (slug upsert crash) + Issue #11 (prune/adopt)
+# ---------------------------------------------------------------------------
+import sqlite3
+
+
+_COMPANY_INFO = {
+    "name": "Acme Corp", "slug": "acme-corp", "industry": "widgets",
+    "brand_primary": "#1f2937", "brand_accent": "#3b82f6", "brand_text": "#f8fafc",
+}
+
+
+def _make_db(tmp_path):
+    """Create a mission-control.db with the real companies/workspaces/tasks schema."""
+    db_path = str(tmp_path / "mission-control.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE companies (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+            industry TEXT, config TEXT DEFAULT '{}'
+        );
+        CREATE TABLE workspaces (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+            description TEXT, icon TEXT, company_id TEXT DEFAULT 'default'
+        );
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL, workspace_id TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _workspaces(db_path):
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT id, company_id FROM workspaces ORDER BY id").fetchall()
+    conn.close()
+    return dict(rows)
+
+
+def _companies(db_path):
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id, name, slug FROM companies ORDER BY id").fetchall()
+    conn.close()
+    return rows
+
+
+def test_company_upsert_no_crash_on_slug_conflict_different_id(_clean_env):
+    """Issue #13: an existing companies row with the SAME slug but a DIFFERENT id
+    must not crash the sync (UNIQUE(slug) violation); it is updated in place."""
+    home = _clean_env
+    db_path = _make_db(home)
+    # Pre-seed the company under a uuid id (the pre-fix seed path) with our slug.
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO companies (id, name, slug, industry) VALUES (?,?,?,?)",
+        ("11111111-uuid", "Stale Name", "acme-corp", "old"))
+    conn.commit()
+    conn.close()
+
+    # Must NOT raise sqlite3.IntegrityError.
+    mod.reseed_workspaces(db_path, list(_DEPTS), dict(_COMPANY_INFO))
+
+    companies = _companies(db_path)
+    # Still exactly one company row (updated in place, not duplicated).
+    assert len(companies) == 1
+    cid, name, cslug = companies[0]
+    assert cid == "11111111-uuid"   # kept the existing id
+    assert cslug == "acme-corp"
+    assert name == "Acme Corp"      # refreshed to the build's name
+
+
+def test_company_upsert_fresh_insert(_clean_env):
+    """No pre-existing company -> a new row is inserted with id == slug."""
+    home = _clean_env
+    db_path = _make_db(home)
+    mod.reseed_workspaces(db_path, list(_DEPTS), dict(_COMPANY_INFO))
+    companies = _companies(db_path)
+    assert companies == [("acme-corp", "Acme Corp", "acme-corp")]
+
+
+def test_adopt_workspace_seeded_under_default_company_id(_clean_env):
+    """Issue #11: a workspace row seeded under company_id='default' is ADOPTED
+    (re-homed to the real slug + refreshed), never duplicated or crashed on the
+    PRIMARY KEY(id) INSERT."""
+    home = _clean_env
+    db_path = _make_db(home)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+        "VALUES (?,?,?,?,?,?)",
+        ("marketing", "Old Marketing", "marketing", "old", "\U0001f4c1", "default"))
+    conn.commit()
+    conn.close()
+
+    depts = [{"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"}]
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO))
+
+    ws = _workspaces(db_path)
+    # Exactly one 'marketing' row, re-homed to the real slug (no duplicate id).
+    assert ws == {"marketing": "acme-corp"}
+
+
+def test_prune_deletes_stale_empty_workspace(_clean_env):
+    """--prune deletes a workspace that is no longer in the build and has no tasks."""
+    home = _clean_env
+    db_path = _make_db(home)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+        "VALUES (?,?,?,?,?,?)",
+        ("legacy-dept", "Legacy", "legacy-dept", "", "\U0001f4c1", "acme-corp"))
+    conn.commit()
+    conn.close()
+
+    depts = [{"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"}]
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO), prune=True)
+
+    ws = _workspaces(db_path)
+    assert "legacy-dept" not in ws          # pruned
+    assert "marketing" in ws                # current build present
+
+
+def test_prune_keeps_workspace_with_tasks(_clean_env, capsys):
+    """--prune must NEVER delete a stale workspace that still holds tasks;
+    it is kept and logged for operator review."""
+    home = _clean_env
+    db_path = _make_db(home)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+        "VALUES (?,?,?,?,?,?)",
+        ("legacy-dept", "Legacy", "legacy-dept", "", "\U0001f4c1", "acme-corp"))
+    conn.execute("INSERT INTO tasks (id, title, workspace_id) VALUES (?,?,?)",
+                 ("t1", "unfinished work", "legacy-dept"))
+    conn.commit()
+    conn.close()
+
+    depts = [{"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"}]
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO), prune=True)
+
+    ws = _workspaces(db_path)
+    assert "legacy-dept" in ws               # KEPT because it has tasks
+    assert "KEPT stale workspace" in capsys.readouterr().out
+
+
+def test_prune_never_deletes_reserved_system_workspaces(_clean_env):
+    """--prune must leave reserved infra workspaces (bugs/general-task/default/
+    master-orchestrator) alone even though they are absent from departments.json."""
+    home = _clean_env
+    db_path = _make_db(home)
+    conn = sqlite3.connect(db_path)
+    for wid in ("bugs", "general-task", "default", "master-orchestrator", "inbox"):
+        conn.execute(
+            "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (wid, wid.title(), wid, "", "\U0001f4c1", "acme-corp"))
+    conn.commit()
+    conn.close()
+
+    depts = [{"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"}]
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO), prune=True)
+
+    ws = _workspaces(db_path)
+    for wid in ("bugs", "general-task", "default", "master-orchestrator", "inbox"):
+        assert wid in ws, f"reserved workspace {wid} was wrongly pruned"
+
+
+def test_prune_off_by_default_leaves_stale_rows(_clean_env):
+    """Without --prune, stale workspaces are left in place (backward-compatible)."""
+    home = _clean_env
+    db_path = _make_db(home)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+        "VALUES (?,?,?,?,?,?)",
+        ("legacy-dept", "Legacy", "legacy-dept", "", "\U0001f4c1", "acme-corp"))
+    conn.commit()
+    conn.close()
+
+    depts = [{"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"}]
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO))  # prune defaults off
+
+    ws = _workspaces(db_path)
+    assert "legacy-dept" in ws               # not pruned when --prune absent
+
+
+def test_reseed_prune_no_tasks_table_does_not_crash(_clean_env):
+    """Prune is safe even if the tasks table does not exist yet (fresh DB)."""
+    home = _clean_env
+    db_path = str(home / "mc.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE companies (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+            industry TEXT, config TEXT DEFAULT '{}'
+        );
+        CREATE TABLE workspaces (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+            description TEXT, icon TEXT, company_id TEXT DEFAULT 'default'
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+        "VALUES (?,?,?,?,?,?)",
+        ("legacy-dept", "Legacy", "legacy-dept", "", "\U0001f4c1", "acme-corp"))
+    conn.commit()
+    conn.close()
+
+    depts = [{"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"}]
+    # No tasks table -> treated as zero tasks -> stale row pruned, no crash.
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO), prune=True)
+    assert "legacy-dept" not in _workspaces(db_path)
