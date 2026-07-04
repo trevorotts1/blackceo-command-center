@@ -1,53 +1,111 @@
 'use client';
 
 /**
- * InterviewClient — the client half of the /interview walking skeleton (P0-6).
+ * InterviewClient — the orchestrator for the /interview surface (Wave 5 · P4).
  *
- * Responsibilities (P0 proof-of-wiring; polished panes arrive in P1/P2):
- *   1. WELCOME / CONSENT — three options, NONE auto-selected. The owner must make
- *      an explicit choice before the conversational pane opens (acceptance:
- *      "never auto-select").
- *   2. CONVERSATIONAL PANE — one message at a time, wired to POST
- *      /api/interview/turn. The client's own Skill-23 agent (the "brain") asks the
- *      questions and owns every file write; this UI only relays text and renders
- *      the agent's replies as interviewer bubbles. A 503 (gateway reconnecting)
- *      degrades gracefully to an inline notice.
- *   3. PROGRESS READOUT — a derived percent + the three gate flags from GET
- *      /api/interview/state, re-read after every turn so the Build button arms the
- *      instant the invariants are satisfied.
- *   4. GATED BUILD — "Build my company" is physically un-clickable (disabled AND
- *      guarded) until ALL THREE gate flags are true. On click it POSTs
- *      /api/interview/complete (the same script the Telegram agent presses) and:
- *        • pass         → refresh the shell-lock cookie, router.push('/onboarding/building')
- *        • needs-review → a distinct calm "we're reviewing your answers" screen
- *        • fail         → a distinct drill-back screen listing the QC reasons
- *        • 409 (incomplete) → surface exactly what is still missing, re-read state
+ * This is the integration step: it takes the seven isolated, polished interview
+ * components and drives them as ONE coherent 7-phase flow, entirely from server
+ * truth (GET /api/interview/state → phase/progress/gate-flags) and the canonical
+ * write routes. It never writes a canonical file itself; every persistence path
+ * goes through an API route (turn / answer / decision / complete), which press the
+ * exact same scripts the Telegram interview agent presses.
  *
- * IMPORTANT: this file imports NOTHING from the Node-only interview seam
- * (src/lib/interview/seam.ts pulls node:child_process/fs). It talks only to the
- * API routes and mirrors their JSON shapes with local types, so it stays a clean
- * client bundle. refreshInterviewGate is a 'use server' action (safe to import).
+ * ── The phases it orchestrates ────────────────────────────────────────────────
+ *   0  CONSENT       — three options, NONE auto-selected; Begin stays disabled
+ *                      until an explicit choice (never auto-select).
+ *   RESUME           — when /state says status="in_progress", we skip consent,
+ *                      show <WelcomeBack> at the owner's percent + answer count,
+ *                      land them on next_question_number, and surface the
+ *                      skipped-question circle-back queue. Resume is the only
+ *                      forward path — there is deliberately no "start over".
+ *   1-5 Q&A          — the <ProgressRail> is ALWAYS shown. A STRUCTURED question
+ *                      (from interview-questions) renders the matching
+ *                      QuestionCard / ColorPickerCard / LogoDropCard, one at a
+ *                      time, POSTing /api/interview/answer. When the structured
+ *                      set is exhausted, the free-form conversational depth runs
+ *                      through <ConversationPane> (interviewer bubbles + the
+ *                      "I don't know" research affordance) over /api/interview/turn.
+ *                      A <MilestoneScreen> (words only) marks each phase boundary.
+ *   5.5 DEPARTMENTS  — <DepartmentBoard>; its onCoverageChange drives the coverage
+ *                      gate (mirrors build-side gates #3 ∧ #8).
+ *   6  REVIEW        — <ReviewScreen>: synthesis, grouped + inline-editable
+ *                      answers, the skipped circle-back queue, ending in the ONE
+ *                      "Build my company" button, TRIPLE-gated on
+ *                      genuineTranscriptReady ∧ decisionCoverageComplete ∧
+ *                      noUnprovenancedDeclines. On QC pass → /onboarding/building.
+ *
+ * ── Clean client bundle ───────────────────────────────────────────────────────
+ * Imports NOTHING from the Node-only interview seam. INTERVIEW_QUESTIONS in
+ * src/lib/interview-questions.ts is a Node-only value (createRequire/node:module),
+ * so the structured set is rebuilt here from the same vendored branding JSON plus
+ * the two identity questions — a byte-for-byte mirror of INTERVIEW_QUESTIONS,
+ * with only the InterviewQuestion TYPE imported (type-only, erased at build).
+ *
+ * P3-2 live-rebrand hooks (useCompanyBrand / useLogoUrl) and the P3-3 walkthrough
+ * data-walkthrough targets are preserved.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { AnimatePresence, motion } from 'framer-motion';
-import {
-  AlertTriangle,
-  ArrowRight,
-  Building2,
-  CheckCircle2,
-  ClipboardList,
-  Info,
-  Loader2,
-  Lock,
-  MessagesSquare,
-  RotateCcw,
-  Send,
-  ShieldCheck,
-  Sparkles,
-} from 'lucide-react';
-import { refreshInterviewGate } from '@/components/interview/gate-actions';
+import { ArrowRight, Info, Lock, Sparkles } from 'lucide-react';
+
+import { iv, ivcx, ivScreenVariants } from '@/components/interview/interview-theme';
+import type { InterviewQuestion } from '@/lib/interview-questions';
+import brandingRaw from '@/lib/interview-questions.branding-questions.json';
+
+import ProgressRail from '@/components/interview/ProgressRail';
+import QuestionCard from '@/components/interview/QuestionCard';
+import ConversationPane from '@/components/interview/ConversationPane';
+import DepartmentBoard from '@/components/interview/DepartmentBoard';
+import ReviewScreen from '@/components/interview/ReviewScreen';
+import MilestoneScreen from '@/components/interview/MilestoneScreen';
+import WelcomeBack from '@/components/interview/WelcomeBack';
+
+import { useCompanyBrand } from '@/hooks/useCompanyBrand';
+import { useLogoUrl } from '@/hooks/useLogoUrl';
+
+/* -------------------------------------------------------------------------- */
+/* structured question set (client mirror of INTERVIEW_QUESTIONS)              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The two identity questions that precede the branding set — kept inline (not
+ * imported) so no Node-only module is pulled into this client bundle. This mirrors
+ * the head of INTERVIEW_QUESTIONS in src/lib/interview-questions.ts exactly.
+ */
+const IDENTITY_QUESTIONS: InterviewQuestion[] = [
+  {
+    id: 'company_name',
+    section: 'identity',
+    prompt: 'What is your company name?',
+    kind: 'text',
+    storeOn: 'client.name',
+    required: true,
+  },
+  {
+    id: 'industry',
+    section: 'identity',
+    prompt: 'What industry are you in?',
+    help: 'e.g. SaaS, e-commerce, healthcare, real estate.',
+    kind: 'text',
+    storeOn: 'company.industry',
+    required: true,
+  },
+];
+
+/** identity + branding — the full ordered structured set the cards render. */
+const STRUCTURED_QUESTIONS: InterviewQuestion[] = [
+  ...IDENTITY_QUESTIONS,
+  ...((brandingRaw as { questions: unknown }).questions as InterviewQuestion[]),
+];
+
+/** Jargon-free milestone name for a completed structured section. */
+const SECTION_MILESTONE: Record<InterviewQuestion['section'], string> = {
+  identity: 'Your company',
+  branding: 'Your brand',
+  operations: 'How you run',
+};
 
 /* -------------------------------------------------------------------------- */
 /* JSON shapes (mirror the API routes — kept local so no Node import leaks in) */
@@ -95,43 +153,24 @@ interface TurnResponse {
   message?: string;
 }
 
-interface CompleteMissingItem {
-  gate: 'transcript' | 'decision_coverage' | 'unprovenanced_declines';
-  reason: string;
-  departments?: string[];
-  rejections?: string[];
-}
-
-interface CompleteResponse {
-  ok?: boolean;
-  status?: 'pass' | 'needs-review' | 'fail';
-  redirect?: string;
-  reasons?: string[];
-  message?: string;
-  error?: string;
-  missing?: CompleteMissingItem[];
-  operatorPing?: boolean;
-}
-
 /* -------------------------------------------------------------------------- */
 /* local UI state                                                              */
 /* -------------------------------------------------------------------------- */
 
-type Role = 'owner' | 'interviewer' | 'system';
-
-interface ChatMessage {
-  id: string;
-  role: Role;
-  text: string;
-}
-
-/** One of the three welcome/consent options. Null = nothing selected (default). */
+/** The three welcome/consent options. Null = nothing selected (the default). */
 type Consent = 'full' | 'quick' | 'learn' | null;
 
-/** Terminal screens the /complete verdict can route us to. */
-type Outcome =
-  | { kind: 'needs-review'; message: string }
-  | { kind: 'fail'; reasons: string[] };
+/** The orchestrated phases (0-6, with the department board as 5.5). */
+type Stage = 'consent' | 'welcome-back' | 'qa' | 'milestone' | 'departments' | 'review';
+
+/** Within the Q&A stage: structured cards first, then free-form conversation. */
+type QaMode = 'structured' | 'conversation';
+
+interface PendingMilestone {
+  phase: string;
+  completed: number;
+  total: number;
+}
 
 const ALL_GATES_FALSE: GateFlags = {
   genuineTranscriptReady: false,
@@ -139,11 +178,8 @@ const ALL_GATES_FALSE: GateFlags = {
   noUnprovenancedDeclines: false,
 };
 
-let __mid = 0;
-function nextId(): string {
-  __mid += 1;
-  return `m${__mid}-${Date.now()}`;
-}
+/** Total interview phases used for the milestone step counter (words only). */
+const TOTAL_PHASES = 4; // company · brand · team · departments
 
 /* -------------------------------------------------------------------------- */
 /* component                                                                   */
@@ -152,80 +188,84 @@ function nextId(): string {
 export default function InterviewClient() {
   const router = useRouter();
 
-  // Phase.
-  const [consent, setConsent] = useState<Consent>(null);
-  const [started, setStarted] = useState(false);
+  // P3-2 live-rebrand hooks — the surface re-themes the instant branding answers
+  // land (BrandTheme rewrites the --brand-* vars the iv-* tokens point at); the
+  // logo + accent below make that live rebrand visible in the header.
+  const logoUrl = useLogoUrl();
+  const brand = useCompanyBrand();
 
-  // Conversation.
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Phase machine.
+  const [stage, setStage] = useState<Stage>('consent');
+  const [consent, setConsent] = useState<Consent>(null);
+  const [qaMode, setQaMode] = useState<QaMode>('structured');
+  const [structIndex, setStructIndex] = useState(0);
+
+  // Server truth (progress rail + resume + gate flags).
+  const [state, setState] = useState<InterviewStateResponse | null>(null);
+
+  // Conversation (free-form Q&A depth).
+  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [currentReaction, setCurrentReaction] = useState('');
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
 
-  // Progress + gate.
-  const [state, setState] = useState<InterviewStateResponse | null>(null);
+  // Department board completeness (gates #3 ∧ #8), relayed via onCoverageChange.
+  const [boardComplete, setBoardComplete] = useState(false);
 
-  // Build trigger.
-  const [submitting, setSubmitting] = useState(false);
-  const [completeError, setCompleteError] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<Outcome | null>(null);
+  // Milestone interstitial (words only).
+  const [milestone, setMilestone] = useState<PendingMilestone | null>(null);
+  const afterMilestone = useRef<() => void>(() => {});
 
   // One-shot guards.
-  const seededRef = useRef(false);
-  const kickedRef = useRef(false);
-
+  const routedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const flags = state?.flags ?? ALL_GATES_FALSE;
-  const allGatesPass =
-    flags.genuineTranscriptReady &&
-    flags.decisionCoverageComplete &&
-    flags.noUnprovenancedDeclines;
+  const transcriptReady = flags.genuineTranscriptReady;
 
-  const addMessage = useCallback((role: Role, text: string) => {
-    setMessages((prev) => [...prev, { id: nextId(), role, text }]);
-  }, []);
+  /* ---- state (progress + resume + gate flags) ---- */
 
-  /* ---- state (progress + gate flags) ---- */
-
-  const loadState = useCallback(async () => {
+  const loadState = useCallback(async (): Promise<InterviewStateResponse | null> => {
     try {
       const res = await fetch('/api/interview/state', { cache: 'no-store' });
       const data = (await res.json()) as InterviewStateResponse;
       setState(data);
+      return data;
+    } catch {
+      // Non-fatal: the rail stays as-is and gates stay fail-closed until the next
+      // successful read.
+      return null;
+    }
+  }, []);
 
-      // Welcome-back seed: only on the very first successful load, and only when
-      // the handoff says the interview is already in progress.
+  // On mount: read state once and route resume → WelcomeBack (skipping consent).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const data = await loadState();
+      if (cancelled || routedRef.current || !data) return;
+      routedRef.current = true;
       if (
-        !seededRef.current &&
         data.resume?.status === 'in_progress' &&
         (data.resume.totalQuestionsAnswered ?? 0) > 0
       ) {
-        seededRef.current = true;
-        kickedRef.current = true; // don't auto-kick a resumed interview
-        const pct = data.progress?.percent ?? 0;
-        const n = data.resume.totalQuestionsAnswered ?? 0;
-        addMessage(
-          'interviewer',
-          `Welcome back — you're ${pct}% done, ${n} answer${n === 1 ? '' : 's'} saved. Whenever you're ready, let's pick up where we left off.`,
-        );
-      } else {
-        seededRef.current = true;
+        setStage('welcome-back');
       }
-    } catch {
-      // Non-fatal: the rail simply stays empty and the Build button stays
-      // disabled (fail-closed) until the next successful read.
-    }
-  }, [addMessage]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadState]);
 
-  /* ---- a single conversational turn ---- */
+  /* ---- a single conversational turn (free-form depth) ---- */
 
   const sendTurn = useCallback(
-    async (content: string, asOwner = true) => {
+    async (content: string) => {
       const text = content.trim();
       if (!text || sending) return;
-      if (asOwner) addMessage('owner', text);
       setSending(true);
+      setCurrentReaction('');
       try {
         const res = await fetch('/api/interview/turn', {
           method: 'POST',
@@ -235,8 +275,7 @@ export default function InterviewClient() {
 
         if (res.status === 503) {
           const data = (await res.json().catch(() => ({}))) as TurnResponse;
-          addMessage(
-            'system',
+          setCurrentReaction(
             data.message ??
               'Your interviewer is reconnecting. Your answers are safe — try again in a moment.',
           );
@@ -244,209 +283,447 @@ export default function InterviewClient() {
         }
 
         const data = (await res.json().catch(() => ({}))) as TurnResponse;
+        if (data.sessionId) setSessionId(data.sessionId);
 
         if (!res.ok) {
-          addMessage(
-            'system',
+          setCurrentReaction(
             data.message ?? 'Something went wrong sending that. Please try again.',
           );
           return;
         }
 
-        if (data.sessionId) setSessionId(data.sessionId);
-
         if (data.reply && data.reply.trim()) {
-          addMessage('interviewer', data.reply);
+          setCurrentQuestion(data.reply);
         } else if (data.pending) {
-          addMessage(
-            'system',
-            'Your interviewer is thinking — their reply will appear here shortly.',
+          setCurrentReaction(
+            'Your interviewer is thinking — their next question will appear here shortly.',
           );
         }
       } catch {
-        addMessage('system', 'Network hiccup — that message did not send. Please try again.');
+        setCurrentReaction('Network hiccup — that message did not send. Please try again.');
       } finally {
         setSending(false);
-        // Re-read progress + gate flags after every turn so the Build button arms
-        // the moment the transcript + board invariants are satisfied.
+        // Re-read progress + gate flags after every turn so the continue affordance
+        // arms the instant the transcript gate is satisfied.
         void loadState();
       }
     },
-    [addMessage, loadState, sending, sessionId],
+    [loadState, sending, sessionId],
   );
 
-  /* ---- entering the conversation from consent ---- */
+  /* ---- milestone helper (words only) ---- */
+
+  const fireMilestone = useCallback((m: PendingMilestone, next: () => void) => {
+    afterMilestone.current = next;
+    setMilestone(m);
+    setStage('milestone');
+  }, []);
+
+  const dismissMilestone = useCallback(() => {
+    const next = afterMilestone.current;
+    afterMilestone.current = () => {};
+    setMilestone(null);
+    next();
+  }, []);
+
+  /* ---- entering the conversational (free-form) sub-phase ---- */
+
+  const startConversation = useCallback(() => {
+    setQaMode('conversation');
+    setStage('qa');
+    setCurrentQuestion('');
+    void sendTurn(
+      "I've shared my company's basics — I'm ready to talk through how my business actually runs day to day.",
+    );
+  }, [sendTurn]);
+
+  /* ---- advancing the structured question set ---- */
+
+  const advanceStructured = useCallback(
+    (fromIndex: number) => {
+      const q = STRUCTURED_QUESTIONS[fromIndex];
+      const next = STRUCTURED_QUESTIONS[fromIndex + 1];
+      const nextIndex = fromIndex + 1;
+      setStructIndex(nextIndex);
+      void loadState();
+
+      const atSectionBoundary = !next || next.section !== q.section;
+      if (!atSectionBoundary) return; // stay on the structured cards
+
+      // Section complete → celebrate (words only), then continue.
+      const sectionOrdinal =
+        Array.from(new Set(STRUCTURED_QUESTIONS.slice(0, nextIndex).map((x) => x.section))).length;
+      const done = nextIndex >= STRUCTURED_QUESTIONS.length;
+      fireMilestone(
+        { phase: SECTION_MILESTONE[q.section], completed: sectionOrdinal, total: TOTAL_PHASES },
+        () => {
+          if (done) startConversation();
+          else setStage('qa');
+        },
+      );
+    },
+    [fireMilestone, loadState, startConversation],
+  );
+
+  /* ---- Q&A → departments (gated on a genuine transcript) ---- */
+
+  const goToDepartments = useCallback(() => {
+    fireMilestone(
+      { phase: 'Your team', completed: 3, total: TOTAL_PHASES },
+      () => setStage('departments'),
+    );
+  }, [fireMilestone]);
+
+  /* ---- departments → review (celebrate with the REAL department counts) ---- */
+
+  const goToReview = useCallback(async () => {
+    const data = await loadState();
+    const cov = data?.decisionCoverage;
+    const completed = cov?.covered.length ?? 0;
+    const total = cov?.expected.length ?? 0;
+    fireMilestone(
+      { phase: 'Your departments', completed, total },
+      () => setStage('review'),
+    );
+  }, [fireMilestone, loadState]);
+
+  /* ---- consent → begin (never proceed without an explicit choice) ---- */
 
   const beginInterview = useCallback(() => {
-    if (consent === null) return; // never proceed without an explicit choice
-    setStarted(true);
+    if (consent === null) return;
+    setQaMode('structured');
+    setStructIndex(0);
+    setStage('qa');
   }, [consent]);
 
-  // On entering the conversation: load state, then (for a fresh interview only)
-  // send one kickoff turn so the agent asks the first question. A resumed
-  // interview is NOT auto-kicked (kickedRef is set inside loadState).
-  useEffect(() => {
-    if (!started) return;
-    let cancelled = false;
-    (async () => {
-      await loadState();
-      if (cancelled) return;
-      if (!kickedRef.current) {
-        kickedRef.current = true;
-        void sendTurn("I'm ready to begin my AI workforce interview.", true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [started]);
+  /* ---- resume (WelcomeBack) ---- */
 
-  // Auto-scroll the transcript as it grows.
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, sending]);
+  const resumeInterview = useCallback(() => {
+    setQaMode('conversation');
+    setStage('qa');
+    setCurrentQuestion('');
+    void sendTurn("I'm back — let's pick up right where we left off.");
+  }, [sendTurn]);
 
-  /* ---- the gated build trigger ---- */
-
-  const submitComplete = useCallback(async () => {
-    // Belt-and-suspenders: never fire while any gate flag is false, even if a
-    // caller bypasses the disabled attribute.
-    if (!allGatesPass || submitting) return;
-    setSubmitting(true);
-    setCompleteError(null);
-    try {
-      const res = await fetch('/api/interview/complete', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      const data = (await res.json().catch(() => ({}))) as CompleteResponse;
-
-      if (res.ok && data.status === 'pass') {
-        // Warm the Edge shell-lock cookie so the dashboard unlocks, then redirect
-        // to the (already-live) build screen.
-        try {
-          await refreshInterviewGate();
-        } catch {
-          /* non-fatal — the layout's InterviewGateSync refreshes it too */
-        }
-        router.push(data.redirect || '/onboarding/building');
-        return;
-      }
-
-      if (res.ok && data.status === 'needs-review') {
-        setOutcome({
-          kind: 'needs-review',
-          message:
-            data.message ??
-            "Thanks — we're reviewing your answers. Your workforce will start building shortly; no action is needed from you.",
-        });
-        return;
-      }
-
-      if (res.ok && data.status === 'fail') {
-        setOutcome({ kind: 'fail', reasons: data.reasons ?? [] });
-        return;
-      }
-
-      // 409 incomplete / pending / reconciliation, or a 5xx.
-      if (res.status === 409) {
-        setCompleteError(formatMissing(data));
-        void loadState(); // re-sync the flags so the button reflects reality
-        return;
-      }
-      setCompleteError(
-        data.message ?? "We couldn't complete the interview just yet. Please try again.",
+  const circleBack = useCallback(
+    (questionNumber: number | null) => {
+      setQaMode('conversation');
+      setStage('qa');
+      setCurrentQuestion('');
+      void sendTurn(
+        questionNumber != null
+          ? `I'd like to go back and answer question ${questionNumber} now.`
+          : "I'd like to revisit a question I skipped earlier.",
       );
-    } catch {
-      setCompleteError('Network error — please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  }, [allGatesPass, loadState, router, submitting]);
+    },
+    [sendTurn],
+  );
 
   /* ---- renders ---- */
 
-  if (outcome?.kind === 'fail') {
+  const brandStyle = brand.primaryColor
+    ? ({ ['--iv-accent-strong' as string]: brand.primaryColor } as React.CSSProperties)
+    : undefined;
+
+  if (stage === 'milestone' && milestone) {
     return (
-      <FailScreen
-        reasons={outcome.reasons}
-        onReview={() => {
-          setOutcome(null);
-          void loadState();
+      <MilestoneScreen
+        phase={milestone.phase}
+        completed={milestone.completed}
+        totalDepts={milestone.total}
+        onDismiss={dismissMilestone}
+      />
+    );
+  }
+
+  if (stage === 'welcome-back') {
+    return (
+      <WelcomeBack
+        percent={state?.progress.percent ?? 0}
+        answersSaved={state?.resume.totalQuestionsAnswered ?? 0}
+        nextQuestionNumber={state?.resume.nextQuestionNumber ?? null}
+        skippedQuestions={state?.resume.skippedQuestions ?? []}
+        onContinue={resumeInterview}
+        onReviewSkipped={circleBack}
+      />
+    );
+  }
+
+  if (stage === 'departments') {
+    return (
+      <DepartmentsStage
+        sessionId={sessionId}
+        onCoverageChange={setBoardComplete}
+        boardComplete={boardComplete}
+        onContinue={() => void goToReview()}
+      />
+    );
+  }
+
+  if (stage === 'review') {
+    return (
+      <div style={brandStyle}>
+        <ReviewScreen
+          sessionId={sessionId ?? undefined}
+          onCircleBack={circleBack}
+        />
+      </div>
+    );
+  }
+
+  if (stage === 'qa') {
+    const question = STRUCTURED_QUESTIONS[structIndex];
+    return (
+      <QaStage
+        brandStyle={brandStyle}
+        logoUrl={logoUrl}
+        phasesComplete={state?.progress.phasesComplete ?? []}
+        lastQuestionNumber={state?.progress.lastQuestionNumber ?? null}
+        mode={qaMode}
+        question={qaMode === 'structured' ? question : undefined}
+        sessionId={sessionId}
+        onAnswered={() => advanceStructured(structIndex)}
+        onSkip={() => advanceStructured(structIndex)}
+        // conversation props
+        currentQuestion={currentQuestion}
+        currentReaction={currentReaction}
+        input={input}
+        onInput={setInput}
+        onSend={() => {
+          const text = input;
+          setInput('');
+          void sendTurn(text);
         }}
+        onIDontKnow={(msg) => void sendTurn(msg)}
+        sending={sending}
+        scrollRef={scrollRef}
+        transcriptReady={transcriptReady}
+        onContinueToDepartments={goToDepartments}
       />
     );
   }
 
-  if (outcome?.kind === 'needs-review') {
-    return <NeedsReviewScreen message={outcome.message} />;
-  }
-
-  if (!started) {
-    return (
-      <ConsentScreen
-        consent={consent}
-        onSelect={setConsent}
-        onBegin={beginInterview}
-      />
-    );
-  }
-
+  // stage === 'consent'
   return (
-    <ConversationScreen
-      messages={messages}
-      input={input}
-      onInput={setInput}
-      onSend={() => {
-        const text = input;
-        setInput('');
-        void sendTurn(text, true);
-      }}
-      sending={sending}
-      state={state}
-      flags={flags}
-      allGatesPass={allGatesPass}
-      submitting={submitting}
-      completeError={completeError}
-      onBuild={submitComplete}
-      scrollRef={scrollRef}
+    <ConsentScreen
+      logoUrl={logoUrl}
+      brandStyle={brandStyle}
+      consent={consent}
+      onSelect={setConsent}
+      onBegin={beginInterview}
     />
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/* helpers                                                                     */
+/* Q&A stage — ALWAYS shows the ProgressRail; structured card OR conversation  */
 /* -------------------------------------------------------------------------- */
 
-/** Turn a 409 /complete body into a single human sentence for the owner. */
-function formatMissing(data: CompleteResponse): string {
-  const items = data.missing ?? [];
-  if (items.length === 0) {
-    return (
-      data.message ??
-      'A few things still need finishing before we can build. Keep answering and the button will light up.'
-    );
-  }
-  const parts = items.map((m) => {
-    if (m.gate === 'decision_coverage' && m.departments?.length) {
-      return `${m.reason} (${m.departments.length} left)`;
-    }
-    return m.reason;
-  });
-  return parts.join(' ');
+function QaStage({
+  brandStyle,
+  logoUrl,
+  phasesComplete,
+  lastQuestionNumber,
+  mode,
+  question,
+  sessionId,
+  onAnswered,
+  onSkip,
+  currentQuestion,
+  currentReaction,
+  input,
+  onInput,
+  onSend,
+  onIDontKnow,
+  sending,
+  scrollRef,
+  transcriptReady,
+  onContinueToDepartments,
+}: {
+  brandStyle?: React.CSSProperties;
+  logoUrl: string;
+  phasesComplete: string[];
+  lastQuestionNumber: number | null;
+  mode: QaMode;
+  question?: InterviewQuestion;
+  sessionId: string | null;
+  onAnswered: () => void;
+  onSkip: () => void;
+  currentQuestion: string;
+  currentReaction: string;
+  input: string;
+  onInput: (v: string) => void;
+  onSend: () => void;
+  onIDontKnow: (msg: string) => void;
+  sending: boolean;
+  scrollRef: React.RefObject<HTMLDivElement>;
+  transcriptReady: boolean;
+  onContinueToDepartments: () => void;
+}) {
+  return (
+    <div className={iv.root} style={brandStyle}>
+      <div className="mx-auto grid w-full max-w-5xl grid-cols-1 gap-8 px-5 py-8 lg:grid-cols-[1fr_260px]">
+        {/* ── main column ─────────────────────────────────────────────────── */}
+        <main className={iv.stage} style={{ width: '100%' }}>
+          <BrandHeader logoUrl={logoUrl} />
+
+          {mode === 'structured' && question ? (
+            <AnimatePresence mode="wait">
+              <QuestionCard
+                key={question.id}
+                question={question}
+                sessionId={sessionId ?? undefined}
+                onAnswered={onAnswered}
+                onSkip={onSkip}
+                autoFocus
+              />
+            </AnimatePresence>
+          ) : (
+            <div>
+              <ConversationPane
+                currentReaction={currentReaction}
+                currentQuestion={currentQuestion}
+                input={input}
+                onInput={onInput}
+                onSend={onSend}
+                onIDontKnow={onIDontKnow}
+                sending={sending}
+                sessionId={sessionId}
+                scrollRef={scrollRef}
+              />
+
+              {/* Advance to the department board once the transcript gate (a
+                  genuine, non-fabricated transcript) is satisfied. */}
+              <div className="mt-8 flex flex-col items-start gap-2">
+                <button
+                  type="button"
+                  onClick={onContinueToDepartments}
+                  disabled={!transcriptReady}
+                  aria-disabled={!transcriptReady}
+                  className={ivcx(iv.btnPrimary, !transcriptReady && 'is-busy')}
+                  style={{
+                    opacity: transcriptReady ? 1 : 0.55,
+                    cursor: transcriptReady ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {transcriptReady ? (
+                    <ArrowRight className="h-4 w-4" aria-hidden />
+                  ) : (
+                    <Lock className="h-4 w-4" aria-hidden />
+                  )}
+                  Continue to your departments
+                </button>
+                {!transcriptReady && (
+                  <p className={iv.lede} style={{ fontSize: '0.8rem' }}>
+                    Answer a few more questions and this will unlock.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* ── progress rail (ALWAYS shown in Q&A) ─────────────────────────── */}
+        <aside data-walkthrough="interview-progress-rail">
+          <ProgressRail
+            phasesComplete={phasesComplete}
+            lastQuestionNumber={lastQuestionNumber}
+          />
+        </aside>
+      </div>
+    </div>
+  );
 }
 
 /* -------------------------------------------------------------------------- */
-/* consent / welcome                                                           */
+/* Departments stage — DepartmentBoard + a coverage-gated continue             */
 /* -------------------------------------------------------------------------- */
 
-const CONSENT_OPTIONS: Array<{
-  id: Exclude<Consent, null>;
-  title: string;
-  desc: string;
-}> = [
+function DepartmentsStage({
+  sessionId,
+  onCoverageChange,
+  boardComplete,
+  onContinue,
+}: {
+  sessionId: string | null;
+  onCoverageChange: (complete: boolean) => void;
+  boardComplete: boolean;
+  onContinue: () => void;
+}) {
+  return (
+    <div className={iv.dark} style={{ minHeight: '100vh' }}>
+      <DepartmentBoard
+        sessionId={sessionId ?? undefined}
+        onCoverageChange={onCoverageChange}
+      />
+      {/* Coverage-gated continue: arms only when the board reports every expected
+          department decided AND zero un-provenanced declines. */}
+      <div
+        style={{
+          position: 'sticky',
+          bottom: 0,
+          display: 'flex',
+          justifyContent: 'center',
+          padding: '1rem',
+          background: 'linear-gradient(to top, var(--iv-canvas), transparent)',
+        }}
+      >
+        <button
+          type="button"
+          onClick={onContinue}
+          disabled={!boardComplete}
+          aria-disabled={!boardComplete}
+          className={ivcx(iv.btnPrimary, !boardComplete && 'is-busy')}
+          style={{
+            opacity: boardComplete ? 1 : 0.55,
+            cursor: boardComplete ? 'pointer' : 'not-allowed',
+          }}
+        >
+          {boardComplete ? (
+            <ArrowRight className="h-4 w-4" aria-hidden />
+          ) : (
+            <Lock className="h-4 w-4" aria-hidden />
+          )}
+          Review &amp; build
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* brand header (live rebrand: logo swaps in as soon as it's answered)         */
+/* -------------------------------------------------------------------------- */
+
+function BrandHeader({ logoUrl }: { logoUrl: string }) {
+  const isImageUrl = /^(https?:|data:image\/)/i.test(logoUrl);
+  return (
+    <div className="mb-6 flex items-center gap-3">
+      {isImageUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={logoUrl}
+          alt="Your logo"
+          style={{ height: 32, maxWidth: 160, objectFit: 'contain' }}
+        />
+      ) : (
+        <span
+          className="inline-flex items-center gap-2"
+          style={{ color: 'var(--iv-accent-strong)', fontWeight: 600 }}
+        >
+          <Sparkles className="h-5 w-5" aria-hidden />
+          {logoUrl}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* consent / welcome (phase 0) — three options, NONE auto-selected             */
+/* -------------------------------------------------------------------------- */
+
+const CONSENT_OPTIONS: Array<{ id: Exclude<Consent, null>; title: string; desc: string }> = [
   {
     id: 'full',
     title: 'Yes — interview me now',
@@ -465,25 +742,32 @@ const CONSENT_OPTIONS: Array<{
 ];
 
 function ConsentScreen({
+  logoUrl,
+  brandStyle,
   consent,
   onSelect,
   onBegin,
 }: {
+  logoUrl: string;
+  brandStyle?: React.CSSProperties;
   consent: Consent;
   onSelect: (c: Consent) => void;
   onBegin: () => void;
 }) {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 p-6 sm:p-8">
-      <div className="max-w-2xl mx-auto">
-        <div className="text-center mb-8" data-walkthrough="interview-welcome">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-100 mb-4">
-            <Sparkles className="h-9 w-9 text-indigo-600" />
+    <div className={iv.root} style={brandStyle}>
+      <motion.div
+        variants={ivScreenVariants}
+        initial="initial"
+        animate="animate"
+        className={iv.stage}
+      >
+        <div className="mb-8 text-center" data-walkthrough="interview-welcome">
+          <div className="mb-4 flex justify-center">
+            <BrandHeader logoUrl={logoUrl} />
           </div>
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            Let&apos;s build your company
-          </h1>
-          <p className="text-gray-600">
+          <h1 className={iv.question}>Let&apos;s build your company</h1>
+          <p className={ivcx(iv.lede, 'mt-2')}>
             A short conversation about your business. We turn your answers into a full AI
             workforce — no jargon, just your own words.
           </p>
@@ -492,7 +776,7 @@ function ConsentScreen({
         <div
           role="radiogroup"
           aria-label="How would you like to begin?"
-          className="space-y-3 mb-6"
+          className="mb-6 space-y-3"
           data-walkthrough="interview-consent-options"
         >
           {CONSENT_OPTIONS.map((opt) => {
@@ -504,26 +788,38 @@ function ConsentScreen({
                 role="radio"
                 aria-checked={selected}
                 onClick={() => onSelect(opt.id)}
-                className={`w-full text-left rounded-2xl border p-5 transition-colors ${
-                  selected
-                    ? 'border-indigo-500 bg-white ring-2 ring-indigo-200 shadow-sm'
-                    : 'border-gray-200 bg-white hover:border-indigo-300'
-                }`}
+                className={ivcx(iv.choice, selected && 'is-selected')}
+                style={{ width: '100%', textAlign: 'left' }}
               >
-                <div className="flex items-start gap-3">
+                <span className="flex items-start gap-3">
                   <span
-                    className={`mt-0.5 flex h-5 w-5 items-center justify-center rounded-full border-2 ${
-                      selected ? 'border-indigo-600' : 'border-gray-300'
-                    }`}
                     aria-hidden
+                    className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full border-2"
+                    style={{
+                      borderColor: selected
+                        ? 'var(--iv-accent-strong)'
+                        : 'var(--iv-line-strong)',
+                    }}
                   >
-                    {selected && <span className="h-2.5 w-2.5 rounded-full bg-indigo-600" />}
+                    {selected && (
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ background: 'var(--iv-accent-strong)' }}
+                      />
+                    )}
                   </span>
                   <span>
-                    <span className="block font-semibold text-gray-900">{opt.title}</span>
-                    <span className="block text-sm text-gray-600 mt-0.5">{opt.desc}</span>
+                    <span className="block font-semibold" style={{ color: 'var(--iv-ink)' }}>
+                      {opt.title}
+                    </span>
+                    <span
+                      className="mt-0.5 block text-sm"
+                      style={{ color: 'var(--iv-ink-soft)' }}
+                    >
+                      {opt.desc}
+                    </span>
                   </span>
-                </div>
+                </span>
               </button>
             );
           })}
@@ -537,16 +833,21 @@ function ConsentScreen({
               exit={{ opacity: 0, height: 0 }}
               className="overflow-hidden"
             >
-              <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-5 mb-6 text-sm text-gray-700">
-                <div className="flex items-start gap-2">
-                  <Info className="h-4 w-4 text-indigo-600 mt-0.5 shrink-0" />
-                  <p>
-                    Your answers are saved on your own box and used only to design your
-                    departments, roles, and playbooks. Nothing is shared. When you finish,
-                    we assemble everything and start building — you can keep going below
-                    whenever you&apos;re ready.
-                  </p>
-                </div>
+              <div
+                className={iv.card}
+                style={{ marginBottom: '1.5rem', display: 'flex', gap: '0.6rem' }}
+              >
+                <Info
+                  className="h-4 w-4"
+                  aria-hidden
+                  style={{ color: 'var(--iv-accent-strong)', flexShrink: 0, marginTop: '0.15rem' }}
+                />
+                <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--iv-ink-soft)' }}>
+                  Your answers are saved on your own box and used only to design your
+                  departments, roles, and playbooks. Nothing is shared. When you finish, we
+                  assemble everything and start building — you can keep going whenever
+                  you&apos;re ready.
+                </p>
               </div>
             </motion.div>
           )}
@@ -556,344 +857,25 @@ function ConsentScreen({
           type="button"
           onClick={onBegin}
           disabled={consent === null}
+          aria-disabled={consent === null}
           data-walkthrough="interview-begin-button"
-          className={`w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-semibold transition-colors ${
-            consent === null
-              ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-              : 'bg-indigo-600 text-white hover:bg-indigo-700'
-          }`}
+          className={ivcx(iv.btnPrimary, consent === null && 'is-busy')}
+          style={{
+            width: '100%',
+            justifyContent: 'center',
+            opacity: consent === null ? 0.55 : 1,
+            cursor: consent === null ? 'not-allowed' : 'pointer',
+          }}
         >
           Begin interview
-          <ArrowRight className="h-5 w-5" />
+          <ArrowRight className="h-5 w-5" aria-hidden />
         </button>
         {consent === null && (
-          <p className="text-center text-xs text-gray-400 mt-3">
+          <p className={ivcx(iv.lede, 'mt-3 text-center')} style={{ fontSize: '0.78rem' }}>
             Choose an option above to start.
           </p>
         )}
-      </div>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* conversation + progress rail + gated build                                  */
-/* -------------------------------------------------------------------------- */
-
-function ConversationScreen({
-  messages,
-  input,
-  onInput,
-  onSend,
-  sending,
-  state,
-  flags,
-  allGatesPass,
-  submitting,
-  completeError,
-  onBuild,
-  scrollRef,
-}: {
-  messages: ChatMessage[];
-  input: string;
-  onInput: (v: string) => void;
-  onSend: () => void;
-  sending: boolean;
-  state: InterviewStateResponse | null;
-  flags: GateFlags;
-  allGatesPass: boolean;
-  submitting: boolean;
-  completeError: string | null;
-  onBuild: () => void;
-  scrollRef: React.RefObject<HTMLDivElement>;
-}) {
-  const percent = state?.progress?.percent ?? 0;
-  const qNum = state?.progress?.lastQuestionNumber ?? null;
-  const missingDepts = state?.decisionCoverage?.missing?.length ?? 0;
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 p-4 sm:p-6">
-      <div className="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6">
-        {/* ── conversational pane ─────────────────────────────────────────── */}
-        <div className="flex flex-col bg-white rounded-2xl shadow-sm border overflow-hidden min-h-[70vh]">
-          <div className="flex items-center gap-2 px-5 py-4 border-b">
-            <MessagesSquare className="h-5 w-5 text-indigo-600" />
-            <h2 className="font-semibold text-gray-900">Your interview</h2>
-          </div>
-
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-            {messages.length === 0 && !sending && (
-              <p className="text-sm text-gray-400 text-center mt-8">
-                Your interviewer is getting ready…
-              </p>
-            )}
-            <AnimatePresence initial={false}>
-              {messages.map((m) => (
-                <MessageBubble key={m.id} message={m} />
-              ))}
-            </AnimatePresence>
-            {sending && (
-              <div className="flex items-center gap-2 text-sm text-gray-400">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Sending…
-              </div>
-            )}
-          </div>
-
-          <div className="border-t p-3">
-            <div className="flex items-end gap-2">
-              <textarea
-                value={input}
-                onChange={(e) => onInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    if (input.trim() && !sending) onSend();
-                  }
-                }}
-                rows={1}
-                placeholder="Type your answer…"
-                className="flex-1 resize-none rounded-xl border border-gray-200 px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 max-h-40"
-              />
-              <button
-                type="button"
-                onClick={onSend}
-                disabled={!input.trim() || sending}
-                aria-label="Send answer"
-                className={`shrink-0 inline-flex items-center justify-center h-11 w-11 rounded-xl transition-colors ${
-                  !input.trim() || sending
-                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    : 'bg-indigo-600 text-white hover:bg-indigo-700'
-                }`}
-              >
-                <Send className="h-5 w-5" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* ── progress rail + gated build ─────────────────────────────────── */}
-        <aside className="space-y-4" data-walkthrough="interview-progress-rail">
-          <div className="bg-white rounded-2xl shadow-sm border p-5">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-gray-700">Progress</span>
-              <span className="text-sm font-semibold text-indigo-600">{percent}%</span>
-            </div>
-            <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full transition-all duration-500"
-                style={{ width: `${percent}%` }}
-              />
-            </div>
-            {qNum != null && (
-              <p className="text-xs text-gray-500 mt-2">Question {qNum}</p>
-            )}
-            {state?.progress?.phasesComplete && state.progress.phasesComplete.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mt-3">
-                {state.progress.phasesComplete.map((p) => (
-                  <span
-                    key={p}
-                    className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700"
-                  >
-                    <CheckCircle2 className="h-3 w-3" />
-                    {p}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Gate checklist — makes the disabled Build button self-explaining. */}
-          <div className="bg-white rounded-2xl shadow-sm border p-5" data-walkthrough="interview-gate-checklist">
-            <h3 className="flex items-center gap-2 text-sm font-semibold text-gray-700 mb-3">
-              <ShieldCheck className="h-4 w-4 text-indigo-600" />
-              Before we can build
-            </h3>
-            <ul className="space-y-2.5">
-              <GateRow
-                done={flags.genuineTranscriptReady}
-                label="Interview recorded"
-              />
-              <GateRow
-                done={flags.decisionCoverageComplete}
-                label={
-                  flags.decisionCoverageComplete
-                    ? 'Departments decided'
-                    : `Departments decided${missingDepts ? ` (${missingDepts} left)` : ''}`
-                }
-              />
-              <GateRow
-                done={flags.noUnprovenancedDeclines}
-                label="Choices confirmed"
-              />
-            </ul>
-          </div>
-
-          {completeError && (
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-                <p>{completeError}</p>
-              </div>
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={onBuild}
-            disabled={!allGatesPass || submitting}
-            aria-disabled={!allGatesPass || submitting}
-            data-walkthrough="interview-build-button"
-            className={`w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-semibold transition-colors ${
-              !allGatesPass || submitting
-                ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                : 'bg-emerald-600 text-white hover:bg-emerald-700'
-            }`}
-          >
-            {submitting ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin" />
-                Building…
-              </>
-            ) : allGatesPass ? (
-              <>
-                <Building2 className="h-5 w-5" />
-                Build my company
-              </>
-            ) : (
-              <>
-                <Lock className="h-4 w-4" />
-                Build my company
-              </>
-            )}
-          </button>
-          {!allGatesPass && (
-            <p className="text-center text-xs text-gray-400">
-              Finish the checklist above to unlock.
-            </p>
-          )}
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-function GateRow({ done, label }: { done: boolean; label: string }) {
-  return (
-    <li className="flex items-center gap-2.5 text-sm">
-      {done ? (
-        <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-      ) : (
-        <Lock className="h-4 w-4 text-gray-300 shrink-0" />
-      )}
-      <span className={done ? 'text-gray-800' : 'text-gray-400'}>{label}</span>
-    </li>
-  );
-}
-
-function MessageBubble({ message }: { message: ChatMessage }) {
-  if (message.role === 'system') {
-    return (
-      <motion.div
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex justify-center"
-      >
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-500">
-          <Info className="h-3 w-3" />
-          {message.text}
-        </span>
       </motion.div>
-    );
-  }
-
-  const isOwner = message.role === 'owner';
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      className={`flex ${isOwner ? 'justify-end' : 'justify-start'}`}
-    >
-      <div
-        className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ${
-          isOwner
-            ? 'bg-indigo-600 text-white rounded-br-sm'
-            : 'bg-gray-100 text-gray-900 rounded-bl-sm'
-        }`}
-      >
-        {message.text}
-      </div>
-    </motion.div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* terminal screens: needs-review + fail (distinct renders)                    */
-/* -------------------------------------------------------------------------- */
-
-function NeedsReviewScreen({ message }: { message: string }) {
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-amber-50 flex items-center justify-center p-6">
-      <div className="max-w-md w-full text-center">
-        <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-amber-100 mb-4">
-          <ClipboardList className="h-9 w-9 text-amber-600" />
-        </div>
-        <h1 className="text-2xl font-bold text-gray-900 mb-2">
-          Thanks — we&apos;re reviewing your answers
-        </h1>
-        <p className="text-gray-600">{message}</p>
-        <p className="text-sm text-gray-400 mt-6">
-          You can close this tab. We&apos;ll be in touch shortly — no action needed.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function FailScreen({
-  reasons,
-  onReview,
-}: {
-  reasons: string[];
-  onReview: () => void;
-}) {
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-rose-50 flex items-center justify-center p-6">
-      <div className="max-w-lg w-full">
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-rose-100 mb-4">
-            <AlertTriangle className="h-9 w-9 text-rose-600" />
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900 mb-2">
-            A few answers need another look
-          </h1>
-          <p className="text-gray-600">
-            We couldn&apos;t start the build yet. Here&apos;s what to revisit, then try again.
-          </p>
-        </div>
-
-        {reasons.length > 0 && (
-          <div className="bg-white rounded-2xl shadow-sm border p-5 mb-6">
-            <ul className="space-y-2.5">
-              {reasons.map((r, i) => (
-                <li key={i} className="flex items-start gap-2.5 text-sm text-gray-700">
-                  <AlertTriangle className="h-4 w-4 text-rose-500 mt-0.5 shrink-0" />
-                  <span>{r}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        <button
-          type="button"
-          onClick={onReview}
-          className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
-        >
-          <RotateCcw className="h-5 w-5" />
-          Review my answers
-        </button>
-      </div>
     </div>
   );
 }
