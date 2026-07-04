@@ -3320,6 +3320,68 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '087',
+    name: 'add_interview_sessions',
+    up: (db) => {
+      // Wave 5 (AI Workforce Interview APP): a READ-MIRROR / fast-UI index for the
+      // /interview surface. The FILES stay the single source of truth — the three
+      // canonical artifacts (.workforce-build-state.json, workforce-interview-
+      // answers.md, interview-handoff.md) are written ONLY through the Skill-23
+      // shell scripts. These two tables are NEVER a write authority for
+      // interviewComplete or for canonicalReconciliation.decisions; they only
+      // cache what the canonical files already say so the UI can render progress /
+      // an answer list without re-parsing on every request. If the mirror and the
+      // files ever disagree, the FILES WIN (same posture as department-floor.py) —
+      // src/lib/interview/store.ts reconciles from the files, never the reverse.
+      console.log('[Migration 087] Adding interview_sessions + interview_answers mirror tables...');
+
+      // interview_sessions — one row per interviewSessionId (the stable id the
+      // seam persists into build-state). status/phase/percent are UI-facing mirror
+      // fields derived from the handoff + build-state; NONE of them is authoritative.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS interview_sessions (
+          id TEXT PRIMARY KEY,
+          client_id TEXT,
+          owner_id TEXT,
+          channel TEXT NOT NULL DEFAULT 'web',
+          status TEXT NOT NULL DEFAULT 'in_progress',
+          phase TEXT,
+          last_question_number INTEGER,
+          percent INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+
+      // interview_answers — a mirror of the Q/A blocks that live (canonically) in
+      // workforce-interview-answers.md. `provenance` mirrors any provenance note
+      // (e.g. confirmed-from-context / updated-on) captured in the file. UNIQUE on
+      // (session_id, question_number) so a re-answer/edit upserts the same row
+      // rather than duplicating it.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS interview_answers (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          question_number INTEGER,
+          phase TEXT,
+          question TEXT,
+          answer TEXT,
+          provenance TEXT,
+          asked_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE (session_id, question_number)
+        )
+      `);
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_interview_sessions_status ON interview_sessions(status)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_interview_sessions_client ON interview_sessions(client_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_interview_answers_session ON interview_answers(session_id, question_number)`);
+
+      console.log('[Migration 087] interview_sessions + interview_answers ready');
+    },
+  },
 ];
 
 /**

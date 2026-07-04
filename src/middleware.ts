@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
+import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gate-cookie';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).
@@ -96,6 +97,28 @@ function isWebhookSecretRoute(pathname: string): boolean {
   );
 }
 
+/**
+ * Routes exempt from the interview-mode shell lock (P0-5 / WG-9). While the
+ * interview is incomplete the middleware 302s every OTHER page route to
+ * /interview, so the client only ever sees the interview until closeout.
+ * Exempt:
+ *   • /interview(/*)            — the lock target itself (no redirect loop)
+ *   • /onboarding(/*)           — resume redirect (P0-7) + /onboarding/building
+ *   • /api/*                    — never lock an API route (also returned earlier)
+ *   • /_next/*                  — framework internals + RSC/data payloads
+ *   • asset-like requests       — anything whose last path segment has a dot
+ *                                 (favicon.ico, robots.txt, *.svg, manifest.json…)
+ */
+function isInterviewGateExempt(pathname: string): boolean {
+  if (pathname === '/interview' || pathname.startsWith('/interview/')) return true;
+  if (pathname === '/onboarding' || pathname.startsWith('/onboarding/')) return true;
+  if (pathname.startsWith('/api/')) return true;
+  if (pathname.startsWith('/_next/')) return true;
+  const last = pathname.slice(pathname.lastIndexOf('/') + 1);
+  if (last.includes('.')) return true;
+  return false;
+}
+
 if (DEMO_MODE) {
   console.log('[DEMO] Running in demo mode, all write operations are blocked');
 } else {
@@ -152,7 +175,7 @@ function unauthorized(message: string, status = 401): NextResponse {
   return NextResponse.json({ error: message }, { status });
 }
 
-export function middleware(request: NextRequest): NextResponse {
+export async function middleware(request: NextRequest): Promise<NextResponse> {
   const { pathname } = request.nextUrl;
 
   // Cloudflare health checks + liveness/deep probes must bypass everything.
@@ -258,6 +281,33 @@ export function middleware(request: NextRequest): NextResponse {
     const passthrough = NextResponse.next();
     if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
     return passthrough;
+  }
+
+  // ── Interview-mode shell lock (P0-5 / WG-9) ─────────────────────────────
+  // RATIFIED re-scope of "No CC = interview not done, BY DESIGN": the dashboard
+  // stays locked behind /interview until the AI Workforce interview is complete
+  // (or the build has finished / closeout), so the client never lands on an
+  // empty dashboard — the full CC is the closeout reveal.
+  //
+  // Edge can't read the DB/state, so a Node setter (the refreshInterviewGate
+  // server action mounted by the root layout) maintains a short-TTL signed
+  // `mc_interview_complete` cookie; here we only READ + verify it. Only GET/HEAD
+  // page navigations are gated (never server-action POSTs). Completion is
+  // terminal: a signature-valid "complete" token unlocks even if it has expired
+  // (it never reverts; the setter just refreshes it). Every other signal —
+  // valid-incomplete, expired-incomplete, absent, or forged — fails CLOSED to
+  // /interview (the documented mitigation).
+  if (
+    (request.method === 'GET' || request.method === 'HEAD') &&
+    !isInterviewGateExempt(pathname)
+  ) {
+    const token = request.cookies.get(INTERVIEW_COOKIE_NAME)?.value;
+    const verdict = await verifyInterviewToken(token);
+    if (verdict.complete !== true) {
+      const redirect = NextResponse.redirect(new URL('/interview', request.url), 302);
+      if (cfEmail) redirect.headers.set('x-operator-email', cfEmail);
+      return redirect;
+    }
   }
 
   // Non-API path. CF Access already enforced above (or not required).
