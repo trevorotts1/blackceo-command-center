@@ -59,3 +59,9 @@ test-results/
 # graphify (knowledge-graph map) — generated output, never committed
 graphify-out/
 __pycache__/
+
+# operator-local client roster — the REAL client name/chat-ID/GHL-ID denylist
+# consumed at runtime by the leak-detection gates. Must NEVER be committed; only
+# the scripts/client-roster.example.txt template (fake placeholders) is tracked.
+.openclaw-client-roster.txt
+client-roster.txt

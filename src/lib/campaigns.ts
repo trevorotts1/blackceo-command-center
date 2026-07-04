@@ -5,7 +5,7 @@
  *   The campaign Kanban (`/campaigns/[id]`) is the board the spec calls "the
  *   board", but it had ZERO data: `campaigns` had 0 rows and `tasks.campaign_id`
  *   was NULL on every task. Routing produced cards but never fed them to a
- *   campaign, so routed work (e.g. Teresa's deck) never appeared on — let alone
+ *   campaign, so routed work (e.g. a routed deck) never appeared on — let alone
  *   moved across — the board.
  *
  * FIX:
