@@ -249,7 +249,25 @@ def write_config(config_path, departments):
     print(f"  [sync] wrote {len(departments)} departments to {config_path}")
 
 
-def reseed_workspaces(db_path, departments, company_info):
+# Reserved system/infrastructure workspaces that are NOT department-build rows
+# and must NEVER be pruned even when absent from the client's departments.json.
+# Mirrors the reserved ids seeded by the dashboard itself (migrations.ts): the
+# inbox/general-task/bugs/default infra columns and every CEO/master-orchestrator
+# alias. Compared case-insensitively.
+RESERVED_WORKSPACE_IDS = frozenset({
+    "default", "general-task", "bugs", "inbox",
+    "master-orchestrator", "ceo", "dept-ceo", "ceo-com",
+})
+
+
+def _table_exists(cur, name):
+    row = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def reseed_workspaces(db_path, departments, company_info, prune=False):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute("""
@@ -271,37 +289,90 @@ def reseed_workspaces(db_path, departments, company_info):
         "accent": company_info["brand_accent"],
         "text": company_info["brand_text"],
     }})
-    cur.execute("""
-        INSERT INTO companies (id, name, slug, industry, config)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          name=excluded.name, industry=excluded.industry, config=excluded.config
-    """, (slug, company_info["name"], slug, company_info["industry"], company_config))
+    # Issue #13: companies.slug is UNIQUE. A plain INSERT ... ON CONFLICT(id) crashes
+    # with a UNIQUE(slug) violation when an earlier seed created this company under a
+    # DIFFERENT id (e.g. a uuid) with the same slug. Pre-query by slug and branch
+    # UPDATE/INSERT so the upsert is safe on every SQLite version (no dependency on
+    # multi-target ON CONFLICT, which needs SQLite >= 3.35).
+    existing_company = cur.execute(
+        "SELECT id FROM companies WHERE slug=?", (slug,)).fetchone()
+    if existing_company:
+        cur.execute(
+            "UPDATE companies SET name=?, industry=?, config=? WHERE slug=?",
+            (company_info["name"], company_info["industry"], company_config, slug))
+    else:
+        cur.execute(
+            "INSERT INTO companies (id, name, slug, industry, config) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (slug, company_info["name"], slug, company_info["industry"], company_config))
 
-    existing = {row[0] for row in cur.execute(
-        "SELECT id FROM workspaces WHERE company_id=?", (slug,)).fetchall()}
-    inserted = skipped = 0
+    # Issue #11: widen the existing-set to ALL workspaces (any company_id), not just
+    # rows already under this slug. Rows seeded under a stale company_id (e.g. the
+    # pre-064 'default') are then ADOPTED (re-homed to the real slug + refreshed)
+    # instead of being duplicated or crashing on the PRIMARY KEY(id) INSERT.
+    existing = {row[0]: row[1] for row in cur.execute(
+        "SELECT id, company_id FROM workspaces").fetchall()}
+    build_ids = set()
+    inserted = updated = 0
     for dept in departments:
         raw_id = dept.get("id", "")
         dept_id = raw_id[5:] if raw_id.startswith("dept-") else raw_id
         if not dept_id:
             continue
+        build_ids.add(dept_id)
+        name = dept["name"]
+        description = f"{name} department workspace"
+        icon = dept.get("emoji", "\U0001f4c1")
         if dept_id in existing:
-            skipped += 1
-            continue
-        cur.execute("""
-            INSERT INTO workspaces (id, name, slug, description, icon, company_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (dept_id, dept["name"], dept_id,
-              f"{dept['name']} department workspace",
-              dept.get("emoji", "\U0001f4c1"), slug))
-        inserted += 1
-        print(f"  [sync] inserted workspace: {dept_id} ({dept['name']})")
+            cur.execute("""
+                UPDATE workspaces
+                SET name=?, slug=?, description=?, icon=?, company_id=?
+                WHERE id=?
+            """, (name, dept_id, description, icon, slug, dept_id))
+            updated += 1
+            if existing[dept_id] != slug:
+                print(f"  [sync] re-homed workspace {dept_id}: company_id "
+                      f"{existing[dept_id]!r} -> {slug!r}")
+        else:
+            cur.execute("""
+                INSERT INTO workspaces (id, name, slug, description, icon, company_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (dept_id, name, dept_id, description, icon, slug))
+            inserted += 1
+            print(f"  [sync] inserted workspace: {dept_id} ({name})")
+
+    # Issue #11 prune (default OFF): remove stale workspaces that are no longer in
+    # the build. NEVER delete a valid client row -- reserved system workspaces and
+    # any workspace that still holds tasks are kept, the latter logged for operator
+    # review. Only invoked with --prune (run-full-install Phase 6c) so ad-hoc syncs
+    # can never over-delete.
+    pruned = kept_nonempty = 0
+    if prune:
+        has_tasks = _table_exists(cur, "tasks")
+        for wid, _cid in list(existing.items()):
+            if wid in build_ids:
+                continue
+            if wid.lower() in RESERVED_WORKSPACE_IDS:
+                continue
+            task_count = 0
+            if has_tasks:
+                task_count = cur.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE workspace_id=?", (wid,)
+                ).fetchone()[0]
+            if task_count > 0:
+                kept_nonempty += 1
+                print(f"  [sync] KEPT stale workspace {wid!r} (not in build) -- "
+                      f"has {task_count} task(s); operator review needed")
+                continue
+            cur.execute("DELETE FROM workspaces WHERE id=?", (wid,))
+            pruned += 1
+            print(f"  [sync] pruned stale workspace: {wid}")
 
     conn.commit()
     conn.close()
-    print(f"  [sync] workspaces re-seeded. inserted={inserted} skipped={skipped} "
-          f"total_in_build={len(departments)}")
+    print(f"  [sync] workspaces re-seeded. inserted={inserted} updated={updated} "
+          f"pruned={pruned} kept_nonempty={kept_nonempty} "
+          f"total_in_build={len(build_ids)}")
 
 
 def main():
@@ -312,6 +383,11 @@ def main():
     ap.add_argument("--db", default=None, help="Path to mission-control.db")
     ap.add_argument("--config", default=None,
                     help="Path to config/departments.json to regenerate")
+    ap.add_argument("--prune", action="store_true", default=False,
+                    help="Delete stale workspaces no longer in the build "
+                         "(skips reserved system workspaces and any workspace "
+                         "that still holds tasks). Default OFF; enable from "
+                         "run-full-install Phase 6c.")
     args = ap.parse_args()
 
     departments, source = find_departments(args.company_slug)
@@ -336,7 +412,7 @@ def main():
     print(f"[sync] DB: {db_path}")
     print(f"[sync] Company: {company_info['name']} (slug={company_info['slug']}, "
           f"industry={company_info['industry'] or 'n/a'})")
-    reseed_workspaces(db_path, departments, company_info)
+    reseed_workspaces(db_path, departments, company_info, prune=args.prune)
     print("[sync] Done. Dashboard now reflects the client's real build-state.")
 
 
