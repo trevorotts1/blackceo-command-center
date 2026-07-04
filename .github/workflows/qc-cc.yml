@@ -459,3 +459,57 @@ jobs:
           # Empty -> harness resolves the default skill path; if the enforcers are
           # not installed on the runner the suite SKIPS loudly rather than fake-pass.
           OPENCLAW_SKILL23_SCRIPTS: ${{ vars.OPENCLAW_SKILL23_SCRIPTS || '' }}
+
+  # ── Interview-mode shell-lock e2e (WG-6 / WG-10c command-center half) ──────
+  # Drives the REAL Edge middleware + sanctioned Node cookie-setter through a live
+  # Next server in a real browser (Playwright/Chromium), proving the P0-5 / WG-9
+  # lock end-to-end: locked while the interview is incomplete, exempt routes open,
+  # and the dashboard unlocks once completion is signalled the sanctioned way.
+  #
+  # The suite is self-contained: playwright.interview-lock.config.ts stands up its
+  # OWN `next dev` server (webServer{}) against a THROWAWAY fixture workspace under
+  # test-results/ — never ~/.openclaw, never the operator's canonical files. It
+  # runs in dev on purpose (a production build would mint a `secure` cookie that
+  # http://127.0.0.1 drops, so the unlock could never be observed). GitHub Actions
+  # sets CI=true, so the config uses retries: 2 + trace-on-first-retry for flake
+  # control; the job timeout keeps a hung server from stalling the whole run.
+  interview-lock-e2e:
+    name: Interview-unlock shell-lock e2e (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser (Chromium + OS deps)
+        # Only Chromium is needed (config runs headless Chromium); --with-deps
+        # pulls the apt libs the runner is missing so the browser launches.
+        run: npx playwright install --with-deps chromium
+
+      - name: Run interview-unlock e2e (config boots its own dev server)
+        # `test:e2e:interview-lock` -> playwright test --config=playwright.interview-lock.config.ts
+        # Playwright's webServer{} builds-on-demand, starts `next dev` on :4123
+        # with the fixture env, waits for /api/health, runs the specs, then tears
+        # the server down. GitHub sets CI=true automatically (enables retries +
+        # reuseExistingServer:false). Job-level timeout guards against a stuck boot.
+        run: npm run test:e2e:interview-lock
+        timeout-minutes: 12
+
+      - name: Upload Playwright trace + fixture artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interview-lock-e2e-traces
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore

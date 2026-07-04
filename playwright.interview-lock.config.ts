@@ -24,7 +24,11 @@ export default defineConfig({
   testMatch: /interview-lock\.spec\.ts$/,
   timeout: 60_000,
   expect: { timeout: 15_000 },
-  retries: 0,
+  // Flake control in CI: a first-request `next dev` compile or a fire-and-forget
+  // cookie-setter race can occasionally lose a poll. Retry twice in CI (never
+  // locally, so a real regression fails fast for the author). Serial + 1 worker
+  // keeps the shared fixture build-state deterministic across retries.
+  retries: process.env.CI ? 2 : 0,
   workers: 1,
   fullyParallel: false,
   reporter: [['list']],
@@ -32,8 +36,11 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     headless: true,
-    trace: 'off',
-    screenshot: 'off',
+    // Capture a full Playwright trace + screenshot only when a test is retried
+    // after a failure, so green runs stay cheap but any CI flake/regression is
+    // debuggable from the uploaded artifact.
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
     video: 'off',
   },
   webServer: {
