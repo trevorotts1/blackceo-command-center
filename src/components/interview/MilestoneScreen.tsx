@@ -28,12 +28,14 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { iv, ivcx, ivTokens, ivScreenVariants, ivDurations, ivEase } from './interview-theme';
 
 export interface MilestoneScreenProps {
-  /** The department/phase name being celebrated. */
+  /** The phase name being celebrated. */
   phase: string;
-  /** Total expected departments (denominator for the progress stat). */
-  totalDepts: number;
-  /** Number of departments completed so far (numerator). */
-  completed: number;
+  /** Optional: the noun for the progress stat (default "department"). Only rendered if completed is also provided. */
+  unit?: string;
+  /** Optional: total expected items (denominator for the progress stat). Only rendered if completed is also provided. */
+  totalDepts?: number;
+  /** Optional: number of items completed so far (numerator). Only rendered if totalDepts is also provided. */
+  completed?: number;
   /** Called when the user dismisses the screen or the auto-advance timer fires. */
   onDismiss?: () => void;
   /** Optional: auto-advance after this many milliseconds. Null = no auto-advance. */
@@ -42,6 +44,7 @@ export interface MilestoneScreenProps {
 
 export default function MilestoneScreen({
   phase,
+  unit = 'department',
   totalDepts,
   completed,
   onDismiss,
@@ -130,20 +133,23 @@ export default function MilestoneScreen({
                   That&apos;s {phase} done
                 </motion.h1>
 
-                {/* Progress stat: "3 of 16 departments" */}
-                <motion.p
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{
-                    duration: ivDurations.base,
-                    ease: ivEase,
-                    delay: 0.25,
-                  }}
-                  className={ivcx(iv.lede, 'mt-3')}
-                  style={{ color: ivTokens.ink }}
-                >
-                  {completed} of {totalDepts} department{totalDepts === 1 ? '' : 's'}
-                </motion.p>
+                {/* Progress stat: "3 of 16 departments" — only rendered if counts are provided */}
+                {typeof completed === 'number' && typeof totalDepts === 'number' && (
+                  <motion.p
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{
+                      duration: ivDurations.base,
+                      ease: ivEase,
+                      delay: 0.25,
+                    }}
+                    className={ivcx(iv.lede, 'mt-3')}
+                    style={{ color: ivTokens.ink }}
+                  >
+                    {completed} of {totalDepts} {unit}
+                    {totalDepts === 1 ? '' : 's'}
+                  </motion.p>
+                )}
 
                 {/* CTA: Continue or auto-advance hint */}
                 <motion.button

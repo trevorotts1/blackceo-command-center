@@ -68,7 +68,7 @@ export default function IDontKnowButton({
       )}
     >
       <HelpCircle className="h-4 w-4" />
-      <span>I don't know</span>
+      <span>I don&apos;t know</span>
     </motion.button>
   );
 }

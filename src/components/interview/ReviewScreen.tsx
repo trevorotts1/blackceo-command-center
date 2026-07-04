@@ -153,6 +153,29 @@ interface StateResponse {
   };
 }
 
+/** GET /api/interview/answers — the grouped read-back this screen renders. */
+interface AnswersResponseAnswer {
+  id: string;
+  questionId?: string;
+  question: string;
+  answer: string;
+  loggedAt?: string;
+  provenance?: string;
+  editable: boolean;
+}
+
+interface AnswersResponseGroup {
+  phase: string;
+  label: string;
+  answers: AnswersResponseAnswer[];
+}
+
+interface AnswersResponse {
+  groups: AnswersResponseGroup[];
+  synthesis?: string;
+  skipped: number[];
+}
+
 interface CompleteMissingItem {
   gate: 'transcript' | 'decision_coverage' | 'unprovenanced_declines';
   reason: string;
@@ -225,6 +248,31 @@ function groupByPhase(answers: ReviewAnswer[]): Array<{ phase: string; rows: Rev
   return order.map((phase) => ({ phase, rows: buckets.get(phase)! }));
 }
 
+/**
+ * Flatten the grouped GET /api/interview/answers payload into the flat
+ * ReviewAnswer[] this screen edits and re-groups. The group's display `label`
+ * becomes each row's `phase` so the screen's own groupByPhase reproduces the same
+ * groups. loggedAt is folded into the visible provenance line when the block
+ * carries no explicit provenance note of its own.
+ */
+function flattenAnswers(resp: AnswersResponse): ReviewAnswer[] {
+  const out: ReviewAnswer[] = [];
+  for (const group of resp.groups ?? []) {
+    for (const a of group.answers ?? []) {
+      out.push({
+        id: a.id,
+        question: a.question,
+        answer: a.answer,
+        phase: group.label,
+        questionId: a.questionId ?? null,
+        provenance: a.provenance ?? (a.loggedAt ? `Recorded ${a.loggedAt}` : null),
+        editable: a.editable,
+      });
+    }
+  }
+  return out;
+}
+
 /** Turn a 409 /complete body into one human sentence (mirrors InterviewClient). */
 function formatMissing(data: CompleteResponse): string {
   const items = data.missing ?? [];
@@ -260,6 +308,15 @@ export default function ReviewScreen({
 
   // Live server truth (gate flags + skipped queue + coverage).
   const [state, setState] = useState<StateResponse | null>(null);
+
+  // The host may pass a synthesis prop; otherwise we load it from the answers
+  // route. A host-provided synthesis always wins over the fetched one.
+  const [loadedSynthesis, setLoadedSynthesis] = useState<string | null>(null);
+  const displaySynthesis = synthesis ?? loadedSynthesis ?? undefined;
+
+  // Did the host hand us an answer list? When it did, we render that and never
+  // clobber it with the self-fetch (the fetch is the empty-state replacement).
+  const hostProvidedAnswers = answers.length > 0;
 
   // Local, editable copy of the answer list (seeded from props, updated on save).
   const [rows, setRows] = useState<ReviewAnswer[]>(answers);
@@ -300,6 +357,29 @@ export default function ReviewScreen({
     if (!autoLoad) return;
     void loadState();
   }, [autoLoad, loadState]);
+
+  /* ---- live answer list (grouped read-back from the canonical files) ---- */
+
+  const loadAnswers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/interview/answers', { cache: 'no-store' });
+      if (!res.ok) return; // fail-soft: keep the empty state, never throw
+      const data = (await res.json()) as AnswersResponse;
+      setRows(flattenAnswers(data));
+      if (data.synthesis && data.synthesis.trim()) {
+        setLoadedSynthesis(data.synthesis.trim());
+      }
+    } catch {
+      // Fail-soft: the built-in empty state stays; the Build gate is unaffected.
+    }
+  }, []);
+
+  useEffect(() => {
+    // Self-load the read-back only when the host did not supply one (it renders
+    // props.answers in that case). This is the replacement for the empty state.
+    if (!autoLoad || hostProvidedAnswers) return;
+    void loadAnswers();
+  }, [autoLoad, hostProvidedAnswers, loadAnswers]);
 
   /* ---- inline edit (append genuine block + updated-on note) ---- */
 
@@ -418,7 +498,7 @@ export default function ReviewScreen({
           <h1 className={iv.question} style={{ fontSize: 'clamp(1.6rem, 1.1rem + 2vw, 2.4rem)' }}>
             Here&apos;s everything you told us
           </h1>
-          {synthesis ? (
+          {displaySynthesis ? (
             <div
               className={iv.card}
               style={{ marginTop: '0.9rem', display: 'flex', gap: '0.7rem', alignItems: 'flex-start' }}
@@ -428,8 +508,8 @@ export default function ReviewScreen({
                 aria-hidden
                 style={{ color: 'var(--iv-accent-strong)', flexShrink: 0, marginTop: '0.15rem' }}
               />
-              <p style={{ margin: 0, fontSize: '0.95rem', lineHeight: 1.6, color: 'var(--iv-ink-soft)' }}>
-                {synthesis}
+              <p style={{ margin: 0, fontSize: '0.95rem', lineHeight: 1.6, color: 'var(--iv-ink-soft)', whiteSpace: 'pre-wrap' }}>
+                {displaySynthesis}
               </p>
             </div>
           ) : (

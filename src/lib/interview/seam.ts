@@ -312,6 +312,118 @@ export function readAnswers(state?: BuildState | null): AnswersInfo {
   return { exists: true, path: p, sizeBytes: size, qBlockCount, hasSyntheticHeader, genuine };
 }
 
+/** One parsed Q/A block from workforce-interview-answers.md, content-level. */
+export interface AnswerBlock {
+  /** The question text exactly as it was asked (verbatim). */
+  question: string;
+  /** The current answer text (may span multiple lines). */
+  answer: string;
+  /** Any provenance note on the block (confirmed-from-context / updated-on), joined. */
+  provenance: string | null;
+  /** The `**Logged:** …` human timestamp, when the block carries one. */
+  loggedAt: string | null;
+}
+
+/**
+ * Split the transcript into content-level Q/A blocks. This is the READ-ONLY
+ * content reader the review surface uses; it is intentionally a sibling of (not a
+ * dependency on) mirror.parseAnswerBlocks — the seam is the lower layer and must
+ * not import the mirror. The Q/A/Provenance capture is byte-identical to the
+ * mirror's parser so the two never drift; this reader additionally captures the
+ * `**Logged:**` stamp. The header chunk (no `**Q:**`) is skipped. Never throws.
+ */
+export function parseAnswerBlocks(text: string): AnswerBlock[] {
+  if (!text) return [];
+  const chunks = text.split(/\n\s*-{3,}\s*\n/);
+  const blocks: AnswerBlock[] = [];
+
+  for (const chunk of chunks) {
+    const qMatch = chunk.match(/\*\*Q:\*\*\s*([\s\S]*?)(?=\n\*\*A:\*\*)/);
+    const aMatch = chunk.match(
+      /\*\*A:\*\*\s*([\s\S]*?)(?=\n\*\*(?:Provenance|Logged|Updated)\b|$)/,
+    );
+    if (!qMatch || !aMatch) continue;
+
+    const question = qMatch[1].trim();
+    if (!question) continue;
+    const answer = aMatch[1].trim();
+
+    // Provenance: an explicit **Provenance:** note (confirmed-from-context) and/or
+    // any "Updated on … previous answer was …" inline-edit note (SKILL.md).
+    const provParts: string[] = [];
+    const provMatch = chunk.match(
+      /\*\*Provenance:\*\*\s*([\s\S]*?)(?=\n\*\*(?:Logged|Updated)\b|$)/,
+    );
+    if (provMatch && provMatch[1].trim()) provParts.push(provMatch[1].trim());
+    const updatedMatch = chunk.match(/Updated on[^\n]*previous answer was[^\n]*/i);
+    if (updatedMatch) provParts.push(updatedMatch[0].trim());
+    const provenance = provParts.length ? provParts.join(' | ') : null;
+
+    const loggedMatch = chunk.match(/\*\*Logged:\*\*\s*([^\n]+)/);
+    const loggedAt = loggedMatch && loggedMatch[1].trim() ? loggedMatch[1].trim() : null;
+
+    blocks.push({ question, answer, provenance, loggedAt });
+  }
+
+  return blocks;
+}
+
+/**
+ * READ-ONLY: read the resolved transcript file and parse its Q/A blocks. Returns
+ * an empty array on absence / read error (never throws). This is the reader the
+ * /api/interview/answers route uses to render the review read-back — it performs
+ * no writes and shells to no Skill-23 script.
+ */
+export function readAnswerBlocks(state?: BuildState | null): AnswerBlock[] {
+  const info = readAnswers(state);
+  if (!info.exists) return [];
+  try {
+    return parseAnswerBlocks(fs.readFileSync(info.path, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * READ-ONLY: extract the agent's plain-English synthesis / read-back paragraph
+ * from interview-handoff.md, when present. Probes (in order):
+ *   1. a single-line `synthesis:` frontmatter value, then
+ *   2. the body under a heading whose text starts with synthesis / summary /
+ *      read-back / "what we heard" / "about you", captured until the next
+ *      heading or `---` rule.
+ * Returns null when the handoff is absent or carries no synthesis. Never throws.
+ */
+export function readInterviewSynthesis(): string | null {
+  const p = handoffFilePath();
+  let content = '';
+  try {
+    if (!fs.existsSync(p)) return null;
+    content = fs.readFileSync(p, 'utf-8');
+  } catch {
+    return null;
+  }
+
+  const fm = matchFrontmatter(content, 'synthesis');
+  if (fm && fm.trim()) return fm.trim();
+
+  const lines = content.split('\n');
+  const headingRe = /^#{1,6}\s*(synthesis|summary|read[-\s]?back|what we heard|about you)\b/i;
+  for (let i = 0; i < lines.length; i++) {
+    if (!headingRe.test(lines[i].trim())) continue;
+    const body: string[] = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const ln = lines[j];
+      const t = ln.trim();
+      if (/^#{1,6}\s/.test(t)) break; // next heading
+      if (/^-{3,}\s*$/.test(t)) break; // horizontal rule
+      body.push(ln);
+    }
+    const text = body.join('\n').trim();
+    if (text) return text;
+  }
+  return null;
+}
+
 /* ────────────────────────── Session id (benign write) ──────────────────────── */
 
 /**

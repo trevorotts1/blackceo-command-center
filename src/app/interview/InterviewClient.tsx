@@ -168,8 +168,9 @@ type QaMode = 'structured' | 'conversation';
 
 interface PendingMilestone {
   phase: string;
-  completed: number;
-  total: number;
+  completed?: number;
+  total?: number;
+  unit?: string;
 }
 
 const ALL_GATES_FALSE: GateFlags = {
@@ -351,11 +352,10 @@ export default function InterviewClient() {
       if (!atSectionBoundary) return; // stay on the structured cards
 
       // Section complete → celebrate (words only), then continue.
-      const sectionOrdinal =
-        Array.from(new Set(STRUCTURED_QUESTIONS.slice(0, nextIndex).map((x) => x.section))).length;
+      // For early phase boundaries, show phase words only (no false department counts).
       const done = nextIndex >= STRUCTURED_QUESTIONS.length;
       fireMilestone(
-        { phase: SECTION_MILESTONE[q.section], completed: sectionOrdinal, total: TOTAL_PHASES },
+        { phase: SECTION_MILESTONE[q.section] },
         () => {
           if (done) startConversation();
           else setStage('qa');
@@ -368,8 +368,9 @@ export default function InterviewClient() {
   /* ---- Q&A → departments (gated on a genuine transcript) ---- */
 
   const goToDepartments = useCallback(() => {
+    // Transition to departments phase; show phase words only (no false counts).
     fireMilestone(
-      { phase: 'Your team', completed: 3, total: TOTAL_PHASES },
+      { phase: 'Your team' },
       () => setStage('departments'),
     );
   }, [fireMilestone]);
@@ -382,7 +383,7 @@ export default function InterviewClient() {
     const completed = cov?.covered.length ?? 0;
     const total = cov?.expected.length ?? 0;
     fireMilestone(
-      { phase: 'Your departments', completed, total },
+      { phase: 'Your departments', completed, total, unit: 'department' },
       () => setStage('review'),
     );
   }, [fireMilestone, loadState]);
@@ -429,6 +430,7 @@ export default function InterviewClient() {
     return (
       <MilestoneScreen
         phase={milestone.phase}
+        unit={milestone.unit}
         completed={milestone.completed}
         totalDepts={milestone.total}
         onDismiss={dismissMilestone}
