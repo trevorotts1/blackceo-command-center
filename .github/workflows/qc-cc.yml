@@ -365,23 +365,31 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Self-test — planted client name MUST fail the gate
+      - name: Self-test — planted placeholder name MUST fail the gate (box mode)
         run: |
-          # Hermetic: copy the planted fixture (which holds a denylisted name +
-          # operator path) into an isolated temp repo-root under a NON-excluded
-          # name and confirm the gate exits 1. The denylisted literal lives only
-          # in the self-excluded fixture, never inline in this workflow.
+          # Hermetic: copy the planted fixture (which holds an obviously-fake
+          # PLACEHOLDER name + the operator path) into an isolated temp repo-root
+          # under a NON-excluded name and confirm the gate exits 1. Point the gate
+          # at the committed .example roster (fake placeholder names) so BOX-mode
+          # detection is exercised without any real client roster. The denylisted
+          # literal lives only in the self-excluded fixture, never inline here.
           TMP="$(mktemp -d)"
           cp tests/fixtures/no-client-names/planted-client-name.txt "$TMP/leak.ts"
-          if bash scripts/qc-assert-no-client-names.sh --repo-root "$TMP"; then
-            echo "ERROR: gate passed on a planted client name — the check is broken"
+          if OPENCLAW_CLIENT_ROSTER="$PWD/scripts/client-roster.example.txt" \
+               bash scripts/qc-assert-no-client-names.sh --repo-root "$TMP"; then
+            echo "ERROR: gate passed on a planted placeholder name — the check is broken"
             rm -rf "$TMP"
             exit 1
           fi
           echo "OK: gate correctly failed (exit 1) on the planted fixture"
           rm -rf "$TMP"
 
-      - name: Assert no client names / operator paths in any tracked file
+      # Roster absent in CI → STRUCTURAL mode: the gate must NOT fail-open. It
+      # scans for the operator path + any leaked .example placeholder names,
+      # WARNS that the full roster-specific scan was skipped, and passes (exit 0)
+      # only when the tree is clean. The authoritative roster scan runs on
+      # operator boxes / pre-commit where the roster exists.
+      - name: Assert no operator paths / placeholder leaks in any tracked file (structural)
         run: bash scripts/qc-assert-no-client-names.sh
 
   # ── Shell script syntax guard (PRD P0-1 regression guard) ─────────────────

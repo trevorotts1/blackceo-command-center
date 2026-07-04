@@ -97,9 +97,9 @@ test('AF-SPELL (c2) known acronym not in spec still PASSES (allowlist)', () => {
 });
 
 test('AF-SPELL (c3) proper noun / brand name present in spec ⇒ PASS', () => {
-  // The brand names Bobatoon / Star Consulting are in the spec copy → must not
+  // The brand names Zorp Widgets / Acme Consulting are in the spec copy → must not
   // be flagged as misspellings even though they are not dictionary words.
-  const res = compareSpellingFidelity('Bobatoon Star Consulting', 'Built by Bobatoon for Star Consulting');
+  const res = compareSpellingFidelity('Zorp Widgets Acme Consulting', 'Built by Zorp Widgets for Acme Consulting');
   assert.equal(res.pass, true, `spec brand names must not be flagged: ${res.explanation}`);
   console.log('  [AF-SPELL c3] brand-name PASS');
 });
