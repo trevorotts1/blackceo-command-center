@@ -476,7 +476,7 @@ function ConsentScreen({
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 p-6 sm:p-8">
       <div className="max-w-2xl mx-auto">
-        <div className="text-center mb-8">
+        <div className="text-center mb-8" data-walkthrough="interview-welcome">
           <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-100 mb-4">
             <Sparkles className="h-9 w-9 text-indigo-600" />
           </div>
@@ -493,6 +493,7 @@ function ConsentScreen({
           role="radiogroup"
           aria-label="How would you like to begin?"
           className="space-y-3 mb-6"
+          data-walkthrough="interview-consent-options"
         >
           {CONSENT_OPTIONS.map((opt) => {
             const selected = consent === opt.id;
@@ -555,6 +556,7 @@ function ConsentScreen({
           type="button"
           onClick={onBegin}
           disabled={consent === null}
+          data-walkthrough="interview-begin-button"
           className={`w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-semibold transition-colors ${
             consent === null
               ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
@@ -671,7 +673,7 @@ function ConversationScreen({
         </div>
 
         {/* ── progress rail + gated build ─────────────────────────────────── */}
-        <aside className="space-y-4">
+        <aside className="space-y-4" data-walkthrough="interview-progress-rail">
           <div className="bg-white rounded-2xl shadow-sm border p-5">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm font-medium text-gray-700">Progress</span>
@@ -702,7 +704,7 @@ function ConversationScreen({
           </div>
 
           {/* Gate checklist — makes the disabled Build button self-explaining. */}
-          <div className="bg-white rounded-2xl shadow-sm border p-5">
+          <div className="bg-white rounded-2xl shadow-sm border p-5" data-walkthrough="interview-gate-checklist">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-gray-700 mb-3">
               <ShieldCheck className="h-4 w-4 text-indigo-600" />
               Before we can build
@@ -741,6 +743,7 @@ function ConversationScreen({
             onClick={onBuild}
             disabled={!allGatesPass || submitting}
             aria-disabled={!allGatesPass || submitting}
+            data-walkthrough="interview-build-button"
             className={`w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-semibold transition-colors ${
               !allGatesPass || submitting
                 ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
