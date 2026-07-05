@@ -629,6 +629,120 @@ export function countStaleGoogleEmbeddings(): {
   };
 }
 
+/**
+ * Health snapshot of the SOP / routing embedding store (F2.3 / DEP-11).
+ *
+ * This is the TypeScript-side half of the dual-store embedding health surface.
+ * It reports the SOP store's active provider, per-row model histogram, stale
+ * count and semantic-readiness so the CC `/api/health` endpoint can present it
+ * side-by-side with the persona index (reported by shared-utils/embedding_health.py).
+ *
+ * FAIL-CLOSED / DEGRADE-LOUDLY: this function NEVER throws. A missing table,
+ * empty store, or DB error is reported as `available:false` + `degraded:true`
+ * with a human note — never an exception that would 500 the health route. It is
+ * also the last-resort fallback the health route uses when the Python probe is
+ * unavailable (no python3, timeout), so it must stand on its own.
+ */
+export interface SOPEmbeddingHealth {
+  store: 'sop_index';
+  available: boolean;
+  provider: EmbeddingProviderName;
+  activeModel: string;
+  activeDims: number;
+  totalRows: number;
+  modelHistogram: Record<string, number>;
+  staleRows: number;
+  semanticReady: boolean;
+  degraded: boolean;
+  notes: string[];
+}
+
+export function getSOPEmbeddingHealth(): SOPEmbeddingHealth {
+  const notes: string[] = [];
+  let provider: EmbeddingProvider;
+  try {
+    provider = resolveEmbeddingProvider();
+  } catch {
+    provider = { name: 'none', apiKey: null, model: '', dims: 0 };
+  }
+
+  const health: SOPEmbeddingHealth = {
+    store: 'sop_index',
+    available: false,
+    provider: provider.name,
+    activeModel: provider.model,
+    activeDims: provider.dims,
+    totalRows: 0,
+    modelHistogram: {},
+    staleRows: 0,
+    semanticReady: false,
+    degraded: true,
+    notes,
+  };
+
+  try {
+    const db = getDb();
+    const tableExists = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sop_embeddings'")
+      .get();
+    if (!tableExists) {
+      notes.push('sop_index: table sop_embeddings missing (migration 057 not run) — keyword-only fallback.');
+      return health;
+    }
+
+    health.available = true;
+
+    const hist: Record<string, number> = {};
+    const rows = queryAll<{ model: string | null; cnt: number }>(
+      `SELECT COALESCE(NULLIF(embedding_model, ''), '(unknown)') AS model, COUNT(*) AS cnt
+         FROM sop_embeddings GROUP BY model`,
+      []
+    );
+    for (const r of rows) hist[r.model ?? '(unknown)'] = r.cnt;
+    health.modelHistogram = hist;
+    health.totalRows = Object.values(hist).reduce((a, b) => a + b, 0);
+
+    // Stale rows = the retired Google model (gemini-embedding-001), reused from
+    // the single source of truth so the two paths never drift.
+    health.staleRows = countStaleGoogleEmbeddings().stale;
+
+    if (provider.name === 'none') {
+      health.semanticReady = false;
+      notes.push('sop_index: no embedding provider key configured — SOP routing is keyword-only.');
+    } else {
+      const canonicalRows = hist[provider.model] ?? 0;
+      health.semanticReady = canonicalRows > 0;
+      if (canonicalRows === 0 && health.totalRows > 0) {
+        notes.push(
+          `sop_index: ZERO rows match the active model ${provider.model} ` +
+          `(stored: [${Object.keys(hist).join(', ')}]) — semantic routing DISABLED (keyword-only).`
+        );
+      }
+    }
+
+    if (health.totalRows === 0) {
+      notes.push('sop_index: table present but EMPTY — run the backfill to build the SOP index.');
+    }
+    if (health.staleRows > 0) {
+      notes.push(
+        `sop_index: ${health.staleRows} row(s) on retired gemini-embedding-001 — ` +
+        `re-embed with ${PINNED_GOOGLE_MODEL} before the 2026-07-14 shutdown.`
+      );
+    }
+
+    // degraded when no usable semantic rows OR any stale rows poison the space.
+    health.degraded = !health.semanticReady || health.staleRows > 0;
+    return health;
+  } catch (err) {
+    health.available = false;
+    health.degraded = true;
+    notes.push(
+      `sop_index: could not read store (${(err as Error).message}) — treating as degraded/keyword-only.`
+    );
+    return health;
+  }
+}
+
 /** Fetch the stored embedding for a SOP, or null if not embedded yet. */
 export function getStoredEmbedding(sopId: string): Float32Array | null {
   const row = queryOne<SOPEmbeddingRow>(
