@@ -223,6 +223,115 @@ test("readView reports open-by-severity, MTTR, repeat offenders, cap usage", () 
   }
 });
 
+// === FIX-RESCUE-08: semantic dedup at mint time =============================
+
+test("mintOrRecur mints a genuinely new ticket and counts the cap", () => {
+  const { store, cleanup } = freshStore();
+  try {
+    const r = store.mintOrRecur({ ticketId: "acme-gateway-down-2026-07-05", client: "acme", failureClass: "gateway-down" });
+    assert.equal(r.status, "minted");
+    assert.equal(r.minted, true);
+    assert.equal(r.deduped, false);
+    assert.equal(r.rrNumber, 1);
+    assert.equal(store.countToday("acme"), 1, "mint counts toward the daily cap");
+  } finally {
+    cleanup();
+  }
+});
+
+test("mintOrRecur folds a recurrence onto the open sibling without minting or counting the cap", () => {
+  const { store, cleanup } = freshStore();
+  try {
+    const first = store.mintOrRecur({ ticketId: "acme-gateway-down-2026-07-05", client: "acme", failureClass: "gateway-down", problem: "box down" });
+    assert.equal(first.status, "minted");
+    assert.equal(store.countToday("acme"), 1);
+
+    // Same client + class, DIFFERENT ticketId (a client agent that never
+    // persists its id) — must dedup onto the first ticket.
+    const again = store.mintOrRecur({ ticketId: "acme-gateway-down-DIFFERENT", client: "acme", failureClass: "gateway-down", problem: "still down" });
+    assert.equal(again.status, "deduped");
+    assert.equal(again.deduped, true);
+    assert.equal(again.minted, false);
+    assert.equal(again.ticketId, "acme-gateway-down-2026-07-05", "returns the EXISTING ticketId");
+    assert.equal(store.countToday("acme"), 1, "the 25/day cap is NOT incremented on a dedup");
+
+    // A "recurred" audit event was appended to the existing ticket.
+    const evs = store.events("acme-gateway-down-2026-07-05");
+    const recurred = evs.filter((e) => /recurred/.test(e.note || ""));
+    assert.equal(recurred.length, 1, "one recurred event appended");
+    assert.equal(store.getByRrNumber(1).ticket_id, "acme-gateway-down-2026-07-05");
+    assert.equal(store.getTicket("acme-gateway-down-DIFFERENT"), null, "no duplicate ticket minted");
+  } finally {
+    cleanup();
+  }
+});
+
+test("mintOrRecur: exact ticketId repeat returns existing (idempotent), never counts twice", () => {
+  const { store, cleanup } = freshStore();
+  try {
+    store.mintOrRecur({ ticketId: "acme-cron-2026-07-05", client: "acme", failureClass: "cron" });
+    const dup = store.mintOrRecur({ ticketId: "acme-cron-2026-07-05", client: "acme", failureClass: "cron" });
+    assert.equal(dup.status, "exists");
+    assert.equal(dup.deduped, true);
+    assert.equal(store.countToday("acme"), 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("mintOrRecur: different failure_class mints a distinct ticket (not deduped)", () => {
+  const { store, cleanup } = freshStore();
+  try {
+    store.mintOrRecur({ ticketId: "acme-gateway-down-2026-07-05", client: "acme", failureClass: "gateway-down" });
+    const other = store.mintOrRecur({ ticketId: "acme-cron-2026-07-05", client: "acme", failureClass: "cron" });
+    assert.equal(other.status, "minted", "a different failure_class is a different problem");
+    assert.equal(store.countToday("acme"), 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("mintOrRecur: a resolved sibling does NOT absorb a new outage (window/terminal gate)", () => {
+  const { store, cleanup } = freshStore();
+  try {
+    store.mintOrRecur({ ticketId: "acme-gateway-down-A", client: "acme", failureClass: "gateway-down" });
+    store.transition("acme-gateway-down-A", "RESOLVED", { actor: "rescue-agent" });
+    // The prior one is resolved -> a fresh outage should MINT, not dedup.
+    const fresh = store.mintOrRecur({ ticketId: "acme-gateway-down-B", client: "acme", failureClass: "gateway-down" });
+    assert.equal(fresh.status, "minted");
+    assert.equal(store.countToday("acme"), 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("mintOrRecur: dedup window is honored (stale sibling => mint)", () => {
+  const { store, cleanup } = freshStore();
+  try {
+    store.mintOrRecur({ ticketId: "acme-gateway-down-old", client: "acme", failureClass: "gateway-down" });
+    // Now = 7h later, window = 6h -> the old open ticket is out of window.
+    const later = Date.now() + 7 * 60 * 60 * 1000;
+    const r = store.mintOrRecur({ ticketId: "acme-gateway-down-new", client: "acme", failureClass: "gateway-down", now: later });
+    assert.equal(r.status, "minted", "outside the 6h window a fresh ticket mints");
+  } finally {
+    cleanup();
+  }
+});
+
+test("recurrence appends an event without changing state and throws on unknown ticket", () => {
+  const { store, cleanup } = freshStore();
+  try {
+    store.createTicket({ ticketId: "t-r", client: "acme", failureClass: "cron" });
+    const before = store.getTicket("t-r").status;
+    store.recurrence("t-r", { note: "recurred x2" });
+    assert.equal(store.getTicket("t-r").status, before, "state unchanged");
+    assert.ok(store.events("t-r").some((e) => e.note === "recurred x2"));
+    assert.throws(() => store.recurrence("nope", {}), /unknown ticket/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("durability: reopening the same DB file preserves tickets and RR sequence", () => {
   const dir = mkdtempSync(join(tmpdir(), "rr-persist-"));
   const p = join(dir, "t.sqlite");
