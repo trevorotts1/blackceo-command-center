@@ -48,6 +48,7 @@ import { notifyOwner } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { buildPersonaBlock } from '@/lib/persona-dispatch';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { getBestSOPForTask } from '@/lib/sops';
@@ -691,24 +692,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
-**Agent Persona:** ${
-      settings.persona === 'auto'
-        ? 'AUTO-SELECT. Run the 5-Layer Persona Matching Protocol before starting:'
-        : settings.persona
-    }
-${
-  settings.persona === 'auto'
-    ? `
-1. **Layer 1 (Company Mission):** Does this persona align with the company's stated mission?
-2. **Layer 2 (Owner Values):** Does this persona match the owner's beliefs and style (see USER.md)?
-3. **Layer 3 (Company Goals):** Does this persona support the company's current goals/KPIs?
-4. **Layer 4 (Department Goals):** Does this persona fit this department's objectives/KPIs?
-5. **Layer 5 (Task Fit):** Is this persona the right guide for THIS specific task?
-
-After selecting, log your choice to persona-selection-log.md:
-[date] [task-id] [candidates-considered] [selected-persona] [layer-3-reason] [layer-4-reason] [layer-5-reason]`
-    : ''
-}
+${buildPersonaBlock(task, settings)}
 **Specialist Type:** ${specialistType}
 ${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
 **IMPORTANT:** After completing work, you MUST call these APIs:
