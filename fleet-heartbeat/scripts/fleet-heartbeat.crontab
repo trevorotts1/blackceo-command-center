@@ -1,0 +1,16 @@
+# FIX-RESCUE-12 (ii): system-crontab alternative to the launchd plist for the
+# fleet heartbeat, matching exactly how the poller and the receiver watchdog
+# already run (direct command, no OpenClaw agent turn, no model).
+#
+# Add this ONE line to `crontab -e` (it sits alongside the existing
+# rescue-rangers-poller.sh and rescue-receiver-watchdog.sh lines):
+#
+#   0 6-21/3 * * * /opt/homebrew/bin/bash "$HOME"/clawd/fleet-heartbeat/scripts/fleet-heartbeat-cron.sh >>"$HOME"/.openclaw/logs/fleet-heartbeat.cron.log 2>&1
+#
+# Schedule = minute 0 of hours 6,9,12,15,18,21 (every 3h, 6am-9pm), the same
+# `0 6-21/3` the retired OpenClaw cron used. cron runs in the box's local tz
+# (America/New_York), matching the original cron's tz.
+#
+# Use EITHER this crontab line OR the launchd plist
+# (ai.openclaw.fleet-heartbeat.plist) — not both, or the heartbeat double-fires.
+0 6-21/3 * * * /opt/homebrew/bin/bash "$HOME"/clawd/fleet-heartbeat/scripts/fleet-heartbeat-cron.sh >>"$HOME"/.openclaw/logs/fleet-heartbeat.cron.log 2>&1
