@@ -193,3 +193,77 @@ export function buildPersonaBlock(
   // 5. Never naked, never AUTO-SELECT — govern under the house fallback.
   return governanceBlock(GOVERNANCE_PERSONA_FALLBACK, { unresolved: true });
 }
+
+/**
+ * One sub-task's persona plan row (DEP-5 / F3.7). Shape mirrors a
+ * `task_subtask_persona` row + the SOP `slot` it filled (F3.9). All fields
+ * optional/nullable so it tolerates older rows and rows written by a CLI-run
+ * decompose that predates the `slot` column.
+ */
+export interface PersonaPlanSubtask {
+  seq: number;
+  subtask_text?: string | null;
+  persona_id?: string | null;
+  persona_name?: string | null;
+  persona_mode?: string | null;
+  slot?: string | null;
+  department?: string | null;
+  task_category?: string | null;
+  /** Human "why this persona for this part" — from the plan, shown inline. */
+  why?: string | null;
+  /** A mechanical sub-task (send/deploy) needs a governance pointer, not a load. */
+  no_persona_required?: boolean | number | null;
+  governance_persona_id?: string | null;
+}
+
+/**
+ * Build the multi-persona PERSONA PLAN block for a decomposed task (F3.7 dispatch
+ * side). One Section-4 load pointer per NON-mechanical sub-task — each rendered by
+ * REUSING `buildPersonaBlock` (the FDN-3 mechanism ×N), so a plan sub-task and a
+ * single-persona task deliver byte-identical persona contracts, and every
+ * fail-closed guarantee (never `'auto'`, never naked, mechanical → governance
+ * pointer) holds per sub-task automatically.
+ *
+ * Returns '' when there is no real multi-persona plan (0 or 1 sub-task) so the
+ * caller keeps the single-persona block unchanged (no regression).
+ */
+export function buildPersonaPlanBlock(
+  subtasks: PersonaPlanSubtask[],
+  settings: PersonaSettings,
+): string {
+  if (!Array.isArray(subtasks) || subtasks.length < 2) return '';
+
+  const ordered = [...subtasks].sort((a, b) => (a.seq || 0) - (b.seq || 0));
+  const distinctPersonas = new Set(
+    ordered.map((s) => s.persona_id).filter((id): id is string => !!id),
+  );
+
+  const sections = ordered.map((st) => {
+    const label = st.slot ? `${st.slot} slot` : (st.task_category || 'sub-task');
+    const heading = `**${st.seq}. ${label}${st.subtask_text ? ` — ${st.subtask_text}` : ''}**`;
+    // Reuse the SINGLE-persona renderer for each sub-task: a mechanical sub-task
+    // yields a governance pointer, a matched one yields the full Section-4 load
+    // contract, an unresolved one yields the house fallback — never naked.
+    const body = buildPersonaBlock(
+      {
+        persona_id: st.persona_id,
+        persona_name: st.persona_name,
+        persona_mode: st.persona_mode,
+        no_persona_required: st.no_persona_required,
+        governance_persona_id: st.governance_persona_id,
+      },
+      // The per-agent operator lock must NOT hijack every sub-task's matched
+      // persona — neutralize it locally (persona 'auto' + a non-lock source) so
+      // branch 3 (task persona) / branch 5 (fallback) governs each sub-task by
+      // its OWN plan row.
+      { ...settings, persona: 'auto', personaSource: 'hardcoded_default' },
+    );
+    const why = st.why ? `\n_Why this persona:_ ${st.why}` : '';
+    return `${heading}\n${body}${why}`;
+  });
+
+  return `**PERSONA PLAN (multi-persona task — ${ordered.length} sub-tasks, ${distinctPersonas.size} distinct persona${distinctPersonas.size === 1 ? '' : 's'}):**
+Operate EACH sub-task as its OWN assigned persona below — load that sub-task's blueprint before you start that sub-task. Do NOT run any self-selection protocol; every sub-task's persona is already assigned.
+
+${sections.join('\n\n')}`;
+}

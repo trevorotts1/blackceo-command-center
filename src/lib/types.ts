@@ -107,6 +107,23 @@ export interface Agent {
   updated_at: string;
 }
 
+/**
+ * One sub-task's persona pick on a decomposed (multi-persona) task — a
+ * `task_subtask_persona` row (DEP-5 / F3.7 + F3.9). Rendered as a slot chip on
+ * the kanban card.
+ */
+export interface TaskSubtaskPersona {
+  seq: number;
+  subtask_text?: string | null;
+  persona_id: string | null;
+  persona_name?: string | null;
+  score?: number | null;
+  department?: string | null;
+  task_category?: string | null;
+  /** Which declared SOP slot this sub-task filled (F3.9); NULL for text decomp. */
+  slot?: string | null;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -153,6 +170,11 @@ export interface Task {
   persona_score?: number | null;
   persona_selected_at?: string | null;
   persona_version?: number | null;
+  // Multi-persona plan rows (DEP-5 / F3.7 + F3.9 — migration 088). Present only on
+  // decomposed tasks; populated by the tasks GET route + the persona-plan SSE
+  // broadcast so the kanban card can render per-sub-task slot chips. Empty/absent
+  // for a single-persona task.
+  subtask_personas?: TaskSubtaskPersona[];
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;

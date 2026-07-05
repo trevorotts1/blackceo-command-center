@@ -11,11 +11,46 @@ import type { Task } from '@/lib/types';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { isEmbeddingAvailable, rankSOPsBySemantic } from '@/lib/sop-embeddings';
 
+/**
+ * F3.9 — a step-level SOP → persona-role SLOT contract.
+ *
+ * An SOP that spans multiple crafts (e.g. "Build a website": CONTENT / CODE /
+ * IMAGE) declares one `persona_slot` per craft step. When >1 slot is declared,
+ * `createTaskCore` runs decomposition in `--combined` mode and the matcher fills
+ * EACH slot with a distinct best-fit persona (F3.7). Slots are the per-step
+ * contract; `SOP.persona_hints` stays the SOP-LEVEL hint list (F3.4).
+ *
+ * Vocabulary is intentionally the EXISTING taxonomy — no new taxonomy to invent:
+ *   - `task_category` = an `infer-task-category` slug (e.g. `content-write`,
+ *     `code`, `design`), which pins the craft floor + primary-domain bonus.
+ *   - `domains`       = `CRAFT_PRIMARY_DOMAINS` families (e.g. `copywriting`,
+ *     `software-craft`, `visual-storytelling`).
+ *   - `audience_from` = `'task'` folds the task's audience context into the
+ *     slot's Layer-5 query (so a CONTENT slot for "Black women" reaches the
+ *     lived-experience persona).
+ *   - `required`      = a required slot may NEVER be left empty; it inherits the
+ *     FDN-1 fallback guarantee (dept-default persona) on the CC side.
+ */
+export interface PersonaSlot {
+  /** Short slot name, e.g. "content" | "code" | "image". */
+  slot: string;
+  /** infer-task-category slug forced for this slot's per-sub-task match. */
+  task_category?: string;
+  /** CRAFT_PRIMARY_DOMAINS families this slot should resolve within. */
+  domains?: string[];
+  /** 'task' = fold the task's audience context into the slot's Layer-5 query. */
+  audience_from?: 'task' | 'none';
+  /** A required slot must always resolve to a persona (FDN-1 guarantee). */
+  required?: boolean;
+}
+
 export interface SOPStep {
   name: string;
   checklist?: string[];
   success_criteria?: string;
   persona_hint?: string;
+  /** F3.9 — optional per-step persona-role slot (multi-craft SOPs). */
+  persona_slot?: PersonaSlot;
 }
 
 export interface SOP {
@@ -86,14 +121,92 @@ export function parseAndValidateSteps(stepsRaw: unknown): SOPStep[] {
     if (s.persona_hint !== undefined && s.persona_hint !== null && typeof s.persona_hint !== 'string') {
       throw new Error(`steps[${idx}].persona_hint must be string`);
     }
+    // F3.9 — validate + PRESERVE an optional persona_slot so a slot survives a
+    // round-trip through any SOP-editing API route (which re-validates steps).
+    const personaSlot = validatePersonaSlot(s.persona_slot, idx);
     out.push({
       name: s.name.trim(),
       checklist: Array.isArray(checklist) ? (checklist as string[]) : undefined,
       success_criteria: typeof s.success_criteria === 'string' ? s.success_criteria : undefined,
       persona_hint: typeof s.persona_hint === 'string' ? s.persona_hint : undefined,
+      ...(personaSlot ? { persona_slot: personaSlot } : {}),
     });
   });
   return out;
+}
+
+/**
+ * Validate + normalize an optional step-level persona_slot (F3.9). Returns the
+ * cleaned slot or undefined when absent. Throws with a clear message on a
+ * malformed slot so a bad SOP author-time payload fails loud, not silent.
+ */
+export function validatePersonaSlot(raw: unknown, idx = 0): PersonaSlot | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object') {
+    throw new Error(`steps[${idx}].persona_slot must be an object`);
+  }
+  const s = raw as Record<string, unknown>;
+  if (typeof s.slot !== 'string' || !s.slot.trim()) {
+    throw new Error(`steps[${idx}].persona_slot.slot is required`);
+  }
+  if (s.task_category !== undefined && s.task_category !== null && typeof s.task_category !== 'string') {
+    throw new Error(`steps[${idx}].persona_slot.task_category must be string`);
+  }
+  if (
+    s.domains !== undefined &&
+    s.domains !== null &&
+    (!Array.isArray(s.domains) || !s.domains.every((d) => typeof d === 'string'))
+  ) {
+    throw new Error(`steps[${idx}].persona_slot.domains must be string[]`);
+  }
+  if (
+    s.audience_from !== undefined &&
+    s.audience_from !== null &&
+    s.audience_from !== 'task' &&
+    s.audience_from !== 'none'
+  ) {
+    throw new Error(`steps[${idx}].persona_slot.audience_from must be 'task' | 'none'`);
+  }
+  return {
+    slot: s.slot.trim(),
+    task_category: typeof s.task_category === 'string' ? s.task_category.trim() : undefined,
+    domains: Array.isArray(s.domains) ? (s.domains as string[]) : undefined,
+    audience_from: s.audience_from === 'task' || s.audience_from === 'none' ? s.audience_from : undefined,
+    required: s.required === true,
+  };
+}
+
+/**
+ * Extract the ordered list of declared persona slots from a SOP's `steps` JSON.
+ * Tolerant: returns [] on malformed/absent steps (never throws) so the CALLER
+ * (createTaskCore's single-vs-combined decision) degrades to text decomposition
+ * rather than failing task creation.
+ */
+export function getPersonaSlots(stepsRaw: string | SOPStep[] | null | undefined): PersonaSlot[] {
+  if (!stepsRaw) return [];
+  let steps: unknown;
+  if (typeof stepsRaw === 'string') {
+    try {
+      steps = JSON.parse(stepsRaw);
+    } catch {
+      return [];
+    }
+  } else {
+    steps = stepsRaw;
+  }
+  if (!Array.isArray(steps)) return [];
+  const slots: PersonaSlot[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i] as Record<string, unknown> | null;
+    if (!step || typeof step !== 'object') continue;
+    try {
+      const slot = validatePersonaSlot(step.persona_slot, i);
+      if (slot) slots.push(slot);
+    } catch {
+      // A single malformed slot is skipped — never fail slot extraction on one bad step.
+    }
+  }
+  return slots;
 }
 
 /**
