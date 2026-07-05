@@ -9,6 +9,7 @@ import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { buildPersonaBlock } from '@/lib/persona-dispatch';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import type { SOP, SOPStep } from '@/lib/sops';
@@ -261,6 +262,29 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
+    // ── SYNCHRONOUS PERSONA DISPATCH GATE (F3.1 / F4.1 — heal, not stall) ────
+    // Mirror of the auto-dispatch path: resolveAndLog delivers a pinned persona
+    // (Hop 10). If the task is naked, settings.persona is the 'auto' self-select
+    // sentinel — heal it deterministically here and deliver the pinned persona
+    // instead of telling the doer to self-select (F3.6). Never stalls the board.
+    if (settings.persona === 'auto') {
+      try {
+        const { ensurePersonaForDispatch } = await import('@/lib/tasks');
+        const { canonicalDeptSlug } = await import('@/lib/routing/canonical-slug');
+        const healDept =
+          canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+        const healed = ensurePersonaForDispatch(task.id, healDept);
+        settings.persona = healed.persona_name;
+        settings.personaMode = healed.persona_mode;
+        console.warn(
+          `[Dispatch] persona gate: task ${task.id} was naked — delivering ` +
+            `${healed.healed ? 'healed' : 'pinned'} persona "${healed.persona_name}".`,
+        );
+      } catch (healErr) {
+        console.error(`[Dispatch] persona gate failed for task ${task.id}:`, healErr);
+      }
+    }
+
     const dispatchInventory = listModels();
     const dispatchModality = settings.required_modality ??
       detectModality(task.title, task.description);
@@ -347,16 +371,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
-**Agent Persona:** ${settings.persona === 'auto' ? 'AUTO-SELECT. Run the 5-Layer Persona Matching Protocol before starting:' : settings.persona}
-${settings.persona === 'auto' ? `
-1. **Layer 1 (Company Mission):** Does this persona align with the company's stated mission?
-2. **Layer 2 (Owner Values):** Does this persona match the owner's beliefs and style (see USER.md)?
-3. **Layer 3 (Company Goals):** Does this persona support the company's current goals/KPIs?
-4. **Layer 4 (Department Goals):** Does this persona fit this department's objectives/KPIs?
-5. **Layer 5 (Task Fit):** Is this persona the right guide for THIS specific task?
-
-After selecting, log your choice to persona-selection-log.md:
-[date] [task-id] [candidates-considered] [selected-persona] [layer-3-reason] [layer-4-reason] [layer-5-reason]` : ''}
+${buildPersonaBlock(task, settings)}
 **Specialist Type:** ${specialistType}
 
 **OUTPUT DIRECTORY:** ${taskProjectDir}

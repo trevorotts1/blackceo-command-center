@@ -48,6 +48,7 @@ import { notifyOwner } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { buildPersonaBlock } from '@/lib/persona-dispatch';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { getBestSOPForTask } from '@/lib/sops';
@@ -468,6 +469,34 @@ export async function autoDispatchTask(
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
+    // ── SYNCHRONOUS PERSONA DISPATCH GATE (F3.1 / F4.1 — heal, not stall) ────
+    // resolveAndLog reads tasks.persona_id first (Hop 10), so a pinned persona is
+    // ALREADY delivered. But if the task reached dispatch naked (a create-time
+    // selection that silently failed / a pre-existing backlog card), settings.persona
+    // resolves to the 'auto' self-select sentinel. Rather than tell the doer to
+    // self-select (the F3.6 bug), we HEAL the task here: apply the deterministic
+    // fallback chain, pin it, and deliver THAT persona. Never HOLD a task for a
+    // persona — the fallback makes NULL impossible (availability > purity). Dynamic
+    // import avoids the tasks<->task-dispatcher static cycle.
+    if (settings.persona === 'auto') {
+      try {
+        const { ensurePersonaForDispatch } = await import('@/lib/tasks');
+        const healDept =
+          canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+        const healed = ensurePersonaForDispatch(task.id, healDept);
+        settings.persona = healed.persona_name;
+        settings.personaMode = healed.persona_mode;
+        console.warn(
+          `[${context}] persona dispatch gate: task ${task.id} was naked — ` +
+            `delivering ${healed.healed ? 'healed' : 'pinned'} persona "${healed.persona_name}".`,
+        );
+      } catch (healErr) {
+        // Never block dispatch on the heal — a matched persona is preferred, but an
+        // unhealed 'auto' still ships (degraded) rather than stalling the board.
+        console.error(`[${context}] persona dispatch gate failed for task ${task.id}:`, healErr);
+      }
+    }
+
     // ── AF-MODEL-SOVEREIGNTY gate ───────────────────────────────────────────
     // Block dispatch if resolved model is null, free default, forbidden, or
     // modality-wrong. Routes to needs_owner_input — never silently downgrades.
@@ -691,24 +720,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
-**Agent Persona:** ${
-      settings.persona === 'auto'
-        ? 'AUTO-SELECT. Run the 5-Layer Persona Matching Protocol before starting:'
-        : settings.persona
-    }
-${
-  settings.persona === 'auto'
-    ? `
-1. **Layer 1 (Company Mission):** Does this persona align with the company's stated mission?
-2. **Layer 2 (Owner Values):** Does this persona match the owner's beliefs and style (see USER.md)?
-3. **Layer 3 (Company Goals):** Does this persona support the company's current goals/KPIs?
-4. **Layer 4 (Department Goals):** Does this persona fit this department's objectives/KPIs?
-5. **Layer 5 (Task Fit):** Is this persona the right guide for THIS specific task?
-
-After selecting, log your choice to persona-selection-log.md:
-[date] [task-id] [candidates-considered] [selected-persona] [layer-3-reason] [layer-4-reason] [layer-5-reason]`
-    : ''
-}
+${buildPersonaBlock(task, settings)}
 **Specialist Type:** ${specialistType}
 ${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
 **IMPORTANT:** After completing work, you MUST call these APIs:

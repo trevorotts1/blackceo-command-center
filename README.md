@@ -1,5 +1,7 @@
 # Command Center
 
+> **v4.61.0 (2026-07-05)** delivers the matched persona to the doer at dispatch (Persona-Matching-Overhaul foundation, FDN-3/F4.1). Both dispatch paths — the fast-loop auto-dispatch (`src/lib/task-dispatcher.ts`) and the operator-click route (`src/app/api/tasks/[id]/dispatch/route.ts`) — now render a shared `buildPersonaBlock` (`src/lib/persona-dispatch.ts`) that reads `task.persona_id` and emits the resolved persona's Section-4 (A–D) + §7B load contract, instead of telling the doer to "AUTO-SELECT / run the 5-Layer Protocol." `agent_settings.persona` is now an operator lock only; every branch is fail-closed (never naked, never `'auto'`). See `CHANGELOG.md` for the full v4.61.0 entry.
+>
 > **v4.56.0 (2026-06-29)** adds ingest schema-error self-heal + clear 503 + owner escalation (`notifyOwnerSchemaError`), and a presentations done-gate requiring `process_certificate_sha` (no-skip proof) before any presentations task can be marked done at the board. See `CHANGELOG.md` for the full v4.56.0 entry.
 >
 > **v4.14.0 (2026-06-09)** closes the two-step routing gap: specialist tasks now **auto-invoke OpenClaw** after routing without any manual "Send to Agent" click. `src/lib/task-dispatcher.ts` (`autoDispatchTask`) is called fire-and-forget from `createTaskCore`, `auto-route`, and `ceo-delegation-sweep`. Guards: master/CEO agents skipped, terminal statuses skipped, QC loop cap respected. See `CHANGELOG.md` for the full v4.14.0 entry.
