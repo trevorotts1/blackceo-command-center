@@ -129,6 +129,11 @@ jobs:
           # No DB or server needed — tests use mocks and temp dirs
           DATABASE_PATH: ""
 
+      - name: F3.1 no-naked-dispatch contract test (persona invariant)
+        run: bash tests/unit/no-naked-dispatch.test.sh
+        env:
+          NODE_ENV: test
+
   # ── B.1 thin-probe fixture run ─────────────────────────────────────────────
   # Exercises cc-health-check.sh against a real Next.js build + pm2-less fixture
   # to confirm the script exits 0 (green) on a known-good state and exits 1 on
