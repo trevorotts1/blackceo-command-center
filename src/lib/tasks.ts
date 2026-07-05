@@ -36,8 +36,14 @@ import os from 'os';
 import path from 'path';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { selectPersonaForTask } from '@/lib/persona-selector';
-import { getBestSOPForTask } from '@/lib/sops';
+import {
+  selectPersonaForTask,
+  selectPersonaPlanForTask,
+  loadSubtaskPersonas,
+  broadcastPersonaPlan,
+  type SubtaskPersona,
+} from '@/lib/persona-selector';
+import { getBestSOPForTask, getPersonaSlots, type PersonaSlot } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
@@ -366,6 +372,305 @@ export async function resolvePersonaAndPin(
     );
     return null;
   }
+}
+
+// ─── MULTI-PERSONA DECOMPOSITION DECISION (DEP-5 / F3.7 + F3.9) ──────────────
+// createTaskCore decides single-persona vs `--combined` decomposition. It runs
+// combined selection when EITHER:
+//   (i)  the resolved SOP declares >1 `persona_slot` (F3.9 — authoritative), OR
+//   (ii) a cheap, FREE heuristic decomposition probe yields >1 sub-task AND the
+//        task is non-mechanical (F3.7).
+// The probe is a faithful TS mirror of decompose-task.py's `heuristic_decompose`
+// (pure regex, no LLM, no subprocess) so the DECISION costs nothing; the real
+// (LLM-allowed) decomposition only runs once combined mode is chosen.
+
+/** Hard cap on sub-tasks — mirrors decompose-task.py DECOMP_MAX_SUBTASKS. */
+export const DECOMP_MAX_SUBTASKS = 6;
+
+// Mirror of decompose-task.py `_ACTION_VERBS` (coordination-split gate).
+const _ACTION_VERBS = [
+  'write', 'create', 'build', 'design', 'draft', 'compose', 'produce',
+  'send', 'schedule', 'publish', 'post', 'edit', 'research', 'analyze',
+  'plan', 'structure', 'set up', 'configure', 'review', 'format', 'generate',
+  'map', 'outline', 'sketch', 'record', 'compile', 'summarize', 'sequence',
+];
+
+// Mirror of decompose-task.py `_SEQ_SPLIT_RE` (sequence markers / lists).
+const _SEQ_SPLIT_RE =
+  /(?:\b(?:then|after that|afterwards|next|followed by|and then|finally|once that(?:'s| is) done)\b|;|→|->|\n\s*[-*•]\s+|\n\s*\d+[.)]\s+)/gi;
+
+function _stripEnds(s: string): string {
+  return s.replace(/^[\s\t,.;]+/, '').replace(/[\s\t,.;]+$/, '');
+}
+
+/** Mirror of `_split_on_for_sections`: "…for the X, …for the Y" → 2 parts. */
+function _splitOnForSections(chunk: string): string[] {
+  const cues = chunk.match(/\bfor the\b/gi);
+  if (!cues || cues.length < 2) return [chunk];
+  const parts = chunk
+    .split(/\s*,\s*(?=(?:a |an |another |the )?[\w\- ]{0,40}?\bfor the\b)/i)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts.length >= 2 ? parts : [chunk];
+}
+
+/** Mirror of `_coordination_split`: split "X and Y" only when both are actions. */
+function _coordinationSplit(chunk: string): string[] {
+  const pieces = chunk.split(/\s+\band\b\s+/i);
+  if (pieces.length < 2) return [chunk];
+  const out: string[] = [];
+  let buf = pieces[0];
+  for (const nxt of pieces.slice(1)) {
+    const nxtL = nxt.toLowerCase().replace(/^\s+/, '');
+    const startsAction = _ACTION_VERBS.some((v) => nxtL.startsWith(v));
+    const bufL = buf.toLowerCase();
+    const bufHasAction = _ACTION_VERBS.some((v) =>
+      new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(bufL),
+    );
+    if (startsAction && bufHasAction) {
+      out.push(buf.trim());
+      buf = nxt;
+    } else {
+      buf = `${buf} and ${nxt}`;
+    }
+  }
+  out.push(buf.trim());
+  return out.filter(Boolean);
+}
+
+/**
+ * Faithful TS mirror of decompose-task.py `heuristic_decompose` — returns the
+ * ordered list of raw sub-task strings. Single-part → 1 element (no regression).
+ * Deterministic, pure-regex, FREE (no LLM). Exported for the contract test.
+ */
+export function heuristicDecompose(text: string, maxSubtasks = DECOMP_MAX_SUBTASKS): string[] {
+  const raw = (text || '').trim();
+  if (!raw) return [];
+  let chunks = raw
+    .split(_SEQ_SPLIT_RE)
+    .map((c) => (c ? _stripEnds(c) : ''))
+    .filter((c) => c && c.length > 0);
+  if (chunks.length === 0) chunks = [raw];
+
+  const expanded: string[] = [];
+  for (const ch of chunks) {
+    for (const seg of _splitOnForSections(ch)) {
+      expanded.push(..._coordinationSplit(seg));
+    }
+  }
+
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const s of expanded) {
+    let s2 = _stripEnds(s);
+    s2 = s2.replace(/^\s*(?:and|then|next|also)\b\s+/i, '');
+    s2 = s2.replace(/\s*[,;]?\s*(?:and|then)\s*$/i, '');
+    s2 = _stripEnds(s2);
+    const key = s2.toLowerCase();
+    if (s2.length >= 3 && !seen.has(key)) {
+      seen.add(key);
+      ordered.push(s2);
+    }
+  }
+  const final = ordered.length > 0 ? ordered : [raw];
+  return final.slice(0, maxSubtasks);
+}
+
+/** Cheap sub-task count for the single-vs-combined decision (never throws). */
+export function heuristicSubtaskCount(text: string, maxSubtasks = DECOMP_MAX_SUBTASKS): number {
+  try {
+    return heuristicDecompose(text, maxSubtasks).length;
+  } catch {
+    return 1;
+  }
+}
+
+// Mirror of decompose-task.py `_is_mechanical` — a send/deploy/plumbing task is
+// persona-free by design; it must NOT trigger multi-persona decomposition.
+const _MECH_MULTIWORD = ['check disk', 'check memory'];
+const _MECH_SINGLEWORD = ['restart', 'reboot', 'ping', 'ls', 'chmod', 'chown'];
+const _MECH_DELIVERY = [
+  'send it', 'send the', 'schedule the send', 'deploy', 'publish to',
+  'push to', 'upload', 'queue the', 'sequence the send', 'blast',
+];
+
+/** Whether a task is mechanical/operational (mirror of the selector's gate). */
+export function isMechanicalTask(text: string): boolean {
+  const t = (text || '').toLowerCase();
+  if (_MECH_MULTIWORD.some((m) => t.includes(m))) return true;
+  if (_MECH_SINGLEWORD.some((m) => new RegExp(`\\b${m}\\b`).test(t))) return true;
+  if (_MECH_DELIVERY.some((m) => t.includes(m))) return true;
+  return false;
+}
+
+/**
+ * Decide whether a task should run multi-persona decomposition, and gather the
+ * SOP-declared slots. Pure + free (no subprocess). Exported for the contract test.
+ */
+export function decideMultiPersona(
+  taskText: string,
+  slots: PersonaSlot[],
+): { combined: boolean; reason: string } {
+  if (slots.length > 1) {
+    return { combined: true, reason: `sop-slots(${slots.length})` };
+  }
+  if (isMechanicalTask(taskText)) {
+    return { combined: false, reason: 'mechanical' };
+  }
+  const count = heuristicSubtaskCount(taskText);
+  if (count > 1) {
+    return { combined: true, reason: `heuristic-subtasks(${count})` };
+  }
+  return { combined: false, reason: 'single' };
+}
+
+/** Load the persona slots declared by a task's resolved SOP (never throws). */
+function loadSopPersonaSlots(sopId: string | null): PersonaSlot[] {
+  if (!sopId) return [];
+  try {
+    const row = queryOne<{ steps: string | null }>('SELECT steps FROM sops WHERE id = ?', [sopId]);
+    return row ? getPersonaSlots(row.steps) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Run multi-persona decomposition for a task, persist the primary (seq-1) persona
+ * onto `tasks.persona_*` for back-compat, enforce the FDN-1 fallback guarantee on
+ * every REQUIRED slot, and broadcast the plan over SSE.
+ *
+ * Never leaves a task naked: on decomposition failure / empty plan it falls back
+ * to single-persona `resolvePersonaAndPin` (which itself has the exhaustion
+ * fallback). Returns the pinned primary persona id, or null only when the plan is
+ * genuinely all-mechanical AND single selection returns `no_persona_required`.
+ */
+export async function resolvePersonaPlanAndPin(
+  taskId: string,
+  taskDescription: string,
+  departmentForSelector: string,
+  slots: PersonaSlot[],
+): Promise<string | null> {
+  let plan;
+  try {
+    plan = await selectPersonaPlanForTask(taskId, taskDescription, departmentForSelector, { slots });
+  } catch (err) {
+    console.error(`[resolvePersonaPlanAndPin] decomposition threw for task ${taskId}:`, err);
+    plan = null;
+  }
+
+  // No usable plan (or only a single sub-task) → single-persona path. This keeps
+  // the never-naked invariant intact through the existing exhaustion fallback.
+  if (!plan || plan.subtask_personas.length < 2) {
+    console.log(
+      `[resolvePersonaPlanAndPin] task ${taskId}: decomposition yielded ` +
+      `${plan ? plan.subtask_personas.length : 0} sub-task(s) — using single-persona selection`,
+    );
+    return resolvePersonaAndPin(taskId, taskDescription, departmentForSelector);
+  }
+
+  // FDN-1 REQUIRED-SLOT GUARANTEE: a REQUIRED slot may never be empty. When a
+  // slot was declared required (slots[i]) but its sub-task came back persona-less
+  // (no persona available — NOT a mechanical step), backfill the dept-default so
+  // the required slot always carries a persona.
+  try {
+    enforceRequiredSlots(taskId, plan.subtask_personas, slots, departmentForSelector);
+  } catch (err) {
+    console.error(`[resolvePersonaPlanAndPin] required-slot enforcement failed for task ${taskId}:`, err);
+  }
+
+  // Pin the PRIMARY (seq-1) persona onto tasks.persona_* for back-compat. If the
+  // seq-1 sub-task is mechanical / persona-less, fall to the first sub-task that
+  // DID resolve a persona; if none, the dept-default exhaustion fallback ensures
+  // the board invariant (every task carries a persona) still holds.
+  const rows = loadSubtaskPersonas(taskId);
+  const source = rows.length > 0 ? rows : plan.subtask_personas;
+  const primary =
+    source.find((s) => s.seq === 1 && s.persona_id && !SENTINEL_IDS.has(s.persona_id)) ||
+    source.find((s) => s.persona_id && !SENTINEL_IDS.has(s.persona_id!));
+
+  if (primary && primary.persona_id) {
+    const personaSelectedAt = new Date().toISOString();
+    run(
+      `UPDATE tasks
+          SET persona_id = ?, persona_name = ?, persona_mode = ?,
+              persona_score = ?, persona_version = ?, persona_selected_at = ?
+        WHERE id = ?`,
+      [
+        primary.persona_id,
+        primary.persona_name || humanizeSlug(primary.persona_id),
+        'leadership',
+        primary.score ?? null,
+        1,
+        personaSelectedAt,
+        taskId,
+      ],
+    );
+    broadcastPersonaPlan(taskId);
+    console.log(
+      `[resolvePersonaPlanAndPin] task ${taskId}: pinned primary "${primary.persona_id}" ` +
+      `(seq ${primary.seq}); ${plan.distinct_persona_count} distinct persona(s) across ` +
+      `${plan.subtask_count} sub-tasks.`,
+    );
+    return primary.persona_id;
+  }
+
+  // Every sub-task was mechanical / persona-less. Broadcast the plan (so the card
+  // shows the mechanical sub-tasks) then fall back to single selection for the
+  // primary field — which handles no_persona_required + the exhaustion fallback.
+  broadcastPersonaPlan(taskId);
+  console.log(`[resolvePersonaPlanAndPin] task ${taskId}: plan had no non-mechanical persona — single-persona fallback for primary`);
+  return resolvePersonaAndPin(taskId, taskDescription, departmentForSelector);
+}
+
+/**
+ * FDN-1 guarantee for REQUIRED slots: patch any required slot whose sub-task came
+ * back persona-less with the deterministic dept-default persona (never empty).
+ * Correlates slots to plan rows by order (slot[i] ↔ seq i+1, the contract when
+ * slots drive decomposition). Best-effort; logs a per-task audit event.
+ */
+function enforceRequiredSlots(
+  taskId: string,
+  subtaskPersonas: SubtaskPersona[],
+  slots: PersonaSlot[],
+  department: string,
+): void {
+  if (slots.length === 0) return;
+  const rows = loadSubtaskPersonas(taskId);
+  const bySeq = new Map(rows.map((r) => [r.seq, r]));
+  const fallback = deriveDepartmentDefaultPersona(department);
+  const now = new Date().toISOString();
+
+  slots.forEach((slot, i) => {
+    if (!slot.required) return;
+    const seq = i + 1;
+    const row = bySeq.get(seq) ?? subtaskPersonas.find((s) => s.seq === seq);
+    // A resolved persona (from decompose) needs nothing. Only a persona-LESS
+    // required slot (no persona available) is backfilled.
+    if (!row || (row.persona_id && !SENTINEL_IDS.has(row.persona_id))) return;
+
+    try {
+      run(
+        `UPDATE task_subtask_persona
+            SET persona_id = ?, persona_name = ?
+          WHERE task_id = ? AND seq = ?`,
+        [fallback.persona_id, fallback.persona_name, taskId, seq],
+      );
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          'persona_fallback',
+          taskId,
+          `[PERSONA-SLOT-FALLBACK] Required slot "${slot.slot}" (seq ${seq}) came back empty — ` +
+            `pinned ${fallback.source} department-default persona "${fallback.persona_id}".`,
+          now,
+        ],
+      );
+    } catch (err) {
+      console.error(`[enforceRequiredSlots] backfill failed for task ${taskId} slot "${slot.slot}":`, err);
+    }
+  });
 }
 
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
@@ -737,9 +1042,25 @@ export async function createTaskCore(
     canonicalDeptSlug(workspaceSlug) ||
     (input.department ? canonicalDeptSlug(input.department) : null) ||
     'general';
-  const personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment);
+
+  // DEP-5 / F3.7 + F3.9 — decide single-persona vs multi-persona decomposition.
+  // Combined mode runs when the resolved SOP declares >1 persona slot OR a free
+  // heuristic probe finds >1 sub-task on a non-mechanical task. The primary
+  // (seq-1) persona is still pinned onto tasks.persona_* for back-compat either
+  // way; combined mode additionally persists the per-sub-task plan rows.
+  const personaSlots = loadSopPersonaSlots(sopId);
+  const { combined: useCombinedPersona, reason: decompReason } = decideMultiPersona(
+    personaTaskDescription,
+    personaSlots,
+  );
+  if (useCombinedPersona) {
+    console.log(`[createTaskCore] task ${id}: multi-persona decomposition (${decompReason})`);
+  }
+  const personaPinPromise = useCombinedPersona
+    ? resolvePersonaPlanAndPin(id, personaTaskDescription, personaDepartment, personaSlots)
+    : resolvePersonaAndPin(id, personaTaskDescription, personaDepartment);
   // Swallow at the source so a background failure never becomes an unhandled
-  // rejection — resolvePersonaAndPin logs internally and never throws to callers.
+  // rejection — both resolvers log internally and never throw to callers.
   void personaPinPromise.catch(() => null);
 
   // --- AUTO-DISPATCH (v4.14.0) ---

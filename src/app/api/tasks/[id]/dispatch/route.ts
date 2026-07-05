@@ -9,7 +9,8 @@ import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
-import { buildPersonaBlock } from '@/lib/persona-dispatch';
+import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import type { SOP, SOPStep } from '@/lib/sops';
@@ -340,6 +341,16 @@ ${stepLines.join('\n')}
     const taskProjectDir = `${projectsPath}/${projectDir}`;
     const missionControlUrl = getMissionControlUrl();
 
+    // DEP-5 / F3.7 — mirror the fast-loop dispatcher: deliver the PERSONA PLAN
+    // block for a decomposed multi-persona task. buildPersonaPlanBlock returns ''
+    // for a single-persona task, so this path is a no-op regression there. Keeps
+    // the two dispatch messages byte-identical for the persona section (FDN-3).
+    const subtaskPlan = loadSubtaskPersonas(task.id);
+    const personaPlanBlock = buildPersonaPlanBlock(subtaskPlan, settings);
+    const personaSection = personaPlanBlock
+      ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
+      : buildPersonaBlock(task, settings);
+
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 
 **Title:** ${task.title}
@@ -348,7 +359,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
-${buildPersonaBlock(task, settings)}
+${personaSection}
 **Specialist Type:** ${specialistType}
 
 **OUTPUT DIRECTORY:** ${taskProjectDir}

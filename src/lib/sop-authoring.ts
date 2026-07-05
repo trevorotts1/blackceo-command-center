@@ -288,6 +288,74 @@ function sopToHowToMd(opts: {
 // §1.3 — The authoring entry point (custom path only)
 // ---------------------------------------------------------------------------
 
+// ─── F3.9 — PERSONA SLOT EMISSION (authored multi-craft SOPs) ────────────────
+// An authored SOP that spans multiple crafts (e.g. a website build: CONTENT copy,
+// CODE build, IMAGE hero) declares one `persona_slot` per craft STEP so the
+// matcher fills each slot with a distinct best-fit persona (F3.7 `--combined`).
+// Slot vocabulary is the EXISTING taxonomy — `infer-task-category` slugs +
+// `CRAFT_PRIMARY_DOMAINS` families — never a new taxonomy.
+//
+// Q3 (ratified): the CODE family resolves to the `software-craft` domain
+// (hunt-thomas-pragmatic-programmer, added matcher-side by F3.8/DEP-6); the IMAGE
+// family resolves to `visual-storytelling` (budelmann-brand-identity-essentials +
+// opara-color-works, surfaced matcher-side). CONTENT resolves to `copywriting`.
+
+interface AuthoredStepSlot {
+  slot: string;
+  task_category: string;
+  domains: string[];
+  audience_from: 'task' | 'none';
+  required: boolean;
+}
+
+const _SLOT_FAMILIES: Array<{ family: string; keywords: RegExp; slot: AuthoredStepSlot }> = [
+  {
+    family: 'content',
+    keywords: /\b(copy|copywrit|content|headline|messaging|caption|script|voice|narrative)\b/i,
+    slot: { slot: 'content', task_category: 'content-write', domains: ['copywriting'], audience_from: 'task', required: true },
+  },
+  {
+    family: 'code',
+    keywords: /\b(code|build the (site|page|funnel|app)|develop|implement|frontend|back[- ]?end|api|deploy the (site|app)|engineer|program)\b/i,
+    slot: { slot: 'code', task_category: 'code', domains: ['software-craft'], audience_from: 'none', required: true },
+  },
+  {
+    family: 'image',
+    keywords: /\b(image|hero shot|visual|graphic|illustration|photo|art\s?direction|design the (hero|banner|graphic))\b/i,
+    slot: { slot: 'image', task_category: 'design', domains: ['visual-storytelling'], audience_from: 'task', required: false },
+  },
+];
+
+/**
+ * Annotate drafted SOP steps with `persona_slot` for a MULTI-CRAFT SOP. Returns a
+ * NEW steps array (never mutates the input); a step that already declares a slot
+ * or matches no craft family is passed through untouched. Slots are emitted ONLY
+ * when ≥2 DISTINCT craft families are detected across the steps — a single-craft
+ * SOP is left alone (it will match a single persona the normal way).
+ *
+ * Exported for the contract test.
+ */
+export function emitPersonaSlots<T extends { name: string; persona_slot?: unknown }>(
+  steps: T[],
+): T[] {
+  if (!Array.isArray(steps) || steps.length === 0) return steps;
+
+  // First pass: which family (if any) does each step map to?
+  const perStepFamily = steps.map((s) => {
+    const name = s?.name || '';
+    return _SLOT_FAMILIES.find((f) => f.keywords.test(name)) ?? null;
+  });
+  const distinctFamilies = new Set(perStepFamily.filter(Boolean).map((f) => f!.family));
+  if (distinctFamilies.size < 2) return steps; // not multi-craft — leave untouched
+
+  return steps.map((step, i) => {
+    const fam = perStepFamily[i];
+    if (!fam) return step;
+    if (step.persona_slot) return step; // author already declared one — respect it
+    return { ...step, persona_slot: { ...fam.slot } };
+  });
+}
+
 export interface AuthorSOPInput {
   originalTaskId: string;
   title: string;
@@ -658,6 +726,13 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     const collision = queryOne<{ id: string }>('SELECT id FROM sops WHERE slug = ? AND deleted_at IS NULL', [baseSlug]);
     const finalSlug = collision ? `${baseSlug}-${sopId.slice(0, 6)}` : baseSlug;
 
+    // F3.9 — emit per-step persona slots for a multi-craft authored SOP so the
+    // matcher fills each craft slot with a distinct best-fit persona at task time.
+    const stepsWithSlots = emitPersonaSlots(
+      finalDrafted.steps as Array<{ name: string; persona_slot?: unknown }>,
+    );
+    const stepsJson = JSON.stringify(stepsWithSlots);
+
     const sources3 = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
     const evidenceSummary = [
       `[QC-PASS ${finalQcResult.score.toFixed(1)}/10]`,
@@ -682,7 +757,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
           finalDept,
           input.agentRoleSlug ?? null,
           finalDrafted.task_keywords ?? null,
-          JSON.stringify(finalDrafted.steps),
+          stepsJson,
           finalDrafted.success_criteria ?? null,
           fileNow,
           fileNow,
@@ -708,7 +783,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
           proposalId,
           finalName,
           finalDept,
-          JSON.stringify(finalDrafted.steps),
+          stepsJson,
           JSON.stringify([input.originalTaskId]),
           evidenceSummary,
           fileNow,

@@ -8,6 +8,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
+import { PersonaSlotChips } from './kanban/TaskCard';
 import { formatDistanceToNow } from 'date-fns';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
@@ -679,6 +680,9 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         {/* Skill 35 — Marketing-dept Publish button (no-op for non-marketing) */}
         <MarketingPublishButton task={task} />
       </div>
+
+      {/* DEP-5 / F3.7 + F3.9 — per-sub-task persona slot chips (multi-persona tasks only) */}
+      <PersonaSlotChips task={task} />
 
       {/* Sprint and Due Date */}
       {(task.sprint || task.due_date) && (

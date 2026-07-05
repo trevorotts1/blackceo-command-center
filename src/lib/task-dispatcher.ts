@@ -48,7 +48,8 @@ import { notifyOwner } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
-import { buildPersonaBlock } from '@/lib/persona-dispatch';
+import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { getBestSOPForTask } from '@/lib/sops';
@@ -684,6 +685,17 @@ ${stepLines.join('\n')}
     const { artifactDir: taskArtifactDir, messageFragment: artifactFragment } =
       artifactDispatchPayload(task.id);
 
+    // DEP-5 / F3.7 — when the task was decomposed into a multi-persona plan,
+    // deliver a PERSONA PLAN block (one Section-4 pointer per non-mechanical
+    // sub-task, buildPersonaBlock ×N) IN ADDITION to the primary persona block.
+    // Single-persona tasks (0/1 plan rows) render only the primary block —
+    // buildPersonaPlanBlock returns '' so there is no regression.
+    const subtaskPlan = loadSubtaskPersonas(task.id);
+    const personaPlanBlock = buildPersonaPlanBlock(subtaskPlan, settings);
+    const personaSection = personaPlanBlock
+      ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
+      : buildPersonaBlock(task, settings);
+
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 
 **Title:** ${task.title}
@@ -692,7 +704,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
-${buildPersonaBlock(task, settings)}
+${personaSection}
 **Specialist Type:** ${specialistType}
 ${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
 **IMPORTANT:** After completing work, you MUST call these APIs:

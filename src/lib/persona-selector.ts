@@ -31,7 +31,10 @@ import { execFile, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { DB_PATH } from "@/lib/db";
+import { DB_PATH, queryAll, queryOne } from "@/lib/db";
+import { broadcast } from "@/lib/events";
+import type { PersonaSlot } from "@/lib/sops";
+import type { Task } from "@/lib/types";
 
 // Promisified async version — never blocks the event loop.
 const execFileAsync = promisify(execFile);
@@ -104,6 +107,23 @@ function resolveScriptPath(): string {
     "23-ai-workforce-blueprint",
     "scripts",
     "persona-selector-v2.py"
+  );
+}
+
+/**
+ * Path to the multi-persona decomposition engine (`decompose-task.py`), which
+ * lives beside `persona-selector-v2.py` in the same installed skill folder.
+ * DEP-5 / F3.7: the CC spawns this in `--combined` mode when a task decomposes
+ * into >1 sub-task (or an SOP declares >1 persona slot).
+ */
+function resolveDecomposeScriptPath(): string {
+  const root = resolveOpenClawRoot();
+  return path.join(
+    root,
+    "skills",
+    "23-ai-workforce-blueprint",
+    "scripts",
+    "decompose-task.py"
   );
 }
 
@@ -205,6 +225,195 @@ export async function selectPersonaForTask(
   } catch (error) {
     console.error(`[persona-selector] Failed for task ${taskId}:`, error);
     return null;
+  }
+}
+
+// ─── MULTI-PERSONA DECOMPOSITION (DEP-5 / F3.7 + F3.9) ───────────────────────
+
+/**
+ * One sub-task's persona pick — the W6.4 `subtask_personas[]` contract emitted by
+ * `decompose-task.py` on stdout AND the row shape of `task_subtask_persona`.
+ */
+export interface SubtaskPersona {
+  seq: number;
+  subtask_text?: string | null;
+  persona_id: string | null;
+  persona_name?: string | null;
+  score?: number | null;
+  department?: string | null;
+  task_category?: string | null;
+  /** F3.9 — which declared SOP slot this sub-task filled (NULL for text decomp). */
+  slot?: string | null;
+  /** Present in the rich `plan[]` (not persisted): human "why this persona". */
+  why?: string | null;
+  /** Present in the rich `plan[]`: a mechanical sub-task needs no persona. */
+  no_persona_required?: boolean | null;
+}
+
+export interface PersonaPlanResult {
+  mode: "combined";
+  subtask_count: number;
+  distinct_persona_count: number;
+  decomposition_method?: string;
+  /** W6.4 row-shape array — the authoritative plan the CC persists/renders. */
+  subtask_personas: SubtaskPersona[];
+}
+
+/**
+ * Run `decompose-task.py --combined` for a task and return the per-sub-task
+ * persona plan (W6.4 contract). The script itself persists the plan rows into
+ * `task_subtask_persona` (keyed by `OPENCLAW_TASK_ID`), so this function's job is
+ * to (a) drive the spawn, (b) parse the `subtask_personas[]` array, and (c) hand
+ * it back for the primary-pin decision + SSE broadcast.
+ *
+ * Robust to DEP-4 rollout timing: `--slots` is a DEP-4 flag on the matcher side.
+ * If the installed script is older (strict argparse rejects `--slots`), the first
+ * spawn fails and we transparently retry WITHOUT slots (pure text decomposition).
+ * A total failure returns null and the caller falls back to single-persona
+ * selection — a decomposition problem never leaves a task naked.
+ *
+ * @returns the plan, or null when decomposition did not produce a usable plan.
+ */
+export async function selectPersonaPlanForTask(
+  taskId: string,
+  taskDescription: string,
+  departmentId: string | null,
+  opts?: { slots?: PersonaSlot[] },
+): Promise<PersonaPlanResult | null> {
+  // Test/CI escape hatch — mirrors PERSONA_FIXTURE_JSON. Never set in production.
+  if (process.env.PERSONA_PLAN_FIXTURE_JSON) {
+    try {
+      const fixture = JSON.parse(process.env.PERSONA_PLAN_FIXTURE_JSON) as Partial<PersonaPlanResult>;
+      const rows = Array.isArray(fixture.subtask_personas) ? fixture.subtask_personas : [];
+      return normalizePlan(rows, fixture);
+    } catch {
+      // Malformed fixture — fall through to the real engine.
+    }
+  }
+
+  const scriptPath = resolveDecomposeScriptPath();
+  if (!fs.existsSync(scriptPath)) {
+    console.warn(`[persona-plan] decompose-task.py not found at ${scriptPath} — skipping decomposition`);
+    return null;
+  }
+  const dept = departmentId || "general";
+  const companyConfigHint = resolveCompanyConfigHint();
+  const slots = opts?.slots && opts.slots.length > 0 ? opts.slots : undefined;
+
+  const baseArgs = [scriptPath, "--task", taskDescription, "--department", dept, "--format", "json"];
+  const env = {
+    ...process.env,
+    DASHBOARD_DB_PATH: DB_PATH,
+    OPENCLAW_TASK_ID: taskId,
+    ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
+  };
+
+  const runOnce = async (args: string[]): Promise<PersonaPlanResult | null> => {
+    const { stdout } = await execFileAsync("python3", args, {
+      encoding: "utf-8",
+      timeout: 60_000,
+      maxBuffer: 8 * 1024 * 1024,
+      env,
+    });
+    const parsed = JSON.parse(stdout) as { subtask_personas?: unknown[] } & Record<string, unknown>;
+    const rows = Array.isArray(parsed.subtask_personas) ? parsed.subtask_personas : [];
+    return normalizePlan(rows as Partial<SubtaskPersona>[], parsed);
+  };
+
+  try {
+    if (slots) {
+      try {
+        return await runOnce([...baseArgs, "--slots", JSON.stringify(slots)]);
+      } catch (slotErr) {
+        // Older script without a --slots flag (strict argparse SystemExit) — retry
+        // with pure text decomposition so DEP-5 works before DEP-4 lands on a box.
+        console.warn(`[persona-plan] --slots rejected for task ${taskId}, retrying text decomposition:`, (slotErr as Error).message);
+        return await runOnce(baseArgs);
+      }
+    }
+    return await runOnce(baseArgs);
+  } catch (error) {
+    console.error(`[persona-plan] decomposition failed for task ${taskId}:`, error);
+    return null;
+  }
+}
+
+/** Coerce the raw `subtask_personas[]` array into a typed, counted plan. */
+function normalizePlan(
+  rows: Partial<SubtaskPersona>[],
+  parsed?: Record<string, unknown>,
+): PersonaPlanResult | null {
+  const subtask_personas: SubtaskPersona[] = rows.map((r, i) => ({
+    seq: typeof r.seq === "number" ? r.seq : i + 1,
+    subtask_text: r.subtask_text ?? null,
+    persona_id: r.persona_id ?? null,
+    persona_name: r.persona_name ?? null,
+    score: typeof r.score === "number" ? r.score : null,
+    department: r.department ?? null,
+    task_category: r.task_category ?? null,
+    slot: r.slot ?? null,
+    why: r.why ?? null,
+    no_persona_required: r.no_persona_required ?? null,
+  }));
+  if (subtask_personas.length === 0) return null;
+  const distinct = new Set(subtask_personas.map((s) => s.persona_id).filter(Boolean));
+  const rawCount = parsed?.subtask_count;
+  const rawDistinct = parsed?.distinct_persona_count;
+  const rawMethod = parsed?.decomposition_method;
+  return {
+    mode: "combined",
+    subtask_count: typeof rawCount === "number" ? rawCount : subtask_personas.length,
+    distinct_persona_count: typeof rawDistinct === "number" ? rawDistinct : distinct.size,
+    decomposition_method: typeof rawMethod === "string" ? rawMethod : undefined,
+    subtask_personas,
+  };
+}
+
+/**
+ * Read the persisted per-sub-task persona plan for a task (ordered by seq).
+ * Tolerant: returns [] when the `task_subtask_persona` table is absent
+ * (pre-migration-088 box) or on any query error — the caller (kanban card, GET
+ * route, dispatcher) simply shows no plan rather than crashing.
+ */
+export function loadSubtaskPersonas(taskId: string): SubtaskPersona[] {
+  try {
+    const rows = queryAll<SubtaskPersona>(
+      `SELECT seq, subtask_text, persona_id, persona_name, score, department, task_category, slot
+         FROM task_subtask_persona
+        WHERE task_id = ?
+        ORDER BY seq ASC`,
+      [taskId],
+    );
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Re-broadcast a task over SSE with its per-sub-task persona plan attached, so
+ * the kanban card can render slot chips the moment the plan lands. Best-effort:
+ * a broadcast failure never propagates to the caller.
+ */
+export function broadcastPersonaPlan(taskId: string): void {
+  try {
+    const task = queryOne<Task>(
+      `SELECT t.*,
+          aa.name as assigned_agent_name,
+          aa.avatar_emoji as assigned_agent_emoji,
+          ca.name as created_by_agent_name,
+          ca.avatar_emoji as created_by_agent_emoji
+         FROM tasks t
+         LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+        WHERE t.id = ?`,
+      [taskId],
+    );
+    if (!task) return;
+    const subtask_personas = loadSubtaskPersonas(taskId);
+    broadcast({ type: "task_updated", payload: { ...task, subtask_personas } });
+  } catch (err) {
+    console.error(`[persona-plan] broadcastPersonaPlan failed for task ${taskId}:`, err);
   }
 }
 

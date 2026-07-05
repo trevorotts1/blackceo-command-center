@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryAll } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
+import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -104,6 +105,11 @@ export async function GET(request: NextRequest) {
               avatar_emoji: task.assigned_agent_emoji,
             }
           : undefined,
+      // DEP-5 / F3.7 — attach the multi-persona plan rows so the kanban card can
+      // render slot chips on reload (SSE carries them live at selection time).
+      // loadSubtaskPersonas is tolerant: [] on a single-persona task or a
+      // pre-migration-088 box, so this never breaks the board.
+      subtask_personas: loadSubtaskPersonas(task.id),
     }));
 
     return NextResponse.json(transformedTasks);
