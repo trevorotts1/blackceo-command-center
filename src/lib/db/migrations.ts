@@ -3382,6 +3382,59 @@ const migrations: Migration[] = [
       console.log('[Migration 087] interview_sessions + interview_answers ready');
     },
   },
+  {
+    id: '088',
+    name: 'add_task_subtask_persona',
+    up: (db) => {
+      // DEP-5 / findings F3.7 + F3.9 — wire multi-persona decomposition into the CC.
+      //
+      // `decompose-task.py --combined` (the matcher-side engine) picks a best-fit
+      // persona PER sub-task and writes one row per sub-task into
+      // `task_subtask_persona`, keyed (task_id, seq). The table is the row source
+      // the kanban card (slot chips) and the dispatcher (PERSONA PLAN block) read.
+      //
+      // Schema is EXACTLY `_SUBTASK_PERSONA_DDL` (decompose-task.py) plus:
+      //   - a `slot` column (F3.9 SOP persona slots — which declared slot filled
+      //     this sub-task; NULL for pure text-decomposition sub-tasks), and
+      //   - an index on task_id (the only lookup key the readers use).
+      //
+      // The decompose script ships its OWN defensive `CREATE TABLE IF NOT EXISTS`
+      // (with the base columns, no `slot`) for hand-run CLI use, so the table may
+      // already exist on a box where someone ran the CLI before this migration.
+      // We therefore (a) CREATE IF NOT EXISTS with the full schema for a fresh DB,
+      // then (b) ALTER-add `slot` when an older CLI-created table lacks it. Both
+      // steps are idempotent — the DDL tolerates a table with extra columns and the
+      // script's explicit-column INSERT never writes `slot`, so the two converge.
+      console.log('[Migration 088] Adding task_subtask_persona (multi-persona plan rows)...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_subtask_persona (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          subtask_text TEXT,
+          persona_id TEXT,
+          persona_name TEXT,
+          score REAL,
+          department TEXT,
+          task_category TEXT,
+          slot TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      // Older CLI-created table (script DDL has no `slot`) → add it. Additive,
+      // nullable, never touches existing rows.
+      const cols = db.prepare("PRAGMA table_info(task_subtask_persona)").all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'slot')) {
+        db.prepare('ALTER TABLE task_subtask_persona ADD COLUMN slot TEXT').run();
+      }
+
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_subtask_persona_task ON task_subtask_persona(task_id)').run();
+
+      console.log('[Migration 088] task_subtask_persona + idx_subtask_persona_task ready');
+    },
+  },
 ];
 
 /**
