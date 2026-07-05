@@ -58,7 +58,16 @@ fleet-heartbeat/state/rescue-return-verify.json*
 # Backups
 *.backup
 *.bak
+*.bak-*
 *.db.backup
+
+# FIX-RESCUE-12: retired backups/archive + legacy bridge live outside git.
+# _archive/ holds relocated *.bak* and the retired rescue-rangers-bridge.py
+# (a historical secret carrier); it must never be committed to this
+# fleet-wide repo. Belt-and-braces alongside the *.bak rules above.
+fleet-heartbeat/scripts/_archive/
+fleet-heartbeat/scripts/rescue-rangers-bridge.py
+fleet-heartbeat/scripts/rescue-rangers-bridge.py.*
 
 # Build backups
 .next-backup/

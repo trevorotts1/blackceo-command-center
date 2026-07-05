@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  FIX-RESCUE-12 (ii): direct-command replacement for the LLM-agent-turn
+  `fleet-heartbeat` OpenClaw cron. Runs fleet-heartbeat-cron.sh (which shells
+  the deterministic heartbeat.sh) with NO model / NO agent turn, on the same
+  schedule the OpenClaw cron used: `0 6-21/3 * * *` America/New_York, i.e.
+  minute 0 of hours 6, 9, 12, 15, 18, 21. Modelled on the existing
+  ai.openclaw.rescue-receiver.plist so the heartbeat runs the same way the
+  receiver and (crontab) poller/watchdog already do.
+
+  NOTE: launchd StartCalendarInterval uses the machine's LOCAL timezone. This
+  box runs America/New_York, matching the cron's tz. If the box tz ever
+  differs, prefer the crontab route (fleet-heartbeat.crontab) which carries an
+  explicit tz, or adjust the hours below.
+
+  Install:
+    cp ai.openclaw.fleet-heartbeat.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.fleet-heartbeat.plist
+  (legacy fallback: launchctl load -w ~/Library/LaunchAgents/ai.openclaw.fleet-heartbeat.plist)
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.openclaw.fleet-heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/bash</string>
+    <string>/Users/blackceomacmini/clawd/fleet-heartbeat/scripts/fleet-heartbeat-cron.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/blackceomacmini/clawd/fleet-heartbeat</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/blackceomacmini/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/blackceomacmini</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/blackceomacmini/.openclaw/logs/fleet-heartbeat.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/blackceomacmini/.openclaw/logs/fleet-heartbeat.launchd.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
