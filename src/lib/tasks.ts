@@ -36,8 +36,8 @@ import os from 'os';
 import path from 'path';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { selectPersonaForTask } from '@/lib/persona-selector';
-import { getBestSOPForTask } from '@/lib/sops';
+import { selectPersonaForTask, type SopSelectorContext } from '@/lib/persona-selector';
+import { getBestSOPForTask, type SOP } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
@@ -116,6 +116,9 @@ export const PERSONA_PIN_RETRY_BASE_MS = 1500;
 // Max time auto-dispatch waits for the pin before proceeding (degraded to 'auto').
 // The retry promise still lands the pin + re-broadcasts after dispatch if it times out.
 export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
+// Dispatch-time SOP rescore (F3.4) is a single bounded, heuristic-mode spawn so
+// dispatch stays responsive — no retry loop, tighter than the creation timeout.
+export const PERSONA_RESCORE_TIMEOUT_MS = 10000;
 
 // ─── DEPARTMENT-DEFAULT PERSONA FALLBACK (POINT 10 fix 1) ────────────────────
 // The founder's board invariant: EVERY task carries a persona. Historically,
@@ -267,10 +270,69 @@ function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPerson
   }
 }
 
+// ─── SOP-AWARE MATCHING (F3.4) ──────────────────────────────────────────────
+// The persona match is only as good as the context it sees. Historically the
+// selector saw task title+description only; the running SOP — which governs HOW
+// the work is done and carries curated `persona_hints` — never informed the
+// match (`sops.persona_hints` had five writers and zero readers). These helpers
+// translate an SOP row into the selector's SopSelectorContext (slug + name +
+// parsed persona_hints) so createTaskCore can pass it AT creation and the
+// dispatcher can re-score when a DIFFERENT SOP resolves at dispatch time.
+
+/** Minimal SOP shape needed to build selector context. */
+type SopContextRow = Pick<SOP, 'slug' | 'name' | 'persona_hints'>;
+
+/**
+ * Parse an SOP's `persona_hints` JSON (a string[] of canonical persona slugs)
+ * defensively — never throws. Drops empties and known sentinel ids so a stale /
+ * malformed hint list can never poison the candidate pool.
+ */
+export function parsePersonaHints(raw: string | null | undefined): string[] {
+  if (!raw || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((h) => (typeof h === 'string' ? h.trim() : ''))
+      .filter((h) => h.length > 0 && !SENTINEL_IDS.has(h));
+  } catch {
+    return [];
+  }
+}
+
+/** Build the selector SOP context from an SOP row (undefined when it carries nothing usable). */
+export function sopSelectorContextFromRow(
+  sop: SopContextRow | null | undefined,
+): SopSelectorContext | undefined {
+  if (!sop) return undefined;
+  const hints = parsePersonaHints(sop.persona_hints);
+  const slug = sop.slug ?? null;
+  const name = sop.name ?? null;
+  if (!slug && !name && hints.length === 0) return undefined;
+  return { slug, name, hints };
+}
+
+/** Load an SOP's selector context by id (used at the dispatch-time rescore). */
+export function loadSopSelectorContextById(
+  sopId: string | null | undefined,
+): SopSelectorContext | undefined {
+  if (!sopId) return undefined;
+  try {
+    const row = queryOne<SopContextRow>(
+      `SELECT slug, name, persona_hints FROM sops WHERE id = ? AND deleted_at IS NULL`,
+      [sopId],
+    );
+    return sopSelectorContextFromRow(row);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Select a persona for a task, persist it (tasks.persona_*), and re-broadcast the
  * updated task over SSE so the board chip lands. Retry-backed and bounded.
  *
+ * @param sopContext Optional SOP context (F3.4) folded into the match at creation.
  * @returns the pinned persona_id (a matched persona OR, on selector exhaustion, a
  *          deterministic department-default flagged persona_fallback=true), or null
  *          ONLY when the selector explicitly returned no_persona_required.
@@ -279,10 +341,11 @@ export async function resolvePersonaAndPin(
   taskId: string,
   taskDescription: string,
   departmentForSelector: string,
+  sopContext?: SopSelectorContext,
 ): Promise<string | null> {
   for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
     try {
-      const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector);
+      const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext);
 
       // PRD 3.4 SENTINEL GUARD: loudly flag bad ids from a stale selector install.
       if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
@@ -365,6 +428,136 @@ export async function resolvePersonaAndPin(
       fbErr,
     );
     return null;
+  }
+}
+
+export interface RescoreResult {
+  /** True when the rescore landed a DIFFERENT persona than the task already carried. */
+  changed: boolean;
+  persona_id: string | null;
+  persona_name: string | null;
+  persona_mode: string | null;
+}
+
+/**
+ * Re-run persona selection WITH SOP context at dispatch time (F3.4).
+ *
+ * Called by the dispatcher when the SOP it resolves differs from the one the
+ * creation-time selection saw (or selection saw none). Single-shot + bounded
+ * (heuristic mode, PERSONA_RESCORE_TIMEOUT_MS) so dispatch stays responsive.
+ *
+ * FAIL-CLOSED: an empty / mechanical / sentinel selector result NEVER downgrades
+ * a persona the task already carries — the existing pin is kept untouched. Only a
+ * concrete, non-sentinel persona replaces the pin. Persists a queryable
+ * `persona_rescored_at_dispatch` event and re-broadcasts the row. Never throws
+ * (dispatch must proceed regardless).
+ *
+ * The persona currently on the row (for the never-downgrade guard + audit) is
+ * read here, not passed in — the DB already knows it.
+ *
+ * @returns the persona now on the row (changed=false + the prior persona echoed
+ *          back on any no-op).
+ */
+export async function rescorePersonaWithSOP(
+  taskId: string,
+  taskDescription: string,
+  departmentForSelector: string,
+  sopContext: SopSelectorContext,
+): Promise<RescoreResult> {
+  const prev = queryOne<{
+    persona_id: string | null;
+    persona_name: string | null;
+    persona_mode: string | null;
+  }>('SELECT persona_id, persona_name, persona_mode FROM tasks WHERE id = ?', [taskId]);
+  const unchanged: RescoreResult = {
+    changed: false,
+    persona_id: prev?.persona_id ?? null,
+    persona_name: prev?.persona_name ?? null,
+    persona_mode: prev?.persona_mode ?? null,
+  };
+  try {
+    const persona = await selectPersonaForTask(
+      taskId,
+      taskDescription,
+      departmentForSelector,
+      sopContext,
+      { timeoutMs: PERSONA_RESCORE_TIMEOUT_MS },
+    );
+
+    // Never-downgrade: a null / mechanical / sentinel result keeps the current pin.
+    if (
+      !persona ||
+      persona.no_persona_required ||
+      !persona.persona_id ||
+      SENTINEL_IDS.has(persona.persona_id)
+    ) {
+      return unchanged;
+    }
+
+    const changed = persona.persona_id !== (prev?.persona_id ?? null);
+    const now = new Date().toISOString();
+
+    run(
+      `UPDATE tasks
+          SET persona_id = ?, persona_name = ?, persona_mode = ?,
+              persona_score = ?, persona_version = ?, persona_selected_at = ?
+        WHERE id = ?`,
+      [
+        persona.persona_id,
+        persona.persona_name,
+        persona.interaction_mode,
+        persona.score ?? null,
+        persona.persona_version ?? 1,
+        now,
+        taskId,
+      ],
+    );
+
+    const sopLabel = sopContext.slug || sopContext.name || 'sop';
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        'persona_rescored_at_dispatch',
+        taskId,
+        `[PERSONA-RESCORE] SOP "${sopLabel}" resolved at dispatch differed from the SOP the ` +
+          `creation-time selection saw — re-ran SOP-aware selection. persona ` +
+          `${prev?.persona_id ?? '(none)'} → ${persona.persona_id}${changed ? '' : ' (unchanged)'}.`,
+        now,
+      ],
+    );
+
+    const updatedTask = queryOne<Task>(
+      `SELECT t.*,
+          aa.name as assigned_agent_name,
+          aa.avatar_emoji as assigned_agent_emoji,
+          ca.name as created_by_agent_name,
+          ca.avatar_emoji as created_by_agent_emoji
+         FROM tasks t
+         LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+        WHERE t.id = ?`,
+      [taskId],
+    );
+    if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
+
+    console.log(
+      `[rescorePersonaWithSOP] task ${taskId}: SOP "${sopLabel}" → persona ` +
+        `${persona.persona_id}${changed ? ` (was ${prev?.persona_id ?? '(none)'})` : ' (unchanged)'}.`,
+    );
+
+    return {
+      changed,
+      persona_id: persona.persona_id,
+      persona_name: persona.persona_name,
+      persona_mode: persona.interaction_mode,
+    };
+  } catch (err) {
+    console.warn(
+      `[rescorePersonaWithSOP] non-fatal for task ${taskId}:`,
+      (err as Error).message,
+    );
+    return unchanged;
   }
 }
 
@@ -619,7 +812,14 @@ export async function createTaskCore(
 
   // Auto-suggest SOP if none provided. Scored by department + keyword overlap;
   // anything below 0.5 leaves sop_id NULL so the operator picks manually.
+  //
+  // F3.4 (SOP-aware matching): the SOP auto-suggest runs HERE, BEFORE persona
+  // selection is kicked off below, so the winning SOP's slug + name + curated
+  // persona_hints can be folded into the match (`sops.persona_hints` was
+  // written by five paths and read by none until now). `sopContext` is passed
+  // through to resolvePersonaAndPin → the selector.
   let sopId: string | null = input.sop_id ?? null;
+  let sopContext: SopSelectorContext | undefined;
   if (!sopId) {
     try {
       const best = await getBestSOPForTask({
@@ -628,10 +828,16 @@ export async function createTaskCore(
         department: input.department ?? undefined,
         workspace_id: workspaceId,
       });
-      if (best) sopId = best.id;
+      if (best) {
+        sopId = best.id;
+        sopContext = sopSelectorContextFromRow(best);
+      }
     } catch (err) {
       console.warn('[createTaskCore] SOP auto-suggest failed (non-fatal):', err);
     }
+  } else {
+    // Caller supplied an explicit SOP — load its selector context too (F3.4).
+    sopContext = loadSopSelectorContextById(sopId);
   }
 
   run(
@@ -737,7 +943,8 @@ export async function createTaskCore(
     canonicalDeptSlug(workspaceSlug) ||
     (input.department ? canonicalDeptSlug(input.department) : null) ||
     'general';
-  const personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment);
+  // F3.4: pass the resolved SOP context so the creation-time match is SOP-aware.
+  const personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext);
   // Swallow at the source so a background failure never becomes an unhandled
   // rejection — resolvePersonaAndPin logs internally and never throws to callers.
   void personaPinPromise.catch(() => null);
