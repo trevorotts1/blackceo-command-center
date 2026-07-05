@@ -262,6 +262,29 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
+    // ── SYNCHRONOUS PERSONA DISPATCH GATE (F3.1 / F4.1 — heal, not stall) ────
+    // Mirror of the auto-dispatch path: resolveAndLog delivers a pinned persona
+    // (Hop 10). If the task is naked, settings.persona is the 'auto' self-select
+    // sentinel — heal it deterministically here and deliver the pinned persona
+    // instead of telling the doer to self-select (F3.6). Never stalls the board.
+    if (settings.persona === 'auto') {
+      try {
+        const { ensurePersonaForDispatch } = await import('@/lib/tasks');
+        const { canonicalDeptSlug } = await import('@/lib/routing/canonical-slug');
+        const healDept =
+          canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+        const healed = ensurePersonaForDispatch(task.id, healDept);
+        settings.persona = healed.persona_name;
+        settings.personaMode = healed.persona_mode;
+        console.warn(
+          `[Dispatch] persona gate: task ${task.id} was naked — delivering ` +
+            `${healed.healed ? 'healed' : 'pinned'} persona "${healed.persona_name}".`,
+        );
+      } catch (healErr) {
+        console.error(`[Dispatch] persona gate failed for task ${task.id}:`, healErr);
+      }
+    }
+
     const dispatchInventory = listModels();
     const dispatchModality = settings.required_modality ??
       detectModality(task.title, task.description);
