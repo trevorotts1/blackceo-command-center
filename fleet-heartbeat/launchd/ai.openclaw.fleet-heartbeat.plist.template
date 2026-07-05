@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ai.openclaw.fleet-heartbeat  (FIX-RESCUE-12 part ii)
+
+  Runs the fleet heartbeat as a DIRECT command on a schedule, exactly like the
+  rescue poller and watchdog already do -- instead of an OpenClaw agent cron that
+  spins a full LLM turn every hour just to shell a deterministic script (an
+  Ollama-Cloud "furnace"). heartbeat.sh does its own probing, remediation, and
+  gateway send; no model turn is needed to launch it.
+
+  Schedule: minute 0 of hours 06..21 (local time), matching the prior
+  `0 6-21` cron cadence. Adjust the StartCalendarInterval block to change it.
+
+  Placeholders (install-heartbeat-direct-cron.sh substitutes these):
+    __HEARTBEAT_SH__  absolute path to scripts/heartbeat.sh
+    __LOG_DIR__       absolute path to the fleet-heartbeat logs dir
+    __BASH__          absolute path to bash (heartbeat.sh needs bash >= 4)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.openclaw.fleet-heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BASH__</string>
+    <string>__HEARTBEAT_SH__</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Anti-furnace: never let a fire overlap or spin. -->
+  <key>AbandonProcessGroup</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/heartbeat-launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/heartbeat-launchd.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

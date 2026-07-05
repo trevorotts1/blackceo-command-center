@@ -1,0 +1,31 @@
+# fleet-heartbeat local ignores (FIX-RESCUE-04 / FIX-RESCUE-12)
+
+# n8n workflow EXPORTS carry live webhook/push secrets and the bot token in
+# plaintext. Never commit them. Export future workflows with credentials STRIPPED
+# (n8n: "download" from a credential-less copy) and place any sharable, stripped
+# export under rescue-ticketing/ (not scripts/).
+scripts/rescue-rangers-relay-*.json
+scripts/*relay*LIVE*.json
+scripts/*relay*BACKUP*.json
+
+# Backups + archives are operator-box hygiene, never source of truth.
+scripts/*.bak
+scripts/*.bak-*
+scripts/*.orig
+scripts/*.rej
+scripts/_archive/
+
+# Legacy / superseded runtime scripts (kept on the box, out of git).
+scripts/rescue-rangers-bridge.py
+scripts/remote-rescue/
+
+# Runtime state, rotated logs, and the compact incident index live on the box.
+change-log.md
+change-log-*.md
+incidents.tsv
+.change-log-month
+heartbeat-state.json*
+.last-alert-state.json
+.loop-state.*
+logs/
+state/
