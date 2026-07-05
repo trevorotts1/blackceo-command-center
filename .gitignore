@@ -39,6 +39,12 @@ next-env.d.ts
 *.db-journal
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+# Rescue Rangers durable ticket store (runtime client data — never commit)
+fleet-heartbeat/state/rescue-tickets.sqlite*
 
 # claude code local files
 .claude/settings.local.json
