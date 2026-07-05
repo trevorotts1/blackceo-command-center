@@ -10,6 +10,8 @@
     "social": "none"
   },
   "companyKPIs": [],
+  "default_persona_id": null,
+  "governance_persona_id": null,
   "gradingWeights": {
     "kpiAchievement": 0.4,
     "agentPerformance": 0.3,

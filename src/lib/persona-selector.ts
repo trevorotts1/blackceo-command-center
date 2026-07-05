@@ -36,6 +36,29 @@ import { DB_PATH } from "@/lib/db";
 // Promisified async version — never blocks the event loop.
 const execFileAsync = promisify(execFile);
 
+// ─── PINNED FALLBACK CONSTANTS (F3.1 / Persona-Matching-Overhaul FDN-2) ───────
+// Mirror of the Python-side pins in persona-selector-v2.py (next to GEMINI_MODEL):
+//   DEFAULT_PERSONA_FALLBACK   — the generic BlackCEO house-voice persona seeded
+//     into the fleet (triad 81->82). It is deliberately generic so it never
+//     out-scores a real specialist; only the last-resort fallback returns it, so
+//     NO task is ever naked. Per-client override: company-config.json
+//     `default_persona_id`.
+//   GOVERNANCE_PERSONA_FALLBACK — the oversight pointer carried by mechanical
+//     (no_persona_required) tasks so the doer still has principle-centered
+//     governance without pretending a chmod needs coaching. Per-client override:
+//     company-config.json `governance_persona_id`.
+// These are the TS side of the resolved Q1/Q2 decisions and are the terminal tier
+// of the fallback chain (never-null when everything else is unavailable).
+export const DEFAULT_PERSONA_FALLBACK = "blackceo-house-voice";
+export const GOVERNANCE_PERSONA_FALLBACK = "covey-7-habits";
+
+// CC selector spawn budget. Raised 30s -> 60s (F3.1 / A3): LLM-mode scoring of
+// ~12 finalists x 4 layers plus a cold embedding call can exceed 30s on a loaded
+// box, so a 30s cap turned a slow-but-valid selection into a null result (naked
+// task). 60s gives the real selection room to land before the retry/fallback
+// chain engages.
+export const PERSONA_SELECT_TIMEOUT_MS = 60_000;
+
 /**
  * Resolve the company-config.json path to hand the python selector as a grounding
  * hint (G10-TRIAD-PERSONA-RESOLVE / Gap A/B). Without company-config the selector's
@@ -85,6 +108,13 @@ export interface PersonaSelectionResult {
   warning?: string;
   message?: string;
   no_persona_required?: boolean;
+  /**
+   * Oversight pointer for mechanical (no_persona_required) tasks — the governance
+   * persona the dispatcher hands the doer instead of a full Section-4 persona load
+   * (Q1). Resolves company-config.json `governance_persona_id` else
+   * GOVERNANCE_PERSONA_FALLBACK. Present alongside no_persona_required:true.
+   */
+  governance_persona_id?: string | null;
 }
 
 function resolveOpenClawRoot(): string {
@@ -134,6 +164,7 @@ export async function selectPersonaForTask(
         score: typeof fixture.score === 'number' ? fixture.score : 0,
         interaction_mode: (fixture.interaction_mode as PersonaInteractionMode) || 'leadership',
         no_persona_required: fixture.no_persona_required,
+        governance_persona_id: fixture.governance_persona_id ?? null,
       };
     } catch {
       // Malformed fixture — fall through to real selector.
@@ -169,7 +200,7 @@ export async function selectPersonaForTask(
       [scriptPath, "--task", taskDescription, "--department", dept, "--task-id", taskId, "--format", "json"],
       {
         encoding: "utf-8",
-        timeout: 30_000,
+        timeout: PERSONA_SELECT_TIMEOUT_MS,
         env: {
           ...process.env,
           DASHBOARD_DB_PATH: DB_PATH,
@@ -201,6 +232,7 @@ export async function selectPersonaForTask(
       warning: result.warning,
       message: result.message,
       no_persona_required: result.no_persona_required,
+      governance_persona_id: result.governance_persona_id ?? null,
     };
   } catch (error) {
     console.error(`[persona-selector] Failed for task ${taskId}:`, error);

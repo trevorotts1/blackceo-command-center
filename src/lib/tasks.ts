@@ -36,7 +36,11 @@ import os from 'os';
 import path from 'path';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { selectPersonaForTask } from '@/lib/persona-selector';
+import {
+  selectPersonaForTask,
+  DEFAULT_PERSONA_FALLBACK,
+  GOVERNANCE_PERSONA_FALLBACK,
+} from '@/lib/persona-selector';
 import { getBestSOPForTask } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -111,21 +115,39 @@ export const SENTINEL_IDS = new Set([
 // PERSONA_PIN_MAX_ATTEMPTS python spawns with capped linear backoff. createTaskCore
 // kicks this off concurrently, then gates autoDispatchTask on it for a bounded
 // budget so board persona == runtime persona without blocking the API response.
-export const PERSONA_PIN_MAX_ATTEMPTS = 3;
-export const PERSONA_PIN_RETRY_BASE_MS = 1500;
+//
+// F3.1 / FDN-2: the per-spawn timeout is 60s (PERSONA_SELECT_TIMEOUT_MS) and the
+// policy is "1 retry after 5s" — one real attempt, a 5s cool-off, then one retry
+// (2 spawns total) before the deterministic TS fallback chain engages. A
+// slow-but-valid selection now has 60s to land; a genuinely broken selector fails
+// over in bounded time instead of hammering the box. The retry is off the hot
+// path — autoDispatchTask only waits PERSONA_PIN_DISPATCH_BUDGET_MS and the
+// dispatch gate heals anything still naked, so the 5s cool-off never stalls a board.
+export const PERSONA_PIN_MAX_ATTEMPTS = 2;
+// 5s cool-off before the single retry (backoff = BASE * attempt; attempt 1 → 5s).
+export const PERSONA_PIN_RETRY_BASE_MS = 5000;
 // Max time auto-dispatch waits for the pin before proceeding (degraded to 'auto').
 // The retry promise still lands the pin + re-broadcasts after dispatch if it times out.
 export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
 
-// ─── DEPARTMENT-DEFAULT PERSONA FALLBACK (POINT 10 fix 1) ────────────────────
+// ─── DEFAULT-PERSONA FALLBACK CHAIN (POINT 10 fix 1 / F3.1 FDN-2) ────────────
 // The founder's board invariant: EVERY task carries a persona. Historically,
 // resolvePersonaAndPin() left a task personaless after PERSONA_PIN_MAX_ATTEMPTS
 // failed selector spawns, so a card could sit in backlog with no persona chip
 // until it was moved (the Triad gate auto-resolved on the first move). On a box
 // whose selector is degraded, that is a silent, board-wide gap. On exhaustion we
-// now pin a DETERMINISTIC department-default persona and flag it
-// `persona_fallback=1` for audit. `no_persona_required` (intentional) is handled
-// earlier and stays personaless.
+// now pin a DETERMINISTIC default persona and flag it `persona_fallback=1` for
+// audit. `no_persona_required` (intentional) is handled earlier and stays
+// personaless (but carries a governance oversight pointer).
+//
+// The TS-side fallback chain (resolved Q2 decision), in order:
+//   1. last department persona_assignment  (per-department sticky "lead")
+//   2. company-config.json `default_persona_id`  (per-client override)
+//   3. DEFAULT_PERSONA_FALLBACK constant ('blackceo-house-voice')
+// Tier 3 is a REAL, embedded fleet persona (triad 81->82) — deliberately generic
+// so it never out-scores a specialist, and it exists in the library so the doer's
+// Section-4 load at dispatch always resolves. It replaces the old synthetic
+// `dept-default-<slug>` id, which pointed at a blueprint that did not exist.
 
 /** Collapse a persona id / slug to a human-readable display name. */
 function humanizeSlug(slug: string): string {
@@ -150,11 +172,57 @@ export interface DepartmentDefaultPersona {
   persona_name: string;
   persona_mode: string;
   /** How the default was derived — for audit + observability. */
-  source: 'department-sticky' | 'department-synthetic';
+  source: 'department-sticky' | 'company-default' | 'house-voice-constant';
 }
 
 /**
- * Derive a deterministic department-default persona for the exhaustion path.
+ * Read the per-client persona-override fields from config/company-config.json.
+ * Additive + non-breaking: any missing file / field / parse error degrades to
+ * nulls (the constant tiers then apply). Never throws.
+ *
+ * Resolution mirrors persona-selector.ts:resolveCompanyConfigHint — explicit
+ * OPENCLAW_COMPANY_CONFIG env override, else <cwd>/config/company-config.json.
+ */
+export function readCompanyConfigPersonaDefaults(): {
+  default_persona_id: string | null;
+  governance_persona_id: string | null;
+} {
+  const empty = { default_persona_id: null, governance_persona_id: null };
+  try {
+    const explicit = process.env.OPENCLAW_COMPANY_CONFIG;
+    const configPath =
+      explicit && fs.existsSync(explicit)
+        ? explicit
+        : path.join(process.cwd(), 'config', 'company-config.json');
+    if (!fs.existsSync(configPath)) return empty;
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+      default_persona_id?: unknown;
+      governance_persona_id?: unknown;
+    };
+    const norm = (v: unknown): string | null =>
+      typeof v === 'string' && v.trim() ? v.trim() : null;
+    return {
+      default_persona_id: norm(parsed.default_persona_id),
+      governance_persona_id: norm(parsed.governance_persona_id),
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Resolve the governance oversight pointer for a mechanical (no_persona_required)
+ * task (Q1): company-config.json `governance_persona_id` else the pinned
+ * GOVERNANCE_PERSONA_FALLBACK constant. Always non-null — a mechanical task is
+ * never "naked" of oversight even though it carries no full coaching persona.
+ */
+export function resolveGovernancePersonaId(): string {
+  return readCompanyConfigPersonaDefaults().governance_persona_id || GOVERNANCE_PERSONA_FALLBACK;
+}
+
+/**
+ * Derive a deterministic default persona for the exhaustion / dispatch-heal path,
+ * walking the resolved Q2 fallback chain.
  *
  * Tier 1 — the department's current sticky "lead" persona from
  *   `persona_assignment` (the genuine, selector-recorded stickiness state per
@@ -162,17 +230,21 @@ export interface DepartmentDefaultPersona {
  *   closest thing the board has to a department-head persona. This table is
  *   written ONLY by the real selector — never by this fallback path — so it can
  *   never feed on itself.
- * Tier 2 — a stable, department-tagged synthetic default (`dept-default-<slug>`).
- *   Deterministic from the canonical slug, so a brand-new department with zero
- *   history still gets the SAME default every time and the board invariant holds.
+ * Tier 2 — the per-client `default_persona_id` from company-config.json, so an
+ *   operator can pin a client-chosen house default without a code change.
+ * Tier 3 — DEFAULT_PERSONA_FALLBACK ('blackceo-house-voice'): a real, embedded,
+ *   brand-neutral fleet persona. Deterministic and always available, so a
+ *   brand-new department with zero history still gets a loadable persona and the
+ *   board invariant holds.
  *
- * Never throws for a caller: any DB error degrades to the Tier-2 synthetic id.
+ * Never throws for a caller: any DB/config error degrades to the Tier-3 constant.
  */
 export function deriveDepartmentDefaultPersona(
   department: string | null | undefined,
 ): DepartmentDefaultPersona {
   const canon = canonicalDeptSlug(department || '') || 'general-task';
 
+  // Tier 1 — department sticky lead.
   try {
     const sticky = queryOne<{
       persona_id: string;
@@ -196,14 +268,26 @@ export function deriveDepartmentDefaultPersona(
       };
     }
   } catch {
-    // persona_assignment absent (pre-migration-019) — fall through to synthetic.
+    // persona_assignment absent (pre-migration-019) — fall through to config/constant.
   }
 
+  // Tier 2 — per-client company-config override.
+  const configured = readCompanyConfigPersonaDefaults().default_persona_id;
+  if (configured && !SENTINEL_IDS.has(configured)) {
+    return {
+      persona_id: configured,
+      persona_name: humanizeSlug(configured),
+      persona_mode: 'leadership',
+      source: 'company-default',
+    };
+  }
+
+  // Tier 3 — pinned house-voice constant (always available, always loadable).
   return {
-    persona_id: `dept-default-${canon}`,
-    persona_name: `${humanizeSlug(canon)} Department Default`,
+    persona_id: DEFAULT_PERSONA_FALLBACK,
+    persona_name: humanizeSlug(DEFAULT_PERSONA_FALLBACK),
     persona_mode: 'leadership',
-    source: 'department-synthetic',
+    source: 'house-voice-constant',
   };
 }
 
@@ -294,7 +378,30 @@ export async function resolvePersonaAndPin(
       }
 
       // Explicit "no persona required" is terminal — not a failure, do not retry.
+      // The task stays personaless BY DESIGN (a chmod does not need coaching), but
+      // it is never "naked" of oversight: we record the governance pointer (Q1) —
+      // company-config.governance_persona_id else GOVERNANCE_PERSONA_FALLBACK — as a
+      // queryable audit event the dispatcher reads as a light oversight pointer.
       if (persona && persona.no_persona_required) {
+        try {
+          const governanceId =
+            (persona.governance_persona_id && persona.governance_persona_id.trim())
+              ? persona.governance_persona_id.trim()
+              : resolveGovernancePersonaId();
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'persona_governance',
+              taskId,
+              `[PERSONA-GOVERNANCE] no_persona_required task — governance oversight pointer "${governanceId}" ` +
+                `(no full persona load). persona_id stays NULL by design.`,
+              new Date().toISOString(),
+            ],
+          );
+        } catch {
+          /* audit-only — never block the no-persona-required path */
+        }
         return null;
       }
 
@@ -366,6 +473,67 @@ export async function resolvePersonaAndPin(
     );
     return null;
   }
+}
+
+export interface DispatchPersonaResolution {
+  persona_id: string;
+  persona_name: string;
+  persona_mode: string;
+  /** true when the persona was applied by this gate (task was naked at dispatch). */
+  healed: boolean;
+}
+
+/**
+ * SYNCHRONOUS DISPATCH GATE (F3.1 / FDN-2) — the last-hop guarantee that no task
+ * is dispatched naked. HEAL, NOT STALL: if a task reaches the dispatcher with no
+ * pinned persona (a create-time selection that silently failed, or a pre-existing
+ * backlog task), apply the DETERMINISTIC fallback chain immediately and pin it —
+ * never HOLD the task for a persona (availability > purity; the fallback makes
+ * NULL impossible anyway). It runs no Python (real selection already had its turn
+ * at create-time with retries, and the persona-backfill sweep re-runs it in the
+ * background) so it adds no latency to the hot dispatch path.
+ *
+ * Returns the persona the dispatcher must deliver:
+ *   - the already-pinned persona when one exists (healed:false), or
+ *   - a freshly pinned deterministic fallback (healed:true).
+ * Never returns null — a persona is always resolvable via the constant tier.
+ */
+export function ensurePersonaForDispatch(
+  taskId: string,
+  departmentForSelector: string | null | undefined,
+): DispatchPersonaResolution {
+  // Already pinned? Deliver it unchanged.
+  try {
+    const row = queryOne<{ persona_id: string | null; persona_name: string | null; persona_mode: string | null }>(
+      'SELECT persona_id, persona_name, persona_mode FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    if (row && row.persona_id && !SENTINEL_IDS.has(row.persona_id)) {
+      return {
+        persona_id: row.persona_id,
+        persona_name: row.persona_name || humanizeSlug(row.persona_id),
+        persona_mode: row.persona_mode || 'leadership',
+        healed: false,
+      };
+    }
+  } catch {
+    /* fall through to heal */
+  }
+
+  // Naked at dispatch — heal deterministically (no stall). pinDepartmentDefaultPersona
+  // writes the persona_fallback audit event + re-broadcasts the row.
+  const fb = deriveDepartmentDefaultPersona(departmentForSelector);
+  try {
+    pinDepartmentDefaultPersona(taskId, fb);
+    console.warn(
+      `[ensurePersonaForDispatch] task ${taskId} was naked at dispatch — healed with ${fb.source} ` +
+        `persona "${fb.persona_id}" (persona_fallback=true).`,
+    );
+  } catch (err) {
+    // Even a failed pin still returns the persona so the message is never naked.
+    console.error(`[ensurePersonaForDispatch] heal-pin failed for task ${taskId} (delivering anyway):`, err);
+  }
+  return { persona_id: fb.persona_id, persona_name: fb.persona_name, persona_mode: fb.persona_mode, healed: true };
 }
 
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────

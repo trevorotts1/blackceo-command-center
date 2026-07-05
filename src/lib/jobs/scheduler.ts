@@ -36,6 +36,7 @@ import { runQCReviewSweep } from './qc-review-sweep';
 import { runStaleTaskSweep, STALE_TASK_SWEEP_CRON } from './stale-task-sweep';
 import { runInterviewNudgeSweep, INTERVIEW_NUDGE_SWEEP_CRON } from './interview-nudge-sweep';
 import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
+import { runPersonaBackfillSweep } from './persona-backfill-sweep';
 import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
@@ -326,6 +327,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else if (result.scanned > 0) {
         console.log(
           `[cron] backlog-redispatch: scanned ${result.scanned} stuck task(s), re-dispatched ${result.dispatched}`,
+        );
+      }
+    },
+  },
+
+  // persona-backfill: every 5 minutes, HEAL any non-terminal task still carrying
+  // no persona (F3.1 no-naked-tasks invariant). Re-runs resolvePersonaAndPin,
+  // which pins a matched persona, pins the deterministic fallback chain, or (for a
+  // genuine mechanical task) records the governance pointer and leaves it NULL by
+  // design. Furnace/loop-proof: one attempt per task ever (guarded by a
+  // persona_backfill_attempt event), a 120s grace window, and a batch cap.
+  // Disable with PERSONA_BACKFILL_SWEEP_ENABLED=0.
+  {
+    name: 'persona-backfill',
+    expr: '*/5 * * * *',
+    fn: async () => {
+      const result = await runPersonaBackfillSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] persona-backfill: skipped — ${result.skippedReason}`);
+      } else if (result.scanned > 0) {
+        console.log(
+          `[cron] persona-backfill: scanned ${result.scanned} naked task(s), ` +
+            `pinned ${result.pinned}, left ${result.leftPersonaless} personaless (mechanical)`,
         );
       }
     },

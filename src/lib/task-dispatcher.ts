@@ -469,6 +469,34 @@ export async function autoDispatchTask(
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
+    // ── SYNCHRONOUS PERSONA DISPATCH GATE (F3.1 / F4.1 — heal, not stall) ────
+    // resolveAndLog reads tasks.persona_id first (Hop 10), so a pinned persona is
+    // ALREADY delivered. But if the task reached dispatch naked (a create-time
+    // selection that silently failed / a pre-existing backlog card), settings.persona
+    // resolves to the 'auto' self-select sentinel. Rather than tell the doer to
+    // self-select (the F3.6 bug), we HEAL the task here: apply the deterministic
+    // fallback chain, pin it, and deliver THAT persona. Never HOLD a task for a
+    // persona — the fallback makes NULL impossible (availability > purity). Dynamic
+    // import avoids the tasks<->task-dispatcher static cycle.
+    if (settings.persona === 'auto') {
+      try {
+        const { ensurePersonaForDispatch } = await import('@/lib/tasks');
+        const healDept =
+          canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+        const healed = ensurePersonaForDispatch(task.id, healDept);
+        settings.persona = healed.persona_name;
+        settings.personaMode = healed.persona_mode;
+        console.warn(
+          `[${context}] persona dispatch gate: task ${task.id} was naked — ` +
+            `delivering ${healed.healed ? 'healed' : 'pinned'} persona "${healed.persona_name}".`,
+        );
+      } catch (healErr) {
+        // Never block dispatch on the heal — a matched persona is preferred, but an
+        // unhealed 'auto' still ships (degraded) rather than stalling the board.
+        console.error(`[${context}] persona dispatch gate failed for task ${task.id}:`, healErr);
+      }
+    }
+
     // ── AF-MODEL-SOVEREIGNTY gate ───────────────────────────────────────────
     // Block dispatch if resolved model is null, free default, forbidden, or
     // modality-wrong. Routes to needs_owner_input — never silently downgrades.
