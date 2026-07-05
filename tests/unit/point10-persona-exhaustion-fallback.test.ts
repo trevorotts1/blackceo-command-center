@@ -8,7 +8,7 @@
  * `no_persona_required` (intentional) stays personaless.
  *
  * Coverage:
- *   (a) deriveDepartmentDefaultPersona → Tier-2 synthetic default (no history).
+ *   (a) deriveDepartmentDefaultPersona → Tier-3 house-voice constant (no history).
  *   (b) deriveDepartmentDefaultPersona → Tier-1 department sticky lead persona
  *       (persona_assignment row present).
  *   (c) resolvePersonaAndPin exhaustion → task pinned to the department-default,
@@ -72,21 +72,22 @@ test.after(() => {
   try { fs.rmdirSync(path.dirname(TMP_DB)); } catch { /* ignore */ }
 });
 
-// ── (a) Tier-2 synthetic default when the department has no history ──────────
-test('[Point10a] deriveDepartmentDefaultPersona: synthetic default for a department with no history', () => {
+// ── (a) Tier-3 house-voice constant when there is no history / no config ─────
+test('[Point10a] deriveDepartmentDefaultPersona: house-voice constant for a department with no history', () => {
   const fb = deriveDepartmentDefaultPersona('marketing');
-  assert.equal(fb.persona_id, 'dept-default-marketing', 'synthetic id must be dept-default-<slug>');
-  assert.equal(fb.source, 'department-synthetic');
+  // Tier 3 of the F3.1 fallback chain: a REAL, embedded fleet persona (never a
+  // synthetic id whose blueprint does not exist).
+  assert.equal(fb.persona_id, 'blackceo-house-voice', 'tier-3 must be the house-voice constant');
+  assert.equal(fb.source, 'house-voice-constant');
   assert.ok(fb.persona_name.length > 0, 'must have a display name');
   assert.ok(fb.persona_mode, 'must have an interaction mode');
 
-  // Deterministic: same department ⇒ same id, every call.
+  // Deterministic: same result every call, department-independent at tier 3.
   const fb2 = deriveDepartmentDefaultPersona('marketing');
   assert.equal(fb2.persona_id, fb.persona_id, 'derivation must be deterministic');
 
-  // Slug is canonicalized: 'dept-marketing' collapses to 'marketing'.
   const fb3 = deriveDepartmentDefaultPersona('dept-marketing');
-  assert.equal(fb3.persona_id, 'dept-default-marketing', 'canonical slug must be used');
+  assert.equal(fb3.persona_id, 'blackceo-house-voice', 'tier-3 constant is stable across slugs');
 });
 
 // ── (b) Tier-1 department sticky "lead" persona when history exists ──────────
@@ -115,14 +116,14 @@ test('[Point10c] resolvePersonaAndPin: exhaustion pins a department-default + pe
   const pinned = await resolvePersonaAndPin(id, 'Some marketing deliverable', 'marketing');
   delete process.env.PERSONA_FIXTURE_JSON;
 
-  assert.equal(pinned, 'dept-default-marketing', 'exhaustion must return the department-default id (never null)');
+  assert.equal(pinned, 'blackceo-house-voice', 'exhaustion must return the fallback persona id (never null)');
 
   const row = queryOne<{ persona_id: string | null; persona_name: string | null; persona_fallback: number | null }>(
     'SELECT persona_id, persona_name, persona_fallback FROM tasks WHERE id = ?',
     [id],
   );
   assert.ok(row, 'task must exist');
-  assert.equal(row.persona_id, 'dept-default-marketing', 'task.persona_id must be the department-default');
+  assert.equal(row.persona_id, 'blackceo-house-voice', 'task.persona_id must be the fallback persona');
   assert.ok(row.persona_name && row.persona_name.length > 0, 'persona_name must be set');
   assert.equal(row.persona_fallback, 1, 'persona_fallback must be flagged 1 for audit');
 

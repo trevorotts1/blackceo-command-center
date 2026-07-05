@@ -41,9 +41,12 @@ import {
   selectPersonaPlanForTask,
   loadSubtaskPersonas,
   broadcastPersonaPlan,
+  DEFAULT_PERSONA_FALLBACK,
+  GOVERNANCE_PERSONA_FALLBACK,
   type SubtaskPersona,
+  type SopSelectorContext,
 } from '@/lib/persona-selector';
-import { getBestSOPForTask, getPersonaSlots, type PersonaSlot } from '@/lib/sops';
+import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
@@ -117,21 +120,42 @@ export const SENTINEL_IDS = new Set([
 // PERSONA_PIN_MAX_ATTEMPTS python spawns with capped linear backoff. createTaskCore
 // kicks this off concurrently, then gates autoDispatchTask on it for a bounded
 // budget so board persona == runtime persona without blocking the API response.
-export const PERSONA_PIN_MAX_ATTEMPTS = 3;
-export const PERSONA_PIN_RETRY_BASE_MS = 1500;
+//
+// F3.1 / FDN-2: the per-spawn timeout is 60s (PERSONA_SELECT_TIMEOUT_MS) and the
+// policy is "1 retry after 5s" — one real attempt, a 5s cool-off, then one retry
+// (2 spawns total) before the deterministic TS fallback chain engages. A
+// slow-but-valid selection now has 60s to land; a genuinely broken selector fails
+// over in bounded time instead of hammering the box. The retry is off the hot
+// path — autoDispatchTask only waits PERSONA_PIN_DISPATCH_BUDGET_MS and the
+// dispatch gate heals anything still naked, so the 5s cool-off never stalls a board.
+export const PERSONA_PIN_MAX_ATTEMPTS = 2;
+// 5s cool-off before the single retry (backoff = BASE * attempt; attempt 1 → 5s).
+export const PERSONA_PIN_RETRY_BASE_MS = 5000;
 // Max time auto-dispatch waits for the pin before proceeding (degraded to 'auto').
 // The retry promise still lands the pin + re-broadcasts after dispatch if it times out.
 export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
+// Dispatch-time SOP rescore (F3.4) is a single bounded, heuristic-mode spawn so
+// dispatch stays responsive — no retry loop, tighter than the creation timeout.
+export const PERSONA_RESCORE_TIMEOUT_MS = 10000;
 
-// ─── DEPARTMENT-DEFAULT PERSONA FALLBACK (POINT 10 fix 1) ────────────────────
+// ─── DEFAULT-PERSONA FALLBACK CHAIN (POINT 10 fix 1 / F3.1 FDN-2) ────────────
 // The founder's board invariant: EVERY task carries a persona. Historically,
 // resolvePersonaAndPin() left a task personaless after PERSONA_PIN_MAX_ATTEMPTS
 // failed selector spawns, so a card could sit in backlog with no persona chip
 // until it was moved (the Triad gate auto-resolved on the first move). On a box
 // whose selector is degraded, that is a silent, board-wide gap. On exhaustion we
-// now pin a DETERMINISTIC department-default persona and flag it
-// `persona_fallback=1` for audit. `no_persona_required` (intentional) is handled
-// earlier and stays personaless.
+// now pin a DETERMINISTIC default persona and flag it `persona_fallback=1` for
+// audit. `no_persona_required` (intentional) is handled earlier and stays
+// personaless (but carries a governance oversight pointer).
+//
+// The TS-side fallback chain (resolved Q2 decision), in order:
+//   1. last department persona_assignment  (per-department sticky "lead")
+//   2. company-config.json `default_persona_id`  (per-client override)
+//   3. DEFAULT_PERSONA_FALLBACK constant ('blackceo-house-voice')
+// Tier 3 is a REAL, embedded fleet persona (triad 81->82) — deliberately generic
+// so it never out-scores a specialist, and it exists in the library so the doer's
+// Section-4 load at dispatch always resolves. It replaces the old synthetic
+// `dept-default-<slug>` id, which pointed at a blueprint that did not exist.
 
 /** Collapse a persona id / slug to a human-readable display name. */
 function humanizeSlug(slug: string): string {
@@ -156,11 +180,57 @@ export interface DepartmentDefaultPersona {
   persona_name: string;
   persona_mode: string;
   /** How the default was derived — for audit + observability. */
-  source: 'department-sticky' | 'department-synthetic';
+  source: 'department-sticky' | 'company-default' | 'house-voice-constant';
 }
 
 /**
- * Derive a deterministic department-default persona for the exhaustion path.
+ * Read the per-client persona-override fields from config/company-config.json.
+ * Additive + non-breaking: any missing file / field / parse error degrades to
+ * nulls (the constant tiers then apply). Never throws.
+ *
+ * Resolution mirrors persona-selector.ts:resolveCompanyConfigHint — explicit
+ * OPENCLAW_COMPANY_CONFIG env override, else <cwd>/config/company-config.json.
+ */
+export function readCompanyConfigPersonaDefaults(): {
+  default_persona_id: string | null;
+  governance_persona_id: string | null;
+} {
+  const empty = { default_persona_id: null, governance_persona_id: null };
+  try {
+    const explicit = process.env.OPENCLAW_COMPANY_CONFIG;
+    const configPath =
+      explicit && fs.existsSync(explicit)
+        ? explicit
+        : path.join(process.cwd(), 'config', 'company-config.json');
+    if (!fs.existsSync(configPath)) return empty;
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+      default_persona_id?: unknown;
+      governance_persona_id?: unknown;
+    };
+    const norm = (v: unknown): string | null =>
+      typeof v === 'string' && v.trim() ? v.trim() : null;
+    return {
+      default_persona_id: norm(parsed.default_persona_id),
+      governance_persona_id: norm(parsed.governance_persona_id),
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Resolve the governance oversight pointer for a mechanical (no_persona_required)
+ * task (Q1): company-config.json `governance_persona_id` else the pinned
+ * GOVERNANCE_PERSONA_FALLBACK constant. Always non-null — a mechanical task is
+ * never "naked" of oversight even though it carries no full coaching persona.
+ */
+export function resolveGovernancePersonaId(): string {
+  return readCompanyConfigPersonaDefaults().governance_persona_id || GOVERNANCE_PERSONA_FALLBACK;
+}
+
+/**
+ * Derive a deterministic default persona for the exhaustion / dispatch-heal path,
+ * walking the resolved Q2 fallback chain.
  *
  * Tier 1 — the department's current sticky "lead" persona from
  *   `persona_assignment` (the genuine, selector-recorded stickiness state per
@@ -168,17 +238,21 @@ export interface DepartmentDefaultPersona {
  *   closest thing the board has to a department-head persona. This table is
  *   written ONLY by the real selector — never by this fallback path — so it can
  *   never feed on itself.
- * Tier 2 — a stable, department-tagged synthetic default (`dept-default-<slug>`).
- *   Deterministic from the canonical slug, so a brand-new department with zero
- *   history still gets the SAME default every time and the board invariant holds.
+ * Tier 2 — the per-client `default_persona_id` from company-config.json, so an
+ *   operator can pin a client-chosen house default without a code change.
+ * Tier 3 — DEFAULT_PERSONA_FALLBACK ('blackceo-house-voice'): a real, embedded,
+ *   brand-neutral fleet persona. Deterministic and always available, so a
+ *   brand-new department with zero history still gets a loadable persona and the
+ *   board invariant holds.
  *
- * Never throws for a caller: any DB error degrades to the Tier-2 synthetic id.
+ * Never throws for a caller: any DB/config error degrades to the Tier-3 constant.
  */
 export function deriveDepartmentDefaultPersona(
   department: string | null | undefined,
 ): DepartmentDefaultPersona {
   const canon = canonicalDeptSlug(department || '') || 'general-task';
 
+  // Tier 1 — department sticky lead.
   try {
     const sticky = queryOne<{
       persona_id: string;
@@ -202,14 +276,26 @@ export function deriveDepartmentDefaultPersona(
       };
     }
   } catch {
-    // persona_assignment absent (pre-migration-019) — fall through to synthetic.
+    // persona_assignment absent (pre-migration-019) — fall through to config/constant.
   }
 
+  // Tier 2 — per-client company-config override.
+  const configured = readCompanyConfigPersonaDefaults().default_persona_id;
+  if (configured && !SENTINEL_IDS.has(configured)) {
+    return {
+      persona_id: configured,
+      persona_name: humanizeSlug(configured),
+      persona_mode: 'leadership',
+      source: 'company-default',
+    };
+  }
+
+  // Tier 3 — pinned house-voice constant (always available, always loadable).
   return {
-    persona_id: `dept-default-${canon}`,
-    persona_name: `${humanizeSlug(canon)} Department Default`,
+    persona_id: DEFAULT_PERSONA_FALLBACK,
+    persona_name: humanizeSlug(DEFAULT_PERSONA_FALLBACK),
     persona_mode: 'leadership',
-    source: 'department-synthetic',
+    source: 'house-voice-constant',
   };
 }
 
@@ -273,10 +359,69 @@ function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPerson
   }
 }
 
+// ─── SOP-AWARE MATCHING (F3.4) ──────────────────────────────────────────────
+// The persona match is only as good as the context it sees. Historically the
+// selector saw task title+description only; the running SOP — which governs HOW
+// the work is done and carries curated `persona_hints` — never informed the
+// match (`sops.persona_hints` had five writers and zero readers). These helpers
+// translate an SOP row into the selector's SopSelectorContext (slug + name +
+// parsed persona_hints) so createTaskCore can pass it AT creation and the
+// dispatcher can re-score when a DIFFERENT SOP resolves at dispatch time.
+
+/** Minimal SOP shape needed to build selector context. */
+type SopContextRow = Pick<SOP, 'slug' | 'name' | 'persona_hints'>;
+
+/**
+ * Parse an SOP's `persona_hints` JSON (a string[] of canonical persona slugs)
+ * defensively — never throws. Drops empties and known sentinel ids so a stale /
+ * malformed hint list can never poison the candidate pool.
+ */
+export function parsePersonaHints(raw: string | null | undefined): string[] {
+  if (!raw || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((h) => (typeof h === 'string' ? h.trim() : ''))
+      .filter((h) => h.length > 0 && !SENTINEL_IDS.has(h));
+  } catch {
+    return [];
+  }
+}
+
+/** Build the selector SOP context from an SOP row (undefined when it carries nothing usable). */
+export function sopSelectorContextFromRow(
+  sop: SopContextRow | null | undefined,
+): SopSelectorContext | undefined {
+  if (!sop) return undefined;
+  const hints = parsePersonaHints(sop.persona_hints);
+  const slug = sop.slug ?? null;
+  const name = sop.name ?? null;
+  if (!slug && !name && hints.length === 0) return undefined;
+  return { slug, name, hints };
+}
+
+/** Load an SOP's selector context by id (used at the dispatch-time rescore). */
+export function loadSopSelectorContextById(
+  sopId: string | null | undefined,
+): SopSelectorContext | undefined {
+  if (!sopId) return undefined;
+  try {
+    const row = queryOne<SopContextRow>(
+      `SELECT slug, name, persona_hints FROM sops WHERE id = ? AND deleted_at IS NULL`,
+      [sopId],
+    );
+    return sopSelectorContextFromRow(row);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Select a persona for a task, persist it (tasks.persona_*), and re-broadcast the
  * updated task over SSE so the board chip lands. Retry-backed and bounded.
  *
+ * @param sopContext Optional SOP context (F3.4) folded into the match at creation.
  * @returns the pinned persona_id (a matched persona OR, on selector exhaustion, a
  *          deterministic department-default flagged persona_fallback=true), or null
  *          ONLY when the selector explicitly returned no_persona_required.
@@ -285,10 +430,11 @@ export async function resolvePersonaAndPin(
   taskId: string,
   taskDescription: string,
   departmentForSelector: string,
+  sopContext?: SopSelectorContext,
 ): Promise<string | null> {
   for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
     try {
-      const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector);
+      const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext);
 
       // PRD 3.4 SENTINEL GUARD: loudly flag bad ids from a stale selector install.
       if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
@@ -300,7 +446,30 @@ export async function resolvePersonaAndPin(
       }
 
       // Explicit "no persona required" is terminal — not a failure, do not retry.
+      // The task stays personaless BY DESIGN (a chmod does not need coaching), but
+      // it is never "naked" of oversight: we record the governance pointer (Q1) —
+      // company-config.governance_persona_id else GOVERNANCE_PERSONA_FALLBACK — as a
+      // queryable audit event the dispatcher reads as a light oversight pointer.
       if (persona && persona.no_persona_required) {
+        try {
+          const governanceId =
+            (persona.governance_persona_id && persona.governance_persona_id.trim())
+              ? persona.governance_persona_id.trim()
+              : resolveGovernancePersonaId();
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'persona_governance',
+              taskId,
+              `[PERSONA-GOVERNANCE] no_persona_required task — governance oversight pointer "${governanceId}" ` +
+                `(no full persona load). persona_id stays NULL by design.`,
+              new Date().toISOString(),
+            ],
+          );
+        } catch {
+          /* audit-only — never block the no-persona-required path */
+        }
         return null;
       }
 
@@ -673,6 +842,202 @@ function enforceRequiredSlots(
   });
 }
 
+// ─── F3.4 DISPATCH-TIME SOP RESCORE (DEP-2) ─────────────────────────────────
+
+export interface RescoreResult {
+  /** True when the rescore landed a DIFFERENT persona than the task already carried. */
+  changed: boolean;
+  persona_id: string | null;
+  persona_name: string | null;
+  persona_mode: string | null;
+}
+
+/**
+ * Re-run persona selection WITH SOP context at dispatch time (F3.4).
+ *
+ * Called by the dispatcher when the SOP it resolves differs from the one the
+ * creation-time selection saw (or selection saw none). Single-shot + bounded
+ * (heuristic mode, PERSONA_RESCORE_TIMEOUT_MS) so dispatch stays responsive.
+ *
+ * FAIL-CLOSED: an empty / mechanical / sentinel selector result NEVER downgrades
+ * a persona the task already carries — the existing pin is kept untouched. Only a
+ * concrete, non-sentinel persona replaces the pin. Persists a queryable
+ * `persona_rescored_at_dispatch` event and re-broadcasts the row. Never throws
+ * (dispatch must proceed regardless).
+ *
+ * The persona currently on the row (for the never-downgrade guard + audit) is
+ * read here, not passed in — the DB already knows it.
+ *
+ * @returns the persona now on the row (changed=false + the prior persona echoed
+ *          back on any no-op).
+ */
+export async function rescorePersonaWithSOP(
+  taskId: string,
+  taskDescription: string,
+  departmentForSelector: string,
+  sopContext: SopSelectorContext,
+): Promise<RescoreResult> {
+  const prev = queryOne<{
+    persona_id: string | null;
+    persona_name: string | null;
+    persona_mode: string | null;
+  }>('SELECT persona_id, persona_name, persona_mode FROM tasks WHERE id = ?', [taskId]);
+  const unchanged: RescoreResult = {
+    changed: false,
+    persona_id: prev?.persona_id ?? null,
+    persona_name: prev?.persona_name ?? null,
+    persona_mode: prev?.persona_mode ?? null,
+  };
+  try {
+    const persona = await selectPersonaForTask(
+      taskId,
+      taskDescription,
+      departmentForSelector,
+      sopContext,
+      { timeoutMs: PERSONA_RESCORE_TIMEOUT_MS },
+    );
+
+    // Never-downgrade: a null / mechanical / sentinel result keeps the current pin.
+    if (
+      !persona ||
+      persona.no_persona_required ||
+      !persona.persona_id ||
+      SENTINEL_IDS.has(persona.persona_id)
+    ) {
+      return unchanged;
+    }
+
+    const changed = persona.persona_id !== (prev?.persona_id ?? null);
+    const now = new Date().toISOString();
+
+    run(
+      `UPDATE tasks
+          SET persona_id = ?, persona_name = ?, persona_mode = ?,
+              persona_score = ?, persona_version = ?, persona_selected_at = ?
+        WHERE id = ?`,
+      [
+        persona.persona_id,
+        persona.persona_name,
+        persona.interaction_mode,
+        persona.score ?? null,
+        persona.persona_version ?? 1,
+        now,
+        taskId,
+      ],
+    );
+
+    const sopLabel = sopContext.slug || sopContext.name || 'sop';
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        'persona_rescored_at_dispatch',
+        taskId,
+        `[PERSONA-RESCORE] SOP "${sopLabel}" resolved at dispatch differed from the SOP the ` +
+          `creation-time selection saw — re-ran SOP-aware selection. persona ` +
+          `${prev?.persona_id ?? '(none)'} → ${persona.persona_id}${changed ? '' : ' (unchanged)'}.`,
+        now,
+      ],
+    );
+
+    const updatedTask = queryOne<Task>(
+      `SELECT t.*,
+          aa.name as assigned_agent_name,
+          aa.avatar_emoji as assigned_agent_emoji,
+          ca.name as created_by_agent_name,
+          ca.avatar_emoji as created_by_agent_emoji
+         FROM tasks t
+         LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+        WHERE t.id = ?`,
+      [taskId],
+    );
+    if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
+
+    console.log(
+      `[rescorePersonaWithSOP] task ${taskId}: SOP "${sopLabel}" → persona ` +
+        `${persona.persona_id}${changed ? ` (was ${prev?.persona_id ?? '(none)'})` : ' (unchanged)'}.`,
+    );
+
+    return {
+      changed,
+      persona_id: persona.persona_id,
+      persona_name: persona.persona_name,
+      persona_mode: persona.interaction_mode,
+    };
+  } catch (err) {
+    console.warn(
+      `[rescorePersonaWithSOP] non-fatal for task ${taskId}:`,
+      (err as Error).message,
+    );
+    return unchanged;
+  }
+}
+
+// ─── F3.1 / FDN-2 SYNCHRONOUS DISPATCH GATE ─────────────────────────────────
+
+export interface DispatchPersonaResolution {
+  persona_id: string;
+  persona_name: string;
+  persona_mode: string;
+  /** true when the persona was applied by this gate (task was naked at dispatch). */
+  healed: boolean;
+}
+
+/**
+ * SYNCHRONOUS DISPATCH GATE (F3.1 / FDN-2) — the last-hop guarantee that no task
+ * is dispatched naked. HEAL, NOT STALL: if a task reaches the dispatcher with no
+ * pinned persona (a create-time selection that silently failed, or a pre-existing
+ * backlog task), apply the DETERMINISTIC fallback chain immediately and pin it —
+ * never HOLD the task for a persona (availability > purity; the fallback makes
+ * NULL impossible anyway). It runs no Python (real selection already had its turn
+ * at create-time with retries, and the persona-backfill sweep re-runs it in the
+ * background) so it adds no latency to the hot dispatch path.
+ *
+ * Returns the persona the dispatcher must deliver:
+ *   - the already-pinned persona when one exists (healed:false), or
+ *   - a freshly pinned deterministic fallback (healed:true).
+ * Never returns null — a persona is always resolvable via the constant tier.
+ */
+export function ensurePersonaForDispatch(
+  taskId: string,
+  departmentForSelector: string | null | undefined,
+): DispatchPersonaResolution {
+  // Already pinned? Deliver it unchanged.
+  try {
+    const row = queryOne<{ persona_id: string | null; persona_name: string | null; persona_mode: string | null }>(
+      'SELECT persona_id, persona_name, persona_mode FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    if (row && row.persona_id && !SENTINEL_IDS.has(row.persona_id)) {
+      return {
+        persona_id: row.persona_id,
+        persona_name: row.persona_name || humanizeSlug(row.persona_id),
+        persona_mode: row.persona_mode || 'leadership',
+        healed: false,
+      };
+    }
+  } catch {
+    /* fall through to heal */
+  }
+
+  // Naked at dispatch — heal deterministically (no stall). pinDepartmentDefaultPersona
+  // writes the persona_fallback audit event + re-broadcasts the row.
+  const fb = deriveDepartmentDefaultPersona(departmentForSelector);
+  try {
+    pinDepartmentDefaultPersona(taskId, fb);
+    console.warn(
+      `[ensurePersonaForDispatch] task ${taskId} was naked at dispatch — healed with ${fb.source} ` +
+        `persona "${fb.persona_id}" (persona_fallback=true).`,
+    );
+  } catch (err) {
+    // Even a failed pin still returns the persona so the message is never naked.
+    console.error(`[ensurePersonaForDispatch] heal-pin failed for task ${taskId} (delivering anyway):`, err);
+  }
+  return { persona_id: fb.persona_id, persona_name: fb.persona_name, persona_mode: fb.persona_mode, healed: true };
+}
+
+
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
 
 /**
@@ -924,7 +1289,14 @@ export async function createTaskCore(
 
   // Auto-suggest SOP if none provided. Scored by department + keyword overlap;
   // anything below 0.5 leaves sop_id NULL so the operator picks manually.
+  //
+  // F3.4 (SOP-aware matching): the SOP auto-suggest runs HERE, BEFORE persona
+  // selection is kicked off below, so the winning SOP's slug + name + curated
+  // persona_hints can be folded into the match (`sops.persona_hints` was
+  // written by five paths and read by none until now). `sopContext` is passed
+  // through to resolvePersonaAndPin → the selector.
   let sopId: string | null = input.sop_id ?? null;
+  let sopContext: SopSelectorContext | undefined;
   if (!sopId) {
     try {
       const best = await getBestSOPForTask({
@@ -933,10 +1305,16 @@ export async function createTaskCore(
         department: input.department ?? undefined,
         workspace_id: workspaceId,
       });
-      if (best) sopId = best.id;
+      if (best) {
+        sopId = best.id;
+        sopContext = sopSelectorContextFromRow(best);
+      }
     } catch (err) {
       console.warn('[createTaskCore] SOP auto-suggest failed (non-fatal):', err);
     }
+  } else {
+    // Caller supplied an explicit SOP — load its selector context too (F3.4).
+    sopContext = loadSopSelectorContextById(sopId);
   }
 
   run(
@@ -1048,6 +1426,8 @@ export async function createTaskCore(
   // heuristic probe finds >1 sub-task on a non-mechanical task. The primary
   // (seq-1) persona is still pinned onto tasks.persona_* for back-compat either
   // way; combined mode additionally persists the per-sub-task plan rows.
+  // F3.4 (DEP-2): the single-persona path stays SOP-aware by folding the resolved
+  // SOP context into the creation-time match.
   const personaSlots = loadSopPersonaSlots(sopId);
   const { combined: useCombinedPersona, reason: decompReason } = decideMultiPersona(
     personaTaskDescription,
@@ -1058,7 +1438,7 @@ export async function createTaskCore(
   }
   const personaPinPromise = useCombinedPersona
     ? resolvePersonaPlanAndPin(id, personaTaskDescription, personaDepartment, personaSlots)
-    : resolvePersonaAndPin(id, personaTaskDescription, personaDepartment);
+    : resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext);
   // Swallow at the source so a background failure never becomes an unhandled
   // rejection — both resolvers log internally and never throw to callers.
   void personaPinPromise.catch(() => null);

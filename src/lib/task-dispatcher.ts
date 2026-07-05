@@ -470,6 +470,34 @@ export async function autoDispatchTask(
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
+    // ── SYNCHRONOUS PERSONA DISPATCH GATE (F3.1 / F4.1 — heal, not stall) ────
+    // resolveAndLog reads tasks.persona_id first (Hop 10), so a pinned persona is
+    // ALREADY delivered. But if the task reached dispatch naked (a create-time
+    // selection that silently failed / a pre-existing backlog card), settings.persona
+    // resolves to the 'auto' self-select sentinel. Rather than tell the doer to
+    // self-select (the F3.6 bug), we HEAL the task here: apply the deterministic
+    // fallback chain, pin it, and deliver THAT persona. Never HOLD a task for a
+    // persona — the fallback makes NULL impossible (availability > purity). Dynamic
+    // import avoids the tasks<->task-dispatcher static cycle.
+    if (settings.persona === 'auto') {
+      try {
+        const { ensurePersonaForDispatch } = await import('@/lib/tasks');
+        const healDept =
+          canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+        const healed = ensurePersonaForDispatch(task.id, healDept);
+        settings.persona = healed.persona_name;
+        settings.personaMode = healed.persona_mode;
+        console.warn(
+          `[${context}] persona dispatch gate: task ${task.id} was naked — ` +
+            `delivering ${healed.healed ? 'healed' : 'pinned'} persona "${healed.persona_name}".`,
+        );
+      } catch (healErr) {
+        // Never block dispatch on the heal — a matched persona is preferred, but an
+        // unhealed 'auto' still ships (degraded) rather than stalling the board.
+        console.error(`[${context}] persona dispatch gate failed for task ${task.id}:`, healErr);
+      }
+    }
+
     // ── AF-MODEL-SOVEREIGNTY gate ───────────────────────────────────────────
     // Block dispatch if resolved model is null, free default, forbidden, or
     // modality-wrong. Routes to needs_owner_input — never silently downgrades.
@@ -628,6 +656,57 @@ ${stepLines.join('\n')}
 `;
       }
     }
+
+    // ── F3.4: SOP-aware persona RESCORE at dispatch ─────────────────────────
+    // Persona selection runs at task CREATION — before we know which SOP will
+    // govern the work. If the SOP resolved at dispatch (canonical copy, the
+    // getBestSOPForTask re-pull above, or an operator edit) differs from the one
+    // the creation-time selection saw (`task.sop_id` at dispatch entry — most
+    // commonly: selection saw NONE and an SOP was resolved here), re-run
+    // selection WITH the SOP context so the persona actually DELIVERED reflects
+    // the governing SOP + its curated `persona_hints`. Bounded (single-shot,
+    // heuristic-mode timeout), fail-closed (never downgrades an existing
+    // persona), and fully non-fatal — dispatch proceeds regardless. Persists a
+    // queryable `persona_rescored_at_dispatch` event.
+    const selectionSopId = task.sop_id ?? null; // SOP the creation-time selection consumed
+    if (resolvedSopId && resolvedSopId !== selectionSopId) {
+      try {
+        // Dynamic import: tasks.ts already imports this module (autoDispatchTask),
+        // so resolve the rescore helpers lazily to avoid a static import cycle —
+        // same pattern as the task-lifecycle import below.
+        const { rescorePersonaWithSOP, loadSopSelectorContextById } = await import('@/lib/tasks');
+        const sopContext = loadSopSelectorContextById(resolvedSopId);
+        if (sopContext) {
+          const deptForSelector =
+            canonicalDeptSlug(task.department ?? task.workspace_id ?? '') || 'general';
+          const rescoreDescription =
+            `${task.title}${task.description ? `. ${task.description}` : ''}`.trim();
+          const rescored = await rescorePersonaWithSOP(
+            task.id,
+            rescoreDescription,
+            deptForSelector,
+            sopContext,
+          );
+          // Patch the in-memory row so buildPersonaBlock DELIVERS the rescored
+          // persona in this same dispatch message (not just on the board).
+          task.persona_id = rescored.persona_id;
+          task.persona_name = rescored.persona_name;
+          task.persona_mode = rescored.persona_mode;
+          if (rescored.changed) {
+            console.log(
+              `[${context}] SOP-aware rescore: task ${task.id} persona → ${rescored.persona_id} ` +
+              `(SOP ${resolvedSopId} differed from selection-time SOP ${selectionSopId ?? '(none)'})`,
+            );
+          }
+        }
+      } catch (rescoreErr) {
+        console.warn(
+          `[${context}] SOP-aware persona rescore failed (non-fatal):`,
+          (rescoreErr as Error).message,
+        );
+      }
+    }
+    // ── End F3.4 rescore ────────────────────────────────────────────────────
 
     // ── W4.2: Full-context handoff — build ContextPack (never throws) ──────
     // Resolved SOP is available at this point (resolvedSopId + sop local).

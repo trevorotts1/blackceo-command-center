@@ -39,6 +39,29 @@ import type { Task } from "@/lib/types";
 // Promisified async version — never blocks the event loop.
 const execFileAsync = promisify(execFile);
 
+// ─── PINNED FALLBACK CONSTANTS (F3.1 / Persona-Matching-Overhaul FDN-2) ───────
+// Mirror of the Python-side pins in persona-selector-v2.py (next to GEMINI_MODEL):
+//   DEFAULT_PERSONA_FALLBACK   — the generic BlackCEO house-voice persona seeded
+//     into the fleet (triad 81->82). It is deliberately generic so it never
+//     out-scores a real specialist; only the last-resort fallback returns it, so
+//     NO task is ever naked. Per-client override: company-config.json
+//     `default_persona_id`.
+//   GOVERNANCE_PERSONA_FALLBACK — the oversight pointer carried by mechanical
+//     (no_persona_required) tasks so the doer still has principle-centered
+//     governance without pretending a chmod needs coaching. Per-client override:
+//     company-config.json `governance_persona_id`.
+// These are the TS side of the resolved Q1/Q2 decisions and are the terminal tier
+// of the fallback chain (never-null when everything else is unavailable).
+export const DEFAULT_PERSONA_FALLBACK = "blackceo-house-voice";
+export const GOVERNANCE_PERSONA_FALLBACK = "covey-7-habits";
+
+// CC selector spawn budget. Raised 30s -> 60s (F3.1 / A3): LLM-mode scoring of
+// ~12 finalists x 4 layers plus a cold embedding call can exceed 30s on a loaded
+// box, so a 30s cap turned a slow-but-valid selection into a null result (naked
+// task). 60s gives the real selection room to land before the retry/fallback
+// chain engages.
+export const PERSONA_SELECT_TIMEOUT_MS = 60_000;
+
 /**
  * Resolve the company-config.json path to hand the python selector as a grounding
  * hint (G10-TRIAD-PERSONA-RESOLVE / Gap A/B). Without company-config the selector's
@@ -70,6 +93,95 @@ function resolveCompanyConfigHint(): string | undefined {
 
 export type PersonaInteractionMode = "leadership" | "coaching" | "hybrid";
 
+/**
+ * SOP context handed to the selector so the match is SOP-aware (finding F3.4).
+ *
+ * The selector folds `name` into the task-category / Layer-5 embed query and
+ * UNIONs `hints` (SOP-declared `persona_hints`, canonical persona slugs) into
+ * the candidate pool with a bounded additive bonus — so a hinted specialist can
+ * win when relevant, but a stale hint can never force a bad match.
+ *
+ * These map to DEP-1's `--sop-slug` / `--sop-name` / `--sop-hints` selector
+ * inputs. All fields optional: a partial context (e.g. hints only) is valid.
+ */
+export interface SopSelectorContext {
+  slug?: string | null;
+  name?: string | null;
+  hints?: string[] | null;
+}
+
+/** Optional knobs for a single selection run (bounded dispatch-time rescore). */
+export interface SelectPersonaOptions {
+  /** Spawn timeout in ms. Defaults to 30_000 (creation); dispatch rescore bounds it tighter. */
+  timeoutMs?: number;
+}
+
+/** True when the SOP context carries at least one selector-consumable value. */
+export function hasSopContext(ctx: SopSelectorContext | null | undefined): ctx is SopSelectorContext {
+  if (!ctx) return false;
+  return Boolean(
+    (ctx.slug && ctx.slug.trim()) ||
+      (ctx.name && ctx.name.trim()) ||
+      (ctx.hints && ctx.hints.length > 0),
+  );
+}
+
+/**
+ * Build the argv for one `persona-selector-v2.py --mode select` spawn.
+ *
+ * The base argv is unchanged from the pre-SOP behaviour. When `sopContext`
+ * carries meaningful values the `--sop-slug` / `--sop-name` / `--sop-hints`
+ * flags (DEP-1) are appended. Exported so a unit test can assert the forwarding
+ * without spawning Python.
+ */
+export function buildSelectorArgv(
+  scriptPath: string,
+  taskDescription: string,
+  dept: string,
+  taskId: string,
+  sopContext?: SopSelectorContext | null,
+): string[] {
+  const argv = [
+    scriptPath,
+    "--task", taskDescription,
+    "--department", dept,
+    "--task-id", taskId,
+    "--format", "json",
+  ];
+  if (sopContext) {
+    if (sopContext.slug && sopContext.slug.trim()) {
+      argv.push("--sop-slug", sopContext.slug.trim());
+    }
+    if (sopContext.name && sopContext.name.trim()) {
+      argv.push("--sop-name", sopContext.name.trim());
+    }
+    const hints = (sopContext.hints || [])
+      .map((h) => (h || "").trim())
+      .filter(Boolean);
+    if (hints.length > 0) {
+      // Comma-joined list — the selector splits on ',' (mirrors its other list inputs).
+      argv.push("--sop-hints", hints.join(","));
+    }
+  }
+  return argv;
+}
+
+/**
+ * Heuristic: did the selector reject an argument it doesn't understand?
+ *
+ * A box whose `persona-selector-v2.py` predates DEP-1 has no `--sop-*` flags;
+ * its strict argparse exits 2 with "unrecognized arguments" on SystemExit. We
+ * detect that so the caller can retry WITHOUT the SOP flags rather than let an
+ * entire SOP-carrying task degrade to the department-default fallback. Any other
+ * failure (timeout, python missing, real error) is NOT swallowed here.
+ */
+function isUnknownArgumentError(err: unknown): boolean {
+  const e = err as { code?: number | string; stderr?: string; message?: string };
+  if (e?.code === 2) return true;
+  const text = `${e?.stderr ?? ""} ${e?.message ?? ""}`;
+  return /unrecognized arguments|no such option|invalid choice|unrecognized option/i.test(text);
+}
+
 export interface PersonaSelectionResult {
   persona_id: string | null;
   persona_name: string;
@@ -88,6 +200,13 @@ export interface PersonaSelectionResult {
   warning?: string;
   message?: string;
   no_persona_required?: boolean;
+  /**
+   * Oversight pointer for mechanical (no_persona_required) tasks — the governance
+   * persona the dispatcher hands the doer instead of a full Section-4 persona load
+   * (Q1). Resolves company-config.json `governance_persona_id` else
+   * GOVERNANCE_PERSONA_FALLBACK. Present alongside no_persona_required:true.
+   */
+  governance_persona_id?: string | null;
 }
 
 function resolveOpenClawRoot(): string {
@@ -133,12 +252,16 @@ function resolveDecomposeScriptPath(): string {
  * @param taskId          Database task id (used for logging only).
  * @param taskDescription Title + description concatenated.
  * @param departmentId    Department slug (e.g. "sales", "marketing"). Pass null to fall back to "general".
+ * @param sopContext      Optional SOP context (F3.4) — slug/name/hints folded into the match.
+ * @param opts            Optional per-run knobs (bounded timeout for dispatch-time rescore).
  * @returns               JSON result from the Python script, or null on failure.
  */
 export async function selectPersonaForTask(
   taskId: string,
   taskDescription: string,
-  departmentId: string | null
+  departmentId: string | null,
+  sopContext?: SopSelectorContext | null,
+  opts?: SelectPersonaOptions,
 ): Promise<PersonaSelectionResult | null> {
   // Test/CI escape hatch: PERSONA_FIXTURE_JSON env var returns a fixture
   // instead of spawning Python.  This allows unit tests to exercise the
@@ -154,6 +277,7 @@ export async function selectPersonaForTask(
         score: typeof fixture.score === 'number' ? fixture.score : 0,
         interaction_mode: (fixture.interaction_mode as PersonaInteractionMode) || 'leadership',
         no_persona_required: fixture.no_persona_required,
+        governance_persona_id: fixture.governance_persona_id ?? null,
       };
     } catch {
       // Malformed fixture — fall through to real selector.
@@ -184,20 +308,49 @@ export async function selectPersonaForTask(
     //    `--company-config` flag: the script's strict argparse has no such flag and
     //    would crash on it.
     const companyConfigHint = resolveCompanyConfigHint();
-    const { stdout: output } = await execFileAsync(
-      "python3",
-      [scriptPath, "--task", taskDescription, "--department", dept, "--task-id", taskId, "--format", "json"],
-      {
+    const timeoutMs = opts?.timeoutMs ?? PERSONA_SELECT_TIMEOUT_MS;
+    const spawnEnv = {
+      ...process.env,
+      DASHBOARD_DB_PATH: DB_PATH,
+      OPENCLAW_TASK_ID: taskId,
+      ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
+    };
+
+    const runSelector = async (argv: string[]): Promise<string> => {
+      const { stdout } = await execFileAsync("python3", argv, {
         encoding: "utf-8",
-        timeout: 30_000,
-        env: {
-          ...process.env,
-          DASHBOARD_DB_PATH: DB_PATH,
-          OPENCLAW_TASK_ID: taskId,
-          ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
-        },
+        timeout: timeoutMs,
+        env: spawnEnv,
+      });
+      return stdout;
+    };
+
+    // F3.4: fold SOP context into the match when present. DEP-1 teaches the
+    // selector the --sop-* flags; on a box whose selector predates DEP-1 the
+    // strict argparse rejects them, so we retry ONCE without the SOP flags
+    // rather than let the whole SOP-carrying task fail selection (fail-closed:
+    // degrade to a non-SOP-aware match, never to a naked/fallback persona).
+    const wantsSop = hasSopContext(sopContext);
+    const baseArgv = buildSelectorArgv(scriptPath, taskDescription, dept, taskId);
+    let output: string;
+    if (wantsSop) {
+      const sopArgv = buildSelectorArgv(scriptPath, taskDescription, dept, taskId, sopContext);
+      try {
+        output = await runSelector(sopArgv);
+      } catch (sopErr) {
+        if (isUnknownArgumentError(sopErr)) {
+          console.warn(
+            `[persona-selector] SOP-aware flags rejected by selector for task ${taskId} ` +
+            `(selector predates DEP-1 --sop-* inputs) — retrying without SOP context.`,
+          );
+          output = await runSelector(baseArgv);
+        } else {
+          throw sopErr;
+        }
       }
-    );
+    } else {
+      output = await runSelector(baseArgv);
+    }
 
     const result = JSON.parse(output) as Partial<PersonaSelectionResult>;
 
@@ -221,6 +374,7 @@ export async function selectPersonaForTask(
       warning: result.warning,
       message: result.message,
       no_persona_required: result.no_persona_required,
+      governance_persona_id: result.governance_persona_id ?? null,
     };
   } catch (error) {
     console.error(`[persona-selector] Failed for task ${taskId}:`, error);
