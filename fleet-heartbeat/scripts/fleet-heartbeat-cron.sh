@@ -28,11 +28,11 @@
 #                               only — never hard-coded here (fleet-wide repo).
 set -u
 
-FH_ROOT="${FH_ROOT:-/Users/blackceomacmini/clawd/fleet-heartbeat}"
+FH_ROOT="${FH_ROOT:-${CLAWD_HOME:-${HOME}/clawd}/fleet-heartbeat}"
 HEARTBEAT="${FH_ROOT}/scripts/heartbeat.sh"
 LOG_DIR="${FH_ROOT}/logs"
 HEARTBEAT_LOG="${LOG_DIR}/heartbeat.log"
-OPENCLAW="${OPENCLAW:-/Users/blackceomacmini/.local/bin/openclaw}"
+OPENCLAW="${OPENCLAW:-${HOME}/.local/bin/openclaw}"
 mkdir -p "$LOG_DIR"
 
 # Load secrets the same additive way rescue-receiver-run.sh does, so a

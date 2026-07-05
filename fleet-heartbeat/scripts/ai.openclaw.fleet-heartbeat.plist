@@ -13,8 +13,14 @@
   differs, prefer the crontab route (fleet-heartbeat.crontab) which carries an
   explicit tz, or adjust the hours below.
 
+  This is a TEMPLATE: the __HOME__ and __CLAWD_HOME__ tokens keep any operator
+  path out of the fleet-wide repo. Expand them at install time (launchd does not
+  itself expand env vars inside these strings).
+
   Install:
-    cp ai.openclaw.fleet-heartbeat.plist ~/Library/LaunchAgents/
+    sed -e "s#__HOME__#${HOME}#g" \
+        -e "s#__CLAWD_HOME__#${CLAWD_HOME:-${HOME}/clawd}#g" \
+        ai.openclaw.fleet-heartbeat.plist > ~/Library/LaunchAgents/ai.openclaw.fleet-heartbeat.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.fleet-heartbeat.plist
   (legacy fallback: launchctl load -w ~/Library/LaunchAgents/ai.openclaw.fleet-heartbeat.plist)
 -->
@@ -27,7 +33,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/bash</string>
-    <string>/Users/blackceomacmini/clawd/fleet-heartbeat/scripts/fleet-heartbeat-cron.sh</string>
+    <string>__CLAWD_HOME__/fleet-heartbeat/scripts/fleet-heartbeat-cron.sh</string>
   </array>
 
   <key>StartCalendarInterval</key>
@@ -44,22 +50,22 @@
   <false/>
 
   <key>WorkingDirectory</key>
-  <string>/Users/blackceomacmini/clawd/fleet-heartbeat</string>
+  <string>__CLAWD_HOME__/fleet-heartbeat</string>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/blackceomacmini/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HOME</key>
-    <string>/Users/blackceomacmini</string>
+    <string>__HOME__</string>
     <key>LANG</key>
     <string>en_US.UTF-8</string>
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/blackceomacmini/.openclaw/logs/fleet-heartbeat.launchd.log</string>
+  <string>__HOME__/.openclaw/logs/fleet-heartbeat.launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/blackceomacmini/.openclaw/logs/fleet-heartbeat.launchd.log</string>
+  <string>__HOME__/.openclaw/logs/fleet-heartbeat.launchd.log</string>
 
   <key>ProcessType</key>
   <string>Background</string>

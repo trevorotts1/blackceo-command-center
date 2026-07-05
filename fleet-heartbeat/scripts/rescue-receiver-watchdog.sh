@@ -4,7 +4,7 @@
 # Watchdog for the rescue-receiver HTTP service (port 8799).
 #
 # Runs from cron every minute:
-#   * * * * * /Users/blackceomacmini/clawd/fleet-heartbeat/scripts/rescue-receiver-watchdog.sh
+#   * * * * * "$HOME"/clawd/fleet-heartbeat/scripts/rescue-receiver-watchdog.sh
 #
 # Behaviour:
 #   1. Pings http://127.0.0.1:8799/health (5s connect / 8s total timeout).
@@ -13,7 +13,9 @@
 #   3. If any other response, while under the auto-restart budget (MAX_RESTARTS):
 #      a. Kickstart via launchctl to restart the receiver.
 #      b. Post ONE first-detection alarm to the OpenClaw Fixer topic
-#         (chat -1003865262028, thread 3) using the Rescue Rangers bot.
+#         (chat + thread come from FIXER_GROUP_CHAT_ID / FIXER_THREAD_ID in the
+#         secret store — never hard-coded here, fleet-wide repo) using the
+#         Rescue Rangers bot.
 #   4. If the auto-restart budget is exhausted while still DOWN (N kickstarts
 #      fired and the receiver never came back) it is a CRASH-LOOP, not a
 #      transient stall: STOP kickstarting (churning a deterministic crash does
@@ -45,8 +47,11 @@ HEALTH_URL="http://127.0.0.1:8799/health"
 LOG="$HOME/.openclaw/logs/rescue-receiver-watchdog.log"
 FLAG_FILE="$HOME/.openclaw/logs/rescue-receiver-watchdog-alarm.flag"
 LAUNCHD_LABEL="ai.openclaw.rescue-receiver"
-FIXER_CHAT_ID="-1003865262028"
-FIXER_THREAD_ID="3"
+# Operator Fixer/Rescue-Rangers topic. NEVER hard-coded (fleet-wide repo):
+# both come from the secret store, loaded just below. The alarm path degrades
+# gracefully (logs + skips) when the chat id is unset, exactly like BOT_TOKEN.
+FIXER_CHAT_ID=""
+FIXER_THREAD_ID=""
 LOG_MAX_LINES=5000
 # Bounded auto-restart: stop kickstarting after MAX_RESTARTS consecutive DOWN
 # ticks so a genuinely broken receiver is not churned forever (anti-crash-loop).
@@ -92,6 +97,14 @@ set +a
 # until the secret store loads it, and the alarm path below degrades gracefully
 # if unset. Posts ONLY to the operator Fixer/Rescue-Rangers topic, never a client.
 BOT_TOKEN="${RESCUE_RANGERS_BOT_TOKEN:-}"
+
+# Operator Fixer/Rescue-Rangers topic destination, now that the secret store is
+# sourced. Never hard-coded, never printed. Accepts the canonical FIXER_* names
+# (shared with the return-verifier) and falls back to RESCUE_RANGERS_CHAT_ID.
+# The alarm path skips gracefully if the chat id is unset; the thread id is
+# optional (omitted from the payload when empty).
+FIXER_CHAT_ID="${FIXER_GROUP_CHAT_ID:-${RESCUE_RANGERS_FIXER_CHAT_ID:-${RESCUE_RANGERS_CHAT_ID:-}}}"
+FIXER_THREAD_ID="${FIXER_THREAD_ID:-${RESCUE_RANGERS_FIXER_THREAD_ID:-}}"
 
 # ---------------------------------------------------------------------------
 # Health check
@@ -168,9 +181,13 @@ fi
 # ---------------------------------------------------------------------------
 post_alarm() {
   # $1 = flag file (dedup), $2 = message text
-  local flag="$1" msg="$2" msg_json payload result
+  local flag="$1" msg="$2" msg_json payload result thread_field
   if [ -z "$BOT_TOKEN" ]; then
     logw "WATCHDOG WARNING: RESCUE_RANGERS_BOT_TOKEN not found — cannot post alarm"
+    return 0
+  fi
+  if [ -z "$FIXER_CHAT_ID" ]; then
+    logw "WATCHDOG WARNING: FIXER_GROUP_CHAT_ID not found — cannot post alarm (chat id unset)"
     return 0
   fi
   if [ -f "$flag" ]; then
@@ -180,7 +197,14 @@ post_alarm() {
   # Write flag BEFORE the curl call so a crash can't produce double-posts.
   printf '%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$flag"
   msg_json="${msg//\"/\\\"}"
-  payload="{\"chat_id\":\"${FIXER_CHAT_ID}\",\"message_thread_id\":${FIXER_THREAD_ID},\"text\":\"${msg_json}\"}"
+  # Thread id is optional: omit the key entirely when unset so the payload stays
+  # valid JSON (an empty message_thread_id value would be a syntax error).
+  thread_field=""
+  case "$FIXER_THREAD_ID" in
+    ''|*[!0-9]*) : ;;                                            # unset / non-numeric -> omit
+    *) thread_field="\"message_thread_id\":${FIXER_THREAD_ID}," ;;
+  esac
+  payload="{\"chat_id\":\"${FIXER_CHAT_ID}\",${thread_field}\"text\":\"${msg_json}\"}"
   result="$(curl -sf --connect-timeout 5 --max-time 10 \
       -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
       -H 'Content-Type: application/json' \

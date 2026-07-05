@@ -34,7 +34,7 @@ secret-bearing.
 
 **Run:**
 ```bash
-cd /Users/blackceomacmini/clawd/fleet-heartbeat/scripts
+cd "$HOME"/clawd/fleet-heartbeat/scripts   # or wherever your fleet-heartbeat checkout lives
 ./rescue-12-cleanup.sh                              # dry-run, shows every move
 ./rescue-12-cleanup.sh --apply                      # archive .bak + retire bridge
 ./rescue-12-cleanup.sh --apply --remove-remote-rescue   # also archive remote-rescue/
@@ -80,15 +80,18 @@ Both preserve the original `0 6-21/3` schedule (minute 0 of hours
 **Deploy (operator, deliberate — this is a live scheduler change):**
 ```bash
 # 1. install the direct-command scheduler (pick ONE):
-#    -- launchd --
-cp ai.openclaw.fleet-heartbeat.plist ~/Library/LaunchAgents/
+#    -- launchd -- (the plist ships with __HOME__/__CLAWD_HOME__ placeholder
+#       tokens so no operator path is ever committed; expand them at install)
+sed -e "s#__HOME__#${HOME}#g" \
+    -e "s#__CLAWD_HOME__#${CLAWD_HOME:-${HOME}/clawd}#g" \
+    ai.openclaw.fleet-heartbeat.plist > ~/Library/LaunchAgents/ai.openclaw.fleet-heartbeat.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.fleet-heartbeat.plist
 #    -- OR crontab -- add the line from fleet-heartbeat.crontab via `crontab -e`
 
 # 2. verify one manual fire works end-to-end:
 HEARTBEAT_MODE=smoke-test /opt/homebrew/bin/bash \
-  /Users/blackceomacmini/clawd/fleet-heartbeat/scripts/fleet-heartbeat-cron.sh
-tail -n 20 /Users/blackceomacmini/clawd/fleet-heartbeat/logs/heartbeat.log
+  "$HOME"/clawd/fleet-heartbeat/scripts/fleet-heartbeat-cron.sh
+tail -n 20 "$HOME"/clawd/fleet-heartbeat/logs/heartbeat.log
 
 # 3. ONLY after the direct fire is confirmed, retire the LLM-turn cron:
 openclaw cron delete 3f0f33c9-41d9-4244-a02f-3a94819eaa8e

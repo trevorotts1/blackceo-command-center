@@ -31,8 +31,8 @@
 #   RR_ROOT       remote-rescue root
 set -u
 
-FH_ROOT="${FH_ROOT:-/Users/blackceomacmini/clawd/fleet-heartbeat}"
-RR_ROOT="${RR_ROOT:-/Users/blackceomacmini/clawd/remote-rescue}"
+FH_ROOT="${FH_ROOT:-${CLAWD_HOME:-${HOME}/clawd}/fleet-heartbeat}"
+RR_ROOT="${RR_ROOT:-${CLAWD_HOME:-${HOME}/clawd}/remote-rescue}"
 ARCHIVE="${FH_ROOT}/scripts/_archive"
 BRIDGE="${FH_ROOT}/scripts/rescue-rangers-bridge.py"
 HEARTBEAT="${FH_ROOT}/scripts/heartbeat.sh"
