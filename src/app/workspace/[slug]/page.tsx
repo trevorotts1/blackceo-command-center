@@ -300,11 +300,13 @@ export default function WorkspacePage() {
   const showTaskBoard = true;
 
   return (
-    <div className="min-h-screen lg:h-screen flex flex-col bg-bcc-bg lg:overflow-hidden">
+    /* Shell contract (v4.66.0 bottom-cutoff fix) — see /tasks/all: dvh-sized
+       shell + min-h-0 scroll chain so the board never clips unreachable rows. */
+    <div className="min-h-dvh lg:h-dvh flex flex-col bg-bcc-bg lg:overflow-hidden">
       <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
 
       {/* Breadcrumb: shows Home > CEO Board > [Dept Name] > Focus View */}
-      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100">
+      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100 shrink-0">
         <Breadcrumb
           items={[
             { label: 'Home', href: '/' },
@@ -338,7 +340,7 @@ export default function WorkspacePage() {
         </div>
       )}
 
-      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar — focus mode (scoped rail) for a single department,
             full all-departments list only on the CEO / default workspace. */}
         <AgentsSidebar

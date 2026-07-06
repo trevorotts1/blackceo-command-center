@@ -112,7 +112,8 @@ export function CompanyHeroCard() {
 
   if (loading) {
     return (
-      <div className="w-full rounded-2xl bg-gradient-to-br from-[#1B5E20] to-[#2E7D32] p-8 animate-pulse">
+      <div className="w-full rounded-2xl p-8 animate-pulse"
+        style={{ background: 'linear-gradient(135deg, var(--brand-900), var(--brand-800))' }}>
         <div className="flex flex-col items-center gap-4">
           <div className="h-24 w-24 rounded-full bg-white/20" />
           <div className="h-5 w-40 rounded bg-white/20" />
@@ -129,8 +130,8 @@ export function CompanyHeroCard() {
 
   return (
     <motion.div
-      className="w-full rounded-[20px] bg-gradient-to-br from-[#1B5E20] to-[#2E7D32] px-12 py-10 shadow-lg backdrop-blur-sm"
-      style={{ backgroundColor: 'rgba(27, 94, 32, 0.92)' }}
+      className="w-full rounded-[20px] px-6 py-8 sm:px-12 sm:py-10 shadow-lg"
+      style={{ background: 'linear-gradient(135deg, var(--brand-900), var(--brand-800))' }}
       initial={{ scale: 0.96, opacity: 0 }}
       animate={{ scale: 1, opacity: 1 }}
       transition={{ duration: 0.6, ease: [0.4, 0, 0.2, 1] }}
@@ -142,7 +143,7 @@ export function CompanyHeroCard() {
             <span className="font-mono text-[96px] font-black text-white leading-none">
               {grade}
             </span>
-            <span style={{ color: '#81C784' }} className="text-xl font-medium">
+            <span className="text-xl font-medium text-brand-300">
               {label}
             </span>
           </>
@@ -160,7 +161,7 @@ export function CompanyHeroCard() {
         <p className="text-white/80 text-base text-center max-w-lg mt-1">{statusLine}</p>
 
         {/* Bottom stat pills — always real counts, never fabricated */}
-        <div className="flex gap-3 mt-6">
+        <div className="flex flex-wrap justify-center gap-2 sm:gap-3 mt-6">
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
             <span className="text-white text-base font-semibold">{totalTasks}</span>
             <span className="text-white/70 text-sm">Total Tasks</span>

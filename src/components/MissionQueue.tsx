@@ -454,7 +454,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   ];
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-bcc-bg">
+    /* min-w-0 + min-h-0 (v4.66.0): flex items default to min-size:auto, which
+       let this region silently grow past the dvh shell and clip the bottom
+       card row with no scroll affordance — the reported bottom-cutoff bug. */
+    <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden bg-bcc-bg">
       {/* Header */}
       <header className="bg-white h-auto lg:h-20 px-4 lg:px-8 py-3 lg:py-0 flex flex-col lg:flex-row items-start lg:items-center justify-between border-b border-gray-100 shrink-0 gap-3 lg:gap-0">
         <div className="flex items-center gap-3 w-full lg:w-auto">
@@ -557,7 +560,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         The fade overlays use pointer-events:none so they never block card drag+drop.
         Chevron buttons have pointer-events:all and sit centred within each fade zone.
       */}
-      <div className="flex-1 relative overflow-hidden">
+      <div className="flex-1 min-h-0 relative overflow-hidden">
         {/* Left scroll affordance — fade + chevron */}
         {canScrollLeft && (
           <div className="kanban-fade-left hidden lg:block" aria-hidden="true">
@@ -591,7 +594,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         {/* Actual scrollable column strip */}
         <div
           ref={scrollRef}
-          className="kanban-scroll overflow-x-auto overflow-y-auto lg:overflow-y-hidden h-full p-4 lg:p-8"
+          className="kanban-scroll overflow-x-auto overflow-y-auto lg:overflow-y-hidden overscroll-contain h-full p-4 lg:p-6"
           role="region"
           aria-label="Task board columns — scroll left or right to see more"
           tabIndex={0}
@@ -608,7 +611,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                     <div
                       key={column.id}
                       data-walkthrough={`bug-column-${column.id}`}
-                      className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                      className="w-full lg:w-80 flex flex-col gap-4 lg:min-h-0"
                     >
                       {/* Column Header */}
                       <div className="flex items-center justify-between shrink-0">
@@ -620,8 +623,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                         </div>
                       </div>
 
-                      {/* Bug Cards */}
-                      <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
+                      {/* Bug Cards — lg:min-h-0 keeps the list constrained so
+                          it scrolls internally instead of clipping; lg:pb-6
+                          gives the last card breathing room at the shell edge. */}
+                      <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto lg:min-h-0 lg:pb-6 overscroll-contain pr-0 lg:pr-2">
                         {columnBugs.map((bug) => (
                           <BugCard key={bug.id} bug={bug} />
                         ))}
@@ -638,7 +643,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                   <div
                     key={column.id}
                     data-walkthrough={`column-${column.id}`}
-                    className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                    className="w-full lg:w-80 flex flex-col gap-4 lg:min-h-0"
                     onDragOver={handleDragOver}
                     onDrop={(e) => handleDrop(e, column.id as TaskStatus | 'todo')}
                   >
@@ -676,8 +681,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                       )}
                     </div>
 
-                    {/* Tasks */}
-                    <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
+                    {/* Tasks — lg:min-h-0 keeps the list constrained so it
+                        scrolls internally instead of clipping; lg:pb-6 gives
+                        the last card breathing room at the shell edge. */}
+                    <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto lg:min-h-0 lg:pb-6 overscroll-contain pr-0 lg:pr-2">
                       {columnTasks.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-10 text-gray-300 select-none">
                           <InboxIcon className="w-7 h-7 mb-2" aria-hidden="true" />

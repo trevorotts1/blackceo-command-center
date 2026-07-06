@@ -148,14 +148,11 @@ export default function CEOPerformanceBoardPage() {
   });
 
   return (
+    /* v4.66.0: dropped the url('/holo-bg.png') backdrop — the file was never
+       shipped (404 on every load) so the board rendered on a broken-image
+       background. A quiet bcc-bg surface is the intended look. */
     <motion.div
-      className="min-h-screen relative"
-      style={{
-        backgroundImage: `url('/holo-bg.png')`,
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundRepeat: 'no-repeat',
-      }}
+      className="min-h-dvh relative bg-bcc-bg"
       variants={pageVariants}
       initial="hidden"
       animate="visible"
@@ -163,7 +160,7 @@ export default function CEOPerformanceBoardPage() {
       {/* Navigation Header */}
       <motion.header
         variants={sectionVariants}
-        className="sticky top-0 z-50 h-16 flex items-center justify-between gap-2 px-4 sm:px-6 bg-gray-100 shadow-sm"
+        className="sticky top-0 z-50 h-16 flex items-center justify-between gap-2 px-4 sm:px-6 bg-white/90 backdrop-blur border-b border-gray-200"
       >
         {/* LEFT - Company name pill */}
         <div className="flex items-center min-w-0">
@@ -253,7 +250,7 @@ export default function CEOPerformanceBoardPage() {
       </div>
 
       {/* Main Content */}
-      <main className="relative z-10 p-8">
+      <main className="relative z-10 px-4 py-6 sm:p-6 lg:p-8">
         <div className="max-w-[1600px] mx-auto space-y-6">
           {/* Breadcrumb */}
           <Breadcrumb

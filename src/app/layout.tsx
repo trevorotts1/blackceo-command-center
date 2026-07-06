@@ -44,10 +44,11 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 // Next 14 moved viewport out of the Metadata object into its own export.
+// maximumScale removed (v4.66.0): capping zoom at 1 blocked pinch-zoom on
+// mobile, a WCAG 1.4.4 failure. Layouts must survive zoom, not forbid it.
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 1,
 };
 
 export default function RootLayout({
@@ -57,7 +58,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
-      <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-screen`}>
+      {/* min-h-dvh (not 100vh): on mobile Safari 100vh includes the space
+          under the retractable URL bar, so “100vh” shells hid their last row
+          of content behind browser chrome — the bottom-cutoff bug (v4.66.0). */}
+      <body className={`${inter.className} bg-bcc-bg text-bcc-text min-h-dvh`}>
         {/* D2: per-client brand theme — re-themes brand-* utilities + --bcc-*
             variables from the selected client's primary color (BlackCEO green
             fallback). Mounted first so its :root vars are in the cascade. */}
@@ -69,7 +73,7 @@ export default function RootLayout({
         {/* pb-16 md:pb-0: reserves room for the fixed MobileNav bar below
             md so it never overlaps page content; no-op at md+ where
             MobileNav renders nothing. */}
-        <div className="min-h-screen pb-16 md:pb-0">{children}</div>
+        <div className="min-h-dvh pb-16 md:pb-0">{children}</div>
         <CommandPalette />
         {/* Mobile bottom nav (md:hidden) — replaces the retired AppShell
             sidebar's navigation affordance on phones. */}
