@@ -59,7 +59,12 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload } from '@/lib/task-lifecycle';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
-import { buildContextPack, renderContextPackSection } from '@/lib/context-pack';
+import {
+  buildContextPack,
+  renderContextPackSection,
+  matchSkillsForTask,
+  type MatchedSkill,
+} from '@/lib/context-pack';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
 
 // Statuses where dispatch must not re-fire.
@@ -722,6 +727,20 @@ ${stepLines.join('\n')}
         /* non-fatal — pack degrades gracefully */
       }
     }
+    // Layer A (departments-that-use-skills): match installed SKILL.md files to
+    // the task and hand the top-3 to the doer. Async (embeddings) so it runs
+    // BEFORE the synchronous pack builder; never throws (degrades to []).
+    let matchedSkills: MatchedSkill[] = [];
+    try {
+      matchedSkills = await matchSkillsForTask({
+        title: task.title,
+        description: task.description,
+        department: task.department,
+      });
+    } catch {
+      matchedSkills = [];
+    }
+
     const contextPack = (() => {
       try {
         return buildContextPack({
@@ -743,6 +762,7 @@ ${stepLines.join('\n')}
           },
           specialistType,
           sop: resolvedSopForPack,
+          matchedSkills,
         });
       } catch {
         return null;
