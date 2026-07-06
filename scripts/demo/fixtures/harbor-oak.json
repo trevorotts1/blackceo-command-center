@@ -1,0 +1,122 @@
+{
+  "_comment": "Command Center Demo Pack fixture — the ENTIRE fictional narrative for the 'Harbor & Oak Candle Co.' demo. Fictional data only; no real client PII, no real names, no secrets. Consumed by scripts/demo/seed-demo.ts. Per-department targetInputs drive the REAL computeCompanyHealth engine (we seed the four grading INPUTS and let the engine compute the letters — grades are never faked with a grade column).",
+  "company": {
+    "name": "Harbor & Oak Candle Co.",
+    "slug": "harbor-oak",
+    "industry": "E-commerce — hand-poured artisan candles & home fragrance",
+    "commandCenterName": "The Workshop",
+    "brandColor": "#1F6F54",
+    "brandSecondaryColor": "#C9A36B",
+    "connectedSystems": {
+      "payment": "Stripe (demo — sandboxed)",
+      "crm": "GoHighLevel (demo — sandboxed)",
+      "email": "Klaviyo (demo — sandboxed)",
+      "social": "Instagram + TikTok (demo — sandboxed)"
+    },
+    "companyKPIs": [
+      { "id": "monthly-revenue", "name": "Monthly Revenue", "target": 120000, "unit": "usd" },
+      { "id": "repeat-rate", "name": "Repeat Purchase Rate", "target": 38, "unit": "percent" },
+      { "id": "aov", "name": "Average Order Value", "target": 64, "unit": "usd" }
+    ]
+  },
+  "logoSvg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120' role='img' aria-label='Harbor and Oak'><rect width='120' height='120' rx='24' fill='#1F6F54'/><path d='M60 26c-9 10-16 19-16 29a16 16 0 0 0 32 0c0-10-7-19-16-29z' fill='#C9A36B'/><circle cx='60' cy='55' r='6' fill='#1F6F54'/><rect x='50' y='74' width='20' height='22' rx='3' fill='#F3ECE0'/><text x='60' y='112' font-family='Georgia, serif' font-size='13' fill='#F3ECE0' text-anchor='middle'>H&amp;O</text></svg>",
+  "departments": [
+    { "slug": "marketing", "name": "Marketing", "emoji": "📣", "headTitle": "Chief Marketing Officer", "grade": "A",
+      "targetInputs": { "throughput": 92, "qcPassRate": 93, "sopCoverage": 100, "kpiAttainment": 96 }, "taskCount": 8 },
+    { "slug": "sales", "name": "Sales", "emoji": "💰", "headTitle": "Head of Sales", "grade": "B",
+      "targetInputs": { "throughput": 82, "qcPassRate": 80, "sopCoverage": 78, "kpiAttainment": 84 }, "taskCount": 6 },
+    { "slug": "social-media", "name": "Social Media", "emoji": "📱", "headTitle": "Social Media Lead", "grade": "B",
+      "targetInputs": { "throughput": 86, "qcPassRate": 79, "sopCoverage": 80, "kpiAttainment": 80 }, "taskCount": 7 },
+    { "slug": "paid-advertisement", "name": "Paid Advertisement", "emoji": "🎯", "headTitle": "Paid Media Manager", "grade": "B",
+      "targetInputs": { "throughput": 80, "qcPassRate": 83, "sopCoverage": 75, "kpiAttainment": 85 }, "taskCount": 6 },
+    { "slug": "customer-support", "name": "Customer Support", "emoji": "💬", "headTitle": "Head of Customer Experience", "grade": "B",
+      "targetInputs": { "throughput": 88, "qcPassRate": 78, "sopCoverage": 84, "kpiAttainment": 79 }, "taskCount": 7 },
+    { "slug": "graphics", "name": "Graphics", "emoji": "🎨", "headTitle": "Creative Director", "grade": "B",
+      "targetInputs": { "throughput": 84, "qcPassRate": 82, "sopCoverage": 80, "kpiAttainment": 80 }, "taskCount": 6 },
+    { "slug": "web-development", "name": "Web Development", "emoji": "🌐", "headTitle": "Head of Web", "grade": "B",
+      "targetInputs": { "throughput": 85, "qcPassRate": 84, "sopCoverage": 82, "kpiAttainment": 83 }, "taskCount": 6 },
+    { "slug": "logistics-fulfillment", "name": "Logistics & Fulfillment", "emoji": "📦", "headTitle": "Fulfillment Lead", "grade": "C",
+      "targetInputs": { "throughput": 62, "qcPassRate": 58, "sopCoverage": 60, "kpiAttainment": 65 }, "taskCount": 9,
+      "trendDown": true,
+      "prevInputs": { "throughput": 86, "qcPassRate": 88, "sopCoverage": 82 } }
+  ],
+  "agents": [
+    { "name": "Atlas", "role": "Team Lead & Orchestrator", "emoji": "🦞", "isMaster": true, "workspace": "default", "status": "working", "persona": "Calm, decisive operator who keeps every department moving and unblocks fast." },
+    { "name": "Mara", "role": "Chief Marketing Officer", "emoji": "📣", "workspace": "marketing", "status": "working", "persona": "Story-first brand marketer; obsessed with scent narratives and seasonal launches." },
+    { "name": "Dev", "role": "Head of Sales", "emoji": "💰", "workspace": "sales", "status": "working", "persona": "Warm closer who runs wholesale outreach and gifting deals." },
+    { "name": "Nova", "role": "Social Media Lead", "emoji": "📱", "workspace": "social-media", "status": "working", "persona": "Trend-native creator; ships short-form daily and reads the comments." },
+    { "name": "Kai", "role": "Paid Media Manager", "emoji": "🎯", "workspace": "paid-advertisement", "status": "standby", "persona": "ROAS-driven media buyer; tests creative angles relentlessly." },
+    { "name": "Wren", "role": "Head of Customer Experience", "emoji": "💬", "workspace": "customer-support", "status": "working", "persona": "Empathetic problem-solver; turns a melted-in-transit candle into a loyal customer." },
+    { "name": "Iris", "role": "Creative Director", "emoji": "🎨", "workspace": "graphics", "status": "working", "persona": "Editorial art director; keeps every asset on the warm, earthy brand." },
+    { "name": "Cole", "role": "Head of Web", "emoji": "🌐", "workspace": "web-development", "status": "standby", "persona": "Conversion-focused web dev; ships fast PDP and checkout improvements." },
+    { "name": "Sage", "role": "Fulfillment Lead", "emoji": "📦", "workspace": "logistics-fulfillment", "status": "working", "persona": "Detail-driven ops lead currently firefighting a carrier delay and a returns backlog." }
+  ],
+  "taskPools": {
+    "marketing": ["Autumn 'Harvest & Ember' launch email flow", "Refresh the scent-story landing page copy", "Plan the holiday gift-set bundle campaign", "Draft Q4 influencer seeding brief", "Write the 'notes of oak & sea salt' blog post", "Segment lapsed buyers for a win-back offer", "Storyboard the new-arrival announcement", "A/B test the welcome-series subject lines"],
+    "sales": ["Follow up with 4 boutique wholesale leads", "Build the corporate gifting price sheet", "Close the spa-partnership sample order", "Draft a net-30 wholesale agreement", "Qualify inbound bulk-order form fills", "Prep the trade-show follow-up sequence"],
+    "social-media": ["Film 3 candle-pour reels for the week", "Schedule the TikTok 'scent of the month' series", "Reply to weekend comments + DMs", "Plan the UGC repost calendar", "Design the Instagram Story poll on next scent", "Draft captions for the harvest collection", "Recap top-performing posts for the month"],
+    "paid-advertisement": ["Refresh Meta creative for the harvest set", "Rebalance budget toward the winning ad set", "Launch a TikTok Spark Ads test", "Set up the abandoned-cart retargeting", "Audit the ROAS by scent category", "Draft new hook variations for cold traffic"],
+    "customer-support": ["Answer the melted-in-transit replacement queue", "Update the shipping-delay macro", "Handle the fragrance-sensitivity questions", "Process 3 gift-order address changes", "Write a scent-recommendation help doc", "Escalate the recurring wick-tunneling reports", "Close out the weekend ticket backlog"],
+    "graphics": ["Design the harvest collection hero image", "Update the PDP scent-note iconography", "Lay out the holiday gift-guide PDF", "Retouch the new candle photography", "Build the email header template set", "Create the wholesale line-sheet layout"],
+    "web-development": ["Speed up the product-detail page load", "Add the gift-message field at checkout", "Fix the mobile scent-filter bug", "Wire up the bundle-builder page", "Add the low-stock badge to PDPs", "Improve the cart-drawer upsell block"],
+    "logistics-fulfillment": ["Resolve the carrier delay on the harvest batch", "Clear the returns/replacements backlog", "Reconcile inventory after the miscount", "Re-pack the damaged-in-transit orders", "Update the packaging SOP for fragile glass", "Chase the late candle-jar supplier", "Audit the shipping-cost overruns", "Fix the mislabelled wax-melt SKUs", "Investigate the warehouse pick error rate"]
+  },
+  "sops": [
+    { "name": "Melted / Damaged-in-Transit Replacement", "slug": "cx-melted-replacement", "department": "customer-support", "steps": "1. Verify order + photo. 2. Offer replacement or refund. 3. File carrier claim. 4. Send apology + code.", "success": "Customer replied to, replacement created, claim filed." },
+    { "name": "New Scent Launch Playbook", "slug": "mkt-scent-launch", "department": "marketing", "steps": "1. Scent story brief. 2. Photography + copy. 3. Email flow. 4. Social + paid. 5. Post-launch recap.", "success": "Launch shipped on date with all assets QC-passed." },
+    { "name": "Reel Production Checklist", "slug": "social-reel-checklist", "department": "social-media", "steps": "1. Hook in first 2s. 2. On-brand color grade. 3. Captions. 4. CTA. 5. Schedule.", "success": "Reel published with caption + CTA." },
+    { "name": "Fragile Glass Packing Standard", "slug": "ops-fragile-packing", "department": "logistics-fulfillment", "steps": "1. Double-wall box. 2. Corner protectors. 3. Fragile label. 4. Photo before seal.", "success": "Order packed to standard with proof photo." },
+    { "name": "Paid Creative Refresh", "slug": "paid-creative-refresh", "department": "paid-advertisement", "steps": "1. Pull fatigued creative. 2. Draft 3 hooks. 3. Launch test. 4. Read ROAS at 72h.", "success": "New creative live, baseline logged." },
+    { "name": "PDP Conversion Fix", "slug": "web-pdp-fix", "department": "web-development", "steps": "1. Repro issue. 2. Fix + test mobile. 3. Ship. 4. Verify analytics.", "success": "Change shipped and verified on mobile + desktop." },
+    { "name": "Wholesale Lead Follow-Up", "slug": "sales-wholesale-followup", "department": "sales", "steps": "1. Qualify the boutique. 2. Send line sheet + samples. 3. Follow up in 3 days. 4. Log in CRM.", "success": "Lead qualified, samples sent, next step booked." },
+    { "name": "On-Brand Asset Delivery", "slug": "graphics-asset-delivery", "department": "graphics", "steps": "1. Brief + references. 2. Draft in brand palette. 3. Internal QC. 4. Export + hand off.", "success": "Asset delivered on-brand and QC-passed." }
+  ],
+  "campaigns": [
+    { "name": "Harvest & Ember — Autumn Launch", "description": "Cross-department push for the autumn scent collection: email, social, paid, and a gift-set bundle.", "status": "active", "departments": ["marketing", "social-media", "paid-advertisement", "graphics"] },
+    { "name": "Holiday Gifting 2026", "description": "Corporate + retail gifting program with wholesale outreach and a limited holiday bundle.", "status": "planning", "departments": ["sales", "marketing", "logistics-fulfillment"] }
+  ],
+  "conversation": {
+    "title": "The Workshop — Team Chat",
+    "messages": [
+      { "agent": "Atlas", "text": "Morning team — harvest launch is live. Marketing and Social, keep the momentum; Fulfillment, flag the carrier delay the moment it risks the ship-by date." },
+      { "agent": "Mara", "text": "Launch email went out to the win-back segment — open rate is tracking above our Q3 average." },
+      { "agent": "Nova", "text": "Three pour reels queued for the week, the 'oak & sea salt' one is already outperforming." },
+      { "agent": "Sage", "text": "Heads up: the carrier delay hit the harvest batch. Working the backlog and re-packing two damaged orders now." },
+      { "agent": "Wren", "text": "On it from the CX side — I've got the melted-in-transit replacements moving and I'm reusing the shipping-delay macro." },
+      { "agent": "Atlas", "text": "Good. Sage, if the delay slips past Friday, escalate and we'll comp shipping. Everyone else, stay the course." }
+    ]
+  },
+  "interview": {
+    "ownerId": "self",
+    "startedDate": "2026-06-30",
+    "lastUpdated": "2026-07-05",
+    "lastQuestionNumber": 19,
+    "phasesCompleteCount": 3,
+    "synthesis": "Harbor & Oak Candle Co. is a hand-poured, small-batch candle and home-fragrance brand selling direct-to-consumer online, with a growing wholesale side into boutiques and spas. The owner wants the brand to feel warm, grounded, and quietly premium — 'a calm room in a loud world' — and cares most about repeat customers who come back every season. They are 65% of the way through onboarding: identity and most of branding are captured; the brand color and the home-base name are the last two cards before the department board.",
+    "answers": [
+      { "id": "company_name", "prompt": "What is your company name?", "answer": "Harbor & Oak Candle Co.", "logged": "2026-06-30 14:22 UTC" },
+      { "id": "industry", "prompt": "What industry are you in?", "answer": "E-commerce — hand-poured artisan candles and home fragrance, direct-to-consumer with a growing wholesale side into boutiques and spas.", "logged": "2026-06-30 14:24 UTC" },
+      { "id": "brand_logo", "prompt": "Do you have a logo? Paste a public link to it (or upload one).", "answer": "Yes — the amber flame-and-jar mark on deep forest green. It's already loaded into the workspace.", "logged": "2026-06-30 14:31 UTC", "provenance": "confirmed-from-context: brand asset on file" },
+      { "id": "brand_evokes", "prompt": "What feeling do you want your brand to evoke?", "answer": "Calm and grounded — like walking into a warm, quiet room after a long, loud day. Understated, not flashy.", "logged": "2026-06-30 14:36 UTC" },
+      { "id": "customer_feeling", "prompt": "What feeling do you want your customers to leave with after working with you?", "answer": "Cared for. Like they treated themselves to something small and real that makes their home feel like theirs.", "logged": "2026-06-30 14:41 UTC" },
+      { "id": "brand_descriptors", "prompt": "What words would your best customer use to describe you?", "answer": "Cozy, honest, beautifully made, and 'the candle that actually smells like it says.'", "logged": "2026-06-30 14:45 UTC" },
+      { "id": "brand_voice", "prompt": "How would you describe your brand voice?", "answer": "Warm and unhurried, a little poetic but never precious. We talk about scent like a story, not a spec sheet.", "logged": "2026-07-05 10:12 UTC" },
+      { "id": "ideal_customer", "prompt": "Who is your ideal customer — and why do they come to YOU specifically?", "answer": "Women 30–55 who make their home a sanctuary and are tired of candles that look great and smell like nothing. They come to us because our scents are true and our burn is clean — and they come back every season for the new collection.", "logged": "2026-07-05 10:18 UTC" },
+      { "id": "unique_differentiator", "prompt": "Why do people come to YOU versus anyone else who does what you do?", "answer": "Honest scent and an honest burn. No synthetic 'fragrance oil' that fades in an hour, no tunneling. Real story, real throw, and packaging that survives the mail.", "logged": "2026-07-05 10:25 UTC" }
+    ],
+    "conversationalDepth": [
+      { "prompt": "How do orders usually come in today, and where do things get stuck?", "answer": "Most orders are online through the website; wholesale comes through a form and email. The stuck point is fulfillment when a carrier is slow or glass gets damaged — that's our weak spot right now.", "logged": "2026-07-05 10:31 UTC" },
+      { "prompt": "What does a great season look like for you a year from now?", "answer": "Repeat-purchase rate up near 40%, fulfillment complaints basically gone, and a holiday collection that sells through without me touching the day-to-day.", "logged": "2026-07-05 10:36 UTC" }
+    ],
+    "decidedDepartments": {
+      "marketing": "yes", "sales": "yes", "billing-finance": "yes", "customer-support": "yes",
+      "web-development": "yes", "graphics": "yes", "video": "later", "audio": "later",
+      "research": "yes", "communications": "yes", "crm": "yes", "openclaw-maintenance": "yes",
+      "legal": "yes", "social-media": "yes", "paid-advertisement": "yes", "personal-assistant": "yes",
+      "general-task": "yes", "project-architecture-office": "yes", "bugs": "yes", "healer": "yes",
+      "quality-control": "yes", "presentations": "later", "scheduling-dispatch": "no",
+      "logistics-fulfillment": "yes", "engineering": "later", "account-management": "yes"
+    },
+    "undecidedDepartments": ["app-development", "podcast"]
+  }
+}
