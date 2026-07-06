@@ -75,6 +75,9 @@ Auto-built for every zero-human company:
 ### The 30-Question Interview
 6 phases, ~35 minutes total. Pre-interview asset drop pre-fills 40%+ of answers. Behavioral interview (5 scenario-based questions) replaces value-based platitudes. Department customization bundled across 13 questions (not 1-per-dept).
 
+### The `/interview` Web Surface (v4.64)
+The Command Center ships LOCKED to `/interview` until the AI Workforce interview completes (WG-9 doctrine): consent → structured cards (identity → brand → operations) → conversational depth → department decision board → review → the triple-gated "Build my company" trigger. Continuity is server-derived from the canonical Skill-23 files: a refresh, a new browser, or a hop from Telegram resumes on the EXACT next unanswered question with every prior answer intact, the conversation session survives reloads, and facts already on file are offered as confirm-or-correct (recorded with `confirmed-from-context` provenance). The client↔route request contract is pinned by `tests/unit/interview-answer-contract.test.ts` against the route's own zod schema so the two can never drift.
+
 ### Universal How-To Template
 Every role's `how-to.md` follows the same 18-section structure: identity, persona governance, daily/weekly/monthly/quarterly ops, KPIs tied to revenue cascade, tools, SOPs, quality gates, handoffs, escalation paths, good/bad examples, common mistakes, research sources, edge cases, update triggers.
 

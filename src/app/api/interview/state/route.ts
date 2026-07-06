@@ -33,9 +33,67 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   derivedPercent,
   getInterviewGateSnapshot,
+  readAnswerBlocks,
   type GateFlags,
 } from '@/lib/interview/seam';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
+import {
+  computeAnsweredIds,
+  computeStructuredResume,
+} from '@/lib/interview/structured-progress';
+import { INTERVIEW_QUESTIONS } from '@/lib/interview-questions';
+import { getClientContext } from '@/lib/clients';
+import { loadCompanyConfig } from '@/lib/company-config';
+
+/* -------------------------------------------------------------------------- */
+/* known-context (memory) — facts already on file the interview can CONFIRM    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Facts the box already holds (clients row + company config) keyed by the
+ * structured question that asks for them. The UI prefills the matching card and
+ * offers "confirm or correct"; a confirm posts confirmedFromContext so the QC
+ * gate classifies it as confirmed-from-context, never fabricated. Values are
+ * read-only here; template/default values are filtered out so the owner is
+ * never asked to "confirm" a placeholder.
+ */
+function readKnownContext(): Record<string, { value: string; source: string }> {
+  const known: Record<string, { value: string; source: string }> = {};
+  try {
+    const client = getClientContext();
+    const name = (client?.name ?? '').trim();
+    // Placeholder names (fresh-box auto-seed rows) are NOT known facts.
+    const placeholderName = /^(default|this box(\s*\(operator\))?|operator)$/i.test(name);
+    if (name && !placeholderName) {
+      known.company_name = { value: name, source: 'client-record' };
+    }
+    if (client?.brand_color && String(client.brand_color).trim()) {
+      known.brand_primary_color = {
+        value: String(client.brand_color).trim(),
+        source: 'client-record',
+      };
+    }
+    if (client?.logo_url && String(client.logo_url).trim()) {
+      known.brand_logo = { value: String(client.logo_url).trim(), source: 'client-record' };
+    }
+  } catch {
+    /* fail-soft: no client context → nothing known */
+  }
+  try {
+    const cfg = loadCompanyConfig();
+    const industry = (cfg.industry ?? '').trim();
+    if (industry && !/^(unknown|general|template)$/i.test(industry)) {
+      known.industry = { value: industry, source: 'company-settings' };
+    }
+    const ccName = (cfg.commandCenterName ?? '').trim();
+    if (ccName && ccName.toLowerCase() !== 'command center') {
+      known.command_center_name = { value: ccName, source: 'company-settings' };
+    }
+  } catch {
+    /* fail-soft */
+  }
+  return known;
+}
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -81,8 +139,33 @@ export async function GET(request: NextRequest) {
 
     const percent = derivedPercent(lastQuestionNumber);
 
+    // ── Structured resume position (continuity) ──────────────────────────
+    // Which structured questions already carry a transcript answer, and the
+    // exact card index a paused owner resumes at. Computed from the canonical
+    // transcript (files win) through the same matcher the client folds over
+    // its mirrored question set — a refresh can never restart the deck.
+    const blocks = readAnswerBlocks(snap.buildState);
+    const answeredIds = computeAnsweredIds(blocks, INTERVIEW_QUESTIONS);
+    const structured = computeStructuredResume(INTERVIEW_QUESTIONS, answeredIds);
+
     return NextResponse.json({
       ok: true,
+
+      // ── Stable session + structured resume + known context ───────────
+      // interviewSessionId is READ-only here (never minted on a GET); the
+      // client uses it to key its gateway-session persistence.
+      session: {
+        interviewSessionId:
+          (snap.buildState?.interviewSessionId as string | undefined) ?? null,
+      },
+      structured: {
+        total: structured.total,
+        answeredIds: structured.answeredIds,
+        remainingIds: structured.remainingIds,
+        nextIndex: structured.nextIndex,
+        complete: structured.complete,
+      },
+      knownContext: readKnownContext(),
 
       // Top-level lifecycle signals (drive the locked-shell + redirect logic).
       interviewComplete: snap.interviewComplete,
@@ -148,6 +231,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       {
         ok: false,
+        session: { interviewSessionId: null },
+        structured: {
+          total: INTERVIEW_QUESTIONS.length,
+          answeredIds: [],
+          remainingIds: INTERVIEW_QUESTIONS.map((q) => q.id),
+          nextIndex: 0,
+          complete: false,
+        },
+        knownContext: {},
         interviewComplete: false,
         buildCompleted: false,
         qcStatus: 'pending',

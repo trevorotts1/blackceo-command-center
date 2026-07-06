@@ -46,11 +46,15 @@ function isValidLogoUrl(value: string): boolean {
 export default function LogoDropCard({
   question,
   sessionId,
+  questionNumber,
+  knownValue,
+  knownSource,
   onAnswered,
   onSkip,
   autoFocus,
 }: StructuredCardProps) {
-  const [value, setValue] = useState('');
+  // Memory: prefill with the logo already on file (confirm-or-correct).
+  const [value, setValue] = useState(knownValue ?? '');
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,12 +103,14 @@ export default function LogoDropCard({
     }
     if (busy) return;
     setBusy(true);
+    const confirmsKnown =
+      !!knownSource && !!knownValue && value.trim() === knownValue.trim();
     const result = await submitInterviewAnswer({
-      questionId: question.id,
-      storeOn: question.storeOn,
-      kind: 'url',
+      question,
       value: value.trim(),
+      questionNumber,
       sessionId,
+      confirmedFromContext: confirmsKnown ? knownSource : undefined,
     });
     setBusy(false);
     if (!result.ok) {
@@ -112,7 +118,7 @@ export default function LogoDropCard({
       return;
     }
     onAnswered({ question, value: value.trim(), data: result.data });
-  }, [busy, onAnswered, question, sessionId, value]);
+  }, [busy, knownSource, knownValue, onAnswered, question, questionNumber, sessionId, value]);
 
   const showPreview = valid && !previewFailed;
 

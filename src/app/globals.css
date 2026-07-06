@@ -760,6 +760,43 @@ body {
   color: var(--iv-danger);
 }
 
+/* Known-context note ("We already have this on file — confirm or change it"):
+   a calm accent-washed line above a prefilled control. */
+.iv-known-note {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--iv-accent-strong);
+  background: var(--iv-accent-wash);
+  border-radius: var(--iv-radius-sm);
+  padding: 0.5rem 0.75rem;
+}
+
+/* Circle-back chip (skipped-question queue on WelcomeBack / review). Rides the
+   accent tokens so it re-themes per client and flips in .iv-dark scopes. */
+.iv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: 999px;
+  border: 1px solid var(--iv-line-strong);
+  background: var(--iv-accent-wash);
+  color: var(--iv-accent-strong);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.375rem 0.75rem;
+  cursor: pointer;
+  transition: border-color var(--iv-dur-fast) var(--iv-ease),
+    background var(--iv-dur-fast) var(--iv-ease);
+}
+.iv-chip:hover:not(:disabled) {
+  border-color: var(--iv-accent-ring);
+}
+.iv-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 /* ── Color picker card ───────────────────────────────────────────────────────
    A single control: a native swatch + a text field that accept hex OR a name. */
 .iv-color-row {

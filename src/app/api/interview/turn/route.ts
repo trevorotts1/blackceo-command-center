@@ -375,7 +375,57 @@ export async function POST(req: NextRequest) {
     sessionId,
     reply: reply ?? null,
     // pending=true means the message was delivered but the interviewer's reply
-    // had not landed within the window — the UI can poll or resend to fetch it.
+    // had not landed within the window — the UI polls GET /api/interview/turn
+    // (below) to fetch it when it lands, instead of forcing a resend.
     pending: reply === null,
+    // Baseline agent-turn count for the recovery poll (?after=<agentCount>).
+    agentCount: baselineCount + (reply === null ? 0 : 1),
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* GET — pending-reply recovery (read-only)                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * GET /api/interview/turn?sessionId=<id>&after=<agentCount>
+ *
+ * The recovery read for a `pending` POST: when the interviewer's reply had not
+ * landed within the POST's bounded wait, the UI polls THIS endpoint until the
+ * next agent turn appears in session history. Pure read — it sends nothing,
+ * writes nothing, and reuses the exact same history parser as the POST path, so
+ * a slow model turn is no longer a dead-end that forces the owner to re-send.
+ *
+ * Response: { sessionId, reply: string|null, agentCount } — reply carries any
+ * agent text beyond `after` (joined), or null when nothing new has landed yet.
+ */
+export async function GET(req: NextRequest) {
+  const url = new URL(req.url);
+  const sessionId = (url.searchParams.get('sessionId') ?? '').trim();
+  const after = Math.max(0, parseInt(url.searchParams.get('after') ?? '0', 10) || 0);
+  if (!sessionId) {
+    return NextResponse.json(
+      { error: 'invalid_request', detail: 'sessionId is required' },
+      { status: 400 },
+    );
+  }
+
+  const conn = await connectOr503();
+  if (!conn.ok) return conn.response;
+
+  let texts: string[];
+  try {
+    texts = await agentTexts(conn.client, sessionId);
+  } catch {
+    // Older gateway without sessions.history — report "nothing yet" rather than
+    // a crash; the UI keeps its calm waiting state.
+    return NextResponse.json({ sessionId, reply: null, agentCount: after });
+  }
+
+  const fresh = texts.length > after ? texts.slice(after).join('\n\n') : null;
+  return NextResponse.json({
+    sessionId,
+    reply: fresh,
+    agentCount: texts.length,
   });
 }

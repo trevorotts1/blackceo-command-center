@@ -33,11 +33,15 @@ import {
 export default function ColorPickerCard({
   question,
   sessionId,
+  questionNumber,
+  knownValue,
+  knownSource,
   onAnswered,
   onSkip,
   autoFocus,
 }: StructuredCardProps) {
-  const [raw, setRaw] = useState('');
+  // Memory: prefill with the brand color already on file (confirm-or-correct).
+  const [raw, setRaw] = useState(knownValue ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const required = question.required === true;
@@ -60,14 +64,18 @@ export default function ColorPickerCard({
     }
     if (busy) return;
     setBusy(true);
+    const confirmsKnown =
+      !!knownSource &&
+      !!knownValue &&
+      resolution.hex.toLowerCase() === knownValue.trim().toLowerCase();
     const result = await submitInterviewAnswer({
-      questionId: question.id,
-      storeOn: question.storeOn,
-      kind: 'color',
+      question,
       // Persist the RESOLVED hex, not the raw name — this is the value the acceptance
       // ("resolveBrandColor-valid hex") and the live re-theme both depend on.
       value: resolution.hex,
+      questionNumber,
       sessionId,
+      confirmedFromContext: confirmsKnown ? knownSource : undefined,
     });
     setBusy(false);
     if (!result.ok) {
@@ -75,7 +83,7 @@ export default function ColorPickerCard({
       return;
     }
     onAnswered({ question, value: resolution.hex, data: result.data });
-  }, [busy, onAnswered, question, resolution.hex, sessionId, valid]);
+  }, [busy, knownSource, knownValue, onAnswered, question, questionNumber, resolution.hex, sessionId, valid]);
 
   return (
     <div className="iv-field-block">
