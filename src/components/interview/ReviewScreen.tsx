@@ -563,6 +563,24 @@ export default function ReviewScreen({
           ))
         )}
 
+        {/* ── keep a copy: the durable questions-and-answers document ──────
+            A byte-faithful download of the canonical answers file (every
+            question asked + every answer given), served read-only by
+            /api/interview/answers/export. */}
+        {rows.length > 0 && (
+          <p style={{ margin: 0, textAlign: 'right' }}>
+            <a
+              href="/api/interview/answers/export?download=1"
+              className={iv.btnQuiet}
+              download
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
+            >
+              <ClipboardList className="h-4 w-4" aria-hidden />
+              Download a copy of your answers
+            </a>
+          </p>
+        )}
+
         {/* ── skipped-question circle-back queue ────────────────────────── */}
         {skipped.length > 0 && (
           <SkippedQueue skipped={skipped} onCircleBack={onCircleBack} />

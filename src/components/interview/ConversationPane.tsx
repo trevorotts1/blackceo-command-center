@@ -23,6 +23,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Loader2, HelpCircle } from 'lucide-react';
 import { iv, ivcx, ivTransition, ivDurations, ivEase } from './interview-theme';
 import IDontKnowButton from './IDontKnowButton';
+import DictateAnswerButton from './DictateAnswerButton';
 
 export interface ConversationPaneProps {
   /** The current interviewer reaction or question intro. Empty string = no bubble yet. */
@@ -127,12 +128,20 @@ export default function ConversationPane({
                   onChange={(e) => onInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   rows={3}
-                  placeholder="Type your answer…"
+                  placeholder="Type or speak your answer…"
                   className={ivcx(
                     iv.input,
                     'flex-1 resize-none max-h-40 focus:outline-none',
                   )}
                   disabled={sending}
+                />
+                {/* Voice input: dictates into the SAME field, submitted via the
+                    same /api/interview/turn path as a typed answer. */}
+                <DictateAnswerButton
+                  value={input}
+                  onChange={onInput}
+                  disabled={sending}
+                  className="h-11 w-11 shrink-0"
                 />
                 <button
                   type="button"
