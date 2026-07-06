@@ -3818,6 +3818,13 @@ export function reseedWorkspacesFromConfig(
     const existsCheck = db.prepare('SELECT id FROM workspaces WHERE id = ?');
 
     for (const dept of depts) {
+      // Robustness guard (mirrors autoSeedFromDepartmentsJson): a bare-string or
+      // slug/id-less entry would throw and abort the whole reseed, dropping every
+      // department that follows it. Skip malformed entries, seed the rest.
+      if (!dept || typeof dept !== 'object' || (!dept.id && !dept.slug)) {
+        console.log('[reseed] Skipping malformed departments.json entry (no slug/id):', JSON.stringify(dept).slice(0, 80));
+        continue;
+      }
       const slugLower = String(dept.slug || dept.id || '').toLowerCase();
       const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo';
       const isGeneralTask = slugLower === 'general-task';
@@ -3911,6 +3918,17 @@ function autoSeedFromDepartmentsJson(db: Database.Database) {
     const companySlug = seedResult.companyId ?? 'default';
 
     for (const dept of depts) {
+      // Robustness guard: skip any entry that is not a usable department object.
+      // A departments.json that is an array of bare strings (a legacy/partial
+      // writer output), or that contains an object missing both `slug` and `id`,
+      // otherwise threw inside findCanonicalWorkspaceId / the INSERT below and
+      // ABORTED the entire seed loop — so one bad entry left the board with
+      // zero (or only the entries before it) departments. Skip-and-continue
+      // seeds every WELL-FORMED department instead of losing them all.
+      if (!dept || typeof dept !== 'object' || (!dept.id && !dept.slug)) {
+        console.log('[Auto-seed] Skipping malformed departments.json entry (no slug/id):', JSON.stringify(dept).slice(0, 80));
+        continue;
+      }
       // Board layout guarantee — two anchor rows on every seed:
       //   CEO / master-orchestrator → sort_order = 0   (always FIRST)
       //   General Tasks             → sort_order = 99999 (always LAST)

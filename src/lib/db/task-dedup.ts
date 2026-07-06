@@ -168,6 +168,13 @@ export function dedupeCanonicalWorkspaces(db: Database): WorkspaceDedupResult {
  * as the same department instead of creating a duplicate Kanban column.
  */
 export function findCanonicalWorkspaceId(db: Database, slug: string): string | null {
+  // Null-guard the input: a departments.json entry that is a bare string or an
+  // object missing both slug and id resolves to `undefined` here. Without this
+  // guard `slug.toLowerCase()` throws ("Cannot read properties of undefined"),
+  // and because the auto-seed loop calls this per department, ONE malformed
+  // entry aborted the WHOLE seed — leaving the board with zero/partial
+  // departments. Treat an unusable slug as "no canonical match".
+  if (!slug || typeof slug !== 'string') return null;
   const canon = canonicalDeptSlug(slug) || slug.toLowerCase();
   let rows: { id: string; slug: string }[];
   try {
