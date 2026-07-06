@@ -70,6 +70,33 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
   const [perfLoading, setPerfLoading] = useState(true);
   // E26: track where KPI data is coming from so we can label it honestly.
   const [perfError, setPerfError] = useState<string | null>(null);
+  // PRD 2.10: the REAL company health score/grade from src/lib/grading.ts —
+  // replaces the old departmentsWithTasks/doneRate/agentsPerDept formula below,
+  // which was headcount-dominated and unrelated to actual output quality.
+  const [companyHealth, setCompanyHealth] = useState<{ score: number | null; grade: string | null } | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+
+  // Load the real company health score (PRD 2.10 grading engine — throughput,
+  // QC pass rate, SOP coverage, KPI attainment). score === null means fewer
+  // than 2 of those four inputs have enough data yet — render "Insufficient
+  // data", never a fabricated number.
+  useEffect(() => {
+    async function loadCompanyHealth() {
+      try {
+        setHealthLoading(true);
+        const res = await fetch('/api/company-health');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as { score: number | null; grade: string | null };
+        setCompanyHealth({ score: data.score ?? null, grade: data.grade ?? null });
+      } catch (err) {
+        console.error('Failed to load company health:', err);
+        setCompanyHealth(null);
+      } finally {
+        setHealthLoading(false);
+      }
+    }
+    loadCompanyHealth();
+  }, []);
 
   // E26: Load aggregate performance metrics from the local Command Center DB.
   // Source: /api/performance reads the local SQLite task history — this reflects
@@ -141,13 +168,11 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
     const totalAgents = departments.reduce((sum, dept) => sum + (dept.agentCount || 0), 0);
     const doneRate = totalTasks > 0 ? totalDone / totalTasks : 0;
 
-    const totalDepartments = departments.length || 1; // dynamic, never hardcoded
-    const healthScoreRaw =
-      (departmentsWithTasks / totalDepartments) * 40 +
-      doneRate * 40 +
-      (totalAgents / totalDepartments) * 20;
-
-    const healthScore = Math.max(0, Math.min(100, Math.round(healthScoreRaw)));
+    // NOTE: healthScore used to be computed here as a headcount-dominated
+    // formula (departmentsWithTasks/total*40 + doneRate*40 + agentsPerDept*20)
+    // — removed. The real company health score comes from companyHealth.score
+    // (PRD 2.10 grading engine, /api/company-health) below, not from this derived
+    // per-department task/agent tally.
 
     return {
       departmentsWithTasks,
@@ -155,7 +180,6 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
       totalTasks,
       totalAgents,
       doneRate,
-      healthScore,
     };
   }, [departments]);
 
@@ -183,14 +207,21 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
     return items.slice(0, 3);
   }, [departments, metrics.doneRate]);
 
-  const scoreColor =
-    metrics.healthScore < 40
-      ? '#ef4444'
-      : metrics.healthScore <= 70
-        ? '#f59e0b'
-        : '#22c55e';
+  // Real score from /api/company-health. null (still loading, or fewer than 2
+  // of the four graded inputs have data) → honest "Insufficient data" state,
+  // never a fabricated number or color.
+  const healthScore = companyHealth?.score ?? null;
 
-  const gaugeDegrees = Math.round((metrics.healthScore / 100) * 360);
+  const scoreColor =
+    healthScore === null
+      ? '#9ca3af'
+      : healthScore < 40
+        ? '#ef4444'
+        : healthScore <= 70
+          ? '#f59e0b'
+          : '#22c55e';
+
+  const gaugeDegrees = healthScore === null ? 0 : Math.round((healthScore / 100) * 360);
 
   return (
     <main className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
@@ -205,7 +236,8 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
                 Company Health Score
               </h1>
               <p className="mt-3 text-base text-gray-500 sm:text-lg">
-                Based on active departments, task completion, and agent coverage.
+                Based on throughput, QC pass rate, SOP coverage, and KPI attainment
+                across departments (PRD 2.10 grading engine).
               </p>
 
               <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -237,27 +269,35 @@ export function CEODashboard({ workspace }: CEODashboardProps) {
                 />
                 <div className="absolute inset-[18px] rounded-full bg-white shadow-inner" />
                 <div className="relative z-10 text-center">
-                  <div className="text-6xl font-bold leading-none text-gray-900">
-                    {metrics.healthScore}
+                  <div className={`text-6xl font-bold leading-none ${healthScore === null ? 'text-gray-300' : 'text-gray-900'}`}>
+                    {healthLoading ? '…' : healthScore ?? '—'}
                   </div>
-                  <div className="mt-3 text-sm font-medium text-gray-500">out of 100</div>
+                  <div className="mt-3 text-sm font-medium text-gray-500">
+                    {healthScore === null ? '' : 'out of 100'}
+                  </div>
                   <div
                     className="mx-auto mt-4 inline-flex rounded-full px-3 py-1 text-xs font-semibold"
                     style={{
                       color: scoreColor,
                       backgroundColor:
-                        metrics.healthScore < 40
-                          ? '#fef2f2'
-                          : metrics.healthScore <= 70
-                            ? '#fffbeb'
-                            : '#f0fdf4',
+                        healthScore === null
+                          ? '#f3f4f6'
+                          : healthScore < 40
+                            ? '#fef2f2'
+                            : healthScore <= 70
+                              ? '#fffbeb'
+                              : '#f0fdf4',
                     }}
                   >
-                    {metrics.healthScore < 40
-                      ? 'Needs attention'
-                      : metrics.healthScore <= 70
-                        ? 'Stable'
-                        : 'Strong'}
+                    {healthLoading
+                      ? 'Loading…'
+                      : healthScore === null
+                        ? 'Insufficient data'
+                        : healthScore < 40
+                          ? 'Needs attention'
+                          : healthScore <= 70
+                            ? 'Stable'
+                            : 'Strong'}
                   </div>
                 </div>
               </div>

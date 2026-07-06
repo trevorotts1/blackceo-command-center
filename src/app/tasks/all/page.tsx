@@ -26,6 +26,7 @@ import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import { Breadcrumb } from '@/components/Breadcrumb';
+import type { Task } from '@/lib/types';
 
 export default function AllTasksPage() {
   const {
@@ -89,9 +90,41 @@ export default function AllTasksPage() {
     checkHealth();
     const interval = setInterval(checkHealth, 60000);
 
+    // SSE-fallback task refetch (mirrors src/app/workspace/[slug]/page.tsx):
+    // this page previously had no polling fallback at all for tasks — only
+    // the 60s /api/health ping above — so if SSE was blocked (proxy/firewall)
+    // the cross-department board would go stale indefinitely with no way to
+    // self-heal short of a manual reload. Reconcile the store only when the
+    // fetched set actually differs (count or any status) to avoid needless
+    // re-renders.
+    const taskPoll = setInterval(async () => {
+      try {
+        const res = await fetch('/api/tasks');
+        if (res.ok) {
+          const newTasks: Task[] = await res.json();
+          const currentTasks = useMissionControl.getState().tasks;
+
+          const hasChanges =
+            newTasks.length !== currentTasks.length ||
+            newTasks.some((t) => {
+              const current = currentTasks.find((ct) => ct.id === t.id);
+              return !current || current.status !== t.status;
+            });
+
+          if (hasChanges) {
+            debug.api('[FALLBACK] Task changes detected via polling, updating store');
+            setTasks(newTasks);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to poll tasks:', error);
+      }
+    }, 60000);
+
     return () => {
       cancelled = true;
       clearInterval(interval);
+      clearInterval(taskPoll);
     };
   }, [setAgents, setTasks, setEvents, setIsOnline, setIsLoading]);
 

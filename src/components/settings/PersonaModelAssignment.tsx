@@ -310,7 +310,7 @@ export function PersonaModelAssignment({
                               <button
                                 onClick={() => onResetModel(dept.id, role.id)}
                                 className="p-1.5 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition-colors flex-shrink-0"
-                                title="Reset to department default"
+                                title="Reset to inherited (clears the saved override for this agent)"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
                               </button>
@@ -343,7 +343,7 @@ export function PersonaModelAssignment({
                               <button
                                 onClick={() => onResetPersona(dept.id, role.id)}
                                 className="p-1.5 text-gray-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors flex-shrink-0"
-                                title="Reset to department default"
+                                title="Reset to inherited (clears the saved override for this agent)"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
                               </button>

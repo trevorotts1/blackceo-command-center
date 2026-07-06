@@ -473,6 +473,14 @@ export async function GET() {
  *
  * Saves model/persona assignments.
  * Body: { assignments: Array<{ department_id, role_id?, setting_type, value }> }
+ *
+ * BUG 3 FIX — clear semantics: `value === null` (or `''`) is an explicit
+ * instruction to CLEAR the matching agent_settings row (DELETE it), so a
+ * role/department reverts to inheriting the next layer up. Previously any
+ * falsy value (including an intentional clear) was silently skipped — there
+ * was no way to remove a saved override once set. A missing `value` key
+ * (`undefined`) is still a no-op for that assignment, same as before. Both
+ * upserts AND clears respect the same lock check below.
  */
 export async function PUT(request: NextRequest) {
   try {
@@ -482,7 +490,8 @@ export async function PUT(request: NextRequest) {
         department_id: string;
         role_id?: string | null;
         setting_type: 'model' | 'persona';
-        value: string;
+        /** `null` or `''` clears (deletes) the saved override. */
+        value: string | null;
       }>;
     };
 
@@ -495,10 +504,21 @@ export async function PUT(request: NextRequest) {
 
     const db = getDb();
 
+    // An assignment is actionable (upsert OR clear) when it targets a real
+    // department + setting_type and carries an explicit value (including
+    // null/'' for a clear). `value === undefined` means "nothing to do".
+    const isActionable = (a: { department_id?: string; setting_type?: string; value?: string | null }) =>
+      !!a.department_id &&
+      (a.setting_type === 'model' || a.setting_type === 'persona') &&
+      a.value !== undefined;
+    const isClear = (value: string | null) => value === null || value === '';
+
     // ── Model Lock Protocol ────────────────────────────────────────────
     // If the target setting is locked, the caller MUST present the matching
     // X-Lock-Token. Otherwise we 423 Locked with the lock_by/lock_reason so
     // the UI can render a clear "Locked by X for Y, request unlock?" CTA.
+    // Applies to clears exactly like upserts — a lock protects the row from
+    // being REMOVED without the token just as much as from being overwritten.
     const providedToken = request.headers.get('x-lock-token');
 
     const lockedConflict: Array<{
@@ -510,8 +530,7 @@ export async function PUT(request: NextRequest) {
     }> = [];
 
     for (const a of assignments) {
-      if (!a.department_id || !a.setting_type || !a.value) continue;
-      if (a.setting_type !== 'model' && a.setting_type !== 'persona') continue;
+      if (!isActionable(a)) continue;
       const roleId = a.role_id || null;
       const existing = db
         .prepare(
@@ -545,14 +564,19 @@ export async function PUT(request: NextRequest) {
 
     const upsert = db.transaction(() => {
       for (const a of assignments) {
-        if (!a.department_id || !a.setting_type || !a.value) {
-          continue;
-        }
-        if (a.setting_type !== 'model' && a.setting_type !== 'persona') {
-          continue;
-        }
+        if (!isActionable(a)) continue;
 
         const roleId = a.role_id || null;
+
+        if (isClear(a.value)) {
+          // BUG 3: explicit clear — delete the row so the department/role
+          // reverts to inheriting the next layer up (department default, or
+          // the auto-selector). A no-op if no override existed.
+          db.prepare(
+            'DELETE FROM agent_settings WHERE department_id = ? AND role_id IS ? AND setting_type = ?'
+          ).run(a.department_id, roleId, a.setting_type);
+          continue;
+        }
 
         // Check if setting already exists
         const existing = db.prepare(

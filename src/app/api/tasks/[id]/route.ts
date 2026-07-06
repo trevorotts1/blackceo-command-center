@@ -645,14 +645,35 @@ export async function DELETE(
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // Delete or nullify related records first (foreign key constraints)
-    // Note: task_activities and task_deliverables have ON DELETE CASCADE
+    // Delete or nullify related records first (foreign key constraints).
+    //
+    // Tables with `ON DELETE CASCADE` (task_history, planning_questions,
+    // planning_specs, task_activities, task_deliverables, task_events,
+    // task_qc_results) and `ON DELETE SET NULL` (execution_queue) are handled
+    // automatically by SQLite. The rows below are the ones whose FK to tasks(id)
+    // carries NO action clause — with `PRAGMA foreign_keys=ON` those references
+    // HARD-BLOCK the task delete, which is why DELETE returned a generic 500
+    // once a task had any persona-selection / persona-performance history (every
+    // task acquires those the moment the persona backfill sweep runs).
     run('DELETE FROM openclaw_sessions WHERE task_id = ?', [id]);
     run('DELETE FROM events WHERE task_id = ?', [id]);
-    // Conversations reference tasks - nullify or delete
+    // Conversations reference tasks - nullify (task_id is nullable there).
     run('UPDATE conversations SET task_id = NULL WHERE task_id = ?', [id]);
+    // persona_selection_log / persona_performance carry a plain (no-action) FK
+    // and a NOT NULL task_id, so they cannot be nullified — delete the
+    // task-scoped analytics rows. Guarded: older DBs may predate these tables.
+    try {
+      run('DELETE FROM persona_selection_log WHERE task_id = ?', [id]);
+    } catch (err) {
+      console.warn('[tasks DELETE] persona_selection_log cleanup skipped:', (err as Error).message);
+    }
+    try {
+      run('DELETE FROM persona_performance WHERE task_id = ?', [id]);
+    } catch (err) {
+      console.warn('[tasks DELETE] persona_performance cleanup skipped:', (err as Error).message);
+    }
 
-    // Now delete the task (cascades to task_activities and task_deliverables)
+    // Now delete the task (cascades to the ON DELETE CASCADE children above).
     run('DELETE FROM tasks WHERE id = ?', [id]);
 
     // Broadcast deletion via SSE

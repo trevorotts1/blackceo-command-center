@@ -115,9 +115,11 @@ export default function IntelligenceSettingsPage() {
   // tweaking filters never disturbs unsaved persona/model changes below.
   const [filterState, setFilterState] = useState<ModelFilterState>(EMPTY_FILTER_STATE);
 
-  // Local state for pending changes
+  // Local state for pending changes. `null` is an explicit "clear the saved
+  // override" instruction (BUG 3) — distinct from `undefined`, which means
+  // "no pending change at this key at all".
   const [pendingChanges, setPendingChanges] = useState<
-    Record<string, { model?: string; persona?: string }>
+    Record<string, { model?: string | null; persona?: string | null }>
   >({});
 
   const fetchData = useCallback(async () => {
@@ -172,40 +174,50 @@ export default function IntelligenceSettingsPage() {
     : false;
 
   const getEffectiveModel = (dept: AssignmentDepartment, role?: AssignmentRole): string => {
-    if (role) {
-      const pending = pendingChanges[`${dept.id}:${role.id}:model`];
-      if (pending?.model !== undefined) return pending.model;
-      return role.model;
+    const key = role ? `${dept.id}:${role.id}:model` : `${dept.id}:dept:model`;
+    const pending = pendingChanges[key];
+    if (pending && pending.model !== undefined) {
+      if (pending.model !== null) return pending.model;
+      // Staged clear (BUG 3) on a role override — preview what it will
+      // revert to: the department's effective model (its own pending edit,
+      // if any, else its saved value).
+      if (role) {
+        const deptPending = pendingChanges[`${dept.id}:dept:model`];
+        return deptPending?.model ?? dept.model;
+      }
+      return dept.model;
     }
-    const pending = pendingChanges[`${dept.id}:dept:model`];
-    if (pending?.model !== undefined) return pending.model;
-    return dept.model;
+    return role ? role.model : dept.model;
   };
 
   const getEffectivePersona = (dept: AssignmentDepartment, role?: AssignmentRole): string => {
-    if (role) {
-      const pending = pendingChanges[`${dept.id}:${role.id}:persona`];
-      if (pending?.persona !== undefined) return pending.persona;
-      return role.persona;
+    const key = role ? `${dept.id}:${role.id}:persona` : `${dept.id}:dept:persona`;
+    const pending = pendingChanges[key];
+    if (pending && pending.persona !== undefined) {
+      if (pending.persona !== null) return pending.persona;
+      // Staged clear on a role override — preview the department's effective persona.
+      if (role) {
+        const deptPending = pendingChanges[`${dept.id}:dept:persona`];
+        return deptPending?.persona ?? dept.persona;
+      }
+      return dept.persona;
     }
-    const pending = pendingChanges[`${dept.id}:dept:persona`];
-    if (pending?.persona !== undefined) return pending.persona;
-    return dept.persona;
+    return role ? role.persona : dept.persona;
   };
 
   const isModelInheritedFor = (dept: AssignmentDepartment, role: AssignmentRole): boolean => {
     const pending = pendingChanges[`${dept.id}:${role.id}:model`];
-    if (pending !== undefined) return false;
+    if (pending && pending.model !== undefined) return pending.model === null;
     return role.modelInherited;
   };
 
   const isPersonaInheritedFor = (dept: AssignmentDepartment, role: AssignmentRole): boolean => {
     const pending = pendingChanges[`${dept.id}:${role.id}:persona`];
-    if (pending !== undefined) return false;
+    if (pending && pending.persona !== undefined) return pending.persona === null;
     return role.personaInherited;
   };
 
-  const setModel = (key: string, value: string) => {
+  const setModel = (key: string, value: string | null) => {
     setPendingChanges((prev) => ({
       ...prev,
       [key]: { ...prev[key], model: value },
@@ -213,7 +225,7 @@ export default function IntelligenceSettingsPage() {
     setSaved(false);
   };
 
-  const setPersona = (key: string, value: string) => {
+  const setPersona = (key: string, value: string | null) => {
     setPendingChanges((prev) => ({
       ...prev,
       [key]: { ...prev[key], persona: value },
@@ -228,7 +240,7 @@ export default function IntelligenceSettingsPage() {
       `Apply "${modelLabel}" to ALL ${data.departments.length} departments?\n\nThis will override every department's current model setting. You can still review changes before saving.`
     );
     if (!confirmed) return;
-    const updates: Record<string, { model?: string; persona?: string }> = {};
+    const updates: Record<string, { model?: string | null; persona?: string | null }> = {};
     for (const dept of data.departments) {
       updates[`${dept.id}:dept:model`] = { model: modelId };
     }
@@ -251,20 +263,42 @@ export default function IntelligenceSettingsPage() {
     });
   };
 
+  // BUG 3 FIX: clicking "Reset to inherited" on a role override now
+  // distinguishes two cases:
+  //   - A persisted override exists on the server (role.modelInherited ===
+  //     false) → stage an explicit clear (value=null) so Save sends a
+  //     DELETE and the role actually reverts to inheriting the department
+  //     default. Previously this was unreachable: dropping a nonexistent
+  //     pending-change key was a silent no-op and the saved override could
+  //     never be removed through the UI.
+  //   - No persisted override, just an unsaved local edit → discard the
+  //     pending edit (original behavior; nothing to clear on the server).
   const handleResetRoleModel = (deptId: string, roleId: string) => {
-    setPendingChanges((prev) => {
-      const key = `${deptId}:${roleId}:model`;
-      const { [key]: _omit, ...rest } = prev;
-      return rest;
-    });
+    const dept = data?.departments.find((d) => d.id === deptId);
+    const role = dept?.roles.find((r) => r.id === roleId);
+    const key = `${deptId}:${roleId}:model`;
+    if (role && !role.modelInherited) {
+      setModel(key, null);
+    } else {
+      setPendingChanges((prev) => {
+        const { [key]: _omit, ...rest } = prev;
+        return rest;
+      });
+    }
   };
 
   const handleResetRolePersona = (deptId: string, roleId: string) => {
-    setPendingChanges((prev) => {
-      const key = `${deptId}:${roleId}:persona`;
-      const { [key]: _omit, ...rest } = prev;
-      return rest;
-    });
+    const dept = data?.departments.find((d) => d.id === deptId);
+    const role = dept?.roles.find((r) => r.id === roleId);
+    const key = `${deptId}:${roleId}:persona`;
+    if (role && !role.personaInherited) {
+      setPersona(key, null);
+    } else {
+      setPendingChanges((prev) => {
+        const { [key]: _omit, ...rest } = prev;
+        return rest;
+      });
+    }
   };
 
   const handleSave = async () => {
@@ -278,7 +312,8 @@ export default function IntelligenceSettingsPage() {
         department_id: string;
         role_id: string | null;
         setting_type: 'model' | 'persona';
-        value: string;
+        /** `null` clears (deletes) a saved override — BUG 3. */
+        value: string | null;
       }> = [];
 
       for (const [key, changes] of Object.entries(pendingChanges)) {
@@ -288,7 +323,10 @@ export default function IntelligenceSettingsPage() {
         const deptId = parts[0];
         const roleId = isDept ? null : parts[1];
 
-        if (changes.model && settingType === 'model') {
+        // BUG 3 FIX: check `!== undefined` (not truthy) so a staged clear
+        // (value === null, from "Reset to inherited" on a saved override)
+        // is actually sent to the server instead of being silently dropped.
+        if (changes.model !== undefined && settingType === 'model') {
           assignments.push({
             department_id: deptId,
             role_id: roleId,
@@ -296,7 +334,7 @@ export default function IntelligenceSettingsPage() {
             value: changes.model,
           });
         }
-        if (changes.persona && settingType === 'persona') {
+        if (changes.persona !== undefined && settingType === 'persona') {
           assignments.push({
             department_id: deptId,
             role_id: roleId,
@@ -312,7 +350,35 @@ export default function IntelligenceSettingsPage() {
         body: JSON.stringify({ assignments }),
       });
 
-      if (!res.ok) throw new Error('Failed to save');
+      if (!res.ok) {
+        // BUG 4 FIX: the PUT route 423s with { locked: [{ locked_by,
+        // lock_reason, department_id, role_id, setting_type }] } when a
+        // target setting is locked, but this previously always surfaced the
+        // generic "Failed to save" — the operator had no idea WHO locked it
+        // or WHY. Parse the body and build a message naming the lock holder.
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+          message?: string;
+          locked?: Array<{
+            department_id: string;
+            role_id: string | null;
+            setting_type: string;
+            locked_by: string;
+            lock_reason: string | null;
+          }>;
+        } | null;
+
+        if (res.status === 423 && body?.locked && body.locked.length > 0) {
+          const details = body.locked
+            .map((l) => {
+              const target = l.role_id ? `${l.setting_type} override for agent ${l.role_id}` : `${l.setting_type} default for ${l.department_id}`;
+              return `${target} is locked by ${l.locked_by}${l.lock_reason ? ` (${l.lock_reason})` : ''}`;
+            })
+            .join('; ');
+          throw new Error(`Save blocked — ${details}`);
+        }
+        throw new Error(body?.message || body?.error || 'Failed to save');
+      }
 
       setSaved(true);
       setPendingChanges({});
@@ -552,7 +618,7 @@ export default function IntelligenceSettingsPage() {
             }}
             defaultValue=""
             aria-label="Apply one model to all departments"
-            className="flex-1 min-w-[220px] px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
+            className="w-full sm:flex-1 sm:min-w-[220px] px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-brand-500 focus:border-transparent focus:outline-none"
           >
             <option value="" disabled>
               Select a model…

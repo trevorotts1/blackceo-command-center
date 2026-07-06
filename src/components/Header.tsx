@@ -13,15 +13,13 @@ import { SystemStatusPill } from './SystemStatusPill';
 
 // --- AI Settings model & persona options ---
 // openrouter/free intentionally removed — AF-MODEL-SOVEREIGNTY forbids it as a default.
-// Available models are loaded dynamically from the model_registry via the intelligence API.
-const MODEL_OPTIONS = [
-  { value: '', label: '— select a model —' },
-  { value: 'moonshot/kimi-k2.5', label: 'Kimi K2.5' },
-  { value: 'openrouter/xiaomi/mimo-v2-pro', label: 'MiMo V2 Pro' },
-  { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet' },
-  { value: 'openai-codex/gpt-5.4', label: 'GPT 5.4' },
-  { value: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash' },
-];
+// The static MODEL_OPTIONS array (Kimi/MiMo/Claude/GPT/Gemini) was removed —
+// it hardcoded an anthropic id and drifted from whatever is actually
+// installed. Both models and personas are now loaded dynamically from
+// /api/settings/intelligence (GET returns { models, personas, ... } sourced
+// from `model_registry`) when the AI panel opens — see the loadSettings
+// effect below.
+const DEFAULT_MODEL_OPTIONS = [{ value: '', label: '— select a model —' }];
 
 // Persona options are loaded dynamically from the API
 
@@ -55,6 +53,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const [aiSaved, setAiSaved] = useState(false);
   const [aiLoaded, setAiLoaded] = useState(false);
   const [personaOptions, setPersonaOptions] = useState<{value: string; label: string}[]>([{ value: 'auto', label: 'Auto-assign' }]);
+  const [modelOptions, setModelOptions] = useState<{value: string; label: string}[]>(DEFAULT_MODEL_OPTIONS);
   const aiPanelRef = useRef<HTMLDivElement>(null);
   const aiButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -176,6 +175,15 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
           if (data.personas) {
             setPersonaOptions(data.personas.map((p: {id: string; label: string}) => ({ value: p.id, label: p.label })));
           }
+          // Load dynamic model list from API (model_registry, PRD Section 3.2
+          // Fix #2). Always keep the "— select a model —" placeholder first
+          // so an unconfigured department shows unambiguously as such.
+          if (Array.isArray(data.models)) {
+            setModelOptions([
+              ...DEFAULT_MODEL_OPTIONS,
+              ...data.models.map((m: { id: string; label: string }) => ({ value: m.id, label: m.label })),
+            ]);
+          }
         }
       } catch (err) {
         console.error('Failed to load AI settings:', err);
@@ -276,10 +284,10 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const tasksInQueue = tasks.filter((t) => t.status !== 'done' && t.status !== 'review').length;
 
   return (
-    <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4">
+    <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between gap-2 px-3 sm:px-4">
       {/* Left: Logo & Title */}
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+        <div className="flex items-center gap-2 shrink-0">
           <img
             src={logoUrl}
             alt={LogoConfig.alt}
@@ -289,7 +297,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
         {/* Workspace indicator or back to dashboard */}
         {workspace ? (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <Link
               href="/"
               className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
@@ -297,18 +305,18 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
               <Home className="w-4 h-4" />
               <span>Home</span>
             </Link>
-            <span className="text-gray-300">/</span>
+            <span className="text-gray-300 hidden sm:inline">/</span>
             <Link
               href="/workspace"
-              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
+              className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
               <span>All Departments</span>
             </Link>
-            <span className="text-gray-300">/</span>
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg">
-              <span className="text-lg">{workspace.icon}</span>
-              <span className="font-semibold text-gray-900">{workspace.name}</span>
+            <span className="text-gray-300 hidden sm:inline">/</span>
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg min-w-0">
+              <span className="text-lg shrink-0">{workspace.icon}</span>
+              <span className="font-semibold text-gray-900 truncate">{workspace.name}</span>
             </div>
           </div>
         ) : (
@@ -317,14 +325,15 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 hover:border-gray-300 transition-colors"
           >
             <LayoutGrid className="w-4 h-4 text-gray-500" />
-            <span className="text-sm font-medium text-gray-700">All Departments</span>
+            <span className="hidden sm:inline text-sm font-medium text-gray-700">All Departments</span>
           </Link>
         )}
       </div>
 
-      {/* Center: Stats - only show in workspace view */}
+      {/* Center: Stats - only show in workspace view. Hidden below lg — at
+          375-1023px this row collided with the left/right clusters. */}
       {workspace && (
-        <div className="flex items-center gap-8">
+        <div className="hidden lg:flex items-center gap-8">
           <div className="text-center">
             <div className="text-2xl font-bold text-brand-600">{activeAgents}</div>
             <div className="text-sm text-gray-500 uppercase tracking-wide">Agents Active</div>
@@ -337,17 +346,17 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
       )}
 
       {/* Right: Time & Status */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2 sm:gap-4 shrink-0">
         <Link
           href="/operator"
           aria-label="Operator Console"
           title="Operator Console"
-          className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors"
+          className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
         >
           <Terminal className="w-4 h-4" />
           <span className="hidden sm:inline">Operator Console</span>
         </Link>
-        <span className="text-gray-500 text-sm font-mono">
+        <span className="hidden md:inline text-gray-500 text-sm font-mono">
           {currentTime ? (
             format(currentTime, 'HH:mm:ss')
           ) : (
@@ -486,9 +495,9 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
                       onChange={(e) => setAiModel(e.target.value)}
                       className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 pr-8 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition-colors"
                     >
-                      {MODEL_OPTIONS.map((m) => (
+                      {modelOptions.map((m) => (
                         <option key={m.value} value={m.value}>
-                          {m.label} ({m.value})
+                          {m.value ? `${m.label} (${m.value})` : m.label}
                         </option>
                       ))}
                     </select>
@@ -536,8 +545,9 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
         <button
           onClick={() => router.push('/settings')}
-          className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors"
+          className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
           title="Settings"
+          aria-label="Settings"
         >
           <Settings className="w-5 h-5" />
         </button>

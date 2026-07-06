@@ -77,7 +77,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   description TEXT,
-  status TEXT DEFAULT 'backlog' CHECK (status IN ('backlog', 'in_progress', 'review', 'blocked', 'done')),
+  -- 10-status board model, in lockstep with TaskStatus (src/lib/types.ts) and
+  -- validation.ts. Fresh databases get the widened CHECK directly; existing
+  -- databases were rebuilt by migration 076, which detects this widened form
+  -- and skips (its explicit "a future schema.ts ships the widened CHECK" path).
+  status TEXT DEFAULT 'backlog' CHECK (status IN ('backlog', 'inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'review', 'testing', 'blocked', 'done')),
   priority TEXT DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high', 'critical')),
   assigned_agent_id TEXT REFERENCES agents(id),
   created_by_agent_id TEXT REFERENCES agents(id),

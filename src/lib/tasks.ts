@@ -1317,6 +1317,24 @@ export async function createTaskCore(
     sopContext = loadSopSelectorContextById(sopId);
   }
 
+  // Department backfill (UI-created-task visibility fix): the operator UI
+  // create path (TaskModal -> POST /api/tasks) never sends `department`, only
+  // `workspace_id` — so without this, tasks.department is written as NULL for
+  // every UI-created task. The /tasks/all board's department filter chip
+  // compares `task.department === selectedDepartment` (a workspace-slug
+  // string), which NULL never matches, so those tasks silently vanished from
+  // any department-scoped view. `workspaceSlug` was already resolved above
+  // (from the workspaces table, keyed by the same workspaceId) for the
+  // persona selector further down — reuse it here too, canonicalized with the
+  // same canonicalDeptSlug() helper every other department write in this file
+  // uses, so a UI-created task lands with the same department value a
+  // department-tagged ingest task would get.
+  const resolvedDepartment = input.department
+    ? canonicalDeptSlug(input.department)
+    : workspaceSlug
+      ? canonicalDeptSlug(workspaceSlug)
+      : null;
+
   run(
     `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1330,7 +1348,7 @@ export async function createTaskCore(
       input.created_by_agent_id || null,
       workspaceId,   // NULL when no valid workspace found — avoids FK crash on 'default'
       input.business_id || null,
-      input.department ? canonicalDeptSlug(input.department) : null,
+      resolvedDepartment,
       input.due_date || null,
       sopId,
       now,

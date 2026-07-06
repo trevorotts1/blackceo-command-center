@@ -5,7 +5,10 @@
  * model inventory, selects the best model using:
  *   A. Nature + difficulty classification → purpose tier (heavy/mid/fast)
  *   B. Required modality hard-filter (vision tasks can NEVER resolve to text-only)
- *   C. Cascade: Ollama Cloud → OpenRouter open-source → Free (last resort)
+ *   C. Cascade: Ollama Cloud (`ollama-cloud/*`) → OpenRouter open-source /
+ *      self-hosted Ollama (`ollama-local/*`) → Free (last resort). See
+ *      `tierOf()` for the exact prefix matching — it must stay in sync with
+ *      whatever id shape each connector in `src/lib/model-providers/` emits.
  *   D. Tie-break: capability fit → version number → cost band
  *
  * Never returns 'openrouter/free'. Returns needs_owner_input when no valid
@@ -63,14 +66,36 @@ const OPENROUTER_OSS_PREFIXES = [
 
 type ModelTier = 1 | 2 | 3; // 1=OllamaCloud, 2=OpenRouterOSS, 3=Free
 
+/**
+ * BUG FIX (flagship cascade never firing): the real Ollama Cloud connector
+ * (`src/lib/model-providers/ollama-cloud.ts`) emits ids shaped
+ * `ollama-cloud/<model>` (e.g. `ollama-cloud/llama3.3:70b`,
+ * pricing_model 'flat_rate_plan') — NOT `ollama/<model>:cloud`. The original
+ * check here only matched the latter, so `ollama-cloud/*` never classified
+ * as Tier 1 and fell through to Tier 3 (free-only), where it was then
+ * filtered out entirely by the tier-3 `isFree` guard. Net effect: the
+ * advertised "Ollama Cloud → OpenRouter OSS → Free" cascade could NEVER
+ * actually select Ollama Cloud. Fixed by recognizing the real connector
+ * prefix; the legacy `ollama/<model>:cloud` shape is also still recognized
+ * for back-compat with existing fixtures/data written under the old shape.
+ *
+ * The self-hosted local connector (`ollama-local.ts`) emits
+ * `ollama-local/<model>` and is always unmetered/free (pricing_model
+ * 'free') — it is grouped into Tier 2 alongside OpenRouter open-source
+ * models (both are "run it yourself" open-weight options), same as the
+ * legacy no-`:cloud`-suffix `ollama/*` shape was already treated.
+ */
 function tierOf(modelId: string): ModelTier {
+  if (modelId.startsWith('ollama-cloud/')) return 1;
   if (modelId.startsWith('ollama/') && modelId.includes(':cloud')) return 1;
   if (OPENROUTER_OSS_PREFIXES.some((p) => modelId.startsWith(p))) return 2;
   // Anything openrouter/* not matched above that's free-tier goes to 3
   if (modelId.endsWith(':free') || modelId === 'openrouter/free') return 3;
   // Any other openrouter/* (proprietary routes) is NOT tier 2 — treat as 3
   if (modelId.startsWith('openrouter/')) return 3;
-  // Local ollama (no :cloud) — treat as tier 2 (open-source, local)
+  // Self-hosted local Ollama (unmetered, open-source) — Tier 2.
+  if (modelId.startsWith('ollama-local/')) return 2;
+  // Legacy local ollama shape (no :cloud suffix) — same tier-2 treatment.
   if (modelId.startsWith('ollama/')) return 2;
   return 3;
 }

@@ -126,6 +126,19 @@ async function seed() {
   // by Skill 23 (AI Workforce Interview) or by the auto-seed from
   // departments.json on first boot (migrations.ts). Until then the
   // bootstrap page renders.
+  // Structural prerequisite: agents.workspace_id defaults to 'default' with a
+  // FOREIGN KEY on workspaces(id), but nothing seeds a 'default' workspace
+  // (migration 002 deliberately seeds no departments — those come from Skill 23
+  // / departments.json). On a fresh database the Orchestrator INSERT below
+  // therefore failed with SQLITE_CONSTRAINT_FOREIGNKEY before any output.
+  // Guarantee the structural 'default' workspace exists (idempotent; carries no
+  // client/demo content — it is the schema's own DEFAULT target, not a
+  // department).
+  db.prepare(
+    `INSERT OR IGNORE INTO workspaces (id, name, slug, description, sort_order, created_at, updated_at)
+     VALUES ('default', 'General', 'default', 'Structural default workspace (schema DEFAULT target)', 50000, ?, ?)`
+  ).run(now, now);
+
   const existingMaster = db
     .prepare("SELECT id FROM agents WHERE is_master = 1 AND name = 'Orchestrator'")
     .get() as { id: string } | undefined;
