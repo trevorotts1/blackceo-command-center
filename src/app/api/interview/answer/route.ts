@@ -42,7 +42,6 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -53,6 +52,12 @@ import {
 } from '@/lib/interview/seam';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { answersFilePath } from '@/lib/interview/paths';
+import { mirrorCompanyAnswer } from '@/lib/interview/company-mirror';
+import {
+  answerRequestSchema,
+  isDataImageUrl,
+  type AnswerRequestBody,
+} from '@/lib/interview/answer-schema';
 import { INTERVIEW_QUESTIONS, type InterviewQuestion } from '@/lib/interview-questions';
 import { resolveBrandColor } from '@/lib/branding';
 import { getClientContext, updateClient } from '@/lib/clients';
@@ -68,26 +73,14 @@ const SYNTHETIC_HEADER = '# Workforce Interview Answers (Non-Interactive)';
 /** The GENUINE header the canonical writer (build-workforce.log_answer) stamps. */
 const GENUINE_HEADER = '# Workforce Interview Answers';
 
-const requestSchema = z.object({
-  // Preferred: the stable interview-questions.ts id (resolves prompt + storeOn).
-  questionId: z.string().min(1).max(128).optional(),
-  // The question text actually shown to the client. Required only when questionId
-  // is absent/unknown (so the transcript always records a real question line).
-  prompt: z.string().min(1).max(2000).optional(),
-  // The client's answer value (a color, a URL, or free text). Never empty.
-  answer: z.string().min(1).max(20000),
-  // Progress stamp inputs (pressed straight through to update-interview-state.sh).
-  phase: z.string().min(1).max(64).optional(),
-  questionNumber: z.number().int().min(0).max(100000).optional(),
-  // Who asked — provenance for the state stamp. Defaults to the web surface.
-  askedBy: z.string().min(1).max(128).optional(),
-  // When this answer CONFIRMS a known-context fact, the source is recorded as a
-  // `confirmed-from-context: <source>` provenance note inside the Q/A block, so
-  // qc-interview-completion.py check #5 classifies it as confirmed, not fabricated.
-  confirmedFromContext: z.string().min(1).max(256).optional(),
-});
-
-type AnswerBody = z.infer<typeof requestSchema>;
+/**
+ * The request schema lives in src/lib/interview/answer-schema.ts so the
+ * contract test (tests/unit/interview-answer-contract.test.ts) can parse the
+ * exact bodies the client-side buildAnswerPayload() produces with the route's
+ * REAL rules — any client/route drift fails CI instead of failing owners (the
+ * pre-v4.63 `value` vs `answer` bug 400'd every structured card submit).
+ */
+type AnswerBody = AnswerRequestBody;
 
 /** Human timestamp in the same style as build-workforce.log_answer's "%B %d, %Y at %I:%M %p". */
 function humanNow(): string {
@@ -158,7 +151,7 @@ export async function POST(req: NextRequest) {
   // 1) Validate the body.
   let body: AnswerBody;
   try {
-    body = requestSchema.parse(await req.json());
+    body = answerRequestSchema.parse(await req.json());
   } catch (err) {
     return NextResponse.json(
       { error: 'invalid_request', detail: err instanceof Error ? err.message : 'bad body' },
@@ -214,16 +207,27 @@ export async function POST(req: NextRequest) {
     transcriptAnswer =
       res.source === 'hex' ? res.hex : `${answer} (resolved brand color: ${res.hex})`;
   } else if (storeOn === 'client.logo_url') {
-    if (!isHttpUrl(answer)) {
+    if (isDataImageUrl(answer)) {
+      // File-drop path: the card carries the image inline as a data: URL. The
+      // FULL value mirrors onto clients.logo_url (so <BrandTheme/> renders it),
+      // but the transcript records a short, human line instead of a megabyte of
+      // base64 — the genuine answer is "uploaded a logo file", not the bytes.
+      logoUrl = answer.trim();
+      const mime = /^data:(image\/[a-z0-9.+-]+);/i.exec(logoUrl)?.[1] ?? 'image';
+      const approxKb = Math.max(1, Math.round((logoUrl.length * 3) / 4 / 1024));
+      transcriptAnswer = `Uploaded a logo file (${mime}, ~${approxKb} KB) — stored for the dashboard and brand materials.`;
+    } else if (isHttpUrl(answer)) {
+      logoUrl = answer.trim();
+    } else {
       return NextResponse.json(
         {
           error: 'invalid_logo_url',
-          message: 'Paste a public http(s) link to your logo (for example https://…/logo.png).',
+          message:
+            'Paste a public http(s) link to your logo (for example https://…/logo.png), or drop an image file.',
         },
         { status: 400 },
       );
     }
-    logoUrl = answer.trim();
   }
 
   // 4) CANONICAL WRITE #1 — append the genuine Q/A block to the transcript.
@@ -299,39 +303,76 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 6) DERIVED MIRROR — reflect branding answers onto the clients table so
-  //    BrandTheme re-themes live. Best-effort: a mirror failure NEVER unwinds the
-  //    canonical writes above (files win). Reports what landed / what warned.
+  // 6) DERIVED MIRROR — reflect answers onto their display-facing stores so the
+  //    Command Center the owner unlocks already carries what they said:
+  //      client.brand_color / client.logo_url → clients row (BrandTheme re-theme)
+  //      client.name                          → clients row (header / roster)
+  //      company.industry / commandCenterName → config/company-config.json
+  //    Best-effort: a mirror failure NEVER unwinds the canonical writes above
+  //    (files win). Reports what landed / what warned.
   let mirror:
-    | { column: 'brand_color' | 'logo_url'; value: string; ok: true }
-    | { column: 'brand_color' | 'logo_url'; value: string; ok: false; warning: string }
+    | { column: string; value: string; ok: true }
+    | { column: string; value: string; ok: false; warning: string }
     | null = null;
 
-  if (brandColorHex || logoUrl) {
-    const column: 'brand_color' | 'logo_url' = brandColorHex ? 'brand_color' : 'logo_url';
-    const value = (brandColorHex ?? logoUrl) as string;
+  const clientColumn: 'brand_color' | 'logo_url' | 'name' | null = brandColorHex
+    ? 'brand_color'
+    : logoUrl
+      ? 'logo_url'
+      : storeOn === 'client.name'
+        ? 'name'
+        : null;
+
+  if (clientColumn) {
+    const value = (brandColorHex ?? logoUrl ?? answer) as string;
     try {
       const client = getClientContext();
       if (!client?.id) {
         mirror = {
-          column,
+          column: clientColumn,
           value,
           ok: false,
-          warning: 'no client on record to mirror the branding answer onto (transcript still saved)',
+          warning: 'no client on record to mirror the answer onto (transcript still saved)',
         };
       } else {
-        const patch =
-          column === 'brand_color' ? { brand_color: value } : { logo_url: value };
-        updateClient(client.id, patch);
-        mirror = { column, value, ok: true };
+        updateClient(client.id, { [clientColumn]: value });
+        mirror = { column: clientColumn, value, ok: true };
       }
     } catch (err) {
       mirror = {
-        column,
+        column: clientColumn,
         value,
         ok: false,
         warning: err instanceof Error ? err.message : 'mirror upsert failed',
       };
+    }
+  } else if (
+    storeOn === 'company.industry' ||
+    storeOn === 'company.commandCenterName'
+  ) {
+    // Company-config mirror (atomic merge write; template repo copy untouched).
+    const key = storeOn === 'company.industry' ? 'industry' : 'commandCenterName';
+    try {
+      const ok = mirrorCompanyAnswer({ [key]: answer });
+      mirror = ok
+        ? { column: key, value: answer, ok: true }
+        : { column: key, value: answer, ok: false, warning: 'company-config mirror skipped' };
+    } catch (err) {
+      mirror = {
+        column: key,
+        value: answer,
+        ok: false,
+        warning: err instanceof Error ? err.message : 'company-config mirror failed',
+      };
+    }
+  }
+  // company_name additionally mirrors into company-config (the CEO Board title)
+  // alongside the clients-row name above — still best-effort, never blocking.
+  if (storeOn === 'client.name') {
+    try {
+      mirrorCompanyAnswer({ companyName: answer });
+    } catch {
+      /* non-fatal */
     }
   }
 

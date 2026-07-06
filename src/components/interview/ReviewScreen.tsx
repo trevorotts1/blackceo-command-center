@@ -424,10 +424,14 @@ export default function ReviewScreen({
     setSubmitting(true);
     setCompleteError(null);
     try {
+      // NOTE: the complete route's schema is STRICT ({customDeptIds?,
+      // implicitYesCustomIds?} only) — posting any other key (the old
+      // `sessionId`) failed validation with a 400 whenever a conversational
+      // session existed, killing the Build button. The trigger needs no body.
       const res = await fetch('/api/interview/complete', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId: sessionId ?? undefined }),
+        body: JSON.stringify({}),
       });
       const data = (await res.json().catch(() => ({}))) as CompleteResponse;
 
@@ -466,7 +470,7 @@ export default function ReviewScreen({
     } finally {
       setSubmitting(false);
     }
-  }, [allGatesPass, loadState, router, sessionId, submitting]);
+  }, [allGatesPass, loadState, router, submitting]);
 
   /* ---- renders: terminal screens first ---- */
 

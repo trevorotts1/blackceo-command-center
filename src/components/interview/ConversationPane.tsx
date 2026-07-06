@@ -74,7 +74,9 @@ export default function ConversationPane({
   };
 
   return (
-    <div className={ivcx('flex flex-col gap-6', className)}>
+    // aria-live: interviewer reactions + questions are announced to screen
+    // readers as they land (polite — never interrupts the owner mid-typing).
+    <div className={ivcx('flex flex-col gap-6', className)} aria-live="polite">
       {/* ── Warm Reaction Bubble ─────────────────────────────────────────────── */}
       <AnimatePresence mode="wait">
         {currentReaction && (

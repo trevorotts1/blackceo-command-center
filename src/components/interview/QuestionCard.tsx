@@ -32,44 +32,38 @@
 
 import { useCallback, useState } from 'react';
 import { motion } from 'framer-motion';
-import { HelpCircle } from 'lucide-react';
+import { HelpCircle, ShieldCheck } from 'lucide-react';
 import {
   iv,
   ivcx,
   ivQuestionVariants,
 } from '@/components/interview/interview-theme';
-import type {
-  InterviewAnswerKind,
-  InterviewQuestion,
-} from '@/lib/interview-questions';
+import type { InterviewQuestion } from '@/lib/interview-questions';
+import {
+  buildAnswerPayload,
+  type BuildAnswerPayloadArgs,
+} from '@/lib/interview/answer-payload';
+import { personalizePrompt } from '@/lib/interview/structured-progress';
 import ColorPickerCard from '@/components/interview/ColorPickerCard';
 import LogoDropCard from '@/components/interview/LogoDropCard';
 
 /* -------------------------------------------------------------------------- */
-/* /api/interview/answer contract (mirrors the P1-2 route — kept local so no   */
-/* Node import leaks into the client bundle)                                    */
+/* /api/interview/answer contract — built EXCLUSIVELY through                  */
+/* buildAnswerPayload() (src/lib/interview/answer-payload.ts), the shared      */
+/* client/route shape that tests/unit/interview-answer-contract.test.ts pins   */
+/* against the route's own zod schema. Never hand-shape this body again: the   */
+/* pre-v4.63 local shape ({value, storeOn, kind}) failed route validation and  */
+/* 400'd every structured card submit.                                         */
 /* -------------------------------------------------------------------------- */
 
-export interface AnswerRequest {
-  /** Stable question id from interview-questions.ts (persisted with the answer). */
-  questionId: string;
-  /** The tenant/company column this answer lands on (from the question's storeOn). */
-  storeOn: InterviewQuestion['storeOn'];
-  kind: InterviewAnswerKind;
-  /** The final, client-validated value (for color: the resolved #rrggbb hex). */
-  value: string;
-  /** Optional interview session to attribute the write to. */
-  sessionId?: string;
-}
+export type AnswerRequest = BuildAnswerPayloadArgs;
 
 export interface AnswerResponse {
   ok?: boolean;
   questionId?: string;
   storeOn?: string;
-  storedValue?: string;
-  /** Present for color answers — the hex the route persisted. */
-  resolvedHex?: string | null;
-  colorSource?: 'hex' | 'name' | 'unknown';
+  appended?: boolean;
+  stateStamped?: boolean;
   error?: string;
   message?: string;
 }
@@ -80,7 +74,8 @@ export type SubmitResult =
 
 /**
  * POST one structured answer to /api/interview/answer. The single network path
- * every card shares, so the request/response shape lives in exactly one place.
+ * every card shares; the body is shaped by buildAnswerPayload() so it can never
+ * drift from the route schema again (the contract test pins both sides).
  * Returns a discriminated result; the caller renders `message` inline on failure.
  */
 export async function submitInterviewAnswer(
@@ -91,7 +86,7 @@ export async function submitInterviewAnswer(
     res = await fetch('/api/interview/answer', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(req),
+      body: JSON.stringify(buildAnswerPayload(req)),
     });
   } catch {
     return {
@@ -100,20 +95,16 @@ export async function submitInterviewAnswer(
     };
   }
 
-  if (res.status === 503) {
-    const data = (await res.json().catch(() => ({}))) as AnswerResponse;
-    return {
-      ok: false,
-      status: 503,
-      message:
-        data.message ??
-        'Your interviewer is reconnecting. Your answers are safe — try again in a moment.',
-    };
-  }
-
   const data = (await res.json().catch(() => ({}))) as AnswerResponse;
 
   if (!res.ok) {
+    // SOFT success: the transcript append landed (`appended: true`) but the
+    // progress stamp failed (script missing / non-zero exit → 502/503). The
+    // answer is SAVED, so the owner advances instead of being dead-ended on a
+    // card they can never "fix"; the stamp self-heals on the next good save.
+    if (data.appended === true) {
+      return { ok: true, data };
+    }
     return {
       ok: false,
       status: res.status,
@@ -136,6 +127,18 @@ export interface StructuredCardProps {
   question: InterviewQuestion;
   /** Interview session to attribute the write to (optional). */
   sessionId?: string;
+  /** 1-based position of this question in the owner's journey (progress stamp). */
+  questionNumber?: number;
+  /** A value already on file for this question (memory/known-context). The card
+   *  prefills it and offers "confirm or correct"; confirming records
+   *  confirmed-from-context provenance instead of a fresh fabrication vector. */
+  knownValue?: string;
+  /** Where the known value came from (e.g. 'client-record') — sent as the
+   *  confirmed-from-context source when the owner confirms it unchanged. */
+  knownSource?: string;
+  /** Company name from an earlier answer — personalizes the ON-SCREEN prompt
+   *  copy only (the canonical prompt is always what gets recorded). */
+  companyName?: string | null;
   /** Called after a successful save so the parent can advance to the next Q. */
   onAnswered: (result: {
     question: InterviewQuestion;
@@ -162,11 +165,19 @@ const SECTION_LABEL: Record<InterviewQuestion['section'], string> = {
   operations: 'How you run',
 };
 
-export function QuestionHeader({ question }: { question: InterviewQuestion }) {
+export function QuestionHeader({
+  question,
+  companyName,
+}: {
+  question: InterviewQuestion;
+  companyName?: string | null;
+}) {
   return (
     <header>
       <p className={iv.eyebrow}>{SECTION_LABEL[question.section]}</p>
-      <h1 className={iv.question}>{question.prompt}</h1>
+      {/* Personalized copy is PRESENTATION only — the canonical question.prompt
+          is what buildAnswerPayload records, so matching/QC stay exact. */}
+      <h1 className={iv.question}>{personalizePrompt(question.prompt, companyName)}</h1>
       {question.help && (
         <p className={ivcx(iv.lede, 'iv-help')}>
           <HelpCircle
@@ -199,16 +210,22 @@ function textIsValid(value: string, required: boolean): boolean {
 function TextControl({
   question,
   sessionId,
+  questionNumber,
+  knownValue,
+  knownSource,
   onAnswered,
   onSkip,
   autoFocus,
 }: StructuredCardProps) {
-  const [value, setValue] = useState('');
+  // Memory: prefill with the value already on file so the owner confirms
+  // instead of re-typing. An untouched confirm records confirmed-from-context.
+  const [value, setValue] = useState(knownValue ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const required = question.required === true;
   // Longer, reflective branding prompts read better as a small textarea.
   const multiline = question.section === 'branding';
+  const hasKnown = !!(knownValue && knownValue.trim());
 
   const submit = useCallback(async () => {
     setError(null);
@@ -220,12 +237,14 @@ function TextControl({
     }
     if (busy) return;
     setBusy(true);
+    const confirmsKnown =
+      hasKnown && trimmed === (knownValue ?? '').trim() && !!knownSource;
     const result = await submitInterviewAnswer({
-      questionId: question.id,
-      storeOn: question.storeOn,
-      kind: question.kind,
+      question,
       value: trimmed,
+      questionNumber,
       sessionId,
+      confirmedFromContext: confirmsKnown ? knownSource : undefined,
     });
     setBusy(false);
     if (!result.ok) {
@@ -233,12 +252,39 @@ function TextControl({
       return;
     }
     onAnswered({ question, value: trimmed, data: result.data });
-  }, [busy, onAnswered, question, required, sessionId, value]);
+  }, [
+    busy,
+    hasKnown,
+    knownSource,
+    knownValue,
+    onAnswered,
+    question,
+    questionNumber,
+    required,
+    sessionId,
+    value,
+  ]);
 
   const canSubmit = !busy && textIsValid(value, required);
 
   return (
     <div className="iv-field-block">
+      {hasKnown && (
+        <p className="iv-known-note">
+          <ShieldCheck
+            aria-hidden
+            style={{
+              width: '1em',
+              height: '1em',
+              display: 'inline',
+              verticalAlign: '-0.15em',
+              marginRight: '0.4em',
+            }}
+          />
+          We already have this on file — confirm it below, or change it to
+          whatever&apos;s right.
+        </p>
+      )}
       {multiline ? (
         <textarea
           className={iv.field}
@@ -287,6 +333,11 @@ function TextControl({
         busy={busy}
         required={required}
         onSkip={onSkip ? () => onSkip(question) : undefined}
+        submitLabel={
+          hasKnown && value.trim() === (knownValue ?? '').trim()
+            ? 'Confirm & continue'
+            : 'Continue'
+        }
       />
     </div>
   );
@@ -353,7 +404,7 @@ export default function QuestionCard(props: StructuredCardProps) {
       animate="animate"
       exit="exit"
     >
-      <QuestionHeader question={question} />
+      <QuestionHeader question={question} companyName={props.companyName} />
 
       {question.kind === 'color' ? (
         <ColorPickerCard {...props} />
