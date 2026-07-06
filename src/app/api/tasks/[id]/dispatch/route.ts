@@ -16,6 +16,7 @@ import { listModels } from '@/lib/model-registry';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
+import { matchSkillsForTask, renderMatchedSkillsSection } from '@/lib/context-pack';
 
 /**
  * P1-5 FIX — no hardcoded operator home.
@@ -374,6 +375,21 @@ ${stepLines.join('\n')}
       ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
       : buildPersonaBlock(task, settings);
 
+    // Layer A (departments-that-use-skills): match installed SKILL.md files to
+    // the task and deliver the top-3 to the doer — parity with the auto path.
+    // Never throws (degrades to '').
+    let skillsBlock = '';
+    try {
+      const matchedSkills = await matchSkillsForTask({
+        title: task.title,
+        description: task.description,
+        department: task.department,
+      });
+      skillsBlock = renderMatchedSkillsSection(matchedSkills);
+    } catch {
+      skillsBlock = '';
+    }
+
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 
 **Title:** ${task.title}
@@ -384,7 +400,7 @@ ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
 ${personaSection}
 **Specialist Type:** ${specialistType}
-
+${skillsBlock}
 **OUTPUT DIRECTORY:** ${taskProjectDir}
 Create this directory and save all deliverables there.
 

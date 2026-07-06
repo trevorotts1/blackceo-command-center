@@ -59,6 +59,12 @@ import * as path from 'path';
 import os from 'os';
 import { queryOne } from '@/lib/db';
 import { detectPlatform, vaultRoot, zhcLibraryBaseDirs } from '@/lib/platform';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import {
+  getEmbeddingApiKey,
+  fetchEmbeddings,
+  cosineSimilarity,
+} from '@/lib/sop-embeddings';
 import type { SOP } from '@/lib/sops';
 import type { Agent, Task } from '@/lib/types';
 
@@ -73,6 +79,7 @@ export type DocPointerKind =
   | 'master-file'        // OpenClaw core file on THIS box (AGENTS/TOOLS/MEMORY)
   | 'teach-yourself'     // the teach-yourself protocol
   | 'research-source'    // where to research for this specialist type
+  | 'skill'              // an installed SKILL.md that matches this task (Layer A)
   | 'context-ref';       // an explicit pointer the CEO attached to the task
 
 /** A "here is WHERE the documentation lives" pointer. */
@@ -82,6 +89,36 @@ export interface DocPointer {
   location: string;       // absolute path, URL, or a stable descriptor
   why?: string;           // why it matters for THIS task
   /** true when `location` is a filesystem path that exists on this box right now. */
+  resolvable: boolean;
+}
+
+/**
+ * A skill (SKILL.md) matched to this task by the Layer-A skill-matcher.
+ *
+ * Departments-that-use-skills: the CEO does not just route to a specialist, it
+ * also hands over the installed capabilities (skills) most relevant to the task
+ * so the doer reaches for the right playbook instead of reinventing it.
+ */
+export interface MatchedSkill {
+  /** Skill name (SKILL.md frontmatter `name:`, else the skill directory name). */
+  name: string;
+  /** One-line capability description from the SKILL.md frontmatter (may be ''). */
+  description: string;
+  /** Absolute path to the SKILL.md on this box. */
+  location: string;
+  /**
+   * Match strength. For `semantic` this is the cosine similarity (0–1); for
+   * `keyword` it is the raw weighted keyword-hit count.
+   */
+  score: number;
+  /** How the match was scored — semantic (embedding) or keyword fallback. */
+  matchKind: 'semantic' | 'keyword';
+  /**
+   * Canonical department slugs this skill is scoped to per the onboarding
+   * skill-department-map.json. Empty = unmapped / globally available.
+   */
+  departments: string[];
+  /** true when `location` resolves on disk right now. */
   resolvable: boolean;
 }
 
@@ -110,6 +147,12 @@ export interface ContextPack {
   doc_pointers: DocPointer[];
   /** Research sources keyed by specialist type / department domain. */
   research_sources: DocPointer[];
+  /**
+   * Layer-A skill matches (top-N installed SKILL.md files scored against the
+   * task text, dept-scoped via the onboarding skill-department-map.json).
+   * Empty when the box has no skills, none match, or matching is disabled.
+   */
+  matched_skills: MatchedSkill[];
   /** At least one doc pointer resolved on disk (the §4 DONE acceptance condition). */
   has_resolvable_pointer: boolean;
   /** Non-fatal degradations (missing dept dir, no SOP, etc.) for observability. */
@@ -135,6 +178,12 @@ export interface BuildContextPackInput {
   } | null;
   /** W4.1 — optional doc pointers the CEO attached to the ingest payload. */
   contextRefs?: string[] | string | null;
+  /**
+   * Layer-A skill matches, pre-computed by `matchSkillsForTask()` at the
+   * dispatch call site (it is async — embeddings — so it runs BEFORE this
+   * synchronous builder and its result is threaded in here). Defaults to [].
+   */
+  matchedSkills?: MatchedSkill[] | null;
 }
 
 // ── Path helpers ─────────────────────────────────────────────────────────────
@@ -232,7 +281,11 @@ const STOPWORDS = new Set([
   'that', 'your', 'you', 'it', 'is', 'are', 'be', 'do', 'does', 'task', 'new',
 ]);
 
-function keywordsFromTask(task: BuildContextPackInput['task']): string[] {
+function keywordsFromTask(task: {
+  title?: string | null;
+  description?: string | null;
+  department?: string | null;
+}): string[] {
   const haystack = `${task.title ?? ''} ${task.description ?? ''} ${task.department ?? ''}`;
   return Array.from(
     new Set(
@@ -466,6 +519,7 @@ export function buildContextPack(input: BuildContextPackInput): ContextPack {
       core_excerpts,
       doc_pointers,
       research_sources,
+      matched_skills: input.matchedSkills ?? [],
       has_resolvable_pointer,
       notes,
     };
@@ -483,6 +537,7 @@ export function buildContextPack(input: BuildContextPackInput): ContextPack {
       core_excerpts,
       doc_pointers: doc_pointers.length ? doc_pointers : [teachYourself],
       research_sources: [teachYourself],
+      matched_skills: input.matchedSkills ?? [],
       has_resolvable_pointer: teachYourself.resolvable,
       notes,
     };
@@ -528,6 +583,13 @@ export function renderContextPackSection(pack: ContextPack): string {
     }
   }
 
+  // Layer-A skill matches (rendered by the shared helper so the manual dispatch
+  // route — which does not build a full ContextPack — renders them identically).
+  if (pack.matched_skills && pack.matched_skills.length > 0) {
+    const skillsBlock = renderMatchedSkillsSection(pack.matched_skills);
+    if (skillsBlock) lines.push(skillsBlock);
+  }
+
   if (pack.notes.length > 0) {
     lines.push('');
     lines.push(`_(context-pack notes: ${pack.notes.join('; ')})_`);
@@ -535,6 +597,382 @@ export function renderContextPackSection(pack: ContextPack): string {
 
   lines.push('');
   return lines.join('\n');
+}
+
+/**
+ * Render the "SKILLS AVAILABLE FOR THIS TASK" block for the dispatch message.
+ *
+ * Standalone (not tied to a full ContextPack) so BOTH dispatch sites can splice
+ * it in: the auto path renders it via `renderContextPackSection` (the pack
+ * carries `matched_skills`), and the manual dispatch route — which does not
+ * build a full pack — calls this directly with the `matchSkillsForTask()` result.
+ *
+ * Returns '' when there are no matches so it is a no-op to concatenate.
+ */
+export function renderMatchedSkillsSection(skills: MatchedSkill[]): string {
+  if (!skills || skills.length === 0) return '';
+  const lines: string[] = [];
+  lines.push('');
+  lines.push('**🧠 SKILLS AVAILABLE FOR THIS TASK:**');
+  lines.push(
+    '_These installed skills match this task. Read the SKILL.md, then USE the ' +
+      'skill if it fits — do not reinvent a capability you already have:_',
+  );
+  for (const s of skills) {
+    const confidence =
+      s.matchKind === 'semantic'
+        ? `semantic ${s.score.toFixed(3)}`
+        : `keyword ${s.score}`;
+    const desc = s.description ? ` — ${s.description}` : '';
+    lines.push(`- **${s.name}** (${confidence}) — \`${s.location}\`${desc}`);
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+// ── Layer A — task → skill matcher ────────────────────────────────────────────
+//
+// Departments-that-use-skills: score the box's installed SKILL.md files against
+// the task text and hand the doer the top matches. Reuses the SAME embedding +
+// cosine machinery as the department-router (client's own key, floor ~0.55,
+// keyword fallback when no key). Dept-scoped via the onboarding
+// skill-department-map.json. NEVER throws — degrades to [] on any error so the
+// dispatch hot path is never blocked.
+
+/** Confidence floor for a semantic skill match. Env: SKILL_MATCH_FLOOR (0–1). */
+const SKILL_MATCH_FLOOR: number = (() => {
+  const env = process.env.SKILL_MATCH_FLOOR;
+  if (env) {
+    const parsed = parseFloat(env);
+    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) return parsed;
+  }
+  return 0.55;
+})();
+
+/** Global-scope tokens in the skill-department-map (skill available to all depts). */
+const SKILL_GLOBAL_TOKENS = new Set(['*', 'all', 'global', 'any', 'core', 'shared']);
+
+/** Cap the filesystem walk so a misconfigured root can never hang dispatch. */
+const SKILL_WALK_MAX_DEPTH = 4;
+const SKILL_WALK_MAX_FILES = 800;
+
+interface SkillCandidate {
+  name: string;
+  description: string;
+  location: string;
+  departments: string[];
+}
+
+/**
+ * Roots to scan for SKILL.md files. Env-overridable via SKILL_SEARCH_ROOTS or
+ * CC_SKILL_ROOTS (":" or "," separated). Defaults probe the common on-box skill
+ * install locations + the onboarding-shipped skills tree, per-platform.
+ */
+function skillSearchRoots(): string[] {
+  const roots: string[] = [];
+  const envRoots = process.env.CC_SKILL_ROOTS || process.env.SKILL_SEARCH_ROOTS;
+  if (envRoots && envRoots.trim()) {
+    for (const r of envRoots.split(/[:,]/).map((s) => s.trim()).filter(Boolean)) {
+      roots.push(r);
+    }
+    // When roots are pinned explicitly, honour ONLY those (test/CI determinism).
+    return Array.from(new Set(roots));
+  }
+
+  const home = homeDir();
+  roots.push(path.join(home, '.claude', 'skills'));
+  roots.push(path.join(home, '.openclaw', 'skills'));
+  roots.push(path.join(vaultRoot(), 'skills'));
+  for (const base of [vaultRoot(), path.join(home, 'clawd'), path.join(home, '.openclaw', 'workspace')]) {
+    roots.push(path.join(base, 'openclaw-onboarding', 'skills'));
+  }
+  return Array.from(new Set(roots.filter(Boolean)));
+}
+
+/** Recursively find SKILL.md files under the given roots (depth + count capped). */
+function findSkillFiles(roots: string[]): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+
+  const walk = (dir: string, depth: number): void => {
+    if (found.length >= SKILL_WALK_MAX_FILES || depth > SKILL_WALK_MAX_DEPTH) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (found.length >= SKILL_WALK_MAX_FILES) return;
+      if (e.name === 'node_modules' || (e.name.startsWith('.') && e.name !== '.claude')) continue;
+      const full = path.join(dir, e.name);
+
+      // Resolve type. Symlinked skill dirs (common for plugin skills under
+      // ~/.claude/skills) report isFile()===isDirectory()===false on the Dirent,
+      // so a symlink is stat-followed to recover its real type. The depth cap
+      // guards against symlink cycles.
+      let isFile = e.isFile();
+      let isDir = e.isDirectory();
+      if (e.isSymbolicLink()) {
+        try {
+          const st = fs.statSync(full);
+          isFile = st.isFile();
+          isDir = st.isDirectory();
+        } catch {
+          continue;
+        }
+      }
+
+      if (isFile) {
+        if (e.name === 'SKILL.md' && !seen.has(full)) {
+          seen.add(full);
+          found.push(full);
+        }
+        continue;
+      }
+      if (isDir) walk(full, depth + 1);
+    }
+  };
+
+  for (const r of roots) walk(r, 0);
+  return found;
+}
+
+/**
+ * Parse the minimal metadata from a SKILL.md: `name` + `description` from the
+ * YAML frontmatter, falling back to the skill's directory name for `name`.
+ */
+function parseSkillMeta(skillPath: string): { name: string; description: string } | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(skillPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const dirName = path.basename(path.dirname(skillPath));
+  let name = dirName;
+  let description = '';
+
+  const fm = /^---\s*\r?\n([\s\S]*?)\r?\n---/m.exec(content);
+  const block = fm ? fm[1] : content.slice(0, 4000);
+
+  const nameM = /^name:\s*["']?(.+?)["']?\s*$/im.exec(block);
+  if (nameM && nameM[1].trim()) name = nameM[1].trim();
+
+  const descM = /^description:\s*(?:[>|][-+]?\s*)?["']?(.+?)["']?\s*$/im.exec(block);
+  if (descM && descM[1].trim()) description = descM[1].trim();
+
+  return { name: name || dirName, description };
+}
+
+/**
+ * Resolve the onboarding skill-department-map.json. Env-overridable via
+ * SKILL_DEPARTMENT_MAP or CC_SKILL_DEPARTMENT_MAP (absolute file path).
+ * Returns null when no map is present (skills then treated as globally scoped).
+ */
+function resolveSkillDeptMapPath(): string | null {
+  const env = process.env.CC_SKILL_DEPARTMENT_MAP || process.env.SKILL_DEPARTMENT_MAP;
+  if (env && env.trim()) return existsSafe(env.trim()) ? env.trim() : null;
+
+  const home = homeDir();
+  const candidates: string[] = [];
+  for (const base of [vaultRoot(), path.join(home, 'clawd'), path.join(home, '.openclaw', 'workspace')]) {
+    candidates.push(path.join(base, 'openclaw-onboarding', 'skill-department-map.json'));
+  }
+  candidates.push(path.join(home, '.claude', 'skills', 'skill-department-map.json'));
+  const hit = firstExisting(candidates);
+  return hit.resolvable ? hit.path : null;
+}
+
+/**
+ * Load + normalize the skill-department-map to `skill-name → canonical-dept-slug[]`.
+ *
+ * Accepts three shapes (in precedence order):
+ *   1. `{ "departments": { "<dept>": ["skill", …] } }`  (dept → skills)
+ *   2. `{ "skills": { "<skill>": ["dept", …] } }`        (skill → depts)
+ *   3. bare `{ "<skill>": ["dept", …] }`                 (skill → depts)
+ *
+ * Global tokens (*, all, global, …) are preserved as `*` so a skill can be
+ * mapped to every department. Returns null when no usable map is found.
+ */
+function loadSkillDeptMap(): Map<string, string[]> | null {
+  const p = resolveSkillDeptMapPath();
+  if (!p) return null;
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+
+  const map = new Map<string, string[]>();
+  const canon = (d: string): string =>
+    SKILL_GLOBAL_TOKENS.has(d.trim().toLowerCase()) ? '*' : canonicalDeptSlug(d);
+  const addSkill = (skill: string, depts: string[]): void => {
+    const key = skill.trim().toLowerCase();
+    if (!key) return;
+    const cur = map.get(key) ?? [];
+    map.set(key, Array.from(new Set([...cur, ...depts.map(canon).filter(Boolean)])));
+  };
+
+  const obj = raw as Record<string, unknown>;
+  const deptContainer =
+    obj.departments && typeof obj.departments === 'object'
+      ? (obj.departments as Record<string, unknown>)
+      : null;
+  const skillContainer =
+    obj.skills && typeof obj.skills === 'object' ? (obj.skills as Record<string, unknown>) : null;
+
+  if (deptContainer) {
+    for (const [dept, skills] of Object.entries(deptContainer)) {
+      if (Array.isArray(skills)) {
+        for (const s of skills) if (typeof s === 'string') addSkill(s, [dept]);
+      }
+    }
+  } else if (skillContainer) {
+    for (const [skill, depts] of Object.entries(skillContainer)) {
+      if (Array.isArray(depts)) addSkill(skill, depts.filter((x): x is string => typeof x === 'string'));
+    }
+  } else {
+    // Bare shape — interpret keys as skill names → department arrays.
+    for (const [skill, depts] of Object.entries(obj)) {
+      if (Array.isArray(depts)) addSkill(skill, depts.filter((x): x is string => typeof x === 'string'));
+    }
+  }
+
+  return map.size > 0 ? map : null;
+}
+
+/**
+ * Whether a skill is in-scope for the task's department.
+ *   - no department on the task → every skill is a candidate.
+ *   - no map, or skill absent from the map → unscoped (globally available).
+ *   - skill mapped to a global token (*) → available to all departments.
+ *   - otherwise → in-scope only if the mapped depts include the task's dept.
+ */
+function skillAllowedForDept(
+  keys: string[],
+  deptCanon: string | null,
+  map: Map<string, string[]> | null,
+): { allowed: boolean; departments: string[] } {
+  if (!map) return { allowed: true, departments: [] };
+  let entry: string[] | undefined;
+  for (const k of keys) {
+    const e = map.get(k.toLowerCase());
+    if (e) {
+      entry = e;
+      break;
+    }
+  }
+  if (!entry || entry.length === 0) return { allowed: true, departments: [] };
+  if (!deptCanon) return { allowed: true, departments: entry };
+  if (entry.includes('*')) return { allowed: true, departments: entry };
+  return { allowed: entry.includes(deptCanon), departments: entry };
+}
+
+function toMatchedSkill(
+  c: SkillCandidate,
+  score: number,
+  matchKind: MatchedSkill['matchKind'],
+): MatchedSkill {
+  return {
+    name: c.name,
+    description: c.description,
+    location: c.location,
+    score: matchKind === 'semantic' ? Number(score.toFixed(4)) : score,
+    matchKind,
+    departments: c.departments,
+    resolvable: existsSafe(c.location),
+  };
+}
+
+/**
+ * Layer-A skill matcher: return the top-N installed skills (SKILL.md) most
+ * relevant to the task, dept-scoped via the onboarding skill-department-map.json.
+ *
+ * Scoring reuses the department-router's embedding + cosine machinery:
+ *   • when an embedding key is configured (the CLIENT'S OWN key), each skill's
+ *     `name. description` is embedded alongside the task text and ranked by
+ *     cosine similarity, keeping only matches at/above SKILL_MATCH_FLOOR (~0.55);
+ *   • otherwise (or if the API errors, or nothing clears the floor) it falls
+ *     back to keyword-overlap scoring so the feature works with zero config.
+ *
+ * Async (embeddings do I/O). NEVER throws — returns [] on any failure.
+ */
+export async function matchSkillsForTask(
+  task: { title?: string | null; description?: string | null; department?: string | null },
+  opts?: { limit?: number },
+): Promise<MatchedSkill[]> {
+  const limit = opts?.limit ?? 3;
+  try {
+    const files = findSkillFiles(skillSearchRoots());
+    if (files.length === 0) return [];
+
+    const map = loadSkillDeptMap();
+    const deptCanon = task.department ? canonicalDeptSlug(task.department) : null;
+
+    const candidates: SkillCandidate[] = [];
+    for (const file of files) {
+      const meta = parseSkillMeta(file);
+      if (!meta) continue;
+      const dirKey = path.basename(path.dirname(file));
+      const scope = skillAllowedForDept([meta.name, dirKey], deptCanon, map);
+      if (!scope.allowed) continue;
+      candidates.push({
+        name: meta.name,
+        description: meta.description,
+        location: file,
+        departments: scope.departments,
+      });
+    }
+    if (candidates.length === 0) return [];
+
+    const taskText = [task.title, task.description].filter(Boolean).join(' — ').trim();
+    if (!taskText) return [];
+
+    // ── Semantic path (client's own embedding key) ──────────────────────────
+    if (getEmbeddingApiKey()) {
+      try {
+        const texts = [taskText, ...candidates.map((c) => `${c.name}. ${c.description}`.trim())].map(
+          (t) => (t.length > 8_000 ? t.slice(0, 8_000) : t),
+        );
+        const emb = await fetchEmbeddings(texts);
+        if (emb && emb.length === texts.length) {
+          const taskVec = emb[0].embedding;
+          const scored = candidates
+            .map((c, i) => ({ c, score: cosineSimilarity(taskVec, emb[i + 1].embedding) }))
+            .filter((s) => s.score >= SKILL_MATCH_FLOOR)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit);
+          if (scored.length > 0) return scored.map((s) => toMatchedSkill(s.c, s.score, 'semantic'));
+          // Nothing cleared the floor → fall through to keyword scoring.
+        }
+      } catch (err) {
+        console.debug('[context-pack] skill semantic match failed, keyword fallback:', (err as Error).message);
+      }
+    }
+
+    // ── Keyword fallback (zero-config) ──────────────────────────────────────
+    const keywords = keywordsFromTask(task);
+    if (keywords.length === 0) return [];
+    const scored = candidates
+      .map((c) => {
+        const hay = `${c.name} ${c.description}`.toLowerCase();
+        let score = 0;
+        for (const kw of keywords) if (hay.includes(kw)) score += 1;
+        return { c, score };
+      })
+      .filter((s) => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+
+    return scored.map((s) => toMatchedSkill(s.c, s.score, 'keyword'));
+  } catch (err) {
+    console.debug('[context-pack] matchSkillsForTask degraded:', (err as Error).message);
+    return [];
+  }
 }
 
 // ── Small internal helpers ───────────────────────────────────────────────────
