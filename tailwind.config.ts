@@ -56,7 +56,9 @@ const config: Config = {
         // Text colors
         'bcc-text': '#1A1D26',
         'bcc-text-secondary': '#6B7280',
-        'bcc-text-muted': '#9CA3AF',
+        // Retoned from #9CA3AF (2.6:1 on white — fails WCAG AA) to #6B7280
+        // (~4.6:1). Kept in lockstep with --bcc-text-muted in globals.css.
+        'bcc-text-muted': '#6B7280',
         
         // Brand colors
         'bcc-primary': '#43A047',

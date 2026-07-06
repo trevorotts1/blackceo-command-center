@@ -136,6 +136,30 @@ export async function POST(request: NextRequest) {
 
     const validatedData = validation.data;
 
+    // A task can never be CREATED directly in `blocked`. Blocked is a transition
+    // state a task reaches only once it is in flight and waiting on a specific
+    // human action (decision/approval/credential/payment) — and that transition
+    // is gated by PATCH /api/tasks/[id], which requires blocked_reason +
+    // blocked_on_human + ask. CreateTaskSchema/createTaskCore do not carry those
+    // three fields, so accepting status:'blocked' here would silently persist a
+    // "blocked" row with NO reason — a card parked in Blocked that no one can act
+    // on. Reject it with a descriptive 400 pointing at the correct flow instead
+    // of dropping the fields. (Surfaced by the kanban CRUD audit, v4.63.0.)
+    if (validatedData.status === 'blocked') {
+      return NextResponse.json(
+        {
+          error: 'A task cannot be created directly as blocked',
+          message:
+            'Blocked is a human-wait state a task enters after it is in flight. ' +
+            'Create the task in backlog/inbox first, then move it to Blocked (which ' +
+            'requires a reason, an audience, and what you need from the human).',
+          hint: 'Set status to backlog, inbox, planning, assigned, or in_progress on create; ' +
+            'reach Blocked via PATCH /api/tasks/{id} with blocked_reason, blocked_on_human, and ask.',
+        },
+        { status: 400 },
+      );
+    }
+
     // Delegate to the shared task-creation core so the UI create path and the
     // universal ingest endpoint (POST /api/tasks/ingest) can never drift.
     // UI creates use skipWindowDedup:true — if an operator manually creates the

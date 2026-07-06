@@ -1,11 +1,45 @@
 'use client';
 
+/**
+ * DepartmentPulseStrip — PRD 2.10 rebuild
+ *
+ * Was calculateDeptScore(): fabricated a 72 score (and thus a fake letter
+ * grade) for any department with zero tasks or a <10% done ratio — a direct
+ * violation of the "never 72" doctrine documented in CompanyHeroCard.tsx and
+ * DepartmentGradeCards.tsx. Now drives grade/score from /api/company-health
+ * (the single grading source of truth, src/lib/grading.ts). grade === null
+ * renders an explicit muted "Insufficient data" pill — never a fabricated
+ * letter, never a fake trend arrow.
+ */
+
 import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { ArrowUp, ArrowDown, Minus } from 'lucide-react';
-import { scoreToGrade, gradeToLabel, type Grade } from '@/lib/grading';
+import { gradeToLabel, isRealDepartment, type Grade } from '@/lib/grading';
 import type { WorkspaceStats } from '@/lib/types';
+
+// Client-side shape of one entry in /api/company-health's `departments` array
+// (mirrors DepartmentGrade from grading.ts — only the fields this strip needs).
+interface ClientDepartmentGrade {
+  workspaceId: string;
+  slug: string;
+  name: string;
+  score: number | null;
+  grade: string | null;
+}
+
+interface ClientCompanyHealth {
+  departments: ClientDepartmentGrade[];
+}
+
+interface PulseDept {
+  id: string;
+  name: string;
+  emoji: string;
+  grade: Grade | null;
+  score: number | null;
+}
 
 const DEPARTMENT_EMOJIS: Record<string, string> = {
   marketing: '\u{1F4E2}',
@@ -19,11 +53,11 @@ const DEPARTMENT_EMOJIS: Record<string, string> = {
   legal: '\u{2696}\u{FE0F}',
   product: '\u{1F4E6}',
   engineering: '\u{1F4BB}',
-  design: '\u2728',
+  design: '✨',
   'customer-success': '\u{1F91D}',
   'account-management': '\u{1F511}',
   'business-development': '\u{1F4C8}',
-  'content-marketing': '\u270D\u{FE0F}',
+  'content-marketing': '✍\u{FE0F}',
   'social-media': '\u{1F4F1}',
 };
 
@@ -63,17 +97,10 @@ const itemVariants = {
   },
 };
 
-function calculateDeptScore(dept: WorkspaceStats): number {
-  const total = dept.taskCounts?.total || 0;
-  const done = dept.taskCounts?.done || 0;
-  const inProgress = dept.taskCounts?.in_progress || 0;
-  if (total === 0) return 72;
-  const dr = done / total;
-  if (dr < 0.1) return 72;
-  return Math.round(((done + inProgress * 0.5) / total) * 100);
-}
-
-function TrendArrow({ grade }: { grade: Grade }) {
+function TrendArrow({ grade }: { grade: Grade | null }) {
+  // Tier indicator derived from the REAL grade — never a fabricated trend.
+  // null (insufficient data) gets a muted dash, not a color-coded guess.
+  if (!grade) return <Minus className="h-3.5 w-3.5 text-gray-300" />;
   if (grade === 'A' || grade === 'B') {
     return <ArrowUp className="h-3.5 w-3.5 text-emerald-500" />;
   }
@@ -85,27 +112,35 @@ function TrendArrow({ grade }: { grade: Grade }) {
 
 export function DepartmentPulseStrip() {
   const router = useRouter();
-  const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
+  const [health, setHealth] = useState<ClientCompanyHealth | null>(null);
+  const [icons, setIcons] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       try {
         setLoading(true);
-        const res = await fetch('/api/workspaces?stats=true');
-        if (res.ok) {
-          const data: WorkspaceStats[] = await res.json();
-          setDepartments(
-            data.filter((d) => {
-              const slug = d.slug || d.id;
-              return (
-                slug !== 'default' && !slug.startsWith('acme-') && !slug.startsWith('zhw-')
-              );
-            })
-          );
+        const [healthRes, wsRes] = await Promise.all([
+          fetch('/api/company-health'),
+          fetch('/api/workspaces?stats=true'),
+        ]);
+        if (healthRes.ok) {
+          setHealth(await healthRes.json());
+        }
+        if (wsRes.ok) {
+          // Only used to look up each department's custom icon — grade/score
+          // always come from /api/company-health, never derived from task counts.
+          const data: WorkspaceStats[] = await wsRes.json();
+          const iconMap: Record<string, string> = {};
+          data
+            .filter((d) => isRealDepartment(d.slug || d.id))
+            .forEach((d) => {
+              iconMap[d.id] = d.icon || DEPARTMENT_EMOJIS[d.slug] || '\u{1F3E2}';
+            });
+          setIcons(iconMap);
         }
       } catch {
-        // handled
+        // handled by loading state
       } finally {
         setLoading(false);
       }
@@ -113,23 +148,26 @@ export function DepartmentPulseStrip() {
     load();
   }, []);
 
-  const deptGrades = useMemo(() => {
-    return departments
-      .map((d) => {
-        const score = calculateDeptScore(d);
-        const grade = scoreToGrade(score);
-        return {
-          id: d.id,
-          name: d.name,
-          emoji: d.icon || DEPARTMENT_EMOJIS[d.slug] || '\u{1F3E2}',
-          grade,
-        };
-      })
+  const deptGrades = useMemo((): PulseDept[] => {
+    if (!health) return [];
+    return health.departments
+      .map((d): PulseDept => ({
+        id: d.workspaceId,
+        name: d.name,
+        emoji: icons[d.workspaceId] || DEPARTMENT_EMOJIS[d.slug] || '\u{1F3E2}',
+        grade: (d.grade as Grade | null) ?? null,
+        score: d.score,
+      }))
       .sort((a, b) => {
+        // Real grades sort best-to-worst; insufficient-data departments sort last
+        // (never mixed in ranked among fabricated positions).
+        if (a.grade === null && b.grade === null) return 0;
+        if (a.grade === null) return 1;
+        if (b.grade === null) return -1;
         const order: Grade[] = ['A', 'B', 'C', 'D', 'F'];
         return order.indexOf(a.grade) - order.indexOf(b.grade);
       });
-  }, [departments]);
+  }, [health, icons]);
 
   if (loading) {
     return (
@@ -158,7 +196,8 @@ export function DepartmentPulseStrip() {
           key={dept.id}
           variants={itemVariants}
           onClick={() => router.push(`/ceo-board/${dept.id}`)}
-          className={`flex items-center gap-3 p-4 rounded-2xl border-2 ${GRADE_BORDER[dept.grade]} shadow-sm flex-shrink-0 cursor-pointer hover:shadow-md transition-shadow`}
+          title={dept.grade ? gradeToLabel(dept.grade) : 'Insufficient data'}
+          className={`flex items-center gap-3 p-4 rounded-2xl border-2 ${dept.grade ? GRADE_BORDER[dept.grade] : 'border-gray-200'} shadow-sm flex-shrink-0 cursor-pointer hover:shadow-md transition-shadow`}
           style={{
             backgroundColor: 'rgba(255,255,255,0.88)',
             backdropFilter: 'blur(8px)',
@@ -178,15 +217,23 @@ export function DepartmentPulseStrip() {
             {dept.name}
           </span>
 
-          {/* Right: grade circle + trend arrow */}
+          {/* Right: grade circle (or insufficient-data pill) + tier arrow */}
           <div className="flex flex-col items-center gap-0.5">
-            <div
-              className={`flex h-12 w-12 items-center justify-center rounded-full ${GRADE_BG[dept.grade]}`}
-            >
-              <span className="text-xl font-black text-white">
-                {dept.grade}
-              </span>
-            </div>
+            {dept.grade ? (
+              <div
+                className={`flex h-12 w-12 items-center justify-center rounded-full ${GRADE_BG[dept.grade]}`}
+              >
+                <span className="text-xl font-black text-white">
+                  {dept.grade}
+                </span>
+              </div>
+            ) : (
+              // never-72 doctrine: insufficient data renders a muted "—",
+              // never a fabricated letter grade.
+              <div className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-gray-200 bg-gray-50">
+                <span className="text-lg font-bold text-gray-400">—</span>
+              </div>
+            )}
             <TrendArrow grade={dept.grade} />
           </div>
         </motion.button>

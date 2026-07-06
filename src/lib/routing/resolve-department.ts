@@ -1,19 +1,33 @@
+'use server';
+
 /**
- * Shared Department Resolution
+ * Shared Department Resolution — Server Action (PRD 2.10)
  *
  * Both /ceo-board/[dept] and /workspace/[slug] need to resolve a slug or id
- * to a department/workspace. This module provides a single resolution function
- * so both routes use identical logic.
+ * to a department/workspace, including its REAL performance grade. This is a
+ * Server Action (Next 14 'use server' file — same pattern as
+ * src/components/interview/gate-actions.ts) so it can query the SQLite DB
+ * directly via better-sqlite3, which cannot run in the browser, while still
+ * being importable and callable from the 'use client' pages that render it.
  *
  * Resolution strategy:
- *   1. Call /api/workspaces/${slugOrId} (direct lookup by slug or id)
- *   2. If that fails, fall back to listing all workspaces and matching by id or slug
- *   3. Return a normalized DepartmentResolution object
+ *   1. Query workspaces directly by id or slug (same join as
+ *      /api/workspaces/[id] — LEFT JOIN agents for head_agent_name).
+ *   2. Compute the REAL grade via computeDepartmentGrade (src/lib/grading.ts)
+ *      — never the old hardcoded grade:'B'/gradeScore:75. computeDepartmentGrade
+ *      needs 2+ of the four graded inputs to have data; when it doesn't,
+ *      score/grade are null. The "never 72" doctrine applies here too: null
+ *      MUST render as "Insufficient data" in the UI, never a fake letter.
+ *   3. Return a normalized DepartmentResolution object.
  *
  * PRD 2.9(e): headTitle is the REAL per-client agent name from head_agent_name
- * (populated via the agents JOIN in /api/workspaces routes). Generic
- * "Head of <Dept>" is only used when no agent is registered as head yet.
+ * (populated via the agents JOIN below). Generic "Head of <Dept>" is only used
+ * when no agent is registered as head yet.
  */
+
+import { getDb } from '@/lib/db';
+import { computeDepartmentGrade, type Grade } from '@/lib/grading';
+import { loadCompanyConfig } from '@/lib/company-config';
 
 export interface DepartmentResolution {
   /** The workspace/department id from the database */
@@ -30,10 +44,10 @@ export interface DepartmentResolution {
    * generic "Head of <Dept>" fallback when no head agent is seeded yet.
    */
   headTitle: string;
-  /** Grade (A-F) */
-  grade: 'A' | 'B' | 'C' | 'D' | 'F';
-  /** Grade score (0-100) */
-  gradeScore: number;
+  /** Real grade (A-F) from computeDepartmentGrade; null = insufficient data — never a fabricated letter */
+  grade: Grade | null;
+  /** Real grade score (0-100) from computeDepartmentGrade; null = insufficient data — never 0 or 72 */
+  gradeScore: number | null;
   /** AI insight text */
   insight: string;
   /** Description from workspace record */
@@ -42,73 +56,71 @@ export interface DepartmentResolution {
   headAgentName?: string | null;
 }
 
+interface WorkspaceJoinRow {
+  id: string;
+  slug: string | null;
+  name: string | null;
+  icon: string | null;
+  description: string | null;
+  head_agent_name: string | null;
+}
+
 /**
- * Resolve a slug or id to a department.
+ * Resolve a slug or id to a department, including its real computed grade.
  * Works identically for /ceo-board/[dept] and /workspace/[slug].
+ * Returns null when no matching workspace exists, or on any DB error
+ * (never throws to the caller — callers treat null as "not found").
  */
 export async function resolveDepartment(
   slugOrId: string,
 ): Promise<DepartmentResolution | null> {
-  // Strategy 1: Direct API lookup (fastest path)
   try {
-    const res = await fetch(`/api/workspaces/${slugOrId}`, { cache: 'no-store' });
-    if (res.ok) {
-      const data = await res.json();
-      return normalizeWorkspace(data);
-    }
-  } catch {
-    // Fall through to strategy 2
+    const db = getDb();
+
+    const ws = db.prepare(
+      `SELECT w.id, w.slug, w.name, w.icon, w.description,
+              a.name AS head_agent_name
+         FROM workspaces w
+         LEFT JOIN agents a ON a.id = w.head_agent_id
+        WHERE w.id = ? OR w.slug = ?`
+    ).get(slugOrId, slugOrId) as WorkspaceJoinRow | undefined;
+
+    if (!ws) return null;
+
+    const config = loadCompanyConfig();
+    const windowDays = config.gradingWindowDays ?? 30;
+    const slug = ws.slug || ws.id;
+    const name = ws.name || 'Unknown Department';
+
+    // PRD 2.10 single source of truth — real grade from observable DB signals,
+    // honest null gating when there isn't enough data yet (never 'B'/75).
+    const deptGrade = computeDepartmentGrade(
+      db,
+      { id: ws.id, slug, name },
+      windowDays,
+      config.gradingInputWeights,
+    );
+
+    // head_agent_name is populated by the agents LEFT JOIN above. When present
+    // it is the real per-client agent identity (e.g. "Nova", "Orion") rather
+    // than a generic role label.
+    const headAgentName = ws.head_agent_name ?? null;
+    const headTitle = headAgentName || `Head of ${name}`;
+
+    return {
+      id: ws.id,
+      slug,
+      name,
+      emoji: ws.icon || '🏢',
+      headTitle,
+      headAgentName,
+      grade: deptGrade.grade,
+      gradeScore: deptGrade.score,
+      insight: ws.description || `${name} department is active and operational.`,
+      description: ws.description ?? undefined,
+    };
+  } catch (err) {
+    console.error('[resolveDepartment] Error:', (err as Error).message);
+    return null;
   }
-
-  // Strategy 2: List workspaces and match by id or slug
-  try {
-    const wsRes = await fetch('/api/workspaces', { cache: 'no-store' });
-    if (wsRes.ok) {
-      const workspaces = await wsRes.json();
-      const allWorkspaces = Array.isArray(workspaces) ? workspaces : workspaces.workspaces || [];
-      const ws = allWorkspaces.find(
-        (w: { id: string; slug?: string }) => w.id === slugOrId || w.slug === slugOrId,
-      );
-      if (ws) {
-        return normalizeWorkspace(ws);
-      }
-    }
-  } catch {
-    // No match found
-  }
-
-  return null;
-}
-
-/**
- * Normalize a workspace API response into a DepartmentResolution.
- * Handles both singular workspace objects and list items.
- *
- * PRD 2.9(e): headTitle uses the real per-client agent name (head_agent_name
- * from the agents LEFT JOIN in all /api/workspaces routes). Falls back to the
- * generic "Head of <Name>" only when no head agent has been registered yet.
- */
-function normalizeWorkspace(ws: Record<string, unknown>): DepartmentResolution {
-  const name = (ws.name as string) || 'Unknown Department';
-  const slug = (ws.slug as string) || (ws.id as string) || '';
-  const description = ws.description as string | undefined;
-
-  // head_agent_name is populated by the agents LEFT JOIN in /api/workspaces/[id]
-  // and /api/workspaces (list). When present it is the real per-client agent
-  // identity (e.g. "Nova", "Orion") rather than a generic role label.
-  const headAgentName = (ws.head_agent_name as string | null | undefined) ?? null;
-  const headTitle = headAgentName || `Head of ${name}`;
-
-  return {
-    id: ws.id as string,
-    slug,
-    name,
-    emoji: (ws.icon as string) || (ws.emoji as string) || '🏢',
-    headTitle,
-    headAgentName,
-    grade: 'B',
-    gradeScore: 75,
-    insight: description || `${name} department is active and operational.`,
-    description,
-  };
 }

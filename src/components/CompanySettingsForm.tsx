@@ -79,6 +79,13 @@ export default function CompanySettingsForm({ initial }: Props) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Non-fatal: config/company-config.json saved fine but the live-branding
+  // PATCH to the client tenant record (the ONLY path that actually drives
+  // <BrandTheme/>) failed or had no client to target. Previously this was
+  // swallowed with a console.warn and the button still said "Saved!" —
+  // technically true (the file wrote) but misleading (branding didn't
+  // change on screen). Surfaced here so the operator knows to investigate.
+  const [brandWarning, setBrandWarning] = useState<string | null>(null);
 
   const hasChanges =
     companyName !== initial.companyName ||
@@ -91,6 +98,7 @@ export default function CompanySettingsForm({ initial }: Props) {
   const handleSave = async () => {
     setSaving(true);
     setError(null);
+    setBrandWarning(null);
     try {
       const res = await fetch('/api/company/config', {
         method: 'POST',
@@ -112,6 +120,12 @@ export default function CompanySettingsForm({ initial }: Props) {
 
       // D1/D2/D3: also persist brand_color + logo_url on the SELECTED client
       // tenant record so <BrandTheme/> re-themes and the Header swaps the logo.
+      // This PATCH is the ONLY path that actually drives live branding — if it
+      // fails, or there's no client to target, config/company-config.json
+      // still saved, but the operator would otherwise see a bare "Saved!"
+      // that lies about branding having taken effect. Track the real outcome
+      // instead of swallowing it.
+      let brandFailureReason: string | null = null;
       try {
         const sel = await fetch('/api/clients', { cache: 'no-store' });
         if (sel.ok) {
@@ -122,7 +136,7 @@ export default function CompanySettingsForm({ initial }: Props) {
               ? data.clients.find((c: { id: string; is_self: boolean }) => c.is_self)?.id ?? null
               : null);
           if (selectedId) {
-            await fetch(`/api/clients/${selectedId}`, {
+            const patchRes = await fetch(`/api/clients/${selectedId}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -131,11 +145,23 @@ export default function CompanySettingsForm({ initial }: Props) {
                 ...(logoUrl ? { logo_url: logoUrl } : {}),
               }),
             });
+            if (!patchRes.ok) {
+              const patchBody = await patchRes.json().catch(() => ({}));
+              brandFailureReason = patchBody?.error || `client update failed (${patchRes.status})`;
+            }
+          } else {
+            brandFailureReason = 'no client selected — branding was saved to config only';
           }
+        } else {
+          brandFailureReason = `could not look up the selected client (${sel.status})`;
         }
       } catch (e) {
-        // Non-fatal: company config already saved.
-        console.warn('Could not persist brand to client record:', e);
+        brandFailureReason = e instanceof Error ? e.message : 'network error contacting the client record';
+      }
+
+      if (brandFailureReason) {
+        console.warn('Could not persist brand to client record:', brandFailureReason);
+        setBrandWarning(brandFailureReason);
       }
 
       setSaved(true);
@@ -198,6 +224,12 @@ export default function CompanySettingsForm({ initial }: Props) {
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
             {error}
+          </div>
+        )}
+
+        {brandWarning && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
+            Saved to config, but live branding not applied: {brandWarning}
           </div>
         )}
 
