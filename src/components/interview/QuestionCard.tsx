@@ -46,6 +46,7 @@ import {
 import { personalizePrompt } from '@/lib/interview/structured-progress';
 import ColorPickerCard from '@/components/interview/ColorPickerCard';
 import LogoDropCard from '@/components/interview/LogoDropCard';
+import DictateAnswerButton from '@/components/interview/DictateAnswerButton';
 
 /* -------------------------------------------------------------------------- */
 /* /api/interview/answer contract — built EXCLUSIVELY through                  */
@@ -285,41 +286,54 @@ function TextControl({
           whatever&apos;s right.
         </p>
       )}
-      {multiline ? (
-        <textarea
-          className={iv.field}
+      {/* Type OR speak: the mic dictates into the SAME controlled field, so a
+          voice answer submits through the same validated path as a typed one. */}
+      <div className="flex items-end gap-2">
+        {multiline ? (
+          <textarea
+            className={ivcx(iv.field, 'flex-1')}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              if (error) setError(null);
+            }}
+            rows={3}
+            autoFocus={autoFocus}
+            placeholder="Type or speak your answer…"
+            aria-label={question.prompt}
+            aria-invalid={error ? true : undefined}
+          />
+        ) : (
+          <input
+            type="text"
+            className={ivcx(iv.input, 'flex-1')}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              if (error) setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                if (canSubmit) void submit();
+              }
+            }}
+            autoFocus={autoFocus}
+            placeholder="Type or speak your answer…"
+            aria-label={question.prompt}
+            aria-invalid={error ? true : undefined}
+          />
+        )}
+        <DictateAnswerButton
           value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
+          onChange={(next) => {
+            setValue(next);
             if (error) setError(null);
           }}
-          rows={3}
-          autoFocus={autoFocus}
-          placeholder="Type your answer…"
-          aria-label={question.prompt}
-          aria-invalid={error ? true : undefined}
+          disabled={busy}
+          className="mb-1 h-10 w-10 shrink-0"
         />
-      ) : (
-        <input
-          type="text"
-          className={iv.input}
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            if (error) setError(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              if (canSubmit) void submit();
-            }
-          }}
-          autoFocus={autoFocus}
-          placeholder="Type your answer…"
-          aria-label={question.prompt}
-          aria-invalid={error ? true : undefined}
-        />
-      )}
+      </div>
 
       {error && (
         <p className="iv-error" role="alert">
