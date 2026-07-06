@@ -373,6 +373,62 @@ export class TicketStore {
     }
   }
 
+  // --- semantic dedup: recurrence event (FIX-RESCUE-08) ---------------------
+  // Append a "recurred" audit event to an EXISTING ticket without changing its
+  // state. Bumps updated_at so aging/GC sees the fresh activity. This is how a
+  // repeated outage / a client agent that never persists its ticketId folds
+  // back onto the open ticket instead of minting (and cap-counting) a duplicate.
+  recurrence(ticketId, { note = "recurred", decisionMode = null, actor = "rescue-agent" } = {}) {
+    const t = this.getTicket(ticketId);
+    if (!t) throw new Error(`recurrence: unknown ticket ${ticketId}`);
+    this.db.prepare("UPDATE tickets SET updated_at = :u WHERE ticket_id = :t").run({ u: nowISO(), t: ticketId });
+    this.#recordEvent(ticketId, t.status, t.status, { actor, decisionMode, note });
+    return this.getTicket(ticketId);
+  }
+
+  // --- semantic dedup: mint decision (FIX-RESCUE-08) ------------------------
+  // The single entry point the mint path should call INSTEAD of createTicket.
+  // Order of precedence:
+  //   1. EXACT ticket_id already exists  -> return it (createTicket idempotency;
+  //      never dedups against a different ticket, never double-counts the cap).
+  //   2. A still-open ticket shares the semantic dedup key (client + class)
+  //      inside `dedupWindowMs` (default 6h) -> append a "recurred" event to
+  //      THAT ticket and return { status:"deduped", ticketId:<existing> }
+  //      WITHOUT minting an RR number and WITHOUT touching the 25/day cap.
+  //   3. Otherwise mint a fresh ticket (counts toward the cap by default).
+  // The uniform return shape lets the caller decide cap accounting once:
+  //   { status:"minted"|"deduped"|"exists", deduped, minted, ticketId, rrNumber, ticket }.
+  mintOrRecur(opts = {}) {
+    const {
+      ticketId,
+      client,
+      failureClass = null,
+      dedupWindowMs = 6 * 60 * 60 * 1000,
+      now = Date.now(),
+      problem = "",
+      decisionMode = null,
+    } = opts;
+    if (!ticketId) throw new Error("mintOrRecur: ticketId is required");
+
+    // (1) exact-id idempotency ALWAYS wins over semantic dedup.
+    const exact = this.getTicket(ticketId);
+    if (exact) {
+      return { status: "exists", deduped: true, minted: false, ticketId: exact.ticket_id, rrNumber: exact.rr_number, ticket: exact };
+    }
+
+    // (2) semantic dedup against an open sibling.
+    const open = this.findByDedup(dedupKey(client, failureClass), dedupWindowMs, now);
+    if (open && open.ticket_id !== ticketId) {
+      const suffix = problem ? " — " + String(problem).slice(0, 200) : "";
+      this.recurrence(open.ticket_id, { decisionMode, note: `recurred (would-be ${ticketId})${suffix}` });
+      return { status: "deduped", deduped: true, minted: false, ticketId: open.ticket_id, rrNumber: open.rr_number, ticket: this.getTicket(open.ticket_id) };
+    }
+
+    // (3) genuinely new -> mint (counts toward the cap unless caller opts out).
+    const res = this.createTicket(opts);
+    return { status: "minted", deduped: false, minted: true, ticketId: res.ticket.ticket_id, rrNumber: res.ticket.rr_number, ticket: res.ticket };
+  }
+
   // --- transition -----------------------------------------------------------
   // Validates against LEGAL_TRANSITIONS, updates lifecycle timestamps + owner,
   // and writes an audit event. Throws on an unknown ticket or illegal jump.
