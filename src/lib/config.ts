@@ -1,154 +1,46 @@
 /**
- * Configuration Management
- * 
- * Handles user-configurable settings for Command Center.
- * Settings are stored in localStorage for client-side access.
- * 
+ * Server Configuration
+ *
+ * These values are environment-variable driven ONLY — Command Center's
+ * runtime (dispatch, orchestration, QC scoring, job sweeps, etc.) reads
+ * them exclusively from `process.env` on the server.
+ *
+ * HONESTY FIX (v4.63): this module used to also expose a localStorage-backed
+ * `getConfig()`/`updateConfig()`/`resetConfig()` pair that the /settings page
+ * read and wrote client-side, plus a client-side branch in each getter below
+ * (`typeof window !== 'undefined' ? getConfig().x : process.env.X`). NO
+ * server code path ever read that client-side value — every consumer of
+ * `getMissionControlUrl()` / `getProjectsPath()` runs server-side (API
+ * routes, dispatch, qc-scorer, job sweeps) and only ever hit the env-var
+ * branch. So the Settings page's "Save" button silently lied: it wrote to
+ * localStorage, the UI looked saved, and nothing on the server ever changed.
+ * That dead mechanism (plus the `defaultProjectName` field, which had ZERO
+ * consumers anywhere in the codebase) has been removed. To change one of
+ * these values, set the corresponding env var and restart the server — see
+ * /settings for the env-var reference.
+ *
  * NEVER commit hardcoded IPs, paths, or sensitive data!
  */
 
-export interface MissionControlConfig {
-  // Workspace settings
-  workspaceBasePath: string; // e.g., ~/Documents/Shared
-  projectsPath: string; // e.g., ${workspaceBasePath}/projects
-  
-  // Command Center API URL (for orchestration)
-  missionControlUrl: string; // Auto-detected or manually set
-  
-  // OpenClaw Gateway settings (these come from .env on server)
-  // Client-side only needs to know if it's configured
-  
-  // Project defaults
-  defaultProjectName: string; // 'mission-control' or custom
-}
-
-const DEFAULT_CONFIG: MissionControlConfig = {
-  workspaceBasePath: '~/Documents/Shared',
-  projectsPath: '~/Documents/Shared/projects',
-  missionControlUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000',
-  defaultProjectName: 'command-center',
-};
-
-const CONFIG_KEY = 'command-center-config';
-
 /**
- * Get current configuration
- * Returns defaults merged with user overrides
- */
-export function getConfig(): MissionControlConfig {
-  if (typeof window === 'undefined') {
-    return DEFAULT_CONFIG;
-  }
-
-  try {
-    const stored = localStorage.getItem(CONFIG_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      return { ...DEFAULT_CONFIG, ...parsed };
-    }
-  } catch (error) {
-    console.error('Failed to load config:', error);
-  }
-
-  return DEFAULT_CONFIG;
-}
-
-/**
- * Update configuration
- * Validates and saves to localStorage
- */
-export function updateConfig(updates: Partial<MissionControlConfig>): void {
-  if (typeof window === 'undefined') {
-    throw new Error('Cannot update config on server side');
-  }
-
-  const current = getConfig();
-  const updated = { ...current, ...updates };
-
-  // Validate paths
-  if (updates.workspaceBasePath !== undefined) {
-    if (!updates.workspaceBasePath.trim()) {
-      throw new Error('Workspace base path cannot be empty');
-    }
-  }
-
-  if (updates.missionControlUrl !== undefined) {
-    try {
-      new URL(updates.missionControlUrl);
-    } catch {
-      throw new Error('Invalid Command Center URL');
-    }
-  }
-
-  try {
-    localStorage.setItem(CONFIG_KEY, JSON.stringify(updated));
-  } catch (error) {
-    console.error('Failed to save config:', error);
-    throw new Error('Failed to save configuration');
-  }
-}
-
-/**
- * Reset configuration to defaults
- */
-export function resetConfig(): void {
-  if (typeof window === 'undefined') {
-    throw new Error('Cannot reset config on server side');
-  }
-
-  localStorage.removeItem(CONFIG_KEY);
-}
-
-/**
- * Expand tilde in paths (for display purposes)
- * Note: Actual path resolution happens server-side
- */
-export function expandPath(path: string): string {
-  if (typeof window === 'undefined') {
-    return path;
-  }
-
-  // This is client-side only - server will handle actual expansion
-  return path.replace(/^~/, process.env.HOME || '/root');
-}
-
-/**
- * Get Command Center URL for API calls
- * Used by orchestration module and other server-side modules
+ * Get Command Center URL for API calls.
+ * Used by orchestration, dispatch, and QC scoring modules.
  */
 export function getMissionControlUrl(): string {
-  // Server-side: use env var or auto-detect
-  if (typeof window === 'undefined') {
-    return process.env.MISSION_CONTROL_URL || 'http://localhost:4000';
-  }
-
-  // Client-side: use config
-  return getConfig().missionControlUrl;
+  return process.env.MISSION_CONTROL_URL || 'http://localhost:4000';
 }
 
 /**
- * Get workspace base path
- * Server-side only - returns configured path or default
+ * Get workspace base path. Env-var driven; falls back to a sane default.
  */
 export function getWorkspaceBasePath(): string {
-  if (typeof window !== 'undefined') {
-    return getConfig().workspaceBasePath;
-  }
-
-  // Server-side: check env var first, then default
   return process.env.WORKSPACE_BASE_PATH || '~/Documents/Shared';
 }
 
 /**
- * Get projects path
- * Server-side only - returns configured path or default
+ * Get projects path. Env-var driven; falls back to a sane default.
  */
 export function getProjectsPath(): string {
-  if (typeof window !== 'undefined') {
-    return getConfig().projectsPath;
-  }
-
-  // Server-side: check env var first, then default
   return process.env.PROJECTS_PATH || '~/Documents/Shared/projects';
 }
 

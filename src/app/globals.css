@@ -16,7 +16,11 @@
   
   --bcc-text: #1A1D26;
   --bcc-text-secondary: #6B7280;
-  --bcc-text-muted: #9CA3AF;
+  /* Was #9CA3AF (2.6:1 on white — fails WCAG AA, which needs 4.5:1 for body
+     text). #6B7280 is Tailwind gray-500 and gives ~4.6:1 on white, so muted
+     text stays legible. Kept as its own token (matches --bcc-text-secondary)
+     since call sites distinguish "muted" from "secondary" intent. */
+  --bcc-text-muted: #6B7280;
   
   /* Brand primary — BlackCEO green by default. <BrandTheme/> (D2) overrides
      these on :root from the selected client's brand color at runtime, and also

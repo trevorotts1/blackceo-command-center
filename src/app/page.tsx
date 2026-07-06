@@ -157,7 +157,7 @@ export default function HomePage() {
   ];
 
   return (
-    <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
+    <div className="min-h-screen bg-bcc-bg flex flex-col">
       {/* Header */}
       <header className="h-16 bg-white border-b border-gray-200 px-6 flex items-center justify-between">
         <div className="flex items-center gap-4">

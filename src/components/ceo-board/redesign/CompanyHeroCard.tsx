@@ -11,7 +11,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { gradeToLabel } from '@/lib/grading';
+import { gradeToLabel, isRealDepartment } from '@/lib/grading';
 import type { Grade } from '@/lib/grading';
 import type { WorkspaceStats, Agent } from '@/lib/types';
 
@@ -57,14 +57,7 @@ export function CompanyHeroCard() {
         }
         if (wsRes.ok) {
           const data: WorkspaceStats[] = await wsRes.json();
-          setDepartments(
-            data.filter((d) => {
-              const slug = d.slug || d.id;
-              return (
-                slug !== 'default' && !slug.startsWith('acme-') && !slug.startsWith('zhw-')
-              );
-            })
-          );
+          setDepartments(data.filter((d) => isRealDepartment(d.slug || d.id)));
         }
         if (agentsRes.ok) {
           setAgents(await agentsRes.json());
@@ -81,7 +74,12 @@ export function CompanyHeroCard() {
   const { totalTasks, activeAgents, completionRate } = useMemo(() => {
     const total = departments.reduce((s, d) => s + (d.taskCounts?.total || 0), 0);
     const done = departments.reduce((s, d) => s + (d.taskCounts?.done || 0), 0);
-    const active = agents.filter((a) => a.status === 'active' || a.status === 'working').length;
+    // Agent status enum is standby/working/offline (DB CHECK constraint) —
+    // 'active' never matches a real row, so counting it was dead code that
+    // silently overstated nothing but misled readers of this filter. Count
+    // 'working' only; the "Active Agents" label describes agents currently
+    // working, not a distinct 'active' status.
+    const active = agents.filter((a) => a.status === 'working').length;
     return {
       totalTasks: total,
       activeAgents: active,

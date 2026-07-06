@@ -18,6 +18,14 @@ import { RefreshCcw, Loader2, CheckCircle2, AlertCircle, Clock, KeyRound, X, Ser
  *
  * Per PRD Section 5.4 the page must surface a "last refreshed" timestamp
  * and a manual refresh trigger. This component owns both.
+ *
+ * HONESTY NOTE (BUG 5): the badge here reads "Key present", not "Configured"
+ * or "Verified". /api/models/provider-status's detectKey() only checks
+ * whether a non-empty string exists under a candidate env-var name in
+ * process.env / a .env file / openclaw.json — it never calls the provider.
+ * A present-but-revoked, present-but-typo'd, or present-but-wrong key still
+ * reads "Key present". Do not add live probing here (cost/latency) — the
+ * fix is an honest label, not more machinery.
  */
 
 export interface ProviderRefreshEntry {
@@ -265,7 +273,7 @@ export function IntelligenceProviderList({
       setKeyNotice(notice);
       setKeyNoticeOk(noticeOk);
       setKeyForm(null);
-      // C2 — re-fetch provider status so the "Configured" badge reflects the new key.
+      // C2 — re-fetch provider status so the "Key present" badge reflects the new key.
       await fetchProviderStatus();
       if (onRefreshComplete) onRefreshComplete();
     } catch (err) {
@@ -380,14 +388,23 @@ export function IntelligenceProviderList({
                         {entry.error_message}
                       </div>
                     )}
-                    {/* C2 — Live key detection status (multi-store). When
-                        configured, show "Configured (key: ENVVAR)" and
-                        suppress the re-entry prompt. */}
+                    {/* C2 — Live key detection status (multi-store). When a
+                        candidate env var is found, show "Key present (key:
+                        ENVVAR)" and suppress the re-entry prompt.
+                        BUG 5 FIX: this was labeled "Configured", which reads
+                        as "verified working" — detectKey() only scans env
+                        stores for a non-empty string; it never calls the
+                        provider. Renamed to "Key present" + a tooltip
+                        spelling out that distinction, so operators don't
+                        mistake presence for a live, working credential. */}
                     {status && !isLocalEndpoint && (
                       <div className="text-xs text-gray-400 mt-0.5">
                         {status.configured ? (
-                          <span className="text-emerald-600">
-                            Configured (key:{' '}
+                          <span
+                            className="text-emerald-600"
+                            title="A key was found under this name in an env store. This does NOT mean it has been verified against the provider — presence, not proof."
+                          >
+                            Key present (key:{' '}
                             <code className="font-mono">{status.foundEnvVar}</code>
                             {status.foundInStore && status.foundInStore !== 'process.env' && (
                               <> · found in <span className="italic">{sourceLabel(status.foundInStore)}</span></>
@@ -482,7 +499,7 @@ export function IntelligenceProviderList({
                         placeholder={`${p.toUpperCase().replace(/-/g, '_')}_API_KEY value`}
                         value={keyForm.value}
                         onChange={(e) => setKeyForm({ provider: p, value: e.target.value })}
-                        className="flex-1 min-w-[200px] px-3 py-1.5 bg-white border border-amber-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-amber-400 focus:border-transparent focus:outline-none"
+                        className="w-full sm:flex-1 sm:min-w-[200px] px-3 py-1.5 bg-white border border-amber-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-amber-400 focus:border-transparent focus:outline-none"
                       />
                       <button
                         type="button"
@@ -535,9 +552,12 @@ export function IntelligenceProviderList({
                     )}
                   </div>
                   {integ.configured ? (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    <span
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200"
+                      title="A key was found under this name in an env store. This does NOT mean it has been verified against the provider — presence, not proof."
+                    >
                       <CheckCircle2 className="w-3 h-3" />
-                      Configured
+                      Key present
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-gray-50 text-gray-500 border border-gray-200">

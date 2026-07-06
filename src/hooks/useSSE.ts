@@ -18,6 +18,7 @@ export function useSSE() {
   const {
     updateTask,
     addTask,
+    removeTask,
     setIsOnline,
     selectedTask,
     setSelectedTask,
@@ -83,6 +84,14 @@ export function useSSE() {
                 debug.sse('Also updating selectedTask for modal');
                 setSelectedTask(incomingTask);
               }
+              break;
+
+            case 'task_deleted':
+              // Broadcast by DELETE /api/tasks/[id] as { id }. Without this case
+              // a deletion made elsewhere never disappeared from an open board
+              // until the next full page load/refetch.
+              debug.sse('Task deleted', sseEvent.payload);
+              removeTask((sseEvent.payload as { id: string }).id);
               break;
 
             case 'activity_logged':
@@ -159,5 +168,5 @@ export function useSSE() {
     };
   // selectedTask removed from deps to prevent re-connection loop
   // We use selectedTaskIdRef to check the current selected task ID without triggering re-renders
-  }, [addTask, updateTask, setIsOnline, setSelectedTask]);
+  }, [addTask, updateTask, removeTask, setIsOnline, setSelectedTask]);
 }

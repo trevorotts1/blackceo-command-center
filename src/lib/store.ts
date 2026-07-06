@@ -45,6 +45,7 @@ interface MissionControlState {
   updateTaskStatus: (taskId: string, status: TaskStatus) => void;
   updateTask: (task: Task) => void;
   addTask: (task: Task) => void;
+  removeTask: (taskId: string) => void;
 
   // Agent mutations
   updateAgent: (agent: Agent) => void;
@@ -139,6 +140,14 @@ export const useMissionControl = create<MissionControlState>((set) => ({
       }
       return { tasks: [task, ...state.tasks] };
     });
+  },
+  // DELETE /api/tasks/[id] broadcasts an SSE `task_deleted` event, but until
+  // now the store had no way to drop a task without a full refetch — so a
+  // deletion made in one tab/session never disappeared from the board in any
+  // other open session listening on SSE. Wired from useSSE's 'task_deleted' case.
+  removeTask: (taskId) => {
+    debug.store('removeTask called', { taskId });
+    set((state) => ({ tasks: state.tasks.filter((t) => t.id !== taskId) }));
   },
 
   // Agent mutations

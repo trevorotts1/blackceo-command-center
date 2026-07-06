@@ -264,7 +264,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
     return (
       <aside
         className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
-          isMinimized ? 'w-12' : 'w-72'
+          isMinimized ? 'w-12' : 'w-full lg:w-72'
         }`}
         aria-label="Department focus rail"
       >
@@ -336,8 +336,9 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
   return (
     <aside
       className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
-        isMinimized ? 'w-12' : 'w-72'
+        isMinimized ? 'w-12' : 'w-full lg:w-72'
       }`}
+      aria-label="All departments navigation"
     >
       {/* Header */}
       <div className="p-3 border-b border-gray-100">
