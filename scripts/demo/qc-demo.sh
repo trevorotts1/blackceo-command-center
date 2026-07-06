@@ -58,19 +58,36 @@ else
   fail "gateway not pinned to the dead port in both env files"
 fi
 
-# ── 3. No real client names / operator path in demo files ──────────────────
-echo "[3] No-client-names / operator-path scan..."
-if grep -RInE '/Users/[a-zA-Z0-9._-]+/(command-center|clawd|\.openclaw)' "$HERE" >/dev/null 2>&1; then
-  fail "operator absolute path found under scripts/demo"
+# ── 3. No real client names / operator path in the DEMO content ────────────
+# We scan the demo's actual content — the scripts/demo sources, the runtime
+# config/*.json the seeder writes, and the seeded workspace interview files —
+# NOT the whole built repo. (The repo's own authoritative no-client-names CI
+# already scans git-tracked files at PR time; find-walking the built tree here
+# would false-positive on .next/ build manifests, which embed the checkout's
+# absolute path when the demo lives under the operator home, e.g. ~/demo.)
+echo "[3] No-client-names / operator-path scan (demo content)..."
+DEMO_SCAN=("$HERE" "$DEMO_REPO/config/company-config.json" "$DEMO_REPO/config/departments.json")
+[ -d "$DEMO_DATA_ROOT/interview/workspace" ] && DEMO_SCAN+=("$DEMO_DATA_ROOT/interview/workspace")
+[ -d "$DEMO_DATA_ROOT/dashboard/workspace" ] && DEMO_SCAN+=("$DEMO_DATA_ROOT/dashboard/workspace")
+if grep -RIlE '/Users/[a-zA-Z0-9._-]+/(command-center|clawd|\.openclaw)' "${DEMO_SCAN[@]}" 2>/dev/null | grep -q .; then
+  fail "operator path found in demo content"
 else
-  pass "no operator absolute path under scripts/demo"
+  pass "no operator path in demo content (scripts/demo, config, seeded workspace)"
 fi
+# Roster-aware real-name scan: reuse the repo's qc-assert-no-client-names.sh, but
+# scoped to a temp copy of ONLY the demo content (no node_modules, no .next).
 if [ -x "$DEMO_REPO/scripts/qc-assert-no-client-names.sh" ]; then
-  if ( cd "$DEMO_REPO" && bash scripts/qc-assert-no-client-names.sh --repo-root "$DEMO_REPO" >/tmp/qc-cn.$$.log 2>&1 ); then
-    pass "repo qc-assert-no-client-names.sh: clean"
+  SCAN="$(mktemp -d)"; LOG="/tmp/qc-cn.$$.log"
+  mkdir -p "$SCAN/scripts" "$SCAN/config"
+  cp -R "$HERE" "$SCAN/scripts/demo" 2>/dev/null
+  cp "$DEMO_REPO/config/company-config.json" "$DEMO_REPO/config/departments.json" "$SCAN/config/" 2>/dev/null
+  [ -d "$DEMO_DATA_ROOT/interview/workspace" ] && cp -R "$DEMO_DATA_ROOT/interview/workspace" "$SCAN/interview-workspace" 2>/dev/null
+  if ( bash "$DEMO_REPO/scripts/qc-assert-no-client-names.sh" --repo-root "$SCAN" >"$LOG" 2>&1 ); then
+    pass "qc-assert-no-client-names.sh: demo content clean"
   else
-    fail "repo qc-assert-no-client-names.sh reported hits (see /tmp/qc-cn.$$.log)"
+    fail "qc-assert-no-client-names.sh flagged demo content (see $LOG)"
   fi
+  rm -rf "$SCAN"
 else
   pass "repo qc-assert-no-client-names.sh not present (skipped)"
 fi
