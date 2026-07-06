@@ -117,7 +117,7 @@ export default function SettingsPage() {
             <div className="px-6 pb-6 border-t border-gray-100 pt-4">
               <div className="bg-gray-50 rounded-xl p-5">
                 <p className="text-sm text-gray-600 mb-4">
-                  Command Center's paths and URLs are read directly from the server&rsquo;s
+                  Command Center&rsquo;s paths and URLs are read directly from the server&rsquo;s
                   environment — there is no in-app editor for them. To change one, set the
                   variable (e.g. in <code className="px-1.5 py-0.5 bg-white rounded border border-gray-200 text-sm">.env.local</code>)
                   and restart the server:
