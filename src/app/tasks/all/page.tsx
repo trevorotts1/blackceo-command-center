@@ -129,10 +129,17 @@ export default function AllTasksPage() {
   }, [setAgents, setTasks, setEvents, setIsOnline, setIsLoading]);
 
   return (
-    <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
+    /* Shell contract (v4.66.0 bottom-cutoff fix):
+       • lg:h-dvh — dynamic viewport height, so mobile-Safari/short-window
+         chrome never hides the last row (100vh over-measured the viewport).
+       • min-h-0 on the flex row — without it the board region's flex children
+         keep min-height:auto and silently overflow the h-dvh shell, clipping
+         the bottom of the columns with no way to reach it.
+       • Below lg the page is a normal min-h-dvh document scroll. */
+    <div className="min-h-dvh lg:h-dvh flex flex-col bg-bcc-bg lg:overflow-hidden">
       <Header onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
 
-      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100">
+      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100 shrink-0">
         <Breadcrumb
           items={[
             { label: 'Home', href: '/' },
@@ -141,7 +148,7 @@ export default function AllTasksPage() {
         />
       </div>
 
-      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
         <AgentsSidebar navigateOnSelect isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <MissionQueue departmentFilter={null} />
         <LiveFeed />

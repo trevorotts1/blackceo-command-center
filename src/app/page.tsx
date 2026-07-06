@@ -1,288 +1,576 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+/**
+ * Main screen (v4.66.0 rebuild) — an operations overview, not a splash page.
+ *
+ * The previous landing was seven full-bleed gradient billboards with zero live
+ * data: an operator opened the Command Center several times a day and learned
+ * nothing from its first screen. This rebuild applies the patterns shared by
+ * best-in-class operational dashboards (Linear / Stripe / Vercel):
+ *
+ *   • F-pattern hierarchy — the 4 numbers that matter sit top-left, set in the
+ *     app's data face (JetBrains Mono, tabular) on quiet hairline cards.
+ *   • Restrained color — neutral surfaces; the themeable brand-* accent and
+ *     the semantic status colors are the only saturated elements. Per-view
+ *     color appears only as a 10%-tint icon chip, never a full-card gradient.
+ *   • Live pulse — departments render as chips with real working/idle dots;
+ *     recent activity streams in from /api/events. Everything on this screen
+ *     is real data or an honest empty state; nothing is fabricated.
+ *   • Density with calm — all seven destinations remain one click away, in a
+ *     compact grid that fits above the fold at 1440×900.
+ *
+ * White-label safe: every accent uses brand-* utilities (re-themed by
+ * <BrandTheme/>) or --bcc-* variables; no hardcoded brand hues.
+ */
+
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare } from 'lucide-react';
+import { motion, useReducedMotion } from 'framer-motion';
+import {
+  LayoutGrid,
+  BarChart3,
+  Kanban,
+  ArrowRight,
+  ArrowUpRight,
+  Activity,
+  Brain,
+  Settings,
+  Terminal,
+  MessagesSquare,
+  CircleAlert,
+  CheckCircle2,
+  Loader2,
+} from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
-import { useCompanyBrand } from '@/hooks/useCompanyBrand';
-import { format } from 'date-fns';
-import { Breadcrumb } from '@/components/Breadcrumb';
+import { format, formatDistanceToNow } from 'date-fns';
+import type { Task, Agent } from '@/lib/types';
 
-const cardVariants = {
-  hidden: { opacity: 0, y: 30, scale: 0.95 },
-  visible: {
-    opacity: 1, y: 0, scale: 1,
-    transition: { type: 'spring' as const, stiffness: 100, damping: 15 },
-  },
-};
+/* ── types for the lightweight fetches ─────────────────────────────────── */
 
-const containerVariants = {
-  hidden: { opacity: 0 },
-  visible: { opacity: 1, transition: { staggerChildren: 0.12, delayChildren: 0.05 } },
-};
+interface WorkspaceRow {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string;
+}
 
-interface EntryCard {
+interface EventRow {
+  id: string;
+  type: string;
+  message: string;
+  created_at: string;
+  agent_name?: string | null;
+}
+
+interface ViewCard {
   title: string;
   description: string;
-  detail: string;
   icon: React.ReactNode;
-  gradient: string;
+  /** 10%-tint chip classes; color lives ONLY here (icon chip), never the card. */
+  chip: string;
   route: string;
-  cta: string;
+  badge?: number | null;
+}
+
+const OPEN_STATUSES = new Set([
+  'backlog',
+  'inbox',
+  'planning',
+  'pending_dispatch',
+  'assigned',
+  'in_progress',
+  'review',
+  'testing',
+]);
+
+function greetingFor(date: Date): string {
+  const h = date.getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+/** Dot color for an activity event — semantic, worst-case-first. */
+function eventTone(type: string): string {
+  if (/(error|blocked|failed)/.test(type)) return 'bg-red-500';
+  if (/(completed|done|success)/.test(type)) return 'bg-emerald-500';
+  if (/(created|assigned|dispatch|started)/.test(type)) return 'bg-blue-500';
+  return 'bg-gray-300';
 }
 
 export default function HomePage() {
   const logoUrl = useLogoUrl();
-  const brand = useCompanyBrand();
-  const [currentTime, setCurrentTime] = useState(new Date());
+  const reduceMotion = useReducedMotion();
+
+  const [now, setNow] = useState<Date | null>(null);
   const [isOnline, setIsOnline] = useState(true);
-  // PRD 3.7: initial state must be empty so white-label deployments never flash "BlackCEO".
   const [companyName, setCompanyName] = useState('');
   const [companyLoaded, setCompanyLoaded] = useState(false);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([]);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [dataLoaded, setDataLoaded] = useState(false);
 
-  const hasBrand = brand.primaryColor && brand.secondaryColor;
-  const cardBackground = hasBrand
-    ? { background: `linear-gradient(135deg, ${brand.primaryLight}, ${brand.secondaryLight})` }
-    : null;
-  const headerGradient = hasBrand
-    ? { background: `linear-gradient(135deg, ${brand.primaryColor}, ${brand.secondaryColor})` }
-    : null;
-
+  /* clock — minute precision; no per-second re-render */
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
+    setNow(new Date());
+    const t = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(t);
   }, []);
 
+  /* company name (PRD 3.7: never flash a default brand on white-label boxes) */
   useEffect(() => {
-    async function fetchCompany() {
+    let cancelled = false;
+    (async () => {
       try {
         const res = await fetch('/api/company', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
           const name = data?.name || data?.company?.name || '';
-          if (name) setCompanyName(name);
+          if (!cancelled && name) setCompanyName(name);
         }
       } catch {}
-      finally {
-        setCompanyLoaded(true);
-      }
-    }
-    fetchCompany();
+      if (!cancelled) setCompanyLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
+  /* live overview data + health, refreshed every 60s */
   useEffect(() => {
-    async function checkConnection() {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const [tasksRes, agentsRes, wsRes, eventsRes] = await Promise.all([
+          fetch('/api/tasks', { cache: 'no-store' }),
+          fetch('/api/agents', { cache: 'no-store' }),
+          fetch('/api/workspaces', { cache: 'no-store' }),
+          fetch('/api/events', { cache: 'no-store' }),
+        ]);
+        if (cancelled) return;
+        if (tasksRes.ok) setTasks(await tasksRes.json());
+        if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (wsRes.ok) {
+          const ws = await wsRes.json();
+          setWorkspaces(Array.isArray(ws) ? ws : ws?.workspaces ?? []);
+        }
+        if (eventsRes.ok) {
+          const ev = await eventsRes.json();
+          if (Array.isArray(ev)) {
+            // Internal plumbing events (backfills, dedup sweeps, heartbeats)
+            // are real but not what an owner means by “activity”. Prefer
+            // user-meaningful events; fall back to everything rather than
+            // showing a false “no activity” empty state.
+            const meaningful = ev.filter(
+              (e: EventRow) => !/(backfill|dedup|reconcile|heartbeat|probe)/i.test(e.type)
+            );
+            setEvents((meaningful.length > 0 ? meaningful : ev).slice(0, 8));
+          } else {
+            setEvents([]);
+          }
+        }
+      } catch {
+        // network hiccup: keep last known data on screen
+      } finally {
+        if (!cancelled) setDataLoaded(true);
+      }
+    }
+
+    async function health() {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
         const res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
         clearTimeout(timeoutId);
-        setIsOnline(res.ok);
+        if (!cancelled) setIsOnline(res.ok);
       } catch {
-        setIsOnline(false);
+        if (!cancelled) setIsOnline(false);
       }
     }
-    checkConnection();
-    const interval = setInterval(checkConnection, 60000);
-    return () => clearInterval(interval);
+
+    load();
+    health();
+    const interval = setInterval(() => {
+      load();
+      health();
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
-  // PRD 3.8 + v4.0.1 P0-1: landing layout. Operator Console is the 5th card.
-  // F52: Conversational AI analytics is the 7th card (fills the next 3-col slot).
-  const cards: EntryCard[] = [
+  /* ── derived numbers (all real; no fabrication) ──────────────────────── */
+
+  const stats = useMemo(() => {
+    const active = tasks.filter((t) => OPEN_STATUSES.has(t.status));
+    const inProgress = tasks.filter((t) => t.status === 'in_progress');
+    const blocked = tasks.filter((t) => t.status === 'blocked');
+    const done = tasks.filter((t) => t.status === 'done');
+    const workingAgents = agents.filter((a) => a.status === 'working' || a.status === 'active');
+    return {
+      active: active.length,
+      inProgress: inProgress.length,
+      blocked: blocked.length,
+      done: done.length,
+      agentsTotal: agents.length,
+      agentsWorking: workingAgents.length,
+    };
+  }, [tasks, agents]);
+
+  /** Per-department live pulse: open tasks + whether any agent is working. */
+  const deptPulse = useMemo(() => {
+    const realWs = workspaces.filter((w) => w.slug !== 'default');
+    return realWs.map((w) => {
+      const open = tasks.filter(
+        (t) => t.workspace_id === w.id && OPEN_STATUSES.has(t.status)
+      ).length;
+      const working = agents.some(
+        (a) => a.workspace_id === w.id && (a.status === 'working' || a.status === 'active')
+      );
+      return { ...w, open, working };
+    });
+  }, [workspaces, tasks, agents]);
+
+  const kpis = [
+    { label: 'Active tasks', value: stats.active, sub: 'across all departments', href: '/tasks/all' },
+    { label: 'In progress', value: stats.inProgress, sub: 'being worked right now', href: '/tasks/all' },
+    { label: 'Completed', value: stats.done, sub: 'all time', href: '/tasks/all' },
     {
-      title: 'View All Tasks',
-      description: 'Master view with department sidebar',
-      detail: 'Every active task across every department in one Kanban. Use the left sidebar to switch the focused department without losing the view.',
-      icon: <Kanban className="w-7 h-7 text-white" />,
-      gradient: 'from-indigo-500 via-purple-500 to-pink-500',
+      label: 'Needs attention',
+      value: stats.blocked,
+      sub: stats.blocked > 0 ? 'blocked — action required' : 'nothing blocked',
+      href: '/tasks/all',
+      alert: stats.blocked > 0,
+    },
+  ];
+
+  /* All seven destinations preserved (PRD 3.8 + F52), now as quiet cards. */
+  const views: ViewCard[] = [
+    {
+      title: 'All Tasks',
+      description: 'One Kanban, all departments',
+      icon: <Kanban className="w-5 h-5" />,
+      chip: 'bg-indigo-50 text-indigo-600',
       route: '/tasks/all',
-      cta: 'Open All Tasks',
+      badge: dataLoaded ? stats.active : null,
     },
     {
       title: 'Departments',
-      description: 'Focus mode, one department at a time',
-      detail: 'Pick a department, get a department-only Kanban and department-only KPIs. Use the back button to return to the picker.',
-      icon: <LayoutGrid className="w-7 h-7 text-white" />,
-      gradient: 'from-emerald-400 via-teal-500 to-cyan-500',
+      description: 'One department at a time',
+      icon: <LayoutGrid className="w-5 h-5" />,
+      chip: 'bg-emerald-50 text-emerald-600',
       route: '/tasks/by-department',
-      cta: 'Pick a Department',
+      badge: dataLoaded ? deptPulse.length : null,
     },
     {
       title: 'Performance Board',
-      description: 'CEO Performance Overview',
-      detail: 'Company-wide analytics, department grades, agent roster, KPIs, benchmarks, and strategic recommendations.',
-      icon: <BarChart3 className="w-7 h-7 text-white" />,
-      gradient: 'from-amber-400 via-orange-500 to-red-500',
+      description: 'Analytics and grades',
+      icon: <BarChart3 className="w-5 h-5" />,
+      chip: 'bg-amber-50 text-amber-600',
       route: '/ceo-board',
-      cta: 'View Performance',
     },
     {
       title: 'Conversational AI',
-      description: 'Live conversation analytics',
-      detail: 'Channel volume, conversations over time, sentiment, escalations, top objections, KB hit rate, and pixel-funnel performance across every messaging surface. Unlocks persona-tuned views once your AI Workforce interview is complete.',
-      icon: <MessagesSquare className="w-7 h-7 text-white" />,
-      gradient: 'from-fuchsia-500 via-pink-500 to-rose-500',
+      description: 'Conversation analytics',
+      icon: <MessagesSquare className="w-5 h-5" />,
+      chip: 'bg-pink-50 text-pink-600',
       route: '/conversational-ai',
-      cta: 'View Conversations',
     },
     {
       title: 'Intelligence Settings',
-      description: 'AI Configuration',
-      detail: 'Manage which AI models and personas power each department and role. Fine-tune your workforce intelligence.',
-      icon: <Brain className="w-7 h-7 text-white" />,
-      gradient: 'from-violet-500 via-purple-500 to-fuchsia-500',
+      description: 'Models and personas',
+      icon: <Brain className="w-5 h-5" />,
+      chip: 'bg-violet-50 text-violet-600',
       route: '/settings/intelligence',
-      cta: 'Configure AI',
     },
     {
       title: 'Operator Console',
-      description: 'Your direct workspace',
-      detail: 'Chat with operator-level AIs, generate media, take notes, track goals, journal, search your memory, run research, make voice calls, and dispatch the Web Agent.',
-      icon: <Terminal className="w-7 h-7 text-white" />,
-      gradient: 'from-cyan-500 via-sky-500 to-blue-600',
+      description: 'Chat, media, research, web agent',
+      icon: <Terminal className="w-5 h-5" />,
+      chip: 'bg-sky-50 text-sky-600',
       route: '/operator',
-      cta: 'Open Console',
     },
     {
       title: 'Company Settings',
-      description: 'Company configuration',
-      detail: 'Update company name, brand colors, logo, and white-label settings for this deployment.',
-      icon: <Settings className="w-7 h-7 text-white" />,
-      gradient: 'from-slate-500 via-gray-600 to-zinc-700',
+      description: 'Name, brand, logo',
+      icon: <Settings className="w-5 h-5" />,
+      chip: 'bg-gray-100 text-gray-600',
       route: '/settings/company',
-      cta: 'Open Settings',
     },
   ];
 
   return (
-    <div className="min-h-screen bg-bcc-bg flex flex-col">
-      {/* Header */}
-      <header className="h-16 bg-white border-b border-gray-200 px-6 flex items-center justify-between">
-        <div className="flex items-center gap-4">
+    <div className="min-h-dvh bg-bcc-bg flex flex-col">
+      {/* ── Top bar ─────────────────────────────────────────────────────── */}
+      <header className="h-14 bg-white border-b border-gray-200 px-4 sm:px-6 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           {logoUrl ? (
-            <img src={logoUrl} alt="Command Center" className="h-9 w-auto" />
+            <img src={logoUrl} alt="Company logo" className="h-8 w-auto shrink-0" />
           ) : (
-            <div className="flex items-center gap-2">
-              <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
-                <BarChart3 className="w-5 h-5 text-white" />
-              </div>
-              {companyLoaded ? (
-                companyName ? (
-                  <span className="text-gray-900 font-bold text-xl tracking-tight">{companyName}</span>
-                ) : null
-              ) : (
-                <span
-                  aria-hidden="true"
-                  className="inline-block h-5 w-32 rounded bg-gray-200 animate-pulse"
-                />
-              )}
+            <div className="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center shrink-0">
+              <BarChart3 className="w-4 h-4 text-white" />
             </div>
           )}
-          <div className="h-6 w-px bg-gray-200 mx-2" />
-          <h1 className="text-gray-900 font-semibold text-lg">Command Center</h1>
+          <div className="min-w-0 flex items-baseline gap-2">
+            {companyLoaded ? (
+              companyName ? (
+                <span className="text-gray-900 font-semibold text-[15px] truncate">
+                  {companyName}
+                </span>
+              ) : null
+            ) : (
+              <span aria-hidden="true" className="inline-block h-4 w-24 rounded bg-gray-200 animate-pulse" />
+            )}
+            <span className="hidden sm:inline text-gray-400 text-[15px] shrink-0" aria-hidden="true">
+              /
+            </span>
+            <span className="hidden sm:inline text-gray-500 text-[15px] font-medium shrink-0">
+              Command Center
+            </span>
+          </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          <span className="text-gray-500 text-base font-mono">
-            {format(currentTime, 'MMM d, HH:mm:ss')}
-          </span>
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
-            isOnline
-              ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
-              : 'bg-red-50 border border-red-200 text-red-700'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-            {isOnline ? 'LIVE' : 'OFFLINE'}
+        <div className="flex items-center gap-3 shrink-0">
+          {now && (
+            <span className="hidden md:inline text-gray-500 text-sm font-mono tabular-nums">
+              {format(now, 'EEE MMM d · HH:mm')}
+            </span>
+          )}
+          <div
+            role="status"
+            aria-label={`Connection status: ${isOnline ? 'live' : 'offline'}`}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+              isOnline
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                : 'bg-red-50 border-red-200 text-red-700'
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}
+            />
+            {isOnline ? 'Live' : 'Offline'}
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 flex flex-col items-center justify-center px-6 py-4">
-        <div className="max-w-7xl w-full">
-          <Breadcrumb items={[{ label: 'Home' }]} />
+      {/* ── Overview ────────────────────────────────────────────────────── */}
+      <motion.main
+        className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8"
+        initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.25, ease: 'easeOut' }}
+      >
+        {/* Greeting */}
+        <div className="mb-6">
+          <p className="text-sm text-gray-500 mb-0.5">
+            {now ? format(now, 'EEEE, MMMM d') : ' '}
+          </p>
+          <h1 className="text-2xl sm:text-[28px] font-bold text-gray-900 tracking-tight leading-tight">
+            {now ? greetingFor(now) : 'Welcome'}
+            {companyName ? `, ${companyName}` : ''}
+          </h1>
         </div>
-        <motion.div
-          className="max-w-7xl w-full"
-          initial="hidden"
-          animate="visible"
-          variants={containerVariants}
-        >
-          {/* Title */}
-          <motion.div className="text-center mb-12" variants={cardVariants}>
-            <h2 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
-              {companyLoaded ? (
-                companyName ? `Welcome to ${companyName}` : 'Welcome to your Command Center'
-              ) : (
-                <span
-                  aria-hidden="true"
-                  className="inline-block h-10 sm:h-12 w-72 rounded bg-gray-200 animate-pulse align-middle"
-                />
-              )}
-            </h2>
-            <p className="text-gray-500 text-lg max-w-xl mx-auto">
-              Choose where you want to go
-            </p>
-          </motion.div>
 
-          {/* Entry Cards */}
-          <motion.div
-            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-stretch"
-            variants={containerVariants}
-          >
-            {cards.map((card) => (
-              <motion.div
-                key={card.route}
-                className="group relative w-full h-full"
-                variants={cardVariants}
-                whileHover={{ scale: 1.03, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } }}
-                whileTap={{ scale: 0.98 }}
+        {/* KPI strip — the four numbers that matter, top-left first */}
+        <section aria-label="Today's numbers" className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
+          {kpis.map((kpi) => (
+            <Link
+              key={kpi.label}
+              href={kpi.href}
+              className="group bg-white border border-gray-200 rounded-xl p-4 hover:border-brand-300 hover:shadow-card transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-medium text-gray-500">{kpi.label}</span>
+                {kpi.alert ? (
+                  <CircleAlert className="w-3.5 h-3.5 text-red-500" aria-hidden="true" />
+                ) : (
+                  <ArrowUpRight
+                    className="w-3.5 h-3.5 text-gray-300 group-hover:text-brand-500 transition-colors"
+                    aria-hidden="true"
+                  />
+                )}
+              </div>
+              <div
+                className={`font-mono text-[28px] leading-none font-semibold tabular-nums tracking-tight ${
+                  kpi.alert ? 'text-red-600' : 'text-gray-900'
+                }`}
               >
-                <Link href={card.route} className="block text-left h-full">
-                  <div
-                    className={`relative overflow-hidden rounded-2xl ${cardBackground ? '' : `bg-gradient-to-br ${card.gradient}`} p-8 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
-                    style={cardBackground || undefined}
-                  >
-                    {/* Decorative */}
-                    <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
-                    <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
+                {dataLoaded ? kpi.value : '–'}
+              </div>
+              <p className="text-xs text-gray-400 mt-1.5 truncate">{kpi.sub}</p>
+            </Link>
+          ))}
+        </section>
 
-                    <div className="relative z-10 flex flex-col h-full">
-                      {/* Icon */}
-                      <div className="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-5">
-                        {card.icon}
-                      </div>
-
-                      {/* Title + subtitle */}
-                      <h3 className="text-white font-bold text-xl mb-1 leading-tight">{card.title}</h3>
-                      <p className="text-white/70 text-sm font-semibold uppercase tracking-wider mb-4">{card.description}</p>
-
-                      {/* Detail */}
-                      <p className="text-white/75 text-sm leading-relaxed flex-1">{card.detail}</p>
-
-                      {/* CTA */}
-                      <div className="mt-6 flex items-center gap-2 text-white font-semibold text-sm">
-                        <span>{card.cta}</span>
-                        <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
-                      </div>
-                    </div>
-                  </div>
-                </Link>
-              </motion.div>
-            ))}
-          </motion.div>
-
-          {/* Footer */}
-          <motion.div className="mt-12 text-center" variants={cardVariants}>
-            <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
-              <Activity className="w-4 h-4 text-indigo-500" />
-              <span>{isOnline ? 'All systems operational' : 'System check failed'}</span>
+        {/* Department pulse — live working/idle state per department */}
+        {deptPulse.length > 0 && (
+          <section aria-label="Department pulse" className="mb-8">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-gray-900">Departments</h2>
+              <Link
+                href="/tasks/by-department"
+                className="text-xs font-medium text-brand-700 hover:text-brand-800 flex items-center gap-1"
+              >
+                View all
+                <ArrowRight className="w-3 h-3" aria-hidden="true" />
+              </Link>
             </div>
-          </motion.div>
-        </motion.div>
-      </main>
+            <div className="flex flex-wrap gap-2">
+              {deptPulse.map((d) => (
+                <Link
+                  key={d.id}
+                  href={`/workspace/${d.slug}`}
+                  className="flex items-center gap-2 pl-2.5 pr-3 py-2 bg-white border border-gray-200 rounded-lg hover:border-brand-300 hover:shadow-card transition-all min-h-[40px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+                >
+                  <span className="text-base leading-none" aria-hidden="true">
+                    {d.icon}
+                  </span>
+                  <span className="text-sm font-medium text-gray-800">{d.name}</span>
+                  {d.open > 0 && (
+                    <span className="text-xs font-mono tabular-nums font-medium text-gray-500 bg-gray-100 rounded px-1.5 py-0.5">
+                      {d.open}
+                    </span>
+                  )}
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      d.working ? 'bg-emerald-500 animate-pulse' : 'bg-gray-300'
+                    }`}
+                    title={d.working ? 'Agents working' : 'Idle'}
+                  />
+                </Link>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Views — every destination, one click, no billboards */}
+        <section aria-label="Views" className="mb-8">
+          <h2 className="text-sm font-semibold text-gray-900 mb-3">Views</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+            {views.map((view) => (
+              <Link
+                key={view.route}
+                href={view.route}
+                className="group flex items-center gap-3 bg-white border border-gray-200 rounded-xl p-4 hover:border-brand-300 hover:shadow-card transition-all min-h-[72px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+              >
+                <div
+                  className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${view.chip}`}
+                  aria-hidden="true"
+                >
+                  {view.icon}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-gray-900 truncate">
+                      {view.title}
+                    </span>
+                    {typeof view.badge === 'number' && view.badge > 0 && (
+                      <span className="text-xs font-mono tabular-nums font-medium text-gray-500 bg-gray-100 rounded px-1.5 py-0.5 shrink-0">
+                        {view.badge}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 truncate mt-0.5">{view.description}</p>
+                </div>
+                <ArrowUpRight
+                  className="w-4 h-4 text-gray-300 group-hover:text-brand-500 transition-colors shrink-0"
+                  aria-hidden="true"
+                />
+              </Link>
+            ))}
+          </div>
+        </section>
+
+        {/* Activity + system status */}
+        <section aria-label="Recent activity" className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+          <div className="lg:col-span-2 bg-white border border-gray-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-gray-900">Recent activity</h2>
+              <Link
+                href="/tasks/all"
+                className="text-xs font-medium text-brand-700 hover:text-brand-800 flex items-center gap-1"
+              >
+                Open board
+                <ArrowRight className="w-3 h-3" aria-hidden="true" />
+              </Link>
+            </div>
+            {!dataLoaded ? (
+              <div className="flex items-center gap-2 py-6 justify-center text-gray-400 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                Loading activity…
+              </div>
+            ) : events.length === 0 ? (
+              <div className="py-6 text-center">
+                <p className="text-sm text-gray-500">No activity yet.</p>
+                <p className="text-xs text-gray-400 mt-1">
+                  Dispatch your first task from the board and your agents&rsquo; work will show up here.
+                </p>
+              </div>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {events.map((ev) => (
+                  <li key={ev.id} className="flex items-start gap-2.5 py-2 first:pt-0 last:pb-0">
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${eventTone(ev.type)}`}
+                      aria-hidden="true"
+                    />
+                    <p className="flex-1 min-w-0 text-sm text-gray-700 truncate">
+                      {ev.message.replace(/^\[[A-Z0-9 _-]+\]\s*/, '')}
+                    </p>
+                    <span className="text-xs text-gray-400 shrink-0 whitespace-nowrap">
+                      {formatDistanceToNow(new Date(ev.created_at), { addSuffix: true })}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col">
+            <h2 className="text-sm font-semibold text-gray-900 mb-3">System</h2>
+            <ul className="space-y-2.5 flex-1">
+              <li className="flex items-center justify-between gap-2">
+                <span className="text-sm text-gray-600">Gateway</span>
+                <span
+                  className={`flex items-center gap-1.5 text-xs font-medium ${
+                    isOnline ? 'text-emerald-700' : 'text-red-700'
+                  }`}
+                >
+                  {isOnline ? (
+                    <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
+                  ) : (
+                    <CircleAlert className="w-3.5 h-3.5" aria-hidden="true" />
+                  )}
+                  {isOnline ? 'Operational' : 'Unreachable'}
+                </span>
+              </li>
+              <li className="flex items-center justify-between gap-2">
+                <span className="text-sm text-gray-600">Agents</span>
+                <span className="text-xs font-mono tabular-nums font-medium text-gray-700">
+                  {dataLoaded ? `${stats.agentsWorking} working / ${stats.agentsTotal}` : '–'}
+                </span>
+              </li>
+              <li className="flex items-center justify-between gap-2">
+                <span className="text-sm text-gray-600">Departments</span>
+                <span className="text-xs font-mono tabular-nums font-medium text-gray-700">
+                  {dataLoaded ? deptPulse.length : '–'}
+                </span>
+              </li>
+            </ul>
+            <Link
+              href="/ceo-board"
+              className="mt-4 flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded-lg bg-brand-600 text-white text-sm font-semibold hover:bg-brand-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 min-h-[40px]"
+            >
+              <Activity className="w-4 h-4" aria-hidden="true" />
+              Performance Board
+            </Link>
+          </div>
+        </section>
+      </motion.main>
     </div>
   );
 }

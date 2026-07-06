@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown, Terminal, Check, Building2 } from 'lucide-react';
+import { Settings, ChevronLeft, LayoutGrid, Home, Sparkles, ChevronDown, Terminal, Check, Building2, Menu } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
@@ -287,6 +287,20 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
     <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-between gap-2 px-3 sm:px-4">
       {/* Left: Logo & Title */}
       <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+        {/* Departments drawer toggle (v4.66.0) — the sidebar is an overlay
+            drawer below lg, and this is its only opener. Header always
+            received onMenuClick but never rendered a button for it. */}
+        {onMenuClick && (
+          <button
+            type="button"
+            onClick={onMenuClick}
+            aria-label={sidebarOpen ? 'Close departments menu' : 'Open departments menu'}
+            aria-expanded={sidebarOpen}
+            className="lg:hidden flex items-center justify-center w-10 h-10 -ml-1 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 shrink-0"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+        )}
         <div className="flex items-center gap-2 shrink-0">
           <img
             src={logoUrl}
@@ -381,18 +395,23 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
           void selectedClient;
           const online = isOnline;
           return (
+            /* “Gateway …” wording + sm+ only (v4.66.0): this pill used to say
+               a bare “Online” right next to the system pill's “OFFLINE”, which
+               read as the app contradicting itself. Naming the subject and
+               hiding it on phones (where the system pill is the one status)
+               removes the contradiction. */
             <div
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border ${
+              className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border ${
                 online
                   ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
                   : 'bg-gray-50 border-gray-200 text-gray-600'
               }`}
               role="status"
-              aria-label={`Connection status: ${online ? 'Online' : 'Offline'}`}
+              aria-label={`Gateway connection: ${online ? 'online' : 'offline'}`}
               title={online ? 'Connected to the selected client gateway' : 'Not connected to the selected client gateway'}
             >
               <span className={`w-2 h-2 rounded-full ${online ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`} />
-              <span>{online ? 'Online' : 'Offline'}</span>
+              <span>{online ? 'Gateway Online' : 'Gateway Offline'}</span>
             </div>
           );
         })()}
