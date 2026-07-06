@@ -405,8 +405,32 @@ export async function GET() {
       // Fall through with whatever the registry gave us.
     }
 
-    // Try to enrich personas from persona-matrix.md
-    const enrichedPersonas = [...AVAILABLE_PERSONAS];
+    // Build the persona-lock picker from the FULL coaching-personas library
+    // (persona-categories.json — the same 99-persona universe the matcher picks
+    // from and the /personas page renders), NOT the hardcoded curated subset.
+    // Previously the operator-lock dropdown seeded from AVAILABLE_PERSONAS (~38
+    // slugs) and only grew if a per-company persona-matrix.md happened to exist
+    // at one of three exact paths; on every box without that file the picker
+    // showed a stale short list missing 60+ personas (incl. blackceo-house-voice
+    // and hunt-thomas-pragmatic-programmer). 'auto' stays first (defer-to-matcher
+    // default). AVAILABLE_PERSONAS is retained ONLY as an empty-file fallback so
+    // the dropdown is never empty. persona-matrix.md still supplements below.
+    const personaLibrary = loadPersonaCategories();
+    const enrichedPersonas: { id: string; label: string }[] = [
+      { id: 'auto', label: 'Auto-assign (recommended)' },
+    ];
+    for (const slug of Object.keys(personaLibrary).sort()) {
+      const e = personaLibrary[slug];
+      enrichedPersonas.push({
+        id: slug,
+        label: `${e.author} - ${e.book} (${getPersonaCategory(e)})`,
+      });
+    }
+    if (enrichedPersonas.length === 1) {
+      // persona-categories.json missing/unreadable — fall back to the curated
+      // hardcoded list so the picker is never empty on an unprovisioned box.
+      enrichedPersonas.push(...AVAILABLE_PERSONAS.filter((p) => p.id !== 'auto'));
+    }
     try {
       const { existsSync, readFileSync } = await import('fs');
       const { homedir } = await import('os');
