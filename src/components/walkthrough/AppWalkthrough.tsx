@@ -62,6 +62,15 @@ const POPOVER_MARGIN = 16; // min gap between popover edge and viewport edge
 const ANCHOR_GAP = 14; // gap between anchor rect and popover box (+ arrow height)
 
 /**
+ * The popover's EFFECTIVE width: capped to the viewport so a phone screen
+ * (e.g. 375px) never gets a 420px card whose close/Next controls hang off the
+ * right edge with no way to dismiss it (there is no Escape key on a phone).
+ */
+function popoverWidth(vw: number): number {
+  return Math.min(POPOVER_W, vw - 2 * POPOVER_MARGIN);
+}
+
+/**
  * Compute where to place the popover so it stays on-screen and doesn't
  * overlap the anchor element. Preference order: below → above → right → left.
  */
@@ -72,6 +81,7 @@ function computePosition(
   vh: number,
 ): PopoverPosition {
   const candidates: Placement[] = ['below', 'above', 'right', 'left'];
+  const w = popoverWidth(vw);
 
   for (const placement of candidates) {
     let top = 0;
@@ -79,21 +89,21 @@ function computePosition(
 
     if (placement === 'below') {
       top = anchorRect.bottom + ANCHOR_GAP;
-      left = anchorRect.left + anchorRect.width / 2 - POPOVER_W / 2;
+      left = anchorRect.left + anchorRect.width / 2 - w / 2;
     } else if (placement === 'above') {
       top = anchorRect.top - ANCHOR_GAP - popoverH;
-      left = anchorRect.left + anchorRect.width / 2 - POPOVER_W / 2;
+      left = anchorRect.left + anchorRect.width / 2 - w / 2;
     } else if (placement === 'right') {
       top = anchorRect.top + anchorRect.height / 2 - popoverH / 2;
       left = anchorRect.right + ANCHOR_GAP;
     } else {
       // left
       top = anchorRect.top + anchorRect.height / 2 - popoverH / 2;
-      left = anchorRect.left - ANCHOR_GAP - POPOVER_W;
+      left = anchorRect.left - ANCHOR_GAP - w;
     }
 
     // Clamp horizontally
-    left = Math.max(POPOVER_MARGIN, Math.min(left, vw - POPOVER_W - POPOVER_MARGIN));
+    left = Math.max(POPOVER_MARGIN, Math.min(left, vw - w - POPOVER_MARGIN));
     // Clamp vertically
     top = Math.max(POPOVER_MARGIN, Math.min(top, vh - popoverH - POPOVER_MARGIN));
 
@@ -101,7 +111,7 @@ function computePosition(
     const fits =
       top + popoverH <= vh - POPOVER_MARGIN &&
       top >= POPOVER_MARGIN &&
-      left + POPOVER_W <= vw - POPOVER_MARGIN &&
+      left + w <= vw - POPOVER_MARGIN &&
       left >= POPOVER_MARGIN;
 
     if (fits) return { top, left, placement };
@@ -110,7 +120,7 @@ function computePosition(
   // Fallback: center on screen
   return {
     top: Math.max(POPOVER_MARGIN, (vh - popoverH) / 2),
-    left: Math.max(POPOVER_MARGIN, (vw - POPOVER_W) / 2),
+    left: Math.max(POPOVER_MARGIN, (vw - w) / 2),
     placement: 'below',
   };
 }
@@ -439,15 +449,24 @@ export default function AppWalkthrough() {
                     position: 'fixed',
                     top: popoverPos.top,
                     left: popoverPos.left,
-                    width: POPOVER_W,
+                    // Same viewport cap as computePosition (popoverWidth): a
+                    // fixed 420px card off a 375px phone screen left the
+                    // close/Next controls unreachable.
+                    width: `min(${POPOVER_W}px, calc(100vw - ${2 * POPOVER_MARGIN}px))`,
                     zIndex: 62,
                   }
                 : {
+                    // Centered WITHOUT a CSS transform: framer-motion's scale
+                    // animation owns the `transform` property and silently
+                    // dropped the old translate(-50%,-50%), so the card hung
+                    // off the right/bottom edge of small screens (its Close /
+                    // Next controls unreachable on a phone). inset+margin:auto
+                    // centers a fixed, fit-content box on both axes instead.
                     position: 'fixed',
-                    top: '50%',
-                    left: '50%',
-                    transform: 'translate(-50%, -50%)',
-                    width: `min(${POPOVER_W}px, 94vw)`,
+                    inset: 0,
+                    margin: 'auto',
+                    height: 'fit-content',
+                    width: `min(${POPOVER_W}px, calc(100vw - ${2 * POPOVER_MARGIN}px))`,
                     zIndex: 62,
                   }
             }
