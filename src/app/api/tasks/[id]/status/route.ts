@@ -73,20 +73,21 @@ export const revalidate = 0;
  *      other status this route sets. An unmarked card still gets the
  *      existing non-Skill-6 403 for 'blocked', the same as any other status.
  *
- *   2. Card scope — the route only acts on tasks that carry the Skill-6
- *      producer's marker (see SKILL6_SOURCE_MARKER below). There is no
- *      dedicated `source` column on `tasks`; /api/tasks/ingest folds
+ *   2. Card scope — the route only acts on tasks that carry a signed
+ *      board-producer marker (see isSignedBoardProducerCard below). There is
+ *      no dedicated `source` column on `tasks`; /api/tasks/ingest folds
  *      provenance into the description as a "Source: <value>" line inside a
- *      "— Captured via task-ingest —" block. cc_board.py's ingest_task()
- *      (06-ghl-install-pages/tools/cc_board.py) is the Skill-6 producer and
- *      is the only caller that stamps source to 'funnel' | 'survey' |
- *      'web-development' (its job_type → source mapping). A task missing
- *      that marker (i.e. not created by the Skill-6 board hookup) is
- *      rejected with 403 — a signed caller can only move Skill-6's own
- *      cards, not an arbitrary task on the board. This is the check that
- *      gates 'blocked': it runs after the 'done'-always-403 check but before
- *      any status transition is persisted, so a marked card may be set to
- *      'blocked' (human escalation) while an unmarked card may not.
+ *      "— Captured via task-ingest —" block. Two producers stamp such a
+ *      marker: cc_board.py's ingest_task() (06-ghl-install-pages/tools/
+ *      cc_board.py, the Skill-6 producer, source 'funnel' | 'survey' |
+ *      'web-development') and mc_board.py (the Anthology Engine's FAIL-SOFT
+ *      board client, source 'anthology'; W3.1). A task missing any recognized
+ *      marker (i.e. not created by a signed board producer) is rejected with
+ *      403 — a signed caller can only move its own producer's cards, not an
+ *      arbitrary task on the board. This is the check that gates 'blocked': it
+ *      runs after the 'done'-always-403 check but before any status transition
+ *      is persisted, so a marked card may be set to 'blocked' (human
+ *      escalation) while an unmarked card may not.
  */
 
 // LOCKSTEP: mirrors the canonical 10-status TaskStatus union in
@@ -140,6 +141,34 @@ const SKILL6_SOURCE_MARKER = /^Source:\s*(?:funnel|survey|web-development)\s*$/m
 
 function hasSkill6Marker(description: string | null | undefined): boolean {
   return typeof description === 'string' && SKILL6_SOURCE_MARKER.test(description);
+}
+
+/**
+ * W3.1 — Anthology Engine board-mirror scope marker. The Anthology Engine's
+ * FAIL-SOFT board client (mc_board.py) creates each participant card and the
+ * per-anthology Assembly card via /api/tasks/ingest with source="anthology", so
+ * the ingest route folds a "Source: anthology" line into the description exactly
+ * as it does for the Skill-6 producer's markers. mc_board.py then mirrors the
+ * ledger stage_cursor / assembly_state onto its OWN cards (backlog | in_progress |
+ * review | blocked) and NEVER sets 'done' — review → done stays owned by the
+ * independent QC auto-scorer at ≥ 8.5 (FORBIDDEN_STATUSES is unchanged, so a
+ * 'done' is still rejected 403 before scope is even checked). Recognizing this
+ * marker lets a signed caller move the Anthology Engine's own cards, and only
+ * those — an unmarked task is still out of scope.
+ */
+const ANTHOLOGY_SOURCE_MARKER = /^Source:\s*anthology\s*$/m;
+
+function hasAnthologyMarker(description: string | null | undefined): boolean {
+  return typeof description === 'string' && ANTHOLOGY_SOURCE_MARKER.test(description);
+}
+
+/**
+ * A signed caller may transition a card only when it carries a recognized
+ * board-producer source marker: the Skill-6 producer's cards OR the Anthology
+ * Engine's cards. Any other task is out of scope (403).
+ */
+function isSignedBoardProducerCard(description: string | null | undefined): boolean {
+  return hasSkill6Marker(description) || hasAnthologyMarker(description);
 }
 
 /**
@@ -255,14 +284,16 @@ export async function POST(
     // may be escalated to 'blocked' (e.g. cc_board.py's
     // BuildPhaseDriver.fail(human_required=True) signaling a human is
     // needed); an unmarked card gets the same 403 as any other status. ──
-    if (!hasSkill6Marker(existing.description)) {
+    if (!isSignedBoardProducerCard(existing.description)) {
       return NextResponse.json(
         {
-          error: 'Forbidden: this task is not a Skill-6 producer card.',
+          error: 'Forbidden: this task is not a signed board-producer card.',
           hint:
-            'This route only transitions tasks created by the Skill-6 board hookup ' +
-            '(cc_board.py ingest_task, source=funnel|survey|web-development). ' +
-            'Use PATCH /api/tasks/{id} for other tasks.',
+            'This route only transitions cards created by a signed board producer: ' +
+            'the Skill-6 board hookup (cc_board.py ingest_task, ' +
+            'source=funnel|survey|web-development) or the Anthology Engine board ' +
+            'client (mc_board.py, source=anthology). Use PATCH /api/tasks/{id} for ' +
+            'other tasks.',
         },
         { status: 403 },
       );
@@ -358,14 +389,15 @@ export async function GET() {
       note: 'string (optional; appended to the task description + status-change event)',
     },
     scope:
-      'Only acts on tasks carrying the Skill-6 producer source marker ' +
-      '("Source: funnel|survey|web-development" in the description, written by ' +
-      '/api/tasks/ingest for cc_board.py ingest_task() cards). Other tasks get 403. ' +
+      'Only acts on tasks carrying a signed board-producer source marker ' +
+      '("Source: funnel|survey|web-development" for cc_board.py ingest_task() ' +
+      'cards, or "Source: anthology" for the Anthology Engine mc_board.py cards, ' +
+      'in the description, written by /api/tasks/ingest). Other tasks get 403. ' +
       "'done' is always rejected with 403 regardless of card scope — it is " +
       'authority-gated on PATCH /api/tasks/{id} (independent QC auto-scorer / ' +
-      "master agent only). 'blocked' is allowed ONLY for Skill-6-marked cards " +
-      '(the Skill-6 producer escalating its own build failure to a human via ' +
-      "cc_board.py's BuildPhaseDriver.fail(human_required=True)) — an unmarked " +
+      "master agent only). 'blocked' is allowed ONLY for a marked card (the " +
+      'Skill-6 producer escalating its own build failure to a human, or the ' +
+      'Anthology Engine escalating a held/exception participant) — an unmarked ' +
       "card gets the same 403 as any other out-of-scope status.",
     returns:
       '200 with the updated task JSON; 400 invalid body/status, 401 auth, ' +
