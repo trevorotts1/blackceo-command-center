@@ -1,0 +1,259 @@
+{
+  "_doc": "Harbor & Oak Candle Co. — the entire fictional narrative for the Command Center demo pack. ZERO real client data. All names/companies are invented. Consumed by scripts/demo/seed-demo.ts. Per-dept CURRENT/PREVIOUS window counts are engineered against the REAL grading engine (src/lib/grading.ts) to yield: sales=A, research=C (worst-trending), the other 7=B, company=B.",
+  "company": {
+    "id": "harbor-oak",
+    "name": "Harbor & Oak Candle Co.",
+    "slug": "harbor-oak",
+    "industry": "E-commerce / Home Fragrance",
+    "commandCenterName": "Harbor & Oak Command Center",
+    "ownerPersona": "Maya Okafor",
+    "brandPrimary": "#1F6F54",
+    "brandSecondary": "#C8A96A",
+    "brandNeutral": "#43A047",
+    "logoDataUri": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCA2NCA2NCcgd2lkdGg9JzY0JyBoZWlnaHQ9JzY0Jz48cmVjdCB4PSc2JyB5PSc1NCcgd2lkdGg9JzUyJyBoZWlnaHQ9JzUnIHJ4PScyLjUnIGZpbGw9JyMxRjZGNTQnLz48cmVjdCB4PScyNScgeT0nMjYnIHdpZHRoPScxNCcgaGVpZ2h0PScyOScgcng9JzMnIGZpbGw9JyMxRjZGNTQnLz48cmVjdCB4PSczMC41JyB5PScxNycgd2lkdGg9JzMnIGhlaWdodD0nOScgZmlsbD0nIzVDNDMyNicvPjxwYXRoIGQ9J00zMiAzYzcgOCA5LjUgMTMuNSA5LjUgMThBOS41IDkuNSAwIDAgMSAyMi41IDIxYzAtNC41IDIuNS0xMCA5LjUtMTh6JyBmaWxsPScjQzhBOTZBJy8+PHBhdGggZD0nTTMyIDljMy41IDUgNC44IDggNC44IDEwLjZBNC44IDQuOCAwIDAgMSAyNy4yIDE5LjZjMC0yLjYgMS4zLTUuNiA0LjgtMTAuNnonIGZpbGw9JyNGNEU0QzEnLz48L3N2Zz4=",
+    "connectedSystems": {
+      "payment": "Stripe (demo)",
+      "crm": "none",
+      "email": "none",
+      "social": "none"
+    },
+    "companyKPIs": [
+      "Repeat purchase rate (target 35%)",
+      "Average order value (target $58)",
+      "On-time fulfillment (target 98%)"
+    ]
+  },
+  "sessionId": "demo-harbor-oak-0001",
+  "master": {
+    "name": "Orchestrator",
+    "emoji": "🦞",
+    "role": "Team Lead & Orchestrator"
+  },
+  "departments": [
+    {
+      "slug": "marketing",
+      "name": "Marketing",
+      "icon": "📣",
+      "sortOrder": 10,
+      "head": { "name": "Delphine Carver", "emoji": "📣", "role": "Head of Marketing", "status": "working" },
+      "current": { "created": 9, "done": 8, "qcTotal": 10, "qcPass": 8, "dispatched": 10, "withSop": 8 },
+      "kpis": [
+        { "id": "cpl", "name": "Cost per Lead", "target": 25, "unit": "currency", "attainment": 78 },
+        { "id": "conversion", "name": "Conversion Rate", "target": 22, "unit": "percent", "attainment": 78 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: Grow repeat-purchase rate to 35% via a fall scent-of-the-month email arc.", "importance": 5 },
+        { "type": "constraint", "content": "Constraint: Every asset must use the Harbor & Oak deep-green + warm-gold palette.", "importance": 4 },
+        { "type": "lesson", "content": "Lesson: Story-led candle-care emails outperform discount blasts 3x on open rate.", "importance": 3 }
+      ]
+    },
+    {
+      "slug": "sales",
+      "name": "Sales",
+      "icon": "💼",
+      "sortOrder": 20,
+      "head": { "name": "Priya Ansel", "emoji": "💼", "role": "Head of Sales", "status": "working" },
+      "current": { "created": 10, "done": 10, "qcTotal": 10, "qcPass": 9, "dispatched": 10, "withSop": 9 },
+      "kpis": [
+        { "id": "deals-closed", "name": "Wholesale Accounts Closed", "target": 12, "unit": "count", "attainment": 92 },
+        { "id": "pipeline-value", "name": "Pipeline Value", "target": 280000, "unit": "currency", "attainment": 92 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: Land 12 boutique wholesale accounts this quarter.", "importance": 5 },
+        { "type": "lesson", "content": "Lesson: Sample boxes shipped within 24h of inquiry convert at 2.5x.", "importance": 4 }
+      ]
+    },
+    {
+      "slug": "customer-support",
+      "name": "Customer Support",
+      "icon": "🎧",
+      "sortOrder": 30,
+      "head": { "name": "Rosa Ellery", "emoji": "🎧", "role": "Head of Customer Support", "status": "standby" },
+      "current": { "created": 8, "done": 6, "qcTotal": 8, "qcPass": 6, "dispatched": 8, "withSop": 6 },
+      "kpis": [
+        { "id": "csat", "name": "CSAT Score", "target": 90, "unit": "percent", "attainment": 80 },
+        { "id": "first-contact", "name": "First-Contact Resolution", "target": 80, "unit": "percent", "attainment": 80 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: Hold CSAT above 90% through the Q4 holiday rush.", "importance": 5 },
+        { "type": "context", "content": "Context: Top tickets are melted-in-transit candles and scent-swap requests.", "importance": 3 }
+      ]
+    },
+    {
+      "slug": "web-development",
+      "name": "Web Development",
+      "icon": "🌐",
+      "sortOrder": 40,
+      "head": { "name": "Theo Vantak", "emoji": "🌐", "role": "Head of Web Development", "status": "working" },
+      "current": { "created": 8, "done": 6, "qcTotal": 9, "qcPass": 7, "dispatched": 8, "withSop": 6 },
+      "kpis": [
+        { "id": "deploy-freq", "name": "Deploy Frequency", "target": 10, "unit": "count", "attainment": 76 },
+        { "id": "build-success", "name": "Build Success Rate", "target": 98, "unit": "percent", "attainment": 76 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: Sub-2s product-page load on the shop storefront.", "importance": 5 },
+        { "type": "lesson", "content": "Lesson: Lazy-loading the scent-gallery images cut LCP by 40%.", "importance": 3 }
+      ]
+    },
+    {
+      "slug": "social-media",
+      "name": "Social Media",
+      "icon": "📱",
+      "sortOrder": 50,
+      "head": { "name": "Juno Brandt", "emoji": "📱", "role": "Head of Social Media", "status": "working" },
+      "current": { "created": 9, "done": 7, "qcTotal": 8, "qcPass": 6, "dispatched": 7, "withSop": 5 },
+      "kpis": [
+        { "id": "engagement-rate", "name": "Engagement Rate", "target": 6, "unit": "percent", "attainment": 78 },
+        { "id": "follower-growth", "name": "Monthly Follower Growth", "target": 4000, "unit": "count", "attainment": 78 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: One cohesive 'burn night' content pillar per week.", "importance": 5 },
+        { "type": "lesson", "content": "Lesson: Pour-process reels outperform flat-lay photos 4x on saves.", "importance": 3 }
+      ]
+    },
+    {
+      "slug": "video",
+      "name": "Video",
+      "icon": "🎬",
+      "sortOrder": 60,
+      "head": { "name": "Cass Delroy", "emoji": "🎬", "role": "Head of Video", "status": "standby" },
+      "current": { "created": 8, "done": 6, "qcTotal": 9, "qcPass": 7, "dispatched": 8, "withSop": 6 },
+      "kpis": [
+        { "id": "production-volume", "name": "Short-Form Production Volume", "target": 12, "unit": "count", "attainment": 74 },
+        { "id": "avg-view-duration", "name": "Avg View Duration", "target": 45, "unit": "count", "attainment": 74 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: 12 short-form pours + care clips per month across Reels and Shorts.", "importance": 5 },
+        { "type": "constraint", "content": "Constraint: Every clip captioned and cut for 9:16, 1:1, and 16:9.", "importance": 4 }
+      ]
+    },
+    {
+      "slug": "research",
+      "name": "Research",
+      "icon": "🔬",
+      "sortOrder": 70,
+      "head": { "name": "Iman Fowler", "emoji": "🔬", "role": "Head of Research", "status": "standby" },
+      "current": { "created": 9, "done": 6, "qcTotal": 8, "qcPass": 5, "dispatched": 5, "withSop": 3 },
+      "previous": { "created": 8, "done": 7, "qcTotal": 8, "qcPass": 7, "dispatched": 6, "withSop": 5 },
+      "kpis": [
+        { "id": "insights-shipped", "name": "Insights Shipped", "target": 12, "unit": "count", "attainment": 58 },
+        { "id": "reports-delivered", "name": "Reports Delivered", "target": 8, "unit": "count", "attainment": 58 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: Ship a monthly scent-trend brief two weeks ahead of buying decisions.", "importance": 5 },
+        { "type": "lesson", "content": "Lesson: Momentum slipped this cycle — the trend brief shipped late and thin (worst-trending).", "importance": 4 }
+      ]
+    },
+    {
+      "slug": "billing-finance",
+      "name": "Billing & Finance",
+      "icon": "💰",
+      "sortOrder": 80,
+      "head": { "name": "Marcus Boaz", "emoji": "💰", "role": "Head of Billing & Finance", "status": "working" },
+      "current": { "created": 9, "done": 8, "qcTotal": 10, "qcPass": 8, "dispatched": 10, "withSop": 8 },
+      "kpis": [
+        { "id": "collection-rate", "name": "Collection Rate", "target": 95, "unit": "percent", "attainment": 80 },
+        { "id": "invoice-accuracy", "name": "Invoice Accuracy", "target": 99, "unit": "percent", "attainment": 80 }
+      ],
+      "memories": [
+        { "type": "goal", "content": "Goal: Reconcile Stripe payouts weekly and keep collection above 95%.", "importance": 5 },
+        { "type": "context", "content": "Context: 70% of revenue is DTC one-time orders, 30% wholesale net-30.", "importance": 3 }
+      ]
+    },
+    {
+      "slug": "legal",
+      "name": "Legal",
+      "icon": "⚖️",
+      "sortOrder": 90,
+      "head": { "name": "Nadia Sol", "emoji": "⚖️", "role": "Head of Legal", "status": "standby" },
+      "current": { "created": 9, "done": 7, "qcTotal": 9, "qcPass": 7, "dispatched": 8, "withSop": 6 },
+      "kpis": [
+        { "id": "compliance-score", "name": "Label Compliance Score", "target": 98, "unit": "percent", "attainment": 76 },
+        { "id": "contract-review-time", "name": "Contract Review Time (hrs)", "target": 48, "unit": "count", "attainment": 76 }
+      ],
+      "memories": [
+        { "type": "constraint", "content": "Constraint: Every candle label must carry the CPSC-compliant burn-safety warning.", "importance": 5 },
+        { "type": "lesson", "content": "Lesson: Pre-approved wholesale terms cut contract review time nearly in half.", "importance": 3 }
+      ]
+    }
+  ],
+  "conversation": {
+    "title": "Harbor & Oak Team Chat",
+    "messages": [
+      { "from": "master", "content": "Morning, team. Q4 candle season is spinning up. Priorities today: Marketing's scent-of-the-month arc, Sales' wholesale sample boxes, and Research owes us the trend brief." },
+      { "from": "marketing", "content": "Scent-of-the-month arc is drafted — three emails, all on the deep-green and gold palette. Sending to QC now." },
+      { "from": "sales", "content": "Two boutique accounts verbally in. Sample boxes ship today so we stay inside the 24-hour window." },
+      { "from": "research", "content": "Trend brief is behind. I'll have the short version to the board by end of day — flagging it so it doesn't slip again." },
+      { "from": "master", "content": "Appreciated, Iman. Get me the short version; we can deepen it next cycle. Nice work everyone." }
+    ]
+  },
+  "campaigns": [
+    {
+      "name": "Autumn Ember Launch",
+      "description": "Q4 fall/holiday scent line — cross-department push across marketing, social, video, and sales.",
+      "status": "active",
+      "departments": ["marketing", "social-media", "video", "sales"]
+    },
+    {
+      "name": "Wholesale Sample Box Program",
+      "description": "Sample-box outreach to independent boutiques, supported by billing terms and legal wholesale agreements.",
+      "status": "planning",
+      "departments": ["sales", "billing-finance", "legal"]
+    }
+  ],
+  "interview": {
+    "startedHuman": "September 18, 2026",
+    "handoff": "# Interview Handoff\n\nstatus: in-progress\nnext_question_number: 15\nlast_question_number: 14\ntotal_questions_answered: 9\ntotal_questions_estimated: 30\nstarted_date: September 18, 2026\nlast_updated: September 18, 2026\n\n## Synthesis\n\nHarbor & Oak Candle Co. is a small e-commerce home-fragrance brand run by founder Maya Okafor with a handful of part-time helpers. Identity and brand voice are captured; the exact brand COLOR was deliberately left for the owner to choose live on the color card. Operations are partially mapped (fulfillment out of a small Savannah studio, busiest in Q4). Department reconciliation is nearly complete — three departments (podcast, paid advertisement, presentations) are still to be decided live on the board.\n",
+    "phasesComplete": ["consent", "identity", "branding-partial"],
+    "lastQuestionPhase": "operations",
+    "lastQuestionNumber": 14,
+    "lastQuestionAskedBy": "interview-web",
+    "transcript": [
+      { "q": "What is the name of your business?", "a": "Harbor & Oak Candle Co.", "provenance": "confirmed-from-context: owner stated the legal and trading name directly." },
+      { "q": "In one or two sentences, what does the business do and what industry is it in?", "a": "We are an e-commerce home-fragrance brand. We hand-pour small-batch soy candles and sell them direct-to-consumer online, with a growing wholesale side to independent boutiques.", "provenance": "confirmed-from-context: owner described product, channel, and industry." },
+      { "q": "Who owns or runs the business day to day?", "a": "I do — Maya Okafor, the founder. I make the final call on brand, product, and money.", "provenance": "confirmed-from-context: owner self-identified as founder and decision-maker." },
+      { "q": "How big is the team right now?", "a": "Small. It's me full-time plus four part-time helpers who handle pouring, packing, and social when things get busy.", "provenance": "confirmed-from-context: owner gave headcount and how roles split." },
+      { "q": "What name or short-hand do customers actually use for the brand?", "a": "Most people just say 'Harbor & Oak', and regulars shorten it to 'H&O'.", "provenance": "confirmed-from-context: owner confirmed the customer-facing brand name and nickname." },
+      { "q": "Do you have a tagline or one line that captures the brand?", "a": "Yes — 'Light that feels like home.' It's on the packaging and the site header.", "provenance": "confirmed-from-context: owner supplied the working tagline verbatim." },
+      { "q": "How would you describe the brand's voice or tone?", "a": "Warm, grounded, and unhurried. Like a friend who knows candles but never lectures you about them.", "provenance": "confirmed-from-context: owner described tone in her own words." },
+      { "q": "How do orders get fulfilled once someone buys?", "a": "Everything ships from our little studio in Savannah. Checkout runs through Stripe, and we pack and hand off to USPS the same or next day.", "provenance": "confirmed-from-context: owner walked through the fulfillment path and payment tool." },
+      { "q": "When is your busiest season?", "a": "Q4, hands down. September through December is the holiday and gifting rush — it's most of our year.", "provenance": "confirmed-from-context: owner named the peak months and why." }
+    ]
+  },
+  "decisions": [
+    { "dept": "marketing", "decision": "yes" },
+    { "dept": "sales", "decision": "yes" },
+    { "dept": "billing-finance", "decision": "yes" },
+    { "dept": "customer-support", "decision": "yes" },
+    { "dept": "web-development", "decision": "yes" },
+    { "dept": "app-development", "decision": "later" },
+    { "dept": "graphics", "decision": "yes" },
+    { "dept": "video", "decision": "yes" },
+    { "dept": "audio", "decision": "no" },
+    { "dept": "research", "decision": "yes" },
+    { "dept": "communications", "decision": "yes" },
+    { "dept": "crm", "decision": "yes" },
+    { "dept": "openclaw-maintenance", "decision": "yes" },
+    { "dept": "legal", "decision": "yes" },
+    { "dept": "social-media", "decision": "yes" },
+    { "dept": "personal-assistant", "decision": "yes" },
+    { "dept": "general-task", "decision": "yes" },
+    { "dept": "project-architecture-office", "decision": "yes" },
+    { "dept": "bugs", "decision": "yes" },
+    { "dept": "healer", "decision": "yes" },
+    { "dept": "quality-control", "decision": "yes" },
+    { "dept": "scheduling-dispatch", "decision": "no" },
+    { "dept": "logistics-fulfillment", "decision": "yes" },
+    { "dept": "engineering", "decision": "later" },
+    { "dept": "account-management", "decision": "no" }
+  ],
+  "undecided": ["paid-advertisement", "presentations", "podcast"],
+  "canonicalOrder": [
+    "marketing", "sales", "billing-finance", "customer-support", "web-development",
+    "app-development", "graphics", "video", "audio", "research", "communications",
+    "crm", "openclaw-maintenance", "legal", "social-media", "paid-advertisement",
+    "personal-assistant", "general-task", "project-architecture-office", "bugs",
+    "healer", "quality-control", "presentations", "scheduling-dispatch",
+    "logistics-fulfillment", "engineering", "account-management", "podcast"
+  ]
+}
