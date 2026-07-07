@@ -389,6 +389,28 @@ export async function POST(request: NextRequest) {
     const sourceRef = typeof body.source_ref === 'string' ? body.source_ref.trim() : undefined;
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
+
+    // ── Skill-6 survey job-type mapping (PRD §6.3.2, Option 1 — zero-migration) ─
+    // cc_board.py (and callers like it) may post department_slug='survey', 'form',
+    // or 'quiz' to describe a GoHighLevel web-builder task. There is no 'survey'
+    // workspace in the standard CC schema; the 'survey' keyword that exists in
+    // departments.config.ts maps to the Research department (wrong semantic).
+    //
+    // Zero-migration fix: remap these job types to 'web-development' — the one
+    // department that reliably resolves today — so the card lands in the right
+    // workspace rather than falling through to the CEO catch-all.
+    //
+    // NOTE (operator): a dedicated 'surveys' department (Option 2) is a fast-follow
+    // once survey volume justifies its own Kanban column. When that department is
+    // added its SOP MUST include `success_criteria` so runQCOnReview auto-scores
+    // the build instead of parking at 7.5 for human sign-off. The sop_id is
+    // auto-suggested by createTaskCore (src/lib/tasks.ts getBestSOPForTask path).
+    const SKILL6_SURVEY_SLUGS = new Set(['survey', 'form', 'quiz']);
+    const resolvedDeptSlug =
+      departmentSlug && SKILL6_SURVEY_SLUGS.has(departmentSlug.toLowerCase())
+        ? 'web-development'
+        : departmentSlug;
+
     const persona = typeof body.persona === 'string' ? body.persona.trim() : undefined;
     // W3.2 — owner-direct specialist pin. `target_agent` wins; `specialist` is
     // an accepted alias. Empty strings collapse to undefined.
@@ -413,8 +435,8 @@ export async function POST(request: NextRequest) {
     // AND checks it before inserting.
     const dedupeKey = idempotencyKey || sourceRef;
 
-    let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(departmentSlug, persona);
-    let resolvedDepartment: string | undefined = departmentSlug;
+    let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(resolvedDeptSlug, persona);
+    let resolvedDepartment: string | undefined = resolvedDeptSlug;
 
     // ── W3.2: Owner-direct specialist pin (spec §3 owner-direct exception) ─────
     // When the OWNER names a specific AI/agent, the CEO routes STRAIGHT to it —

@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { Task } from '@/lib/types';
+import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
+import { runQCOnReview } from '@/lib/qc-scorer';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -45,13 +47,20 @@ export const revalidate = 0;
  *   route already authenticates itself; that addition is defence-in-depth only.
  *
  * SCOPE — this endpoint performs a focused status transition (+ optional note),
- * writes the same audit rows the operator UI's PATCH /api/tasks/[id] writes (a
- * task_status_changed / task_completed event and a task_history row), and
- * broadcasts task_updated so the board card moves live. It intentionally does
- * NOT run the interactive Triad / QC / blocked-authority gates that the human
- * PATCH path enforces: the Skill-6 producer only advances its own funnel /
- * website cards, and those gates remain authoritative on the operator PATCH
- * path and the independent QC auto-scorer.
+ * routes the write through transition() (src/lib/task-lifecycle.ts) so the
+ * legal-transition guard applies, writes the same audit rows the operator UI's
+ * PATCH /api/tasks/[id] writes (a task_status_changed / task_completed event
+ * and a task_history row), and broadcasts task_updated so the board card moves
+ * live.
+ *
+ * DONE-SKIP HOLE CLOSURE (PRD §6.3.1): incoming status='done' from this
+ * external/webhook path is coerced to 'review' and runQCOnReview is enqueued,
+ * making QC (≥ 8.5) the only path to 'done'. The interactive Triad /
+ * blocked-authority gates on the human PATCH path and the independent QC
+ * auto-scorer (qc-review-sweep) remain authoritative for their own paths.
+ * IMPORTANT: the internal QC promoter (runQCOnReview / qc-review-sweep) writes
+ * 'done' directly to the DB and does NOT call this HTTP endpoint, so its ability
+ * to set 'done' after a QC pass is fully preserved.
  */
 
 // LOCKSTEP: mirrors the canonical 10-status TaskStatus union in
@@ -178,36 +187,79 @@ export async function POST(
       nextDescription = existing.description ? `${existing.description}\n\n${noteLine}` : noteLine;
     }
 
-    // ── Persist the transition ──
-    const statusChanged = status !== existing.status;
-    const updates: string[] = ['status = ?', 'updated_at = ?', 'last_progress_at = ?'];
-    const values: unknown[] = [status, now, now];
-    if (trimmedNote) {
-      updates.push('description = ?');
-      values.push(nextDescription);
-    }
-    values.push(id);
-    run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
-
-    // ── Audit trail: status-change event + task_history (parity with PATCH) ──
-    if (statusChanged) {
-      const eventType = status === 'done' ? 'task_completed' : 'task_status_changed';
-      const eventMessage = trimmedNote
-        ? `Task "${existing.title}" moved to ${status}: ${trimmedNote}`
-        : `Task "${existing.title}" moved to ${status}`;
-      run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), eventType, id, eventMessage, now],
+    // ── DONE-SKIP HOLE CLOSURE (PRD §6.3.1) ────────────────────────────────────
+    // The external/webhook producer (cc_board.py) MUST NOT bypass QC by posting
+    // status='done' directly. The only valid path to 'done' is:
+    //   review → done via runQCOnReview (QC gate ≥ 8.5).
+    //
+    // When this endpoint receives status='done', coerce it to 'review' and set
+    // enqueueQC so runQCOnReview fires after the HTTP response is sent.
+    //
+    // INTERNAL QC PROMOTER SAFETY: runQCOnReview (and the qc-review-sweep job)
+    // write 'done' directly to the DB — they do NOT call this HTTP endpoint.
+    // The coercion below therefore applies ONLY to the external webhook path; the
+    // internal QC promoter's ability to promote review → done is fully preserved.
+    const effectiveStatus: LifecycleState = status === 'done' ? 'review' : (status as LifecycleState);
+    const enqueueQC = status === 'done';
+    if (enqueueQC) {
+      console.log(
+        `[tasks/status] External 'done' coerced → 'review' for task ${id}. ` +
+          `runQCOnReview will be enqueued so QC (≥8.5) gates review → done.`,
       );
+    }
 
-      // task_history feeds /api/performance duration + attribution. Best-effort:
-      // older DBs without the table (pre-migration 027) simply skip this row.
+    // ── Persist the transition via the lifecycle state machine ───────────────────
+    // transition() enforces the legal-transition guard (LEGAL_TRANSITIONS map in
+    // task-lifecycle.ts), writes task_events + legacy events audit rows, broadcasts
+    // SSE, and fires the done owner-notification when applicable. We catch
+    // TransitionError and map it to the appropriate HTTP status.
+    const statusChanged = effectiveStatus !== existing.status;
+    try {
+      await transition(id, effectiveStatus, {
+        actor: 'cc_board',
+        reason: trimmedNote ?? undefined,
+      });
+    } catch (err) {
+      if (err instanceof TransitionError) {
+        if (err.code === 'NOT_FOUND') {
+          return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+        }
+        if (err.code === 'ILLEGAL_TRANSITION') {
+          return NextResponse.json(
+            { error: err.message, code: err.code },
+            { status: 409 },
+          );
+        }
+        return NextResponse.json(
+          { error: err.message, code: err.code },
+          { status: 422 },
+        );
+      }
+      throw err; // re-throw unknown errors → outer catch → 500
+    }
+
+    // ── Supplementary UPDATE: fields transition() does not touch ─────────────────
+    // transition() only updates `status` + `updated_at`. Preserve last_progress_at
+    // (activity-timestamp surface) and the note-appended description so the board
+    // card shows the timestamped audit line supplied by the producer.
+    const supUpdates: string[] = ['last_progress_at = ?'];
+    const supValues: unknown[] = [now];
+    if (trimmedNote) {
+      supUpdates.push('description = ?');
+      supValues.push(nextDescription);
+    }
+    supValues.push(id);
+    run(`UPDATE tasks SET ${supUpdates.join(', ')} WHERE id = ?`, supValues);
+
+    // ── task_history (parity with PATCH — transition() does not write this) ─────
+    // Feeds /api/performance duration + attribution. Best-effort: older DBs without
+    // the table (pre-migration 027) simply skip this row.
+    if (statusChanged) {
       try {
         run(
           `INSERT INTO task_history (id, task_id, status_from, status_to, changed_at, changed_by_agent_id, agent_name)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), id, existing.status, status, now, existing.assigned_agent_id ?? null, null],
+          [uuidv4(), id, existing.status, effectiveStatus, now, existing.assigned_agent_id ?? null, null],
         );
       } catch (err) {
         console.warn('[tasks status] task_history append skipped:', (err as Error).message);
@@ -229,7 +281,20 @@ export async function POST(
     );
 
     if (task) {
+      // Broadcast again after supplementary updates (last_progress_at, description)
+      // so board clients see the fully-updated card state, not just the status change
+      // that transition() already broadcast.
       broadcast({ type: 'task_updated', payload: task });
+    }
+
+    // ── Enqueue QC when the producer tried to set 'done' ───────────────────────
+    // Non-blocking: the HTTP 200 is returned immediately. The QC scorer runs
+    // asynchronously and on pass (≥ 8.5) promotes the task from review → done.
+    // On fail the task reverts to backlog (or blocked after QC_MAX_REROUTES).
+    if (enqueueQC) {
+      runQCOnReview(id).catch((err) =>
+        console.warn('[tasks/status] runQCOnReview enqueue failed (non-fatal):', (err as Error).message),
+      );
     }
 
     return NextResponse.json(task, { status: 200 });
