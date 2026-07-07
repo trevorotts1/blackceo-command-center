@@ -23,6 +23,13 @@ import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gat
  *
  * Bypass routes:
  *   - `/api/health` (Cloudflare health checks) bypasses both layers.
+ *   - `/participant` (the Anthology participant token page, SPEC 11.3) bypasses
+ *     both layers exactly the way `/api/health` does. External co-author
+ *     participants have NO Cloudflare Access login and NO MC_API_TOKEN; the page
+ *     authenticates each visitor entirely on its own via a single-purpose scoped
+ *     token/PIN the engine mints (HMAC over participant_key + gate id + expiry
+ *     under ANTHOLOGY_GATE_TOKEN_SECRET). An unauthenticated or foreign/expired/
+ *     replayed visitor is refused by the page, never by the middleware.
  *
  * Fail-closed posture (G15-AUTH-HARDEN):
  *   - When MC_API_TOKEN is unset, EXTERNAL (non-same-origin) /api/* callers
@@ -86,6 +93,20 @@ const WEBHOOK_SECRET_DYNAMIC_ROUTES: RegExp[] = [
   /^\/api\/tasks\/[^/]+\/status$/, // /api/tasks/{id}/status
 ];
 
+/**
+ * The Anthology participant token page (SPEC 11.3). This is the ONLY public,
+ * unauthenticated page surface in the deployment: external co-author
+ * participants who have no Cloudflare Access account approve their own gate
+ * (title selection, outline approval, chapter approve-or-rewrite) via a scoped
+ * token/PIN. It is a SUBTREE match so `/participant`, `/participant/`, and
+ * `/participant/<token>` all bypass. Registered in BOTH the early-return bypass
+ * below AND `isInterviewGateExempt` so the interview shell-lock 302 can never
+ * swallow it (belt-and-suspenders: the early return alone already exempts it,
+ * but the shell-lock exemption is kept explicit so a future re-order of the
+ * middleware body cannot silently trap participants behind /interview).
+ */
+const PARTICIPANT_PUBLIC_ROUTE = '/participant';
+
 function matchesRoute(pathname: string, prefix: string): boolean {
   return pathname === prefix || pathname.startsWith(prefix + '/');
 }
@@ -112,6 +133,10 @@ function isWebhookSecretRoute(pathname: string): boolean {
 function isInterviewGateExempt(pathname: string): boolean {
   if (pathname === '/interview' || pathname.startsWith('/interview/')) return true;
   if (pathname === '/onboarding' || pathname.startsWith('/onboarding/')) return true;
+  // The Anthology participant token page is a public, self-authenticating
+  // surface for external co-authors (SPEC 11.3) — it must never be redirected
+  // to the operator interview shell.
+  if (matchesRoute(pathname, PARTICIPANT_PUBLIC_ROUTE)) return true;
   if (pathname.startsWith('/api/')) return true;
   if (pathname.startsWith('/_next/')) return true;
   const last = pathname.slice(pathname.lastIndexOf('/') + 1);
@@ -183,6 +208,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // `/api/health/deep`, …) — the CI thin-probe and CF health checks hit
   // `/api/health/deep`, which must stay reachable with no MC_API_TOKEN set.
   if (matchesRoute(pathname, '/api/health')) {
+    return NextResponse.next();
+  }
+
+  // Anthology participant token page (SPEC 11.3) — the ONE public,
+  // self-authenticating page surface. Bypasses every auth layer exactly the
+  // way `/api/health` does: the page verifies the visitor's scoped token/PIN
+  // itself (engine gate_engine.py, HMAC under ANTHOLOGY_GATE_TOKEN_SECRET) and
+  // refuses foreign/expired/replayed access, so no CF Access / MC_API_TOKEN /
+  // interview-shell gate applies. SUBTREE match (see PARTICIPANT_PUBLIC_ROUTE).
+  if (matchesRoute(pathname, PARTICIPANT_PUBLIC_ROUTE)) {
     return NextResponse.next();
   }
 
