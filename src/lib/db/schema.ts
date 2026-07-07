@@ -68,8 +68,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   description TEXT,
-  status TEXT DEFAULT 'backlog' CHECK (status IN ('backlog', 'in_progress', 'review', 'blocked', 'done')),
-  priority TEXT DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high', 'critical')),
+  status TEXT DEFAULT 'inbox' CHECK (status IN ('backlog', 'inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'testing', 'review', 'blocked', 'done')),
+  priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'medium', 'high', 'urgent', 'critical')),
   assigned_agent_id TEXT REFERENCES agents(id),
   created_by_agent_id TEXT REFERENCES agents(id),
   workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
@@ -82,9 +82,15 @@ CREATE TABLE IF NOT EXISTS tasks (
   planning_spec TEXT,
   planning_agents TEXT,
   planning_dispatch_error TEXT,
+  campaign_id TEXT,
+  stage_slug TEXT,
+  blocked_reason TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Index for grouping a Facebook-ad job's cards under one campaign (Skill 48)
+CREATE INDEX IF NOT EXISTS idx_tasks_campaign ON tasks(campaign_id);
 
 -- Planning questions table
 CREATE TABLE IF NOT EXISTS planning_questions (

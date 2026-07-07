@@ -452,6 +452,79 @@ const migrations: Migration[] = [
         console.log('[Migration 015] specialist_type column already exists, skipping');
       }
     }
+  },
+  {
+    id: '016',
+    name: 'expand_task_status_priority_values',
+    up: (db) => {
+      console.log('[Migration 016] Expanding task status and priority allowed values...');
+
+      const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").get() as { sql?: string } | undefined;
+      const sql = table?.sql || '';
+      const hasExpandedStatuses = sql.includes("'blocked'") && sql.includes("'testing'") && sql.includes("'assigned'");
+      const hasExpandedPriorities = sql.includes("'urgent'") && sql.includes("'critical'") && sql.includes("'medium'");
+
+      if (hasExpandedStatuses && hasExpandedPriorities) {
+        console.log('[Migration 016] tasks table already has expanded constraints, skipping');
+        return;
+      }
+
+      const expandedSql = sql
+        .replace(
+          /status TEXT DEFAULT '[^']+' CHECK \(status IN \([^)]*\)\)/,
+          "status TEXT DEFAULT 'inbox' CHECK (status IN ('backlog', 'inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'testing', 'review', 'blocked', 'done'))"
+        )
+        .replace(
+          /priority TEXT DEFAULT '[^']+' CHECK \(priority IN \([^)]*\)\)/,
+          "priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'medium', 'high', 'urgent', 'critical'))"
+        );
+
+      if (expandedSql === sql) {
+        throw new Error('Could not locate tasks status/priority CHECK constraints for migration 016');
+      }
+
+      // SQLite cannot alter CHECK constraints directly. Rebuilding the parent table
+      // breaks existing child foreign keys during a wrapped migration transaction,
+      // so this migration updates the schema text for constraint expansion only.
+      // No data rows are changed.
+      db.unsafeMode(true);
+      try {
+        db.pragma('writable_schema = ON');
+        db.prepare("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'tasks'").run(expandedSql);
+        db.pragma('writable_schema = OFF');
+        db.pragma('schema_version = ' + ((db.pragma('schema_version', { simple: true }) as number) + 1));
+      } finally {
+        db.pragma('writable_schema = OFF');
+        db.unsafeMode(false);
+      }
+
+      console.log('[Migration 016] Expanded task status and priority constraints');
+    }
+  },
+  {
+    id: '017',
+    name: 'add_ad_campaign_columns',
+    up: (db) => {
+      // Skill 48 (Facebook Ad Generator): group a job's cards under one campaign.
+      // Additive + reversible — three nullable columns + one index. No data changed.
+      console.log('[Migration 017] Adding ad-campaign columns to tasks...');
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      const has = (c: string) => tasksInfo.some(col => col.name === c);
+      if (!has('campaign_id')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN campaign_id TEXT`);
+        console.log('[Migration 017] Added campaign_id');
+      }
+      if (!has('stage_slug')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN stage_slug TEXT`);
+        console.log('[Migration 017] Added stage_slug');
+      }
+      if (!has('blocked_reason')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN blocked_reason TEXT`);
+        console.log('[Migration 017] Added blocked_reason');
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_campaign ON tasks(campaign_id)`);
+      console.log('[Migration 017] Created idx_tasks_campaign');
+    }
   }
 ];
 

@@ -64,13 +64,13 @@ fi
 # Step 3: Check IN_PROGRESS tasks
 log "Checking IN_PROGRESS tasks..."
 IN_PROGRESS_TASKS=$(api_call "GET" "/api/tasks?status=in_progress")
-IN_PROGRESS_COUNT=$(echo "$IN_PROGRESS_TASKS" | grep -c '"id"' || echo "0")
+IN_PROGRESS_COUNT=$(count_task_ids "$IN_PROGRESS_TASKS")
 log "Found $IN_PROGRESS_COUNT tasks in IN_PROGRESS"
 
 # Step 4: Check ASSIGNED tasks (rework loop)
 log "Checking ASSIGNED tasks..."
 ASSIGNED_TASKS=$(api_call "GET" "/api/tasks?status=assigned")
-ASSIGNED_COUNT=$(echo "$ASSIGNED_TASKS" | grep -c '"id"' || echo "0")
+ASSIGNED_COUNT=$(count_task_ids "$ASSIGNED_TASKS")
 log "Found $ASSIGNED_COUNT tasks in ASSIGNED (rework loop)"
 
 # Summary

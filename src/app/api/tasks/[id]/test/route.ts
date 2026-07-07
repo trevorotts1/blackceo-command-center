@@ -104,16 +104,49 @@ export async function POST(
       mkdirSync(SCREENSHOTS_DIR, { recursive: true });
     }
 
-    // Launch browser
-    const browser = await chromium.launch({ headless: true });
     const results: TestResult[] = [];
+    const browserDeliverables: TaskDeliverable[] = [];
 
     for (const deliverable of deliverables) {
-      const result = await testDeliverable(browser, deliverable, taskId);
-      results.push(result);
+      const testPath = deliverable.path || '';
+      const isUrlDeliverable = deliverable.deliverable_type === 'url';
+      const isHtmlFile = testPath.endsWith('.html') || testPath.endsWith('.htm');
+
+      // Non-HTML file deliverables only need existence verification.
+      // Do not launch Playwright for markdown, text, PDF, or other artifact files.
+      if (!isUrlDeliverable && testPath && existsSync(testPath) && !isHtmlFile) {
+        results.push({
+          passed: true,
+          deliverable: {
+            id: deliverable.id,
+            title: deliverable.title,
+            path: testPath,
+            type: 'file'
+          },
+          httpStatus: null,
+          consoleErrors: [],
+          consoleWarnings: [],
+          cssErrors: [],
+          resourceErrors: [],
+          screenshotPath: null,
+          duration: 0,
+          error: 'Skipped browser test - not an HTML file'
+        });
+      } else {
+        browserDeliverables.push(deliverable);
+      }
     }
 
-    await browser.close();
+    if (browserDeliverables.length > 0) {
+      const browser = await chromium.launch({ headless: true });
+
+      for (const deliverable of browserDeliverables) {
+        const result = await testDeliverable(browser, deliverable, taskId);
+        results.push(result);
+      }
+
+      await browser.close();
+    }
 
     // Determine overall pass/fail
     const passed = results.every(r => r.passed);

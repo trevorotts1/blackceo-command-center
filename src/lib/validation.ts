@@ -3,13 +3,18 @@ import { z } from 'zod';
 // Task status and priority enums from types
 const TaskStatus = z.enum([
   'backlog',
+  'inbox',
+  'planning',
   'in_progress',
+  'assigned',
   'review',
+  'testing',
   'blocked',
+  'pending_dispatch',
   'done'
 ]);
 
-const TaskPriority = z.enum(['low', 'medium', 'high', 'critical']);
+const TaskPriority = z.enum(['low', 'normal', 'medium', 'high', 'urgent', 'critical']);
 
 const ActivityType = z.enum([
   'spawned',
@@ -27,8 +32,8 @@ export const CreateTaskSchema = z.object({
   description: z.string().max(10000, 'Description must be 10000 characters or less').optional(),
   status: TaskStatus.optional(),
   priority: TaskPriority.optional(),
-  assigned_agent_id: z.string().uuid().optional(),
-  created_by_agent_id: z.string().uuid().optional(),
+  assigned_agent_id: z.string().min(1).optional(),
+  created_by_agent_id: z.string().min(1).optional(),
   business_id: z.string().optional(),
   workspace_id: z.string().optional(),
   due_date: z.string().optional(),
@@ -39,16 +44,16 @@ export const UpdateTaskSchema = z.object({
   description: z.string().max(10000).optional(),
   status: TaskStatus.optional(),
   priority: TaskPriority.optional(),
-  assigned_agent_id: z.string().uuid().optional().nullable(),
+  assigned_agent_id: z.string().min(1).optional().nullable(),
   due_date: z.string().optional().nullable(),
-  updated_by_agent_id: z.string().uuid().optional(),
+  updated_by_agent_id: z.string().min(1).optional(),
 });
 
 // Activity validation schema
 export const CreateActivitySchema = z.object({
   activity_type: ActivityType,
   message: z.string().min(1, 'Message is required').max(5000, 'Message must be 5000 characters or less'),
-  agent_id: z.string().uuid().optional(),
+  agent_id: z.string().min(1).optional(),
   metadata: z.string().optional(),
 });
 
