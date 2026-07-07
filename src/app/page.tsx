@@ -37,6 +37,9 @@ import {
   Settings,
   Terminal,
   MessagesSquare,
+  BookOpen,
+  Mic,
+  ClipboardList,
   CircleAlert,
   CheckCircle2,
   Loader2,
@@ -248,7 +251,8 @@ export default function HomePage() {
     },
   ];
 
-  /* All seven destinations preserved (PRD 3.8 + F52), now as quiet cards. */
+  /* Every destination, one click — the original seven (PRD 3.8 + F52) plus the
+     Anthology, Podcast, and Interview engine surfaces, as quiet cards. */
   const views: ViewCard[] = [
     {
       title: 'All Tasks',
@@ -279,6 +283,28 @@ export default function HomePage() {
       icon: <MessagesSquare className="w-5 h-5" />,
       chip: 'bg-pink-50 text-pink-600',
       route: '/conversational-ai',
+    },
+    {
+      title: 'Anthology',
+      description: 'Chapters, participants, approvals',
+      icon: <BookOpen className="w-5 h-5" />,
+      chip: 'bg-teal-50 text-teal-600',
+      // Window into the seeded Anthology department board (workspace slug).
+      route: '/workspace/anthology',
+    },
+    {
+      title: 'Podcast',
+      description: 'Episodes and production',
+      icon: <Mic className="w-5 h-5" />,
+      chip: 'bg-orange-50 text-orange-600',
+      route: '/workspace/podcast',
+    },
+    {
+      title: 'Interview',
+      description: 'Your AI Workforce Interview',
+      icon: <ClipboardList className="w-5 h-5" />,
+      chip: 'bg-rose-50 text-rose-600',
+      route: '/interview',
     },
     {
       title: 'Intelligence Settings',

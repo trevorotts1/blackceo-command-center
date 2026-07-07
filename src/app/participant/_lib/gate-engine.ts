@@ -1,0 +1,353 @@
+/**
+ * Server-only bridge from the Command Center to the Anthology engine gate
+ * endpoint (`gate_engine.py`). SPEC 11.3 "both-door rule": the participant token
+ * page and the producer board card are TWO DOORS onto the SAME gate endpoint and
+ * the SAME sole writer — no gate decision is ever verified or written from a
+ * second code path. So this module NEVER re-implements the HMAC token/PIN scheme
+ * or the gate state machine in TypeScript; it shells out to `gate_engine.py`
+ * (which mints, verifies, and records under ANTHOLOGY_GATE_TOKEN_SECRET), exactly
+ * the way `src/app/api/departments/route.ts` shells out to `add-department.sh`.
+ *
+ * This file imports `child_process`, so it can only ever be imported by server
+ * code (the page's Server Component and the `'use server'` action). Pulling it
+ * into a Client Component is a build-time error, which is the intended guard.
+ *
+ * SECRET DISCIPLINE: ANTHOLOGY_GATE_TOKEN_SECRET is resolved INSIDE the child
+ * process (from the inherited env, by label). This module never reads it, never
+ * logs it, and never puts it on a command line. Only SET / NOT-SET, surfaced by
+ * the engine, ever crosses back.
+ */
+
+import { execFileSync } from 'child_process';
+import { existsSync, statSync } from 'fs';
+
+/** The engine participant gates a token/PIN may scope to (SPEC S3/S4/S5). */
+export type ParticipantGateId = 's3_selection' | 's4_participant' | 's5_participant';
+
+/** A visitor's credential, carried in their capability URL / nudge link. */
+export type GateCredential =
+  | { kind: 'token'; token: string }
+  | { kind: 'pin'; subjectKey: string; pin: string; exp: string; gate?: string };
+
+/** Raw JSON shapes the engine emits (only the fields we consume). */
+interface EngineVerify {
+  ok?: boolean;
+  valid?: boolean;
+  subject_key?: string;
+  gate?: string;
+  expires_at?: number;
+  reason?: string;
+  code?: string;
+  secret_status?: string;
+}
+interface EngineStatus {
+  ok?: boolean;
+  open_gate?: string | null;
+  actor?: string;
+  doors?: string[];
+  actions?: string[];
+  reason?: string;
+  note?: string;
+}
+interface EngineDecide {
+  ok?: boolean;
+  committed?: boolean;
+  gate?: string;
+  decision?: string;
+  base_queued?: boolean;
+  noop?: boolean;
+  reason?: string;
+  code?: string;
+  secret_status?: string;
+}
+
+/** Engine exit codes (gate_engine.py house convention). */
+const EX_OK = 0;
+const EX_ERR = 1;
+const EX_REFUSE = 2;
+const EX_GATE = 3;
+
+/**
+ * A normalized, still-internal result of loading a gate. The client-clean
+ * serializer (serialize.ts) turns this into the visitor-facing view — this shape
+ * itself is NEVER sent to the browser.
+ */
+export type GateLoad =
+  | {
+      ok: true;
+      gate: ParticipantGateId;
+      actions: string[];
+      expiresAt: number | null;
+      credential: GateCredential;
+    }
+  | { ok: false; status: GateFailure };
+
+/**
+ * A normalized, still-internal decision result. Also serialized before it ever
+ * reaches the browser.
+ */
+export type DecideResult =
+  | { ok: true; queued: boolean; noop: boolean }
+  | { ok: false; status: GateFailure };
+
+/**
+ * Coarse failure buckets. Deliberately COARSE so the serializer can map them to
+ * honest-but-generic copy without ever echoing an engine reason code, an
+ * internal id, or which of several refusal causes fired (no oracle for an
+ * attacker probing tokens).
+ */
+export type GateFailure =
+  | 'expired' // token/PIN past its hard expiry
+  | 'invalid' // forged / foreign / replayed / malformed / no-credential
+  | 'nothing_open' // subject known but not at an open gate, or unknown subject
+  | 'not_ready' // engine held: secret unset, script/python absent, mirror held
+  | 'error'; // unexpected
+
+const PARTICIPANT_GATES: ReadonlySet<string> = new Set<ParticipantGateId>([
+  's3_selection',
+  's4_participant',
+  's5_participant',
+]);
+
+// --------------------------------------------------------------------------- //
+// Script + interpreter resolution (mirrors findAddDepartmentScript()).
+// --------------------------------------------------------------------------- //
+
+/**
+ * Locate `gate_engine.py`. It ships in the Anthology engine skill (Skill 59).
+ * When the Command Center runs inside the OpenClaw container the payload lives
+ * under /data/.openclaw/skills/59-anthology-engine/scripts/; fall back to a
+ * $HOME-relative path for Mac dev installs. An explicit ANTHOLOGY_GATE_ENGINE
+ * override wins (used by the canary box / tests).
+ */
+function findGateEngineScript(): string | null {
+  const candidates = [
+    process.env.ANTHOLOGY_GATE_ENGINE,
+    '/data/.openclaw/skills/59-anthology-engine/scripts/gate_engine.py',
+    `${process.env.HOME}/.openclaw/skills/59-anthology-engine/scripts/gate_engine.py`,
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+  for (const p of candidates) {
+    try {
+      if (existsSync(p) && statSync(p).isFile()) return p;
+    } catch {
+      /* ignore and try the next candidate */
+    }
+  }
+  return null;
+}
+
+function pythonBin(): string {
+  return process.env.ANTHOLOGY_PYTHON_BIN || 'python3';
+}
+
+/**
+ * Run one `gate_engine.py <subcmd> --json ...` invocation. Returns the exit code
+ * and parsed JSON (or null when the process could not run / produced no JSON).
+ * The child INHERITS this process's env so the engine resolves
+ * ANTHOLOGY_GATE_TOKEN_SECRET / ANTHOLOGY_STATE_DIR itself — we never touch them.
+ * FAIL-SOFT: any spawn/parse problem is reported as a held/error result, never
+ * thrown up into the request, and never logged with argv (argv can carry a PIN).
+ */
+function runGateEngine(
+  subcmd: 'verify' | 'status' | 'decide',
+  args: string[],
+  timeoutMs: number
+): { code: number; json: unknown | null } {
+  const script = findGateEngineScript();
+  if (!script) return { code: EX_GATE, json: null }; // not provisioned → held
+
+  const argv = [script, subcmd, '--json', ...args];
+  try {
+    const out = execFileSync(pythonBin(), argv, {
+      encoding: 'utf-8',
+      timeout: timeoutMs,
+      // Inherit env for secret/state resolution; never surface stdout on error.
+      env: process.env,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return { code: EX_OK, json: parseLastJsonLine(out) };
+  } catch (err: unknown) {
+    // execFileSync throws on a non-zero exit; the engine still prints its JSON
+    // refusal on stdout in that case, so recover both the code and the payload.
+    const e = err as { status?: number | null; stdout?: Buffer | string };
+    const code = typeof e?.status === 'number' ? e.status : EX_ERR;
+    const stdout =
+      typeof e?.stdout === 'string'
+        ? e.stdout
+        : e?.stdout
+          ? e.stdout.toString('utf-8')
+          : '';
+    return { code, json: stdout ? parseLastJsonLine(stdout) : null };
+  }
+}
+
+function parseLastJsonLine(out: string): unknown | null {
+  const lines = out
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(lines[i]);
+    } catch {
+      /* keep scanning upward for the machine-readable line */
+    }
+  }
+  return null;
+}
+
+// --------------------------------------------------------------------------- //
+// Credential → engine argv. A token self-describes its subject (we decode the
+// UNVERIFIED claim only to name the --subject-key; the engine's signature check
+// binds it, so a forged pk dies as bad_signature). A PIN carries its scope in
+// the URL; the engine's HMAC binds (subject, gate, exp) so tampering is caught.
+// --------------------------------------------------------------------------- //
+
+/**
+ * Decode the token's payload segment WITHOUT verifying it, purely to learn the
+ * claimed subject key so we can name it to the engine. NOT trusted: the engine
+ * re-verifies the HMAC over the whole payload (subject + gate + expiry), so a
+ * tampered subject fails there. Never rendered.
+ */
+export function claimedSubjectFromToken(token: string): string | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const json = Buffer.from(b64 + pad, 'base64').toString('utf-8');
+    const claim = JSON.parse(json) as { pk?: unknown };
+    return typeof claim.pk === 'string' && claim.pk.length > 0 ? claim.pk : null;
+  } catch {
+    return null;
+  }
+}
+
+function credentialArgs(cred: GateCredential): { subjectKey: string; args: string[] } | null {
+  if (cred.kind === 'token') {
+    const subjectKey = claimedSubjectFromToken(cred.token);
+    if (!subjectKey) return null;
+    return { subjectKey, args: ['--subject-key', subjectKey, '--token', cred.token] };
+  }
+  // PIN credential.
+  if (!cred.subjectKey || !cred.pin || !cred.exp) return null;
+  const args = ['--subject-key', cred.subjectKey, '--pin', cred.pin, '--exp', cred.exp];
+  if (cred.gate) args.push('--gate', cred.gate);
+  return { subjectKey: cred.subjectKey, args };
+}
+
+function failureFromVerify(code: number, json: EngineVerify | null): GateFailure {
+  if (json && typeof json.reason === 'string') {
+    const r = json.reason;
+    if (r === 'expired') return 'expired';
+    if (r === 'secret_not_set' || r === 'secret_unavailable') return 'not_ready';
+    if (r === 'no_open_gate' || r === 'unknown_subject') return 'nothing_open';
+    // foreign_subject | foreign_gate | bad_signature | malformed | replayed |
+    // no_credential → a single opaque "invalid".
+    return 'invalid';
+  }
+  if (code === EX_GATE) return 'not_ready'; // held: script/python/secret/mirror absent
+  if (code === EX_REFUSE) return 'invalid';
+  return 'error';
+}
+
+// --------------------------------------------------------------------------- //
+// Public bridge API (all still-internal shapes; serialize before the browser).
+// --------------------------------------------------------------------------- //
+
+/**
+ * Authorize a visitor's credential and resolve the single gate their page may
+ * serve. Two engine calls: `verify` (authorizes the credential; the engine
+ * scopes it to the OPEN gate, so a token for a now-closed gate is refused) then
+ * `status` (the authoritative action set for that open gate). Read-only; no
+ * state is written.
+ */
+export function loadGate(cred: GateCredential): GateLoad {
+  const resolved = credentialArgs(cred);
+  if (!resolved) return { ok: false, status: 'invalid' };
+
+  // 1. verify (non-consuming) — the credential must be valid AND for the open gate.
+  const v = runGateEngine('verify', resolved.args, 10_000);
+  const vjson = (v.json ?? null) as EngineVerify | null;
+  if (v.code !== EX_OK || !vjson || vjson.valid !== true || typeof vjson.gate !== 'string') {
+    return { ok: false, status: failureFromVerify(v.code, vjson) };
+  }
+  const gate = vjson.gate;
+  if (!PARTICIPANT_GATES.has(gate)) {
+    // A verified credential can only ever be for a participant gate, but guard
+    // anyway so a producer/assembly gate never renders on the public page.
+    return { ok: false, status: 'nothing_open' };
+  }
+
+  // 2. status — authoritative actions for the open gate (source of truth, no
+  //    drift vs a hand-maintained TS table).
+  const s = runGateEngine('status', ['--subject-key', resolved.subjectKey], 10_000);
+  const sjson = (s.json ?? null) as EngineStatus | null;
+  if (s.code !== EX_OK || !sjson || sjson.ok !== true) {
+    return { ok: false, status: 'nothing_open' };
+  }
+  // The gate must still be the one we authorized (it could have advanced between
+  // the two reads). If it moved, there is nothing for this credential to serve.
+  if (sjson.open_gate !== gate || !Array.isArray(sjson.actions) || sjson.actions.length === 0) {
+    return { ok: false, status: 'nothing_open' };
+  }
+
+  return {
+    ok: true,
+    gate: gate as ParticipantGateId,
+    actions: sjson.actions.filter((a): a is string => typeof a === 'string'),
+    expiresAt: typeof vjson.expires_at === 'number' ? vjson.expires_at : null,
+    credential: cred,
+  };
+}
+
+/** Extra fields an action may carry from the form (already trimmed). */
+export interface DecideFields {
+  title?: string;
+  subtitle?: string;
+  notes?: string;
+}
+
+/**
+ * Record a decision through the SINGLE both-door endpoint (`decide --door
+ * token`). The engine re-verifies the credential, enforces single-use (replay
+ * refused even after the gate closes), checks the action is legal at the open
+ * gate, and shells the sole writer. We pass `--door token` so the ledger records
+ * the provenance as `nudge_link`, exactly as SPEC 11.2/11.3 require.
+ */
+export function decide(
+  cred: GateCredential,
+  action: string,
+  fields: DecideFields
+): DecideResult {
+  const resolved = credentialArgs(cred);
+  if (!resolved) return { ok: false, status: 'invalid' };
+
+  const args = ['--door', 'token', '--action', action, ...resolved.args];
+  if (fields.title) args.push('--title', fields.title);
+  if (fields.subtitle) args.push('--subtitle', fields.subtitle);
+  if (fields.notes) args.push('--notes', fields.notes);
+
+  // decide shells the sole writer (25s internal budget); give it headroom.
+  const d = runGateEngine('decide', args, 30_000);
+  const djson = (d.json ?? null) as EngineDecide | null;
+
+  if (d.code === EX_OK && djson && djson.ok === true && djson.committed === true) {
+    return { ok: true, queued: djson.base_queued === true, noop: djson.noop === true };
+  }
+  // Map refusals to the same coarse buckets used for verify.
+  if (djson && typeof djson.reason === 'string') {
+    const r = djson.reason;
+    if (r === 'expired') return { ok: false, status: 'expired' };
+    if (r === 'secret_not_set' || r === 'sole_writer_held')
+      return { ok: false, status: 'not_ready' };
+    if (r === 'no_open_gate' || r === 'gate_not_open')
+      return { ok: false, status: 'nothing_open' };
+    // replayed | foreign_gate | bad_signature | action_not_allowed_at_gate |
+    // missing_fields | validation_mismatch | no_credential → opaque invalid.
+    return { ok: false, status: 'invalid' };
+  }
+  if (d.code === EX_GATE) return { ok: false, status: 'not_ready' };
+  if (d.code === EX_REFUSE) return { ok: false, status: 'invalid' };
+  return { ok: false, status: 'error' };
+}
