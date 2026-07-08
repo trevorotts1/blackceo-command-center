@@ -31,7 +31,8 @@ import { execFile, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { DB_PATH, queryAll, queryOne } from "@/lib/db";
+import { v4 as uuidv4 } from "uuid";
+import { DB_PATH, queryAll, queryOne, run } from "@/lib/db";
 import { broadcast } from "@/lib/events";
 import type { PersonaSlot } from "@/lib/sops";
 import type { Task } from "@/lib/types";
@@ -672,6 +673,28 @@ export function spawnRecordCompletion(
         `(persona ${personaId}, dept ${dept})` +
         (stderr ? `: ${stderr.trim()}` : "")
       );
+      // PERS-07: previously a non-zero exit was logged and then silently dropped,
+      // leaving a hole in the adaptive learning loop (persona_performance never
+      // got the outcome). Write a QUERYABLE `persona_completion_failed` event so a
+      // retry sweep can pick it up. Audit-only: never throw from the close handler.
+      try {
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            "persona_completion_failed",
+            taskId,
+            `[PERSONA-COMPLETION-FAILED] record-completion exited ${code} for persona ${personaId} (dept ${dept})` +
+              (stderr ? `: ${stderr.trim().slice(0, 500)}` : ""),
+            new Date().toISOString(),
+          ],
+        );
+      } catch (writeErr) {
+        console.warn(
+          `[persona-selector] could not record persona_completion_failed for task ${taskId}:`,
+          (writeErr as Error)?.message ?? writeErr,
+        );
+      }
     } else {
       console.log(
         `[persona-selector] record-completion OK for task ${taskId} ` +
