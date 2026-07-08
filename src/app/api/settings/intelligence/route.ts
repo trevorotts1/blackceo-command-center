@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '@/lib/db';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { openclawConfigPath } from '@/lib/platform';
+import { isForbidden, isFree } from '@/lib/model-selector';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -94,6 +95,42 @@ function loadModelsFromRegistry(): AvailableModel[] {
     console.warn('[Intelligence] Failed to load model_registry, returning empty list:', err);
     return [];
   }
+}
+
+/**
+ * MODEL-07: the set of model ids the operator may legitimately assign — the
+ * SAME catalog GET renders: active/preview `model_registry` rows PLUS any models
+ * declared in the OpenClaw config's `models.providers`. Used by PUT to reject a
+ * phantom model id that is not in the client's real inventory. When the catalog
+ * is empty (fresh box before the first registry refresh AND no config models)
+ * membership is NOT enforced — only the forbidden/free checks apply — so a brand
+ * new box can still be configured without being bricked.
+ */
+function catalogModelIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const m of loadModelsFromRegistry()) ids.add(m.id);
+  try {
+    const configPath = openclawConfigPath();
+    if (existsSync(configPath)) {
+      const stats = statSync(configPath);
+      if (stats.size < 1024 * 1024) {
+        const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+        const providerModels = config?.models?.providers as
+          | Record<string, { models?: Array<{ id: string }> }>
+          | undefined;
+        if (providerModels) {
+          for (const [prov, p] of Object.entries(providerModels)) {
+            for (const m of p.models ?? []) {
+              if (m?.id) ids.add(`${prov}/${m.id}`);
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Config missing/unreadable — registry ids only.
+  }
+  return ids;
 }
 
 /* ── Persona details: loaded at runtime from persona-categories.json ── */
@@ -477,9 +514,14 @@ export async function GET() {
       // Use static list
     }
 
+    // MODEL-07: never render a forbidden (Anthropic) model as a selectable
+    // option — filter BOTH the registry rows and the config-enriched rows
+    // through isForbidden so a forbidden option can never reach the dropdown.
+    const sovereignModels = enrichedModels.filter((m) => !isForbidden(m.id));
+
     return NextResponse.json({
       departments: departmentsWithRoles,
-      models: enrichedModels,
+      models: sovereignModels,
       personas: enrichedPersonas,
       defaults: { model: DEFAULT_MODEL, persona: DEFAULT_PERSONA },
     });
@@ -536,6 +578,46 @@ export async function PUT(request: NextRequest) {
       (a.setting_type === 'model' || a.setting_type === 'persona') &&
       a.value !== undefined;
     const isClear = (value: string | null) => value === null || value === '';
+
+    // ── MODEL-07: model-sovereignty validation on the WRITE path ────────
+    // The write path previously persisted ANY string as a model override. A
+    // forbidden (Anthropic — including the MODEL-01 dot-route / future-generation
+    // forms), free-sentinel, or phantom (absent-from-catalog) value could be
+    // stored — and, before the GET filter, rendered — even though the resolver's
+    // sovereignty gate would later skip it. Reject such values here (422) so they
+    // can never be persisted as a role/department override. Clears (null/'') and
+    // persona assignments are unaffected. Catalog membership is enforced ONLY when
+    // a catalog exists (see catalogModelIds) so a fresh box is not bricked.
+    const knownModelIds = catalogModelIds();
+    const invalidModels: Array<{
+      department_id: string;
+      role_id: string | null;
+      value: string;
+      reason: 'forbidden_anthropic' | 'free_default' | 'unknown_model';
+    }> = [];
+    for (const a of assignments) {
+      if (!isActionable(a) || a.setting_type !== 'model') continue;
+      if (isClear(a.value)) continue;
+      const value = (a.value as string).trim();
+      let reason: 'forbidden_anthropic' | 'free_default' | 'unknown_model' | null = null;
+      if (isForbidden(value)) reason = 'forbidden_anthropic';
+      else if (isFree(value)) reason = 'free_default';
+      else if (knownModelIds.size > 0 && !knownModelIds.has(value)) reason = 'unknown_model';
+      if (reason) {
+        invalidModels.push({ department_id: a.department_id, role_id: a.role_id || null, value, reason });
+      }
+    }
+    if (invalidModels.length > 0) {
+      return NextResponse.json(
+        {
+          error: 'InvalidModel',
+          message:
+            'One or more model assignments are not sovereign-valid (forbidden Anthropic model, a free sentinel, or a model absent from the catalog).',
+          invalid: invalidModels,
+        },
+        { status: 422 },
+      );
+    }
 
     // ── Model Lock Protocol ────────────────────────────────────────────
     // If the target setting is locked, the caller MUST present the matching
