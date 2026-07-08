@@ -61,6 +61,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
@@ -852,6 +853,12 @@ async function llmScoreViaGoogle(
  * Falls back to heuristic on any LLM error (never throws).
  */
 export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
+  // QC-11: hard-fail if any fixture/simulate bypass env var is set in
+  // production. Both QC_FIXTURE_JSON_PATH (below) and QC_SIMULATE_PROVIDER_DOWN
+  // (further down) would otherwise let a canned "pass" verdict skip real
+  // scoring on a live box. No-op in dev/test, so fixtures keep working there.
+  assertNoFixtureEnvInProduction();
+
   // Fixture path for testing — no live cost. Set QC_FIXTURE_JSON_PATH to a JSON
   // file with shape { score, pass, reason, gaps } to force a deterministic result.
   const qcFixturePath = process.env.QC_FIXTURE_JSON_PATH;

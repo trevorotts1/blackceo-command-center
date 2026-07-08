@@ -10,6 +10,7 @@
  */
 
 import fs from 'fs';
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 
 export interface GeminiGenerateOptions {
   model?: string; // default 'gemini-1.5-flash'
@@ -22,6 +23,10 @@ export interface GeminiGenerateOptions {
  * Caller is responsible for JSON.parse if response_mime_type='application/json'.
  */
 export async function geminiGenerate(prompt: string, opts: GeminiGenerateOptions = {}): Promise<string> {
+  // QC-11: never honor GEMINI_FIXTURE_JSON_PATH on a production box — a fixture
+  // would let a hand-written SOP draft bypass live synthesis. No-op in dev/test.
+  assertNoFixtureEnvInProduction();
+
   const fixturePath = process.env.GEMINI_FIXTURE_JSON_PATH;
   if (fixturePath) {
     return fs.readFileSync(fixturePath, 'utf8');
