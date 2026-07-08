@@ -64,6 +64,7 @@ def _clean_env(monkeypatch, tmp_path):
         "MASTER_FILES_DIR",
         "COMPANY_SLUG",
         "COMPANY_NAME",
+        "DASHBOARD_DB_PATH",
         "DATABASE_PATH",
         "OPENCLAW_COMPANY_SLUG",
     ):

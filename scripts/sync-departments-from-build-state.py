@@ -46,6 +46,16 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# DATA-08: single shared DB resolver (shared-utils/resolve_db.py) so this script
+# and the Command Center app always resolve the SAME mission-control.db.
+_SHARED_UTILS = Path(__file__).resolve().parent.parent / "shared-utils"
+sys.path.insert(0, str(_SHARED_UTILS))
+try:
+    from resolve_db import find_dashboard_db as _shared_find_dashboard_db, is_db_found as _shared_is_db_found  # type: ignore
+    _HAS_SHARED_RESOLVER = True
+except ImportError:
+    _HAS_SHARED_RESOLVER = False
+
 
 def _oc_root():
     if Path("/data/.openclaw").is_dir():
@@ -179,8 +189,17 @@ def _read_json(path):
 def find_db(explicit=None):
     if explicit:
         return explicit
-    if os.environ.get("DATABASE_PATH"):
-        return os.environ["DATABASE_PATH"]
+    # DATA-08: honor the app's DB path FIRST — DASHBOARD_DB_PATH (forwarded by the
+    # CC app to subprocesses) then DATABASE_PATH (src/lib/db/index.ts) — so this
+    # re-seed can never write to a decoy DB the dashboard never reads.
+    for _ev in ("DASHBOARD_DB_PATH", "DATABASE_PATH"):
+        _v = os.environ.get(_ev)
+        if _v:
+            return _v
+    if _HAS_SHARED_RESOLVER:
+        p = _shared_find_dashboard_db()
+        if _shared_is_db_found(p):
+            return str(p)
     candidates = [
         Path.cwd() / "mission-control.db",
         Path.home() / "projects" / "command-center" / "mission-control.db",

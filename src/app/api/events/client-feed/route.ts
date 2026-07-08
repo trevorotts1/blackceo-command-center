@@ -12,6 +12,12 @@ export const revalidate = 0;
  *
  * E23: Returns recent events scoped to the SELECTED client.
  *
+ * FEED OF RECORD (DATA-07): the self/local path reads the legacy `events` table
+ * — the authoritative activity feed (see the header note in /api/events/route.ts).
+ * `task_events` is a partial sink until DISP-10 routes all status writes through
+ * transition(); do NOT repoint this feed at it before then. Migration is tracked
+ * with DISP-10 (lane L3).
+ *
  * Self-client: reads the local SQLite events table (same as /api/events).
  * Remote client: attempts to connect to the client's OpenClaw gateway and
  *   surfaces recent sessions as feed items. Falls back gracefully to an empty
