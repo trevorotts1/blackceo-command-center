@@ -27,19 +27,51 @@
  *     field. Never print parsed config contents.
  */
 
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 /**
+ * Owner-send timeout (MSG-01). Kept short so a hung gateway can never pin a
+ * send for the old 10s window; the send is fire-and-forget so this only bounds
+ * the detached child, never the request/event loop.
+ */
+const OWNER_SEND_TIMEOUT_MS = 5_000;
+
+/**
  * The known OPERATOR chat IDs — never returned as a client owner target.
- * MUST stay in sync with openclaw-onboarding:
+ *
+ * MSG-03 — SINGLE SOURCE: the authoritative set is read from the
+ * OPERATOR_CHAT_IDS env (comma/space/newline-separated) that the installer
+ * writes, so all three repos consume ONE list instead of hand-maintained
+ * divergent copies. The hardcoded list below is only the fail-safe default
+ * when that env is unset; it MUST stay in sync with openclaw-onboarding:
  *   install.sh, shared-utils/resolve-owner-chat.sh,
  *   shared-utils/nudge-incomplete-interviews.py,
  *   tests/unit/cron-owner-chat-guard.test.sh
+ * Long-term single-source guard: an `openclaw doctor` diff of this resolver
+ * against the onboarding resolver (cross-repo — see MSG-03 in the fix spec).
  */
-const OPERATOR_CHAT_IDS = new Set(['5252140759', '6663821679', '6771245262']);
+const DEFAULT_OPERATOR_CHAT_IDS = ['5252140759', '6663821679', '6771245262'];
+
+/**
+ * Resolve the operator chat-id set from OPERATOR_CHAT_IDS env, falling back to
+ * the built-in default. The fallback is intentional and fail-SAFE: an unset or
+ * malformed env must never SHRINK the operator set (that would let an operator
+ * id resolve as a client owner — the exact leak this list prevents).
+ */
+function loadOperatorChatIds(): Set<string> {
+  const ids = (process.env.OPERATOR_CHAT_IDS ?? '')
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter((s) => /^\d{6,20}$/.test(s));
+  // Always UNION the built-in defaults so an env list can only ADD operator
+  // ids to reject, never drop a known one.
+  return new Set([...DEFAULT_OPERATOR_CHAT_IDS, ...ids]);
+}
+
+const OPERATOR_CHAT_IDS = loadOperatorChatIds();
 
 function safeIsDir(p: string): boolean {
   try {
@@ -154,7 +186,18 @@ export function resolveOwnerChatId(): string | null {
 /**
  * Send a Telegram message to a specific chat via `openclaw message send`.
  *
- * @returns true if the send succeeded, false otherwise (never throws).
+ * MSG-01: this is FIRE-AND-FORGET. The send is dispatched with async
+ * `execFile` and NOT awaited, so a slow or hung gateway can never block the
+ * Node event loop — a burst of DONE reports no longer serializes into 10s
+ * stalls (P32/P39). Send errors are swallowed by the internal callback: the
+ * module contract is BEST-EFFORT and callers must never roll back DB state on
+ * a failed send.
+ *
+ * @returns true when a send was DISPATCHED to the gateway (chat present, not
+ *   disabled); false when suppressed. Because the send is not awaited, `true`
+ *   means "attempted", not "confirmed delivered" — consistent with the
+ *   best-effort contract (even the previous sync path only confirmed the CLI
+ *   exit, never actual Telegram delivery). Never throws.
  */
 export function notifyTelegram(opts: {
   chatId: string;
@@ -163,33 +206,33 @@ export function notifyTelegram(opts: {
   if (process.env.OWNER_NOTIFY_TELEGRAM_DISABLED === '1') {
     return false;
   }
-  try {
-    execFileSync(
-      'openclaw',
-      [
-        'message',
-        'send',
-        '--channel',
-        'telegram',
-        // `--target` / `--message` are the real CLI flags (openclaw 2026.x).
-        // The previous `--to` / `--text` flags do not exist — commander
-        // rejected them, so every owner send silently failed.
-        '--target',
-        opts.chatId,
-        '--message',
-        opts.message,
-      ],
-      { stdio: 'pipe', timeout: 10_000 },
-    );
-    return true;
-  } catch (err) {
-    console.error(
-      '[notify] Telegram send failed (chatId=%s): %s',
+  execFile(
+    'openclaw',
+    [
+      'message',
+      'send',
+      '--channel',
+      'telegram',
+      // `--target` / `--message` are the real CLI flags (openclaw 2026.x).
+      // The previous `--to` / `--text` flags do not exist — commander
+      // rejected them, so every owner send silently failed.
+      '--target',
       opts.chatId,
-      (err as Error).message,
-    );
-    return false;
-  }
+      '--message',
+      opts.message,
+    ],
+    { timeout: OWNER_SEND_TIMEOUT_MS },
+    (err) => {
+      if (err) {
+        console.error(
+          '[notify] Telegram send failed (chatId=%s): %s',
+          opts.chatId,
+          err.message,
+        );
+      }
+    },
+  );
+  return true;
 }
 
 /**
@@ -215,19 +258,74 @@ export function notifyOwner(message: string): boolean {
 export type NotifyAudience = 'OWNER' | 'SYSTEM';
 
 /**
+ * MSG-06 / SWEEP-06 — the SYSTEM (operator) notification channel.
+ *
+ * SYSTEM-audience alerts (dispatch-block-at-cap, silent-failure escalations,
+ * stuck-in-progress) are an OPERATOR concern and must NEVER reach the client
+ * owner DM (MOVE-IN-SILENCE). This routes them to the Rescue Rangers
+ * escalation webhook when configured; otherwise it logs server-side and DROPS
+ * the message. It deliberately does NOT fall back to notifyOwner() — that is
+ * the client's chat, and a SYSTEM alert there is the breach SWEEP-06 fixes.
+ *
+ * Fire-and-forget (does not await the POST); never throws.
+ *
+ * Cross-lane consumers (see fix-spec SWEEP-06 / MSG-06 — wired by the integrator):
+ *   • task-dispatcher.ts recordDispatchFailure(): calls notifySystem() instead
+ *     of notifyOwner() when `audience === 'SYSTEM'`.
+ *   • jobs/stuck-in-progress-sweep.ts + jobs/stale-task-sweep.ts: route their
+ *     operator escalations through notifySystem() (via notifyByAudience below).
+ *
+ * @returns true when dispatched to the rescue webhook; false when no webhook
+ *   is configured (the alert is logged and dropped — never sent to the client).
+ */
+export function notifySystem(
+  message: string,
+  meta?: { agent?: string; action?: string },
+): boolean {
+  const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
+  if (!webhookUrl) {
+    console.warn(
+      '[notify] notifySystem: no RESCUE_RANGERS_WEBHOOK_URL — SYSTEM alert logged, NOT sent to client: %s',
+      message,
+    );
+    return false;
+  }
+  // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
+  void fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: meta?.action ?? 'escalate',
+      agent: meta?.agent ?? 'command-center',
+      message,
+    }),
+  }).catch((err) => {
+    console.warn(
+      '[notify] notifySystem: Rescue Rangers POST failed: %s',
+      (err as Error).message,
+    );
+  });
+  return true;
+}
+
+/**
  * Audience-gated notification (SWEEP-06 / MOVE-IN-SILENCE).
  *
  *   - 'OWNER'  → the client's own Telegram (their board is theirs to see).
- *   - 'SYSTEM' → the OPERATOR only. Routed to RESCUE_RANGERS_WEBHOOK_URL; if that
- *                is unset the message is logged to the server (operator) feed.
+ *   - 'SYSTEM' → the OPERATOR only, via notifySystem() (single source): routed
+ *                to RESCUE_RANGERS_WEBHOOK_URL, or logged + dropped when unset.
  *                It is NEVER sent to the client Telegram.
  *
  * A dispatch-failure / block / stuck-agent alert is a SYSTEM (operator) concern:
- * callers such as `recordDispatchFailure` and the stuck-in-progress sweep must
- * pass 'SYSTEM' so those alerts can never spam a client Telegram. Only a genuine
+ * callers such as `recordDispatchFailure` and the stuck-in-progress sweep pass
+ * 'SYSTEM' so those alerts can never spam a client Telegram. Only a genuine
  * owner-facing message passes 'OWNER'.
  *
- * Best-effort: never throws. Returns true when a notification was delivered.
+ * Reconciliation note (integrator): L2 introduced this audience wrapper and L9
+ * introduced notifySystem(); the SYSTEM branch now delegates to notifySystem()
+ * so there is exactly ONE Rescue Rangers webhook code path.
+ *
+ * Best-effort: never throws. Returns true when a notification was dispatched.
  */
 export async function notifyByAudience(opts: {
   audience: NotifyAudience;
@@ -236,24 +334,6 @@ export async function notifyByAudience(opts: {
   if (opts.audience === 'OWNER') {
     return notifyOwner(opts.message);
   }
-
-  // SYSTEM: operator channel only — never the client Telegram.
-  const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
-  if (webhookUrl) {
-    try {
-      const res = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'escalate', agent: 'command-center', message: opts.message }),
-      });
-      return res.ok;
-    } catch (err) {
-      console.warn('[notify] SYSTEM webhook send failed:', (err as Error).message);
-      return false;
-    }
-  }
-
-  // No operator webhook configured — operator server log only. Client stays silent.
-  console.warn('[notify] SYSTEM alert (no RESCUE_RANGERS_WEBHOOK_URL; client-silent):', opts.message);
-  return false;
+  // SYSTEM: single source of truth — operator channel only, never the client.
+  return notifySystem(opts.message);
 }
