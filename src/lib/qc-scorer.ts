@@ -3655,8 +3655,74 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       }
       // ── End provider-down deferral ────────────────────────────────────────
 
+      // ── No-key heuristic (keyless install by design) ─────────────────────
+      // QC-02: a keyless box can NEVER auto-advance review→done, so without an
+      // escape hatch the qc-review-sweep re-scores this task every ~10 min
+      // FOREVER — each pass writing a fresh [QC-HEURISTIC] event while the card
+      // rots in Review with no terminal signal (the second "nothing moves" trap).
+      // Fix: after N passes, escalate ONCE to a TERMINAL [QC-HEURISTIC-FINAL]
+      // "needs-key / manually promote" state that the sweep excludes PERMANENTLY.
+      // This is kept strictly DISTINCT from the provider-down deferral above,
+      // which KEEPS retrying on the short cadence (a key exists; the provider is
+      // expected to return). The card stays in `review` — the board's
+      // manual-review lane — now flagged terminally instead of silently churning.
+      const noKeyMaxPasses = Math.max(
+        1,
+        parseInt(process.env.QC_HEURISTIC_NO_KEY_MAX_PASSES || '3', 10) || 3,
+      );
+
+      // Already escalated? Idempotent no-op (defensive — the sweep should already
+      // be permanently excluding this task once the -FINAL marker exists).
+      const alreadyFinal = queryOne<{ one: number }>(
+        `SELECT 1 AS one FROM events
+         WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%[QC-HEURISTIC-FINAL]%'
+         LIMIT 1`,
+        [taskId],
+      );
+      if (alreadyFinal) {
+        console.log(
+          `[QCScorer] Task "${task.title}" (${taskId}): already [QC-HEURISTIC-FINAL] (needs-key / manual-promote) — no re-score, stays in review`,
+        );
+        return result;
+      }
+
+      // Count prior no-key heuristic passes. NOTE: SQLite LIKE treats '[' / ']'
+      // literally (no bracket classes), so '%[QC-HEURISTIC]%' matches ONLY the
+      // per-pass marker and NOT '[QC-HEURISTIC-FINAL]' or '[QC-DEFERRED-PROVIDER-DOWN]'.
+      const priorPassesRow = queryOne<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%[QC-HEURISTIC]%'`,
+        [taskId],
+      );
+      const thisPass = (priorPassesRow?.c ?? 0) + 1;
+
+      if (thisPass >= noKeyMaxPasses) {
+        // Terminal escalation — write the [QC-HEURISTIC-FINAL] marker ONCE. The
+        // qc-review-sweep excludes tasks carrying it permanently, so no more
+        // re-scores. Task remains board-visible in the Review / QC (manual-review)
+        // column awaiting a manual promotion or an LLM key.
+        const finalMsg =
+          `[QC-HEURISTIC-FINAL] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode ${thisPass} time(s) ` +
+          `with NO LLM key — this box cannot auto-advance review→done. MANUAL REVIEW REQUIRED: promote this task to ` +
+          `done manually, or configure an LLM scoring key (OPENAI_API_KEY / GOOGLE_API_KEY) and it will be re-scored. ` +
+          `It is now excluded from the QC review sweep permanently. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'qc_review', taskId, finalMsg, now],
+        );
+
+        console.warn(
+          `[QCScorer] Task "${task.title}" (${taskId}): no-key heuristic reached pass ${thisPass}/${noKeyMaxPasses} — ` +
+            `escalated ONCE to [QC-HEURISTIC-FINAL] (manual-promote); permanently excluded from qc-review-sweep`,
+        );
+
+        return result;
+      }
+
       const heuristicEventMsg =
-        `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+        `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required (pass ${thisPass}/${noKeyMaxPasses}). ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
 
       run(
         `INSERT INTO events (id, type, task_id, message, created_at)
@@ -3665,7 +3731,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       );
 
       console.log(
-        `[QCScorer] Task "${task.title}" (${taskId}): heuristic mode — task stays in review, human review required (score ${result.score.toFixed(1)}/10, qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
+        `[QCScorer] Task "${task.title}" (${taskId}): heuristic mode — task stays in review, human review required (score ${result.score.toFixed(1)}/10, pass ${thisPass}/${noKeyMaxPasses}, qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
       );
 
       return result;
