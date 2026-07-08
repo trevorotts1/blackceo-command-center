@@ -1,3 +1,18 @@
+## [v4.69.0] — 2026-07-07 — fix(reliability): stuck-in-progress sweep for silent agent failures
+
+Closes the silent-task-hang gap found in tonight's incident investigation: a task dispatched to `in_progress` whose agent turn dies mid-work (repeated tool failures, degenerate loop, thinking-only turn end) without emitting `TASK_COMPLETE:` or writing a terminal status rotted invisibly — the success reconcile (execution-watcher) only matches completions, and stale-task-sweep's in_progress threshold is 24h with a silent backlog-bounce remedy and no operator alert. Nothing marked such a task blocked or surfaced the error until now.
+
+### fix(jobs): stuck-in-progress-sweep — new cron */5 safety net
+- **`src/lib/jobs/stuck-in-progress-sweep.ts`** (new) — `runStuckInProgressSweep()`: for an `in_progress` task with no progress past `STUCK_IN_PROGRESS_MINUTES` (default 45) and no recent activity event (liveness guard), transitions it to `blocked` via the audited `transition()` (writing the structured `task_events` row a raw UPDATE skips — the exact audit gap that hid the incident), records the failure in the block metadata columns (`block_audience='SYSTEM'`, `blocked_on_human='operator'`), frees the wedged agent (`working` → `standby`), broadcasts `task_updated`, and alerts the operator once (Rescue Rangers webhook → `notifyOwner` fallback). Blocked is recoverable and visible; the point is a dead task stops being invisible. Opt out with `DISABLE_STUCK_IN_PROGRESS_SWEEP=1`.
+- **`src/lib/jobs/scheduler.ts`** — registers the new job (`STUCK_IN_PROGRESS_SWEEP_CRON = '*/5 * * * *'`), alongside the existing `stale-task-sweep` and `interview-nudge-sweep` jobs. No existing job's schedule or behavior touched.
+- **`tests/unit/stuck-in-progress-sweep.test.ts`** (new) — DB-backed coverage: blocks a silently-stuck task (frees agent + writes audit event), leaves a fresh `in_progress` task alone, liveness-guard skips an old-but-active task, and respects the `DISABLE_STUCK_IN_PROGRESS_SWEEP` opt-out. 4/4 passing.
+
+### Verification
+- `tsc --noEmit`: clean (rc=0). `next lint`: clean (pre-existing warnings only, no errors).
+- `scripts/qc-cc.sh`: 111 checks green, 4 environment-only warnings (fresh-clone has no `.env.local`/live DB — expected). `scripts/qc-blocked-gate.sh`: 8/8 pass. `scripts/check-qc-independence.sh`: pass. `tests/unit/no-naked-dispatch.test.sh`: 5/5 pass.
+- `node --test` full unit suite (isolated from this box's live OpenClaw gateway + operator ZHC company data): 598/606 pass. The 8 pre-existing failures (`duck-artifact-qc-preview.test.ts`, `duck-s3-s4-lifecycle.test.ts`, `prd-3.4-sentinel-ids-loud-warning.test.ts`, `task-status-transition.test.ts`) reproduce identically against `origin/main` with this branch's changes reverted — confirmed pre-existing and unrelated to this change; no file this branch touches is among them.
+- `FORBIDDEN_STATUSES = new Set(['done'])` in `src/app/api/tasks/[id]/status/route.ts` — byte-for-byte unchanged (file untouched by this branch); confirmed no collateral damage.
+
 ## [v4.68.0] — 2026-07-07 — feat(anthology): Command Center home tiles, participant token page, and board-producer recognition (W3.1/W3.2/W3.3)
 
 Anthology Engine integration surface, landed from the onboarding-repo side (SPEC 11.2/11.3). Three additive, reversible pieces: Command Center home tiles for the Anthology/Podcast/Interview surfaces, a public self-authenticating participant token page for external co-authors, and status-route recognition of the Anthology board-producer's card marker so `mc_board.py` can move its own board cards.
