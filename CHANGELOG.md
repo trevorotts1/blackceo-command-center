@@ -23,6 +23,9 @@ Enforces a guaranteed match between a client's CHOSEN departments (departments.j
 - **`tests/unit/floor-department-invariant.test.ts`** (vitest, wired into CI) — the authoritative behavioral proof: runs the real reseed + resolver + scoped board query on a throwaway migrated DB and asserts displayed == manifest − opt-outs, App Development + Engineering distinct, foreign-company row excluded, and idempotent across two seed passes.
 - **`tests/fixtures/floor-invariant/{manifest.json,expected-displayed.json}`** — the shared golden the gate and the vitest suite both consume.
 
+### chore(qc): reconcile stale qc-cc.sh check 10.17 with the BUILD-04 deploy.sh deprecation
+- **`scripts/qc-cc.sh`** — after `BUILD-04` turned `deploy.sh` into a thin shim that FORWARDS to `atomic-deploy.sh`, check 10.17 (which greps `deploy.sh` for `pm2 save`) started failing on main even though the OOM/reboot-survival guarantee is fully preserved via the forward (atomic-deploy.sh's `pm2 save`, gated by 10.16). Check 10.17 now accepts EITHER an inline `pm2 save` OR the `atomic-deploy.sh` forward. Independent, revertable one-liner made to unblock the qc-cc CI gate on green — not part of the floor-invariant change.
+
 ## [v4.69.1] — 2026-07-08 — fix(tasks): idempotency key takes precedence over the title-window dedupe (anthology card collision)
 
 Fixes a real collision: one contact enrolled in two different anthologies produced two cards sharing the same title, and Command Center's generic Layer-2 dedupe (title + workspace window) was collapsing them into a single task row instead of the two distinct rows their distinct idempotency keys called for. A caller-supplied idempotency key (Layer 1) is an authoritative, deliberate identity and must never be overridden by the generic same-title safety net meant for keyless callers (operator UI, plain Telegram capture).

@@ -472,8 +472,12 @@ check "10.16" "atomic-deploy.sh: pm2 save on green (CC + cloudflared persist for
 
 # 10.17 deploy.sh (legacy operator deploy path per DEPLOYMENT.md) must ALSO
 #       persist via pm2 save on green — same OOM/reboot-survival guarantee.
-check "10.17" "deploy.sh: pm2 save on green (persist pm2 dump for OOM/reboot survival)" \
-  "grep -q 'pm2 save' scripts/deploy.sh"
+#       As of BUILD-04 deploy.sh is a thin shim that FORWARDS to atomic-deploy.sh,
+#       so it inherits atomic-deploy.sh's `pm2 save` (already gated by 10.16).
+#       Accept EITHER an inline `pm2 save` OR the atomic-deploy.sh forward — both
+#       preserve the OOM/reboot-survival guarantee for the legacy caller.
+check "10.17" "deploy.sh: pm2 save on green (inline, or via the atomic-deploy.sh forward)" \
+  "grep -q 'pm2 save' scripts/deploy.sh || grep -q 'atomic-deploy.sh' scripts/deploy.sh"
 
 blue ""
 blue "── 11. Port-pin and env-bleed guard (v4.42.0+) ──"
