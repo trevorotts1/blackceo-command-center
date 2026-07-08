@@ -97,7 +97,7 @@ type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
  * MAX_DISPATCH_ATTEMPTS — transitions the task to `blocked` with a classified
  * audience + an owner/operator report. Never silent, never furnaces, never throws.
  */
-function recordDispatchFailure(
+export function recordDispatchFailure(
   taskId: string,
   agentId: string | null,
   opts: { reason: string; audience: DispatchBlockAudience; needs: string; context: string },
@@ -403,7 +403,12 @@ export async function autoDispatchTask(
     // instead of hammering it every tick.
     const nextEligibleAt = (task as Task & { next_dispatch_eligible_at?: string | null })
       .next_dispatch_eligible_at;
-    if (nextEligibleAt && nextEligibleAt > now) {
+    // DISP-03: the 'sop-authored-resume' path is the LEGITIMATE release of a
+    // fast-loop HOLD — the SOP is now filed, so it MUST bypass the anti-furnace
+    // backoff that the HOLD itself set below, otherwise the just-authored task
+    // would be stranded in backoff until a later sweep tick (the resume calls
+    // straight back into autoDispatchTask and would otherwise skip here).
+    if (nextEligibleAt && nextEligibleAt > now && context !== 'sop-authored-resume') {
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} in dispatch backoff until ${nextEligibleAt} — skip`,
       );
@@ -618,6 +623,23 @@ export async function autoDispatchTask(
             department: task.department ?? null,
             agentRoleSlug,
             workspaceId: task.workspace_id ?? null,
+          });
+          // DISP-03: this HOLD previously returned with NO accounting, so every
+          // sweep tick re-selected the still-SOP-less card and re-fired the
+          // authoring loop (~every 2 min, uncapped) — a furnace that also spawns
+          // duplicate authoring sub-tasks. Record the pending attempt so the
+          // sweeps back off (via next_dispatch_eligible_at + GUARD 6) between
+          // ticks, and — if authoring never yields an SOP after the cap — the
+          // card BLOCKS with a SYSTEM report instead of looping forever. The
+          // happy path is unaffected: sop-authored-resume bypasses the backoff
+          // (GUARD 6) and recordDispatchSuccess clears this counter on dispatch.
+          recordDispatchFailure(task.id, agent.id, {
+            reason: 'sop_authoring_pending',
+            audience: 'SYSTEM',
+            needs:
+              `Custom dept "${deptSlug}" has no SOP yet; the authoring fast loop is running. ` +
+              'It resumes automatically once the SOP is filed.',
+            context,
           });
           return; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
         }
@@ -877,29 +899,85 @@ If you need help or clarification, ask the orchestrator.`;
       return;
     }
 
-    await client.call('chat.send', {
-      sessionKey,
-      message: taskMessage,
-      idempotencyKey: `auto-dispatch-${task.id}-${Date.now()}`,
-    });
+    // ── DISP-02: atomic CLAIM before send (close the SELECT→send TOCTOU) ────
+    // Two concurrent advancers (overlapping sweeps + the create-time
+    // auto-dispatch) can both pass the load-time GUARD 3 status check and reach
+    // here, then each fire chat.send → double invocation. Claim the card with a
+    // compare-and-swap that only matches a still-claimable status; if we don't
+    // win the swap (changes !== 1) another advancer already claimed it — return
+    // WITHOUT sending. Pairs with the stable idempotencyKey (DISP-01) so even a
+    // same-instant collision the CAS didn't serialize is collapsed at the gateway.
+    const claim = run(
+      `UPDATE tasks SET status = 'in_progress', updated_at = ?
+         WHERE id = ? AND status IN ('backlog','inbox','planning','pending_dispatch','assigned')`,
+      [now, task.id],
+    );
+    if (claim.changes !== 1) {
+      console.log(
+        `[${context}] autoDispatchTask: task ${taskId} was already claimed by a concurrent ` +
+          `advancer (CAS matched ${claim.changes} rows) — skipping send to avoid a double dispatch`,
+      );
+      return;
+    }
 
-    // ── Advance task to in_progress via lifecycle transition ───────────────
-    // Pin model_id first (not part of the state machine itself), then transition.
+    // DISP-01: stable idempotency key. Was `Date.now()`, which handed every
+    // re-fire — including two advancers racing the SAME window — a UNIQUE key,
+    // so the gateway could never dedup a concurrent double-send. Key on the
+    // attempt counter instead: genuine retries (after recordDispatchFailure
+    // bumps dispatch_attempts) get a fresh key, but two advancers in one window
+    // read the same counter → identical key → the gateway collapses them.
+    try {
+      await client.call('chat.send', {
+        sessionKey,
+        message: taskMessage,
+        idempotencyKey: `auto-dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
+      });
+    } catch (sendErr) {
+      // DISP-02 send-failure rollback: we already CAS-claimed the card to
+      // in_progress; a failed send must NOT strand it there. Restore the prior
+      // status (only if we still hold the in_progress we set) so a sweep can
+      // re-select it, then account for the failed advance (backoff → cap) so it
+      // never re-fires every tick.
+      console.error(`[${context}] autoDispatchTask: chat.send failed for task ${task.id} — rolling back claim:`, sendErr);
+      const rollbackNow = new Date().toISOString();
+      run(
+        `UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'in_progress'`,
+        [task.status, rollbackNow, task.id],
+      );
+      try {
+        const rolledBack = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
+        if (rolledBack) broadcast({ type: 'task_updated', payload: rolledBack });
+      } catch { /* broadcast best-effort */ }
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'chat_send_failed',
+        audience: 'SYSTEM',
+        needs:
+          'OpenClaw chat.send failed at dispatch. The task was returned to the queue; it ' +
+          'retries with backoff and stays visible until it sends or hits the cap.',
+        context,
+      });
+      return;
+    }
+
+    // ── Post-claim bookkeeping (status already advanced by the DISP-02 CAS) ──
+    // The DISP-02 CAS above ALREADY advanced the card to in_progress atomically,
+    // so we do NOT re-run transition(→in_progress) here: with status already
+    // in_progress, transition() takes its idempotent from===to branch (no audit
+    // row, no broadcast) — and force-setting in_progress could REGRESS a task a
+    // fast agent has meanwhile moved to review. Instead pin the resolved model_id
+    // and broadcast the CURRENT row so the board reflects live state.
+    //
+    // CROSS-LANE NOTE (DISP-10 / DATA-07, Lane L3): the CAS claim is a raw status
+    // write that bypasses transition()'s task_events audit. The dispatch is still
+    // recorded via the 'task_dispatched' events row + task_activities below; L3's
+    // lifecycle-funnel work should fold this claim into the audited path.
     if (settings.model) {
       run('UPDATE tasks SET model_id = ?, updated_at = ? WHERE id = ?', [settings.model, now, task.id]);
     }
-
     try {
-      const { transition } = await import('@/lib/task-lifecycle');
-      await transition(task.id, 'in_progress', { actor: agent.id, reason: `[${context}] auto-dispatched to ${agent.name}` });
-    } catch (tErr) {
-      // transition() may throw if the task is already in_progress (concurrent dispatch).
-      // Fall back to direct SQL to keep the fire-and-forget guarantee.
-      console.warn(`[${context}] autoDispatchTask: transition() failed (${(tErr as Error).message}), falling back to direct SQL`);
-      run('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?', ['in_progress', now, task.id]);
       const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
       if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
-    }
+    } catch { /* broadcast best-effort */ }
 
     // W8.2: task advanced — clear attempt-accounting so a future re-queue starts
     // from a clean slate (only CONSECUTIVE failures accumulate toward the cap).
