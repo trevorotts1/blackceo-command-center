@@ -26,8 +26,19 @@ export async function GET(request: NextRequest) {
         try {
           controller.enqueue(encoder.encode(`: keep-alive\n\n`));
         } catch (error) {
-          // Client disconnected
+          // MSG-04: the client is gone but the 'abort' listener has not fired
+          // (or will not). Previously we only cleared the interval and left the
+          // controller registered, so it leaked in the broadcast Set and every
+          // subsequent broadcast() had to hit the dead controller before
+          // pruning it. Tear the connection down fully here, mirroring the
+          // abort handler below.
           clearInterval(keepAliveInterval);
+          unregisterClient(controller);
+          try {
+            controller.close();
+          } catch {
+            // Controller may already be closed
+          }
         }
       }, 30000);
 
