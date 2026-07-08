@@ -19,6 +19,14 @@ export async function GET(request: NextRequest) {
     const department = searchParams.get('department');
     const departmentId = searchParams.get('department_id');
     const campaignId = searchParams.get('campaign_id');
+    // Board default: HIDE soft-archived tasks. `archived_at` is stamped by the
+    // weekly Done-clear job and the manual archive path (migration 058); it is
+    // the canonical "this card is off the board" marker. Every board consumer
+    // (main queue, all-tasks, workspace/department/campaign boards, analytics)
+    // reads this route, so filtering here hides archived cards everywhere in one
+    // place. ESCAPE HATCH: `?includeArchived=true` skips the filter so archived
+    // tasks stay fully retrievable (audit, restore) — they are hidden, not gone.
+    const includeArchived = searchParams.get('includeArchived') === 'true';
 
     let sql = `
       SELECT
@@ -38,6 +46,11 @@ export async function GET(request: NextRequest) {
       WHERE 1=1
     `;
     const params: unknown[] = [];
+
+    // Default board fetch hides soft-archived tasks; ?includeArchived=true opts in.
+    if (!includeArchived) {
+      sql += ' AND t.archived_at IS NULL';
+    }
 
     if (status) {
       // Support comma-separated status values (e.g., status=inbox,testing,in_progress)
