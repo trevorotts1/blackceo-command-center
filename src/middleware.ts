@@ -51,7 +51,26 @@ import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gat
 
 const MC_API_TOKEN = process.env.MC_API_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-const REQUIRE_CF_ACCESS = process.env.REQUIRE_CF_ACCESS === 'true';
+/**
+ * Cloudflare Access enforcement (DATA-10).
+ *
+ * Now DEFAULT-ON in production images: a prod box must explicitly opt out with
+ * REQUIRE_CF_ACCESS=false (documented, discouraged). Anywhere else (dev/test)
+ * keeps the historical default-OFF so local runs aren't forced through the CF
+ * edge. This is the belt to the same-origin-passthrough gate below — forgeable
+ * `Origin`/`Referer` headers are only ever trusted when a VERIFIED CF-Access
+ * assertion is present, and in production CF Access is now required by default
+ * so that assertion is actually enforced at the edge.
+ *
+ * NOTE (live-box, §7 #2): whether Cloudflare Access is truly enabled on each of
+ * the ~32 client subdomains is an operator/deploy concern this flag cannot
+ * verify from inside the app. Default-ON only makes the app REQUIRE the CF
+ * headers; the operator must confirm the edge actually injects them.
+ */
+const REQUIRE_CF_ACCESS =
+  process.env.NODE_ENV === 'production'
+    ? process.env.REQUIRE_CF_ACCESS !== 'false'
+    : process.env.REQUIRE_CF_ACCESS === 'true';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 /**
@@ -164,7 +183,12 @@ if (DEMO_MODE) {
     }
   }
   if (!REQUIRE_CF_ACCESS) {
-    console.warn('[SECURITY WARNING] REQUIRE_CF_ACCESS not set, Cloudflare Access enforcement is OFF. Set REQUIRE_CF_ACCESS=true in production.');
+    if (process.env.NODE_ENV === 'production') {
+      // DATA-10: default is ON in prod, so reaching here means an explicit opt-out.
+      console.error('[SECURITY ERROR] REQUIRE_CF_ACCESS=false in production — Cloudflare Access enforcement is DISABLED. Same-origin passthrough is only honored behind a verified CF-Access assertion (DATA-10), so with CF Access off, external /api/* callers must present the MC_API_TOKEN bearer. Remove REQUIRE_CF_ACCESS=false to restore the default-on posture.');
+    } else {
+      console.warn('[SECURITY WARNING] Cloudflare Access enforcement is OFF (non-production default). It defaults ON in production images; set REQUIRE_CF_ACCESS=true here only if you want to exercise the CF path locally.');
+    }
   }
 }
 
@@ -270,12 +294,21 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Same-origin browser requests are already gated by CF Access (layer 1)
-    // so they don't need the bearer token. Checked BEFORE the MC_API_TOKEN
-    // gate so the operator UI keeps working whether or not the token is set.
-    if (isSameOriginRequest(request)) {
+    // Same-origin browser requests are gated by Cloudflare Access (layer 1) and
+    // so don't need the bearer token — BUT only when CF Access has actually
+    // verified the request. `Origin` and `Referer` are client-controllable
+    // headers: an external caller reaching the origin directly can forge a
+    // same-origin `Referer`/`Origin` to skip the MC_API_TOKEN bearer gate
+    // (DATA-10 — the umbrella that also exposed the unauthenticated write paths
+    // in other lanes). We therefore honor the same-origin passthrough ONLY when
+    // a VERIFIED CF-Access assertion is present: both `cf-access-jwt-assertion`
+    // and `cf-access-authenticated-user-email` are populated by Cloudflare's
+    // edge and cannot be set by a client that bypasses Cloudflare. Without that
+    // assertion the request falls through to the MC_API_TOKEN bearer check
+    // below, so a forged same-origin header is worthless on its own.
+    if (cfJwt && cfEmail && isSameOriginRequest(request)) {
       const passthrough = NextResponse.next();
-      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+      passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;
     }
 
