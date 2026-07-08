@@ -77,6 +77,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (token !== expectedToken) {
       return unauthorized('Unauthorized');
     }
+  } else if (process.env.NODE_ENV === 'production') {
+    // DATA-14: never return OPEN when the bearer token is unset. This route
+    // spawns a privileged install/bootstrap script, so a missing MC_API_TOKEN in
+    // production is a misconfiguration that must hard-fail 503, never run open.
+    console.error('[/api/system/bootstrap] MC_API_TOKEN not set in production — refusing (fail-closed 503).');
+    return new Response(
+      JSON.stringify({ error: 'This deployment is misconfigured: MC_API_TOKEN is not set. Contact the operator.' }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } }
+    );
   } else {
     console.warn('[/api/system/bootstrap] MC_API_TOKEN not set, bearer auth disabled (local dev mode)');
   }

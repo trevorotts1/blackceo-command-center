@@ -94,6 +94,18 @@ function loadNeedsTags(): string[] {
 function checkAuth(req: NextRequest): Response | null {
   const expectedToken = process.env.MC_API_TOKEN;
   if (!expectedToken) {
+    // DATA-14: never return OPEN when the bearer token is unset. In production a
+    // missing MC_API_TOKEN is a misconfiguration, not a dev convenience — so a
+    // request that reaches this route with no token configured (e.g. middleware
+    // bypassed) is hard-failed 503, never let through. Only non-production runs
+    // open for local dev.
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[/api/system/converge] MC_API_TOKEN not set in production — refusing (fail-closed 503).');
+      return new Response(
+        JSON.stringify({ error: 'This deployment is misconfigured: MC_API_TOKEN is not set. Contact the operator.' }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
     console.warn('[/api/system/converge] MC_API_TOKEN not set, bearer auth disabled (local dev mode)');
     return null;
   }

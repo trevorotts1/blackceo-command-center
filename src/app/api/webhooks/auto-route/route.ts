@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { run, queryOne } from '@/lib/db';
 import { routeTask } from '@/lib/routing/department-router';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
@@ -7,6 +8,31 @@ import { notifyOwnerAssigned } from '@/lib/owner-reports';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+/**
+ * Verify the HMAC-SHA256 signature of the webhook request (DATA-09).
+ *
+ * Mirrors /api/webhooks/agent-completion: the caller signs the RAW request body
+ * with WEBHOOK_SECRET and sends the hex digest in `x-webhook-signature`. The
+ * middleware supplies the Bearer (MC_API_TOKEN) layer for external callers;
+ * this HMAC is the per-request second factor so the route is never an
+ * unauthenticated write surface even if the middleware layer is bypassed.
+ *
+ * When WEBHOOK_SECRET is unset we skip (dev): safe because this route is now in
+ * the middleware's WEBHOOK_SECRET_ROUTES fail-closed family, so a production box
+ * without WEBHOOK_SECRET is refused at the gate (503) before reaching here.
+ * Comparison is constant-time.
+ */
+function verifyWebhookSignature(signature: string | null, rawBody: string): boolean {
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+  if (!webhookSecret) return true;
+  if (!signature) return false;
+  const expected = createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
+  const sig = Buffer.from(signature);
+  const exp = Buffer.from(expected);
+  if (sig.length !== exp.length) return false;
+  return timingSafeEqual(sig, exp);
+}
 
 /**
  * POST /api/webhooks/auto-route
@@ -26,7 +52,16 @@ export const revalidate = 0;
  */
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    // DATA-09: route-level HMAC auth (Bearer is enforced by middleware).
+    const rawBody = await request.text();
+    if (process.env.WEBHOOK_SECRET) {
+      const signature = request.headers.get('x-webhook-signature');
+      if (!signature || !verifyWebhookSignature(signature, rawBody)) {
+        console.warn('[AutoRoute] Invalid webhook signature attempt');
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    }
+    const body = JSON.parse(rawBody);
     const { taskId, workspaceId } = body as { taskId?: string; workspaceId?: string };
 
     if (!taskId) {

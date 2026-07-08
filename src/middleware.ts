@@ -51,7 +51,26 @@ import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gat
 
 const MC_API_TOKEN = process.env.MC_API_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-const REQUIRE_CF_ACCESS = process.env.REQUIRE_CF_ACCESS === 'true';
+/**
+ * Cloudflare Access enforcement (DATA-10).
+ *
+ * Now DEFAULT-ON in production images: a prod box must explicitly opt out with
+ * REQUIRE_CF_ACCESS=false (documented, discouraged). Anywhere else (dev/test)
+ * keeps the historical default-OFF so local runs aren't forced through the CF
+ * edge. This is the belt to the same-origin-passthrough gate below — forgeable
+ * `Origin`/`Referer` headers are only ever trusted when a VERIFIED CF-Access
+ * assertion is present, and in production CF Access is now required by default
+ * so that assertion is actually enforced at the edge.
+ *
+ * NOTE (live-box, §7 #2): whether Cloudflare Access is truly enabled on each of
+ * the ~32 client subdomains is an operator/deploy concern this flag cannot
+ * verify from inside the app. Default-ON only makes the app REQUIRE the CF
+ * headers; the operator must confirm the edge actually injects them.
+ */
+const REQUIRE_CF_ACCESS =
+  process.env.NODE_ENV === 'production'
+    ? process.env.REQUIRE_CF_ACCESS !== 'false'
+    : process.env.REQUIRE_CF_ACCESS === 'true';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 /**
@@ -77,7 +96,17 @@ const ALLOW_INSECURE_OPEN_API = process.env.ALLOW_INSECURE_OPEN_API === 'true';
  * absent the route-level HMAC check authenticates nothing, so these routes
  * must be refused at the gate unless the operator has opted into open mode.
  */
-const WEBHOOK_SECRET_ROUTES = ['/api/tasks/ingest', '/api/webhooks/agent-completion'];
+const WEBHOOK_SECRET_ROUTES = [
+  '/api/tasks/ingest',
+  '/api/webhooks/agent-completion',
+  // DATA-09: auto-route + task-created mutate routing/dispatch and previously
+  // had NO route-level auth. They now self-authenticate with the same Bearer
+  // (middleware) + HMAC-over-WEBHOOK_SECRET (route) scheme as agent-completion,
+  // so they join the fail-closed family: a box without WEBHOOK_SECRET refuses
+  // them at the gate (503) instead of leaving an open write surface.
+  '/api/webhooks/auto-route',
+  '/api/webhooks/task-created',
+];
 
 /**
  * Same family as WEBHOOK_SECRET_ROUTES, but for routes with a dynamic `[id]`
@@ -164,7 +193,12 @@ if (DEMO_MODE) {
     }
   }
   if (!REQUIRE_CF_ACCESS) {
-    console.warn('[SECURITY WARNING] REQUIRE_CF_ACCESS not set, Cloudflare Access enforcement is OFF. Set REQUIRE_CF_ACCESS=true in production.');
+    if (process.env.NODE_ENV === 'production') {
+      // DATA-10: default is ON in prod, so reaching here means an explicit opt-out.
+      console.error('[SECURITY ERROR] REQUIRE_CF_ACCESS=false in production — Cloudflare Access enforcement is DISABLED. Same-origin passthrough is only honored behind a verified CF-Access assertion (DATA-10), so with CF Access off, external /api/* callers must present the MC_API_TOKEN bearer. Remove REQUIRE_CF_ACCESS=false to restore the default-on posture.');
+    } else {
+      console.warn('[SECURITY WARNING] Cloudflare Access enforcement is OFF (non-production default). It defaults ON in production images; set REQUIRE_CF_ACCESS=true here only if you want to exercise the CF path locally.');
+    }
   }
 }
 
@@ -198,6 +232,30 @@ function isSameOriginRequest(request: NextRequest): boolean {
 
 function unauthorized(message: string, status = 401): NextResponse {
   return NextResponse.json({ error: message }, { status });
+}
+
+/**
+ * Constant-time string comparison (DATA-11).
+ *
+ * `===` on a secret short-circuits on the first differing byte, leaking
+ * length/prefix information through response timing. Used for every comparison
+ * against MC_API_TOKEN — including the `/api/events/stream` query-param token,
+ * which is the highest-exposure surface because the token travels in the URL
+ * (and thus into access logs / Referer). This runs in the Edge runtime, where
+ * node:crypto's timingSafeEqual is unavailable, so we fold over the max length
+ * (never early-returning on a length mismatch) using the Web-standard
+ * TextEncoder.
+ */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  let diff = ab.length ^ bb.length;
+  const len = Math.max(ab.length, bb.length);
+  for (let i = 0; i < len; i++) {
+    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  }
+  return diff === 0;
 }
 
 export async function middleware(request: NextRequest): Promise<NextResponse> {
@@ -270,12 +328,21 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Same-origin browser requests are already gated by CF Access (layer 1)
-    // so they don't need the bearer token. Checked BEFORE the MC_API_TOKEN
-    // gate so the operator UI keeps working whether or not the token is set.
-    if (isSameOriginRequest(request)) {
+    // Same-origin browser requests are gated by Cloudflare Access (layer 1) and
+    // so don't need the bearer token — BUT only when CF Access has actually
+    // verified the request. `Origin` and `Referer` are client-controllable
+    // headers: an external caller reaching the origin directly can forge a
+    // same-origin `Referer`/`Origin` to skip the MC_API_TOKEN bearer gate
+    // (DATA-10 — the umbrella that also exposed the unauthenticated write paths
+    // in other lanes). We therefore honor the same-origin passthrough ONLY when
+    // a VERIFIED CF-Access assertion is present: both `cf-access-jwt-assertion`
+    // and `cf-access-authenticated-user-email` are populated by Cloudflare's
+    // edge and cannot be set by a client that bypasses Cloudflare. Without that
+    // assertion the request falls through to the MC_API_TOKEN bearer check
+    // below, so a forged same-origin header is worthless on its own.
+    if (cfJwt && cfEmail && isSameOriginRequest(request)) {
       const passthrough = NextResponse.next();
-      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+      passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;
     }
 
@@ -296,10 +363,17 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     }
 
     // Special case: /api/events/stream (SSE) accepts the token as a query
-    // param because EventSource cannot set custom headers.
+    // param because EventSource cannot set custom headers. Compared in constant
+    // time (DATA-11). RESIDUAL (cross-lane / operator): passing the long-lived
+    // MASTER token in a URL still lands it in access logs and Referer headers.
+    // The full fix is to mint a short-lived, single-purpose stream token (like
+    // the interview cookie HMAC) — that spans the stream route + useSSE client
+    // (Wave-2 L12), so it is deferred here; and the master token must be on a
+    // mandatory rotation (§7 secret-rotation). This gate is constant-time-hardened
+    // in the interim.
     if (pathname === '/api/events/stream') {
       const queryToken = request.nextUrl.searchParams.get('token');
-      if (queryToken && queryToken === MC_API_TOKEN) {
+      if (queryToken && timingSafeEqualStr(queryToken, MC_API_TOKEN)) {
         return NextResponse.next();
       }
     }
@@ -309,7 +383,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       return unauthorized('Unauthorized');
     }
     const token = authHeader.substring(7);
-    if (token !== MC_API_TOKEN) {
+    if (!timingSafeEqualStr(token, MC_API_TOKEN)) {
       return unauthorized('Unauthorized');
     }
 
