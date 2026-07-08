@@ -37,9 +37,11 @@
  *      `blocked_on_human='operator'`) — mirrors `recordDispatchFailure`.
  *   3. Frees the wedged agent (`working` → `standby`).
  *   4. Broadcasts `task_updated` so the board moves the card immediately.
- *   5. Alerts the operator once — via the Rescue Rangers webhook (per AGENTS.md),
- *      falling back to `notifyOwner`. Dedup is implicit: the task is now
- *      `blocked` so this sweep can never re-select it, so the alert fires once.
+ *   5. Alerts the OPERATOR once — SYSTEM audience only (SWEEP-06): routed to the
+ *      Rescue Rangers webhook, or the server log when it is unset. It is NEVER
+ *      sent to the client's Telegram (MOVE-IN-SILENCE) — a silent-agent failure
+ *      is an operator concern. Dedup is implicit: the task is now `blocked` so
+ *      this sweep can never re-select it, so the alert fires once.
  *
  * A `blocked` task is a RECOVERABLE, visible state — the operator (or the
  * existing stale-blocked path) can unblock, fix, and re-dispatch. Nothing is
@@ -52,7 +54,7 @@
 
 import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { notifyOwner } from '@/lib/notify';
+import { notifyByAudience } from '@/lib/notify';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
@@ -62,6 +64,35 @@ export const STUCK_IN_PROGRESS_SWEEP_CRON = '*/5 * * * *';
 /** No-progress threshold, in minutes. Generous by default to avoid blocking a
  * legitimately long-running turn; a silent-dead task is caught within the hour. */
 const STUCK_IN_PROGRESS_MINUTES = parseFloat(process.env.STUCK_IN_PROGRESS_MINUTES || '45');
+
+/**
+ * SWEEP-05: `events` types that are periodic SWEEP / SYSTEM bookkeeping, NOT
+ * genuine agent forward-progress. They must not satisfy the liveness guard, or a
+ * silently-dead in_progress task whose only recent `events` rows are system
+ * writes (persona backfill, dispatch backoff, stale re-ping, etc.) looks alive
+ * and is never blocked (the P39 false-negative).
+ *
+ * NOTE (verified against this repo): the CC `events` table has NO mid-turn
+ * agent-activity type — a dispatched OpenClaw agent streams to its own session,
+ * and the web-agent runner publishes to an in-memory bus, not here. The spec's
+ * inferred allow-list ('task_progress','agent_message','tool_result') matches
+ * ZERO events rows (agent_message is an activity_type on another table;
+ * tool_result is an in-memory Anthropic block), so an allow-list would make
+ * last_event_at always NULL and over-block every long-running turn. A deny-list
+ * of known system noise implements the intent ("exclude sweep/system noise")
+ * without that regression: anything not listed still counts as possible liveness.
+ */
+const LIVENESS_NOISE_EVENT_TYPES = [
+  'persona_backfill_attempt',
+  'persona_fallback',
+  'persona_governance',
+  'persona_rescored_at_dispatch',
+  'routed_but_not_dispatched',
+  'task_dispatch_deferred',
+  'stale_repinged',
+  'af_model_sovereignty_block',
+  'sop_library_gap',
+];
 
 interface StuckRow {
   id: string;
@@ -137,25 +168,16 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
   } catch { /* broadcast best-effort */ }
 
   // 5. Operator alert (fires exactly once: the task is 'blocked' now).
+  //    SWEEP-06: SYSTEM audience — goes to the operator (Rescue Rangers) or the
+  //    server log, NEVER the client Telegram. The previous notifyOwner fallback
+  //    pushed a silent-failure diagnostic to the client's Telegram, a
+  //    MOVE-IN-SILENCE breach; notifyByAudience('SYSTEM') closes it.
   const message =
-    `🚫 [silent-failure] Task "${task.title}" (id ${task.id}) auto-blocked by stuck-in-progress ` +
+    `[silent-failure] Task "${task.title}" (id ${task.id}) auto-blocked by stuck-in-progress ` +
     `sweep — ${reason}`;
-  const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
-  if (webhookUrl) {
-    try {
-      await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'escalate', agent: 'stuck-in-progress-sweep', message }),
-      });
-    } catch (err) {
-      console.warn('[stuck-in-progress-sweep] Rescue Rangers alert failed:', (err as Error).message);
-    }
-  } else {
-    try {
-      notifyOwner(message);
-    } catch { /* owner notify best-effort */ }
-  }
+  try {
+    await notifyByAudience({ audience: 'SYSTEM', message });
+  } catch { /* operator alert best-effort */ }
 
   console.warn(
     `[stuck-in-progress-sweep] task ${task.id} BLOCKED (${Math.round(ageMinutes)}min no progress, agent ${agentLabel})`,
@@ -177,15 +199,21 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
 
   const cutoffMs = Date.now() - STUCK_IN_PROGRESS_MINUTES * 60_000;
 
+  // SWEEP-05: the liveness subquery ignores SWEEP/SYSTEM-noise event types so
+  // periodic system writes cannot mask a silently-dead task.
+  const noisePlaceholders = LIVENESS_NOISE_EVENT_TYPES.map(() => '?').join(', ');
   const rows = queryAll<StuckRow>(
     `SELECT t.id, t.title, t.assigned_agent_id,
             a.name AS assigned_agent_name,
             t.last_progress_at, t.updated_at,
-            (SELECT MAX(e.created_at) FROM events e WHERE e.task_id = t.id) AS last_event_at
+            (SELECT MAX(e.created_at) FROM events e
+               WHERE e.task_id = t.id
+                 AND e.type NOT IN (${noisePlaceholders})) AS last_event_at
        FROM tasks t
        LEFT JOIN agents a ON a.id = t.assigned_agent_id
       WHERE t.status = 'in_progress'
         AND t.archived_at IS NULL`,
+    [...LIVENESS_NOISE_EVENT_TYPES],
   );
 
   let blocked = 0;

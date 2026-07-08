@@ -209,3 +209,51 @@ export function notifyOwner(message: string): boolean {
   }
   return notifyTelegram({ chatId, message });
 }
+
+/** Notification audience. SYSTEM alerts are operator concerns and must NEVER
+ *  reach a client Telegram (MOVE-IN-SILENCE). */
+export type NotifyAudience = 'OWNER' | 'SYSTEM';
+
+/**
+ * Audience-gated notification (SWEEP-06 / MOVE-IN-SILENCE).
+ *
+ *   - 'OWNER'  → the client's own Telegram (their board is theirs to see).
+ *   - 'SYSTEM' → the OPERATOR only. Routed to RESCUE_RANGERS_WEBHOOK_URL; if that
+ *                is unset the message is logged to the server (operator) feed.
+ *                It is NEVER sent to the client Telegram.
+ *
+ * A dispatch-failure / block / stuck-agent alert is a SYSTEM (operator) concern:
+ * callers such as `recordDispatchFailure` and the stuck-in-progress sweep must
+ * pass 'SYSTEM' so those alerts can never spam a client Telegram. Only a genuine
+ * owner-facing message passes 'OWNER'.
+ *
+ * Best-effort: never throws. Returns true when a notification was delivered.
+ */
+export async function notifyByAudience(opts: {
+  audience: NotifyAudience;
+  message: string;
+}): Promise<boolean> {
+  if (opts.audience === 'OWNER') {
+    return notifyOwner(opts.message);
+  }
+
+  // SYSTEM: operator channel only — never the client Telegram.
+  const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
+  if (webhookUrl) {
+    try {
+      const res = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'escalate', agent: 'command-center', message: opts.message }),
+      });
+      return res.ok;
+    } catch (err) {
+      console.warn('[notify] SYSTEM webhook send failed:', (err as Error).message);
+      return false;
+    }
+  }
+
+  // No operator webhook configured — operator server log only. Client stays silent.
+  console.warn('[notify] SYSTEM alert (no RESCUE_RANGERS_WEBHOOK_URL; client-silent):', opts.message);
+  return false;
+}

@@ -38,8 +38,11 @@
  *      (autoDispatchTask would skip them anyway; excluding here stops them being
  *      re-selected every tick forever).
  *
- * Trivially disabled: set BACKLOG_REDISPATCH_SWEEP_ENABLED=0, or remove the one
- * JOBS entry in scheduler.ts.
+ * PAUSED BY DEFAULT (SWEEP-01): intake-advance-sweep is the single live
+ * board-advancement authority. This legacy sweep is a dormant rollback net and
+ * runs ONLY when explicitly opted in per box with
+ * BACKLOG_REDISPATCH_SWEEP_ENABLED=1 (or =true). Its JOBS entry stays registered
+ * so re-enabling needs no code change — it just returns immediately while off.
  */
 
 import { queryAll, queryOne, run } from '@/lib/db';
@@ -145,11 +148,20 @@ function escalateStuckBacklogTask(
 }
 
 export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResult> {
+  // SWEEP-01: PAUSED BY DEFAULT. intake-advance-sweep is the single live
+  // advancer; this legacy sweep is opt-in (BACKLOG_REDISPATCH_SWEEP_ENABLED=1)
+  // so a fresh in-repo box never double-advances. Previously this only skipped
+  // on an explicit =0, so the CHANGELOG's "REMAINS paused via *_ENABLED=0" claim
+  // was false in the repo and both legacy advancers ran at default.
   if (
-    process.env.BACKLOG_REDISPATCH_SWEEP_ENABLED === '0' ||
-    process.env.BACKLOG_REDISPATCH_SWEEP_ENABLED === 'false'
+    process.env.BACKLOG_REDISPATCH_SWEEP_ENABLED !== '1' &&
+    process.env.BACKLOG_REDISPATCH_SWEEP_ENABLED !== 'true'
   ) {
-    return { scanned: 0, dispatched: 0, skippedReason: 'BACKLOG_REDISPATCH_SWEEP_ENABLED=0' };
+    return {
+      scanned: 0,
+      dispatched: 0,
+      skippedReason: 'backlog-redispatch paused (opt in with BACKLOG_REDISPATCH_SWEEP_ENABLED=1)',
+    };
   }
 
   const cap = parseInt(process.env.QC_MAX_REROUTES || String(QC_MAX_REROUTES), 10);
