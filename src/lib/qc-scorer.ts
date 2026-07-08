@@ -4,8 +4,10 @@
  * Scores a completed task against the assigned SOP's success_criteria using a
  * 1–10 rubric. Called automatically when a task transitions to `review` status.
  *
- * Gate: ≥8.5 → auto-approve (mark done); <8.5 → kick back to in_progress with
- * specific gap notes as a task event.
+ * Gate: ≥8.5 → auto-approve (mark done); <8.5 → kick back to `backlog`
+ * (the task re-enters intake / auto-route from there) with specific gap notes
+ * as a task event. NOTE: the kickback target is `backlog`, NOT `in_progress` —
+ * the raw status writers below all write `status = 'backlog'` on a QC fail.
  *
  * Per-department QC: the scorer resolves the ITEM'S OWN department QC agent
  * (role_type='qc', workspace_id = task's workspace) and uses that agent's
@@ -247,6 +249,99 @@ function af_i14NativeImageToolCalled(rawTrace: string): boolean {
 }
 
 /**
+ * AF-I14 VIOLATION-B/C — STRUCTURED extraction of the command / argument
+ * surfaces of every tool call in the trace.
+ *
+ * Hole-fix (QC-12): VIOLATION-B (dead endpoint invoked) and VIOLATION-C (the
+ * KIE.ai pipeline was NOT invoked) used to key on a naive lowercased substring
+ * scan over the WHOLE trace. That is wrong in both directions:
+ *   - false-positive: a trace that merely QUOTES `/api/v1/image/gpt-image` in
+ *     assistant prose tripped VIOLATION-B even though nothing was called.
+ *   - EVASION (false-negative): a trace that merely QUOTES `api.kie.ai` /
+ *     `kie_generate.py` in prose (e.g. echoing the SOP) satisfied the
+ *     `kiePresent` check, so VIOLATION-C did NOT fire even though the KIE
+ *     pipeline was never actually run.
+ *
+ * This walker mirrors af_i14NativeImageToolCalled (VIOLATION-A): it parses each
+ * JSONL line and collects ONLY the EXECUTION surfaces of real tool activity —
+ * the input/arguments of a tool CALL (the shell command / HTTP url the agent
+ * issued) AND the content/output of a tool RESULT (the HTTP response the call
+ * actually produced, which legitimately echoes the endpoint that was hit). It
+ * deliberately does NOT collect user/assistant message `content` (prose), so B/C
+ * key on what the agent DID, not on what it merely quoted.
+ *
+ * `parsedAnyLine` tells the caller whether ANY JSONL line parsed as JSON; when
+ * it did not, the caller MUST fall back to the legacy whole-trace scan so
+ * detection is never weaker than the prior behaviour.
+ */
+function af_i14ToolCallSurfaces(rawTrace: string): { surfaces: string; parsedAnyLine: boolean } {
+  const parts: string[] = [];
+
+  // A tool CALL node (the command the agent issued).
+  const isToolCallNode = (o: Record<string, unknown>): boolean => {
+    if (o.type === 'tool_use' || o.type === 'tool_call' || o.type === 'function_call') return true;
+    if (typeof o.tool_name === 'string' || typeof o.tool === 'string') return true;
+    if (typeof o.name === 'string' && (o.input !== undefined || o.arguments !== undefined || o.parameters !== undefined)) return true;
+    if (o.function && typeof o.function === 'object') return true;
+    return false;
+  };
+
+  // A tool RESULT node (the output of an actually-executed call). Its content is
+  // a real execution surface — e.g. an HTTP response echoing the endpoint hit —
+  // NOT prose. Assistant/user message `content` is NOT collected (that is prose).
+  const isToolResultNode = (o: Record<string, unknown>): boolean => {
+    if (o.type === 'tool_result' || o.type === 'function_call_output' || o.type === 'tool_output') return true;
+    if (o.role === 'tool') return true;
+    return false;
+  };
+
+  const pushSurface = (v: unknown): void => {
+    if (v === undefined || v === null) return;
+    parts.push(typeof v === 'string' ? v : JSON.stringify(v));
+  };
+
+  const collectFromToolCallNode = (o: Record<string, unknown>): void => {
+    pushSurface(o.input);
+    pushSurface(o.arguments);
+    pushSurface(o.parameters);
+    if (o.function && typeof o.function === 'object') {
+      // OpenAI function-call shape: function.arguments is usually a JSON string.
+      pushSurface((o.function as Record<string, unknown>).arguments);
+    }
+  };
+
+  const collectFromToolResultNode = (o: Record<string, unknown>): void => {
+    pushSurface(o.content);
+    pushSurface(o.output);
+  };
+
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node && typeof node === 'object') {
+      const o = node as Record<string, unknown>;
+      if (isToolCallNode(o)) collectFromToolCallNode(o);
+      if (isToolResultNode(o)) collectFromToolResultNode(o);
+      Object.values(o).forEach(walk);
+    }
+  };
+
+  let parsedAnyLine = false;
+  for (const line of rawTrace.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      parsedAnyLine = true;
+      walk(obj);
+    } catch {
+      /* non-JSON line — skip; whole-trace fallback covers it when nothing parses */
+    }
+  }
+
+  return { surfaces: parts.join('\n').toLowerCase(), parsedAnyLine };
+}
+
+/**
  * AF-I14 guardrail result.
  * When `violated` is true, `violations` lists the specific AF-I14 sub-rules
  * that were breached. The caller should auto-fail with these as gaps.
@@ -376,6 +471,13 @@ export function runAFI14Guardrail(
   const lower = trace.toLowerCase();
   const violations: string[] = [];
 
+  // STRUCTURED tool-call surfaces for VIOLATION-B/C (QC-12). We scan what the
+  // agent actually EXECUTED (tool-call command/args), not prose. When no JSONL
+  // line parses as JSON we fall back to the whole-trace scan so detection is
+  // never weaker than the legacy behaviour.
+  const { surfaces: toolSurfaces, parsedAnyLine } = af_i14ToolCallSurfaces(trace);
+  const bcScan = parsedAnyLine ? toolSurfaces : lower;
+
   // VIOLATION-A: native image_generate tool was called.
   // STRUCTURED detection (parses tool_use blocks) — no longer a naive substring
   // scan, so quoting `image_generate` in prose no longer false-fails.
@@ -387,23 +489,24 @@ export function runAFI14Guardrail(
     );
   }
 
-  // VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in trace
-  if (lower.includes('/api/v1/image/gpt-image')) {
+  // VIOLATION-B: dead endpoint /api/v1/image/gpt-image was actually CALLED
+  // (present in a tool-call command/arg surface), not merely quoted in prose.
+  if (bcScan.includes('/api/v1/image/gpt-image')) {
     violations.push(
-      'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in session trace. ' +
+      'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image was invoked in the session trace. ' +
       'This endpoint returns HTTP 404 — images were not generated. ' +
       'Fix: use kie_generate.py which calls the live /api/v1/jobs/createTask endpoint.',
     );
   }
 
-  // VIOLATION-C: kie_generate.py was never invoked
-  // The script must appear via exec/shell calls. We check for both the script
-  // name and the live KIE.ai endpoint it calls.
+  // VIOLATION-C: kie_generate.py / KIE.ai was never actually invoked.
+  // Keyed on real tool-call surfaces (structured), so merely QUOTING the script
+  // name or `api.kie.ai` in assistant prose no longer masks a missing call.
   const kiePresent =
-    lower.includes('kie_generate.py') ||
-    lower.includes('kie_generate') ||
-    lower.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
-    lower.includes('api.kie.ai');                   // KIE.ai domain
+    bcScan.includes('kie_generate.py') ||
+    bcScan.includes('kie_generate') ||
+    bcScan.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
+    bcScan.includes('api.kie.ai');                   // KIE.ai domain
   if (!kiePresent) {
     violations.push(
       'AF-I14 VIOLATION-C: kie_generate.py was not invoked and no KIE.ai API calls detected in session trace. ' +
@@ -2140,17 +2243,32 @@ export async function evaluateCriteria(
       }
 
       case 'vision_match': {
-        // Try vision-model check; skip gracefully on no key or error.
         const subject = typeof c.params?.subject === 'string' ? c.params.subject : '';
         const visionResult = await visionMatchCheck(manifest, subject);
         if (visionResult === null) {
-          // No key / error — skip (do NOT fail the criterion)
+          // Not applicable / NO vision key configured — neutral skip (do NOT
+          // penalise). This is the keyless-heuristic path, not an error.
           visionSkipped = true;
           results.push({
             id: c.id,
             description: c.description,
             pass: true, // skip = neutral (don't penalise)
             reason: 'Vision check skipped (no LLM key available) — criterion treated as pass',
+          });
+        } else if ('unverifiable' in visionResult) {
+          // QC-05 FAIL-CLOSED: a vision key IS configured but the check errored,
+          // so the subject match is UNVERIFIED. Block the criterion (this drops
+          // the aggregate score below the 8.5 gate — see evaluateCriteria) rather
+          // than passing blind. Distinct from the no-key neutral skip above, and
+          // consistent with the fail-closed AF-LANG / AF-NUM / AF-SPELL gates.
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-VISION FAIL-CLOSED: a vision key is configured but the vision-model check could not be ' +
+              `completed (${visionResult.reason}), so the subject match is unverified. Blocking until a vision ` +
+              'pass confirms the artifact depicts the required subject (auto-retries once the vision provider is reachable).',
           });
         } else {
           results.push({
@@ -2371,13 +2489,26 @@ export async function evaluateCriteria(
 
 /**
  * Call the LLM with a vision prompt: "Does this image depict X?"
- * Returns { yes, confidence, explanation } or null on error / no key.
+ *
+ * Three-way return (QC-05 discriminates no-key from an errored call):
+ *   - { yes, confidence, explanation } — a real vision verdict.
+ *   - null                             — the check is NOT APPLICABLE / cannot run
+ *                                        for a benign reason (no subject, NO vision
+ *                                        key configured, or no image to inspect).
+ *                                        The caller treats this as a NEUTRAL SKIP —
+ *                                        this is the keyless-heuristic path, not an
+ *                                        error.
+ *   - { unverifiable: true, reason }   — a vision key IS configured but the call
+ *                                        errored (unreadable artifact / provider
+ *                                        error / non-200). The caller FAILS CLOSED
+ *                                        (never passes an unverified subject match),
+ *                                        mirroring AF-LANG / AF-NUM / AF-SPELL.
  */
 async function visionMatchCheck(
   manifest: DeliverableManifestItem[],
   subject: string,
-): Promise<{ yes: boolean; confidence: number; explanation: string } | null> {
-  if (!subject.trim()) return null;
+): Promise<{ yes: boolean; confidence: number; explanation: string } | { unverifiable: true; reason: string } | null> {
+  if (!subject.trim()) return null; // criterion not applicable — neutral skip
 
   const openAiKey = process.env.OPENAI_API_KEY;
   const googleKey =
@@ -2385,11 +2516,17 @@ async function visionMatchCheck(
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
     process.env.GEMINI_API_KEY;
 
+  // NO-KEY path: a keyless box cannot run a vision check. This is a separate
+  // heuristic, NOT an error — return null so the caller treats it as a neutral
+  // skip. Fail-closed (below) applies ONLY when a key IS configured.
   if (!openAiKey && !googleKey) return null;
+
+  // A vision key IS configured from here on. Any FAILURE below is an error that
+  // must fail closed (QC-05) — never a silent pass of an unverified subject.
 
   // Find first valid image in manifest
   const imageItem = manifest.find((m) => m.valid && m.type === 'image' && m.path);
-  if (!imageItem?.path) return null;
+  if (!imageItem?.path) return null; // no image to inspect — existence criterion covers this; neutral
 
   // Read file as base64
   let b64: string;
@@ -2397,7 +2534,10 @@ async function visionMatchCheck(
     const buf = readFileSync(imageItem.path);
     b64 = buf.toString('base64');
   } catch {
-    return null;
+    return {
+      unverifiable: true,
+      reason: `the artifact could not be read for subject verification (${imageItem.path})`,
+    };
   }
 
   const prompt = `Look at this image. Does it depict: "${subject}"?
@@ -2465,7 +2605,13 @@ Reply with ONLY this JSON (no other text):
     } catch { /* no vision key or error */ }
   }
 
-  return null;
+  // A vision key was configured but EVERY call failed / returned non-200.
+  // Fail closed (QC-05): the subject match is unverified, so the caller must
+  // NOT pass it blind.
+  return {
+    unverifiable: true,
+    reason: 'every configured vision-model call failed (provider error / non-200 response)',
+  };
 }
 
 /**
@@ -3187,7 +3333,66 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         // ceo-delegation-sweep re-assigns correctly.  Does NOT increment the
         // QC reroute counter — this is an agent registration failure, not a
         // quality failure.
+        // QC-09: the handback endpoint URL defaults to http://localhost:4000 when
+        // MISSION_CONTROL_URL is unset. On a production box that default is almost
+        // never reachable, so the fetch fails and the SQL fallback runs. Warn so
+        // the misconfig is visible, and make the fallback write the SAME structured
+        // handback (multi-line Problem/Tried/Needs/Suggested-dept note + a
+        // task_returned audit event + a last_progress_at bump) the endpoint writes,
+        // so the ceo-delegation-sweep can re-route correctly either way — instead
+        // of the old degraded one-line `[QC-NO-ARTIFACT] <reason>` note.
+        //
+        // NOTE (cross-lane): the return-to-orchestrator endpoint ALSO increments
+        // qc_reroute_attempts. This QC-scorer path is documented (above) as a
+        // registration failure that must NOT consume a quality-reroute attempt, so
+        // the SQL fallback deliberately leaves qc_reroute_attempts UNCHANGED. That
+        // endpoint-increments-vs-scorer-does-not discrepancy predates this fix and
+        // belongs to the return-to-orchestrator route owner to reconcile.
         const baseUrl = getMissionControlUrl();
+        if (!process.env.MISSION_CONTROL_URL && process.env.NODE_ENV === 'production') {
+          console.warn(
+            `[QCScorer] MISSION_CONTROL_URL is unset in production — the return-to-orchestrator handback ` +
+            `endpoint defaults to ${baseUrl}, which is likely unreachable; using the in-process SQL handback ` +
+            `fallback (set MISSION_CONTROL_URL to silence this).`,
+          );
+        }
+
+        // Structured handback note mirroring the return-to-orchestrator endpoint
+        // format so the ceo-delegation-sweep reads the same diagnosis fields.
+        const structuredHandbackNote = [
+          `[QC-NO-ARTIFACT HANDBACK] ${now}`,
+          `Problem: ${noArtifactReason}`,
+          'Tried: QC auto-scorer attempted to evaluate the artifact but found zero registered deliverables in task_deliverables.',
+          'Needs: The executing agent must register the output file via POST /api/tasks/[id]/deliverables before transitioning to review status.',
+          task.department ? `Suggested dept: ${task.department}` : null,
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        const writeStructuredHandbackFallback = (): void => {
+          run(
+            `UPDATE tasks SET status = 'backlog',
+               description = CASE
+                 WHEN description IS NULL OR description = '' THEN ?
+                 ELSE ? || char(10) || char(10) || '---' || char(10) || char(10) || description
+               END,
+               last_progress_at = ?,
+               updated_at = ?
+             WHERE id = ? AND status = 'review'`,
+            [structuredHandbackNote, structuredHandbackNote, now, now, taskId],
+          );
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'task_returned',
+              taskId,
+              `[RETURN] ${noArtifactReason} — suggests: ${task.department ?? 'general'}`,
+              now,
+            ],
+          );
+        };
+
         try {
           const handbackBody = {
             problem: noArtifactReason,
@@ -3202,28 +3407,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             body: JSON.stringify(handbackBody),
           });
           if (!returnResp.ok) {
-            // Fallback: write backlog status directly if the endpoint is unavailable.
-            const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
-            run(
-              `UPDATE tasks SET status = 'backlog',
-                 description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-                 updated_at = ?
-               WHERE id = ? AND status = 'review'`,
-              [handbackNote, handbackNote, now, taskId],
-            );
-            console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote backlog directly`);
+            // Endpoint reachable but rejected/failed — write the structured handback directly.
+            writeStructuredHandbackFallback();
+            console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote structured handback directly`);
           }
         } catch (returnErr) {
-          // Endpoint unreachable: write backlog directly.
-          const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
-          run(
-            `UPDATE tasks SET status = 'backlog',
-               description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-               updated_at = ?
-             WHERE id = ? AND status = 'review'`,
-            [handbackNote, handbackNote, now, taskId],
-          );
-          console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal):', (returnErr as Error).message);
+          // Endpoint unreachable — write the structured handback directly.
+          writeStructuredHandbackFallback();
+          console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal) — wrote structured handback directly:', (returnErr as Error).message);
         }
 
         return {
@@ -3483,8 +3674,74 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       }
       // ── End provider-down deferral ────────────────────────────────────────
 
+      // ── No-key heuristic (keyless install by design) ─────────────────────
+      // QC-02: a keyless box can NEVER auto-advance review→done, so without an
+      // escape hatch the qc-review-sweep re-scores this task every ~10 min
+      // FOREVER — each pass writing a fresh [QC-HEURISTIC] event while the card
+      // rots in Review with no terminal signal (the second "nothing moves" trap).
+      // Fix: after N passes, escalate ONCE to a TERMINAL [QC-HEURISTIC-FINAL]
+      // "needs-key / manually promote" state that the sweep excludes PERMANENTLY.
+      // This is kept strictly DISTINCT from the provider-down deferral above,
+      // which KEEPS retrying on the short cadence (a key exists; the provider is
+      // expected to return). The card stays in `review` — the board's
+      // manual-review lane — now flagged terminally instead of silently churning.
+      const noKeyMaxPasses = Math.max(
+        1,
+        parseInt(process.env.QC_HEURISTIC_NO_KEY_MAX_PASSES || '3', 10) || 3,
+      );
+
+      // Already escalated? Idempotent no-op (defensive — the sweep should already
+      // be permanently excluding this task once the -FINAL marker exists).
+      const alreadyFinal = queryOne<{ one: number }>(
+        `SELECT 1 AS one FROM events
+         WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%[QC-HEURISTIC-FINAL]%'
+         LIMIT 1`,
+        [taskId],
+      );
+      if (alreadyFinal) {
+        console.log(
+          `[QCScorer] Task "${task.title}" (${taskId}): already [QC-HEURISTIC-FINAL] (needs-key / manual-promote) — no re-score, stays in review`,
+        );
+        return result;
+      }
+
+      // Count prior no-key heuristic passes. NOTE: SQLite LIKE treats '[' / ']'
+      // literally (no bracket classes), so '%[QC-HEURISTIC]%' matches ONLY the
+      // per-pass marker and NOT '[QC-HEURISTIC-FINAL]' or '[QC-DEFERRED-PROVIDER-DOWN]'.
+      const priorPassesRow = queryOne<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%[QC-HEURISTIC]%'`,
+        [taskId],
+      );
+      const thisPass = (priorPassesRow?.c ?? 0) + 1;
+
+      if (thisPass >= noKeyMaxPasses) {
+        // Terminal escalation — write the [QC-HEURISTIC-FINAL] marker ONCE. The
+        // qc-review-sweep excludes tasks carrying it permanently, so no more
+        // re-scores. Task remains board-visible in the Review / QC (manual-review)
+        // column awaiting a manual promotion or an LLM key.
+        const finalMsg =
+          `[QC-HEURISTIC-FINAL] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode ${thisPass} time(s) ` +
+          `with NO LLM key — this box cannot auto-advance review→done. MANUAL REVIEW REQUIRED: promote this task to ` +
+          `done manually, or configure an LLM scoring key (OPENAI_API_KEY / GOOGLE_API_KEY) and it will be re-scored. ` +
+          `It is now excluded from the QC review sweep permanently. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'qc_review', taskId, finalMsg, now],
+        );
+
+        console.warn(
+          `[QCScorer] Task "${task.title}" (${taskId}): no-key heuristic reached pass ${thisPass}/${noKeyMaxPasses} — ` +
+            `escalated ONCE to [QC-HEURISTIC-FINAL] (manual-promote); permanently excluded from qc-review-sweep`,
+        );
+
+        return result;
+      }
+
       const heuristicEventMsg =
-        `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+        `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required (pass ${thisPass}/${noKeyMaxPasses}). ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
 
       run(
         `INSERT INTO events (id, type, task_id, message, created_at)
@@ -3493,7 +3750,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       );
 
       console.log(
-        `[QCScorer] Task "${task.title}" (${taskId}): heuristic mode — task stays in review, human review required (score ${result.score.toFixed(1)}/10, qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
+        `[QCScorer] Task "${task.title}" (${taskId}): heuristic mode — task stays in review, human review required (score ${result.score.toFixed(1)}/10, pass ${thisPass}/${noKeyMaxPasses}, qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
       );
 
       return result;
