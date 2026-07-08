@@ -58,6 +58,7 @@ import {
   findClientChatId,
   notifyTelegram,
   WORKSPACE_BASE,
+  groundDraftedSOP,
 } from '@/lib/sop-auto-replace';
 import { scoreTaskForQC, resolveTrioAgents, QC_PASS_THRESHOLD } from '@/lib/qc-scorer';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -81,6 +82,7 @@ export type AuthorStatus =
   | 'no-research-specialist'
   | 'qc-heuristic-pending'
   | 'qc-fail-pending'
+  | 'qc-ungrounded-pending'
   | 'parse-fail-pending'
   | 'error';
 
@@ -713,7 +715,56 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       };
     }
 
-    // §5: QC passed (or heuristic path handled above) — file to BOTH stores.
+    // QC-07: grounding gate BEFORE auto-file. A fluent LLM draft can pass the
+    // 8.5 self-score while being ungrounded in the actual research (or produced
+    // with no research / sub-floor confidence). Such a draft must never become
+    // QC-authoritative ('auto-authored-filed'). If it fails the grounding gate,
+    // file it as a pending proposal for human review instead of auto-filing.
+    const grounding = groundDraftedSOP(finalDrafted, tavily.results);
+    if (!grounding.grounded) {
+      const ungroundedProposalId = uuidv4();
+      const sourcesG = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+      const ungroundedEvidence = [
+        `[QC-UNGROUNDED — needs human review]`,
+        `QC score ${finalQcResult.score.toFixed(1)}/10 passed, but the draft failed the grounding gate.`,
+        `Grounding: ${grounding.reason}`,
+        grounding.ungroundedSteps.length > 0
+          ? `Ungrounded steps: ${grounding.ungroundedSteps.join('; ')}`
+          : '',
+        `Research query: ${researchQuery}`,
+        ...sourcesG.map((s, i) => `  [${i + 1}] ${s.title} (${s.url})`),
+      ].filter(Boolean).join('\n');
+      try {
+        run(
+          `INSERT INTO sop_proposals
+             (id, proposed_name, proposed_department, draft_steps, based_on_task_ids,
+              evidence_summary, status, created_at, confidence, auto_research_attempts, research_sources)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+          [
+            ungroundedProposalId,
+            finalDrafted.name,
+            finalDrafted.department || deptSlug,
+            JSON.stringify(finalDrafted.steps),
+            JSON.stringify([input.originalTaskId]),
+            ungroundedEvidence,
+            new Date().toISOString(),
+            finalDrafted.confidence ?? null,
+            recentAttempts + 1,
+            JSON.stringify(sourcesG),
+          ],
+        );
+      } catch { /* non-fatal */ }
+      emitEvent('sop_authoring_ungrounded_pending', ungroundedEvidence, input.originalTaskId);
+      return {
+        status: 'qc-ungrounded-pending',
+        proposal_id: ungroundedProposalId,
+        qc_score: finalQcResult.score,
+        sub_task_id: subTaskId,
+        reason: ungroundedEvidence,
+      };
+    }
+
+    // §5: QC passed AND grounded — file to BOTH stores.
     const sopId = uuidv4();
     const fileNow = new Date().toISOString();
 
