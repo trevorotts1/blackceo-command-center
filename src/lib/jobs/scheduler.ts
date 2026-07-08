@@ -18,6 +18,7 @@
 import * as cron from 'node-cron';
 import { refreshModels } from './refresh-models';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
+import { resolveProviderApiKey } from '@/lib/provider-key-detection'; // MODEL-08 (usage-refresh key resolution)
 import { runExecutionCompletionReconcile } from './execution-watcher';
 import { runCeoDelegationSweep } from './ceo-delegation-sweep';
 import { detectPatternsAndPropose } from '@/lib/sop-learning';
@@ -112,17 +113,30 @@ async function runUsageRefresh(): Promise<void> {
   // No persistence target exists yet for usage snapshots. Track B6 owns the
   // table + writer. For now we simply confirm the connector responds so a
   // missing API key surfaces in the logs.
+  //
+  // MODEL-08: the API key is resolved with resolveProviderApiKey(p) — the SAME
+  // multi-store, multi-alias detection the model-refresh job uses
+  // (refresh-models.ts). The previous manual derivation
+  // (`SLUG.toUpperCase().replace(/-/g,'_') + '_API_KEY'`) only checked the ONE
+  // canonical env var, so a provider whose key lives under an alias
+  // (envCandidates), in an .env file, or in openclaw.json was wrongly reported
+  // as "no key" and silently skipped.
   await Promise.allSettled(
     providersWithUsage.map(async (p) => {
       const slug = p.slug;
-      const envKey = slug.toUpperCase().replace(/-/g, '_') + '_API_KEY';
-      const apiKey = process.env[envKey];
-      if (!apiKey) {
-        console.log(`[cron] usage-refresh: ${slug} skipped (no ${envKey})`);
+      const keyResult = resolveProviderApiKey(p);
+      if ('localEndpoint' in keyResult) {
+        // Local-endpoint providers authenticate via a daemon and are unmetered —
+        // no usage quota to refresh.
+        console.log(`[cron] usage-refresh: ${slug} skipped (local endpoint, no usage quota)`);
+        return;
+      }
+      if (!keyResult.found) {
+        console.log(`[cron] usage-refresh: ${slug} skipped (no key; checked ${keyResult.checked.join(', ')})`);
         return;
       }
       try {
-        await p.fetchUsage?.(apiKey);
+        await p.fetchUsage?.(keyResult.value);
         console.log(`[cron] usage-refresh: ${slug} ok`);
       } catch (error) {
         console.warn(`[cron] usage-refresh: ${slug} failed:`, (error as Error).message);
