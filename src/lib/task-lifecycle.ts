@@ -2,26 +2,35 @@
  * task-lifecycle.ts — ADVISORY transition helper (NOT the sole status gate).
  *
  * ⚠️ ADOPTION REALITY (read before trusting the "one state machine" framing):
- * `transition()` is an OPTIONAL, opt-in helper. It is NOT enforced as the only
- * path a task's status can change. As of this writing it has a single real
- * caller (task-dispatcher.ts → 'in_progress'), and that caller falls back to a
- * raw `UPDATE tasks SET status = ?` if `transition()` throws. The remaining
- * status changes across the app (~20+ raw `UPDATE tasks SET … status` paths in
- * `src/`, plus more in scripts) write the column directly and DO NOT route
- * through here. Consequences you must not assume away:
+ * `transition()` is now internally SAFE to be the one authoritative status path
+ * — it is atomic (status UPDATE + both audit inserts in a single transaction,
+ * DISP-09) and compare-and-swapped (DISP-10), so two concurrent callers racing
+ * the same task cannot both win. BUT it is still not YET the ONLY path a task's
+ * status changes: a set of raw `UPDATE tasks SET … status` writers in other
+ * modules (dispatcher, QC scorer, sweeps, PATCH/status/return-to-orchestrator
+ * routes, agent-completion + test webhooks, sop-authoring, execution-watcher)
+ * write the column directly and DO NOT route through here. Converting those is
+ * cross-lane work (each lives in another lane's file); the enumerated call-site
+ * list is in the L3 hand-off note for the integrator. Consequences you must not
+ * assume away until that conversion lands:
  *   - The `task_events` structured audit trail is written ONLY when a status
  *     change goes through `transition()`. It is therefore PARTIAL, not a
  *     complete history. Do not treat task_events as a source of truth for "every
  *     transition that ever happened."
- *   - The legal-transition guard + preconditions below only gate the few callers
+ *   - The legal-transition guard + preconditions below only gate the callers
  *     that opt in. They cannot prevent an illegal status anywhere else.
- * A full migration (route every status write through `transition()` and retire
- * the raw UPDATEs) is a separate, coordinated effort — see DUCK-PIPELINE-
- * GUIDANCE.md §3, which describes the TARGET design, not current behavior.
+ * To convert a raw writer: replace its `UPDATE … WHERE id=? AND status='<X>'`
+ * with `transition(id, '<to>', { actor, reason, expectedFrom: '<X>' })` — the
+ * expectedFrom guard preserves the exact optimistic-concurrency the raw CAS had.
+ * See DUCK-PIPELINE-GUIDANCE.md §3 for the target design.
  *
  * What `transition(taskId, to, evidence)` does when a caller DOES opt in:
  *   1. Validates the transition is legal (legal-transitions map + preconditions).
- *   2. Updates the tasks row.
+ *   2. Compare-and-swaps the tasks row: the status UPDATE is guarded by
+ *      `WHERE status = <observed from-status>`, so a concurrent writer that moved
+ *      the row in the read→write window causes a CAS_CONFLICT rather than a blind
+ *      overwrite (DISP-10). Callers may also assert an expected current status via
+ *      `evidence.expectedFrom` for explicit optimistic-concurrency.
  *   3. Writes a task_events row (structured audit trail, distinct from the
  *      legacy `events` table which stays for backwards compat).
  *   4. Steps 2–3 run inside ONE db.transaction() so the status change and both
@@ -151,6 +160,16 @@ export interface TransitionEvidence {
   source?: string;
   /** Skip precondition checks (human operator override — use sparingly) */
   operatorOverride?: boolean;
+  /**
+   * Compare-and-swap guard (DISP-10). When set, the transition only proceeds if
+   * the task's CURRENT status equals this value; otherwise it throws
+   * TransitionError('CAS_CONFLICT') and writes nothing. This lets a raw writer
+   * of the form `UPDATE tasks SET status=? WHERE id=? AND status='<expected>'`
+   * be replaced by a transition() call that preserves the SAME optimistic-
+   * concurrency guarantee (e.g. QC review→done, backlog→in_progress claims).
+   * Independent of the always-on row-level CAS on the observed from-status.
+   */
+  expectedFrom?: LifecycleState;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +372,17 @@ export async function transition(
 
   const from = task.status as LifecycleState;
 
+  // Caller-asserted compare-and-swap (DISP-10): if the caller declared the
+  // status it expects the task to be IN, honour it before doing anything —
+  // including before the idempotent short-circuit — so a task another writer
+  // already advanced surfaces as a CAS_CONFLICT rather than a silent no-op.
+  if (evidence.expectedFrom !== undefined && from !== evidence.expectedFrom) {
+    throw new TransitionError(
+      'CAS_CONFLICT',
+      `Task ${taskId} expected in '${evidence.expectedFrom}' but was '${from}'; transition to ${to} aborted`,
+    );
+  }
+
   // Idempotent: if already in target state, return current row
   if (from === to) {
     const current = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
@@ -375,19 +405,29 @@ export async function transition(
   const now = new Date().toISOString();
   const legacyType = to === 'done' ? 'task_completed' : 'task_status_changed';
 
-  // ── Atomic DB write: status UPDATE + BOTH audit inserts commit together ─────
-  // DISP-09: previously the UPDATE, the task_events insert, and the legacy events
-  // insert were three independent writes. A crash (or a failing process) between
-  // them could leave a committed status change with NO audit row, or an audit row
-  // for a status change that never landed. Wrapping all three in a single
-  // db.transaction() makes them atomic — they all commit or none do. The SSE
-  // broadcast and the owner notification are deliberately kept OUTSIDE the
-  // transaction (below), so nothing is announced for a change that rolled back.
+  // ── Atomic, compare-and-swap DB write ──────────────────────────────────────
+  // DISP-09: the status UPDATE, the task_events insert, and the legacy events
+  // insert commit as ONE db.transaction() — all land or none do. A crash between
+  // them can no longer leave a committed status change with no audit row.
+  // DISP-10: the UPDATE is a compare-and-swap on the status we just read
+  // (`from`). If another writer moved the row in the read→write (TOCTOU) window,
+  // `changes === 0` and we throw CAS_CONFLICT instead of blindly overwriting a
+  // status whose transition we never validated FROM. This is what lets
+  // transition() serve as the ONE authoritative status path: even two concurrent
+  // callers racing the same task cannot both succeed.
+  // The SSE broadcast + owner notify are kept OUTSIDE the transaction (below) so
+  // nothing is announced for a change that rolled back.
   transaction(() => {
-    run(
-      'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-      [to, now, taskId],
+    const res = run(
+      'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?',
+      [to, now, taskId, from],
     );
+    if (res.changes === 0) {
+      throw new TransitionError(
+        'CAS_CONFLICT',
+        `Task ${taskId} was no longer in '${from}' when applying → ${to} (concurrent writer); transition aborted`,
+      );
+    }
 
     // Structured task_events row (primary audit trail).
     writeTaskEvent(taskId, from, to, evidence, now);
