@@ -2224,17 +2224,32 @@ export async function evaluateCriteria(
       }
 
       case 'vision_match': {
-        // Try vision-model check; skip gracefully on no key or error.
         const subject = typeof c.params?.subject === 'string' ? c.params.subject : '';
         const visionResult = await visionMatchCheck(manifest, subject);
         if (visionResult === null) {
-          // No key / error — skip (do NOT fail the criterion)
+          // Not applicable / NO vision key configured — neutral skip (do NOT
+          // penalise). This is the keyless-heuristic path, not an error.
           visionSkipped = true;
           results.push({
             id: c.id,
             description: c.description,
             pass: true, // skip = neutral (don't penalise)
             reason: 'Vision check skipped (no LLM key available) — criterion treated as pass',
+          });
+        } else if ('unverifiable' in visionResult) {
+          // QC-05 FAIL-CLOSED: a vision key IS configured but the check errored,
+          // so the subject match is UNVERIFIED. Block the criterion (this drops
+          // the aggregate score below the 8.5 gate — see evaluateCriteria) rather
+          // than passing blind. Distinct from the no-key neutral skip above, and
+          // consistent with the fail-closed AF-LANG / AF-NUM / AF-SPELL gates.
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-VISION FAIL-CLOSED: a vision key is configured but the vision-model check could not be ' +
+              `completed (${visionResult.reason}), so the subject match is unverified. Blocking until a vision ` +
+              'pass confirms the artifact depicts the required subject (auto-retries once the vision provider is reachable).',
           });
         } else {
           results.push({
@@ -2455,13 +2470,26 @@ export async function evaluateCriteria(
 
 /**
  * Call the LLM with a vision prompt: "Does this image depict X?"
- * Returns { yes, confidence, explanation } or null on error / no key.
+ *
+ * Three-way return (QC-05 discriminates no-key from an errored call):
+ *   - { yes, confidence, explanation } — a real vision verdict.
+ *   - null                             — the check is NOT APPLICABLE / cannot run
+ *                                        for a benign reason (no subject, NO vision
+ *                                        key configured, or no image to inspect).
+ *                                        The caller treats this as a NEUTRAL SKIP —
+ *                                        this is the keyless-heuristic path, not an
+ *                                        error.
+ *   - { unverifiable: true, reason }   — a vision key IS configured but the call
+ *                                        errored (unreadable artifact / provider
+ *                                        error / non-200). The caller FAILS CLOSED
+ *                                        (never passes an unverified subject match),
+ *                                        mirroring AF-LANG / AF-NUM / AF-SPELL.
  */
 async function visionMatchCheck(
   manifest: DeliverableManifestItem[],
   subject: string,
-): Promise<{ yes: boolean; confidence: number; explanation: string } | null> {
-  if (!subject.trim()) return null;
+): Promise<{ yes: boolean; confidence: number; explanation: string } | { unverifiable: true; reason: string } | null> {
+  if (!subject.trim()) return null; // criterion not applicable — neutral skip
 
   const openAiKey = process.env.OPENAI_API_KEY;
   const googleKey =
@@ -2469,11 +2497,17 @@ async function visionMatchCheck(
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
     process.env.GEMINI_API_KEY;
 
+  // NO-KEY path: a keyless box cannot run a vision check. This is a separate
+  // heuristic, NOT an error — return null so the caller treats it as a neutral
+  // skip. Fail-closed (below) applies ONLY when a key IS configured.
   if (!openAiKey && !googleKey) return null;
+
+  // A vision key IS configured from here on. Any FAILURE below is an error that
+  // must fail closed (QC-05) — never a silent pass of an unverified subject.
 
   // Find first valid image in manifest
   const imageItem = manifest.find((m) => m.valid && m.type === 'image' && m.path);
-  if (!imageItem?.path) return null;
+  if (!imageItem?.path) return null; // no image to inspect — existence criterion covers this; neutral
 
   // Read file as base64
   let b64: string;
@@ -2481,7 +2515,10 @@ async function visionMatchCheck(
     const buf = readFileSync(imageItem.path);
     b64 = buf.toString('base64');
   } catch {
-    return null;
+    return {
+      unverifiable: true,
+      reason: `the artifact could not be read for subject verification (${imageItem.path})`,
+    };
   }
 
   const prompt = `Look at this image. Does it depict: "${subject}"?
@@ -2549,7 +2586,13 @@ Reply with ONLY this JSON (no other text):
     } catch { /* no vision key or error */ }
   }
 
-  return null;
+  // A vision key was configured but EVERY call failed / returned non-200.
+  // Fail closed (QC-05): the subject match is unverified, so the caller must
+  // NOT pass it blind.
+  return {
+    unverifiable: true,
+    reason: 'every configured vision-model call failed (provider error / non-200 response)',
+  };
 }
 
 /**
