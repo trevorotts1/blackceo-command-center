@@ -174,12 +174,20 @@ export function buildSelectorArgv(
  * detect that so the caller can retry WITHOUT the SOP flags rather than let an
  * entire SOP-carrying task degrade to the department-default fallback. Any other
  * failure (timeout, python missing, real error) is NOT swallowed here.
+ *
+ * PERS-03: we deliberately do NOT treat a bare exit code 2 as "unknown argument".
+ * argparse (and other CLIs) exit 2 for MANY reasons — a genuine crash inside the
+ * script, a malformed `--task` value, an internal traceback. Short-circuiting on
+ * `code===2` masked those real crashes as a benign predates-DEP-1 signal and
+ * silently downgraded the task to a non-SOP-aware match. We now require the
+ * stderr/message to actually name an unrecognized-flag error. `invalid choice`
+ * is intentionally EXCLUDED — it is argparse's error for a bad *value* (e.g. a
+ * department not in `choices=[...]`), a real error that must not be swallowed.
  */
 function isUnknownArgumentError(err: unknown): boolean {
-  const e = err as { code?: number | string; stderr?: string; message?: string };
-  if (e?.code === 2) return true;
+  const e = err as { stderr?: string; message?: string };
   const text = `${e?.stderr ?? ""} ${e?.message ?? ""}`;
-  return /unrecognized arguments|no such option|invalid choice|unrecognized option/i.test(text);
+  return /unrecognized arguments?|no such option|unrecognized option/i.test(text);
 }
 
 export interface PersonaSelectionResult {
@@ -343,7 +351,18 @@ export async function selectPersonaForTask(
             `[persona-selector] SOP-aware flags rejected by selector for task ${taskId} ` +
             `(selector predates DEP-1 --sop-* inputs) — retrying without SOP context.`,
           );
-          output = await runSelector(baseArgv);
+          try {
+            output = await runSelector(baseArgv);
+          } catch (retryErr) {
+            // PERS-03: the non-SOP retry ALSO failed. Surface the ORIGINAL error
+            // (the primary SOP-run failure) — masking it behind the retry error
+            // would hide the real cause. Log the retry error for context.
+            console.error(
+              `[persona-selector] non-SOP retry also failed for task ${taskId}:`,
+              (retryErr as Error)?.message ?? retryErr,
+            );
+            throw sopErr;
+          }
         } else {
           throw sopErr;
         }
