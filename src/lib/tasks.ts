@@ -1222,9 +1222,18 @@ export async function createTaskCore(
   }
 
   // ── DEDUP LAYER 2: title + workspace window ────────────────────────────────
-  // Applies to BOTH ingest and UI create paths unless the caller explicitly
-  // opts out (skipWindowDedup:true for deliberate repeated creates).
-  if (!input.skipWindowDedup) {
+  // Applies to the UI / Telegram create paths that carry NO idempotency key.
+  //
+  // Layer 1 (idempotency_key) TAKES PRECEDENCE over this generic window: a
+  // caller-supplied idempotency key is an authoritative, deliberate identity.
+  // When Layer 1 ran above and found no prior task, this is a KNOWINGLY-DISTINCT
+  // card, and the generic same-title+workspace window must NOT collapse it onto
+  // a same-titled neighbour. (E.g. one contact enrolled in two different
+  // anthologies produces two cards whose titles can briefly coincide but whose
+  // idempotency keys are distinct — Layer 2 must never merge those two onto one
+  // task row.) So the title window is SKIPPED whenever an idempotency_key was
+  // supplied; it still guards keyless callers against accidental duplicates.
+  if (!input.skipWindowDedup && !input.idempotency_key) {
     const duplicate = findDuplicateByTitleWindow(
       input.title,
       input.workspace_id,
