@@ -19,28 +19,28 @@
  *   template) so it survives independent of the deploy config.
  */
 
-import cluster from 'node:cluster';
-
 import type { SSEEvent } from './types';
 
 /**
  * MSG-05: warn once at process startup if this box appears to run more than one
- * worker, which the in-process SSE registry cannot support. `cluster.isWorker`
- * is the definitive signal for PM2 cluster_mode (which forks via Node's cluster
- * module); the env hints cover other multi-instance managers. Latent no-op on
- * the canonical single fork instance.
+ * worker, which the in-process SSE registry cannot support. Detection is via
+ * PM2 env hints only (NOT the `node:cluster` module — importing it breaks the
+ * Next webpack build because events.ts is bundled through the jobs scheduler):
+ *   - `exec_mode === 'cluster_mode'` — PM2 cluster mode, catches every worker.
+ *   - `NODE_APP_INSTANCE` not unset/'0' — a 2nd+ instance, definitively
+ *     multi-worker. '0' is intentionally NOT flagged so the canonical single
+ *     fork instance (which PM2 sets to '0') stays a silent no-op.
  */
 function warnIfClustered(): void {
   const appInstance = process.env.NODE_APP_INSTANCE;
   const execMode = process.env.exec_mode || process.env.pm_exec_mode;
-  const isWorker = cluster.isWorker === true;
   const multiInstance =
     typeof appInstance === 'string' && appInstance !== '' && appInstance !== '0';
 
-  if (isWorker || execMode === 'cluster_mode' || multiInstance) {
+  if (execMode === 'cluster_mode' || multiInstance) {
     console.warn(
       '[SSE] WARNING: this process looks like a clustered / multi-worker runtime ' +
-        `(cluster.isWorker=${isWorker}, exec_mode=${execMode ?? 'n/a'}, ` +
+        `(exec_mode=${execMode ?? 'n/a'}, ` +
         `NODE_APP_INSTANCE=${appInstance ?? 'n/a'}). The SSE client registry is an ` +
         'in-process Set and is NOT shared across workers: broadcasts only reach ' +
         'clients connected to the emitting worker, so real-time board updates will ' +
