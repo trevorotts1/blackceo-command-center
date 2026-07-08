@@ -13,6 +13,7 @@ import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -88,7 +89,29 @@ function resolveSpecialistSessionKey(
           console.log(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → bare runtime found → key ${key}`);
           return key;
         }
-        console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying role slug`);
+        // Attempt 1b — legacy/aliased slug → CANONICAL runtime. DISP-06: ported
+        // from task-dispatcher.ts so the route (manual "Send to Agent") copy no
+        // longer DRIFTS from the auto-dispatch copy. A workspace slug like `ceo`
+        // or `app-development` has its runtime dir under the canonical name
+        // (`master-orchestrator`, `engineering`); probe the canonical slug before
+        // giving up so an aliased department DISPATCHES instead of falsely
+        // reporting no_specialist_runtime.
+        const canonicalSlug = canonicalDeptSlug(candidateSlug);
+        if (canonicalSlug && canonicalSlug !== candidateSlug) {
+          const canonDeptDir = path.join(AGENTS_ROOT, `dept-${canonicalSlug}`);
+          const canonBareDir = path.join(AGENTS_ROOT, canonicalSlug);
+          if (fs.existsSync(canonDeptDir)) {
+            const key = `agent:dept-${canonicalSlug}:${openclawSessionId}`;
+            console.log(`[Dispatch] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → dept-prefixed runtime → key ${key}`);
+            return key;
+          }
+          if (fs.existsSync(canonBareDir)) {
+            const key = `agent:${canonicalSlug}:${openclawSessionId}`;
+            console.log(`[Dispatch] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → bare runtime → key ${key}`);
+            return key;
+          }
+        }
+        console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalDeptSlug(candidateSlug)}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying role slug`);
       }
     } catch (err) {
       console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
