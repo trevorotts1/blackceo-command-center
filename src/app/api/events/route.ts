@@ -6,7 +6,26 @@ import type { Event } from '@/lib/types';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-// GET /api/events - List events (live feed)
+/**
+ * FEED OF RECORD (DATA-07).
+ *
+ * This endpoint — and /api/events/client-feed — read FROM the legacy `events`
+ * table, which is the AUTHORITATIVE activity feed: every subsystem (dispatch,
+ * sweeps, QC, agent completion, and manual POSTs to this route) writes here.
+ *
+ * The newer `task_events` table is a PARTIAL sink — populated ONLY by
+ * task-lifecycle `transition()`, which the many raw `UPDATE status` writers
+ * still bypass (see DISP-10 / DISP-09 / INGEST-14). Until the integrator routes
+ * ALL lifecycle status writes through `transition()` so `task_events` is
+ * complete, the feeds MUST keep reading `events`; repointing them now would
+ * silently drop every bypassed transition from the board's live feed.
+ *
+ * MIGRATION — coordinate with DISP-10 (lane L3): once `transition()` is the sole
+ * status writer and `task_events` is complete, repoint BOTH feeds at
+ * `task_events` (or a unified view) and retire this `events` dependency.
+ */
+
+// GET /api/events - List events (live feed; reads the `events` feed-of-record)
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
