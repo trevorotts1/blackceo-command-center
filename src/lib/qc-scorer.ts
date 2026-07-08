@@ -919,14 +919,24 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
     process.env.QC_SIMULATE_PROVIDER_DOWN === '1' ||
     process.env.QC_SIMULATE_PROVIDER_DOWN === 'true';
 
-  // Try LLM paths
-  const openAiKey = process.env.OPENAI_API_KEY;
+  // Try LLM paths.
+  //
+  // QC-08 — key sourcing (JUDGE ≠ WRITER, operator-billed by design).
+  // The QC judge is deliberately NOT the client's writer provider: a judge that
+  // shared the writer's key/model could collude with the content it scores. By
+  // design the CC judge runs on the OPERATOR-billed OPENAI_API_KEY / GOOGLE_API_KEY
+  // below — this is the sanctioned co-mingling exception (confirm §7). To bill QC
+  // PER-CLIENT instead, set a client-scoped QC_SCORER_OPENAI_API_KEY /
+  // QC_SCORER_GOOGLE_API_KEY; when present it takes precedence over the shared key
+  // (nothing else changes — same judge, just a client-owned key).
+  const openAiKey = process.env.QC_SCORER_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
   if (openAiKey && !simulateProviderDown) {
     const result = await llmScoreViaOpenAI(prompt, openAiKey, agentModel);
     if (result) return result;
   }
 
   const googleKey =
+    process.env.QC_SCORER_GOOGLE_API_KEY ||
     process.env.GOOGLE_API_KEY ||
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
     process.env.GEMINI_API_KEY;
