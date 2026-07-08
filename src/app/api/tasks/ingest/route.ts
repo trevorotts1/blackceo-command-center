@@ -13,6 +13,30 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 /**
+ * INGEST-07 — request-time schema self-heal guard.
+ *
+ * The self-heal path (POST catch block) calls runMigrations() when a request
+ * hits a schema error. runMigrations applies ALL pending migrations — INCLUDING
+ * the DESTRUCTIVE dedup migrations 081 (canonical-workspace merge) and 082 (reap
+ * duplicate "Author SOP" tasks). Running those while the box is serving live
+ * ingest races data mutations against fresh inserts, so we harden the self-heal:
+ *
+ *   1. A process-level mutex/latch (`selfHealState`) so the self-heal migrate
+ *      runs AT MOST ONCE per process and is never re-entered. runMigrations is
+ *      fully synchronous, so this ALSO guarantees it never overlaps another
+ *      self-heal in the same worker (the event loop cannot interleave two
+ *      synchronous migrate runs). On failure the latch re-arms so a later request
+ *      can retry a transient failure.
+ *   2. Set OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY=1 for the duration of the
+ *      call so the destructive dedup migrations can be gated to explicit offline
+ *      runs. The wiring that makes migrations 081/082 honour this flag lives in
+ *      src/lib/db/migrations.ts (owned by the migrations lane) — see the L7
+ *      cross-lane note. Setting it here is harmless until that gate lands and
+ *      makes the two lanes compose.
+ */
+let selfHealState: 'idle' | 'running' | 'done' = 'idle';
+
+/**
  * POST /api/tasks/ingest — Universal task-capture front door.
  *
  * The Command Center half of "anywhere the agent is told to do something, it
@@ -693,16 +717,36 @@ export async function POST(request: NextRequest) {
     const isSchemaError = /SqliteError|no column named|no such column|no such table/i.test(msg);
     if (isSchemaError) {
       console.error(`[INGEST] SCHEMA error detected ("${msg}") — attempting one-shot self-heal migrate.`);
-      try {
-        runMigrations(getDb());
+      // INGEST-07 — run the self-heal migrate AT MOST ONCE per process, never
+      // re-entered, and never concurrently with a live-ingest destructive dedup.
+      if (selfHealState === 'idle') {
+        selfHealState = 'running';
+        const prevAdditiveFlag = process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
+        process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY = '1';
+        try {
+          runMigrations(getDb());
+          selfHealState = 'done';
+          console.warn(
+            '[INGEST] Self-heal migrate succeeded — future requests should clear. ' +
+              'Returning 503 for this request so the caller can retry.',
+          );
+        } catch (migrateErr) {
+          // Re-arm so a later request can retry a transient migrate failure.
+          selfHealState = 'idle';
+          console.error(
+            '[INGEST] Self-heal migrate FAILED:',
+            migrateErr instanceof Error ? migrateErr.message : String(migrateErr),
+          );
+        } finally {
+          // Restore the flag exactly. runMigrations is synchronous, so no other
+          // request observed this env mutation during the call.
+          if (prevAdditiveFlag === undefined) delete process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
+          else process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY = prevAdditiveFlag;
+        }
+      } else {
         console.warn(
-          '[INGEST] Self-heal migrate succeeded — future requests should clear. ' +
-            'Returning 503 for this request so the caller can retry.',
-        );
-      } catch (migrateErr) {
-        console.error(
-          '[INGEST] Self-heal migrate FAILED:',
-          migrateErr instanceof Error ? migrateErr.message : String(migrateErr),
+          `[INGEST] Self-heal already ${selfHealState} in this process — not re-running migrations; ` +
+            'returning 503 so the caller can retry.',
         );
       }
       try {
