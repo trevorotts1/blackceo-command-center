@@ -249,6 +249,80 @@ function af_i14NativeImageToolCalled(rawTrace: string): boolean {
 }
 
 /**
+ * AF-I14 VIOLATION-B/C — STRUCTURED extraction of the command / argument
+ * surfaces of every tool call in the trace.
+ *
+ * Hole-fix (QC-12): VIOLATION-B (dead endpoint invoked) and VIOLATION-C (the
+ * KIE.ai pipeline was NOT invoked) used to key on a naive lowercased substring
+ * scan over the WHOLE trace. That is wrong in both directions:
+ *   - false-positive: a trace that merely QUOTES `/api/v1/image/gpt-image` in
+ *     assistant prose tripped VIOLATION-B even though nothing was called.
+ *   - EVASION (false-negative): a trace that merely QUOTES `api.kie.ai` /
+ *     `kie_generate.py` in prose (e.g. echoing the SOP) satisfied the
+ *     `kiePresent` check, so VIOLATION-C did NOT fire even though the KIE
+ *     pipeline was never actually run.
+ *
+ * This walker mirrors af_i14NativeImageToolCalled (VIOLATION-A): it parses each
+ * JSONL line and collects ONLY the input/arguments/parameters surfaces of real
+ * tool-call blocks (the shell command, HTTP url, or arguments the agent
+ * actually executed), so B/C key on what the agent DID, not on prose.
+ *
+ * `parsedAnyLine` tells the caller whether ANY JSONL line parsed as JSON; when
+ * it did not, the caller MUST fall back to the legacy whole-trace scan so
+ * detection is never weaker than the prior behaviour.
+ */
+function af_i14ToolCallSurfaces(rawTrace: string): { surfaces: string; parsedAnyLine: boolean } {
+  const parts: string[] = [];
+
+  const isToolNode = (o: Record<string, unknown>): boolean => {
+    if (o.type === 'tool_use' || o.type === 'tool_call' || o.type === 'function_call') return true;
+    if (typeof o.tool_name === 'string' || typeof o.tool === 'string') return true;
+    if (typeof o.name === 'string' && (o.input !== undefined || o.arguments !== undefined || o.parameters !== undefined)) return true;
+    if (o.function && typeof o.function === 'object') return true;
+    return false;
+  };
+
+  const pushSurface = (v: unknown): void => {
+    if (v === undefined || v === null) return;
+    parts.push(typeof v === 'string' ? v : JSON.stringify(v));
+  };
+
+  const collectFromToolNode = (o: Record<string, unknown>): void => {
+    pushSurface(o.input);
+    pushSurface(o.arguments);
+    pushSurface(o.parameters);
+    if (o.function && typeof o.function === 'object') {
+      // OpenAI function-call shape: function.arguments is usually a JSON string.
+      pushSurface((o.function as Record<string, unknown>).arguments);
+    }
+  };
+
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node && typeof node === 'object') {
+      const o = node as Record<string, unknown>;
+      if (isToolNode(o)) collectFromToolNode(o);
+      Object.values(o).forEach(walk);
+    }
+  };
+
+  let parsedAnyLine = false;
+  for (const line of rawTrace.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      parsedAnyLine = true;
+      walk(obj);
+    } catch {
+      /* non-JSON line — skip; whole-trace fallback covers it when nothing parses */
+    }
+  }
+
+  return { surfaces: parts.join('\n').toLowerCase(), parsedAnyLine };
+}
+
+/**
  * AF-I14 guardrail result.
  * When `violated` is true, `violations` lists the specific AF-I14 sub-rules
  * that were breached. The caller should auto-fail with these as gaps.
@@ -378,6 +452,13 @@ export function runAFI14Guardrail(
   const lower = trace.toLowerCase();
   const violations: string[] = [];
 
+  // STRUCTURED tool-call surfaces for VIOLATION-B/C (QC-12). We scan what the
+  // agent actually EXECUTED (tool-call command/args), not prose. When no JSONL
+  // line parses as JSON we fall back to the whole-trace scan so detection is
+  // never weaker than the legacy behaviour.
+  const { surfaces: toolSurfaces, parsedAnyLine } = af_i14ToolCallSurfaces(trace);
+  const bcScan = parsedAnyLine ? toolSurfaces : lower;
+
   // VIOLATION-A: native image_generate tool was called.
   // STRUCTURED detection (parses tool_use blocks) — no longer a naive substring
   // scan, so quoting `image_generate` in prose no longer false-fails.
@@ -389,23 +470,24 @@ export function runAFI14Guardrail(
     );
   }
 
-  // VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in trace
-  if (lower.includes('/api/v1/image/gpt-image')) {
+  // VIOLATION-B: dead endpoint /api/v1/image/gpt-image was actually CALLED
+  // (present in a tool-call command/arg surface), not merely quoted in prose.
+  if (bcScan.includes('/api/v1/image/gpt-image')) {
     violations.push(
-      'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in session trace. ' +
+      'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image was invoked in the session trace. ' +
       'This endpoint returns HTTP 404 — images were not generated. ' +
       'Fix: use kie_generate.py which calls the live /api/v1/jobs/createTask endpoint.',
     );
   }
 
-  // VIOLATION-C: kie_generate.py was never invoked
-  // The script must appear via exec/shell calls. We check for both the script
-  // name and the live KIE.ai endpoint it calls.
+  // VIOLATION-C: kie_generate.py / KIE.ai was never actually invoked.
+  // Keyed on real tool-call surfaces (structured), so merely QUOTING the script
+  // name or `api.kie.ai` in assistant prose no longer masks a missing call.
   const kiePresent =
-    lower.includes('kie_generate.py') ||
-    lower.includes('kie_generate') ||
-    lower.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
-    lower.includes('api.kie.ai');                   // KIE.ai domain
+    bcScan.includes('kie_generate.py') ||
+    bcScan.includes('kie_generate') ||
+    bcScan.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
+    bcScan.includes('api.kie.ai');                   // KIE.ai domain
   if (!kiePresent) {
     violations.push(
       'AF-I14 VIOLATION-C: kie_generate.py was not invoked and no KIE.ai API calls detected in session trace. ' +
