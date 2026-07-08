@@ -34,6 +34,17 @@ interface Migration {
    * transaction. (Bug 1, v4.0.2.)
    */
   useOuterTransaction?: boolean;
+  /**
+   * INGEST-07: when true, this migration performs a DESTRUCTIVE data operation
+   * (row dedup / reap / merge) that must NOT run during the request-time schema
+   * self-heal path — that path races data mutations against live ingest. When
+   * `OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY` is set (the self-heal sets it for
+   * the duration of its one-shot migrate), the runner DEFERS these migrations:
+   * it neither runs `up` nor records them as applied, so they stay pending and
+   * run normally on the next controlled boot. Only additive schema DDL should
+   * be applied during self-heal.
+   */
+  deferInAdditiveSelfHeal?: boolean;
 }
 
 // All migrations in order - NEVER remove or reorder existing migrations
@@ -3071,6 +3082,8 @@ const migrations: Migration[] = [
   {
     id: '081',
     name: 'dedupe_canonical_workspaces',
+    // INGEST-07: destructive workspace merge — defer during additive-only self-heal.
+    deferInAdditiveSelfHeal: true,
     up: (db) => {
       // FM-6 (board single-source): de-dup workspace rows that canonicalize to the
       // SAME department (e.g. `ceo` + `master-orchestrator`, `app-development` +
@@ -3088,6 +3101,8 @@ const migrations: Migration[] = [
   {
     id: '082',
     name: 'reap_duplicate_open_authoring_tasks',
+    // INGEST-07: destructive task reap — defer during additive-only self-heal.
+    deferInAdditiveSelfHeal: true,
     up: (db) => {
       // FM-6b (furnace heal): collapse the duplicate open "Author SOP: …" sub-tasks
       // the SOP-authoring fast loop re-created on every dispatch sweep (300+ stuck
@@ -3465,11 +3480,27 @@ export function runMigrations(db: Database.Database): void {
     return a.id.localeCompare(b.id);
   });
 
+  // INGEST-07: the request-time schema self-heal sets this flag so ONLY additive
+  // schema DDL is applied — destructive data migrations (dedup/reap/merge) that
+  // would race live ingest are DEFERRED (skipped without recording) and run on
+  // the next controlled boot.
+  const additiveOnlySelfHeal =
+    process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY === '1';
+
   for (const migration of ordered) {
     if (applied.has(migration.id)) {
       continue;
     }
-    
+
+    if (additiveOnlySelfHeal && migration.deferInAdditiveSelfHeal) {
+      console.warn(
+        `[DB] Migration ${migration.id} (${migration.name}) DEFERRED — ` +
+          `OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY set (destructive migration not run during ` +
+          `request-time self-heal; stays pending for the next controlled boot).`,
+      );
+      continue;
+    }
+
     console.log(`[DB] Running migration ${migration.id}: ${migration.name}`);
 
     const useOuter = migration.useOuterTransaction !== false;

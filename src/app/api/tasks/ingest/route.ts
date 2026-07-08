@@ -754,10 +754,14 @@ export async function POST(request: NextRequest) {
       } catch {
         /* non-fatal — the clear 503 below is still returned to the caller */
       }
+      // INGEST-08: do NOT echo the raw SqliteError text (`msg`) in the response
+      // body — it leaks column/table names and internal schema shape to any
+      // caller. It is already logged server-side above and sent to the owner.
+      // Return a stable, static detail token instead.
       return NextResponse.json(
         {
           error: 'Command Center schema is out of date on this box — task NOT captured.',
-          detail: msg,
+          detail: 'schema_out_of_date',
           remediation:
             'Run database migrations on this box (restart the app, or `npm run db:seed`) and retry. ' +
             'The owner has been notified.',

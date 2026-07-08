@@ -353,7 +353,8 @@ export interface TaskActivity {
   agent?: Agent;
 }
 
-export type DeliverableType = 'file' | 'url' | 'artifact';
+// QC-03: keep in lockstep with the Zod DeliverableType enum in validation.ts.
+export type DeliverableType = 'file' | 'url' | 'artifact' | 'image';
 
 export interface TaskDeliverable {
   id: string;

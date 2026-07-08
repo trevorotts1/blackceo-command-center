@@ -29,6 +29,7 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { runQCOnReview } from '@/lib/qc-scorer';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 
@@ -52,6 +53,12 @@ interface InProgressRow {
 function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): void {
   const now = new Date().toISOString();
   run('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?', ['review', now, taskId]);
+  // DISP-10: complete the task_events audit sink for this in_progress→review
+  // advance (the watcher only ever selects in_progress tasks).
+  recordStatusEvent(taskId, 'in_progress', 'review', {
+    actor: agentId ?? 'execution-watcher',
+    reason: 'agent reported TASK_COMPLETE (reconcile)',
+  });
   run(
     `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
     [uuidv4(), 'task_completed', agentId, taskId, `${agentName ?? 'Agent'} completed: ${summary}`, now]

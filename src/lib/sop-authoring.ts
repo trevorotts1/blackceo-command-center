@@ -61,6 +61,8 @@ import {
 } from '@/lib/sop-auto-replace';
 import { scoreTaskForQC, resolveTrioAgents, QC_PASS_THRESHOLD } from '@/lib/qc-scorer';
 import type { QCScorerInput } from '@/lib/qc-scorer';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { notifyOwnerDone } from '@/lib/owner-reports';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -831,22 +833,42 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     } catch { /* non-fatal */ }
 
     // §2: Mark the authoring sub-task as done.
+    // DISP-10: this synthetic "Author SOP" sub-task completes from `in_progress`
+    // — an edge the lifecycle state machine does NOT model (in_progress→done is
+    // not a legal transition, and this write sets `completed_at`), so routing it
+    // through transition() would throw ILLEGAL_TRANSITION. We instead use the
+    // spec-sanctioned raw-write alternative: a compare-and-swap on the current
+    // status, the structured `task_events` audit row (so the audit sink is
+    // COMPLETE), and the owner DONE report.
     if (subTaskId) {
       try {
-        run(
-          `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ?`,
+        const subFrom =
+          queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [subTaskId])?.status ??
+          'in_progress';
+        const res = run(
+          `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ? AND status NOT IN ('done')`,
           [fileNow, fileNow, subTaskId],
         );
-        run(
-          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-          [
-            uuidv4(),
-            'task_completed',
-            subTaskId,
-            `[sop-authoring] SOP "${finalName}" authored and filed. QC: ${finalQcResult.score.toFixed(1)}/10 PASS.`,
-            fileNow,
-          ],
-        );
+        if (res.changes > 0) {
+          recordStatusEvent(subTaskId, subFrom, 'done', {
+            actor: 'sop-authoring',
+            reason: `SOP "${finalName}" authored and filed (QC ${finalQcResult.score.toFixed(1)}/10 PASS)`,
+          });
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'task_completed',
+              subTaskId,
+              `[sop-authoring] SOP "${finalName}" authored and filed. QC: ${finalQcResult.score.toFixed(1)}/10 PASS.`,
+              fileNow,
+            ],
+          );
+          // DONE owner report (5-field). Best-effort; gateway-routed; never throws.
+          try {
+            notifyOwnerDone(subTaskId);
+          } catch { /* non-fatal */ }
+        }
       } catch { /* non-fatal */ }
     }
 

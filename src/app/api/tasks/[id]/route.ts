@@ -655,7 +655,10 @@ export async function PATCH(
     //   1. Fetches the task's assigned SOP + success_criteria.
     //   2. Uses the configured LLM (OPENAI/GOOGLE key) or a heuristic fallback.
     //   3. Score ≥8.5 → moves task to `done` + writes task_completed event.
-    //      Score <8.5 → returns to `in_progress` + appends gap notes.
+    //      Score <8.5 → returns to `backlog` (re-enters intake/auto-route) +
+    //      appends gap notes. (QC-01: the scorer writes `backlog`, not
+    //      `in_progress` — a failed task re-routes through intake, it does not
+    //      resume the old dispatch.)
     //   4. Always writes a `qc_review` event for the audit trail.
     //
     // Disable with DISABLE_QC_AUTO_SCORER=1 (env).

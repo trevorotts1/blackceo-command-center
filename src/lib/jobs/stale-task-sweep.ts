@@ -28,6 +28,7 @@
 import { queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
+import { notifySystem } from '@/lib/notify';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -86,23 +87,10 @@ async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
     `Reminder: ${task.ask ?? '(no ask specified)'}`;
 
   if (who === 'operator') {
-    // Notify via Rescue Rangers webhook (per AGENTS.md Rescue Rangers section).
-    const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
-    if (webhookUrl) {
-      try {
-        await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'escalate',
-            agent: 'stale-task-sweep',
-            message,
-          }),
-        });
-      } catch (err) {
-        console.warn('[stale-task-sweep] Rescue Rangers re-ping failed:', (err as Error).message);
-      }
-    }
+    // SWEEP-06 / MSG-06: an operator re-ping is a SYSTEM concern — route it
+    // through the single notifySystem() path (Rescue Rangers webhook, or a
+    // server log when unset). It must NEVER reach a client Telegram.
+    notifySystem(message, { agent: 'stale-task-sweep', action: 'escalate' });
   } else {
     // Owner: notify via the Command Center's internal message route (which
     // triggers Telegram if wired). Best-effort -- no throw on failure.

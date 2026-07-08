@@ -4,6 +4,7 @@ import { createHmac } from 'crypto';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { runQCOnReview } from '@/lib/qc-scorer';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
 /**
@@ -112,6 +113,11 @@ export async function POST(request: NextRequest) {
           'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
           ['review', now, task.id]
         );
+        // DISP-10: complete the task_events audit sink for this advance.
+        recordStatusEvent(task.id, task.status, 'review', {
+          actor: task.assigned_agent_id ?? 'agent-completion',
+          reason: 'agent reported TASK_COMPLETE (webhook)',
+        });
       }
 
       // Log completion
@@ -205,6 +211,11 @@ export async function POST(request: NextRequest) {
           'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
           ['review', now, task.id]
         );
+        // DISP-10: complete the task_events audit sink for this advance.
+        recordStatusEvent(task.id, task.status, 'review', {
+          actor: session.agent_id ?? 'agent-completion',
+          reason: 'agent reported TASK_COMPLETE (webhook, session path)',
+        });
       }
 
       // Log completion with summary

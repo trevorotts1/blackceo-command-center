@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { chromium } from 'playwright';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import { existsSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
 import * as csstree from 'css-tree';
@@ -174,6 +175,11 @@ export async function POST(
         'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
         ['review', now, taskId]
       );
+      // DISP-10: complete the task_events audit sink for this advance.
+      recordStatusEvent(taskId, task.status, 'review', {
+        actor: 'test-runner',
+        reason: 'automated tests passed',
+      });
       newStatus = 'review';
 
       run(
@@ -193,6 +199,11 @@ export async function POST(
         'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
         ['in_progress', now, taskId]
       );
+      // DISP-10: complete the task_events audit sink for this move-back.
+      recordStatusEvent(taskId, task.status, 'in_progress', {
+        actor: 'test-runner',
+        reason: 'automated tests failed',
+      });
       newStatus = 'in_progress';
 
       run(

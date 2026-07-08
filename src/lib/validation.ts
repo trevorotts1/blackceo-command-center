@@ -43,7 +43,11 @@ const ActivityType = z.enum([
   'status_changed'
 ]);
 
-const DeliverableType = z.enum(['file', 'url', 'artifact']);
+// QC-03: 'image' is a first-class deliverable type. Without it a mis-instructed
+// agent that registers an image deliverable is rejected by the Zod enum, falls
+// into the empty-manifest → heuristic-cap → stuck trap. Keep in lockstep with
+// the DeliverableType TS union in types.ts.
+const DeliverableType = z.enum(['file', 'url', 'artifact', 'image']);
 
 // Task validation schemas
 export const CreateTaskSchema = z.object({

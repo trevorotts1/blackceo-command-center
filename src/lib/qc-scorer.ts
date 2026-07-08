@@ -63,6 +63,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
+import { transition, TransitionError } from '@/lib/task-lifecycle';
 
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
@@ -3785,27 +3786,30 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         return result;
       }
 
-      // Auto-approve: move to done
-      run(
-        `UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ? AND status = 'review'`,
-        [now, taskId],
-      );
-      run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), 'task_completed', taskId, `[QC-AUTO] Task "${task.title}" auto-approved (score ${result.score.toFixed(1)}/10 ≥ ${QC_PASS_THRESHOLD})`, now],
-      );
-      console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
-
-      // ── OWNER NOTIFICATION (DONE — QC auto-approve) ────────────────────
-      // W5.4: replaced bare 2-field string with notifyOwnerDone (all 5 fields:
-      // who/role + where + SOP + persona). Best-effort; gateway-routed.
+      // Auto-approve: move review → done through the ONE authoritative lifecycle
+      // path (DISP-10). transition() performs the review→done compare-and-swap,
+      // writes the structured `task_events` audit row AND the legacy
+      // `task_completed` event atomically, broadcasts `task_updated`, and fires
+      // the 5-field DONE owner report (notifyOwnerDone) — replacing the raw
+      // UPDATE + hand-rolled event + separate notify that bypassed the audit sink.
       try {
-        notifyOwnerDone(taskId);
-      } catch (notifyErr) {
-        console.error('[QCScorer] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
+        await transition(taskId, 'done', {
+          actor: 'qc-auto-scorer',
+          reason: `QC auto-approved (score ${result.score.toFixed(1)}/10 ≥ ${QC_PASS_THRESHOLD})`,
+          expectedFrom: 'review',
+        });
+      } catch (txErr) {
+        if (txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT') {
+          // Another writer already advanced the task out of `review` in the
+          // score→write window — do not double-complete or double-report.
+          console.warn(
+            `[QCScorer] Task ${taskId}: review→done CAS conflict (already advanced) — skipping done write`,
+          );
+          return result;
+        }
+        throw txErr;
       }
-      // ── End OWNER NOTIFICATION (DONE — QC auto-approve) ─────────────────
+      console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
 
       // ── Persona completion feedback loop (PRD 1.4) ─────────────────────
       // Spawn record-completion async so persona_performance accumulates.

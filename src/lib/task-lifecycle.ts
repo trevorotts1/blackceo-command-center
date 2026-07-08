@@ -338,6 +338,30 @@ function writeTaskEvent(
   }
 }
 
+/**
+ * DISP-10 / DATA-07 — append the structured `task_events` audit row for a status
+ * change performed by a RAW writer that legitimately cannot route through
+ * transition() (it writes extra columns in the same UPDATE, or its from-status
+ * is not statically a legal transition edge and routing it would risk an
+ * ILLEGAL_TRANSITION throw in a hot path). This writes the SAME row transition()
+ * writes, so the `task_events` sink becomes COMPLETE and feeds can trust it.
+ *
+ * The caller still owns its own legacy `events` row and SSE broadcast — this
+ * only closes the `task_events` gap. Best-effort; never throws.
+ */
+export function recordStatusEvent(
+  taskId: string,
+  fromStatus: string,
+  toStatus: string,
+  evidence: { actor?: string | null; reason?: string } = {},
+): void {
+  try {
+    writeTaskEvent(taskId, fromStatus, toStatus, evidence, new Date().toISOString());
+  } catch {
+    /* audit is best-effort — writeTaskEvent already has its own fallback */
+  }
+}
+
 // ---------------------------------------------------------------------------
 // transition() — the ONE function all status changes go through
 // ---------------------------------------------------------------------------

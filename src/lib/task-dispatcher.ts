@@ -44,7 +44,7 @@ import os from 'os';
 import { queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
-import { notifyOwner } from '@/lib/notify';
+import { notifyOwner, notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
@@ -68,7 +68,11 @@ import {
 import { notifyOwnerStarted } from '@/lib/owner-reports';
 
 // Statuses where dispatch must not re-fire.
-const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked', 'archived']);
+// DISP-12: 'archived' is NOT a task status (it is not in any of the 4 canonical
+// TaskStatus manifests) — archival is tracked by the `archived_at` column. It was
+// dead in this set; the real archival exclusion is `archived_at IS NULL`, applied
+// in GUARD 3 below and the block WHERE-clause.
+const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked']);
 
 // ── W8.2 ANTI-FURNACE: dispatch attempt-accounting + backoff + block-on-N ─────
 // The furnace was: a task that can't advance (gateway down / no sovereign model /
@@ -123,7 +127,7 @@ export function recordDispatchFailure(
       run(
         `UPDATE tasks SET status = 'blocked', dispatch_attempts = ?, last_dispatch_attempt_at = ?,
            next_dispatch_eligible_at = NULL, block_reason = ?, block_needs = ?, block_audience = ?, updated_at = ?
-         WHERE id = ? AND status NOT IN ('done','archived')`,
+         WHERE id = ? AND status NOT IN ('done') AND archived_at IS NULL`,
         [attempts, now, opts.reason, opts.needs, opts.audience, now, taskId],
       );
       run(
@@ -135,8 +139,17 @@ export function recordDispatchFailure(
         if (updated) broadcast({ type: 'task_updated', payload: updated });
       } catch { /* broadcast best-effort */ }
       try {
-        notifyOwner(`🚫 Task blocked: "${row?.title ?? taskId}" — ${opts.needs}`);
-      } catch { /* owner notify best-effort */ }
+        // MSG-06 / SWEEP-06: a SYSTEM-audience block is an OPERATOR concern —
+        // it must NEVER reach the client's Telegram (MOVE-IN-SILENCE). Route it
+        // through notifySystem() (Rescue Rangers / server log); only a genuine
+        // OWNER-audience block goes to the client's own chat.
+        const blockMsg = `Task blocked: "${row?.title ?? taskId}" — ${opts.needs}`;
+        if (opts.audience === 'SYSTEM') {
+          notifySystem(blockMsg, { agent: opts.context, action: 'escalate' });
+        } else {
+          notifyOwner(`🚫 ${blockMsg}`);
+        }
+      } catch { /* notify best-effort */ }
       console.warn(`[${opts.context}] recordDispatchFailure: task ${taskId} BLOCKED (${opts.reason})`);
     } else {
       run(
@@ -346,10 +359,17 @@ export async function autoDispatchTask(
       return;
     }
 
-    // GUARD 3: skip terminal statuses.
+    // GUARD 3: skip terminal statuses + archived tasks (DISP-12: archival is
+    // tracked by archived_at, not a status).
     if (SKIP_STATUSES.has(task.status)) {
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} already "${task.status}" — skip`,
+      );
+      return;
+    }
+    if ((task as Task & { archived_at?: string | null }).archived_at) {
+      console.log(
+        `[${context}] autoDispatchTask: task ${taskId} is archived — skip`,
       );
       return;
     }
