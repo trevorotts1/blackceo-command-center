@@ -13,6 +13,15 @@
  *   orphan-port kill before exec-ing `next start`, so EVERY start path is
  *   hardened by a single canonical launcher.
  *
+ * BUILD-ID FRESHNESS (BUILD-06):
+ *   This config never calls `next start` directly — it always launches via
+ *   scripts/cc-start.sh, which runs a BUILD-ID freshness guard BEFORE exec-ing
+ *   `next start`: it FAIL-LOUD exits when `.next/BUILD_ID` is missing or stale
+ *   (any src/ or config file newer than the compiled build). That non-zero exit
+ *   is caught by the circuit-breaker below (errored state + watchdog alert)
+ *   instead of pm2 quietly serving a stale build (the dead-Kanban class). Every
+ *   start path therefore inherits the guard through this single launcher.
+ *
  * CIRCUIT-BREAKER:
  *   min_uptime ensures PM2 actually trips max_restarts on a fast-failing
  *   process instead of resetting the counter on every brief launch.

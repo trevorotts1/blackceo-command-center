@@ -162,6 +162,66 @@ free_port() {
 
 free_port "$CC_PORT"
 
+# ── 2b. BUILD-ID FRESHNESS GUARD ──────────────────────────────────────────────
+# BUILD-06: `next start` will happily boot onto a MISSING or STALE `.next` build.
+# When an updater pulls new code but never recompiles (BUILD-05 class), the
+# server keeps serving the OLD build — the dead client Kanban. This guard runs
+# on EVERY start path (ecosystem.config.cjs invokes this launcher) and:
+#
+#   1. FAIL-LOUD if `.next/BUILD_ID` is absent — there is no production build.
+#   2. FAIL-LOUD if the build is STALE — any file under src/ (or package.json /
+#      next.config.*) is NEWER than `.next/BUILD_ID`, meaning the code was
+#      updated after the last compile. `git reset --hard` (the updater's pull)
+#      re-stamps source mtimes, so an un-rebuilt update trips this cleanly.
+#
+# Exiting non-zero here makes PM2's circuit-breaker (min_uptime + max_restarts)
+# surface the problem LOUDLY (errored state + watchdog alert) instead of quietly
+# serving stale bytes. Rebuild with `bash scripts/atomic-deploy.sh` (preferred)
+# or `npm run build`, then the next restart clears the guard.
+#
+# Escape hatch (NOT recommended): CC_ALLOW_STALE_BUILD=1 downgrades the staleness
+# failure to a warning. The MISSING-build failure is never bypassable — there is
+# nothing to serve.
+_assert_fresh_build() {
+  local next_dir="$CC_DIR/.next"
+  local build_id="$next_dir/BUILD_ID"
+
+  if [[ ! -f "$build_id" ]]; then
+    printf '[cc-start] FATAL: no production build found (%s missing).\n' "$build_id" >&2
+    printf '[cc-start] `next start` requires a compiled build. Run `bash scripts/atomic-deploy.sh` (preferred)\n' >&2
+    printf '[cc-start] or `npm run build` first. Refusing to start onto a missing build so the PM2\n' >&2
+    printf '[cc-start] circuit-breaker surfaces this loudly instead of an opaque crash-loop.\n' >&2
+    exit 1
+  fi
+
+  # Staleness: is any source input NEWER than the compiled BUILD_ID?
+  local newer=""
+  local _src
+  for _src in "$CC_DIR/src" "$CC_DIR/package.json" \
+              "$CC_DIR/next.config.js" "$CC_DIR/next.config.mjs" "$CC_DIR/next.config.ts"; do
+    [[ -e "$_src" ]] || continue
+    if [[ -n "$(find "$_src" -newer "$build_id" -print -quit 2>/dev/null)" ]]; then
+      newer="$_src"; break
+    fi
+  done
+
+  if [[ -n "$newer" ]]; then
+    if [[ "${CC_ALLOW_STALE_BUILD:-0}" == "1" ]]; then
+      printf '[cc-start] WARN: STALE build (%s is newer than .next/BUILD_ID) — starting anyway because CC_ALLOW_STALE_BUILD=1.\n' "$newer" >&2
+    else
+      printf '[cc-start] FATAL: STALE build — %s is newer than .next/BUILD_ID.\n' "$newer" >&2
+      printf '[cc-start] The running code was updated but never recompiled (BUILD-05/BUILD-06 dead-Kanban class).\n' >&2
+      printf '[cc-start] Rebuild before start: `bash scripts/atomic-deploy.sh` (preferred) or `npm run build`.\n' >&2
+      printf '[cc-start] To bypass for a single start (NOT recommended): CC_ALLOW_STALE_BUILD=1.\n' >&2
+      exit 1
+    fi
+  fi
+
+  printf '[cc-start] BUILD-ID freshness guard: .next/BUILD_ID present and fresh.\n' >&2
+}
+
+_assert_fresh_build
+
 # ── 3. EXEC next start ────────────────────────────────────────────────────────
 # exec replaces this bash process so PM2's PID tracking points at the real node
 # child — cc-health-check.sh pm2-analyze-cc.py regex `(--port|-p)\s+PORT` still
