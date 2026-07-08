@@ -31,7 +31,8 @@ import { execFile, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { DB_PATH, queryAll, queryOne } from "@/lib/db";
+import { v4 as uuidv4 } from "uuid";
+import { DB_PATH, queryAll, queryOne, run } from "@/lib/db";
 import { broadcast } from "@/lib/events";
 import type { PersonaSlot } from "@/lib/sops";
 import type { Task } from "@/lib/types";
@@ -52,6 +53,16 @@ const execFileAsync = promisify(execFile);
 //     company-config.json `governance_persona_id`.
 // These are the TS side of the resolved Q1/Q2 decisions and are the terminal tier
 // of the fallback chain (never-null when everything else is unavailable).
+//
+// PERS-01: these slugs MUST match the Python-side pins (DEFAULT_PERSONA_FALLBACK /
+// GOVERNANCE_PERSONA_FALLBACK in persona-selector-v2.py) AND must exist in the
+// seeded persona catalog (house-voice via triad 81->82). A fallback-pin site
+// (resolvePersonaAndPin in tasks.ts, L7) should verify the resolved slug exists in
+// the catalog before pinning and emit a loud P19 warn on a miss — pinning a
+// non-existent slug leaves the doer unable to load a blueprint. The value parity
+// (these constants vs the documented Python pins) is locked by
+// tests/unit/pers01-fallback-pins.test.ts; cross-repo parity vs the live Python
+// source is an integrator follow-up.
 export const DEFAULT_PERSONA_FALLBACK = "blackceo-house-voice";
 export const GOVERNANCE_PERSONA_FALLBACK = "covey-7-habits";
 
@@ -174,17 +185,32 @@ export function buildSelectorArgv(
  * detect that so the caller can retry WITHOUT the SOP flags rather than let an
  * entire SOP-carrying task degrade to the department-default fallback. Any other
  * failure (timeout, python missing, real error) is NOT swallowed here.
+ *
+ * PERS-03: we deliberately do NOT treat a bare exit code 2 as "unknown argument".
+ * argparse (and other CLIs) exit 2 for MANY reasons — a genuine crash inside the
+ * script, a malformed `--task` value, an internal traceback. Short-circuiting on
+ * `code===2` masked those real crashes as a benign predates-DEP-1 signal and
+ * silently downgraded the task to a non-SOP-aware match. We now require the
+ * stderr/message to actually name an unrecognized-flag error. `invalid choice`
+ * is intentionally EXCLUDED — it is argparse's error for a bad *value* (e.g. a
+ * department not in `choices=[...]`), a real error that must not be swallowed.
  */
 function isUnknownArgumentError(err: unknown): boolean {
-  const e = err as { code?: number | string; stderr?: string; message?: string };
-  if (e?.code === 2) return true;
+  const e = err as { stderr?: string; message?: string };
   const text = `${e?.stderr ?? ""} ${e?.message ?? ""}`;
-  return /unrecognized arguments|no such option|invalid choice|unrecognized option/i.test(text);
+  return /unrecognized arguments?|no such option|unrecognized option/i.test(text);
 }
 
 export interface PersonaSelectionResult {
   persona_id: string | null;
   persona_name: string;
+  /**
+   * PERS-05: true when `persona_name` was NOT supplied by the selector (which
+   * returns a name only when the id resolved to a real catalog persona) and was
+   * instead derived from the raw slug. Consumers must render a synthesized name
+   * as tentative, never as an authoritative catalog display name.
+   */
+  persona_name_synthesized?: boolean;
   persona_version?: number;
   score: number;
   interaction_mode: PersonaInteractionMode;
@@ -343,7 +369,18 @@ export async function selectPersonaForTask(
             `[persona-selector] SOP-aware flags rejected by selector for task ${taskId} ` +
             `(selector predates DEP-1 --sop-* inputs) — retrying without SOP context.`,
           );
-          output = await runSelector(baseArgv);
+          try {
+            output = await runSelector(baseArgv);
+          } catch (retryErr) {
+            // PERS-03: the non-SOP retry ALSO failed. Surface the ORIGINAL error
+            // (the primary SOP-run failure) — masking it behind the retry error
+            // would hide the real cause. Log the retry error for context.
+            console.error(
+              `[persona-selector] non-SOP retry also failed for task ${taskId}:`,
+              (retryErr as Error)?.message ?? retryErr,
+            );
+            throw sopErr;
+          }
         } else {
           throw sopErr;
         }
@@ -354,13 +391,17 @@ export async function selectPersonaForTask(
 
     const result = JSON.parse(output) as Partial<PersonaSelectionResult>;
 
+    // PERS-05: the Python selector returns `persona_name` ONLY when the id
+    // resolved to a real catalog persona — that name is authoritative. When it is
+    // absent we must NOT fabricate a prettified Title-Case name and surface it to
+    // the owner as if it were verified. Keep the RAW slug as the display value and
+    // flag it synthesized so downstream renders it as tentative.
+    const nameFromSelector = result.persona_name;
+    const synthesized = !nameFromSelector && !!result.persona_id;
     return {
       persona_id: result.persona_id ?? null,
-      persona_name:
-        result.persona_name ||
-        (result.persona_id
-          ? result.persona_id.replace(/-/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())
-          : "N/A"),
+      persona_name: nameFromSelector || result.persona_id || "N/A",
+      persona_name_synthesized: synthesized,
       persona_version: result.persona_version,
       score: typeof result.score === "number" ? result.score : 0,
       interaction_mode: (result.interaction_mode as PersonaInteractionMode) || "leadership",
@@ -548,8 +589,15 @@ export function loadSubtaskPersonas(taskId: string): SubtaskPersona[] {
  * Re-broadcast a task over SSE with its per-sub-task persona plan attached, so
  * the kanban card can render slot chips the moment the plan lands. Best-effort:
  * a broadcast failure never propagates to the caller.
+ *
+ * PERS-08: pass `plan` (the in-memory `subtask_personas[]` parsed from
+ * decompose-task.py stdout) to broadcast it DIRECTLY. The decompose child writes
+ * `task_subtask_persona` asynchronously (a detached spawn), so re-reading the
+ * table here can race and return an empty plan that clobbers the card. When no
+ * in-memory plan is supplied we fall back to a table read, and if that read is
+ * empty we SKIP the broadcast rather than overwrite a good plan with nothing.
  */
-export function broadcastPersonaPlan(taskId: string): void {
+export function broadcastPersonaPlan(taskId: string, plan?: SubtaskPersona[]): void {
   try {
     const task = queryOne<Task>(
       `SELECT t.*,
@@ -564,7 +612,13 @@ export function broadcastPersonaPlan(taskId: string): void {
       [taskId],
     );
     if (!task) return;
-    const subtask_personas = loadSubtaskPersonas(taskId);
+    const subtask_personas =
+      plan && plan.length > 0 ? plan : loadSubtaskPersonas(taskId);
+    if (!subtask_personas || subtask_personas.length === 0) {
+      // Empty table read (likely the detached decompose child has not committed
+      // yet) — do NOT broadcast an empty plan over an existing one.
+      return;
+    }
     broadcast({ type: "task_updated", payload: { ...task, subtask_personas } });
   } catch (err) {
     console.error(`[persona-plan] broadcastPersonaPlan failed for task ${taskId}:`, err);
@@ -642,6 +696,28 @@ export function spawnRecordCompletion(
         `(persona ${personaId}, dept ${dept})` +
         (stderr ? `: ${stderr.trim()}` : "")
       );
+      // PERS-07: previously a non-zero exit was logged and then silently dropped,
+      // leaving a hole in the adaptive learning loop (persona_performance never
+      // got the outcome). Write a QUERYABLE `persona_completion_failed` event so a
+      // retry sweep can pick it up. Audit-only: never throw from the close handler.
+      try {
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            "persona_completion_failed",
+            taskId,
+            `[PERSONA-COMPLETION-FAILED] record-completion exited ${code} for persona ${personaId} (dept ${dept})` +
+              (stderr ? `: ${stderr.trim().slice(0, 500)}` : ""),
+            new Date().toISOString(),
+          ],
+        );
+      } catch (writeErr) {
+        console.warn(
+          `[persona-selector] could not record persona_completion_failed for task ${taskId}:`,
+          (writeErr as Error)?.message ?? writeErr,
+        );
+      }
     } else {
       console.log(
         `[persona-selector] record-completion OK for task ${taskId} ` +
