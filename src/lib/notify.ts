@@ -27,10 +27,17 @@
  *     field. Never print parsed config contents.
  */
 
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+
+/**
+ * Owner-send timeout (MSG-01). Kept short so a hung gateway can never pin a
+ * send for the old 10s window; the send is fire-and-forget so this only bounds
+ * the detached child, never the request/event loop.
+ */
+const OWNER_SEND_TIMEOUT_MS = 5_000;
 
 /**
  * The known OPERATOR chat IDs — never returned as a client owner target.
@@ -154,7 +161,18 @@ export function resolveOwnerChatId(): string | null {
 /**
  * Send a Telegram message to a specific chat via `openclaw message send`.
  *
- * @returns true if the send succeeded, false otherwise (never throws).
+ * MSG-01: this is FIRE-AND-FORGET. The send is dispatched with async
+ * `execFile` and NOT awaited, so a slow or hung gateway can never block the
+ * Node event loop — a burst of DONE reports no longer serializes into 10s
+ * stalls (P32/P39). Send errors are swallowed by the internal callback: the
+ * module contract is BEST-EFFORT and callers must never roll back DB state on
+ * a failed send.
+ *
+ * @returns true when a send was DISPATCHED to the gateway (chat present, not
+ *   disabled); false when suppressed. Because the send is not awaited, `true`
+ *   means "attempted", not "confirmed delivered" — consistent with the
+ *   best-effort contract (even the previous sync path only confirmed the CLI
+ *   exit, never actual Telegram delivery). Never throws.
  */
 export function notifyTelegram(opts: {
   chatId: string;
@@ -163,33 +181,33 @@ export function notifyTelegram(opts: {
   if (process.env.OWNER_NOTIFY_TELEGRAM_DISABLED === '1') {
     return false;
   }
-  try {
-    execFileSync(
-      'openclaw',
-      [
-        'message',
-        'send',
-        '--channel',
-        'telegram',
-        // `--target` / `--message` are the real CLI flags (openclaw 2026.x).
-        // The previous `--to` / `--text` flags do not exist — commander
-        // rejected them, so every owner send silently failed.
-        '--target',
-        opts.chatId,
-        '--message',
-        opts.message,
-      ],
-      { stdio: 'pipe', timeout: 10_000 },
-    );
-    return true;
-  } catch (err) {
-    console.error(
-      '[notify] Telegram send failed (chatId=%s): %s',
+  execFile(
+    'openclaw',
+    [
+      'message',
+      'send',
+      '--channel',
+      'telegram',
+      // `--target` / `--message` are the real CLI flags (openclaw 2026.x).
+      // The previous `--to` / `--text` flags do not exist — commander
+      // rejected them, so every owner send silently failed.
+      '--target',
       opts.chatId,
-      (err as Error).message,
-    );
-    return false;
-  }
+      '--message',
+      opts.message,
+    ],
+    { timeout: OWNER_SEND_TIMEOUT_MS },
+    (err) => {
+      if (err) {
+        console.error(
+          '[notify] Telegram send failed (chatId=%s): %s',
+          opts.chatId,
+          err.message,
+        );
+      }
+    },
+  );
+  return true;
 }
 
 /**
