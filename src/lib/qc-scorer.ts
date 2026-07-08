@@ -263,9 +263,12 @@ function af_i14NativeImageToolCalled(rawTrace: string): boolean {
  *     pipeline was never actually run.
  *
  * This walker mirrors af_i14NativeImageToolCalled (VIOLATION-A): it parses each
- * JSONL line and collects ONLY the input/arguments/parameters surfaces of real
- * tool-call blocks (the shell command, HTTP url, or arguments the agent
- * actually executed), so B/C key on what the agent DID, not on prose.
+ * JSONL line and collects ONLY the EXECUTION surfaces of real tool activity —
+ * the input/arguments of a tool CALL (the shell command / HTTP url the agent
+ * issued) AND the content/output of a tool RESULT (the HTTP response the call
+ * actually produced, which legitimately echoes the endpoint that was hit). It
+ * deliberately does NOT collect user/assistant message `content` (prose), so B/C
+ * key on what the agent DID, not on what it merely quoted.
  *
  * `parsedAnyLine` tells the caller whether ANY JSONL line parsed as JSON; when
  * it did not, the caller MUST fall back to the legacy whole-trace scan so
@@ -274,11 +277,21 @@ function af_i14NativeImageToolCalled(rawTrace: string): boolean {
 function af_i14ToolCallSurfaces(rawTrace: string): { surfaces: string; parsedAnyLine: boolean } {
   const parts: string[] = [];
 
-  const isToolNode = (o: Record<string, unknown>): boolean => {
+  // A tool CALL node (the command the agent issued).
+  const isToolCallNode = (o: Record<string, unknown>): boolean => {
     if (o.type === 'tool_use' || o.type === 'tool_call' || o.type === 'function_call') return true;
     if (typeof o.tool_name === 'string' || typeof o.tool === 'string') return true;
     if (typeof o.name === 'string' && (o.input !== undefined || o.arguments !== undefined || o.parameters !== undefined)) return true;
     if (o.function && typeof o.function === 'object') return true;
+    return false;
+  };
+
+  // A tool RESULT node (the output of an actually-executed call). Its content is
+  // a real execution surface — e.g. an HTTP response echoing the endpoint hit —
+  // NOT prose. Assistant/user message `content` is NOT collected (that is prose).
+  const isToolResultNode = (o: Record<string, unknown>): boolean => {
+    if (o.type === 'tool_result' || o.type === 'function_call_output' || o.type === 'tool_output') return true;
+    if (o.role === 'tool') return true;
     return false;
   };
 
@@ -287,7 +300,7 @@ function af_i14ToolCallSurfaces(rawTrace: string): { surfaces: string; parsedAny
     parts.push(typeof v === 'string' ? v : JSON.stringify(v));
   };
 
-  const collectFromToolNode = (o: Record<string, unknown>): void => {
+  const collectFromToolCallNode = (o: Record<string, unknown>): void => {
     pushSurface(o.input);
     pushSurface(o.arguments);
     pushSurface(o.parameters);
@@ -297,11 +310,17 @@ function af_i14ToolCallSurfaces(rawTrace: string): { surfaces: string; parsedAny
     }
   };
 
+  const collectFromToolResultNode = (o: Record<string, unknown>): void => {
+    pushSurface(o.content);
+    pushSurface(o.output);
+  };
+
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) { node.forEach(walk); return; }
     if (node && typeof node === 'object') {
       const o = node as Record<string, unknown>;
-      if (isToolNode(o)) collectFromToolNode(o);
+      if (isToolCallNode(o)) collectFromToolCallNode(o);
+      if (isToolResultNode(o)) collectFromToolResultNode(o);
       Object.values(o).forEach(walk);
     }
   };
