@@ -63,6 +63,35 @@ export const STUCK_IN_PROGRESS_SWEEP_CRON = '*/5 * * * *';
  * legitimately long-running turn; a silent-dead task is caught within the hour. */
 const STUCK_IN_PROGRESS_MINUTES = parseFloat(process.env.STUCK_IN_PROGRESS_MINUTES || '45');
 
+/**
+ * SWEEP-05: `events` types that are periodic SWEEP / SYSTEM bookkeeping, NOT
+ * genuine agent forward-progress. They must not satisfy the liveness guard, or a
+ * silently-dead in_progress task whose only recent `events` rows are system
+ * writes (persona backfill, dispatch backoff, stale re-ping, etc.) looks alive
+ * and is never blocked (the P39 false-negative).
+ *
+ * NOTE (verified against this repo): the CC `events` table has NO mid-turn
+ * agent-activity type — a dispatched OpenClaw agent streams to its own session,
+ * and the web-agent runner publishes to an in-memory bus, not here. The spec's
+ * inferred allow-list ('task_progress','agent_message','tool_result') matches
+ * ZERO events rows (agent_message is an activity_type on another table;
+ * tool_result is an in-memory Anthropic block), so an allow-list would make
+ * last_event_at always NULL and over-block every long-running turn. A deny-list
+ * of known system noise implements the intent ("exclude sweep/system noise")
+ * without that regression: anything not listed still counts as possible liveness.
+ */
+const LIVENESS_NOISE_EVENT_TYPES = [
+  'persona_backfill_attempt',
+  'persona_fallback',
+  'persona_governance',
+  'persona_rescored_at_dispatch',
+  'routed_but_not_dispatched',
+  'task_dispatch_deferred',
+  'stale_repinged',
+  'af_model_sovereignty_block',
+  'sop_library_gap',
+];
+
 interface StuckRow {
   id: string;
   title: string;
@@ -177,15 +206,21 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
 
   const cutoffMs = Date.now() - STUCK_IN_PROGRESS_MINUTES * 60_000;
 
+  // SWEEP-05: the liveness subquery ignores SWEEP/SYSTEM-noise event types so
+  // periodic system writes cannot mask a silently-dead task.
+  const noisePlaceholders = LIVENESS_NOISE_EVENT_TYPES.map(() => '?').join(', ');
   const rows = queryAll<StuckRow>(
     `SELECT t.id, t.title, t.assigned_agent_id,
             a.name AS assigned_agent_name,
             t.last_progress_at, t.updated_at,
-            (SELECT MAX(e.created_at) FROM events e WHERE e.task_id = t.id) AS last_event_at
+            (SELECT MAX(e.created_at) FROM events e
+               WHERE e.task_id = t.id
+                 AND e.type NOT IN (${noisePlaceholders})) AS last_event_at
        FROM tasks t
        LEFT JOIN agents a ON a.id = t.assigned_agent_id
       WHERE t.status = 'in_progress'
         AND t.archived_at IS NULL`,
+    [...LIVENESS_NOISE_EVENT_TYPES],
   );
 
   let blocked = 0;
