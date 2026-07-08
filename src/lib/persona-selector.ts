@@ -579,8 +579,15 @@ export function loadSubtaskPersonas(taskId: string): SubtaskPersona[] {
  * Re-broadcast a task over SSE with its per-sub-task persona plan attached, so
  * the kanban card can render slot chips the moment the plan lands. Best-effort:
  * a broadcast failure never propagates to the caller.
+ *
+ * PERS-08: pass `plan` (the in-memory `subtask_personas[]` parsed from
+ * decompose-task.py stdout) to broadcast it DIRECTLY. The decompose child writes
+ * `task_subtask_persona` asynchronously (a detached spawn), so re-reading the
+ * table here can race and return an empty plan that clobbers the card. When no
+ * in-memory plan is supplied we fall back to a table read, and if that read is
+ * empty we SKIP the broadcast rather than overwrite a good plan with nothing.
  */
-export function broadcastPersonaPlan(taskId: string): void {
+export function broadcastPersonaPlan(taskId: string, plan?: SubtaskPersona[]): void {
   try {
     const task = queryOne<Task>(
       `SELECT t.*,
@@ -595,7 +602,13 @@ export function broadcastPersonaPlan(taskId: string): void {
       [taskId],
     );
     if (!task) return;
-    const subtask_personas = loadSubtaskPersonas(taskId);
+    const subtask_personas =
+      plan && plan.length > 0 ? plan : loadSubtaskPersonas(taskId);
+    if (!subtask_personas || subtask_personas.length === 0) {
+      // Empty table read (likely the detached decompose child has not committed
+      // yet) — do NOT broadcast an empty plan over an existing one.
+      return;
+    }
     broadcast({ type: "task_updated", payload: { ...task, subtask_personas } });
   } catch (err) {
     console.error(`[persona-plan] broadcastPersonaPlan failed for task ${taskId}:`, err);
