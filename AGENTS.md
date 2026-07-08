@@ -130,10 +130,35 @@ Tell Trevor the whole path up front, then IN ORDER: (1) container `oc-<slug>` on
 - **Whisper (macOS):** `pip3 --user` lands `whisper-ctranslate2` at `$(python3 -m site --user-base)/bin` — don't hardcode; prefer `uv tool install` (→ `~/.local/bin`).
 - **GHL Community MCP startup OOM (fleet-wide, 30+ times):** `ghl-community-mcp` registers 833 tools at startup, spiking memory → OOM-kills memory-constrained VPS containers (e.g. Maria Anderson, Angela Tennison on Hostinger VPS) mid-registration. Auto-remediation (`docker compose up -d --force-recreate`) recovers but can exceed the 90s remediation window. Fix path: raise the container mem limit, filter/trim the MCP toolset, or widen the remediation timeout.
 
+### 🟢 GHL Canonical Current State (skill 36)
+
+| Fact | Current canonical value |
+|---|---|
+| Community MCP base URL env var | `$GHL_COMMUNITY_MCP_URL` (always use this, never hardcode a port) |
+| Health probe | `curl $GHL_COMMUNITY_MCP_URL/health` |
+| Tier 0 CLI | `caf` / `convertandflow` / `ghl` — owned by SKILL 44 |
+
+## 🔴 GHL Tier Escalation Protocol
+
+1. **Tier order is binding.** Try Tier 0 (caf CLI) FIRST. Fall to Tier 1 (official MCP). Fall to Tier 2 (community MCP via `$GHL_COMMUNITY_MCP_URL`). Fall to Tier 3 (API + skill 29). Fall to Tier 4 (agent-browser) only as last resort.
+2. **Always use `$GHL_COMMUNITY_MCP_URL`** for Tier 2. Never hardcode a port.
+3. **Required disclosure:** `[GHL tier used: N — tool_name]` on every GHL response.
+
+| Tier | Path | Use for |
+|---|---|---|
+| 0 | `caf` CLI (SKILL 44) | Standard ops: contacts, conversations, workflows, calendars |
+| 1 | Official MCP `ghl-mcp` | Blogs, CLI gaps |
+| 2 | Community MCP `ghl-community-mcp` | Products, subscriptions, estimates, store, coupons, Voice AI |
+| 3 | API + skill 29 | Raw REST when MCPs don't cover it |
+| 4 | agent-browser / Codex | UI-only last resort |
+
+Example: `[GHL tier used: 0 — caf contacts list]`
+
+
 ### Rescue Rangers / fleet onboarding
 Client onboarding for remote SSH via the `trevorotts1/rescue-rangers` two-paste flow (install → Cloudflare tunnel → connector + hardening → Access app + service token + `~/.ssh/config` + fleet register → smoke test). **Do NOT drive from memory or a stale doc** — the canonical walkthrough is the operator-only `fleet-onboarding` skill (`~/.openclaw/skills/fleet-onboarding/`, master box ONLY; deliberately EXCLUDED from every fan-out / `update-skills.sh` / client install — never propagate). Registration mechanics: `ADD-A-FLEET-CLIENT.md`; roster: `accounts.md`.
 - **INTENT ROUTING:** on any fuzzy onboarding ask ("add someone to the fleet", "onboard [name]", "new client", "get [name]'s Mac/VPS connected", "rescue install for X"), your FIRST action = LOAD + START the `fleet-onboarding` skill at P0 INTAKE (collect name / platform Mac|VPS|Contabo-container / phone / email), then let the skill conduct one step at a time. Never hand-improvise install/tunnel/Access/registration. Registration REQUIRES phone AND email — ask, never invent. Ambiguous → confirm first, then start the skill.
-- **Gotcha:** SSH `Connection closed by UNKNOWN port 65535` (rc255) with a healthy tunnel = the Access app policy is missing that client's service-token id (PATCH the include list — operator-level, flag don't auto-apply; healthy tunnel ≠ reachable).
+- **Gotcha:** SSH `Connection closed by UNKNOWN port 65535` (rc255) with a healthy tunnel = the Access app policy is missing that client's service-token id (PATCH the include list — operator-level, flag don't auto-apply; healthy tunnel ≠ reachable). BUT single-check rc255 flaps on Mac-tunnel clients are usually transient and self-recover within one heartbeat cycle (recurring; e.g. Aurelia Gardner + Sonatta Camara 2026-07-07) — confirm DOWN across 2 consecutive checks before diagnosing or escalating.
 - **SSH config — exact working pattern** (the combined `--service-token id:secret` flag does NOT exist — use the two separate flags): `ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h --service-token-id ${CF_ACCESS_<CLIENT>_SVC_CLIENT_ID} --service-token-secret ${CF_ACCESS_<CLIENT>_SVC_CLIENT_SECRET}` — env names match the `CF_ACCESS_<CLIENT>_SVC_*` names in `~/.openclaw/secrets/.env`.
 
 ### Trevor's standing preferences
@@ -270,40 +295,4 @@ Isolated, safe demo environment for showing prospects the AI Workforce Interview
 - Notion: https://app.notion.com/p/How-to-Run-the-BlackCEO-Demos-3956798f3b7c816cac67d71614df5bc8
 - Google Doc (anyone can edit): https://docs.google.com/document/d/1DmY5ETnVGFrK64odFVReemN_cSNRIXxDfjygjMut53Q/edit
 
-
-## UPDATE PENDING -- Skill Update to v18.0.1
-
-A skill update was applied via update-skills.sh on 2026-07-06. Activate each new skill below,
-run the verification gate, then remove this section from AGENTS.md when the gate passes.
-
-### 🔴 THE GATE IS THE TRUTH -- NOT THIS PROSE, NOT YOUR OWN "done"
-This update is **NOT complete** until the VERIFICATION GATE passes. Files on disk = DOWNLOADED, not installed. Source the gate and check state:
-- State file: `~/.openclaw/workspace/.onboarding-state.json` (per-skill: pending → downloaded → wired → qc-passed | qc-failed)
-- Gate library: `~/.openclaw/scripts/onboarding-state.sh` (or the onboarding repo's `scripts/`)
-- Run: source the library, then `obs_gate_summary`. A skill counts INSTALLED only when (a) `openclaw skills info <name>` shows it, (b) its CORE_UPDATES sentinel is present (if it ships CORE_UPDATES.md), and (c) its `qc-*.sh` exits 0 (if it ships one).
-- **NEVER tell the owner "installed / done / onboarded" for any skill that is not `qc-passed` (or an explicit INTERVIEW_PENDING park).**
-
-### What changed in this update
-- Onboarding version: v18.0.1
-- New skills installed (require ACTIVATION + GATE): 58-podcast-production-engine
-
-### How to process each skill that is NOT yet qc-passed
-For each such skill folder under `~/.openclaw/skills/`:
-1. READ all files (Teach Yourself Protocol): SKILL.md, INSTALL.md, CORE_UPDATES.md, QC.md, plus any `references/*.md` files
-2. CHECK prerequisites and search ALL standard credential locations (canonical: `~/.openclaw/secrets/.env` on Mac, `/data/.openclaw/secrets/.env` on VPS, plus `openclaw.json` env.vars). Skip asking the owner if values already exist.
-3. EXECUTE the activation steps in INSTALL.md (read ≠ execute)
-4. APPLY CORE_UPDATES.md surgically -- add to AGENTS.md / TOOLS.md / MEMORY.md / SOUL.md only the sections explicitly labeled in that file
-5. RUN the gate (`obs_verify_skill <folder>`); loop activate→verify until it returns `qc-passed`. Skills that legitimately await owner input may be parked `interview-pending` (re-ping the owner; do NOT treat as terminal "done").
-6. REPORT to owner ONLY what is verified-installed, plus what remains gated.
-
-### Discipline (binding)
-- Skills 22-23: MAIN ORCHESTRATOR ONLY, never delegate
-- Tier order in any tiered skill (e.g. skill 36 GHL MCP): try Tier N before Tier N+1, no skipping
-- Disclosure headers (e.g. `[GHL tier used: N -- tool_name]`) required per any skill's SOUL-level rules
-- No destructive shortcuts: no `--force`, no `--no-verify`, no `--break-system-packages` unless explicitly instructed
-
-### When the GATE passes (and ONLY then)
-- Remove this entire UPDATE PENDING section from AGENTS.md
-- Add to MEMORY.md under "## System Updates":
-  "v18.0.1 update applied on 2026-07-06. Verification gate PASSED. Skills activated: 58-podcast-production-engine."
 
