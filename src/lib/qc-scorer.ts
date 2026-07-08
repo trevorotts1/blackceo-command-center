@@ -3314,7 +3314,66 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         // ceo-delegation-sweep re-assigns correctly.  Does NOT increment the
         // QC reroute counter — this is an agent registration failure, not a
         // quality failure.
+        // QC-09: the handback endpoint URL defaults to http://localhost:4000 when
+        // MISSION_CONTROL_URL is unset. On a production box that default is almost
+        // never reachable, so the fetch fails and the SQL fallback runs. Warn so
+        // the misconfig is visible, and make the fallback write the SAME structured
+        // handback (multi-line Problem/Tried/Needs/Suggested-dept note + a
+        // task_returned audit event + a last_progress_at bump) the endpoint writes,
+        // so the ceo-delegation-sweep can re-route correctly either way — instead
+        // of the old degraded one-line `[QC-NO-ARTIFACT] <reason>` note.
+        //
+        // NOTE (cross-lane): the return-to-orchestrator endpoint ALSO increments
+        // qc_reroute_attempts. This QC-scorer path is documented (above) as a
+        // registration failure that must NOT consume a quality-reroute attempt, so
+        // the SQL fallback deliberately leaves qc_reroute_attempts UNCHANGED. That
+        // endpoint-increments-vs-scorer-does-not discrepancy predates this fix and
+        // belongs to the return-to-orchestrator route owner to reconcile.
         const baseUrl = getMissionControlUrl();
+        if (!process.env.MISSION_CONTROL_URL && process.env.NODE_ENV === 'production') {
+          console.warn(
+            `[QCScorer] MISSION_CONTROL_URL is unset in production — the return-to-orchestrator handback ` +
+            `endpoint defaults to ${baseUrl}, which is likely unreachable; using the in-process SQL handback ` +
+            `fallback (set MISSION_CONTROL_URL to silence this).`,
+          );
+        }
+
+        // Structured handback note mirroring the return-to-orchestrator endpoint
+        // format so the ceo-delegation-sweep reads the same diagnosis fields.
+        const structuredHandbackNote = [
+          `[QC-NO-ARTIFACT HANDBACK] ${now}`,
+          `Problem: ${noArtifactReason}`,
+          'Tried: QC auto-scorer attempted to evaluate the artifact but found zero registered deliverables in task_deliverables.',
+          'Needs: The executing agent must register the output file via POST /api/tasks/[id]/deliverables before transitioning to review status.',
+          task.department ? `Suggested dept: ${task.department}` : null,
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        const writeStructuredHandbackFallback = (): void => {
+          run(
+            `UPDATE tasks SET status = 'backlog',
+               description = CASE
+                 WHEN description IS NULL OR description = '' THEN ?
+                 ELSE ? || char(10) || char(10) || '---' || char(10) || char(10) || description
+               END,
+               last_progress_at = ?,
+               updated_at = ?
+             WHERE id = ? AND status = 'review'`,
+            [structuredHandbackNote, structuredHandbackNote, now, now, taskId],
+          );
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'task_returned',
+              taskId,
+              `[RETURN] ${noArtifactReason} — suggests: ${task.department ?? 'general'}`,
+              now,
+            ],
+          );
+        };
+
         try {
           const handbackBody = {
             problem: noArtifactReason,
@@ -3329,28 +3388,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             body: JSON.stringify(handbackBody),
           });
           if (!returnResp.ok) {
-            // Fallback: write backlog status directly if the endpoint is unavailable.
-            const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
-            run(
-              `UPDATE tasks SET status = 'backlog',
-                 description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-                 updated_at = ?
-               WHERE id = ? AND status = 'review'`,
-              [handbackNote, handbackNote, now, taskId],
-            );
-            console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote backlog directly`);
+            // Endpoint reachable but rejected/failed — write the structured handback directly.
+            writeStructuredHandbackFallback();
+            console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote structured handback directly`);
           }
         } catch (returnErr) {
-          // Endpoint unreachable: write backlog directly.
-          const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
-          run(
-            `UPDATE tasks SET status = 'backlog',
-               description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-               updated_at = ?
-             WHERE id = ? AND status = 'review'`,
-            [handbackNote, handbackNote, now, taskId],
-          );
-          console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal):', (returnErr as Error).message);
+          // Endpoint unreachable — write the structured handback directly.
+          writeStructuredHandbackFallback();
+          console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal) — wrote structured handback directly:', (returnErr as Error).message);
         }
 
         return {
