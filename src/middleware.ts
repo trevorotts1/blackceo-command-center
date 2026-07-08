@@ -96,7 +96,17 @@ const ALLOW_INSECURE_OPEN_API = process.env.ALLOW_INSECURE_OPEN_API === 'true';
  * absent the route-level HMAC check authenticates nothing, so these routes
  * must be refused at the gate unless the operator has opted into open mode.
  */
-const WEBHOOK_SECRET_ROUTES = ['/api/tasks/ingest', '/api/webhooks/agent-completion'];
+const WEBHOOK_SECRET_ROUTES = [
+  '/api/tasks/ingest',
+  '/api/webhooks/agent-completion',
+  // DATA-09: auto-route + task-created mutate routing/dispatch and previously
+  // had NO route-level auth. They now self-authenticate with the same Bearer
+  // (middleware) + HMAC-over-WEBHOOK_SECRET (route) scheme as agent-completion,
+  // so they join the fail-closed family: a box without WEBHOOK_SECRET refuses
+  // them at the gate (503) instead of leaving an open write surface.
+  '/api/webhooks/auto-route',
+  '/api/webhooks/task-created',
+];
 
 /**
  * Same family as WEBHOOK_SECRET_ROUTES, but for routes with a dynamic `[id]`
