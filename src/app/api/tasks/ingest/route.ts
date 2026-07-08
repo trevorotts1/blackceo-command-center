@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac } from 'crypto';
+import { createHmac, createHash } from 'crypto';
 import { queryOne, getDb } from '@/lib/db';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore } from '@/lib/tasks';
@@ -11,6 +11,30 @@ import { getSelfClient } from '@/lib/clients';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+/**
+ * INGEST-07 — request-time schema self-heal guard.
+ *
+ * The self-heal path (POST catch block) calls runMigrations() when a request
+ * hits a schema error. runMigrations applies ALL pending migrations — INCLUDING
+ * the DESTRUCTIVE dedup migrations 081 (canonical-workspace merge) and 082 (reap
+ * duplicate "Author SOP" tasks). Running those while the box is serving live
+ * ingest races data mutations against fresh inserts, so we harden the self-heal:
+ *
+ *   1. A process-level mutex/latch (`selfHealState`) so the self-heal migrate
+ *      runs AT MOST ONCE per process and is never re-entered. runMigrations is
+ *      fully synchronous, so this ALSO guarantees it never overlaps another
+ *      self-heal in the same worker (the event loop cannot interleave two
+ *      synchronous migrate runs). On failure the latch re-arms so a later request
+ *      can retry a transient failure.
+ *   2. Set OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY=1 for the duration of the
+ *      call so the destructive dedup migrations can be gated to explicit offline
+ *      runs. The wiring that makes migrations 081/082 honour this flag lives in
+ *      src/lib/db/migrations.ts (owned by the migrations lane) — see the L7
+ *      cross-lane note. Setting it here is harmless until that gate lands and
+ *      makes the two lanes compose.
+ */
+let selfHealState: 'idle' | 'running' | 'done' = 'idle';
 
 /**
  * POST /api/tasks/ingest — Universal task-capture front door.
@@ -205,6 +229,29 @@ function resolveWorkspaceId(
       [persona.toLowerCase()]
     );
     if (byName) return { workspaceId: byName.id, resolvedBy: `persona:${persona}` };
+  }
+
+  // INGEST-06 — EXPLICIT-but-unrecognized department slug.
+  // When the caller EXPLICITLY supplied a department_slug that resolved to no
+  // workspace (tier 1 missed) and no persona rescued it (tier 2 missed), we must
+  // NOT let it soft-fall into the CEO catch-all or the first arbitrary workspace
+  // below (P4 misroute): that silently drops a mis-tagged task onto a real,
+  // unrelated department and makes it look correctly routed. Instead route it to
+  // the honest `general-task` catch-all — tagged `unrecognized-slug->general` so a
+  // QC sweep can flag the mis-tag — or, if this box has no general-task workspace,
+  // leave workspace_id NULL (FK-safe; the card is still captured and visible in the
+  // All Tasks view) rather than guessing a department. `general-task` is the "we
+  // could not route this" bucket; it is NOT an arbitrary department.
+  if (departmentSlug) {
+    const general = queryOne<{ id: string }>(
+      `SELECT id FROM workspaces
+        WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
+           OR lower(name) IN ('general task', 'general')
+        ORDER BY rowid ASC LIMIT 1`,
+      [],
+    );
+    if (general) return { workspaceId: general.id, resolvedBy: 'unrecognized-slug->general' };
+    return { workspaceId: null, resolvedBy: 'unrecognized-slug->unrouted' };
   }
 
   // 3. CEO catch-all. Match all canonical CEO/master-orchestrator slugs.
@@ -407,14 +454,38 @@ export async function POST(request: NextRequest) {
         ? (priorityRaw as TaskPriority)
         : undefined;
 
-    // Deterministic dedupe key: idempotency_key wins, else source_ref.
-    // NOTE: The actual idempotency check now lives in createTaskCore (Layer 1).
-    // We pass the key through so createTaskCore embeds it in the event message
-    // AND checks it before inserting.
-    const dedupeKey = idempotencyKey || sourceRef;
+    // Deterministic dedupe key: idempotency_key wins, else source_ref, else a
+    // synthesized intrinsic key.
+    // NOTE: The actual idempotency check lives in createTaskCore (Layer 1). We
+    // pass the key through so createTaskCore embeds it in the event message AND
+    // checks it before inserting.
+    //
+    // INGEST-01 — a bare retry that supplies NEITHER an idempotency_key NOR a
+    // source_ref previously reached createTaskCore with no Layer-1 anchor, so two
+    // identical posts (a Telegram/backfill retry) each created a card. INGEST-02 —
+    // Layer 2's title window is workspace-scoped, so a retry that routed to a
+    // DIFFERENT workspace evaded it too. Synthesizing
+    // sha256(title | source | external_session_id) gives Layer 1 a
+    // workspace-INDEPENDENT anchor for every ingest, so an identical retry
+    // collapses onto the first card regardless of which workspace routing picked.
+    // Layer 2 in createTaskCore stays intact for other keyless callers (UI, plain
+    // Telegram) — this synthesis is scoped to the ingest front door only.
+    const syntheticDedupeKey =
+      'auto:' +
+      createHash('sha256')
+        .update(`${title}|${source ?? ''}|${externalSessionId ?? ''}`)
+        .digest('hex');
+    const dedupeKey = idempotencyKey || sourceRef || syntheticDedupeKey;
 
     let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(departmentSlug, persona);
     let resolvedDepartment: string | undefined = departmentSlug;
+    // INGEST-06 — the explicit slug was unrecognized and got redirected to the
+    // general-task catch-all (or left unrouted). Report the department we ACTUALLY
+    // landed in so the W5.2 owner-assignment notice never announces a department
+    // this box does not have.
+    if (resolvedBy.startsWith('unrecognized-slug')) {
+      resolvedDepartment = workspaceId ? 'general-task' : undefined;
+    }
 
     // ── W3.2: Owner-direct specialist pin (spec §3 owner-direct exception) ─────
     // When the OWNER names a specific AI/agent, the CEO routes STRAIGHT to it —
@@ -646,16 +717,36 @@ export async function POST(request: NextRequest) {
     const isSchemaError = /SqliteError|no column named|no such column|no such table/i.test(msg);
     if (isSchemaError) {
       console.error(`[INGEST] SCHEMA error detected ("${msg}") — attempting one-shot self-heal migrate.`);
-      try {
-        runMigrations(getDb());
+      // INGEST-07 — run the self-heal migrate AT MOST ONCE per process, never
+      // re-entered, and never concurrently with a live-ingest destructive dedup.
+      if (selfHealState === 'idle') {
+        selfHealState = 'running';
+        const prevAdditiveFlag = process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
+        process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY = '1';
+        try {
+          runMigrations(getDb());
+          selfHealState = 'done';
+          console.warn(
+            '[INGEST] Self-heal migrate succeeded — future requests should clear. ' +
+              'Returning 503 for this request so the caller can retry.',
+          );
+        } catch (migrateErr) {
+          // Re-arm so a later request can retry a transient migrate failure.
+          selfHealState = 'idle';
+          console.error(
+            '[INGEST] Self-heal migrate FAILED:',
+            migrateErr instanceof Error ? migrateErr.message : String(migrateErr),
+          );
+        } finally {
+          // Restore the flag exactly. runMigrations is synchronous, so no other
+          // request observed this env mutation during the call.
+          if (prevAdditiveFlag === undefined) delete process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
+          else process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY = prevAdditiveFlag;
+        }
+      } else {
         console.warn(
-          '[INGEST] Self-heal migrate succeeded — future requests should clear. ' +
-            'Returning 503 for this request so the caller can retry.',
-        );
-      } catch (migrateErr) {
-        console.error(
-          '[INGEST] Self-heal migrate FAILED:',
-          migrateErr instanceof Error ? migrateErr.message : String(migrateErr),
+          `[INGEST] Self-heal already ${selfHealState} in this process — not re-running migrations; ` +
+            'returning 503 so the caller can retry.',
         );
       }
       try {
