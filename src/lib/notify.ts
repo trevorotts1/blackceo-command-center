@@ -252,3 +252,54 @@ export function notifyOwner(message: string): boolean {
   }
   return notifyTelegram({ chatId, message });
 }
+
+/**
+ * MSG-06 / SWEEP-06 — the SYSTEM (operator) notification channel.
+ *
+ * SYSTEM-audience alerts (dispatch-block-at-cap, silent-failure escalations,
+ * stuck-in-progress) are an OPERATOR concern and must NEVER reach the client
+ * owner DM (MOVE-IN-SILENCE). This routes them to the Rescue Rangers
+ * escalation webhook when configured; otherwise it logs server-side and DROPS
+ * the message. It deliberately does NOT fall back to notifyOwner() — that is
+ * the client's chat, and a SYSTEM alert there is the breach SWEEP-06 fixes.
+ *
+ * Fire-and-forget (does not await the POST); never throws.
+ *
+ * Cross-lane consumers (see fix-spec SWEEP-06 / MSG-06 — NOT owned by L9):
+ *   • task-dispatcher.ts recordDispatchFailure(): call notifySystem() instead
+ *     of notifyOwner() when `audience === 'SYSTEM'`.
+ *   • jobs/stuck-in-progress-sweep.ts + jobs/stale-task-sweep.ts: replace the
+ *     inline webhook POST + notifyOwner fallback with notifySystem().
+ *
+ * @returns true when dispatched to the rescue webhook; false when no webhook
+ *   is configured (the alert is logged and dropped — never sent to the client).
+ */
+export function notifySystem(
+  message: string,
+  meta?: { agent?: string; action?: string },
+): boolean {
+  const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
+  if (!webhookUrl) {
+    console.warn(
+      '[notify] notifySystem: no RESCUE_RANGERS_WEBHOOK_URL — SYSTEM alert logged, NOT sent to client: %s',
+      message,
+    );
+    return false;
+  }
+  // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
+  void fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: meta?.action ?? 'escalate',
+      agent: meta?.agent ?? 'command-center',
+      message,
+    }),
+  }).catch((err) => {
+    console.warn(
+      '[notify] notifySystem: Rescue Rangers POST failed: %s',
+      (err as Error).message,
+    );
+  });
+  return true;
+}
