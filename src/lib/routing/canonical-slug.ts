@@ -73,14 +73,22 @@ const ALIAS_MAP: Record<string, string> = {
   'web-dev':           'web-development',
   'web':               'web-development',
 
-  // app-dev / engineering variants (UNIT ENG — 2026-06-28: engineering is now CORE/FLOOR)
+  // app-dev variants → app-development (a DISTINCT chosen department with its own
+  // Kanban lane). App Development and Engineering are two separate canonical
+  // departments (both live in CANONICAL_SLUGS and departments.config.ts uses
+  // 'app-development'); a client that chose BOTH must get BOTH lanes. Mapping
+  // 'app-development' → 'engineering' here (removed 2026-07-08) collapsed the two
+  // during the seed dedup (findCanonicalWorkspaceId), so App Development never got
+  // a lane on a box that also had Engineering. 'app-development' is therefore left
+  // to resolve to itself (Step-4 canonical passthrough), never aliased away.
   'appdev':             'app-development',
   'app-dev':            'app-development',
   'mobile':             'app-development',
-  // engineering aliases → engineering (canonical CORE slug)
+  // engineering aliases → engineering (canonical CORE slug). These stay pointed at
+  // 'engineering' — only the destructive 'app-development' → 'engineering' entry was
+  // removed, because App Development is its own chosen department.
   'software-development': 'engineering',
   'software-dev':         'engineering',
-  'app-development':      'engineering',
   'apps':                 'engineering',
 
   // video variants

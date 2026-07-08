@@ -589,6 +589,62 @@ else
 fi
 
 blue ""
+blue "── 13. Floor invariant: displayed depts == chosen manifest − opt-outs ──"
+#
+# INVARIANT (2026-07-08): for the ACTIVE client company, the Kanban board displays
+# EXACTLY the client's chosen departments.json manifest MINUS any explicitly
+# opted-out department — with no first-boot staleness, no destructive slug
+# collapse, no foreign-company leakage, and no silent cap. Diagnosed live on a
+# client box: a 43-dept manifest rendered only 42/40 due to FOUR shared-repo bugs.
+# These checks are the drift sentinels for each fix; the AUTHORITATIVE behavioral
+# proof (real seed + board query on a throwaway DB) is
+# tests/unit/floor-department-invariant.test.ts, wired into CI via `npm run test:vitest`.
+
+# 13.1: board query is scoped to the active company in BOTH GET branches (fix #4:
+#       no foreign-company leakage). resolveActiveCompanyId is the shared resolver.
+check "13.1" "/api/workspaces GET filters by active company (both branches)" \
+  '[ "$(grep -c "scope.sql" src/app/api/workspaces/route.ts)" -ge 2 ] && grep -q "resolveActiveCompanyId" src/app/api/workspaces/route.ts' \
+  "scope the board SELECT to the active client company"
+
+check "13.1b" "resolveActiveCompanyId exported from src/lib/company.ts (shared seed+board resolver)" \
+  "grep -q 'export function resolveActiveCompanyId' src/lib/company.ts"
+
+# 13.2: the destructive 'app-development' → 'engineering' alias is GONE (fix #2:
+#       App Development keeps its own distinct lane). Both remain canonical slugs.
+check "13.2" "canonical-slug.ts does NOT collapse app-development into engineering" \
+  "! grep -qE \"'app-development'[[:space:]]*:[[:space:]]*'engineering'\" src/lib/routing/canonical-slug.ts" \
+  "remove the app-development->engineering ALIAS_MAP entry"
+
+check "13.2b" "app-development and engineering are both canonical department slugs" \
+  "grep -qE \"'app-development',\" src/lib/routing/canonical-slug.ts && grep -qE \"'engineering',\" src/lib/routing/canonical-slug.ts"
+
+# 13.3: company seed fails CLOSED on the unpopulated template (fix #3: no
+#       attribution drift under a bogus your-company / fallback company).
+check "13.3" "branding-seed fails closed on the 'Your Company' template (partial-config)" \
+  "grep -q 'isTemplateCompanyName' src/lib/db/branding-seed.ts && grep -qi 'your company' src/lib/db/branding-seed.ts" \
+  "treat companyName='Your Company' as partial-config (do not seed a fallback company)"
+
+# 13.4: department seeding is an idempotent, opt-out-honoring, company-attributed
+#       UPSERT that runs on every boot/converge (fix #1: no first-boot staleness).
+check "13.4" "autoSeed delegates to the idempotent reseed — first-boot-only guard removed" \
+  "grep -q 'reseedWorkspacesFromConfig(db' src/lib/db/migrations.ts && ! grep -q 'Already has data' src/lib/db/migrations.ts" \
+  "make department seeding run every boot (delegate autoSeed to reseedWorkspacesFromConfig)"
+
+check "13.4b" "reseed honors explicit opt-outs and re-homes company_id (additive)" \
+  "grep -q 'isDepartmentOptedOut' src/lib/db/migrations.ts && grep -q 'company_id = excluded.company_id' src/lib/db/migrations.ts" \
+  "skip opted-out depts; set company_id in the upsert"
+
+# 13.5: DYNAMIC fixture-arithmetic — expected-displayed == manifest − opt-outs, with
+#       a real opt-out exercised and app-development + engineering both present.
+check "13.5" "fixture golden == manifest − opt-outs (subtraction contract, node built-ins)" \
+  "node scripts/floor-invariant-fixture-check.mjs" \
+  "run scripts/floor-invariant-fixture-check.mjs and reconcile tests/fixtures/floor-invariant/*"
+
+check "13.6" "floor-invariant behavioral test is present + wired into vitest (CI-gated proof)" \
+  "[ -f tests/unit/floor-department-invariant.test.ts ] && grep -q 'floor-department-invariant.test.ts' vitest.config.ts" \
+  "keep the DB-backed invariant test and its vitest.config.ts include entry"
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"

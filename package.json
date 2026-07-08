@@ -1,6 +1,6 @@
 {
   "name": "mission-control",
-  "version": "4.69.1",
+  "version": "4.70.0",
   "private": true,
   "engines": {
     "node": ">=20.0.0"
@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "bash scripts/cc-start.sh",
     "lint": "next lint",
-    "test:unit": "node --import tsx --test $(ls tests/unit/*.test.ts | grep -v -E 'deep-health\\.test\\.ts|cc-probe-pm2\\.test\\.ts')",
+    "test:unit": "node --import tsx --test $(ls tests/unit/*.test.ts | grep -v -E 'deep-health\\.test\\.ts|cc-probe-pm2\\.test\\.ts|floor-department-invariant\\.test\\.ts')",
     "test:deep-health": "vitest run tests/unit/deep-health.test.ts",
     "test:vitest": "vitest run",
     "test:prove-zhe-web": "node --import tsx --test tests/e2e/prove-zhe-web.e2e.mjs",

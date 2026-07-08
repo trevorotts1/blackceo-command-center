@@ -3803,10 +3803,48 @@ export function resolveDepartmentsTreePath(): string | null {
 }
 
 /**
- * Re-seed workspaces from departments.json + build-state, without the
- * first-boot guard. Idempotent: upserts each dept row, never deletes.
- * Called by the converge endpoint (POST /api/system/converge) to re-sync
- * after a new dept/role is added post-build.
+ * Is this departments.json entry EXPLICITLY opted out?
+ *
+ * The floor invariant is: displayed departments == chosen manifest MINUS any
+ * explicitly opted-out department. A client can decline a department the
+ * interview otherwise offered (the interview seam calls these "declined"); when
+ * that decision is carried into the manifest as an explicit flag rather than by
+ * omission, the seed MUST NOT give it a Kanban lane. This predicate recognises
+ * every explicit opt-out spelling so the seed and the QC gate agree:
+ *   { optOut: true } | { opted_out: true } | { enabled: false } | { active: false }
+ *   | { status: "opted-out" | "opted_out" | "declined" | "disabled" | "inactive" }
+ * A plain manifest entry (no flag) is NOT opted out — omission is the usual path.
+ */
+export function isDepartmentOptedOut(dept: unknown): boolean {
+  if (!dept || typeof dept !== 'object') return false;
+  const d = dept as Record<string, unknown>;
+  if (d.optOut === true || d.opted_out === true) return true;
+  if (d.enabled === false || d.active === false) return true;
+  const status = typeof d.status === 'string' ? d.status.trim().toLowerCase() : '';
+  if (['opted-out', 'opted_out', 'declined', 'disabled', 'inactive'].includes(status)) return true;
+  return false;
+}
+
+/**
+ * Re-seed workspaces from departments.json + build-state — the SINGLE idempotent
+ * upsert used by BOTH the every-boot path (autoSeedFromDepartmentsJson) and the
+ * converge endpoint (POST /api/system/converge). Runs on every boot/converge so
+ * manifest GROWTH (a department added after first boot) re-syncs instead of being
+ * stranded by a first-boot-only guard.
+ *
+ * Floor invariant (enforced here + at the board query in /api/workspaces):
+ *   for the active company, displayed departments == chosen manifest − opt-outs.
+ *
+ * Guarantees:
+ *   • Idempotent UPSERT keyed on dept id — re-running never duplicates a lane.
+ *   • Additive / NON-DESTRUCTIVE — INSERT missing depts, UPDATE display fields +
+ *     company_id; NEVER deletes a workspace or any task/agent data.
+ *   • Company attribution — every chosen dept is (re-)homed to the ACTIVE company
+ *     resolved by seedCompanyGuarded (mirrors sync-departments-from-build-state.py),
+ *     so the active-company board filter never hides a chosen lane.
+ *   • Fail-closed — a template / partial company-config aborts the reseed rather
+ *     than mis-attributing departments to a bogus fallback company.
+ *   • Opt-outs honored — an explicitly opted-out dept never gets a lane.
  *
  * Returns counts of created + updated rows.
  */
@@ -3814,6 +3852,7 @@ export function reseedWorkspacesFromConfig(
   db: Database.Database,
   opts: { force: boolean } = { force: true }
 ): { created: number; updated: number } {
+  void opts; // reserved; the upsert is always idempotent so `force` is a no-op today
   let created = 0;
   let updated = 0;
 
@@ -3829,20 +3868,27 @@ export function reseedWorkspacesFromConfig(
     const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
 
-    // Ensure company row exists
+    // Ensure company row exists / resolve the ACTIVE company. seedCompanyGuarded
+    // returns partial-config for a blank OR unpopulated-template ("Your Company")
+    // company-config — in which case we FAIL CLOSED: do not seed departments under
+    // a fallback company (that is the attribution-drift bug this guards against).
     const seedResult = seedCompanyGuarded(db);
     if (seedResult.reason === 'partial-config') {
-      console.warn('[reseed] Aborting workspace reseed: partial company config');
+      console.warn('[reseed] Aborting workspace reseed: partial/template company config (fail-closed, no mis-attribution)');
       return { created, updated };
     }
+    // Pin every seeded dept to the resolved active company id (re-homes rows that
+    // were created under the pre-064 'default' sentinel or a stale company_id).
+    const companyId = seedResult.companyId ?? 'default';
 
     const upsertStmt = db.prepare(`
-      INSERT INTO workspaces (id, name, slug, description, icon, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         slug = excluded.slug,
         icon = excluded.icon,
+        company_id = excluded.company_id,
         sort_order = excluded.sort_order
     `);
 
@@ -3856,15 +3902,25 @@ export function reseedWorkspacesFromConfig(
         console.log('[reseed] Skipping malformed departments.json entry (no slug/id):', JSON.stringify(dept).slice(0, 80));
         continue;
       }
+
+      // Floor invariant: an EXPLICITLY opted-out department never gets a lane.
+      if (isDepartmentOptedOut(dept)) {
+        console.log(`[reseed] Skipping "${dept.id || dept.slug}" — explicitly opted out (honored decline)`);
+        continue;
+      }
+
       const slugLower = String(dept.slug || dept.id || '').toLowerCase();
-      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo';
+      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
       const isGeneralTask = slugLower === 'general-task';
       const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
 
       // Slug-uniqueness guard (FM-6): never (re)create a SECOND workspace whose
       // slug canonicalizes to a department a DIFFERENT row already represents
       // (e.g. seeding `ceo` when `master-orchestrator` exists). Skip the dupe so
-      // converge can't re-split a department across two Kanban columns.
+      // converge can't re-split a department across two Kanban columns. NOTE: as of
+      // 2026-07-08 'app-development' and 'engineering' are DISTINCT canonical slugs
+      // (the destructive app-development→engineering alias was removed), so two
+      // chosen depts App Development + Engineering no longer collide here.
       const canonOwner = findCanonicalWorkspaceId(db, dept.slug || dept.id);
       if (canonOwner && canonOwner !== dept.id) {
         console.log(`[reseed] Skipping "${dept.id}" — department already represented by workspace "${canonOwner}"`);
@@ -3878,6 +3934,7 @@ export function reseedWorkspacesFromConfig(
         dept.slug || dept.id,
         dept.name + ' department workspace',
         dept.emoji || '📁',
+        companyId,
         sortOrder
       );
       if (existing) {
@@ -3891,7 +3948,7 @@ export function reseedWorkspacesFromConfig(
     autoSeedTrioAgents(db);
     autoSeedStarterSOPs(db);
 
-    console.log(`[reseed] workspaces: created=${created} updated=${updated}`);
+    console.log(`[reseed] workspaces: created=${created} updated=${updated} company=${companyId}`);
   } catch (err) {
     console.error('[reseed] Failed:', (err as Error).message);
     throw err; // Re-throw so converge endpoint can FAIL LOUD
@@ -3915,92 +3972,23 @@ export function getMigrationStatus(db: Database.Database): { applied: string[]; 
   return { applied, pending };
 }
 
-// Auto-seed company + workspaces from config/departments.json on first boot
+// Auto-seed company + workspaces from config/departments.json on EVERY boot.
+//
+// Historically this ran ONLY on first boot: it early-returned the moment the
+// workspaces table had any row, so a manifest that GREW after the first boot (a
+// department added post-build) never re-synced and the board stayed short of the
+// client's chosen count. It is now an idempotent, additive, opt-out-honoring,
+// company-attributed UPSERT delegated to reseedWorkspacesFromConfig() — the SAME
+// function the converge endpoint uses — so boot and converge enforce the floor
+// invariant identically. reseedWorkspacesFromConfig re-throws on error (so
+// converge can fail loud); here we swallow so a seed hiccup never crashes app
+// startup, exactly as the previous first-boot seeder did.
 function autoSeedFromDepartmentsJson(db: Database.Database) {
   try {
-    // Check if workspaces table is empty
-    const count = db.prepare('SELECT COUNT(*) as c FROM workspaces').get() as { c: number } | undefined;
-    if (count && count.c > 0) return; // Already has data
-
-    // Look for departments.json across the robust candidate set (CC root + env
-    // override + legacy installs + the ZHC company folder the floor wrote to).
-    const configPath = resolveDepartmentsConfigPath();
-    if (!configPath) return;
-    console.log('[Auto-seed] Using departments.json:', configPath);
-
-    const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    if (!Array.isArray(depts) || depts.length === 0) return;
-
-    console.log('[Auto-seed] Found departments.json with', depts.length, 'departments');
-
-    // B.3 guard: seed the company row through the guarded function.
-    // It reads company-config.json first; if present + valid it uses that.
-    // If the config is present but companyName is blank (partial-config per B.1),
-    // we abort the entire workspace seed — a misconfigured box must not silently
-    // get a "Command Center" / "Default" company row.
-    const seedResult = seedCompanyGuarded(db);
-    if (seedResult.reason === 'partial-config') {
-      console.warn('[Auto-seed] Aborting workspace seed: company-config.json exists but companyName is blank (partial-config — box is misconfigured)');
-      return;
+    const { created, updated } = reseedWorkspacesFromConfig(db, { force: true });
+    if (created > 0 || updated > 0) {
+      console.log(`[Auto-seed] Departments synced on boot — created=${created} updated=${updated}`);
     }
-    console.log('[Auto-seed] Company seed result:', seedResult.reason, '—', seedResult.companyId);
-
-    // Use the company id that seedCompanyGuarded resolved/created.
-    const companySlug = seedResult.companyId ?? 'default';
-
-    for (const dept of depts) {
-      // Robustness guard: skip any entry that is not a usable department object.
-      // A departments.json that is an array of bare strings (a legacy/partial
-      // writer output), or that contains an object missing both `slug` and `id`,
-      // otherwise threw inside findCanonicalWorkspaceId / the INSERT below and
-      // ABORTED the entire seed loop — so one bad entry left the board with
-      // zero (or only the entries before it) departments. Skip-and-continue
-      // seeds every WELL-FORMED department instead of losing them all.
-      if (!dept || typeof dept !== 'object' || (!dept.id && !dept.slug)) {
-        console.log('[Auto-seed] Skipping malformed departments.json entry (no slug/id):', JSON.stringify(dept).slice(0, 80));
-        continue;
-      }
-      // Board layout guarantee — two anchor rows on every seed:
-      //   CEO / master-orchestrator → sort_order = 0   (always FIRST)
-      //   General Tasks             → sort_order = 99999 (always LAST)
-      // All other depts default to 1000 and will sort alphabetically between.
-      // Display names are free text (the client's persona name), so we match
-      // only on slugs / well-known id variants.
-      const slugLower = String(dept.slug || dept.id || '').toLowerCase();
-      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
-      const isGeneralTask = slugLower === 'general-task';
-      const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
-
-      // Slug-uniqueness guard (FM-6): skip a dept whose slug canonicalizes to one
-      // a DIFFERENT row already seeded in this loop (e.g. both `ceo` and
-      // `master-orchestrator` present in departments.json) — single canonical
-      // department list, never two rows for one Kanban column.
-      const canonOwner = findCanonicalWorkspaceId(db, dept.slug || dept.id);
-      if (canonOwner && canonOwner !== dept.id) {
-        console.log(`[Auto-seed] Skipping "${dept.id}" — department already represented by workspace "${canonOwner}"`);
-        continue;
-      }
-
-      db.prepare(
-        'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(
-        dept.id,
-        dept.name,
-        dept.slug || dept.id,
-        dept.name + ' department workspace',
-        dept.emoji || '📁',
-        companySlug,
-        sortOrder
-      );
-      console.log('[Auto-seed] Created workspace:', dept.id, dept.name, isCeo ? '(CEO → sort_order 0)' : '');
-    }
-
-    // ── PRD 2.11: seed the trio (QC + research + DA) for every workspace ──────
-    // Called here so any workspace created on first-boot via autoSeedFromDepartmentsJson
-    // also gets its trio, even when migration 065 ran before any workspaces existed.
-    autoSeedTrioAgents(db);
-
-    console.log('[Auto-seed] Done. Seeded company +', depts.length, 'workspaces');
   } catch (err) {
     console.log('[Auto-seed] Skipped:', (err as Error).message);
   }
