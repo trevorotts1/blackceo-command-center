@@ -207,6 +207,29 @@ function resolveWorkspaceId(
     if (byName) return { workspaceId: byName.id, resolvedBy: `persona:${persona}` };
   }
 
+  // INGEST-06 — EXPLICIT-but-unrecognized department slug.
+  // When the caller EXPLICITLY supplied a department_slug that resolved to no
+  // workspace (tier 1 missed) and no persona rescued it (tier 2 missed), we must
+  // NOT let it soft-fall into the CEO catch-all or the first arbitrary workspace
+  // below (P4 misroute): that silently drops a mis-tagged task onto a real,
+  // unrelated department and makes it look correctly routed. Instead route it to
+  // the honest `general-task` catch-all — tagged `unrecognized-slug->general` so a
+  // QC sweep can flag the mis-tag — or, if this box has no general-task workspace,
+  // leave workspace_id NULL (FK-safe; the card is still captured and visible in the
+  // All Tasks view) rather than guessing a department. `general-task` is the "we
+  // could not route this" bucket; it is NOT an arbitrary department.
+  if (departmentSlug) {
+    const general = queryOne<{ id: string }>(
+      `SELECT id FROM workspaces
+        WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
+           OR lower(name) IN ('general task', 'general')
+        ORDER BY rowid ASC LIMIT 1`,
+      [],
+    );
+    if (general) return { workspaceId: general.id, resolvedBy: 'unrecognized-slug->general' };
+    return { workspaceId: null, resolvedBy: 'unrecognized-slug->unrouted' };
+  }
+
   // 3. CEO catch-all. Match all canonical CEO/master-orchestrator slugs.
   //    The canonical slug is `master-orchestrator` (migration 051 rewrites
   //    legacy `ceo` / `dept-ceo` slugs on first boot), so we include all
@@ -415,6 +438,13 @@ export async function POST(request: NextRequest) {
 
     let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(departmentSlug, persona);
     let resolvedDepartment: string | undefined = departmentSlug;
+    // INGEST-06 — the explicit slug was unrecognized and got redirected to the
+    // general-task catch-all (or left unrouted). Report the department we ACTUALLY
+    // landed in so the W5.2 owner-assignment notice never announces a department
+    // this box does not have.
+    if (resolvedBy.startsWith('unrecognized-slug')) {
+      resolvedDepartment = workspaceId ? 'general-task' : undefined;
+    }
 
     // ── W3.2: Owner-direct specialist pin (spec §3 owner-direct exception) ─────
     // When the OWNER names a specific AI/agent, the CEO routes STRAIGHT to it —
