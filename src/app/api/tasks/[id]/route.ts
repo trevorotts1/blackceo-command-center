@@ -57,6 +57,20 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
+
+    // ── Trust-boundary operator identity (INGEST-11) ─────────────────────────
+    // Cloudflare Access injects `Cf-Access-Authenticated-User-Email` ONLY after
+    // it has verified the operator's SSO identity at the edge. We derive the
+    // approving human's identity from that verified header — NEVER from a payload
+    // field (updated_by_agent_id) nor a bare, forgeable `x-operator-email`.
+    //
+    // CROSS-LANE DEPENDENCY (L6 · src/middleware.ts): the middleware MUST strip
+    // any inbound copy of the `Cf-Access-*` headers from external callers at the
+    // trust boundary, so a request that did NOT traverse Cloudflare Access cannot
+    // forge this identity. This route consumes the boundary-guaranteed value.
+    const cfAccessEmail =
+      request.headers.get('cf-access-authenticated-user-email')?.trim() || null;
+
     const body: UpdateTaskRequest & { updated_by_agent_id?: string } = await request.json();
 
     // Validate input with Zod
@@ -99,8 +113,32 @@ export async function PATCH(
     // role_type='qc' — is a self-grade conflict of interest and is rejected
     // with 403. This kills the builder self-grade bypass at the gate.
     //
-    // User-initiated moves (no updated_by_agent_id) are always allowed so
-    // human operators are never blocked.
+    // Human review → done approvals (no updated_by_agent_id) are NO LONGER
+    // auto-trusted (INGEST-11): they MUST carry a verified Cloudflare Access
+    // identity. This guard rejects an anonymous scripted "human" that simply
+    // omits updated_by_agent_id; a genuine operator authenticated through CF
+    // Access carries Cf-Access-Authenticated-User-Email and passes — its value
+    // is recorded as the approver in the audit trail below.
+    if (
+      validatedData.status === 'done' &&
+      existing.status === 'review' &&
+      !validatedData.updated_by_agent_id &&
+      !cfAccessEmail
+    ) {
+      return NextResponse.json(
+        {
+          error: 'Forbidden: review → done requires a verified operator identity.',
+          hint:
+            'A human approval must arrive through Cloudflare Access (which sets a ' +
+            'verified Cf-Access-Authenticated-User-Email at the trust boundary). An ' +
+            'agent approval must set updated_by_agent_id to the department QC ' +
+            'Specialist or a master agent. review → done is otherwise decided only ' +
+            'by the independent QC auto-scorer (runQCOnReview).',
+        },
+        { status: 403 },
+      );
+    }
+
     if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
       const updatingAgent = queryOne<Agent & { role_type?: string }>(
         'SELECT id, is_master, role_type, workspace_id FROM agents WHERE id = ?',
