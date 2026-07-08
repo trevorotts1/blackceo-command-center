@@ -495,12 +495,31 @@ export async function PATCH(
         shouldDispatch = true;
       }
 
-      // Log status change event
+      // ── Provenance (INGEST-14): resolve the actor ONCE and stamp it on BOTH
+      // the events row (agent_id) AND the task_history row (changed_by_agent_id
+      // + agent_name) so the two audit sinks never diverge. For a human
+      // review → done approval with no agent id, the verified CF-Access operator
+      // email (INGEST-11) is the approver of record. The canonical consolidation
+      // is the shared transition() (task-lifecycle.ts, owned by L3): this route,
+      // the status route, and the return-to-orchestrator route should all funnel
+      // through it — see integrator note.
+      const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
+      let actorName: string | null = null;
+      if (!validatedData.updated_by_agent_id && cfAccessEmail) {
+        actorName = cfAccessEmail; // verified human operator (INGEST-11)
+      } else if (actingAgentId) {
+        const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
+        actorName = a?.name ?? null;
+      }
+      const approverSuffix =
+        !validatedData.updated_by_agent_id && cfAccessEmail ? ` (approved by ${cfAccessEmail})` : '';
+
+      // Log status change event (with actor agent_id for a complete audit trail).
       const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
       run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`, now]
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), eventType, actingAgentId, id, `Task "${existing.title}" moved to ${validatedData.status}${approverSuffix}`, now]
       );
 
       // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
@@ -519,16 +538,12 @@ export async function PATCH(
       // compute durations + agent attribution per transition. Best-effort:
       // older DBs without the table won't have this row.
       try {
-        const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
-        let actingAgentName: string | null = null;
-        if (actingAgentId) {
-          const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
-          actingAgentName = a?.name ?? null;
-        }
+        // Reuse the single actor resolution stamped on the events row above so
+        // the two audit sinks agree on WHO performed the transition (INGEST-14).
         run(
           `INSERT INTO task_history (id, task_id, status_from, status_to, changed_at, changed_by_agent_id, agent_name)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), id, existing.status, validatedData.status, now, actingAgentId, actingAgentName]
+          [uuidv4(), id, existing.status, validatedData.status, now, actingAgentId, actorName]
         );
       } catch (err) {
         // task_history table missing on older DBs — just log and move on.
