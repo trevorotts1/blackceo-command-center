@@ -143,6 +143,19 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
     ? `${handbackNote}\n\n---\n\n${task.description}`
     : handbackNote;
 
+  // SWEEP-03 (drag-back trap): a task returning to backlog FROM blocked would
+  // otherwise keep dispatch_attempts >= cap and a stale backoff window, so every
+  // advancer (intake-advance / backlog-redispatch) would filter it out and it
+  // would rot in backlog forever. Reset the dispatch accounting ONLY on the
+  // from-blocked transition — a non-blocked stale return (in_progress/review →
+  // backlog) is left untouched so a genuinely looping task still stays capped.
+  const fromBlocked = task.status === 'blocked';
+  const dispatchResetClause = fromBlocked
+    ? `,
+        dispatch_attempts = 0,
+        next_dispatch_eligible_at = NULL`
+    : '';
+
   try {
     run(
       `UPDATE tasks SET
@@ -150,7 +163,7 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
         description = ?,
         qc_reroute_attempts = ?,
         last_progress_at = ?,
-        updated_at = ?
+        updated_at = ?${dispatchResetClause}
        WHERE id = ?`,
       [updatedDescription, newAttempts, now, now, task.id],
     );
