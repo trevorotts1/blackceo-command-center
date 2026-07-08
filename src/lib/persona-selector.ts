@@ -53,6 +53,16 @@ const execFileAsync = promisify(execFile);
 //     company-config.json `governance_persona_id`.
 // These are the TS side of the resolved Q1/Q2 decisions and are the terminal tier
 // of the fallback chain (never-null when everything else is unavailable).
+//
+// PERS-01: these slugs MUST match the Python-side pins (DEFAULT_PERSONA_FALLBACK /
+// GOVERNANCE_PERSONA_FALLBACK in persona-selector-v2.py) AND must exist in the
+// seeded persona catalog (house-voice via triad 81->82). A fallback-pin site
+// (resolvePersonaAndPin in tasks.ts, L7) should verify the resolved slug exists in
+// the catalog before pinning and emit a loud P19 warn on a miss — pinning a
+// non-existent slug leaves the doer unable to load a blueprint. The value parity
+// (these constants vs the documented Python pins) is locked by
+// tests/unit/pers01-fallback-pins.test.ts; cross-repo parity vs the live Python
+// source is an integrator follow-up.
 export const DEFAULT_PERSONA_FALLBACK = "blackceo-house-voice";
 export const GOVERNANCE_PERSONA_FALLBACK = "covey-7-habits";
 
