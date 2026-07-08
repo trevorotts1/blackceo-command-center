@@ -170,7 +170,9 @@ export async function PATCH(
 
       const approved = hasDeptQCAgent
         ? isAuthorizedQC || isMasterInWorkspace || isGlobalMaster
-        : isGlobalMaster; // Pre-QC-migration fallback: any master can approve
+        // Pre-QC-migration (pre-060) fallback: a legit DEPT master must be able
+        // to approve too, not only a global master (INGEST-12).
+        : isMasterInWorkspace || isGlobalMaster;
 
       if (!approved) {
         return NextResponse.json(
