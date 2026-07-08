@@ -11,8 +11,34 @@ Run this after the Command Center is installed and the DB is created.
 import sqlite3, json, os, sys, re
 from pathlib import Path
 
+# DATA-08: use the ONE shared DB resolver (shared-utils/resolve_db.py) so this
+# script opens the SAME mission-control.db the Command Center app uses, instead
+# of its own stale candidate list (the decoy-DB bug).
+_SHARED_UTILS = Path(__file__).resolve().parent.parent / "shared-utils"
+sys.path.insert(0, str(_SHARED_UTILS))
+try:
+    from resolve_db import find_dashboard_db as _shared_find_dashboard_db, is_db_found as _shared_is_db_found  # type: ignore
+    _HAS_SHARED_RESOLVER = True
+except ImportError:
+    _HAS_SHARED_RESOLVER = False
+
+
 def find_db():
+    # DATA-08: honor the app's DB path FIRST — DASHBOARD_DB_PATH (forwarded by the
+    # CC app to subprocesses) then DATABASE_PATH (src/lib/db/index.ts) — before any
+    # install-layout candidate, so the seed never lands on a decoy DB.
+    for _ev in ("DASHBOARD_DB_PATH", "DATABASE_PATH"):
+        _v = os.environ.get(_ev)
+        if _v:
+            return _v
+    if _HAS_SHARED_RESOLVER:
+        p = _shared_find_dashboard_db()
+        if _shared_is_db_found(p):
+            return str(p)
+    # Fallback for bootstrap installs where shared-utils is not yet importable.
     candidates = [
+        Path.home() / "projects/command-center/mission-control.db",
+        Path("/data/projects/command-center/mission-control.db"),
         Path.home() / "projects/mission-control/mission-control.db",
         Path("/opt/mission-control/mission-control.db"),
         Path("/app/mission-control.db"),
