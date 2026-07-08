@@ -4,8 +4,10 @@
  * Scores a completed task against the assigned SOP's success_criteria using a
  * 1–10 rubric. Called automatically when a task transitions to `review` status.
  *
- * Gate: ≥8.5 → auto-approve (mark done); <8.5 → kick back to in_progress with
- * specific gap notes as a task event.
+ * Gate: ≥8.5 → auto-approve (mark done); <8.5 → kick back to `backlog`
+ * (the task re-enters intake / auto-route from there) with specific gap notes
+ * as a task event. NOTE: the kickback target is `backlog`, NOT `in_progress` —
+ * the raw status writers below all write `status = 'backlog'` on a QC fail.
  *
  * Per-department QC: the scorer resolves the ITEM'S OWN department QC agent
  * (role_type='qc', workspace_id = task's workspace) and uses that agent's
