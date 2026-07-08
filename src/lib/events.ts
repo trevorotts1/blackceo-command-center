@@ -1,9 +1,57 @@
 /**
  * Server-Sent Events (SSE) broadcaster for real-time updates
  * Manages client connections and broadcasts events to all listeners
+ *
+ * SINGLE-PROCESS CONSTRAINT (MSG-05):
+ *   The client registry below is an in-process `Set`. It lives in the memory of
+ *   ONE Node process, so broadcast() can only reach clients whose SSE
+ *   connection landed on THIS process. That is correct for the canonical
+ *   deployment (ecosystem.config.cjs: `instances: 1, exec_mode: 'fork'`).
+ *
+ *   Under a PM2 CLUSTER (`exec_mode: 'cluster_mode'`, or `instances > 1`) each
+ *   worker has its own Set. A task update mutated on worker A calls broadcast()
+ *   on worker A only, so every client pinned to worker B silently never
+ *   receives that delta — the board goes stale with no error. Scaling this box
+ *   out therefore requires a shared fan-out bus (e.g. Redis pub/sub) instead of
+ *   this in-memory Set. `warnIfClustered()` below logs a loud startup warning if
+ *   it detects a multi-worker runtime so the misconfiguration is visible rather
+ *   than silent. Keep the constraint documented HERE (not only in the PM2
+ *   template) so it survives independent of the deploy config.
  */
 
+import cluster from 'node:cluster';
+
 import type { SSEEvent } from './types';
+
+/**
+ * MSG-05: warn once at process startup if this box appears to run more than one
+ * worker, which the in-process SSE registry cannot support. `cluster.isWorker`
+ * is the definitive signal for PM2 cluster_mode (which forks via Node's cluster
+ * module); the env hints cover other multi-instance managers. Latent no-op on
+ * the canonical single fork instance.
+ */
+function warnIfClustered(): void {
+  const appInstance = process.env.NODE_APP_INSTANCE;
+  const execMode = process.env.exec_mode || process.env.pm_exec_mode;
+  const isWorker = cluster.isWorker === true;
+  const multiInstance =
+    typeof appInstance === 'string' && appInstance !== '' && appInstance !== '0';
+
+  if (isWorker || execMode === 'cluster_mode' || multiInstance) {
+    console.warn(
+      '[SSE] WARNING: this process looks like a clustered / multi-worker runtime ' +
+        `(cluster.isWorker=${isWorker}, exec_mode=${execMode ?? 'n/a'}, ` +
+        `NODE_APP_INSTANCE=${appInstance ?? 'n/a'}). The SSE client registry is an ` +
+        'in-process Set and is NOT shared across workers: broadcasts only reach ' +
+        'clients connected to the emitting worker, so real-time board updates will ' +
+        'be dropped for clients on other workers. Run the Command Center as a SINGLE ' +
+        "instance (ecosystem.config.cjs: instances: 1, exec_mode: 'fork') or move SSE " +
+        'fan-out to a shared bus (e.g. Redis pub/sub) before scaling out.'
+    );
+  }
+}
+
+warnIfClustered();
 
 // Store active SSE client connections
 const clients = new Set<ReadableStreamDefaultController>();
