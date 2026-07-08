@@ -193,6 +193,13 @@ function isUnknownArgumentError(err: unknown): boolean {
 export interface PersonaSelectionResult {
   persona_id: string | null;
   persona_name: string;
+  /**
+   * PERS-05: true when `persona_name` was NOT supplied by the selector (which
+   * returns a name only when the id resolved to a real catalog persona) and was
+   * instead derived from the raw slug. Consumers must render a synthesized name
+   * as tentative, never as an authoritative catalog display name.
+   */
+  persona_name_synthesized?: boolean;
   persona_version?: number;
   score: number;
   interaction_mode: PersonaInteractionMode;
@@ -373,13 +380,17 @@ export async function selectPersonaForTask(
 
     const result = JSON.parse(output) as Partial<PersonaSelectionResult>;
 
+    // PERS-05: the Python selector returns `persona_name` ONLY when the id
+    // resolved to a real catalog persona — that name is authoritative. When it is
+    // absent we must NOT fabricate a prettified Title-Case name and surface it to
+    // the owner as if it were verified. Keep the RAW slug as the display value and
+    // flag it synthesized so downstream renders it as tentative.
+    const nameFromSelector = result.persona_name;
+    const synthesized = !nameFromSelector && !!result.persona_id;
     return {
       persona_id: result.persona_id ?? null,
-      persona_name:
-        result.persona_name ||
-        (result.persona_id
-          ? result.persona_id.replace(/-/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())
-          : "N/A"),
+      persona_name: nameFromSelector || result.persona_id || "N/A",
+      persona_name_synthesized: synthesized,
       persona_version: result.persona_version,
       score: typeof result.score === "number" ? result.score : 0,
       interaction_mode: (result.interaction_mode as PersonaInteractionMode) || "leadership",
