@@ -44,8 +44,10 @@
  *   working         : in_progress
  *   verify          : review → testing
  *   terminal        : done
- *   safety valve    : blocked (reachable from any state; unblocks back to the
- *                     queue or to in_progress)
+ *   safety valve    : blocked (reachable from any NON-TERMINAL state; unblocks
+ *                     back to the queue or to in_progress). NOT reachable from
+ *                     the terminal 'done' — a done task re-opens only to backlog
+ *                     (done→backlog→blocked if it must be re-blocked).
  * The LEGAL_TRANSITIONS map below covers all 10 statuses so that opt-in callers
  * moving a task through the intake/dispatch/verify lanes are not rejected with a
  * spurious ILLEGAL_TRANSITION. The edge set is permissive (additive): every edge
@@ -105,9 +107,12 @@ export type LifecycleState =
  *   backlog → inbox → planning → pending_dispatch/assigned → in_progress
  *           → review → testing → done
  *
- * NOTE: 'blocked' can be reached from any state (safety valve) and unblocks back
- * to the queue (backlog/inbox/planning/pending_dispatch) or resumes work
- * (in_progress/assigned). 'done' re-opens only to 'backlog'.
+ * NOTE: 'blocked' can be reached from any NON-TERMINAL state (safety valve) and
+ * unblocks back to the queue (backlog/inbox/planning/pending_dispatch) or resumes
+ * work (in_progress/assigned). The terminal 'done' is the one exception: it does
+ * NOT go directly to 'blocked' — 'done' re-opens only to 'backlog' (and from
+ * backlog it can then be blocked), which is why 'blocked' is absent from done's
+ * target set below.
  *
  * ADDITIVE GUARANTEE: every edge that was legal in the original 6-state map is
  * preserved here. The four new statuses (inbox, planning, pending_dispatch,
