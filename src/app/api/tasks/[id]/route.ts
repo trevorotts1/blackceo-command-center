@@ -57,6 +57,20 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
+
+    // ── Trust-boundary operator identity (INGEST-11) ─────────────────────────
+    // Cloudflare Access injects `Cf-Access-Authenticated-User-Email` ONLY after
+    // it has verified the operator's SSO identity at the edge. We derive the
+    // approving human's identity from that verified header — NEVER from a payload
+    // field (updated_by_agent_id) nor a bare, forgeable `x-operator-email`.
+    //
+    // CROSS-LANE DEPENDENCY (L6 · src/middleware.ts): the middleware MUST strip
+    // any inbound copy of the `Cf-Access-*` headers from external callers at the
+    // trust boundary, so a request that did NOT traverse Cloudflare Access cannot
+    // forge this identity. This route consumes the boundary-guaranteed value.
+    const cfAccessEmail =
+      request.headers.get('cf-access-authenticated-user-email')?.trim() || null;
+
     const body: UpdateTaskRequest & { updated_by_agent_id?: string } = await request.json();
 
     // Validate input with Zod
@@ -99,8 +113,32 @@ export async function PATCH(
     // role_type='qc' — is a self-grade conflict of interest and is rejected
     // with 403. This kills the builder self-grade bypass at the gate.
     //
-    // User-initiated moves (no updated_by_agent_id) are always allowed so
-    // human operators are never blocked.
+    // Human review → done approvals (no updated_by_agent_id) are NO LONGER
+    // auto-trusted (INGEST-11): they MUST carry a verified Cloudflare Access
+    // identity. This guard rejects an anonymous scripted "human" that simply
+    // omits updated_by_agent_id; a genuine operator authenticated through CF
+    // Access carries Cf-Access-Authenticated-User-Email and passes — its value
+    // is recorded as the approver in the audit trail below.
+    if (
+      validatedData.status === 'done' &&
+      existing.status === 'review' &&
+      !validatedData.updated_by_agent_id &&
+      !cfAccessEmail
+    ) {
+      return NextResponse.json(
+        {
+          error: 'Forbidden: review → done requires a verified operator identity.',
+          hint:
+            'A human approval must arrive through Cloudflare Access (which sets a ' +
+            'verified Cf-Access-Authenticated-User-Email at the trust boundary). An ' +
+            'agent approval must set updated_by_agent_id to the department QC ' +
+            'Specialist or a master agent. review → done is otherwise decided only ' +
+            'by the independent QC auto-scorer (runQCOnReview).',
+        },
+        { status: 403 },
+      );
+    }
+
     if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
       const updatingAgent = queryOne<Agent & { role_type?: string }>(
         'SELECT id, is_master, role_type, workspace_id FROM agents WHERE id = ?',
@@ -170,7 +208,9 @@ export async function PATCH(
 
       const approved = hasDeptQCAgent
         ? isAuthorizedQC || isMasterInWorkspace || isGlobalMaster
-        : isGlobalMaster; // Pre-QC-migration fallback: any master can approve
+        // Pre-QC-migration (pre-060) fallback: a legit DEPT master must be able
+        // to approve too, not only a global master (INGEST-12).
+        : isMasterInWorkspace || isGlobalMaster;
 
       if (!approved) {
         return NextResponse.json(
@@ -455,12 +495,31 @@ export async function PATCH(
         shouldDispatch = true;
       }
 
-      // Log status change event
+      // ── Provenance (INGEST-14): resolve the actor ONCE and stamp it on BOTH
+      // the events row (agent_id) AND the task_history row (changed_by_agent_id
+      // + agent_name) so the two audit sinks never diverge. For a human
+      // review → done approval with no agent id, the verified CF-Access operator
+      // email (INGEST-11) is the approver of record. The canonical consolidation
+      // is the shared transition() (task-lifecycle.ts, owned by L3): this route,
+      // the status route, and the return-to-orchestrator route should all funnel
+      // through it — see integrator note.
+      const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
+      let actorName: string | null = null;
+      if (!validatedData.updated_by_agent_id && cfAccessEmail) {
+        actorName = cfAccessEmail; // verified human operator (INGEST-11)
+      } else if (actingAgentId) {
+        const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
+        actorName = a?.name ?? null;
+      }
+      const approverSuffix =
+        !validatedData.updated_by_agent_id && cfAccessEmail ? ` (approved by ${cfAccessEmail})` : '';
+
+      // Log status change event (with actor agent_id for a complete audit trail).
       const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
       run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`, now]
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), eventType, actingAgentId, id, `Task "${existing.title}" moved to ${validatedData.status}${approverSuffix}`, now]
       );
 
       // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
@@ -479,16 +538,12 @@ export async function PATCH(
       // compute durations + agent attribution per transition. Best-effort:
       // older DBs without the table won't have this row.
       try {
-        const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
-        let actingAgentName: string | null = null;
-        if (actingAgentId) {
-          const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
-          actingAgentName = a?.name ?? null;
-        }
+        // Reuse the single actor resolution stamped on the events row above so
+        // the two audit sinks agree on WHO performed the transition (INGEST-14).
         run(
           `INSERT INTO task_history (id, task_id, status_from, status_to, changed_at, changed_by_agent_id, agent_name)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), id, existing.status, validatedData.status, now, actingAgentId, actingAgentName]
+          [uuidv4(), id, existing.status, validatedData.status, now, actingAgentId, actorName]
         );
       } catch (err) {
         // task_history table missing on older DBs — just log and move on.
