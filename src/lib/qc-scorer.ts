@@ -772,7 +772,11 @@ async function llmScoreViaOpenAI(
     return {
       score,
       pass: score >= QC_PASS_THRESHOLD,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : `Score: ${score.toFixed(1)}/10`,
+      // QC-06: the reason is LLM-authored prose, not a deterministic verdict.
+      // Mark it [model-stated] at the source so every downstream surface (board
+      // event, Telegram, owner report) shows the owner it is the model's claim,
+      // while the numeric score/criteria line stays the authoritative signal.
+      reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
     };
@@ -828,7 +832,11 @@ async function llmScoreViaGoogle(
     return {
       score,
       pass: score >= QC_PASS_THRESHOLD,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : `Score: ${score.toFixed(1)}/10`,
+      // QC-06: the reason is LLM-authored prose, not a deterministic verdict.
+      // Mark it [model-stated] at the source so every downstream surface (board
+      // event, Telegram, owner report) shows the owner it is the model's claim,
+      // while the numeric score/criteria line stays the authoritative signal.
+      reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
     };
