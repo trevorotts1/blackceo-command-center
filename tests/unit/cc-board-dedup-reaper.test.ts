@@ -117,10 +117,19 @@ test('reapDuplicateOpenAuthoringTasks keeps exactly one open "Author SOP" task a
   const orig = uuidv4();
   const dept = 'widget-research'; // custom (non-canonical) dept
   const wsId = seedWorkspace('widget-research'); // real workspace (mirrors production authoring tasks)
-  for (let i = 0; i < 4; i++) {
+  // INGEST-09: the reaper NEVER deletes a live-dispatch (in_progress/assigned)
+  // authoring row — a live row is the KEEPER, and only the NON-live surplus is
+  // collapsed. So the furnace scenario under test is: one live authoring row +
+  // three non-live (backlog) duplicate clones re-created by the fast loop. All
+  // four carry sop_authoring_for_task_id (the required discriminator).
+  run(
+    'INSERT INTO tasks (id, title, department, workspace_id, status, sop_authoring_for_task_id) VALUES (?, ?, ?, ?, ?, ?)',
+    [uuidv4(), 'Author SOP: Widget', dept, wsId, 'in_progress', orig], // live keeper
+  );
+  for (let i = 0; i < 3; i++) {
     run(
       'INSERT INTO tasks (id, title, department, workspace_id, status, sop_authoring_for_task_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [uuidv4(), 'Author SOP: Widget', dept, wsId, 'in_progress', orig],
+      [uuidv4(), 'Author SOP: Widget', dept, wsId, 'backlog', orig], // non-live surplus clones
     );
   }
   // A real client deliverable that must NEVER be reaped.

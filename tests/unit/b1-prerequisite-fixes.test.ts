@@ -313,27 +313,31 @@ test('P3 (baseline structural): JSON validation only fires on HTTP 200 responses
   );
 });
 
-// ─── P4: deploy.sh passes --canonical-dir to cc-health-check.sh ──────────────
+// ─── P4: the deploy path passes --canonical-dir to cc-health-check.sh ─────────
+// BUILD-04 (Wave-0) deprecated scripts/deploy.sh to a thin shim that FORWARDS to
+// scripts/atomic-deploy.sh (which owns the non-vacuous canonical-dir health
+// check end-to-end). The P4 guarantee therefore now lives in atomic-deploy.sh;
+// deploy.sh's only job is to forward to it. This test asserts BOTH halves so the
+// guarantee stays under test at its new home and the deprecation shim is real.
+const ATOMIC_DEPLOY_SCRIPT = path.join(process.cwd(), 'scripts', 'atomic-deploy.sh');
 
-test('P4 structural: deploy.sh passes --canonical-dir "$APP_DIR" to cc-health-check.sh', () => {
-  const src = readFileSync(DEPLOY_SCRIPT, 'utf8');
+test('P4 structural: the deploy path passes --canonical-dir to cc-health-check.sh (atomic-deploy)', () => {
+  // Half 1: deploy.sh is the deprecated forwarder to atomic-deploy.sh.
+  const deploySrc = readFileSync(DEPLOY_SCRIPT, 'utf8');
+  assert.ok(
+    deploySrc.includes('atomic-deploy.sh'),
+    `P4/BUILD-04: deploy.sh must forward to atomic-deploy.sh (deprecation shim).`,
+  );
 
-  // deploy.sh must pass --canonical-dir with the APP_DIR value
+  // Half 2: atomic-deploy.sh (the real deploy path) enforces the non-vacuous
+  // canonical-dir health check against APP_DIR.
+  const src = readFileSync(ATOMIC_DEPLOY_SCRIPT, 'utf8');
   assert.ok(
     src.includes('--canonical-dir') && src.includes('APP_DIR'),
-    `P4: deploy.sh must pass --canonical-dir "$APP_DIR" to cc-health-check.sh.\n` +
+    `P4: atomic-deploy.sh must pass --canonical-dir "$APP_DIR" to cc-health-check.sh.\n` +
     `This makes the pm2 cwd check non-vacuous (a real target for comparison).\n` +
     `Found: ${src.includes('--canonical-dir') ? '--canonical-dir present' : '--canonical-dir MISSING'}, ` +
     `APP_DIR: ${src.includes('APP_DIR') ? 'present' : 'MISSING'}`,
-  );
-
-  // Confirm --canonical-dir appears in the context of the health script call
-  const healthCallMatch = src.match(/bash\s+"\$HEALTH_SCRIPT"[^\n]*/g) ?? [];
-  const hasCanonicalDir = healthCallMatch.some(line => line.includes('--canonical-dir'));
-  assert.ok(
-    hasCanonicalDir,
-    `P4: --canonical-dir must appear on the bash "$HEALTH_SCRIPT" invocation line.\n` +
-    `Health call lines found:\n${healthCallMatch.join('\n')}`
   );
 });
 

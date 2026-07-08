@@ -42,7 +42,12 @@ process.env.OPENCLAW_GATEWAY_TOKEN = '';
 // Small, fast cap for the test: K=2 retries over M=1 hour.
 process.env.REDISPATCH_MAX_ATTEMPTS = '2';
 process.env.REDISPATCH_ESCALATE_HOURS = '1';
-delete process.env.BACKLOG_REDISPATCH_SWEEP_ENABLED;
+// SWEEP-01: the backlog-redispatch sweep is now PAUSED BY DEFAULT (opt-in) —
+// intake-advance-sweep is the single live advancer. This test exercises the
+// sweep's escalation-cap LOGIC (orthogonal to whether it runs by default), so
+// it must explicitly opt in; otherwise runBacklogRedispatchSweep() returns early
+// as paused and nothing escalates.
+process.env.BACKLOG_REDISPATCH_SWEEP_ENABLED = '1';
 
 type DbModule = typeof import('../../src/lib/db');
 let run: DbModule['run'];
