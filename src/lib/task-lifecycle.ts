@@ -24,7 +24,10 @@
  *   2. Updates the tasks row.
  *   3. Writes a task_events row (structured audit trail, distinct from the
  *      legacy `events` table which stays for backwards compat).
- *   4. Broadcasts the SSE event atomically with the DB write.
+ *   4. Steps 2–3 run inside ONE db.transaction() so the status change and both
+ *      audit inserts are atomic (all commit or none — DISP-09). The SSE broadcast
+ *      and owner-DONE notification run only AFTER the commit, so nothing is
+ *      announced for a change that rolled back.
  *
  * States (the full TaskStatus set — see src/lib/types.ts):
  *   intake/grooming : backlog → inbox → planning
@@ -56,7 +59,7 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { queryOne, queryAll, run } from '@/lib/db';
+import { queryOne, queryAll, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath } from '@/lib/config';
 import type { Task } from '@/lib/types';
@@ -370,37 +373,46 @@ export async function transition(
   checkPreconditions(task, to, evidence);
 
   const now = new Date().toISOString();
-
-  // ── DB write ──────────────────────────────────────────────────────────────
-  run(
-    'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-    [to, now, taskId],
-  );
-
-  // ── Structured task_events row + legacy events row ────────────────────────
-  writeTaskEvent(taskId, from, to, evidence, now);
-
-  // Write legacy events row too for backwards-compat (live feed, existing queries)
   const legacyType = to === 'done' ? 'task_completed' : 'task_status_changed';
-  try {
-    run(
-      `INSERT INTO events (id, type, task_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [
-        uuidv4(),
-        legacyType,
-        taskId,
-        `[lifecycle] Task "${task.title}" moved ${from} → ${to}${evidence.reason ? ': ' + evidence.reason : ''}`,
-        now,
-      ],
-    );
-  } catch { /* legacy table unavailable on tests — non-fatal */ }
 
-  // ── Fetch updated row ────────────────────────────────────────────────────
+  // ── Atomic DB write: status UPDATE + BOTH audit inserts commit together ─────
+  // DISP-09: previously the UPDATE, the task_events insert, and the legacy events
+  // insert were three independent writes. A crash (or a failing process) between
+  // them could leave a committed status change with NO audit row, or an audit row
+  // for a status change that never landed. Wrapping all three in a single
+  // db.transaction() makes them atomic — they all commit or none do. The SSE
+  // broadcast and the owner notification are deliberately kept OUTSIDE the
+  // transaction (below), so nothing is announced for a change that rolled back.
+  transaction(() => {
+    run(
+      'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
+      [to, now, taskId],
+    );
+
+    // Structured task_events row (primary audit trail).
+    writeTaskEvent(taskId, from, to, evidence, now);
+
+    // Legacy events row for backwards-compat (live feed, existing queries).
+    try {
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          legacyType,
+          taskId,
+          `[lifecycle] Task "${task.title}" moved ${from} → ${to}${evidence.reason ? ': ' + evidence.reason : ''}`,
+          now,
+        ],
+      );
+    } catch { /* legacy table unavailable on tests — non-fatal */ }
+  });
+
+  // ── Fetch updated row (post-commit) ────────────────────────────────────────
   const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
   if (!updated) throw new TransitionError('NOT_FOUND', `Task ${taskId} not found after update`);
 
-  // ── SSE broadcast ────────────────────────────────────────────────────────
+  // ── SSE broadcast (post-commit) ────────────────────────────────────────────
   broadcast({ type: 'task_updated', payload: updated });
 
   // W5.1/W5.4 — DONE owner notification: the single lifecycle funnel so every
