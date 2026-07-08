@@ -209,6 +209,139 @@ export function parseDraftedSOP(raw: string): DraftedSOP {
   };
 }
 
+// ---------------------------------------------------------------------------
+// QC-07 — grounding gate for the SOP auto-file path.
+//
+// A drafted SOP that the LLM QC self-scores >= 8.5 can still be a fluent
+// hallucination. Before a draft is filed as QC-AUTHORITATIVE (status
+// 'auto-authored-filed', consumed downstream as ground truth) it must clear a
+// grounding gate: real research must have happened, the model's own confidence
+// must clear a floor, and the draft's steps must be anchored to that research
+// (citation markers and/or lexical entailment against the corpus). This is a
+// deterministic, $0 entailment proxy — no extra model call — so it is stable
+// under fixtures and cannot itself hallucinate.
+// ---------------------------------------------------------------------------
+
+/** Minimum model-reported confidence for the auto-file (QC-authoritative) path. */
+export const AUTO_FILE_CONFIDENCE_FLOOR = 0.7;
+
+/**
+ * Steps below this anchored-fraction are flagged as weakly grounded. It is a
+ * WARN signal (surfaced in the verdict + evidence), NOT a hard block, because a
+ * genuinely grounded SOP can legitimately phrase steps without echoing corpus
+ * terms. The hard blocks are: no research, sub-floor confidence, no steps, and
+ * ZERO anchored steps (pure hallucination — see groundDraftedSOP).
+ */
+export const AUTO_FILE_GROUNDED_STEP_FRACTION = 0.5;
+
+const GROUNDING_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'your', 'their',
+  'have', 'will', 'been', 'being', 'which', 'when', 'then', 'than', 'each',
+  'must', 'should', 'ensure', 'confirm', 'document', 'verify', 'review',
+  'complete', 'within', 'before', 'after', 'using', 'based', 'step', 'steps',
+  'sop', 'client', 'clients', 'approved', 'approval', 'received', 'required',
+]);
+
+function significantTerms(text: string): string[] {
+  const out = new Set<string>();
+  for (const raw of (text || '').toLowerCase().split(/[^a-z0-9]+/)) {
+    if (raw.length >= 4 && !GROUNDING_STOPWORDS.has(raw)) out.add(raw);
+  }
+  return Array.from(out);
+}
+
+export interface GroundingVerdict {
+  /** true when the draft clears every hard auto-file grounding requirement. */
+  grounded: boolean;
+  /** human/audit-readable summary. */
+  reason: string;
+  /** 0-1 fraction of steps anchored to the research corpus. */
+  groundedStepFraction: number;
+  /** true when groundedStepFraction is below AUTO_FILE_GROUNDED_STEP_FRACTION. */
+  weaklyGrounded: boolean;
+  /** model-reported confidence (0-1) or null. */
+  confidence: number | null;
+  /** step names with no anchor to the research corpus. */
+  ungroundedSteps: string[];
+  /** number of Tavily results the draft was researched against. */
+  researchCount: number;
+}
+
+/**
+ * Compute the grounding verdict for a drafted SOP against its Tavily research.
+ * A step is "anchored" when it carries a citation marker ([n]-style or a source
+ * domain) OR shares >= 1 significant term with the research corpus.
+ */
+export function groundDraftedSOP(
+  drafted: Pick<DraftedSOP, 'steps' | 'success_criteria' | 'confidence'>,
+  tavilyResults: TavilyResult[],
+): GroundingVerdict {
+  const confidence = typeof drafted.confidence === 'number' ? drafted.confidence : null;
+  const results = Array.isArray(tavilyResults) ? tavilyResults : [];
+  const researchCount = results.length;
+
+  // Build the research corpus term set + citable source domains.
+  const corpus = new Set<string>();
+  const domains: string[] = [];
+  for (const r of results) {
+    for (const t of significantTerms(`${r.title || ''} ${r.content || ''}`)) corpus.add(t);
+    try {
+      const host = new URL(r.url).hostname.replace(/^www\./, '').toLowerCase();
+      if (host && !domains.includes(host)) domains.push(host);
+    } catch { /* non-URL source — ignore */ }
+  }
+
+  const steps = Array.isArray(drafted.steps) ? drafted.steps : [];
+  const ungroundedSteps: string[] = [];
+  let anchored = 0;
+  for (const step of steps) {
+    const stepText = [
+      step?.name,
+      Array.isArray(step?.checklist) ? step.checklist.join(' ') : '',
+      step?.success_criteria,
+    ].filter(Boolean).join(' ');
+    const lower = stepText.toLowerCase();
+    const hasCitationMarker =
+      /\[\d+\]/.test(stepText) || domains.some((d) => lower.includes(d));
+    let overlaps = false;
+    for (const t of significantTerms(stepText)) {
+      if (corpus.has(t)) { overlaps = true; break; }
+    }
+    if (hasCitationMarker || overlaps) anchored++;
+    else ungroundedSteps.push(step?.name || '(unnamed step)');
+  }
+
+  const groundedStepFraction = steps.length > 0 ? anchored / steps.length : 0;
+  const weaklyGrounded = steps.length > 0 && groundedStepFraction < AUTO_FILE_GROUNDED_STEP_FRACTION;
+
+  // HARD blocks — these mean the draft is NOT safe to become QC-authoritative:
+  const blocks: string[] = [];
+  if (researchCount < 1) blocks.push('no research results (nothing to ground against)');
+  if (confidence === null) blocks.push('draft reported no confidence score');
+  else if (confidence < AUTO_FILE_CONFIDENCE_FLOOR) {
+    blocks.push(`confidence ${confidence.toFixed(2)} < floor ${AUTO_FILE_CONFIDENCE_FLOOR}`);
+  }
+  if (steps.length === 0) blocks.push('draft has no steps');
+  // Zero anchored steps against real research = fluent hallucination.
+  else if (anchored === 0) blocks.push('no step is anchored to any research result (ungrounded)');
+
+  const grounded = blocks.length === 0;
+  const gradeNote = weaklyGrounded
+    ? ` (weakly grounded: only ${(groundedStepFraction * 100).toFixed(0)}% of steps anchored)`
+    : '';
+  return {
+    grounded,
+    reason: grounded
+      ? `grounded: ${anchored}/${steps.length} steps anchored, confidence ${confidence?.toFixed(2)}, ${researchCount} sources${gradeNote}`
+      : `NOT auto-file-grounded: ${blocks.join('; ')}`,
+    groundedStepFraction,
+    weaklyGrounded,
+    confidence,
+    ungroundedSteps,
+    researchCount,
+  };
+}
+
 export function getRecentAttemptCount(deletedSop: SOP): number {
   // "Same slug" = same department + name match within the last 7 days.
   // Counts both successful auto-research proposals AND rejected ones —
@@ -314,14 +447,26 @@ export async function enqueueAutoReplace(
     tavilyAnswer: tavily.answer,
     noV1: false,
   });
-  const raw = await geminiGenerate(synthesisPrompt, { response_mime_type: 'application/json' });
+  // QC-07: temperature 0 for deterministic, grounded SOP synthesis (belt-and-
+  // suspenders — geminiGenerate now also defaults to 0 for SOP synthesis).
+  const raw = await geminiGenerate(synthesisPrompt, { response_mime_type: 'application/json', temperature: 0 });
   const drafted = parseDraftedSOP(raw);
+
+  // QC-07: grounding verdict against the research corpus. This path is
+  // review-gated (writes 'auto-generated-pending-review'), so we do NOT block
+  // here — but we surface the verdict so the operator sees whether the draft is
+  // actually anchored to the sources before approving.
+  const grounding = groundDraftedSOP(drafted, tavily.results);
 
   const sources = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
   const evidenceSummary = [
     `Auto-researched replacement for deleted SOP "${deletedSop.name}".`,
     `Tavily query: ${query}`,
     tavily.answer ? `Synthesis hint: ${tavily.answer}` : '',
+    `Grounding: ${grounding.reason}`,
+    grounding.ungroundedSteps.length > 0
+      ? `Ungrounded steps (verify against sources): ${grounding.ungroundedSteps.join('; ')}`
+      : '',
     `Top sources:`,
     ...sources.map((s, i) => `  [${i + 1}] ${s.title} (${s.url})`),
     ``,

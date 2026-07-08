@@ -43,7 +43,10 @@ export async function geminiGenerate(prompt: string, opts: GeminiGenerateOptions
   const body: Record<string, unknown> = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
-      temperature: opts.temperature ?? 0.4,
+      // QC-07: SOP synthesis must be deterministic. This wrapper's ONLY callers
+      // are the SOP auto-replace / auto-authoring flows, so the default is
+      // temperature 0 (grounded, repeatable output). A caller may still override.
+      temperature: opts.temperature ?? 0,
       response_mime_type: opts.response_mime_type || 'application/json',
     },
   };
