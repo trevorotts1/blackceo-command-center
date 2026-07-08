@@ -224,6 +224,30 @@ function unauthorized(message: string, status = 401): NextResponse {
   return NextResponse.json({ error: message }, { status });
 }
 
+/**
+ * Constant-time string comparison (DATA-11).
+ *
+ * `===` on a secret short-circuits on the first differing byte, leaking
+ * length/prefix information through response timing. Used for every comparison
+ * against MC_API_TOKEN — including the `/api/events/stream` query-param token,
+ * which is the highest-exposure surface because the token travels in the URL
+ * (and thus into access logs / Referer). This runs in the Edge runtime, where
+ * node:crypto's timingSafeEqual is unavailable, so we fold over the max length
+ * (never early-returning on a length mismatch) using the Web-standard
+ * TextEncoder.
+ */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  let diff = ab.length ^ bb.length;
+  const len = Math.max(ab.length, bb.length);
+  for (let i = 0; i < len; i++) {
+    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  }
+  return diff === 0;
+}
+
 export async function middleware(request: NextRequest): Promise<NextResponse> {
   const { pathname } = request.nextUrl;
 
@@ -329,10 +353,17 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     }
 
     // Special case: /api/events/stream (SSE) accepts the token as a query
-    // param because EventSource cannot set custom headers.
+    // param because EventSource cannot set custom headers. Compared in constant
+    // time (DATA-11). RESIDUAL (cross-lane / operator): passing the long-lived
+    // MASTER token in a URL still lands it in access logs and Referer headers.
+    // The full fix is to mint a short-lived, single-purpose stream token (like
+    // the interview cookie HMAC) — that spans the stream route + useSSE client
+    // (Wave-2 L12), so it is deferred here; and the master token must be on a
+    // mandatory rotation (§7 secret-rotation). This gate is constant-time-hardened
+    // in the interim.
     if (pathname === '/api/events/stream') {
       const queryToken = request.nextUrl.searchParams.get('token');
-      if (queryToken && queryToken === MC_API_TOKEN) {
+      if (queryToken && timingSafeEqualStr(queryToken, MC_API_TOKEN)) {
         return NextResponse.next();
       }
     }
@@ -342,7 +373,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       return unauthorized('Unauthorized');
     }
     const token = authHeader.substring(7);
-    if (token !== MC_API_TOKEN) {
+    if (!timingSafeEqualStr(token, MC_API_TOKEN)) {
       return unauthorized('Unauthorized');
     }
 
