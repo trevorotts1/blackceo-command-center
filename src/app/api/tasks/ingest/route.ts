@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac } from 'crypto';
+import { createHmac, createHash } from 'crypto';
 import { queryOne, getDb } from '@/lib/db';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore } from '@/lib/tasks';
@@ -430,11 +430,28 @@ export async function POST(request: NextRequest) {
         ? (priorityRaw as TaskPriority)
         : undefined;
 
-    // Deterministic dedupe key: idempotency_key wins, else source_ref.
-    // NOTE: The actual idempotency check now lives in createTaskCore (Layer 1).
-    // We pass the key through so createTaskCore embeds it in the event message
-    // AND checks it before inserting.
-    const dedupeKey = idempotencyKey || sourceRef;
+    // Deterministic dedupe key: idempotency_key wins, else source_ref, else a
+    // synthesized intrinsic key.
+    // NOTE: The actual idempotency check lives in createTaskCore (Layer 1). We
+    // pass the key through so createTaskCore embeds it in the event message AND
+    // checks it before inserting.
+    //
+    // INGEST-01 — a bare retry that supplies NEITHER an idempotency_key NOR a
+    // source_ref previously reached createTaskCore with no Layer-1 anchor, so two
+    // identical posts (a Telegram/backfill retry) each created a card. INGEST-02 —
+    // Layer 2's title window is workspace-scoped, so a retry that routed to a
+    // DIFFERENT workspace evaded it too. Synthesizing
+    // sha256(title | source | external_session_id) gives Layer 1 a
+    // workspace-INDEPENDENT anchor for every ingest, so an identical retry
+    // collapses onto the first card regardless of which workspace routing picked.
+    // Layer 2 in createTaskCore stays intact for other keyless callers (UI, plain
+    // Telegram) — this synthesis is scoped to the ingest front door only.
+    const syntheticDedupeKey =
+      'auto:' +
+      createHash('sha256')
+        .update(`${title}|${source ?? ''}|${externalSessionId ?? ''}`)
+        .digest('hex');
+    const dedupeKey = idempotencyKey || sourceRef || syntheticDedupeKey;
 
     let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(departmentSlug, persona);
     let resolvedDepartment: string | undefined = departmentSlug;
