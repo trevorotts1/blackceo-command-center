@@ -31,6 +31,17 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 // "Open" = not in a terminal/closed state and not archived. Used by the reaper.
 const OPEN_TASK_PREDICATE = `status != 'done' AND (archived_at IS NULL OR archived_at = '')`;
 
+// ── Authoring-reap safety predicates (INGEST-09 / DATA-04) ────────────────────
+// A genuine SOP-authoring sub-task ALWAYS links back to its parent task via
+// sop_authoring_for_task_id. Requiring that link (not merely the "Author SOP:%"
+// title) is the discriminator that keeps the reaper OFF a real client deliverable
+// that merely happens to be titled "Author SOP: …".
+const AUTHORING_DISCRIMINATOR = `title LIKE 'Author SOP:%' AND sop_authoring_for_task_id IS NOT NULL`;
+// Live work is NEVER reaped. An in_progress/assigned authoring task may be under
+// active execution right now, so it can never be a delete candidate — the reaper
+// only collapses the NON-live surplus and prefers keeping the live-dispatch row.
+const LIVE_DISPATCH_STATUSES = ['in_progress', 'assigned'];
+
 /** Returns the list of tables (excluding `workspaces` itself) that carry a
  *  `workspace_id` column, discovered at run-time so the dedup reassigns EVERY
  *  referencing table (FK and non-FK alike) before a loser row is deleted. */
@@ -249,9 +260,9 @@ export function reapDuplicateOpenAuthoringTasks(db: Database): AuthoringReapResu
                 sop_authoring_for_task_id AS link,
                 COUNT(*) AS n
            FROM tasks
-          WHERE title LIKE 'Author SOP:%'
+          WHERE ${AUTHORING_DISCRIMINATOR}
             AND ${OPEN_TASK_PREDICATE}
-          GROUP BY title, COALESCE(department, ''), COALESCE(sop_authoring_for_task_id, '')
+          GROUP BY title, COALESCE(department, ''), sop_authoring_for_task_id
          HAVING COUNT(*) > 1`,
       )
       .all() as { title: string; department: string | null; link: string | null; n: number }[];
@@ -262,20 +273,33 @@ export function reapDuplicateOpenAuthoringTasks(db: Database): AuthoringReapResu
 
   for (const group of dupeGroups) {
     try {
-      // Oldest open row in the group is the keeper; all others are spurious clones.
+      // Keeper selection (INGEST-09): a row under LIVE dispatch (in_progress /
+      // assigned) sorts FIRST, so the actively-executing authoring task is the
+      // keeper; ties fall back to the oldest row. Live rows are then EXCLUDED
+      // from the loser set below, so genuine live work is never deleted — only
+      // the NON-live surplus clones are collapsed.
       const members = db
         .prepare(
-          `SELECT id FROM tasks
+          `SELECT id, status FROM tasks
             WHERE title = ?
               AND COALESCE(department, '') = COALESCE(?, '')
               AND COALESCE(sop_authoring_for_task_id, '') = COALESCE(?, '')
+              AND ${AUTHORING_DISCRIMINATOR}
               AND ${OPEN_TASK_PREDICATE}
-            ORDER BY created_at ASC, rowid ASC`,
+            ORDER BY (CASE WHEN status IN ('in_progress', 'assigned') THEN 0 ELSE 1 END) ASC,
+                     created_at ASC, rowid ASC`,
         )
-        .all(group.title, group.department, group.link) as { id: string }[];
+        .all(group.title, group.department, group.link) as { id: string; status: string }[];
       if (members.length < 2) continue;
 
-      const losers = members.slice(1);
+      // Never delete a live-dispatch row: the reaper collapses only the non-live
+      // surplus. (A stuck in_progress clone is the stuck-in-progress sweep's
+      // concern, not this destructive dedup path.)
+      const losers = members
+        .slice(1)
+        .filter((m) => !LIVE_DISPATCH_STATUSES.includes(m.status));
+      if (losers.length === 0) continue;
+
       const tx = db.transaction(() => {
         for (const loser of losers) {
           deleteTaskFkSafe(db, loser.id);
