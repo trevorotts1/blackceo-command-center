@@ -113,14 +113,15 @@ test('findCanonicalWorkspaceId recognises an aliased slug as an existing departm
   assert.equal(findCanonicalWorkspaceId(db, 'totally-unrelated-xyz'), null, 'an unrelated slug has no owner');
 });
 
-test('reapDuplicateOpenAuthoringTasks keeps exactly one open "Author SOP" task and is idempotent', () => {
+test('reapDuplicateOpenAuthoringTasks collapses reapable (non-live) "Author SOP" clones and is idempotent', () => {
   const orig = uuidv4();
   const dept = 'widget-research'; // custom (non-canonical) dept
   const wsId = seedWorkspace('widget-research'); // real workspace (mirrors production authoring tasks)
+  // Spurious clones in a NON-live state (DATA-04: only idle clones are reapable).
   for (let i = 0; i < 4; i++) {
     run(
       'INSERT INTO tasks (id, title, department, workspace_id, status, sop_authoring_for_task_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [uuidv4(), 'Author SOP: Widget', dept, wsId, 'in_progress', orig],
+      [uuidv4(), 'Author SOP: Widget', dept, wsId, 'backlog', orig],
     );
   }
   // A real client deliverable that must NEVER be reaped.
@@ -140,6 +141,61 @@ test('reapDuplicateOpenAuthoringTasks keeps exactly one open "Author SOP" task a
 
   const r2 = reapDuplicateOpenAuthoringTasks(db);
   assert.equal(r2.deleted, 0, 'idempotent — a clean board reaps nothing on the second pass');
+});
+
+test('reapDuplicateOpenAuthoringTasks NEVER reaps a live in_progress/assigned authoring task (DATA-04)', () => {
+  const orig = uuidv4();
+  const dept = 'gizmo-research';
+  const wsId = seedWorkspace('gizmo-research');
+  // Four IDENTICAL open authoring rows, ALL with a live dispatch (two in_progress,
+  // two assigned). A live dispatch = an ACTIVE specialist session; deleting any of
+  // them would strand its run, so the reaper must protect EVERY one.
+  const liveIds: string[] = [];
+  for (const status of ['in_progress', 'in_progress', 'assigned', 'assigned']) {
+    const id = uuidv4();
+    liveIds.push(id);
+    run(
+      'INSERT INTO tasks (id, title, department, workspace_id, status, sop_authoring_for_task_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, 'Author SOP: Gizmo', dept, wsId, status, orig],
+    );
+  }
+
+  reapDuplicateOpenAuthoringTasks(db);
+
+  const survivors = queryAll<{ id: string }>(
+    "SELECT id FROM tasks WHERE title = 'Author SOP: Gizmo' AND status != 'done'",
+  );
+  assert.equal(survivors.length, 4, 'all four live authoring rows survive — none reaped');
+  for (const id of liveIds) {
+    assert.ok(queryOne('SELECT id FROM tasks WHERE id = ?', [id]), `live row ${id} untouched`);
+  }
+});
+
+test('reapDuplicateOpenAuthoringTasks keeps a LIVE row as keeper and reaps only the idle clones (DATA-04)', () => {
+  const orig = uuidv4();
+  const dept = 'sprocket-research';
+  const wsId = seedWorkspace('sprocket-research');
+  // One live (in_progress) row + three idle (planning) clones of the same task.
+  const liveId = uuidv4();
+  run(
+    'INSERT INTO tasks (id, title, department, workspace_id, status, sop_authoring_for_task_id) VALUES (?, ?, ?, ?, ?, ?)',
+    [liveId, 'Author SOP: Sprocket', dept, wsId, 'in_progress', orig],
+  );
+  for (let i = 0; i < 3; i++) {
+    run(
+      'INSERT INTO tasks (id, title, department, workspace_id, status, sop_authoring_for_task_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [uuidv4(), 'Author SOP: Sprocket', dept, wsId, 'planning', orig],
+    );
+  }
+
+  reapDuplicateOpenAuthoringTasks(db);
+
+  assert.ok(queryOne('SELECT id FROM tasks WHERE id = ?', [liveId]), 'the LIVE row is kept as the keeper');
+  const survivors = queryAll<{ id: string }>(
+    "SELECT id FROM tasks WHERE title = 'Author SOP: Sprocket' AND status != 'done'",
+  );
+  assert.equal(survivors.length, 1, 'exactly one row remains — the three idle clones were reaped');
+  assert.equal(survivors[0].id, liveId, 'and the survivor is the live one');
 });
 
 test('resolveSpecialistSessionKey resolves a legacy slug (ceo) to its canonical runtime dir', () => {

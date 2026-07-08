@@ -31,6 +31,15 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 // "Open" = not in a terminal/closed state and not archived. Used by the reaper.
 const OPEN_TASK_PREDICATE = `status != 'done' AND (archived_at IS NULL OR archived_at = '')`;
 
+// ── Live-dispatch states (DATA-04 / DATA-05) ─────────────────────────────────
+// A task in one of these has (or is about to have) an ACTIVE specialist session:
+// the runtime session key is derived from the task's workspace/agent. Neither
+// destructive heal below may delete such a row (reaper) or re-home its workspace
+// (workspace merge) — doing so strands an in-flight run. Kept as a JS list for
+// the reaper's in-memory filter; the workspace merge uses the same literals in
+// its SQL COUNT (SQLite has no clean bound-array IN).
+const LIVE_DISPATCH_STATES = ['in_progress', 'assigned'];
+
 /** Returns the list of tables (excluding `workspaces` itself) that carry a
  *  `workspace_id` column, discovered at run-time so the dedup reassigns EVERY
  *  referencing table (FK and non-FK alike) before a loser row is deleted. */
@@ -125,6 +134,36 @@ export function dedupeCanonicalWorkspaces(db: Database): WorkspaceDedupResult {
 
     const keeper = scored[0];
     const losers = scored.slice(1);
+
+    // DATA-05: never collapse a workspace that still has live work. Reassigning
+    // a loser's workspace_id mid-dispatch can strand an in-flight specialist
+    // session (the runtime session key is derived from the workspace/agent). If
+    // ANY loser in this group owns an in_progress/assigned task, SKIP the whole
+    // merge and log — the board keeps the (rare) duplicate column until a quiet
+    // boot re-attempts, which is strictly safer than breaking a running task.
+    // (Uses the same literals as LIVE_DISPATCH_STATES; kept inline for a static
+    //  SQL IN-list.)
+    const liveLoser = losers.find((l) => {
+      try {
+        const row = db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM tasks
+              WHERE workspace_id = ? AND status IN ('in_progress', 'assigned')`,
+          )
+          .get(l.id) as { n: number };
+        return (row?.n ?? 0) > 0;
+      } catch {
+        // Read failure is non-fatal; err on the side of NOT merging.
+        return true;
+      }
+    });
+    if (liveLoser) {
+      console.warn(
+        `[task-dedup] SKIP merge for canonical "${canon}": loser workspace "${liveLoser.id}" ` +
+          'has live in_progress/assigned task(s) — deferring to a quiet boot',
+      );
+      continue;
+    }
 
     try {
       const tx = db.transaction(() => {
@@ -262,20 +301,29 @@ export function reapDuplicateOpenAuthoringTasks(db: Database): AuthoringReapResu
 
   for (const group of dupeGroups) {
     try {
-      // Oldest open row in the group is the keeper; all others are spurious clones.
       const members = db
         .prepare(
-          `SELECT id FROM tasks
+          `SELECT id, status FROM tasks
             WHERE title = ?
               AND COALESCE(department, '') = COALESCE(?, '')
               AND COALESCE(sop_authoring_for_task_id, '') = COALESCE(?, '')
               AND ${OPEN_TASK_PREDICATE}
             ORDER BY created_at ASC, rowid ASC`,
         )
-        .all(group.title, group.department, group.link) as { id: string }[];
+        .all(group.title, group.department, group.link) as { id: string; status: string }[];
       if (members.length < 2) continue;
 
-      const losers = members.slice(1);
+      // DATA-04: NEVER reap a task with a live dispatch. Prefer KEEPING a live
+      // row as the group keeper (oldest live first), else the oldest open row.
+      // Then delete only the NON-live clones — a second live row is left intact
+      // rather than killed, so the reaper can never strand an in-flight run.
+      const liveMembers = members.filter((m) => LIVE_DISPATCH_STATES.includes(m.status));
+      const keeper = liveMembers[0] ?? members[0];
+      const losers = members.filter(
+        (m) => m.id !== keeper.id && !LIVE_DISPATCH_STATES.includes(m.status),
+      );
+      if (losers.length === 0) continue;
+
       const tx = db.transaction(() => {
         for (const loser of losers) {
           deleteTaskFkSafe(db, loser.id);
