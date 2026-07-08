@@ -636,6 +636,19 @@ _banner "Phase 5 — Verdict"
 if [[ $HEALTH_EXIT -eq 0 ]]; then
   # ── SUCCESS ─────────────────────────────────────────────────────────────────
   _ok "Deploy is GREEN on the new build."
+  # Persist the live pm2 process list so BOTH the CC app and the co-resident
+  # cloudflared tunnel connector land in the pm2 dump and auto-resurrect after an
+  # OOM/reboot. This is the persistence gap that took a client dashboard dark:
+  # the app was (re)started under pm2 but the dump was never saved, so on the next
+  # OOM `pm2 resurrect` restored nothing → Cloudflare 1033 "tunnel has no healthy
+  # origin". `pm2 save` snapshots whatever is currently running; it is additive
+  # (never removes a running process) and idempotent, so it is safe to run on
+  # every green deploy. Non-fatal: a save failure must not fail an otherwise-green
+  # deploy, but it is surfaced loudly so an operator can persist manually.
+  _log "[5] Persisting pm2 process list (pm2 save) so CC + cloudflared survive OOM/reboot ..."
+  pm2 save >/dev/null 2>&1 \
+    && _ok "  pm2 process list saved — CC app + cloudflared connector will auto-resurrect after restart/OOM." \
+    || _warn "  pm2 save FAILED — process list NOT persisted. Run 'pm2 save' manually so this box survives a reboot."
   _success_receipt "$HEALTH_JSON" "$BUILD_ID"
   exit 0
 
