@@ -52,8 +52,10 @@ const REASONER = model('ollama/kimi-k2.6:cloud', ['text', 'reasoning', 'long_con
 test('canServeTextTask rejects a pure-TTS model and accepts a language model', () => {
   assert.equal(canServeTextTask(TTS), false);
   assert.equal(canServeTextTask(REASONER), true);
-  // Untyped registry entry (no capabilities) is treated as text-capable (back-compat).
-  assert.equal(canServeTextTask(model('legacy/model', [])), true);
+  // MODEL-06: an untyped registry entry (no capabilities) is NO LONGER assumed
+  // text-capable — every real connector emits `text` for a language model, so an
+  // empty capability set is a media-smuggle / untyped row that fails closed.
+  assert.equal(canServeTextTask(model('legacy/model', [])), false);
   // Pure embeddings model also cannot serve a text task.
   assert.equal(canServeTextTask(model('test/embed', ['embeddings'])), false);
 });

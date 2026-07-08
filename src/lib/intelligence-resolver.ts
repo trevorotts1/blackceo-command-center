@@ -268,12 +268,38 @@ export function resolveSettings(
   let difficulty: 'heavy' | 'mid' | 'fast' | null = null;
   let model_tier: 1 | 2 | 3 | null = null;
 
+  // Modality is computed once, up front (MODEL-02: moved ABOVE Layer 0) so it
+  // can gate EVERY model source — the CEO pin (Layer 0) and SOP pin (Layer 1)
+  // included, not only the role/department overrides and task-time selector
+  // below. Detecting it once keeps every layer looking at the same
+  // classification for this dispatch.
+  const detectedModality: TaskModality = taskContext
+    ? detectModality(taskContext.title, taskContext.description)
+    : 'text';
+
+  // Inventory is loaded lazily and cached for the remainder of this call —
+  // several of the layers below may each need it (Layer 0/1 pin sovereignty
+  // check, role/dept sovereignty check, task selector, sovereign default) but a
+  // single resolution should only hit model_registry once.
+  let inventoryCache: ModelRegistryEntry[] | null = null;
+  const getInventory = (): ModelRegistryEntry[] => {
+    if (inventoryCache === null) inventoryCache = loadInventory();
+    return inventoryCache;
+  };
+
   // Layer 0: CEO model choice (GOAL-5 Item 5). The CEO is gated from EXECUTING
   // work but PRESERVES the right to pick which model a department runs the task
   // on. That choice is persisted onto `tasks.model_id` by the ingest route
   // (requested_model) and survives re-emit/re-dispatch. When a non-empty
   // `tasks.model_id` is already set BEFORE dispatch resolution runs, it is an
   // explicit, owner-/CEO-sanctioned model and outranks every other source.
+  //
+  // MODEL-02: the CEO/task pin is now gated through the SAME checkModelSovereignty
+  // check as the role/department overrides (Layers 2/3). A pin that is forbidden
+  // (Anthropic — including the MODEL-01 dot-route / future-generation forms),
+  // free, or wrong-modality is skipped with a logged reason and falls through,
+  // rather than silently winning and defeating model sovereignty. This makes the
+  // resolver self-sovereign regardless of what a downstream consumer re-checks.
   if (taskId) {
     try {
       const pinned = queryOne<{ model_id: string | null }>(
@@ -281,15 +307,24 @@ export function resolveSettings(
         [taskId],
       );
       if (pinned?.model_id && pinned.model_id !== NEEDS_OWNER_INPUT) {
-        model = pinned.model_id;
-        modelSource = 'role_override'; // explicit pin; treated as a hard override
+        const violation = checkModelSovereignty(pinned.model_id, getInventory(), detectedModality);
+        if (!violation) {
+          model = pinned.model_id;
+          modelSource = 'role_override'; // explicit pin; treated as a hard override
+        } else {
+          console.warn(
+            `[intelligence-resolver] CEO/task model pin rejected (task=${taskId} reason=${violation.reason}): ${pinned.model_id}`,
+          );
+        }
       }
     } catch { /* tasks.model_id may be absent on very old DBs — tolerant */ }
   }
 
   // Layer 1: SOP pin — sops.model_pin for task.sop_id (author intent wins).
   // Guarded on needs_owner_input so a Layer-0 CEO model pin (GOAL-5 Item 5) is
-  // never clobbered by an SOP pin.
+  // never clobbered by an SOP pin. MODEL-02: also gated through
+  // checkModelSovereignty — a forbidden/free/wrong-modality SOP pin is skipped
+  // with a logged reason instead of silently winning.
   const sopId = taskContext?.sop_id ?? null;
   if (modelSource === 'needs_owner_input' && sopId) {
     try {
@@ -298,29 +333,18 @@ export function resolveSettings(
         [sopId],
       );
       if (sopPin?.model_pin) {
-        model = sopPin.model_pin;
-        modelSource = 'sop_pin';
+        const violation = checkModelSovereignty(sopPin.model_pin, getInventory(), detectedModality);
+        if (!violation) {
+          model = sopPin.model_pin;
+          modelSource = 'sop_pin';
+        } else {
+          console.warn(
+            `[intelligence-resolver] SOP model pin rejected (task=${taskId} sop=${sopId} reason=${violation.reason}): ${sopPin.model_pin}`,
+          );
+        }
       }
     } catch { /* sops.model_pin column may not exist on older DBs yet */ }
   }
-
-  // Modality is computed once, up front, so it can gate BOTH the explicit
-  // role/department override sovereignty check below AND the task-time
-  // selector further down — avoids detecting it twice and keeps both layers
-  // looking at the same classification for this dispatch.
-  const detectedModality: TaskModality = taskContext
-    ? detectModality(taskContext.title, taskContext.description)
-    : 'text';
-
-  // Inventory is loaded lazily and cached for the remainder of this call —
-  // several of the layers below may each need it (role/dept sovereignty
-  // check, task selector, sovereign default) but a single resolution should
-  // only hit model_registry once.
-  let inventoryCache: ModelRegistryEntry[] | null = null;
-  const getInventory = (): ModelRegistryEntry[] => {
-    if (inventoryCache === null) inventoryCache = loadInventory();
-    return inventoryCache;
-  };
 
   // Layer 2: Role-level override in agent_settings (role_id = agent.id).
   // BUG-FIX (ORDER): this used to run AFTER the task-time selector (old Layer
