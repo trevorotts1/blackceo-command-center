@@ -403,7 +403,12 @@ export async function autoDispatchTask(
     // instead of hammering it every tick.
     const nextEligibleAt = (task as Task & { next_dispatch_eligible_at?: string | null })
       .next_dispatch_eligible_at;
-    if (nextEligibleAt && nextEligibleAt > now) {
+    // DISP-03: the 'sop-authored-resume' path is the LEGITIMATE release of a
+    // fast-loop HOLD — the SOP is now filed, so it MUST bypass the anti-furnace
+    // backoff that the HOLD itself set below, otherwise the just-authored task
+    // would be stranded in backoff until a later sweep tick (the resume calls
+    // straight back into autoDispatchTask and would otherwise skip here).
+    if (nextEligibleAt && nextEligibleAt > now && context !== 'sop-authored-resume') {
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} in dispatch backoff until ${nextEligibleAt} — skip`,
       );
@@ -618,6 +623,23 @@ export async function autoDispatchTask(
             department: task.department ?? null,
             agentRoleSlug,
             workspaceId: task.workspace_id ?? null,
+          });
+          // DISP-03: this HOLD previously returned with NO accounting, so every
+          // sweep tick re-selected the still-SOP-less card and re-fired the
+          // authoring loop (~every 2 min, uncapped) — a furnace that also spawns
+          // duplicate authoring sub-tasks. Record the pending attempt so the
+          // sweeps back off (via next_dispatch_eligible_at + GUARD 6) between
+          // ticks, and — if authoring never yields an SOP after the cap — the
+          // card BLOCKS with a SYSTEM report instead of looping forever. The
+          // happy path is unaffected: sop-authored-resume bypasses the backoff
+          // (GUARD 6) and recordDispatchSuccess clears this counter on dispatch.
+          recordDispatchFailure(task.id, agent.id, {
+            reason: 'sop_authoring_pending',
+            audience: 'SYSTEM',
+            needs:
+              `Custom dept "${deptSlug}" has no SOP yet; the authoring fast loop is running. ` +
+              'It resumes automatically once the SOP is filed.',
+            context,
           });
           return; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
         }
