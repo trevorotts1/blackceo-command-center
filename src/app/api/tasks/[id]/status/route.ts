@@ -376,11 +376,15 @@ export async function POST(
 
       // task_history feeds /api/performance duration + attribution. Best-effort:
       // older DBs without the table (pre-migration 027) simply skip this row.
+      // INGEST-14: record the board-producer provenance (was null) so the
+      // audit attributes the transition to the signed producer that drove it,
+      // not to nothing. Canonical consolidation is the shared transition()
+      // (task-lifecycle.ts, owned by L3) — see integrator note.
       try {
         run(
           `INSERT INTO task_history (id, task_id, status_from, status_to, changed_at, changed_by_agent_id, agent_name)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), id, existing.status, status, now, existing.assigned_agent_id ?? null, null],
+          [uuidv4(), id, existing.status, status, now, existing.assigned_agent_id ?? null, `board:${boardSource}`],
         );
       } catch (err) {
         console.warn('[tasks status] task_history append skipped:', (err as Error).message);
