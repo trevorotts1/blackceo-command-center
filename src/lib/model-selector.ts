@@ -24,23 +24,38 @@ import type { ModelCapability, ModelRegistryEntry } from './model-registry-types
 export const NEEDS_OWNER_INPUT = 'needs_owner_input' as const;
 
 /**
- * Anthropic is forbidden for all client dispatches — including BARE `claude-*`
- * slugs (e.g. `claude-sonnet-4-5`, `claude-opus-4-1`) that carry no
- * `anthropic/` provider prefix, plus any nested `openrouter/anthropic/…` route.
+ * Anthropic is forbidden for all client dispatches. The list below is anchored
+ * on provider ROOTS, never on specific generations, so it catches renamed and
+ * future Claude families without a code change (the MODEL-01 hardening):
  *
- * Kept at full parity with the onboarding Python selector's FORBIDDEN_PREFIXES
- * (shared-utils/select_model.py). `isForbidden` matches any of these appearing
+ *   - `anthropic/`            canonical provider-prefixed route
+ *   - `anthropic.`            Bedrock/Vertex dot-form (`anthropic.claude-3-5-…`,
+ *                             `anthropic.claude-instant-v1`, any future gen)
+ *   - `openrouter/anthropic/` nested OpenRouter route
+ *   - `claude-`               any Claude family/generation slug carrying no
+ *                             provider prefix: `claude-5`, `claude-fable-5`,
+ *                             `claude-mythos-5`, `claude-instant`, `claude-opus-…`
+ *
+ * The previous per-generation list (`claude-3`, `claude-4`, `claude-opus`, …)
+ * silently ALLOWED `anthropic.claude-…` (dot route), `claude-5`/future gens, and
+ * named future models like `claude-fable-5` / `claude-instant`.
+ *
+ * Bare `opus` / `sonnet` / `haiku` (no vendor prefix and no `claude-` stem) are
+ * NOT routable model ids on any connector, so they are deliberately NOT matched:
+ * a substring match on those bare words would false-positive on unrelated ids
+ * (e.g. a vendor whose slug merely contains "sonnet"). Every real Anthropic
+ * route carries one of the four roots above.
+ *
+ * Kept at BYTE parity with the onboarding Python selector's FORBIDDEN_PREFIXES
+ * (shared-utils/select_model.py). `isForbidden` matches any root appearing
  * ANYWHERE in the lower-cased model_id (substring, not just prefix) — mirroring
  * the Python `mid.startswith(p) or p in mid`.
  */
 const FORBIDDEN_PREFIXES = [
   'anthropic/',
+  'anthropic.',
   'openrouter/anthropic/',
-  'claude-opus',
-  'claude-sonnet',
-  'claude-haiku',
-  'claude-3',
-  'claude-4',
+  'claude-',
 ];
 
 /**
@@ -100,16 +115,19 @@ function tierOf(modelId: string): ModelTier {
   return 3;
 }
 
-function isForbidden(modelId: string): boolean {
-  // Substring (case-insensitive) match — catches bare `claude-*` families and
-  // any nested `anthropic/` route, mirroring Python `_is_forbidden`
-  // (`mid.startswith(p) or p in mid`). Prefix-only matching missed bare slugs
-  // like `claude-sonnet-4-5` that carry no `anthropic/` provider prefix.
+export function isForbidden(modelId: string): boolean {
+  // Substring (case-insensitive) match against the ROOT anchors — catches any
+  // `anthropic/` or `anthropic.` (Bedrock/Vertex dot) route, nested
+  // `openrouter/anthropic/`, and any `claude-` family/generation slug, mirroring
+  // Python `_is_forbidden` (`mid.startswith(p) or p in mid`). Root anchoring
+  // (not per-generation) means future/renamed Claude models stay forbidden with
+  // no code change. Exported so the settings write/read path (MODEL-07) can
+  // reject/hide a forbidden model without re-implementing the rule.
   const mid = modelId.toLowerCase();
   return FORBIDDEN_PREFIXES.some((p) => mid.includes(p));
 }
 
-function isFree(modelId: string, entry?: ModelRegistryEntry): boolean {
+export function isFree(modelId: string, entry?: ModelRegistryEntry): boolean {
   if (modelId.endsWith(':free') || modelId === 'openrouter/free') return true;
   if (entry?.pricing_model === 'free') return true;
   return false;
@@ -251,9 +269,14 @@ function capabilityScore(
 // let exactly such a model win a presentations/text task, pinning a TTS model as
 // the task's reasoning `model_id` (the wrong-field symptom on the affected box).
 // A model serves a text task only when it has at least one LANGUAGE capability
-// (anything that is NOT a pure media-output or embeddings kind). Models with NO
-// declared capabilities are treated as text-capable for back-compat with untyped
-// registries.
+// (anything that is NOT a pure media-output or embeddings kind).
+//
+// MODEL-06: a row with NO declared capabilities is NO LONGER assumed text-capable.
+// Every real connector emits at least `text` for a language model, so an empty
+// capability set is an untyped / media-smuggle row (e.g. a bare image/video/TTS
+// endpoint that never declared its output modality). Treating it as text-capable
+// let such a row be pinned as a text task's reasoning model_id. Empty caps now
+// fail closed — a text task never resolves onto an un-typed row.
 const NON_LANGUAGE_OUTPUT_CAPS = new Set<ModelCapability>([
   'image_generation',
   'video_generation',
@@ -264,7 +287,7 @@ const NON_LANGUAGE_OUTPUT_CAPS = new Set<ModelCapability>([
 
 export function canServeTextTask(entry: ModelRegistryEntry): boolean {
   const caps = entry.capabilities ?? [];
-  if (caps.length === 0) return true; // untyped/generic LLM — assume chat-capable
+  if (caps.length === 0) return false; // MODEL-06: untyped row — cannot prove text-capable, fail closed
   return caps.some((c) => !NON_LANGUAGE_OUTPUT_CAPS.has(c));
 }
 
@@ -474,10 +497,26 @@ export function checkModelSovereignty(
   if (isForbidden(modelId)) {
     return { reason: 'forbidden_prefix', model_id: modelId, required_modality };
   }
-  if (required_modality && required_modality !== 'text') {
+  if (required_modality) {
     const entry = inventory.find((m) => m.model_id === modelId);
-    if (entry && !entry.capabilities.includes(required_modality as ModelCapability)) {
-      return { reason: 'wrong_modality', model_id: modelId, required_modality };
+    if (required_modality === 'text') {
+      // MODEL-06: a resolved TEXT model that IS present in the inventory must be
+      // able to actually serve text — not a pure media/TTS/embeddings row and not
+      // an empty-caps (untyped) row. A model ABSENT from inventory is left to the
+      // free/forbidden checks above (text is the lenient default modality, and an
+      // express text pin the box hasn't registered is not, by itself, a violation).
+      if (entry && !canServeTextTask(entry)) {
+        return { reason: 'wrong_modality', model_id: modelId, required_modality };
+      }
+    } else {
+      // MODEL-03: a NON-text (vision/image/video/audio) pin must be a KNOWN,
+      // capability-verified model. The gate previously FAILED OPEN when the model
+      // was absent from the inventory — an unverifiable id could satisfy a media
+      // task. Treat "absent from inventory" as a violation (we cannot prove it can
+      // serve the required modality), same as a present-but-incapable model.
+      if (!entry || !entry.capabilities.includes(required_modality as ModelCapability)) {
+        return { reason: 'wrong_modality', model_id: modelId, required_modality };
+      }
     }
   }
   return null;
