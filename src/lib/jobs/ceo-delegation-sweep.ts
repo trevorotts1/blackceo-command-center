@@ -65,6 +65,14 @@ export async function runCeoDelegationSweep(): Promise<void> {
   // guards in autoDispatchTask + the intake-advance/backlog sweeps.
   const dispatchCap = Math.max(1, parseInt(process.env.MAX_DISPATCH_ATTEMPTS || '5', 10));
   const nowIso = new Date().toISOString();
+  // SWEEP-04: complete the 4-part anti-furnace SELECT that backlog-redispatch
+  // already uses — a QC re-route cap, a dispatch-attempt cap, a backoff window,
+  // and (below) a 120s grace + master exclusion. Grace stops a just-created
+  // CEO-stranded task from being re-homed + re-dispatched before its first
+  // attempt has had time to land.
+  const cap = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+  const graceSeconds = parseInt(process.env.CEO_DELEGATION_GRACE_SECONDS || '120', 10);
+  const graceCutoff = new Date(Date.now() - graceSeconds * 1000).toISOString();
 
   // ── 1. CEO-workspace stranded tasks (original behavior) ─────────────────
   const ceoWorkspaceIds = (queryAll<{ id: string }>(
@@ -74,15 +82,23 @@ export async function runCeoDelegationSweep(): Promise<void> {
   const ceoTasks: CeoTaskRow[] = [];
   if (ceoWorkspaceIds.length > 0) {
     const placeholders = ceoWorkspaceIds.map(() => '?').join(',');
+    // SWEEP-04: full anti-furnace SELECT — QC re-route cap + dispatch cap +
+    // backoff + grace window + master exclusion (via LEFT JOIN, for symmetry
+    // with branch 2 / backlog-redispatch; branch-1 tasks are unassigned so the
+    // exclusion is a no-op here but keeps the two branches structurally aligned).
     const rows = queryAll<CeoTaskRow>(
-      `SELECT id, title, description, priority, workspace_id, department, qc_reroute_attempts
-       FROM tasks
-       WHERE workspace_id IN (${placeholders})
-         AND status = 'backlog'
-         AND assigned_agent_id IS NULL
-         AND (dispatch_attempts IS NULL OR dispatch_attempts < ?)
-         AND (next_dispatch_eligible_at IS NULL OR next_dispatch_eligible_at <= ?)`,
-      [...ceoWorkspaceIds, dispatchCap, nowIso],
+      `SELECT t.id, t.title, t.description, t.priority, t.workspace_id, t.department, t.qc_reroute_attempts
+       FROM tasks t
+       LEFT JOIN agents a ON t.assigned_agent_id = a.id
+       WHERE t.workspace_id IN (${placeholders})
+         AND t.status = 'backlog'
+         AND t.assigned_agent_id IS NULL
+         AND (t.qc_reroute_attempts IS NULL OR t.qc_reroute_attempts < ?)
+         AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
+         AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
+         AND (a.is_master IS NULL OR a.is_master = 0)
+         AND t.updated_at <= ?`,
+      [...ceoWorkspaceIds, cap, dispatchCap, nowIso, graceCutoff],
     );
     ceoTasks.push(...rows);
   }
@@ -98,17 +114,21 @@ export async function runCeoDelegationSweep(): Promise<void> {
   // Escalation cap: tasks with qc_reroute_attempts >= cap (default 3) are not
   // re-routed -- they already carry a task_escalated event. We skip them here
   // so they stay visible in Backlog for human triage and do not re-loop.
-  const cap = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+  // SWEEP-04: also add the 120s grace window + master exclusion so this branch
+  // matches backlog-redispatch's full anti-furnace SELECT (cap already present).
   const qcFailTasks = queryAll<CeoTaskRow>(
-    `SELECT id, title, description, priority, workspace_id, department, qc_reroute_attempts
-     FROM tasks
-     WHERE status = 'backlog'
-       AND qc_reroute_attempts > 0
-       AND qc_reroute_attempts < ?
-       AND archived_at IS NULL
-       AND (dispatch_attempts IS NULL OR dispatch_attempts < ?)
-       AND (next_dispatch_eligible_at IS NULL OR next_dispatch_eligible_at <= ?)`,
-    [cap, dispatchCap, nowIso],
+    `SELECT t.id, t.title, t.description, t.priority, t.workspace_id, t.department, t.qc_reroute_attempts
+     FROM tasks t
+     LEFT JOIN agents a ON t.assigned_agent_id = a.id
+     WHERE t.status = 'backlog'
+       AND t.qc_reroute_attempts > 0
+       AND t.qc_reroute_attempts < ?
+       AND t.archived_at IS NULL
+       AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
+       AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
+       AND (a.is_master IS NULL OR a.is_master = 0)
+       AND t.updated_at <= ?`,
+    [cap, dispatchCap, nowIso, graceCutoff],
   );
 
   // Merge: de-duplicate by id (a CEO-workspace QC-fail task would appear in both).
