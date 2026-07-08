@@ -53,6 +53,14 @@ export interface GateVerdict {
   expired: boolean;
 }
 
+/**
+ * The well-known dev/unprovisioned fallback secret. It is PUBLIC (it ships in
+ * this source file), so any cookie signed with it is forgeable by anyone who
+ * has read the repo. It exists only so the gate stays internally consistent on
+ * a local/dev box where none of the real secrets are set.
+ */
+const DEV_FALLBACK_SECRET = 'mc-interview-gate-unsigned-dev-secret';
+
 function cookieSecret(): string {
   return (
     process.env.MC_INTERVIEW_COOKIE_SECRET ||
@@ -60,8 +68,27 @@ function cookieSecret(): string {
     process.env.WEBHOOK_SECRET ||
     // Dev/unprovisioned fallback: still internally consistent (sign + verify use
     // the same value in one process), so the gate works locally. In production
-    // one of the above secrets is always set.
-    'mc-interview-gate-unsigned-dev-secret'
+    // one of the above secrets is always set — and if it somehow isn't,
+    // devSecretInProduction() below HARD-LOCKS the gate rather than signing with
+    // this public, forgeable key (DATA-13).
+    DEV_FALLBACK_SECRET
+  );
+}
+
+/**
+ * DATA-13 — production hard-lock condition. When the effective signing secret
+ * resolves to the public {@link DEV_FALLBACK_SECRET} on a production box, the
+ * HMAC key is public: anyone could forge a `{complete:true}` cookie and unlock
+ * the dashboard. In that state we refuse to serve — signing throws and every
+ * verification fails CLOSED (302 → /interview) — so no forged token can pass
+ * and the operator is forced to provision a real secret. Uses only
+ * `process.env` (Edge-safe; Next inlines NODE_ENV in both runtimes), so this
+ * keeps `gate-cookie.ts` importable from the Edge middleware.
+ */
+function devSecretInProduction(): boolean {
+  return (
+    process.env.NODE_ENV === 'production' &&
+    cookieSecret() === DEV_FALLBACK_SECRET
   );
 }
 
@@ -114,6 +141,16 @@ function timingSafeEqual(a: string, b: string): boolean {
 export async function signInterviewToken(
   complete: boolean,
 ): Promise<{ value: string; maxAge: number }> {
+  // DATA-13: never mint a token signed with the public dev fallback in prod —
+  // it would be trivially forgeable. Fail loud so the setter surfaces the
+  // misconfiguration instead of silently issuing a worthless (forgeable) cookie.
+  if (devSecretInProduction()) {
+    throw new Error(
+      'DATA-13: interview cookie secret resolves to the public dev fallback in ' +
+        'production. Set MC_INTERVIEW_COOKIE_SECRET (or MC_API_TOKEN / ' +
+        'WEBHOOK_SECRET). Refusing to sign a forgeable token.',
+    );
+  }
   const ttl = complete ? COMPLETE_TTL_SECONDS : INCOMPLETE_TTL_SECONDS;
   const exp = Math.floor(Date.now() / 1000) + ttl;
   const payload: GatePayload = { complete: !!complete, exp };
@@ -134,6 +171,11 @@ export async function verifyInterviewToken(
   value: string | undefined | null,
 ): Promise<GateVerdict> {
   const fail: GateVerdict = { valid: false, complete: false, expired: false };
+  // DATA-13: on a production box whose secret is the public dev fallback, the
+  // signing key is forgeable — trust NOTHING and hard-lock to /interview,
+  // regardless of what the presented token claims. Over-locking a
+  // mis-provisioned box is the correct fail-safe (spec: "refuse to serve").
+  if (devSecretInProduction()) return fail;
   if (!value || typeof value !== 'string') return fail;
   const dot = value.lastIndexOf('.');
   if (dot <= 0 || dot === value.length - 1) return fail;
