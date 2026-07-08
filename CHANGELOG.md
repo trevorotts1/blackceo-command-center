@@ -1,3 +1,20 @@
+## [v4.69.1] — 2026-07-08 — fix(tasks): idempotency key takes precedence over the title-window dedupe (anthology card collision)
+
+Fixes a real collision: one contact enrolled in two different anthologies produced two cards sharing the same title, and Command Center's generic Layer-2 dedupe (title + workspace window) was collapsing them into a single task row instead of the two distinct rows their distinct idempotency keys called for. A caller-supplied idempotency key (Layer 1) is an authoritative, deliberate identity and must never be overridden by the generic same-title safety net meant for keyless callers (operator UI, plain Telegram capture).
+
+### fix(tasks): Layer 1 (idempotency_key) gates Layer 2 (title window)
+- **`src/lib/tasks.ts`** — the title+workspace dedupe window now only runs `if (!input.skipWindowDedup && !input.idempotency_key)`. When a request carries a distinct idempotency key that Layer 1 already checked and found no prior task for, the row is knowingly distinct and the title window must not fold it onto a same-titled neighbour. Keyless callers are unaffected — Layer 2 still guards them against accidental same-title duplicates.
+- **`tests/unit/task-ingest-dedup.test.ts`** — three new cases: (7) distinct idempotency keys + identical title within the window → 2 tasks (the regression this fixes), (8) same idempotency key still dedupes across the window (Layer 1 unchanged), (9) keyless same-title within the window still dedupes (Layer 2 preserved for keyless callers).
+
+### Verification
+- `tsc --noEmit`: clean (rc=0).
+- `tests/unit/task-ingest-dedup.test.ts`: 14/14 pass. Independently reproduced the regression by reverting only `src/lib/tasks.ts` to its pre-fix `origin/main` content against this branch's test file: exactly test 12 (Layer-1-precedence) fails, 13/14 — confirming the fix (not the new assertions) is what makes 14/14 pass.
+- `scripts/qc-cc.sh`: 111 checks green, 4 environment-only warnings (fresh-clone has no `.env.local`/live DB — expected).
+- `tests/unit/no-naked-dispatch.test.sh`: 5/5 pass.
+- `npm run test:vitest`: 95/95 pass.
+- `FORBIDDEN_STATUSES = new Set(['done'])` in `src/app/api/tasks/[id]/status/route.ts` — byte-for-byte unchanged; file untouched by this branch — the review→done QC-only (≥8.5) guarantee is intact.
+- Repo stays fleet-wide (no client names/IDs/secrets in either changed file); no new npm dependencies. All 5 version locations agree at v4.69.1; annotated tag cut before merge.
+
 ## [v4.69.0] — 2026-07-07 — fix(reliability): stuck-in-progress sweep for silent agent failures
 
 Closes the silent-task-hang gap found in tonight's incident investigation: a task dispatched to `in_progress` whose agent turn dies mid-work (repeated tool failures, degenerate loop, thinking-only turn end) without emitting `TASK_COMPLETE:` or writing a terminal status rotted invisibly — the success reconcile (execution-watcher) only matches completions, and stale-task-sweep's in_progress threshold is 24h with a silent backlog-bounce remedy and no operator alert. Nothing marked such a task blocked or surfaced the error until now.
