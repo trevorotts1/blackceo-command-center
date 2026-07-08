@@ -74,9 +74,12 @@ export const revalidate = 0;
  *      existing non-Skill-6 403 for 'blocked', the same as any other status.
  *
  *   2. Card scope — the route only acts on tasks that carry a signed
- *      board-producer marker (see isSignedBoardProducerCard below). There is
- *      no dedicated `source` column on `tasks`; /api/tasks/ingest folds
- *      provenance into the description as a "Source: <value>" line inside a
+ *      board-producer source (see resolveBoardSource below). INGEST-10: the
+ *      AUTHORITATIVE signal is the IMMUTABLE, server-stamped `tasks.source`
+ *      column (set only at creation by /api/tasks/ingest → createTaskCore and
+ *      never editable), NOT the caller-controllable description. Legacy rows
+ *      predating that column fall back to the "Source: <value>" line
+ *      /api/tasks/ingest folds into the description inside a
  *      "— Captured via task-ingest —" block. Two producers stamp such a
  *      marker: cc_board.py's ingest_task() (06-ghl-install-pages/tools/
  *      cc_board.py, the Skill-6 producer, source 'funnel' | 'survey' |
@@ -163,12 +166,48 @@ function hasAnthologyMarker(description: string | null | undefined): boolean {
 }
 
 /**
- * A signed caller may transition a card only when it carries a recognized
- * board-producer source marker: the Skill-6 producer's cards OR the Anthology
- * Engine's cards. Any other task is out of scope (403).
+ * INGEST-10 — recognized board-producer sources. The board-producer scope was
+ * originally derived from a "Source: <value>" line folded into the
+ * caller-controllable free-text `description`, so a caller could FORGE scope by
+ * putting "Source: funnel" in ANY task body and then drive its status through
+ * this route. The durable fix is an IMMUTABLE, server-stamped `tasks.source`
+ * column set ONLY at creation and never exposed on any update surface.
  */
-function isSignedBoardProducerCard(description: string | null | undefined): boolean {
-  return hasSkill6Marker(description) || hasAnthologyMarker(description);
+const RECOGNIZED_BOARD_SOURCES = new Set(['funnel', 'survey', 'web-development', 'anthology']);
+
+/**
+ * Resolve the effective, authoritative board-producer source for a card.
+ *
+ * Prefers the IMMUTABLE server-stamped `tasks.source` column (non-forgeable).
+ * Legacy rows created before that column existed carry a NULL/absent `source`;
+ * for those we fall back to the (forgeable, legacy) description marker so
+ * pre-migration cards keep working until the fleet is fully migrated.
+ *
+ * CROSS-LANE DEPENDENCIES:
+ *   • MIGRATION (L13 · src/lib/db/migrations.ts + schema.ts): add an immutable
+ *     `tasks.source TEXT` column. Until it lands, `task.source` is always
+ *     undefined and this resolver uses the legacy description fallback.
+ *   • INGEST STAMPING (L7 · src/app/api/tasks/ingest/route.ts + src/lib/tasks.ts):
+ *     stamp `source` at creation from the VALIDATED ingest source, never from
+ *     caller-editable text, and never expose it on the PATCH/update surface.
+ *
+ * Returns the recognized source string when in scope, else null (→ 403).
+ */
+function resolveBoardSource(
+  task: Pick<Task, 'description'> & { source?: string | null },
+): string | null {
+  const stamped = typeof task.source === 'string' ? task.source.trim().toLowerCase() : '';
+  if (stamped) {
+    // Immutable column present → authoritative, non-forgeable gate.
+    return RECOGNIZED_BOARD_SOURCES.has(stamped) ? stamped : null;
+  }
+  // Legacy row (pre-source-column migration) → fall back to the description marker.
+  if (hasSkill6Marker(task.description)) {
+    const m = task.description!.match(/^Source:\s*(funnel|survey|web-development)\s*$/m);
+    return m ? m[1] : null;
+  }
+  if (hasAnthologyMarker(task.description)) return 'anthology';
+  return null;
 }
 
 /**
@@ -277,14 +316,16 @@ export async function POST(
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // ── Scope (P2-3 fix; runs before any status, including 'blocked', is
-    // persisted) — only act on tasks carrying the Skill-6 producer's source
-    // marker; a signed caller can move Skill-6's own cards, not an arbitrary
-    // task on the board. This is also what gates 'blocked': a marked card
-    // may be escalated to 'blocked' (e.g. cc_board.py's
+    // ── Scope (P2-3 / INGEST-10; runs before any status, including 'blocked',
+    // is persisted) — only act on tasks carrying an authoritative board-producer
+    // source (immutable tasks.source column preferred; legacy description marker
+    // as fallback); a signed caller can move a producer's own cards, not an
+    // arbitrary task on the board. This is also what gates 'blocked': a marked
+    // card may be escalated to 'blocked' (e.g. cc_board.py's
     // BuildPhaseDriver.fail(human_required=True) signaling a human is
     // needed); an unmarked card gets the same 403 as any other status. ──
-    if (!isSignedBoardProducerCard(existing.description)) {
+    const boardSource = resolveBoardSource(existing);
+    if (!boardSource) {
       return NextResponse.json(
         {
           error: 'Forbidden: this task is not a signed board-producer card.',
