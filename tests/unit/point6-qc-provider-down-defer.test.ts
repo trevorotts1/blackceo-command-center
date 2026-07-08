@@ -37,6 +37,11 @@ delete process.env.OPENAI_API_KEY;
 delete process.env.GOOGLE_API_KEY;
 delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 delete process.env.GEMINI_API_KEY;
+// QC-08: the judge is a client-owned Ollama Cloud model — clear any ambient
+// judge model/key so the no-key + fresh-defer cases see a truly keyless box.
+delete process.env.QC_JUDGE_MODEL;
+delete process.env.OLLAMA_CLOUD_API_KEY;
+delete process.env.OLLAMA_API_KEY;
 delete process.env.QC_SIMULATE_PROVIDER_DOWN;
 delete process.env.QC_FIXTURE_JSON_PATH;
 delete process.env.DISABLE_QC_AUTO_SCORER;
@@ -104,6 +109,8 @@ test.before(async () => {
 
 test.after(() => {
   delete process.env.OPENAI_API_KEY;
+  delete process.env.QC_JUDGE_MODEL;
+  delete process.env.OLLAMA_CLOUD_API_KEY;
   delete process.env.QC_SIMULATE_PROVIDER_DOWN;
   delete process.env.QC_FIXTURE_JSON_PATH;
   try { closeDb(); } catch { /* ignore */ }
@@ -112,7 +119,10 @@ test.after(() => {
 
 // ── 1: provider-down → deferred marker, stays in review ─────────────────────
 test('[Point6.1a] provider-down: task DEFERRED in review with [QC-DEFERRED-PROVIDER-DOWN], not human-required', async () => {
-  process.env.OPENAI_API_KEY = 'sk-fake-provider-down';
+  // QC-08: the judge is the client's Ollama Cloud model. A configured judge +
+  // key + QC_SIMULATE_PROVIDER_DOWN exercises the provider-down (defer) branch.
+  process.env.QC_JUDGE_MODEL = 'ollama-cloud/qwen2.5:32b';
+  process.env.OLLAMA_CLOUD_API_KEY = 'fake-ollama-key';
   process.env.QC_SIMULATE_PROVIDER_DOWN = '1';
   const id = nextId('provdown');
   insertReviewTask(id);
@@ -123,7 +133,8 @@ test('[Point6.1a] provider-down: task DEFERRED in review with [QC-DEFERRED-PROVI
     assert.equal(result.scoringPath, 'heuristic', 'provider-down falls back to heuristic scoring');
     assert.equal(result.heuristicReason, 'provider-down', 'heuristicReason must be provider-down');
   } finally {
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.QC_JUDGE_MODEL;
+    delete process.env.OLLAMA_CLOUD_API_KEY;
     delete process.env.QC_SIMULATE_PROVIDER_DOWN;
   }
 
@@ -152,12 +163,14 @@ test('[Point6.1b] recovery: provider returns → runQCOnReview re-scores → tas
   const id = nextId('recover-direct');
   insertReviewTask(id);
 
-  // Defer it first (provider down).
-  process.env.OPENAI_API_KEY = 'sk-fake-provider-down';
+  // Defer it first (provider down) — client Ollama Cloud judge configured.
+  process.env.QC_JUDGE_MODEL = 'ollama-cloud/qwen2.5:32b';
+  process.env.OLLAMA_CLOUD_API_KEY = 'fake-ollama-key';
   process.env.QC_SIMULATE_PROVIDER_DOWN = '1';
   await runQCOnReview(id);
   delete process.env.QC_SIMULATE_PROVIDER_DOWN;
-  delete process.env.OPENAI_API_KEY;
+  delete process.env.QC_JUDGE_MODEL;
+  delete process.env.OLLAMA_CLOUD_API_KEY;
 
   let deferred = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [id]);
   assert.equal(deferred!.status, 'review', 'must be deferred in review before recovery');
