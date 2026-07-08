@@ -41,12 +41,37 @@ const OWNER_SEND_TIMEOUT_MS = 5_000;
 
 /**
  * The known OPERATOR chat IDs — never returned as a client owner target.
- * MUST stay in sync with openclaw-onboarding:
+ *
+ * MSG-03 — SINGLE SOURCE: the authoritative set is read from the
+ * OPERATOR_CHAT_IDS env (comma/space/newline-separated) that the installer
+ * writes, so all three repos consume ONE list instead of hand-maintained
+ * divergent copies. The hardcoded list below is only the fail-safe default
+ * when that env is unset; it MUST stay in sync with openclaw-onboarding:
  *   install.sh, shared-utils/resolve-owner-chat.sh,
  *   shared-utils/nudge-incomplete-interviews.py,
  *   tests/unit/cron-owner-chat-guard.test.sh
+ * Long-term single-source guard: an `openclaw doctor` diff of this resolver
+ * against the onboarding resolver (cross-repo — see MSG-03 in the fix spec).
  */
-const OPERATOR_CHAT_IDS = new Set(['5252140759', '6663821679', '6771245262']);
+const DEFAULT_OPERATOR_CHAT_IDS = ['5252140759', '6663821679', '6771245262'];
+
+/**
+ * Resolve the operator chat-id set from OPERATOR_CHAT_IDS env, falling back to
+ * the built-in default. The fallback is intentional and fail-SAFE: an unset or
+ * malformed env must never SHRINK the operator set (that would let an operator
+ * id resolve as a client owner — the exact leak this list prevents).
+ */
+function loadOperatorChatIds(): Set<string> {
+  const ids = (process.env.OPERATOR_CHAT_IDS ?? '')
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter((s) => /^\d{6,20}$/.test(s));
+  // Always UNION the built-in defaults so an env list can only ADD operator
+  // ids to reject, never drop a known one.
+  return new Set([...DEFAULT_OPERATOR_CHAT_IDS, ...ids]);
+}
+
+const OPERATOR_CHAT_IDS = loadOperatorChatIds();
 
 function safeIsDir(p: string): boolean {
   try {
