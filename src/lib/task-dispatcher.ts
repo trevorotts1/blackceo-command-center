@@ -877,10 +877,16 @@ If you need help or clarification, ask the orchestrator.`;
       return;
     }
 
+    // DISP-01: stable idempotency key. Was `Date.now()`, which handed every
+    // re-fire — including two advancers racing the SAME window — a UNIQUE key,
+    // so the gateway could never dedup a concurrent double-send. Key on the
+    // attempt counter instead: genuine retries (after recordDispatchFailure
+    // bumps dispatch_attempts) get a fresh key, but two advancers in one window
+    // read the same counter → identical key → the gateway collapses them.
     await client.call('chat.send', {
       sessionKey,
       message: taskMessage,
-      idempotencyKey: `auto-dispatch-${task.id}-${Date.now()}`,
+      idempotencyKey: `auto-dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
     });
 
     // ── Advance task to in_progress via lifecycle transition ───────────────

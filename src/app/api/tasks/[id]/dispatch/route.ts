@@ -503,10 +503,13 @@ If you need help or clarification, ask the orchestrator.`;
       // message body (Agent Model / Agent Persona above) and pinned on the task
       // as the INTENDED model (see the 🤖 pill relabel in MissionQueue). We do
       // NOT claim it is the model that actually ran.
+      // DISP-01: stable idempotency key (was `Date.now()`). Keyed on the attempt
+      // counter so a genuine retry gets a fresh key while two sends racing the
+      // same window share one → the gateway can dedup a concurrent double-send.
       await client.call('chat.send', {
         sessionKey,
         message: taskMessage,
-        idempotencyKey: `dispatch-${task.id}-${Date.now()}`,
+        idempotencyKey: `dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
       });
 
       // Update task status to in_progress, and pin the resolved model_id so
