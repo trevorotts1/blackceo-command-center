@@ -257,9 +257,11 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // These two are NOT the primary mechanism. The primary B2 path is the instant
   // agent-completion webhook (which now broadcasts task_updated immediately),
   // and the primary B4/B8 path is in-process routing in createTaskCore. These
-  // crons only catch DROPPED events / pre-existing backlog. To disable, delete
-  // the entry here (or set EXECUTION_WATCHER_ENABLED=0 /
-  // CEO_DELEGATION_SWEEP_ENABLED=0). Kept low-frequency on purpose.
+  // crons only catch DROPPED events / pre-existing backlog. Kept low-frequency
+  // on purpose. Their JOBS entries stay registered but the two legacy ADVANCERS
+  // (ceo-delegation + backlog-redispatch) are PAUSED BY DEFAULT (SWEEP-01) — they
+  // return immediately unless opted in per box (CEO_DELEGATION_SWEEP_ENABLED=1 /
+  // BACKLOG_REDISPATCH_SWEEP_ENABLED=1). intake-advance is the single live advancer.
   //
   // execution-reconcile: every 2 minutes, catch in_progress tasks whose
   // TASK_COMPLETE report never reached the webhook.
@@ -282,7 +284,8 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   },
   // ceo-delegation: every 5 minutes, push CEO-stranded backlog tasks down to
   // the right department (mostly relevant for tasks created before in-process
-  // routing shipped).
+  // routing shipped). PAUSED BY DEFAULT (SWEEP-01) — opt in with
+  // CEO_DELEGATION_SWEEP_ENABLED=1; intake-advance is the live advancer.
   { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
 
   // intake-advance: every 2 minutes — THE single board-advancement authority
@@ -291,9 +294,10 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // autoDispatchTask so cards actually move instead of freezing in `inbox`.
   // Furnace-proof by construction — it only selects tasks under the QC cap, under
   // the dispatch attempt cap, and past their backoff window. This REPLACES the
-  // backlog-redispatch + ceo-delegation sweeps as the live advancer (those two
-  // stay paused via *_ENABLED=0 until this consumer is verified).
-  // Disable with INTAKE_ADVANCE_SWEEP_ENABLED=0.
+  // backlog-redispatch + ceo-delegation sweeps as the live advancer — those two
+  // are now PAUSED BY DEFAULT in-repo (SWEEP-01): each returns immediately unless
+  // opted in with its *_ENABLED=1 flag (no longer relying on an env override to
+  // stay off). Disable this one with INTAKE_ADVANCE_SWEEP_ENABLED=0.
   {
     name: 'intake-advance',
     expr: '*/2 * * * *',
@@ -317,7 +321,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // it flips to in_progress (SKIP_STATUSES), and the failing path burns no
   // tokens (guards return before chat.send). A 120s grace window + batch cap
   // prevent a re-dispatch storm / double-invocation of just-assigned tasks.
-  // Disable with BACKLOG_REDISPATCH_SWEEP_ENABLED=0.
+  // PAUSED BY DEFAULT (SWEEP-01) — opt in with BACKLOG_REDISPATCH_SWEEP_ENABLED=1.
   {
     name: 'backlog-redispatch',
     expr: '*/2 * * * *',

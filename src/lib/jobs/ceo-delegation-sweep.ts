@@ -20,8 +20,10 @@
  * These tasks know their target department, so routeTask is run with the
  * original department hint to re-assign the right specialist.
  *
- * LOW-FREQUENCY and trivially disabled: remove the one JOBS entry in
- * scheduler.ts or set CEO_DELEGATION_SWEEP_ENABLED=0.
+ * PAUSED BY DEFAULT (SWEEP-01): intake-advance-sweep now owns board
+ * advancement (including CEO-stranded re-homing). This legacy safety net is
+ * opt-in — it runs ONLY when CEO_DELEGATION_SWEEP_ENABLED=1 (or =true). Its
+ * JOBS entry stays registered so re-enabling needs no code change.
  */
 
 import { queryAll, run, queryOne } from '@/lib/db';
@@ -48,7 +50,15 @@ interface CeoTaskRow {
 }
 
 export async function runCeoDelegationSweep(): Promise<void> {
-  if (process.env.CEO_DELEGATION_SWEEP_ENABLED === '0') return;
+  // SWEEP-01: PAUSED BY DEFAULT. Opt in per box with CEO_DELEGATION_SWEEP_ENABLED=1.
+  // Previously this only skipped on an explicit =0, so it ran at default even
+  // though the CHANGELOG claimed it stayed paused.
+  if (
+    process.env.CEO_DELEGATION_SWEEP_ENABLED !== '1' &&
+    process.env.CEO_DELEGATION_SWEEP_ENABLED !== 'true'
+  ) {
+    return;
+  }
 
   // W8.2 anti-furnace: never re-select a task that has hit the dispatch attempt
   // cap or is still inside its exponential-backoff window. Pairs with the same
