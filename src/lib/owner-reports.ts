@@ -62,6 +62,7 @@
  * ════════════════════════════════════════════════════════════════════════════
  */
 
+import path from 'path';
 import { queryOne } from '@/lib/db';
 import { notifyOwner } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
@@ -90,7 +91,10 @@ export interface OwnerReportFields {
   role: string | null;
   /** the SOP driving the work — sops.name resolved via task.sop_id */
   sop: string | null;
-  /** where the deliverable lives (artifact path) — falls back to the board URL */
+  /**
+   * CLIENT-SAFE "where to find it" (MSG-02): the board URL, optionally with a
+   * deliverable's BASENAME as a hint. NEVER a raw operator filesystem path.
+   */
   location: string | null;
 }
 
@@ -157,9 +161,30 @@ export function resolveReportFields(
     specialist: overrides.specialist ?? agent?.name ?? null,
     role: overrides.role ?? agent?.role ?? null,
     sop: overrides.sop ?? sop?.name ?? null,
-    location:
-      overrides.location ?? resolveLocation(taskId) ?? boardUrl(taskId),
+    location: clientSafeLocation(taskId, overrides.location),
   };
+}
+
+/**
+ * MSG-02 — the client-safe "where to find it" value.
+ *
+ * NEVER surface a raw absolute operator filesystem path to the client
+ * (MOVE-IN-SILENCE). The Command Center board URL is the canonical,
+ * client-safe location. Resolution:
+ *   • A caller override or deliverable value that is ALREADY a public URL
+ *     (http/https) is safe → pass it through.
+ *   • Anything else is treated as a filesystem path: strip to its BASENAME
+ *     (the filename only — never the operator's directory tree) and anchor the
+ *     owner at the board URL where they can actually retrieve it.
+ *   • No deliverable at all → the board URL alone.
+ */
+function clientSafeLocation(taskId: string, override?: string | null): string {
+  const board = boardUrl(taskId);
+  const raw = (override ?? resolveLocation(taskId) ?? '').trim();
+  if (!raw) return board;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const name = path.basename(raw);
+  return name ? `${name} — ${board}` : board;
 }
 
 /**
