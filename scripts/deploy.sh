@@ -119,6 +119,17 @@ HEALTH_CODE=0
 run_health_check "post-deploy" || HEALTH_CODE=$?
 
 if [[ "$HEALTH_CODE" -eq 0 ]]; then
+  # Persist the live pm2 process list so BOTH the CC app and the co-resident
+  # cloudflared tunnel connector land in the pm2 dump and auto-resurrect after an
+  # OOM/reboot. `pm2 restart` above never re-saves the dump, so a box first
+  # brought up outside a `pm2 save` would come back EMPTY after a crash
+  # (Cloudflare 1033 "tunnel has no healthy origin"). `pm2 save` snapshots
+  # whatever is currently running — additive, idempotent, safe on every green
+  # deploy. Non-fatal so a save hiccup never fails an otherwise-green deploy.
+  echo "[6b/6] Persisting pm2 process list (pm2 save) so CC + cloudflared survive OOM/reboot..."
+  pm2 save \
+    && echo "  pm2 process list saved — CC + cloudflared will auto-resurrect after restart/OOM." \
+    || echo "  WARNING: pm2 save failed — run 'pm2 save' manually so this box survives a reboot."
   echo "=== Deploy Complete — GREEN ==="
 elif [[ "$HEALTH_CODE" -eq 1 ]]; then
   echo "  DEPLOY FAILED — definitive RED"

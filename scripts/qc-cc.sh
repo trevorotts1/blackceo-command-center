@@ -461,6 +461,20 @@ check "10.14" "atomic-deploy.sh: exit-3 health check retries (never rolls back o
 check "10.15" "tests/unit/b2-atomic-deploy.test.ts fixture test exists" \
   "[ -f tests/unit/b2-atomic-deploy.test.ts ]"
 
+# 10.16 atomic-deploy.sh persists the pm2 process list (pm2 save) so BOTH the CC
+#       app AND the co-resident cloudflared tunnel connector are in the pm2 dump
+#       and auto-resurrect after an OOM/reboot. Root cause of the CF-1033
+#       "tunnel has no healthy origin" outage: the app was (re)started under pm2
+#       but the dump was never saved, so `pm2 resurrect` on the next boot
+#       restored nothing and the dashboard stayed dark.
+check "10.16" "atomic-deploy.sh: pm2 save on green (CC + cloudflared persist for auto-resurrect)" \
+  "grep -q 'pm2 save' scripts/atomic-deploy.sh"
+
+# 10.17 deploy.sh (legacy operator deploy path per DEPLOYMENT.md) must ALSO
+#       persist via pm2 save on green — same OOM/reboot-survival guarantee.
+check "10.17" "deploy.sh: pm2 save on green (persist pm2 dump for OOM/reboot survival)" \
+  "grep -q 'pm2 save' scripts/deploy.sh"
+
 blue ""
 blue "── 11. Port-pin and env-bleed guard (v4.42.0+) ──"
 #
