@@ -2,6 +2,19 @@
 
 export type AgentStatus = 'standby' | 'working' | 'offline' | 'active';
 
+// CANONICAL status manifest — the 10 real task statuses. The other three status
+// manifests (validation.ts TaskStatus z.enum, task-lifecycle.ts LifecycleState +
+// LEGAL_TRANSITIONS) MUST stay in lockstep with this union.
+//
+// DISP-12: 'archived' is intentionally NOT a member. Archival is a SOFT-archive
+// TIMESTAMP (`Task.archived_at` — IS NOT NULL = archived; NULL = live on the
+// board), never a status value. Any code that excludes archived tasks must
+// filter on `archived_at IS NULL`, NOT `status = 'archived'` / a status set that
+// contains 'archived'. task-dispatcher.ts currently references a phantom
+// 'archived' status (SKIP_STATUSES + a block WHERE-clause `status NOT IN
+// ('done','archived')`); because 'archived' can never equal any real status,
+// those clauses are inert today but drift-prone — the fix is to drop 'archived'
+// there and use `archived_at IS NULL` (owned by lane L1; see L3 hand-off note).
 export type TaskStatus = 'backlog' | 'inbox' | 'planning' | 'in_progress' | 'assigned' | 'review' | 'testing' | 'blocked' | 'pending_dispatch' | 'done';
 
 // Bug ticket lifecycle (T3-001) -- dedicated 7-stage status for the Bugs Department.
