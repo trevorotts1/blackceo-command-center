@@ -97,7 +97,7 @@ type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
  * MAX_DISPATCH_ATTEMPTS — transitions the task to `blocked` with a classified
  * audience + an owner/operator report. Never silent, never furnaces, never throws.
  */
-function recordDispatchFailure(
+export function recordDispatchFailure(
   taskId: string,
   agentId: string | null,
   opts: { reason: string; audience: DispatchBlockAudience; needs: string; context: string },

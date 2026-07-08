@@ -14,6 +14,7 @@ import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { recordDispatchFailure } from '@/lib/task-dispatcher';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -473,6 +474,17 @@ If you need help or clarification, ask the orchestrator.`;
          VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
       );
+      // DISP-07: this HOLD previously returned 202 with NO attempt-accounting,
+      // so repeated dispatches of an un-wireable dept were never capped. Share
+      // the auto path's anti-furnace accounting (recordDispatchFailure): back
+      // off + BLOCK with a SYSTEM "wire the dept runtime" report once the cap is
+      // hit, instead of returning an uncapped soft HOLD every time.
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'no_specialist_runtime',
+        audience: 'SYSTEM',
+        needs: `No OpenClaw runtime for "${agent.name}". Wire ~/.openclaw/agents/<dept-slug>/ to release this department.`,
+        context: 'manual-dispatch',
+      });
       // Leave task in backlog (no status change) so the misroute is visible on the board.
       return NextResponse.json(
         {
