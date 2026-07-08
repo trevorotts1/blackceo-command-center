@@ -34,6 +34,7 @@ import {
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
 import { runStaleTaskSweep, STALE_TASK_SWEEP_CRON } from './stale-task-sweep';
+import { runStuckInProgressSweep, STUCK_IN_PROGRESS_SWEEP_CRON } from './stuck-in-progress-sweep';
 import { runInterviewNudgeSweep, INTERVIEW_NUDGE_SWEEP_CRON } from './interview-nudge-sweep';
 import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
 import { runPersonaBackfillSweep } from './persona-backfill-sweep';
@@ -376,6 +377,27 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0) {
         console.log(
           `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, repinged ${result.repinged}`,
+        );
+      }
+    },
+  },
+
+  // stuck-in-progress-sweep: every 5 minutes, catch a task that was dispatched
+  // to in_progress and then died silently mid-turn (agent looped/aborted without
+  // reporting TASK_COMPLETE or any terminal status). The success reconcile
+  // (execution-watcher) and the 24h stale-task-sweep never mark such a task
+  // blocked nor alert the operator within a useful window — this is that missing
+  // supervisor: block + free the agent + alert the operator once. Tune with
+  // STUCK_IN_PROGRESS_MINUTES (default 45); disable with
+  // DISABLE_STUCK_IN_PROGRESS_SWEEP=1.
+  {
+    name: 'stuck-in-progress-sweep',
+    expr: STUCK_IN_PROGRESS_SWEEP_CRON,
+    fn: async () => {
+      const result = await runStuckInProgressSweep();
+      if (result.blocked > 0) {
+        console.log(
+          `[cron] stuck-in-progress-sweep: scanned ${result.scanned}, blocked ${result.blocked} (${result.blockedIds.join(', ')})`,
         );
       }
     },
