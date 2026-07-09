@@ -18,8 +18,9 @@ import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gat
  *   2. MC_API_TOKEN (API only). A long-lived bearer token used by external
  *      integrations (CLIs, scripts, OpenClaw, SSE consumers) that cannot go
  *      through the Cloudflare Access browser flow. Same-origin browser
- *      requests do NOT need the bearer token because Cloudflare Access
- *      already gates them.
+ *      requests do NOT need the bearer token: the board is served through the
+ *      same origin and is trusted by the same-origin passthrough (Layer 2), so
+ *      it renders on plain-tunnel boxes as well as CF-Access-fronted ones.
  *
  * Bypass routes:
  *   - `/api/health` (Cloudflare health checks) bypasses both layers.
@@ -34,8 +35,8 @@ import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gat
  * Fail-closed posture (G15-AUTH-HARDEN):
  *   - When MC_API_TOKEN is unset, EXTERNAL (non-same-origin) /api/* callers
  *     are REJECTED with a 503 misconfiguration error instead of being let
- *     through. Same-origin browser requests still work because Cloudflare
- *     Access (layer 1) gates them.
+ *     through. Same-origin browser requests still work via the same-origin
+ *     passthrough below (the board reading its own data).
  *   - The webhook routes in WEBHOOK_SECRET_ROUTES (ingest, agent-completion,
  *     and the Skill-6 per-task status consumer /api/tasks/[id]/status) are
  *     REJECTED with a 503 when WEBHOOK_SECRET is unset, because their
@@ -52,25 +53,26 @@ import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gat
 const MC_API_TOKEN = process.env.MC_API_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 /**
- * Cloudflare Access enforcement (DATA-10).
+ * Cloudflare Access enforcement (DATA-10) — OPT-IN (default OFF on ALL boxes).
  *
- * Now DEFAULT-ON in production images: a prod box must explicitly opt out with
- * REQUIRE_CF_ACCESS=false (documented, discouraged). Anywhere else (dev/test)
- * keeps the historical default-OFF so local runs aren't forced through the CF
- * edge. This is the belt to the same-origin-passthrough gate below — forgeable
- * `Origin`/`Referer` headers are only ever trusted when a VERIFIED CF-Access
- * assertion is present, and in production CF Access is now required by default
- * so that assertion is actually enforced at the edge.
+ * v4.72.0 (board-blank fix). v4.71.0 made this DEFAULT-ON in production so the
+ * same-origin passthrough below could trust a VERIFIED CF-Access assertion. But
+ * default-ON hard-401s EVERY non-health route — the board page shell AND every
+ * /api read it makes — on any box the operator did NOT front with Cloudflare
+ * Access, i.e. a plain Cloudflare Tunnel box where the CF edge never injects
+ * `cf-access-jwt-assertion`. The fleet does not guarantee CF Access on every one
+ * of the ~32 client subdomains (§7 #2: the app cannot verify the edge from
+ * inside), so default-ON blanked the Command Center board on those boxes.
  *
- * NOTE (live-box, §7 #2): whether Cloudflare Access is truly enabled on each of
- * the ~32 client subdomains is an operator/deploy concern this flag cannot
- * verify from inside the app. Default-ON only makes the app REQUIRE the CF
- * headers; the operator must confirm the edge actually injects them.
+ * We restore v4.69.1's opt-in default: enforcement is ON only when an operator
+ * who genuinely runs CF Access sets REQUIRE_CF_ACCESS=true (which also closes the
+ * same-origin READ residual at the edge for every route). This does NOT weaken
+ * external-API security: EXTERNAL /api/* access is always gated by the
+ * MC_API_TOKEN bearer (Gate B) and the WEBHOOK_SECRET HMAC (Gate A) below,
+ * regardless of REQUIRE_CF_ACCESS. The board renders via the same-origin
+ * passthrough, which never needed the CF assertion to serve the board's OWN data.
  */
-const REQUIRE_CF_ACCESS =
-  process.env.NODE_ENV === 'production'
-    ? process.env.REQUIRE_CF_ACCESS !== 'false'
-    : process.env.REQUIRE_CF_ACCESS === 'true';
+const REQUIRE_CF_ACCESS = process.env.REQUIRE_CF_ACCESS === 'true';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 /**
@@ -214,12 +216,11 @@ if (DEMO_MODE) {
     }
   }
   if (!REQUIRE_CF_ACCESS) {
-    if (process.env.NODE_ENV === 'production') {
-      // DATA-10: default is ON in prod, so reaching here means an explicit opt-out.
-      console.error('[SECURITY ERROR] REQUIRE_CF_ACCESS=false in production — Cloudflare Access enforcement is DISABLED. Same-origin passthrough is only honored behind a verified CF-Access assertion (DATA-10), so with CF Access off, external /api/* callers must present the MC_API_TOKEN bearer. Remove REQUIRE_CF_ACCESS=false to restore the default-on posture.');
-    } else {
-      console.warn('[SECURITY WARNING] Cloudflare Access enforcement is OFF (non-production default). It defaults ON in production images; set REQUIRE_CF_ACCESS=true here only if you want to exercise the CF path locally.');
-    }
+    // v4.72.0: OFF is the documented default (opt-in). The board renders via the
+    // same-origin passthrough; EXTERNAL /api/* still requires the MC_API_TOKEN
+    // bearer and ingest still requires the WEBHOOK_SECRET HMAC. Set
+    // REQUIRE_CF_ACCESS=true only on boxes actually fronted by Cloudflare Access.
+    console.warn('[SECURITY] Cloudflare Access enforcement is OFF (opt-in default). External /api/* remains bearer-gated (MC_API_TOKEN) and ingest remains HMAC-gated (WEBHOOK_SECRET). Set REQUIRE_CF_ACCESS=true only on a box actually fronted by Cloudflare Access.');
   }
 }
 
@@ -349,21 +350,35 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Same-origin browser requests are gated by Cloudflare Access (layer 1) and
-    // so don't need the bearer token — BUT only when CF Access has actually
-    // verified the request. `Origin` and `Referer` are client-controllable
-    // headers: an external caller reaching the origin directly can forge a
-    // same-origin `Referer`/`Origin` to skip the MC_API_TOKEN bearer gate
-    // (DATA-10 — the umbrella that also exposed the unauthenticated write paths
-    // in other lanes). We therefore honor the same-origin passthrough ONLY when
-    // a VERIFIED CF-Access assertion is present: both `cf-access-jwt-assertion`
-    // and `cf-access-authenticated-user-email` are populated by Cloudflare's
-    // edge and cannot be set by a client that bypasses Cloudflare. Without that
-    // assertion the request falls through to the MC_API_TOKEN bearer check
-    // below, so a forged same-origin header is worthless on its own.
-    if (cfJwt && cfEmail && isSameOriginRequest(request)) {
+    // Same-origin passthrough — the board rendering its OWN data (v4.72.0).
+    //
+    // The Command Center page and every /api read it makes (src/app/page.tsx, the
+    // ceo-board, WorkspaceDashboard, …) are served through the SAME tunnel/origin
+    // and carry NO bearer token — MC_API_TOKEN is a server-only secret, never
+    // exposed to the browser. So a same-origin browser request to a NON-webhook
+    // /api/* route is trusted WITHOUT the bearer (restores v4.69.1 behavior). This
+    // is what makes the board load its data on EVERY box — a plain Cloudflare
+    // Tunnel as well as a CF-Access-fronted subdomain — instead of 401-ing every
+    // read. v4.71.0 additionally required a VERIFIED CF-Access assertion here
+    // (`cfJwt && cfEmail && …`), which no plain-tunnel box has, so the board
+    // blanked (0 tasks / "HTTP 401"). We drop that extra requirement.
+    //
+    // Scope — do NOT re-open what the train closed. Webhook/ingest routes are
+    // EXCLUDED from this passthrough: /api/tasks/ingest, /api/webhooks/*, and
+    // /api/tasks/{id}/status are the EXTERNAL write/ingest surface (DATA-09/10/11)
+    // and must ALWAYS present the MC_API_TOKEN bearer here (plus their route-level
+    // HMAC over WEBHOOK_SECRET), even from a same-origin caller — so a forged
+    // same-origin Origin/Referer can never reach them without auth.
+    //
+    // RESIDUAL (accepted, = v4.69.1): Origin/Referer are client-settable, so a
+    // non-browser caller reaching the origin directly can forge a same-origin
+    // header to READ the board's own data. That surface is READ-only board data;
+    // the ingest/write family above stays fully auth-gated. An operator who fronts
+    // the box with Cloudflare Access (REQUIRE_CF_ACCESS=true) closes even this
+    // residual at the edge for every route.
+    if (!isWebhookSecretRoute(pathname) && isSameOriginRequest(request)) {
       const passthrough = NextResponse.next();
-      passthrough.headers.set('x-operator-email', cfEmail);
+      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;
     }
 
