@@ -315,7 +315,14 @@ export async function POST(request: NextRequest) {
     // (b) ALLOW_INSECURE_OPEN_API=true is explicitly set by the operator (test
     // harness escape hatch). We honour that escape hatch here so the route-level
     // redundant 503 does not fire when the middleware already passed the request.
-    const allowInsecure = process.env.ALLOW_INSECURE_OPEN_API === 'true';
+    //
+    // INGEST-05: mirror src/middleware.ts's ALLOW_INSECURE_OPEN_API neuter —
+    // NODE_ENV !== 'production' is required in addition to the raw env var, so
+    // this route-level check can never diverge from the middleware and honor
+    // the escape hatch in production even if the middleware's copy of the flag
+    // is somehow bypassed or the two checks drift.
+    const allowInsecure =
+      process.env.NODE_ENV !== 'production' && process.env.ALLOW_INSECURE_OPEN_API === 'true';
     if (!webhookSecret) {
       if (process.env.NODE_ENV === 'production' && !allowInsecure) {
         console.error(
@@ -654,6 +661,13 @@ export async function POST(request: NextRequest) {
         // Pass idempotency key through so createTaskCore embeds it in the
         // task_created event AND checks it before writing a new row.
         idempotency_key: dedupeKey ?? null,
+        // INGEST-10: stamp the immutable tasks.source column from this
+        // VALIDATED ingest source (line ~435: trimmed string or undefined —
+        // never raw/unvalidated caller text). This is the authoritative,
+        // non-forgeable scope key /api/tasks/[id]/status's resolveBoardSource()
+        // now reads first, before falling back to the legacy (forgeable)
+        // description marker for pre-migration rows.
+        source: source ?? null,
       },
       { origin: request.headers.get('origin') }
     );

@@ -3450,6 +3450,36 @@ const migrations: Migration[] = [
       console.log('[Migration 088] task_subtask_persona + idx_subtask_persona_task ready');
     },
   },
+  {
+    id: '089',
+    name: 'add_tasks_source_column',
+    up: (db) => {
+      // INGEST-10 — the board-producer scope gate in
+      // /api/tasks/[id]/status/route.ts (resolveBoardSource) was designed to key
+      // off an IMMUTABLE, server-stamped `tasks.source` column, but that column
+      // never actually landed: it existed only as a comment referencing "a future
+      // migration". Until now `task.source` was always undefined, so the resolver
+      // silently fell through to its legacy fallback — a "Source: <value>" line
+      // matched out of the CALLER-EDITABLE `description` field — which a PATCH
+      // caller can forge on any task to grant itself board-producer scope.
+      //
+      // This migration adds the column (idempotent, additive, nullable — existing
+      // rows get NULL and keep using the legacy description-marker fallback,
+      // exactly as resolveBoardSource already handles). The write side
+      // (createTaskCore / src/app/api/tasks/ingest/route.ts) now stamps this
+      // column from the VALIDATED ingest `source` at creation time only; it is
+      // NOT on UpdateTaskSchema and the PATCH route never writes it, so it stays
+      // non-forgeable after creation.
+      console.log('[Migration 089] Adding tasks.source column (INGEST-10 authoritative scope column)...');
+      const cols = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'source')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN source TEXT`);
+        console.log('[Migration 089] Added tasks.source');
+      } else {
+        console.log('[Migration 089] tasks.source already present, skipping');
+      }
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

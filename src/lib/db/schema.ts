@@ -131,6 +131,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   block_reason TEXT,                          -- migration 078
   redispatch_count INTEGER DEFAULT 0,         -- migration 084
   persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
+  -- Immutable board-producer provenance (migration 089 / INGEST-10). Stamped
+  -- ONLY at creation from the validated ingest 'source' field; never exposed
+  -- on UpdateTaskSchema / the PATCH surface. /api/tasks/[id]/status uses this
+  -- (never the caller-editable description) as the authoritative scope gate.
+  source TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
