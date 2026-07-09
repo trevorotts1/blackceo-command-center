@@ -213,6 +213,13 @@ async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
     // testing the auth surface, so use the documented escape hatch to restore
     // legacy open behavior for THIS test server only (production never sets it).
     ALLOW_INSECURE_OPEN_API: 'true',
+    // `next start` forces NODE_ENV=production, under which REQUIRE_CF_ACCESS
+    // defaults ON (DATA-10) — every /api/* call would 401 with "Cloudflare
+    // Access is not active" since there is no CF edge in front of this local
+    // test server. This e2e drives the board directly (not testing the CF-Access
+    // surface), so opt out for THIS test server only, mirroring the
+    // ALLOW_INSECURE_OPEN_API escape hatch above. Production never sets it.
+    REQUIRE_CF_ACCESS: 'false',
   };
 
   // Use the same node binary, run next via node_modules
@@ -410,6 +417,18 @@ async function seedFixtures(): Promise<void> {
   // as process.env for the child server process; we also need it for OUR
   // direct DB queries above).
   process.env.DATABASE_PATH = DB_PATH;
+  // Isolate HOME for THIS (test) process the same way the child server does
+  // (OPENCLAW_HOME, a throwaway temp dir). getDb() runs migrations, and its
+  // autoSeedFromDepartmentsJson step resolves a departments.json across HOME-based
+  // candidate paths (~/Downloads/openclaw-master-files/…, ~/clawd/projects/…, …).
+  // On a box that actually has a real fleet departments.json (e.g. the operator's
+  // own machine), that auto-seed populates the default department roster, whose
+  // `master-orchestrator` / `graphics` slugs then collide (UNIQUE slug) with the
+  // fixtures seeded below — the colliding INSERT OR IGNORE is skipped, the fixture
+  // workspace id never exists, and the agent INSERT fails its workspace_id FK.
+  // Pointing HOME at the isolated temp home makes seeding deterministic (a clean
+  // board seeded by these fixtures only), on CI AND on a populated dev box.
+  process.env.HOME = OPENCLAW_HOME;
 
   const { getDb, closeDb, run, queryAll } = await import('../../src/lib/db') as typeof import('../../src/lib/db');
 
