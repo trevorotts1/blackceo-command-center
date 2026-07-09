@@ -3450,6 +3450,64 @@ const migrations: Migration[] = [
       console.log('[Migration 088] task_subtask_persona + idx_subtask_persona_task ready');
     },
   },
+  {
+    id: '089',
+    name: 'add_persona_blend_bundle',
+    up: (db) => {
+      // PERSONA-BLEND / AUDIENCE-CONFIRM — persist the matcher's persona-bundle
+      // SUPERSET so the CC can (a) render the audience-voice / topic-expertise blend
+      // directive at dispatch and (b) gate the write on operator audience confirmation.
+      //
+      // Two additive changes, both idempotent:
+      //   1. New mirror columns on `tasks` (nullable) — the resolved VOICE decision
+      //      + the confirmed audience, so the board + dispatcher read them without
+      //      re-parsing bundle_json. tasks.persona_id/name/mode remain the mirror of
+      //      the resolved VOICE persona (back-compat with buildPersonaBlock).
+      //   2. New table `task_persona_bundle` — one row per task holding the full
+      //      bundle JSON, the catalog schemaVersion it was reasoned over, and the
+      //      audience confirm lifecycle state (pending gates dispatch).
+      //
+      // ADDITIVE ONLY — never drops/renames a column or persona key. A pre-089 row
+      // simply lacks these columns/rows and the CC degrades to its prior behaviour.
+      console.log('[Migration 089] Adding persona-blend mirror columns + task_persona_bundle...');
+
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      const columnNames = tasksInfo.map((c) => c.name);
+      const adds: Record<string, string> = {
+        voice_persona_id: 'TEXT',
+        topic_persona_id: 'TEXT',
+        audience_id: 'TEXT',
+        audience_label: 'TEXT',
+        audience_source: 'TEXT',
+        voice_collapsed: 'INTEGER',
+        blend_directive: 'TEXT',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.includes(col)) {
+          db.prepare(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_persona_bundle (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+          bundle_json TEXT,
+          catalog_version TEXT,
+          confirm_state TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      db.prepare(
+        'CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id)',
+      ).run();
+      db.prepare(
+        'CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_confirm ON task_persona_bundle(confirm_state)',
+      ).run();
+
+      console.log('[Migration 089] persona-blend columns + task_persona_bundle ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

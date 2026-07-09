@@ -649,6 +649,65 @@ check "13.6" "floor-invariant behavioral test is present + wired into vitest (CI
   "keep the DB-backed invariant test and its vitest.config.ts include entry"
 
 blue ""
+blue "── 14. Persona blend + audience-confirm gate (migration 089) ──"
+#
+# CONTRACT (persona-blend/cc): the Command Center consumes the matcher's
+# persona-bundle SUPERSET. It must (a) persist the bundle additively (migration
+# 089), (b) render the doer-facing blend directive with a NON-REMOVABLE
+# style-inspired-NOT-impersonation guardrail, and (c) gate the dispatcher's write
+# step on operator audience confirmation. These are static drift sentinels; the
+# AUTHORITATIVE behavioral proof is tests/unit/persona-blend-audience-confirm.test.ts
+# (+ fdn3 / prd-1.6 / point10 / dep5 extensions), run by `npm run test:unit`.
+
+# 14.1: migration 089 exists (additive persona-blend bundle) and is the latest id.
+check "14.1" "migration 089 add_persona_blend_bundle present in migrations.ts" \
+  "grep -q \"id: '089'\" src/lib/db/migrations.ts && grep -q 'add_persona_blend_bundle' src/lib/db/migrations.ts" \
+  "add migration 089 (additive tasks cols + task_persona_bundle table)"
+
+# 14.2: migration 089 is ADDITIVE — no destructive DROP/rename of the new columns/table.
+check "14.2" "migration 089 is additive (task_persona_bundle table + ALTER ADD COLUMN, no DROP)" \
+  "awk \"/id: '089'/,/id: '090'|^];/\" src/lib/db/migrations.ts | grep -q 'CREATE TABLE IF NOT EXISTS task_persona_bundle' && awk \"/id: '089'/,/id: '090'|^];/\" src/lib/db/migrations.ts | grep -q 'ADD COLUMN'"
+
+# 14.3: fresh-DB schema.ts mirrors the new task_persona_bundle table + blend_directive col.
+check "14.3" "schema.ts fresh-DB mirrors blend_directive + task_persona_bundle" \
+  "grep -q 'blend_directive TEXT' src/lib/db/schema.ts && grep -q 'CREATE TABLE IF NOT EXISTS task_persona_bundle' src/lib/db/schema.ts" \
+  "mirror the migration-089 columns/table in schema.ts (fresh-DB parity)"
+
+# 14.4: types.ts Task mirrors the blend cols + the PersonaBundle SUPERSET interfaces.
+check "14.4" "types.ts carries blend mirror cols + PersonaBundle interfaces" \
+  "grep -q 'blend_directive?: string | null' src/lib/types.ts && grep -q 'interface PersonaBundle' src/lib/types.ts && grep -q 'interface TaskPersonaBundleRow' src/lib/types.ts"
+
+# 14.5: persona-selector.ts parses + persists the bundle (both exported).
+check "14.5" "persona-selector.ts exports parsePersonaBundle + persistPersonaBundle" \
+  "grep -q 'export function parsePersonaBundle' src/lib/persona-selector.ts && grep -q 'export function persistPersonaBundle' src/lib/persona-selector.ts"
+
+# 14.6: the MANDATORY guardrail is defined + rendered (persona-dispatch.ts).
+check "14.6" "persona-dispatch.ts defines STYLE_INSPIRED_GUARDRAIL + renderBlendDirective + ensureBlendGuardrail" \
+  "grep -q 'STYLE_INSPIRED_GUARDRAIL' src/lib/persona-dispatch.ts && grep -q 'export function renderBlendDirective' src/lib/persona-dispatch.ts && grep -q 'export function ensureBlendGuardrail' src/lib/persona-dispatch.ts"
+
+# 14.7: the guardrail is NON-REMOVABLE — ensureBlendGuardrail asserts BOTH load-bearing markers.
+check "14.7" "ensureBlendGuardrail re-injects the style-inspired + impersonation clause (non-removable)" \
+  "awk '/function ensureBlendGuardrail/,/^}/' src/lib/persona-dispatch.ts | grep -qi 'style-inspired' && awk '/function ensureBlendGuardrail/,/^}/' src/lib/persona-dispatch.ts | grep -qi 'impersonation'"
+
+# 14.8: the audience-confirm gate runs BEFORE the dispatcher's write step (CAS claim).
+check "14.8" "task-dispatcher: audience-confirm gate runs BEFORE the in_progress write step" \
+  "GATE=\$(grep -n evaluateAudienceConfirmGate src/lib/task-dispatcher.ts | head -1 | cut -d: -f1); WRITE=\$(grep -nE \"SET status = .in_progress., updated_at\" src/lib/task-dispatcher.ts | head -1 | cut -d: -f1); [ -n \"\$GATE\" ] && [ -n \"\$WRITE\" ] && [ \"\$GATE\" -lt \"\$WRITE\" ]" \
+  "call evaluateAudienceConfirmGate before the DISP-02 CAS claim in autoDispatchTask"
+
+# 14.9: the gate helpers exist in tasks.ts (evaluate / hold / deadline / confirm).
+check "14.9" "tasks.ts exports the audience-confirm gate helpers" \
+  "grep -q 'export function evaluateAudienceConfirmGate' src/lib/tasks.ts && grep -q 'export function holdForAudienceConfirm' src/lib/tasks.ts && grep -q 'export function markAudienceDeadlineFallback' src/lib/tasks.ts && grep -q 'export function confirmTaskAudience' src/lib/tasks.ts"
+
+# 14.10: the audience-confirm surface is OPERATOR-facing (notifySystem), never the client (MOVE-IN-SILENCE).
+check "14.10" "audience-confirm holds surface via notifySystem (operator), not notifyOwner (client)" \
+  "awk '/function holdForAudienceConfirm/,/^}/' src/lib/tasks.ts | grep -q 'notifySystem' && ! awk '/function holdForAudienceConfirm/,/^}/' src/lib/tasks.ts | grep -q 'notifyOwner'"
+
+# 14.11: the behavioral proof suite exists under tests/unit (so `npm run test:unit` runs it).
+check "14.11" "persona-blend-audience-confirm behavioral test present (test:unit-gated proof)" \
+  "[ -f tests/unit/persona-blend-audience-confirm.test.ts ]" \
+  "keep the DB-backed persona-blend / audience-confirm behavioral test"
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"

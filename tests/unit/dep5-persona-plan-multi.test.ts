@@ -244,3 +244,13 @@ test('buildPersonaPlanBlock returns empty for a single-persona task (no regressi
   assert.equal(buildPersonaPlanBlock([workedPlan[0]], settings), '');
   assert.equal(buildPersonaPlanBlock([], settings), '');
 });
+
+// ── PERSONA-BLEND × multi-persona — the task-level voice directive must NOT be
+//    duplicated onto every sub-task. The blend directive is a TASK-level voice
+//    property; sub-task plan rows carry no blend_directive, so buildPersonaPlanBlock
+//    renders ZERO blend directives (the guardrail rides ONCE on the primary block
+//    that task-dispatcher renders alongside the plan). ─────────────────────────
+test('buildPersonaPlanBlock does NOT render the task-level blend directive per sub-task', () => {
+  const block = buildPersonaPlanBlock(workedPlan, settings);
+  assert.ok(!block.includes('Voice blend directive'), 'plan sub-tasks must not each carry the blend directive');
+});
