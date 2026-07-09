@@ -3455,7 +3455,28 @@ const migrations: Migration[] = [
 /**
  * Run all pending migrations
  */
+// DATA-02: id of the migration that most recently threw inside runMigrations().
+// Set only in the per-migration catch below; reset to null at the start of every
+// runMigrations() pass (a run either completes fully or throws). The DB barrel
+// (getDbInitFailure) and the /api/health route read this to surface a precise
+// "migration <N> failed" 503 instead of a generic degraded state.
+let lastFailedMigrationId: string | null = null;
+
+/**
+ * The id of the migration that failed during the most recent runMigrations()
+ * pass, or null if migrations last completed cleanly (or never ran). Exported
+ * via the db barrel (src/lib/db/index.ts) so the health surface can name the
+ * exact failing migration. DATA-02.
+ */
+export function getLastFailedMigrationId(): string | null {
+  return lastFailedMigrationId;
+}
+
 export function runMigrations(db: Database.Database): void {
+  // DATA-02: clear any prior failure marker — this pass either completes fully
+  // or re-sets it in the catch below.
+  lastFailedMigrationId = null;
+
   // Create migrations tracking table
   db.exec(`
     CREATE TABLE IF NOT EXISTS _migrations (
@@ -3521,6 +3542,9 @@ export function runMigrations(db: Database.Database): void {
 
       console.log(`[DB] Migration ${migration.id} completed`);
     } catch (error) {
+      // DATA-02: record WHICH migration failed before re-throwing so getDb()'s
+      // failure capture (and the /api/health 503) can name it precisely.
+      lastFailedMigrationId = migration.id;
       console.error(`[DB] Migration ${migration.id} failed:`, error);
       throw error;
     }

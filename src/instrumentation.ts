@@ -33,12 +33,29 @@ export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
   // 1. DB init — migrations + first-boot auto-seed (workspaces + starter SOPs).
+  //
+  // DATA-02: do NOT swallow a boot-time DB-init failure. getDb() records the
+  // failure into module state (getDbInitFailure()) which GET /api/health now
+  // surfaces as a deterministic 503 "migration <N> failed". On failure we log
+  // LOUDLY and ABORT the rest of boot (registry seed, cron registration, bridge
+  // bootstrap) — running background jobs against a half-migrated DB is exactly
+  // what corrupts state. We deliberately do NOT re-throw: throwing out of
+  // register() crash-loops the worker and thrashes the watchdog with
+  // connection-refused instead of a clean 503. Fail-closed = stay up, serve 503,
+  // do no further work.
+  const dbmod = await import('@/lib/db');
   try {
-    const { getDb } = await import('@/lib/db');
-    getDb(); // runs migrations + auto-seed (workspaces + starter SOPs)
+    dbmod.getDb(); // runs migrations + auto-seed (workspaces + starter SOPs)
     console.log('[instrumentation] DB initialized (migrations + auto-seed ran)');
   } catch (err) {
-    console.error('[instrumentation] DB init failed:', err);
+    const failure = dbmod.getDbInitFailure();
+    const which = failure?.migrationId ? `migration ${failure.migrationId}` : 'db open/schema';
+    console.error(
+      `[instrumentation] FATAL: DB init failed (${which}) — aborting boot wiring; ` +
+        `/api/health will report 503 fail-closed. NOT registering cron/bridge against a broken DB:`,
+      err,
+    );
+    return;
   }
 
   // 2. v4.1.2: hydrate provider API keys from the OpenClaw secret files BEFORE
