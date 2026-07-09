@@ -88,9 +88,39 @@ import os from 'node:os';
 import { spawn, ChildProcess } from 'node:child_process';
 import net from 'node:net';
 import http from 'node:http';
+import { createHmac } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 import { runMockGenerator } from '../fixtures/mock-generator';
+
+// ── Fail-closed API auth (v4.52.0 AUTH HARDEN) — test credentials ────────────
+// The 60-commit L1-L9 integration train made the API fail CLOSED: EXTERNAL
+// /api/* callers must present an MC_API_TOKEN Bearer (src/middleware.ts Gate B),
+// and the WEBHOOK_SECRET_ROUTES — POST /api/tasks/ingest here — must ALSO carry
+// an HMAC-SHA256(WEBHOOK_SECRET, rawBody) signature (route-level check in
+// src/app/api/tasks/ingest/route.ts). INGEST-05 then hard-gated the legacy
+// ALLOW_INSECURE_OPEN_API escape hatch on NODE_ENV !== 'production', and
+// `next start` (the hasNextBuild() path CI actually runs) FORCES
+// NODE_ENV=production — so the escape hatch is intentionally dead here and this
+// harness must authenticate exactly like a real production caller.
+//
+// We therefore provision test-only secrets on the spawned server (serverEnv
+// below) and have every HTTP helper SEND the matching Bearer + HMAC signature.
+// This exercises the real production auth path end-to-end and touches NO
+// production auth code. These values live only inside this ephemeral localhost
+// test process; they are never real credentials.
+const TEST_MC_API_TOKEN   = 'duck-e2e-mc-api-token';
+const TEST_WEBHOOK_SECRET  = 'duck-e2e-webhook-secret';
+
+/** Middleware layer-2 bearer header every same-process /api/* helper sends. */
+function bearerHeader(): Record<string, string> {
+  return { Authorization: `Bearer ${TEST_MC_API_TOKEN}` };
+}
+
+/** Route-level webhook signature = HMAC-SHA256(WEBHOOK_SECRET, rawBody) hex. */
+function webhookSignature(rawBody: string): string {
+  return createHmac('sha256', TEST_WEBHOOK_SECRET).update(rawBody).digest('hex');
+}
 
 // ── Test timing ──────────────────────────────────────────────────────────────
 // Next.js dev startup takes 20-60s; the full pipeline including server startup,
@@ -208,11 +238,17 @@ async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
     DISABLE_QC_AUTO_SCORER:  '0', // leave QC scorer ON — we want to observe it
     NODE_ENV: 'test',
     // The fail-closed middleware (v4.52.0 AUTH HARDEN) rejects external /api/*
-    // with 503 when MC_API_TOKEN/WEBHOOK_SECRET are unset. This pipeline e2e
-    // drives the board via unauthenticated server-to-server fetches and is NOT
-    // testing the auth surface, so use the documented escape hatch to restore
-    // legacy open behavior for THIS test server only (production never sets it).
-    ALLOW_INSECURE_OPEN_API: 'true',
+    // with 503 when MC_API_TOKEN/WEBHOOK_SECRET are unset. The former
+    // ALLOW_INSECURE_OPEN_API escape hatch is now NEUTERED under `next start`
+    // (INGEST-05 gates it on NODE_ENV !== 'production', and `next start` forces
+    // NODE_ENV=production), so instead of trying to bypass auth we provision
+    // real test-only secrets HERE and have every HTTP helper present the
+    // matching Bearer + HMAC signature. This authenticates the harness exactly
+    // like a production caller — the real prod auth path is exercised, and NO
+    // production auth code is touched or weakened. These secrets exist only in
+    // this ephemeral localhost test server's env.
+    MC_API_TOKEN:  TEST_MC_API_TOKEN,
+    WEBHOOK_SECRET: TEST_WEBHOOK_SECRET,
     // Cloudflare Access enforcement (DATA-10) is now DEFAULT-ON whenever
     // NODE_ENV === 'production'. `next start` (the `hasNextBuild()` path used in
     // CI) FORCES NODE_ENV=production regardless of the NODE_ENV:'test' set above,
@@ -274,7 +310,11 @@ let sseConnected = false;
 function subscribeSSE(base: string): Promise<void> {
   return new Promise((resolve) => {
     const url = `${base}/api/events/stream`;
-    const req = http.get(url, (res) => {
+    // /api/events/stream is MC_API_TOKEN-gated (middleware Gate B). A real
+    // EventSource can only pass the token as a `?token=` query param, but this
+    // raw-http subscriber can send the standard Bearer header, which the
+    // middleware accepts on the fall-through path.
+    const req = http.get(url, { headers: bearerHeader() }, (res) => {
       let buf = '';
       res.on('data', (chunk: Buffer) => {
         buf += chunk.toString();
@@ -314,7 +354,16 @@ async function post(url: string, body: unknown): Promise<{ status: number; json:
     const u = new URL(url);
     const req = http.request(
       { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          // Middleware layer-2 bearer (all external /api/* callers).
+          ...bearerHeader(),
+          // Route-level HMAC over the EXACT raw body we send. Only the
+          // WEBHOOK_SECRET_ROUTES (POST /api/tasks/ingest) validate it; other
+          // POSTs (e.g. /deliverables) ignore the extra header harmlessly.
+          'x-webhook-signature': webhookSignature(payload),
+        } },
       (res) => {
         let data = '';
         res.on('data', (c: Buffer) => { data += c.toString(); });
@@ -333,7 +382,7 @@ async function post(url: string, body: unknown): Promise<{ status: number; json:
 async function get(url: string): Promise<{ status: number; json: unknown; headers: Record<string, string | string[] | undefined> }> {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    http.get({ hostname: u.hostname, port: u.port, path: u.pathname + u.search }, (res) => {
+    http.get({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, headers: bearerHeader() }, (res) => {
       let data = '';
       res.on('data', (c: Buffer) => { data += c.toString(); });
       res.on('end', () => {
@@ -350,7 +399,13 @@ async function patch(url: string, body: unknown): Promise<{ status: number; json
     const u = new URL(url);
     const req = http.request(
       { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          // Middleware layer-2 bearer. PATCH /api/tasks/:id is NOT a
+          // WEBHOOK_SECRET_ROUTE, so no HMAC signature is required.
+          ...bearerHeader(),
+        } },
       (res) => {
         let data = '';
         res.on('data', (c: Buffer) => { data += c.toString(); });
