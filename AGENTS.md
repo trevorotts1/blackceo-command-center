@@ -154,7 +154,6 @@ Tell Trevor the whole path up front, then IN ORDER: (1) container `oc-<slug>` on
 
 Example: `[GHL tier used: 0 — caf contacts list]`
 
-
 ### Rescue Rangers / fleet onboarding
 Client onboarding for remote SSH via the `trevorotts1/rescue-rangers` two-paste flow (install → Cloudflare tunnel → connector + hardening → Access app + service token + `~/.ssh/config` + fleet register → smoke test). **Do NOT drive from memory or a stale doc** — the canonical walkthrough is the operator-only `fleet-onboarding` skill (`~/.openclaw/skills/fleet-onboarding/`, master box ONLY; deliberately EXCLUDED from every fan-out / `update-skills.sh` / client install — never propagate). Registration mechanics: `ADD-A-FLEET-CLIENT.md`; roster: `accounts.md`.
 - **INTENT ROUTING:** on any fuzzy onboarding ask ("add someone to the fleet", "onboard [name]", "new client", "get [name]'s Mac/VPS connected", "rescue install for X"), your FIRST action = LOAD + START the `fleet-onboarding` skill at P0 INTAKE (collect name / platform Mac|VPS|Contabo-container / phone / email), then let the skill conduct one step at a time. Never hand-improvise install/tunnel/Access/registration. Registration REQUIRES phone AND email — ask, never invent. Ambiguous → confirm first, then start the skill.
@@ -295,4 +294,40 @@ Isolated, safe demo environment for showing prospects the AI Workforce Interview
 - Notion: https://app.notion.com/p/How-to-Run-the-BlackCEO-Demos-3956798f3b7c816cac67d71614df5bc8
 - Google Doc (anyone can edit): https://docs.google.com/document/d/1DmY5ETnVGFrK64odFVReemN_cSNRIXxDfjygjMut53Q/edit
 
+
+## UPDATE PENDING -- Skill Update to v19.0.0
+
+A skill update was applied via update-skills.sh on 2026-07-08. Activate each new skill below,
+run the verification gate, then remove this section from AGENTS.md when the gate passes.
+
+### 🔴 THE GATE IS THE TRUTH -- NOT THIS PROSE, NOT YOUR OWN "done"
+This update is **NOT complete** until the VERIFICATION GATE passes. Files on disk = DOWNLOADED, not installed. Source the gate and check state:
+- State file: `~/.openclaw/workspace/.onboarding-state.json` (per-skill: pending → downloaded → wired → qc-passed | qc-failed)
+- Gate library: `~/.openclaw/scripts/onboarding-state.sh` (or the onboarding repo's `scripts/`)
+- Run: source the library, then `obs_gate_summary`. A skill counts INSTALLED only when (a) `openclaw skills info <name>` shows it, (b) its CORE_UPDATES sentinel is present (if it ships CORE_UPDATES.md), and (c) its `qc-*.sh` exits 0 (if it ships one).
+- **NEVER tell the owner "installed / done / onboarded" for any skill that is not `qc-passed` (or an explicit INTERVIEW_PENDING park).**
+
+### What changed in this update
+- Onboarding version: v19.0.0
+- New skills installed (require ACTIVATION + GATE): none -- updates only
+
+### How to process each skill that is NOT yet qc-passed
+For each such skill folder under `~/.openclaw/skills/`:
+1. READ all files (Teach Yourself Protocol): SKILL.md, INSTALL.md, CORE_UPDATES.md, QC.md, plus any `references/*.md` files
+2. CHECK prerequisites and search ALL standard credential locations (canonical: `~/.openclaw/secrets/.env` on Mac, `/data/.openclaw/secrets/.env` on VPS, plus `openclaw.json` env.vars). Skip asking the owner if values already exist.
+3. EXECUTE the activation steps in INSTALL.md (read ≠ execute)
+4. APPLY CORE_UPDATES.md surgically -- add to AGENTS.md / TOOLS.md / MEMORY.md / SOUL.md only the sections explicitly labeled in that file
+5. RUN the gate (`obs_verify_skill <folder>`); loop activate→verify until it returns `qc-passed`. Skills that legitimately await owner input may be parked `interview-pending` (re-ping the owner; do NOT treat as terminal "done").
+6. REPORT to owner ONLY what is verified-installed, plus what remains gated.
+
+### Discipline (binding)
+- Skills 22-23: MAIN ORCHESTRATOR ONLY, never delegate
+- Tier order in any tiered skill (e.g. skill 36 GHL MCP): try Tier N before Tier N+1, no skipping
+- Disclosure headers (e.g. `[GHL tier used: N -- tool_name]`) required per any skill's SOUL-level rules
+- No destructive shortcuts: no `--force`, no `--no-verify`, no `--break-system-packages` unless explicitly instructed
+
+### When the GATE passes (and ONLY then)
+- Remove this entire UPDATE PENDING section from AGENTS.md
+- Add to MEMORY.md under "## System Updates":
+  "v19.0.0 update applied on 2026-07-08. Verification gate PASSED. Skills activated: none."
 
