@@ -202,6 +202,19 @@ jobs:
         env:
           DATABASE_PATH: /tmp/probe-fixture.db
           PORT: 4000
+          # Cloudflare Access enforcement (DATA-10) is DEFAULT-ON when
+          # NODE_ENV=production, and `next start` forces NODE_ENV=production. With
+          # CF Access required, every page GET (including cc-health-check.sh's CF
+          # public-URL probe and outside-in asset probe, which hit 127.0.0.1
+          # directly) 401s with "Cloudflare Access is not active on this
+          # subdomain" instead of the healthy interview-lock 302 → the probe reads
+          # RED. There is NO Cloudflare edge in front of this fixture server to
+          # inject the Cf-Access-* headers, so opt it into the documented dev/test
+          # posture (src/middleware.ts, .env.example, docs/CLOUDFLARE_ACCESS_SETUP.md:
+          # "set REQUIRE_CF_ACCESS=false in local dev; production MUST keep it true").
+          # TEST-SERVER-ONLY: production images stay default-ON; no production code
+          # or the health-check script itself is modified.
+          REQUIRE_CF_ACCESS: "false"
 
       - name: Run cc-health-check.sh — expect GREEN (exit 0)
         run: |
