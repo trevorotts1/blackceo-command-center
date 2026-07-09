@@ -182,8 +182,18 @@ interface PersonaAssignmentRow {
  * (department_id, task_category) pair this categorizer produces; any drift here
  * re-introduces the RESOLVER-CATEGORY misroute (Gap E) where an unpinned task
  * inherits the wrong category's persona.
+ *
+ * PERS-02 — TIE-BREAK CONTRACT (pinned, must match Python): declaration ORDER is
+ * load-bearing. `inferTaskCategory` selects with a strict `>` (see below), so on
+ * a score tie the FIRST category declared here wins. Python's infer_task_category
+ * iterates this same dict in insertion order and also compares with `>`, so the
+ * two engines break ties identically ONLY while this key order matches the Python
+ * dict's key order. Do not reorder keys without reordering the Python dict too.
+ * The golden-parity corpus in tests/unit/pers02-category-parity.test.ts locks the
+ * TS side (including tie cases); run the same corpus through the Python engine to
+ * close cross-repo parity.
  */
-const CATEGORY_KEYWORDS: Record<string, string[]> = {
+export const CATEGORY_KEYWORDS: Record<string, string[]> = {
   'email-outreach':   ['email', 'outreach', 'follow-up', 'follow up', 'cold email', 'send to', 'newsletter'],
   'social-post':      ['social', 'instagram', 'linkedin', 'facebook', 'twitter', 'tiktok', 'pinterest', 'post on', 'reel', 'story'],
   'content-write':    ['article', 'blog', 'essay', 'long form', 'long-form', 'story', 'write a', 'writeup'],
@@ -206,8 +216,14 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
  * wins; defaults to 'general'. Determinism is REQUIRED — this must reproduce the
  * exact category the selector computed so the sticky (department_id,
  * task_category) lookup hits the right persona_assignment row.
+ *
+ * PERS-02 tie-break: the `> bestScore` comparison is strict, so the FIRST
+ * category (in CATEGORY_KEYWORDS declaration order) to reach the maximum score
+ * wins a tie. This is the pinned contract shared with the Python engine — see the
+ * CATEGORY_KEYWORDS docstring. Exported so PERS-11's category-aware sticky lookup
+ * (tasks.ts, L7) and the golden-parity test can reuse the exact same computation.
  */
-function inferTaskCategory(taskText: string | null | undefined): string {
+export function inferTaskCategory(taskText: string | null | undefined): string {
   const text = (taskText || '').toLowerCase();
   let bestCat = 'general';
   let bestScore = 0;
@@ -223,6 +239,7 @@ function inferTaskCategory(taskText: string | null | undefined): string {
         if (pattern.test(text)) score += 1;
       }
     }
+    // Strict `>`: on a tie the earlier-declared category holds (pinned tie-break).
     if (score > bestScore) {
       bestScore = score;
       bestCat = cat;

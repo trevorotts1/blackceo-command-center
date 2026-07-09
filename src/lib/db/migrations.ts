@@ -3452,6 +3452,32 @@ const migrations: Migration[] = [
   },
 ];
 
+// DATA-03: fail-fast at module load if two migrations share an id. The runner
+// keys applied-state on `_migrations.id` and snapshots the applied set ONCE at
+// the top of a run, so a duplicate id is a latent land-mine: depending on order
+// it either double-applies (the second INSERT throws a PRIMARY KEY violation and
+// aborts the whole run) or — history-attested — the second definition is treated
+// as already-applied and SILENTLY never runs on any box (its heal ships but never
+// executes). A renumbering mistake must break the build here, not on a client
+// box at boot. Runs at import time, before any migration can execute.
+(() => {
+  const ids = migrations.map((m) => m.id);
+  if (new Set(ids).size !== ids.length) {
+    const dupes = Array.from(new Set(ids.filter((id, i) => ids.indexOf(id) !== i)));
+    throw new Error(
+      `[migrations] duplicate migration id(s) detected: ${dupes.join(', ')} — each migration id must be unique`,
+    );
+  }
+})();
+
+// DATA-02: the id of the migration that most recently failed in this process,
+// exported so a health endpoint can surface a precise "migration <id> failed"
+// 503 instead of an opaque boot crash. Cleared on any fully-successful run.
+let lastFailedMigrationId: string | null = null;
+export function getLastFailedMigrationId(): string | null {
+  return lastFailedMigrationId;
+}
+
 /**
  * Run all pending migrations
  */
@@ -3513,18 +3539,39 @@ export function runMigrations(db: Database.Database): void {
           db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
         })();
       } else {
-        // Migration owns its own transaction boundary. Runner only records
-        // the apply (in a tiny independent txn) AFTER up succeeds.
-        migration.up(db);
-        db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
+        // Migration owns its own transaction boundary (e.g. a 12-step table
+        // rebuild that must toggle PRAGMA foreign_keys OUTSIDE a transaction).
+        // The runner records the apply in a tiny independent statement AFTER
+        // up() succeeds.
+        try {
+          migration.up(db);
+          db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
+        } finally {
+          // DATA-06: a non-outer migration disables FK enforcement for its
+          // rebuild (`PRAGMA foreign_keys=OFF`) and re-enables it on the happy
+          // path. If up() threw AFTER the OFF but BEFORE the ON, enforcement
+          // would stay OFF for the rest of this connection's life — every later
+          // migration AND all runtime writes would then silently accept
+          // orphaned foreign keys. Re-assert ON here so a failed/partial rebuild
+          // can never leave the connection with FK checks disabled.
+          db.pragma('foreign_keys = ON');
+        }
       }
 
       console.log(`[DB] Migration ${migration.id} completed`);
     } catch (error) {
+      // DATA-02: record WHICH migration failed so a health endpoint can surface
+      // a precise "migration <id> failed" 503, then re-throw (fail-closed — a
+      // half-migrated schema must never serve traffic; see getDb() in db/index.ts).
+      lastFailedMigrationId = migration.id;
       console.error(`[DB] Migration ${migration.id} failed:`, error);
       throw error;
     }
   }
+
+  // DATA-02: every pending migration applied cleanly — clear any stale failure
+  // marker left by an earlier failed attempt in this process.
+  lastFailedMigrationId = null;
 
   // Auto-seed from departments.json if workspaces table is empty
   autoSeedFromDepartmentsJson(db);

@@ -113,6 +113,24 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- campaign_id, which is added by migration 017 (not present in this base
   -- CREATE on a fresh DB before migrations run).
   stage_slug TEXT,
+  -- DATA-01: dispatch/board attempt-accounting columns. These are read by HOT
+  -- runtime paths (task-dispatcher.ts, the intake-advance / backlog-redispatch /
+  -- stale-task sweeps) on every board tick. They were previously added ONLY by
+  -- late ALTERs (migrations 077/078/083/084), so a fresh install that began
+  -- serving traffic before those migrations completed would throw
+  -- "no such column" on the very first dispatch read. Declaring them in the base
+  -- CREATE makes a fresh DB self-sufficient. Existing DBs still receive them via
+  -- the (idempotent, PRAGMA-guarded) migrations — this CREATE is a no-op there.
+  -- NOTE: no CREATE INDEX for these is added to this base schema — schema.ts runs
+  -- BEFORE migrations, so an index referencing one of these columns would throw
+  -- on a pre-migration existing DB. Migration 077 creates
+  -- idx_tasks_next_dispatch_eligible unconditionally (safe on both paths).
+  dispatch_attempts INTEGER DEFAULT 0,        -- migration 077
+  last_dispatch_attempt_at TEXT,              -- migration 077
+  next_dispatch_eligible_at TEXT,             -- migration 077 (backoff gate)
+  block_reason TEXT,                          -- migration 078
+  redispatch_count INTEGER DEFAULT 0,         -- migration 084
+  persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

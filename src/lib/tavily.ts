@@ -14,6 +14,7 @@
  */
 
 import fs from 'fs';
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 
 export interface TavilyResult {
   title: string;
@@ -35,6 +36,10 @@ export interface TavilySearchOptions {
 }
 
 export async function tavilySearch(query: string, opts: TavilySearchOptions = {}): Promise<TavilyResponse> {
+  // QC-11: never honor TAVILY_FIXTURE_JSON_PATH on a production box — fabricated
+  // research would flow straight into SOP grounding. No-op in dev/test.
+  assertNoFixtureEnvInProduction();
+
   // Fixture path for testing — no live cost.
   const fixturePath = process.env.TAVILY_FIXTURE_JSON_PATH;
   if (fixturePath) {

@@ -17,11 +17,13 @@
  * library (one QC specialist per department).
  *
  * Scoring paths:
- *   1. LLM-backed (primary): uses OPENAI_API_KEY / GOOGLE_API_KEY to call the
- *      configured model and score the work against success_criteria.
- *      Model selection: dept QC agent's model field → QC_SCORER_MODEL env →
- *      TIEBREAK_MODEL env → gpt-4o-mini (OpenAI) or gemini-2.5-flash (Google).
- *   2. Heuristic fallback (no API key / LLM error): structural checks on the
+ *   1. LLM-backed (primary): the JUDGE runs on the CLIENT's OWN Ollama Cloud
+ *      model (QC-08 operator decision) — the dept QC agent's model or
+ *      QC_JUDGE_MODEL, which MUST be an ollama-cloud / :cloud model, called via
+ *      the client's OLLAMA_CLOUD_API_KEY. The judge is NEVER an operator/shared
+ *      paid OpenAI/Google key, and NEVER the same model that wrote the content
+ *      (JUDGE != WRITER). No client judge configured → fail CLOSED to (2).
+ *   2. Heuristic fallback (no client judge / judge error): structural checks on the
  *      deliverable meta (description non-empty, SOP assigned, persona assigned,
  *      title non-trivial). Returns a conservative score in [6.0, 8.0].
  *      IMPORTANT: heuristic mode NEVER triggers the auto-reroute loop. Reroutes
@@ -64,6 +66,10 @@ import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
+import { getProvider } from '@/lib/model-providers';
+import { chatCompletion as ollamaCloudChat } from '@/lib/model-providers/ollama-cloud';
+import { resolveProviderApiKey } from '@/lib/provider-key-detection';
 
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
@@ -638,6 +644,14 @@ export interface QCScorerInput {
   qcAgentName?: string | null;
   qcAgentModel?: string | null;
   /**
+   * QC-08 — the model that WROTE the content being judged (the task's assigned
+   * agent / content model). Used to enforce JUDGE != WRITER: the client's Ollama
+   * Cloud judge model must differ from this. Optional; when unknown the equality
+   * guard is skipped (the primary control — client-owned judge, no operator key —
+   * still holds).
+   */
+  writerModel?: string | null;
+  /**
    * When the task has file deliverables, the caller populates this manifest.
    * Presence of a non-empty manifest switches the LLM prompt from
    * "brief completeness" to "deliverable fulfillment" mode.
@@ -824,42 +838,80 @@ If score ≥8.5, "gaps" should be [] or contain only minor polish notes.
 If score <8.5, "gaps" must list specific, actionable rework items.`;
 }
 
+// ---------------------------------------------------------------------------
+// QC-08 (operator decision) — the QC JUDGE runs on the CLIENT's OWN Ollama
+// Cloud model, NEVER an operator/shared paid OpenAI/Google key, and NEVER the
+// same model that wrote the content (JUDGE != WRITER). The prior OpenAI /
+// Google operator-key scorers were removed so nothing can re-wire the judge to
+// a shared paid key.
+// ---------------------------------------------------------------------------
+
 /**
- * Call the LLM API to score the task.
- * Returns null on any error (caller falls back to heuristic).
- * @param modelOverride - Per-dept QC agent's model field (beats env vars)
+ * True when a model id targets the client's Ollama Cloud provider — the ONLY
+ * sanctioned QC-judge provider. Matches the registry shape `ollama-cloud/<m>`,
+ * the legacy `ollama/<m>:cloud` shape, and a bare `<m>:cloud` tag (the ':cloud'
+ * suffix is authoritative). Mirrors model-selector.tierOf()'s tier-1 detection.
  */
-async function llmScoreViaOpenAI(
+function isOllamaCloudModel(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  const id = modelId.trim().toLowerCase();
+  return id.startsWith('ollama-cloud/') || id.includes(':cloud');
+}
+
+/**
+ * Resolve the CLIENT-OWNED Ollama Cloud judge model. Sources, in order:
+ *   1. the per-department QC agent's configured model (input.qcAgentModel)
+ *   2. QC_JUDGE_MODEL (a client-configured judge model id)
+ * Returns the id ONLY when it is an Ollama Cloud model; otherwise null so the
+ * caller fails CLOSED (never an operator/shared paid key).
+ */
+function resolveClientJudgeModel(input: QCScorerInput): string | null {
+  for (const c of [input.qcAgentModel, process.env.QC_JUDGE_MODEL]) {
+    if (c && isOllamaCloudModel(c)) return c.trim();
+  }
+  return null;
+}
+
+/** Resolve the client's Ollama Cloud API key across all env/file/config stores. */
+function resolveOllamaCloudApiKey(): string | null {
+  try {
+    const provider = getProvider('ollama-cloud');
+    if (!provider) return null;
+    const res = resolveProviderApiKey(provider);
+    if ('found' in res && res.found && res.value) return res.value;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Score the task with the client's Ollama Cloud judge model (OpenAI-compatible
+ * via the ollama-cloud connector). Returns null on any error so the caller can
+ * treat it as provider-down (defer + retry). Temperature 0 for a stable verdict.
+ */
+async function llmScoreViaOllamaCloud(
   prompt: string,
   apiKey: string,
-  modelOverride?: string | null,
+  judgeModelId: string,
 ): Promise<QCResult | null> {
   try {
-    const model = modelOverride || process.env.QC_SCORER_MODEL || process.env.TIEBREAK_MODEL || 'gpt-4o-mini';
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: 'You are a precise QC agent. Reply only with valid JSON.' },
-          { role: 'user', content: prompt },
-        ],
-        max_tokens: 300,
-        temperature: 0,
-      }),
+    // The connector wants the raw Ollama model name; strip the registry
+    // 'ollama-cloud/' prefix but keep any ':cloud' tag (that IS the raw name).
+    const rawModel = judgeModelId.startsWith('ollama-cloud/')
+      ? judgeModelId.slice('ollama-cloud/'.length)
+      : judgeModelId;
+    const resp = await ollamaCloudChat(apiKey, {
+      model: rawModel,
+      messages: [
+        { role: 'system', content: 'You are a precise QC agent. Reply only with valid JSON.' },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 300,
+      temperature: 0,
     });
 
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => resp.statusText);
-      console.warn(`[QCScorer] OpenAI API error ${resp.status}: ${errText}`);
-      return null;
-    }
-
-    const data = (await resp.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const raw = data.choices?.[0]?.message?.content?.trim() ?? '';
+    const raw = resp?.choices?.[0]?.message?.content?.trim() ?? '';
     if (!raw) return null;
 
     // Strip markdown code fences if present
@@ -875,68 +927,16 @@ async function llmScoreViaOpenAI(
     return {
       score,
       pass: score >= QC_PASS_THRESHOLD,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : `Score: ${score.toFixed(1)}/10`,
+      // QC-06: the reason is LLM-authored prose, not a deterministic verdict.
+      // Mark it [model-stated] at the source so every downstream surface (board
+      // event, Telegram, owner report) shows the owner it is the model's claim,
+      // while the numeric score/criteria line stays the authoritative signal.
+      reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
     };
   } catch (err) {
-    console.warn('[QCScorer] OpenAI scoring failed:', (err as Error).message);
-    return null;
-  }
-}
-
-/**
- * Call the Google Gemini API to score the task.
- * Returns null on any error.
- * @param modelOverride - Per-dept QC agent's model field (beats env vars)
- */
-async function llmScoreViaGoogle(
-  prompt: string,
-  apiKey: string,
-  modelOverride?: string | null,
-): Promise<QCResult | null> {
-  try {
-    const model = modelOverride || process.env.QC_SCORER_MODEL || 'gemini-2.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, maxOutputTokens: 4096 }, // gemini-2.5-flash uses ~1000 thinking tokens; need headroom
-      }),
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => resp.statusText);
-      console.warn(`[QCScorer] Google Gemini API error ${resp.status} (model: ${model}): ${errText}`);
-      return null;
-    }
-
-    const data = (await resp.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
-    };
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
-    if (!raw) return null;
-
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const parsed = JSON.parse(cleaned) as {
-      score: number;
-      pass: boolean;
-      reason: string;
-      gaps: string[];
-    };
-
-    const score = typeof parsed.score === 'number' ? Math.max(1, Math.min(10, parsed.score)) : 5;
-    return {
-      score,
-      pass: score >= QC_PASS_THRESHOLD,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : `Score: ${score.toFixed(1)}/10`,
-      gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
-      scoringPath: 'llm',
-    };
-  } catch (err) {
-    console.warn('[QCScorer] Google scoring failed:', (err as Error).message);
+    console.warn('[QCScorer] Ollama Cloud judge scoring failed:', (err as Error).message);
     return null;
   }
 }
@@ -948,14 +948,24 @@ async function llmScoreViaGoogle(
 /**
  * Score a task for QC auto-approval.
  *
- * Resolution order for LLM:
- *   1. OPENAI_API_KEY → OpenAI gpt-4o-mini (or QC_SCORER_MODEL)
- *   2. GOOGLE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY → Gemini flash
- *   3. No key → heuristic fallback
+ * QC-08 (operator decision) — the QC JUDGE runs ONLY on the CLIENT's OWN Ollama
+ * Cloud model. Resolution:
+ *   1. client judge model = dept QC agent's model OR QC_JUDGE_MODEL, and it MUST
+ *      be an Ollama Cloud model (ollama-cloud/… or a :cloud tag); else fail closed
+ *   2. JUDGE != WRITER — judge model id must differ from input.writerModel
+ *   3. client Ollama Cloud API key (OLLAMA_CLOUD_API_KEY / OLLAMA_API_KEY)
+ *   4. no client judge configured → fail CLOSED to human review (heuristic
+ *      'no-key'); NEVER an operator/shared paid OpenAI/Google key
  *
- * Falls back to heuristic on any LLM error (never throws).
+ * Falls back to heuristic on any judge error (never throws).
  */
 export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
+  // QC-11: hard-fail if any fixture/simulate bypass env var is set in
+  // production. Both QC_FIXTURE_JSON_PATH (below) and QC_SIMULATE_PROVIDER_DOWN
+  // (further down) would otherwise let a canned "pass" verdict skip real
+  // scoring on a live box. No-op in dev/test, so fixtures keep working there.
+  assertNoFixtureEnvInProduction();
+
   // Fixture path for testing — no live cost. Set QC_FIXTURE_JSON_PATH to a JSON
   // file with shape { score, pass, reason, gaps } to force a deterministic result.
   const qcFixturePath = process.env.QC_FIXTURE_JSON_PATH;
@@ -989,47 +999,64 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
 
   const prompt = buildQCPrompt(input);
 
-  // Model selection: per-dept QC agent's model field beats env vars.
-  // Only use the agent's model when it looks like an OpenAI model id
-  // (starts with 'gpt-' or 'o1' etc.) for the OpenAI path; otherwise
-  // let the env-var defaults handle provider routing.
-  const agentModel = input.qcAgentModel || null;
-
-  // PROVIDER-DOWN vs NO-KEY (Point 6 fix 1): a heuristic fallback means one of two
-  // very different things. If NO scoring key is configured, this box is keyless by
-  // design → genuine human-review fallback (unchanged). If a key IS configured but
-  // every LLM call failed (provider outage / network blip), the heuristic result
-  // must be DEFERRED and auto-rescored when the provider returns — not presented as
-  // human-required, which on a fleet-wide blip storms the entire board into review.
+  // PROVIDER-DOWN vs FAIL-CLOSED: a heuristic fallback means one of two very
+  // different things. If the client has NO Ollama Cloud judge model/key
+  // configured, this box cannot auto-score → fail CLOSED to human review
+  // ('no-key'); we NEVER borrow an operator/shared paid key. If a judge IS
+  // configured but the call failed (outage / blip), DEFER and auto-rescore when
+  // it returns ('provider-down') so a blip doesn't storm the board into review.
   //
-  // QC_SIMULATE_PROVIDER_DOWN forces the provider-down branch (when a key is present)
-  // for a known outage window or deterministic tests — mirrors QC_FIXTURE_JSON_PATH.
+  // QC_SIMULATE_PROVIDER_DOWN forces the provider-down branch (when a judge is
+  // configured) for a known outage window or deterministic tests.
   const simulateProviderDown =
     process.env.QC_SIMULATE_PROVIDER_DOWN === '1' ||
     process.env.QC_SIMULATE_PROVIDER_DOWN === 'true';
 
-  // Try LLM paths
-  const openAiKey = process.env.OPENAI_API_KEY;
-  if (openAiKey && !simulateProviderDown) {
-    const result = await llmScoreViaOpenAI(prompt, openAiKey, agentModel);
+  // QC-08 (operator decision): the QC JUDGE runs on the CLIENT's OWN Ollama
+  // Cloud model — NEVER an operator/shared paid OpenAI/Google key, and NEVER the
+  // same model that WROTE the content (JUDGE != WRITER). Fail CLOSED to human
+  // review when no client judge is configured; do not silently borrow a key.
+  const failClosed = (why: string): QCResult => {
+    const h = heuristicScore(input);
+    // 'no-key' routes to human review and never auto-approves (see runQCOnReview
+    // + QC-02 terminal escalation). It also benefits from the manual-promote lane.
+    h.heuristicReason = 'no-key';
+    h.reason = `QC judge unavailable — ${why}. Task held for human review; no operator/shared key is ever used as the judge. ${h.reason}`;
+    console.warn(`[QCScorer] QC-08 fail-closed (no client judge): ${why}`);
+    return h;
+  };
+
+  const judgeModel = resolveClientJudgeModel(input);
+  if (!judgeModel) {
+    return failClosed(
+      'no client Ollama Cloud judge model configured (set the dept QC agent model or QC_JUDGE_MODEL to an ollama-cloud / :cloud model)',
+    );
+  }
+
+  // JUDGE != WRITER: the judge model must differ from the model that wrote the
+  // content it grades. Enforced whenever the writer model is known (optional).
+  if (
+    input.writerModel &&
+    input.writerModel.trim().toLowerCase() === judgeModel.toLowerCase()
+  ) {
+    return failClosed(`judge model equals writer model (${judgeModel}) — JUDGE != WRITER violated`);
+  }
+
+  const ollamaKey = resolveOllamaCloudApiKey();
+  if (!ollamaKey) {
+    return failClosed('no client Ollama Cloud API key found (OLLAMA_CLOUD_API_KEY / OLLAMA_API_KEY)');
+  }
+
+  if (!simulateProviderDown) {
+    const result = await llmScoreViaOllamaCloud(prompt, ollamaKey, judgeModel);
     if (result) return result;
   }
 
-  const googleKey =
-    process.env.GOOGLE_API_KEY ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-    process.env.GEMINI_API_KEY;
-  if (googleKey && !simulateProviderDown) {
-    const result = await llmScoreViaGoogle(prompt, googleKey, agentModel);
-    if (result) return result;
-  }
-
-  // Fallback: heuristic. Record WHY so runQCOnReview can DEFER (provider-down: a
-  // key exists but every call failed / a simulated outage) vs ESCALATE to human
-  // review (no-key: keyless install by design).
-  const hadAnyKey = Boolean(openAiKey) || Boolean(googleKey);
+  // Judge IS configured and a key is present, but the call failed (or was
+  // simulated down): DEFER + auto-rescore when the provider returns — not
+  // human-required. This is a transient outage, distinct from fail-closed.
   const heuristic = heuristicScore(input);
-  heuristic.heuristicReason = hadAnyKey ? 'provider-down' : 'no-key';
+  heuristic.heuristicReason = 'provider-down';
   return heuristic;
 }
 
@@ -3200,6 +3227,12 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       console.log(`[QCScorer] No dept QC agent found for task "${task.title}" — using global heuristic fallback`);
     }
 
+    // QC-08: resolve the WRITER model (the content author's model) so the scorer
+    // can enforce JUDGE != WRITER. Best-effort — null when the writer is unknown.
+    const writerModel = task.assigned_agent_id
+      ? (queryOne<{ model: string | null }>('SELECT model FROM agents WHERE id = ?', [task.assigned_agent_id])?.model ?? null)
+      : null;
+
     // Fetch SOP if assigned
     let sopRow: SOPRowForQC | null = null;
     if (task.sop_id) {
@@ -3570,6 +3603,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           qcAgentId: qcAgent?.id ?? null,
           qcAgentName: qcAgent?.name ?? null,
           qcAgentModel: qcAgent?.model ?? null,
+          writerModel,
           deliverableManifest: deliverableManifest,
         };
         result = await scoreTaskForQC(input);
@@ -3590,6 +3624,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         qcAgentId: qcAgent?.id ?? null,
         qcAgentName: qcAgent?.name ?? null,
         qcAgentModel: qcAgent?.model ?? null,
+        writerModel,
         deliverableManifest: null,
       };
       result = await scoreTaskForQC(input);

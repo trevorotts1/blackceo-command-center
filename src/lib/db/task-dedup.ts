@@ -137,6 +137,36 @@ export function dedupeCanonicalWorkspaces(db: Database): WorkspaceDedupResult {
     const keeper = scored[0];
     const losers = scored.slice(1);
 
+    // DATA-05: never collapse a workspace that still has live work. Reassigning
+    // a loser's workspace_id mid-dispatch can strand an in-flight specialist
+    // session (the runtime session key is derived from the workspace/agent). If
+    // ANY loser in this group owns an in_progress/assigned task, SKIP the whole
+    // merge and log — the board keeps the (rare) duplicate column until a quiet
+    // boot re-attempts, which is strictly safer than breaking a running task.
+    // (Uses the same literals as LIVE_DISPATCH_STATUSES; kept inline for a static
+    //  SQL IN-list.)
+    const liveLoser = losers.find((l) => {
+      try {
+        const row = db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM tasks
+              WHERE workspace_id = ? AND status IN ('in_progress', 'assigned')`,
+          )
+          .get(l.id) as { n: number };
+        return (row?.n ?? 0) > 0;
+      } catch {
+        // Read failure is non-fatal; err on the side of NOT merging.
+        return true;
+      }
+    });
+    if (liveLoser) {
+      console.warn(
+        `[task-dedup] SKIP merge for canonical "${canon}": loser workspace "${liveLoser.id}" ` +
+          'has live in_progress/assigned task(s) — deferring to a quiet boot',
+      );
+      continue;
+    }
+
     try {
       const tx = db.transaction(() => {
         for (const loser of losers) {

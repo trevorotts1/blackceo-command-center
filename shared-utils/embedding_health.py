@@ -124,7 +124,11 @@ def resolve_persona_db(explicit: str | None) -> str:
 def resolve_sop_db(explicit: str | None) -> str:
     if explicit:
         return explicit
-    env = os.environ.get("DATABASE_PATH")
+    # DATA-08: honor the app-forwarded DB path (DASHBOARD_DB_PATH) then the app's
+    # own env (DATABASE_PATH) before the cwd default — the SOP embedding store
+    # lives in the dashboard DB, so a subprocess must hit the app's file, not a
+    # cwd-relative decoy.
+    env = os.environ.get("DASHBOARD_DB_PATH") or os.environ.get("DATABASE_PATH")
     if env:
         return env
     return os.path.join(os.getcwd(), "mission-control.db")

@@ -422,6 +422,18 @@ async function seedFixtures(): Promise<void> {
   // as process.env for the child server process; we also need it for OUR
   // direct DB queries above).
   process.env.DATABASE_PATH = DB_PATH;
+  // Isolate HOME for THIS (test) process the same way the child server does
+  // (OPENCLAW_HOME, a throwaway temp dir). getDb() runs migrations, and its
+  // autoSeedFromDepartmentsJson step resolves a departments.json across HOME-based
+  // candidate paths (~/Downloads/openclaw-master-files/…, ~/clawd/projects/…, …).
+  // On a box that actually has a real fleet departments.json (e.g. the operator's
+  // own machine), that auto-seed populates the default department roster, whose
+  // `master-orchestrator` / `graphics` slugs then collide (UNIQUE slug) with the
+  // fixtures seeded below — the colliding INSERT OR IGNORE is skipped, the fixture
+  // workspace id never exists, and the agent INSERT fails its workspace_id FK.
+  // Pointing HOME at the isolated temp home makes seeding deterministic (a clean
+  // board seeded by these fixtures only), on CI AND on a populated dev box.
+  process.env.HOME = OPENCLAW_HOME;
 
   const { getDb, closeDb, run, queryAll } = await import('../../src/lib/db') as typeof import('../../src/lib/db');
 
