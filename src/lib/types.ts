@@ -193,6 +193,28 @@ export interface Task {
   // broadcast so the kanban card can render per-sub-task slot chips. Empty/absent
   // for a single-persona task.
   subtask_personas?: TaskSubtaskPersona[];
+  // Persona-blend + audience-confirm mirror columns (migration 090). Written by the
+  // persona-bundle persist path (persistPersonaBundle in persona-selector.ts) so the
+  // board + dispatcher read the resolved VOICE decision and the confirmed audience
+  // WITHOUT re-parsing the bundle_json blob. Additive + nullable — every column is
+  // absent on a pre-090 row and on a non-content (no-bundle) task, so no regression.
+  //   voice_persona_id  — the persona whose VOICE the doer writes in (the audience
+  //                       persona, or the collapsed persona when one covers both).
+  //                       Mirrors tasks.persona_id for the blend case.
+  //   topic_persona_id  — the persona whose topic EXPERTISE is carried into the voice.
+  //   audience_id/label — the resolved + operator-confirmed audience for this task.
+  //   audience_source   — onboarding_icp | operator_confirmed | asked.
+  //   voice_collapsed   — 1 when a single persona covers both audience + topic.
+  //   blend_directive   — the doer-facing "write in X voice, carry Y expertise" string;
+  //                       ALWAYS carries the non-removable style-inspired-NOT-
+  //                       impersonation guardrail clause (ensureBlendGuardrail).
+  voice_persona_id?: string | null;
+  topic_persona_id?: string | null;
+  audience_id?: string | null;
+  audience_label?: string | null;
+  audience_source?: string | null;
+  voice_collapsed?: number | null;
+  blend_directive?: string | null;
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;
@@ -631,4 +653,94 @@ export interface UpdateExecutionQueueRequest {
   result_notes?: string;
   started_at?: string;
   completed_at?: string;
+}
+
+// ─── PERSONA BLEND BUNDLE (Skill-23 matcher SUPERSET output) ──────────────────
+// The matcher (persona-selector-v2.py) emits a persona-bundle that is a strict
+// SUPERSET of the legacy single-persona result: a legacy consumer keeps reading
+// persona_id/name/mode, while a blend-aware consumer (the Command Center) also
+// reads the voice decision (audience persona + topic persona), the resolved +
+// operator-confirmed audience, the doer-facing blend directive, and the up-to-10
+// task-personas plan. Every field is optional at the wire level so a non-content
+// task (or an older matcher) that emits only the legacy shape parses to a null
+// bundle and the CC behaves EXACTLY as before (backward compatible, no regression).
+
+/** Where the resolved audience came from. `asked` = the operator was prompted. */
+export type AudienceConfirmSource = 'onboarding_icp' | 'operator_confirmed' | 'asked';
+
+/**
+ * The audience the content is FOR, resolved from the client ICP (company-config
+ * + SOUL.md/interview) and — per the ALWAYS-confirm rule — never written without
+ * operator sign-off. `candidates` enumerates the known ICP audiences so the
+ * operator prompt can list them; `confidence` drives single-high-confidence vs
+ * ask-when-unsure.
+ */
+export interface ResolvedAudience {
+  source: AudienceConfirmSource;
+  candidates: string[];
+  confidence: number;
+  /** The single chosen audience label (set once confirmed / high-confidence). */
+  label?: string | null;
+  /** A stable audience id/slug when the ICP carries one. */
+  id?: string | null;
+}
+
+/**
+ * The VOICE decision: an AUDIENCE persona (the voice the doer writes IN) blended
+ * with a TOPIC persona (the expertise carried). `collapsed` is true when a single
+ * persona covers BOTH — then `collapsed_persona_id` is that persona and the two
+ * slots point at it. `topic_as_task_guidance` marks that the topic persona also
+ * doubles as task-guidance (so it need not consume a separate task-persona slot).
+ */
+export interface BundleVoiceDecision {
+  audience_persona?: { id: string | null; why?: string | null } | null;
+  topic_persona?: { id: string | null; why?: string | null } | null;
+  collapsed: boolean;
+  collapsed_persona_id?: string | null;
+  topic_as_task_guidance?: boolean;
+}
+
+/** One decomposed part's task-guidance persona (the up-to-10 task-personas plan). */
+export interface BundleTaskPersona {
+  seq: number;
+  part?: string | null;
+  persona_id: string | null;
+  why?: string | null;
+}
+
+/**
+ * The full persona-bundle (matcher SUPERSET output). `confirm_required` GATES the
+ * dispatcher's write step; `blend_directive` is the mandatory doer-facing string
+ * that ALWAYS carries the non-removable style-inspired-NOT-impersonation clause.
+ */
+export interface PersonaBundle {
+  topic?: string | null;
+  resolved_audience?: ResolvedAudience | null;
+  /** When true, the audience must be operator-confirmed before the task is dispatched. */
+  confirm_required: boolean;
+  voice: BundleVoiceDecision;
+  blend_directive: string;
+  task_personas: BundleTaskPersona[];
+  rationale?: Record<string, unknown>;
+  funnel?: Record<string, unknown>;
+  fallbacks?: Record<string, unknown>;
+  /** Catalog schemaVersion the matcher reasoned over (persona-categories.json). */
+  catalog_version?: string | null;
+}
+
+/** Lifecycle of the audience confirmation for a task's persona bundle. */
+export type PersonaBundleConfirmState =
+  | 'pending'            // confirm_required and awaiting operator sign-off (GATES dispatch)
+  | 'confirmed'          // operator confirmed (or changed) the audience — write may proceed
+  | 'not_required'       // no audience blend / non-content task — never gated
+  | 'deadline_fallback'; // unconfirmed past the deadline — house-voice governance, kept visible
+
+/** A row of the `task_persona_bundle` table (migration 090). */
+export interface TaskPersonaBundleRow {
+  id: string;
+  task_id: string;
+  bundle_json: string;
+  catalog_version: string | null;
+  confirm_state: PersonaBundleConfirmState | string;
+  created_at: string;
 }

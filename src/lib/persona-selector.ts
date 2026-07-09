@@ -34,8 +34,16 @@ import os from "os";
 import { v4 as uuidv4 } from "uuid";
 import { DB_PATH, queryAll, queryOne, run } from "@/lib/db";
 import { broadcast } from "@/lib/events";
+import { ensureBlendGuardrail } from "@/lib/persona-dispatch";
 import type { PersonaSlot } from "@/lib/sops";
-import type { Task } from "@/lib/types";
+import type {
+  Task,
+  PersonaBundle,
+  BundleVoiceDecision,
+  BundleTaskPersona,
+  ResolvedAudience,
+  AudienceConfirmSource,
+} from "@/lib/types";
 
 // Promisified async version — never blocks the event loop.
 const execFileAsync = promisify(execFile);
@@ -233,6 +241,197 @@ export interface PersonaSelectionResult {
    * GOVERNANCE_PERSONA_FALLBACK. Present alongside no_persona_required:true.
    */
   governance_persona_id?: string | null;
+  /**
+   * PERSONA-BLEND — the matcher's persona-bundle SUPERSET (voice decision, resolved
+   * audience, blend directive, up-to-10 task-personas). NULL when the matcher emitted
+   * only the legacy single-persona shape (a non-content task, or a pre-blend matcher):
+   * the CC then behaves EXACTLY as before. `parsePersonaBundle` normalizes it and
+   * `persistPersonaBundle` writes it to task_persona_bundle + the mirror columns.
+   */
+  bundle?: PersonaBundle | null;
+}
+
+// ─── PERSONA-BLEND BUNDLE PARSE + PERSIST ────────────────────────────────────
+
+/** True when a raw selector result carries any persona-bundle SUPERSET field. */
+function rawHasBundleFields(raw: Record<string, unknown>): boolean {
+  return (
+    raw.voice !== undefined ||
+    raw.blend_directive !== undefined ||
+    raw.resolved_audience !== undefined ||
+    raw.task_personas !== undefined ||
+    raw.confirm_required !== undefined
+  );
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+function normalizeVoice(raw: unknown): BundleVoiceDecision {
+  const v = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const readPersona = (p: unknown): { id: string | null; why?: string | null } | null => {
+    if (!p || typeof p !== "object") return null;
+    const o = p as Record<string, unknown>;
+    return { id: asString(o.id), why: asString(o.why) };
+  };
+  return {
+    audience_persona: readPersona(v.audience_persona),
+    topic_persona: readPersona(v.topic_persona),
+    collapsed: v.collapsed === true,
+    collapsed_persona_id: asString(v.collapsed_persona_id),
+    topic_as_task_guidance: v.topic_as_task_guidance === true,
+  };
+}
+
+function normalizeResolvedAudience(raw: unknown): ResolvedAudience | null {
+  if (!raw || typeof raw !== "object") return null;
+  const a = raw as Record<string, unknown>;
+  const validSources: AudienceConfirmSource[] = ["onboarding_icp", "operator_confirmed", "asked"];
+  const source = (validSources.includes(a.source as AudienceConfirmSource)
+    ? a.source
+    : "asked") as AudienceConfirmSource;
+  const candidates = Array.isArray(a.candidates)
+    ? (a.candidates.filter((c) => typeof c === "string" && c.trim()) as string[]).map((c) => c.trim())
+    : [];
+  const confidence = typeof a.confidence === "number" ? a.confidence : 0;
+  return { source, candidates, confidence, label: asString(a.label), id: asString(a.id) };
+}
+
+function normalizeTaskPersonas(raw: unknown): BundleTaskPersona[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .slice(0, 10) // up-to-10 task personas — hard cap mirrors the matcher contract
+    .map((r, i) => {
+      const o = (r && typeof r === "object" ? r : {}) as Record<string, unknown>;
+      return {
+        seq: typeof o.seq === "number" ? o.seq : i + 1,
+        part: asString(o.part),
+        persona_id: asString(o.persona_id),
+        why: asString(o.why),
+      };
+    });
+}
+
+/**
+ * Normalize a raw selector result into a typed PersonaBundle, or NULL when the
+ * result carries no bundle SUPERSET fields (legacy / non-content result → the CC
+ * behaves as before). The mandatory style-inspired-NOT-impersonation guardrail is
+ * ALWAYS injected into blend_directive here — even if the matcher omitted it — so
+ * the CC is the last, non-bypassable line of defense on the guardrail.
+ */
+export function parsePersonaBundle(rawResult: unknown): PersonaBundle | null {
+  if (!rawResult || typeof rawResult !== "object") return null;
+  const raw = rawResult as Record<string, unknown>;
+  if (!rawHasBundleFields(raw)) return null;
+
+  const voice = normalizeVoice(raw.voice);
+  const resolved_audience = normalizeResolvedAudience(raw.resolved_audience);
+  const task_personas = normalizeTaskPersonas(raw.task_personas);
+  // NON-REMOVABLE guardrail: whatever the matcher sent (or didn't), the directive
+  // the CC persists + renders always carries the style-inspired clause.
+  const blend_directive = ensureBlendGuardrail(asString(raw.blend_directive));
+
+  return {
+    topic: asString(raw.topic),
+    resolved_audience,
+    confirm_required: raw.confirm_required === true,
+    voice,
+    blend_directive,
+    task_personas,
+    rationale: (raw.rationale && typeof raw.rationale === "object")
+      ? (raw.rationale as Record<string, unknown>)
+      : undefined,
+    funnel: (raw.funnel && typeof raw.funnel === "object")
+      ? (raw.funnel as Record<string, unknown>)
+      : undefined,
+    fallbacks: (raw.fallbacks && typeof raw.fallbacks === "object")
+      ? (raw.fallbacks as Record<string, unknown>)
+      : undefined,
+    catalog_version: asString(raw.catalog_version),
+  };
+}
+
+/**
+ * Persist a parsed persona bundle for a task: one row in `task_persona_bundle`
+ * (full JSON + catalog version + audience confirm state) plus the mirror columns
+ * on `tasks` (voice/topic persona ids, confirmed audience, voice_collapsed,
+ * blend_directive). Idempotent per task (task_id UNIQUE → ON CONFLICT upsert).
+ *
+ * The confirm state is derived from the bundle: `confirm_required` → 'pending'
+ * (GATES dispatch until the operator confirms the audience) else 'not_required'.
+ * Fail-soft: a pre-090 DB (columns/table absent) logs a warning and no-ops rather
+ * than breaking the create-time persona pin.
+ *
+ * @returns true when the bundle row was written, false on a tolerated no-op/error.
+ */
+export function persistPersonaBundle(
+  taskId: string,
+  bundle: PersonaBundle,
+): boolean {
+  const confirmState = bundle.confirm_required ? "pending" : "not_required";
+  const now = new Date().toISOString();
+  const catalogVersion = bundle.catalog_version ?? null;
+  // Guarantee the guardrail one more time at the persist boundary (defense in depth).
+  const blendDirective = ensureBlendGuardrail(bundle.blend_directive);
+  const voice = bundle.voice;
+  // The VOICE persona (the voice the doer writes IN) is the collapsed persona when
+  // one covers both, else the audience persona, else the topic persona.
+  const voicePersonaId =
+    (voice.collapsed ? voice.collapsed_persona_id : voice.audience_persona?.id) ||
+    voice.audience_persona?.id ||
+    voice.topic_persona?.id ||
+    null;
+  const topicPersonaId = voice.topic_persona?.id ?? null;
+  const audience = bundle.resolved_audience;
+  const audienceId = audience?.id ?? null;
+  const audienceLabel =
+    audience?.label ?? (audience?.candidates.length === 1 ? audience.candidates[0] : null);
+  const audienceSource = audience?.source ?? null;
+
+  let wrote = false;
+  try {
+    run(
+      `INSERT INTO task_persona_bundle (task_id, bundle_json, catalog_version, confirm_state, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(task_id) DO UPDATE SET
+         bundle_json = excluded.bundle_json,
+         catalog_version = excluded.catalog_version,
+         confirm_state = excluded.confirm_state`,
+      [taskId, JSON.stringify({ ...bundle, blend_directive: blendDirective }), catalogVersion, confirmState, now],
+    );
+    wrote = true;
+  } catch (err) {
+    console.warn(`[persona-bundle] persist row failed for task ${taskId} (pre-090 DB?):`, (err as Error).message);
+  }
+
+  try {
+    run(
+      `UPDATE tasks
+          SET voice_persona_id = ?,
+              topic_persona_id = ?,
+              audience_id = ?,
+              audience_label = ?,
+              audience_source = ?,
+              voice_collapsed = ?,
+              blend_directive = ?
+        WHERE id = ?`,
+      [
+        voicePersonaId,
+        topicPersonaId,
+        audienceId,
+        audienceLabel,
+        audienceSource,
+        voice.collapsed ? 1 : 0,
+        blendDirective,
+        taskId,
+      ],
+    );
+  } catch (err) {
+    console.warn(`[persona-bundle] mirror-column update failed for task ${taskId} (pre-090 DB?):`, (err as Error).message);
+  }
+
+  return wrote;
 }
 
 function resolveOpenClawRoot(): string {
@@ -304,6 +503,7 @@ export async function selectPersonaForTask(
         interaction_mode: (fixture.interaction_mode as PersonaInteractionMode) || 'leadership',
         no_persona_required: fixture.no_persona_required,
         governance_persona_id: fixture.governance_persona_id ?? null,
+        bundle: parsePersonaBundle(fixture),
       };
     } catch {
       // Malformed fixture — fall through to real selector.
@@ -416,6 +616,9 @@ export async function selectPersonaForTask(
       message: result.message,
       no_persona_required: result.no_persona_required,
       governance_persona_id: result.governance_persona_id ?? null,
+      // Parse the persona-bundle SUPERSET when the matcher emitted it; NULL for a
+      // legacy single-persona result so existing consumers are unaffected.
+      bundle: parsePersonaBundle(result),
     };
   } catch (error) {
     console.error(`[persona-selector] Failed for task ${taskId}:`, error);

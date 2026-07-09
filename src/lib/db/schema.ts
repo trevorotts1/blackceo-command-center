@@ -136,9 +136,37 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- on UpdateTaskSchema / the PATCH surface. /api/tasks/[id]/status uses this
   -- (never the caller-editable description) as the authoritative scope gate.
   source TEXT,
+  -- Persona-blend + audience-confirm mirror columns (migration 090 owns these for
+  -- existing DBs; this base CREATE covers fresh installs). Nullable + additive:
+  -- the resolved VOICE decision (voice_persona_id / topic_persona_id / voice_collapsed
+  -- / blend_directive) and the confirmed audience (audience_id / label / source). The
+  -- full bundle lives in task_persona_bundle; tasks.persona_id/name/mode stay the
+  -- back-compat mirror of the resolved VOICE persona.
+  voice_persona_id TEXT,
+  topic_persona_id TEXT,
+  audience_id TEXT,
+  audience_label TEXT,
+  audience_source TEXT,
+  voice_collapsed INTEGER,
+  blend_directive TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Persona-blend bundle (migration 090 also creates this for existing DBs;
+-- CREATE TABLE IF NOT EXISTS is idempotent). One row per task: the matcher's
+-- persona-bundle SUPERSET (bundle_json), the catalog schemaVersion it reasoned
+-- over, and the audience confirm lifecycle state (pending gates dispatch).
+CREATE TABLE IF NOT EXISTS task_persona_bundle (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+  bundle_json TEXT,
+  catalog_version TEXT,
+  confirm_state TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_confirm ON task_persona_bundle(confirm_state);
 
 -- Task history table — every status transition is recorded here for
 -- performance analytics (avg completion time, throughput, agent attribution).

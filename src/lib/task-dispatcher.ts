@@ -528,6 +528,44 @@ export async function autoDispatchTask(
       }
     }
 
+    // ── AUDIENCE-CONFIRM GATE (persona-blend — BEFORE the write step) ────────
+    // A content task whose persona bundle requires audience confirmation must NOT
+    // be written/dispatched until the operator confirms the audience. Held tasks
+    // are quietly deferred (short poll window, NOT counted toward the anti-furnace
+    // block cap) and the operator is surfaced ONCE. NEVER-NAKED: past the deadline
+    // we flip to house-voice governance and proceed. Non-content tasks (no bundle)
+    // skip this entirely (no regression). Dynamic import avoids the
+    // tasks<->task-dispatcher static import cycle (same pattern as the heal gate).
+    try {
+      const { evaluateAudienceConfirmGate, holdForAudienceConfirm, markAudienceDeadlineFallback } =
+        await import('@/lib/tasks');
+      const gate = evaluateAudienceConfirmGate(task.id);
+      if (gate.hold) {
+        holdForAudienceConfirm(task.id, agent.id, gate);
+        console.log(
+          `[${context}] autoDispatchTask: task ${taskId} HELD for audience confirmation — write gated`,
+        );
+        return; // write step gated — task stays claimable until confirmed/deadline
+      }
+      if (gate.state === 'deadline_fallback') {
+        // NEVER-NAKED: unconfirmed past the deadline → dispatch under house-voice
+        // governance only (buildPersonaBlock's fallback governs; the blend
+        // directive's guardrail still renders). Audience is NOT fabricated.
+        markAudienceDeadlineFallback(task.id);
+        console.warn(
+          `[${context}] autoDispatchTask: task ${taskId} audience unconfirmed past deadline — ` +
+            `dispatching under house-voice governance only`,
+        );
+      }
+    } catch (gateErr) {
+      // Never block dispatch on the gate machinery itself (pre-090 DB, etc.).
+      console.warn(
+        `[${context}] audience-confirm gate non-fatal for task ${task.id}:`,
+        (gateErr as Error).message,
+      );
+    }
+    // ── End audience-confirm gate ────────────────────────────────────────────
+
     // ── AF-MODEL-SOVEREIGNTY gate ───────────────────────────────────────────
     // Block dispatch if resolved model is null, free default, forbidden, or
     // modality-wrong. Routes to needs_owner_input — never silently downgrades.

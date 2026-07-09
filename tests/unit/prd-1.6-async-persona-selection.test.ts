@@ -267,6 +267,59 @@ test('PRD 1.6: 5 rapid task creates each complete in < 500ms', async () => {
   console.log('[PRD 1.6 test] 5-task timings (ms):', timings.join(', '));
 });
 
+// ── PERSONA-BLEND — parsePersonaBundle (pure, no Python) ─────────────────────
+test('BLEND: parsePersonaBundle returns NULL for a legacy single-persona result (backward compat)', async () => {
+  const mod = await import('../../src/lib/persona-selector') as SelectorModule;
+  // A legacy result carries NO bundle SUPERSET fields → null (CC behaves as before).
+  assert.equal(mod.parsePersonaBundle({ persona_id: 'hormozi-100m-offers', score: 0.9 }), null);
+  assert.equal(mod.parsePersonaBundle(null), null);
+  assert.equal(mod.parsePersonaBundle('nonsense'), null);
+});
+
+test('BLEND: parsePersonaBundle normalizes the SUPERSET and ALWAYS injects the guardrail', async () => {
+  const mod = await import('../../src/lib/persona-selector') as SelectorModule;
+  const raw = {
+    persona_id: 'ogilvy-on-advertising',
+    topic: 'SaaS pricing pages',
+    confirm_required: true,
+    resolved_audience: { source: 'onboarding_icp', candidates: ['Founders', 'RevOps leads'], confidence: 0.4 },
+    voice: {
+      audience_persona: { id: 'audience-voice-persona', why: 'writes for founders' },
+      topic_persona: { id: 'ogilvy-on-advertising', why: 'pricing-page craft' },
+      collapsed: false,
+      topic_as_task_guidance: true,
+    },
+    // Matcher-emitted directive WITHOUT the guardrail — parse must inject it.
+    blend_directive: 'Write in the audience voice; carry Ogilvy pricing craft.',
+    task_personas: [
+      { seq: 1, part: 'hero headline', persona_id: 'ogilvy-on-advertising', why: 'headline craft' },
+      { seq: 2, part: 'pricing table', persona_id: 'pricing-strategist' },
+    ],
+  };
+  const bundle = mod.parsePersonaBundle(raw);
+  assert.ok(bundle, 'a SUPERSET result parses to a bundle');
+  assert.equal(bundle!.confirm_required, true);
+  assert.equal(bundle!.voice.collapsed, false);
+  assert.equal(bundle!.voice.topic_persona?.id, 'ogilvy-on-advertising');
+  assert.equal(bundle!.resolved_audience?.source, 'onboarding_icp');
+  assert.deepEqual(bundle!.resolved_audience?.candidates, ['Founders', 'RevOps leads']);
+  assert.equal(bundle!.task_personas.length, 2);
+  // NON-REMOVABLE guardrail: injected even though the matcher omitted it.
+  assert.ok(/style-inspired/i.test(bundle!.blend_directive) && /impersonation/i.test(bundle!.blend_directive));
+  assert.ok(bundle!.blend_directive.includes('Write in the audience voice'), 'upstream directive preserved');
+});
+
+test('BLEND: parsePersonaBundle caps task_personas at 10', async () => {
+  const mod = await import('../../src/lib/persona-selector') as SelectorModule;
+  const raw = {
+    confirm_required: false,
+    task_personas: Array.from({ length: 14 }, (_v, i) => ({ seq: i + 1, persona_id: `p-${i + 1}` })),
+  };
+  const bundle = mod.parsePersonaBundle(raw);
+  assert.ok(bundle);
+  assert.equal(bundle!.task_personas.length, 10, 'up-to-10 task personas — hard cap');
+});
+
 // ── Test 8: tasks.ts delegates async persona block (source-level check) ───────
 test('PRD 1.6: tasks.ts uses void (async () => {}) for persona selection (not await-in-main-path)', () => {
   const tasksSrc = readFileSync(
