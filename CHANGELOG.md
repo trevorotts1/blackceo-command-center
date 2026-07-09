@@ -1,3 +1,34 @@
+## [v4.71.0] — 2026-07-09 — feat(persona-blend): consume the matcher persona-bundle SUPERSET + audience-confirm write gate (migration 090)
+
+Teaches the Command Center to consume the Skill-23 matcher's persona-bundle SUPERSET — a VOICE decision (an audience persona to write IN blended with a topic persona whose expertise is carried), an operator-confirmed audience, a doer-facing blend directive, and the up-to-10 task-personas plan. Every field is optional at the wire level, so a legacy single-persona result (a non-content task or an older matcher) parses to a null bundle and the CC behaves EXACTLY as before — backward compatible, no regression. A persona is a CRAFT LENS, never an identity: the blend directive ALWAYS carries a non-removable STYLE-INSPIRED-NOT-IMPERSONATION guardrail, injected at parse, persist, AND render so no upstream can strip it.
+
+Merged from `persona-blend/cc` (branch QC 8.6). Rebased onto main after the CI-fix landed; the persona-blend migration was renumbered **089 → 090** because main's security fix (INGEST-10, `add_tasks_source_column`) had already claimed 089. Both migrations are additive and coexist; the module-load duplicate-id guard stays green and the fresh-DB `schema.ts` CREATE mirrors both column sets.
+
+### feat — persona-bundle parse + persist (`src/lib/persona-selector.ts`)
+- `parsePersonaBundle()` normalizes a raw selector result into a typed `PersonaBundle`, or NULL when it carries no SUPERSET fields (legacy → CC unchanged). Defensive per-field normalization; `task_personas` hard-capped at 10 (mirrors the matcher contract). The mandatory guardrail is ALWAYS injected into `blend_directive` here — even if the matcher omitted it — so the CC is the last non-bypassable line of defense.
+- `persistPersonaBundle()` writes one `task_persona_bundle` row (full JSON + catalog schemaVersion + audience confirm state) and mirrors the resolved VOICE decision + confirmed audience onto `tasks.*`. Idempotent per task (`task_id` UNIQUE → upsert). `tasks.persona_id/name/mode` stay the back-compat mirror of the resolved VOICE persona.
+
+### feat — mandatory guardrail + blend rendering (`src/lib/persona-dispatch.ts`)
+- `STYLE_INSPIRED_GUARDRAIL` constant + `ensureBlendGuardrail()` (idempotent injector) + `renderBlendDirective()` (fail-closed: renders the guardrail even for a null/empty directive). `buildPersonaBlock()` now appends the blend directive ON TOP of whichever persona branch fired; a no-blend task renders byte-identically to the pre-blend output.
+
+### feat — audience-confirm write gate (`src/lib/task-dispatcher.ts`, `src/lib/tasks.ts`)
+- `evaluateAudienceConfirmGate()` (pure, unit-testable) is called in `autoDispatchTask()` BEFORE the in_progress CAS write: `pending` within deadline → HOLD (write gated); `confirmed`/`not_required`/no-bundle → proceed; `pending` past deadline → NEVER-NAKED release under house-voice governance ONLY (audience never fabricated, `confirm_required` kept visible).
+- `holdForAudienceConfirm()` defers the task on a quiet poll window (NOT counted toward the anti-furnace block cap) and surfaces the operator ONCE via `notifySystem` (operator-facing — MOVE-IN-SILENCE, never client spam). `markAudienceDeadlineFallback()` flips state once on the transition; `confirmTaskAudience()` flips to `confirmed` and mirrors `audience_source='operator_confirmed'`.
+
+### db — migration 090 (`src/lib/db/migrations.ts`, `schema.ts`, `types.ts`)
+- Additive `tasks` mirror columns (`voice_persona_id`, `topic_persona_id`, `audience_id`, `audience_label`, `audience_source`, `voice_collapsed`, `blend_directive`) + new `task_persona_bundle(task_id UNIQUE → tasks ON DELETE CASCADE, bundle_json, catalog_version, confirm_state, created_at)`. Idempotent, PRAGMA-guarded, mirrored in the fresh-DB `schema.ts` CREATE. `types.ts` gains the `PersonaBundle`/`ResolvedAudience`/`BundleVoiceDecision`/`BundleTaskPersona`/`TaskPersonaBundleRow` interfaces and the `Task` mirror fields.
+
+### enforcement + tests
+- **`scripts/qc-cc.sh`** (section 14, migration 090) — 11 drift sentinels: migration additive, schema/types parity, guardrail defined + non-removable, gate-before-write ordering, operator-not-client surface, behavioral proof present.
+- **`tests/unit/persona-blend-audience-confirm.test.ts`** (new) + extensions to `fdn3-persona-dispatch-injection`, `prd-1.6-async-persona-selection`, `dep5-persona-plan-multi`, `point10-persona-exhaustion-fallback` — 21 persona-blend cases covering the migration shape, persist/upsert/mirror, the pure gate decision (hold/confirm/deadline), non-removable guardrail, and backward-compat null-bundle.
+
+### Verification (observed on this integration branch, node v22.19.0)
+- `npm run build` (`next build`): exit 0 — TypeScript typecheck clean across all new types + persona-blend code.
+- `npm run lint`: exit 0 — pre-existing component warnings only; none in any persona-blend file.
+- `scripts/qc-cc.sh`: exit 0 — 133 checks green, 4 environment-only warnings; all section-14 checks green under migration 090.
+- `npm run test:unit`: all 21 persona-blend cases PASS. The suite also shows ~13 residual failures in UNRELATED modules (interview-detection, runQCOnReview/duck, studio-registry-seed, model-resolution, sentinel-persona, skill-6 card) — reproduced identically on a clean `origin/main` (88abb10) worktree and, for `studio-registry-seed`, identically in isolation on both trees. These are the operator box's environment (real `~/clawd/zero-human-company/testco` filesystem signals + absent KIE/OPENAI/FISH_AUDIO provider env), NOT this change; CI runs hermetically and reported main all-green.
+- Migration ids monotonic 085→090, unique (module-load duplicate-id guard passes); no conflict markers; repo stays fleet-wide (no client names/secrets in the diff); no new npm dependencies. All version locations agree at v4.71.0; annotated tag cut before merge.
+
 ## [v4.70.0] — 2026-07-08 — fix(floor): board displays EXACTLY the chosen manifest − opt-outs (four seed/board bugs)
 
 Enforces a guaranteed match between a client's CHOSEN departments (departments.json manifest), the PROVISIONED workspaces, and what the Command Center Kanban DISPLAYS — honoring explicit opt-outs. Diagnosed live on a client box whose manifest listed 43 chosen departments but whose board rendered only 42/40, traced to FOUR bugs in this shared repo (so every client was exposed). The invariant, now enforced at the seed AND the board query: for the active company, displayed departments == chosen manifest − explicitly-opted-out.

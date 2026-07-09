@@ -163,3 +163,63 @@ test('[Point10d] resolvePersonaAndPin: no_persona_required stays personaless (no
   );
   assert.ok(!evt, 'no_persona_required must NOT write a persona_fallback event');
 });
+
+// ── (e) PERSONA-BLEND — a bundle-carrying selection persists the bundle + gate;
+//        a legacy selection writes NO bundle row (backward compat) ─────────────
+test('[Point10e] resolvePersonaAndPin: bundle-carrying result persists task_persona_bundle (pending gate)', async () => {
+  process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    persona_id: 'ogilvy-on-advertising',
+    persona_name: 'David Ogilvy',
+    interaction_mode: 'leadership',
+    score: 0.9,
+    // Bundle SUPERSET fields → parsePersonaBundle produces a bundle.
+    confirm_required: true,
+    resolved_audience: { source: 'onboarding_icp', candidates: ['Founders'], confidence: 0.9, label: 'Founders' },
+    voice: { audience_persona: { id: 'ogilvy-on-advertising' }, topic_persona: { id: 'kennedy-copy' }, collapsed: false },
+    blend_directive: 'Write in the audience voice; carry the topic expertise.',
+  });
+
+  const id = nextId('blend');
+  insertBacklogTask(id);
+  const pinned = await resolvePersonaAndPin(id, 'Write the launch page', 'marketing');
+  delete process.env.PERSONA_FIXTURE_JSON;
+
+  assert.equal(pinned, 'ogilvy-on-advertising', 'voice persona pinned onto tasks.persona_id (back-compat mirror)');
+
+  const bundleRow = queryOne<{ confirm_state: string; bundle_json: string }>(
+    'SELECT confirm_state, bundle_json FROM task_persona_bundle WHERE task_id = ?',
+    [id],
+  );
+  assert.ok(bundleRow, 'a task_persona_bundle row must be written for a bundle-carrying result');
+  assert.equal(bundleRow.confirm_state, 'pending', 'confirm_required → pending (gates dispatch)');
+  assert.ok(/impersonation/i.test(bundleRow.bundle_json), 'persisted bundle carries the guardrail');
+
+  const mirror = queryOne<{ topic_persona_id: string | null; voice_collapsed: number | null; blend_directive: string | null }>(
+    'SELECT topic_persona_id, voice_collapsed, blend_directive FROM tasks WHERE id = ?',
+    [id],
+  );
+  assert.equal(mirror?.topic_persona_id, 'kennedy-copy', 'topic persona mirrored onto the task row');
+  assert.equal(mirror?.voice_collapsed, 0, 'voice_collapsed mirrored (0 = distinct audience+topic)');
+  assert.ok(mirror?.blend_directive && /impersonation/i.test(mirror.blend_directive), 'blend_directive mirrored with guardrail');
+});
+
+test('[Point10e] resolvePersonaAndPin: legacy (no-bundle) result writes NO task_persona_bundle row', async () => {
+  process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    persona_id: 'jordan-belfort-sales',
+    persona_name: 'Jordan Belfort',
+    interaction_mode: 'leadership',
+    score: 0.8,
+    // NO bundle SUPERSET fields — a non-content task.
+  });
+
+  const id = nextId('legacy');
+  insertBacklogTask(id);
+  await resolvePersonaAndPin(id, 'Cold-call the lead list', 'sales');
+  delete process.env.PERSONA_FIXTURE_JSON;
+
+  const bundleRow = queryOne<{ task_id: string }>(
+    'SELECT task_id FROM task_persona_bundle WHERE task_id = ?',
+    [id],
+  );
+  assert.ok(!bundleRow, 'a legacy result must NOT create a bundle row (no gate, no regression)');
+});

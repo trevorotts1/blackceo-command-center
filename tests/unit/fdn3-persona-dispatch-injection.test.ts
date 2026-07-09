@@ -29,6 +29,9 @@ import {
   buildPersonaBlock,
   personaBlueprintPath,
   GOVERNANCE_PERSONA_FALLBACK,
+  renderBlendDirective,
+  ensureBlendGuardrail,
+  STYLE_INSPIRED_GUARDRAIL,
   type PersonaDispatchTask,
 } from '../../src/lib/persona-dispatch';
 
@@ -178,4 +181,60 @@ test('F4.1 — resolver sticky persona (no task id) still renders a real persona
   assertNoSelfSelection(block);
   assert.ok(block.includes('sinek-start-with-why'), 'renders the sticky persona');
   assert.ok(block.includes('Section 4 (A–D)'), 'still carries the load contract');
+});
+
+// ── PERSONA-BLEND — voice directive rendering + mandatory guardrail ───────────
+
+test('BLEND — ensureBlendGuardrail injects the style-inspired-NOT-impersonation clause', () => {
+  // Missing entirely → the guardrail alone is returned (never naked).
+  const fromEmpty = ensureBlendGuardrail('');
+  assert.ok(/style-inspired/i.test(fromEmpty) && /impersonation/i.test(fromEmpty), 'empty → guardrail injected');
+  assert.equal(fromEmpty, STYLE_INSPIRED_GUARDRAIL, 'empty directive yields the guardrail constant');
+
+  // A directive WITHOUT the clause → the clause is appended (non-removable).
+  const appended = ensureBlendGuardrail('Write in Ogilvy voice, carry SaaS-pricing expertise.');
+  assert.ok(appended.includes('Write in Ogilvy voice'), 'preserves the upstream directive');
+  assert.ok(/style-inspired/i.test(appended) && /impersonation/i.test(appended), 'appends the mandatory clause');
+
+  // A directive that ALREADY carries it → idempotent, not duplicated.
+  const already = ensureBlendGuardrail(appended);
+  assert.equal(already, appended, 'idempotent — guardrail is not duplicated');
+});
+
+test('BLEND — renderBlendDirective is fail-closed: guardrail present even for null/empty', () => {
+  for (const input of [null, undefined, '', '   ']) {
+    const rendered = renderBlendDirective(input as string | null | undefined);
+    assert.ok(rendered.includes('Voice blend directive'), 'labels the block');
+    assert.ok(/style-inspired/i.test(rendered) && /impersonation/i.test(rendered), 'guardrail always present');
+  }
+});
+
+test('BLEND — buildPersonaBlock appends the blend directive (with guardrail) to the assigned persona', () => {
+  const task: PersonaDispatchTask = {
+    persona_id: 'ogilvy-on-advertising',
+    persona_name: 'David Ogilvy',
+    persona_mode: 'leadership',
+    // A matcher-emitted directive WITHOUT the guardrail — the render layer must inject it.
+    blend_directive: 'Write in the voice of the audience persona; carry the topic persona\'s SaaS-pricing expertise.',
+  };
+  const block = buildPersonaBlock(task, RESOLVER_TASK_PINNED);
+  assertNoSelfSelection(block);
+  // The persona load contract is still present (blend rides ON TOP, not instead).
+  assert.ok(block.includes('ogilvy-on-advertising'), 'assigned persona still delivered');
+  assert.ok(block.includes(personaBlueprintPath('ogilvy-on-advertising')), 'load contract preserved');
+  // The blend directive + its NON-REMOVABLE guardrail reach the doer.
+  assert.ok(block.includes('Voice blend directive'), 'blend directive block rendered');
+  assert.ok(block.includes('SaaS-pricing expertise'), 'upstream directive text preserved');
+  assert.ok(/style-inspired/i.test(block) && /impersonation/i.test(block), 'guardrail is injected at render');
+});
+
+test('BLEND — no blend_directive → persona block is byte-identical to the pre-blend output (no regression)', () => {
+  const withField: PersonaDispatchTask = {
+    persona_id: 'hormozi-100m-offers',
+    persona_name: 'Alex Hormozi',
+    persona_mode: 'leadership',
+    blend_directive: null,
+  };
+  const block = buildPersonaBlock(withField, RESOLVER_TASK_PINNED);
+  assert.ok(!block.includes('Voice blend directive'), 'absent directive renders no blend block');
 });

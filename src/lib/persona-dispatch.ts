@@ -44,6 +44,45 @@ export const GOVERNANCE_PERSONA_FALLBACK = 'covey-7-habits';
 /** Interaction mode string used when the task row / settings carry none. */
 const DEFAULT_PERSONA_MODE = 'leadership';
 
+// ─── MANDATORY STYLE-INSPIRED (NEVER IMPERSONATION) GUARDRAIL ─────────────────
+// A persona is a CRAFT LENS, not an identity to assume. Every voice-blend
+// directive the doer receives MUST carry this clause, and it is NON-REMOVABLE:
+// `ensureBlendGuardrail` re-injects it if a stored/emitted directive somehow lacks
+// it, and `renderBlendDirective` re-runs that guarantee at the render layer. This
+// is the single most important safety property of the blend feature — a blended
+// voice must never tip into pretending to BE the author.
+export const STYLE_INSPIRED_GUARDRAIL =
+  'STYLE-INSPIRED ONLY — NEVER IMPERSONATION: write in a voice INSPIRED BY this ' +
+  "persona's public style, cadence, and methodology. Do NOT claim to be this " +
+  'person, do NOT sign as them, do NOT speak in the first person AS them, and do ' +
+  'NOT fabricate quotes, biography, or endorsements. The persona is a craft lens ' +
+  'applied to OUR message for OUR audience — not an identity to assume.';
+
+/**
+ * Guarantee the mandatory style-inspired-NOT-impersonation clause is present in a
+ * blend directive. Idempotent: if the directive already carries the guardrail
+ * (detected by the two load-bearing markers), it is returned unchanged; otherwise
+ * the clause is appended. An empty/absent directive yields the guardrail alone —
+ * the guardrail can never be stripped by an upstream that omits it.
+ */
+export function ensureBlendGuardrail(directive: string | null | undefined): string {
+  const base = (directive ?? '').trim();
+  const hasGuardrail = /style-inspired/i.test(base) && /impersonation/i.test(base);
+  if (hasGuardrail) return base;
+  return base ? `${base}\n\n${STYLE_INSPIRED_GUARDRAIL}` : STYLE_INSPIRED_GUARDRAIL;
+}
+
+/**
+ * Render the doer-facing voice-blend directive block. Fail-closed + never-naked:
+ * even a null/empty directive renders the mandatory guardrail (a decided voice
+ * always ships with its safety clause). The guardrail is re-injected here so the
+ * render layer is the last, non-bypassable line of defense.
+ */
+export function renderBlendDirective(directive: string | null | undefined): string {
+  const withGuardrail = ensureBlendGuardrail(directive);
+  return `**Voice blend directive (MANDATORY):**\n${withGuardrail}`;
+}
+
 /**
  * Workspace-relative path to a persona's blueprint. Matches the coaching-personas
  * skill layout the doer's workspace installs (see the `coaching-personas/...`
@@ -71,6 +110,14 @@ export interface PersonaDispatchTask {
   no_persona_required?: boolean | number | null;
   /** Selector-supplied governance oversight pointer for mechanical tasks. */
   governance_persona_id?: string | null;
+  /**
+   * Voice-blend directive (migration 090 mirror column). When present, the doer is
+   * told to write in the audience persona's VOICE while carrying the topic persona's
+   * EXPERTISE. Rendered by `buildPersonaBlock` with the mandatory, non-removable
+   * style-inspired-NOT-impersonation guardrail. Absent on a non-content / no-blend
+   * task, in which case the persona block renders exactly as before.
+   */
+  blend_directive?: string | null;
 }
 
 type PersonaSettings = Pick<
@@ -141,6 +188,23 @@ function governanceBlock(governanceId: string, opts?: { unresolved?: boolean }):
  *      `'auto'`, never a self-selection protocol).
  */
 export function buildPersonaBlock(
+  task: PersonaDispatchTask,
+  settings: PersonaSettings,
+): string {
+  const base = buildBasePersonaBlock(task, settings);
+  // A decided voice blend rides ON TOP of whichever persona branch fired, so the
+  // audience-voice / topic-expertise directive (and its mandatory guardrail) reaches
+  // the doer alongside the load contract. Absent on a non-blend task → base unchanged.
+  const directive = (task.blend_directive ?? '').trim();
+  if (directive) {
+    return `${base}\n${renderBlendDirective(directive)}`;
+  }
+  return base;
+}
+
+/** The persona-branch precedence (pre-blend). Split out so the blend directive can
+ *  be appended uniformly regardless of which branch fired. */
+function buildBasePersonaBlock(
   task: PersonaDispatchTask,
   settings: PersonaSettings,
 ): string {

@@ -41,6 +41,7 @@ import {
   selectPersonaPlanForTask,
   loadSubtaskPersonas,
   broadcastPersonaPlan,
+  persistPersonaBundle,
   DEFAULT_PERSONA_FALLBACK,
   GOVERNANCE_PERSONA_FALLBACK,
   type SubtaskPersona,
@@ -51,7 +52,8 @@ import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
-import type { Task, TaskPriority, Agent } from '@/lib/types';
+import { notifySystem } from '@/lib/notify';
+import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
 
@@ -507,6 +509,18 @@ export async function resolvePersonaAndPin(
            WHERE t.id = ?`,
           [taskId],
         );
+        // PERSONA-BLEND: when the matcher emitted a bundle SUPERSET, persist it
+        // (task_persona_bundle row + mirror columns) so the dispatcher can render
+        // the blend directive and gate the write on audience confirmation. NULL
+        // bundle (legacy/non-content result) → no-op, no behaviour change.
+        if (persona.bundle) {
+          try {
+            persistPersonaBundle(taskId, persona.bundle);
+          } catch (bundleErr) {
+            console.warn(`[resolvePersonaAndPin] bundle persist non-fatal for task ${taskId}:`, (bundleErr as Error).message);
+          }
+        }
+
         if (updatedTask) {
           broadcast({ type: 'task_updated', payload: updatedTask });
           console.log(`[resolvePersonaAndPin] Persona landed for task ${taskId}: ${persona.persona_id}`);
@@ -1035,6 +1049,239 @@ export function ensurePersonaForDispatch(
     console.error(`[ensurePersonaForDispatch] heal-pin failed for task ${taskId} (delivering anyway):`, err);
   }
   return { persona_id: fb.persona_id, persona_name: fb.persona_name, persona_mode: fb.persona_mode, healed: true };
+}
+
+
+// ─── AUDIENCE-CONFIRM GATE (persona-blend) ───────────────────────────────────
+//
+// Content tasks that went through the audience/topic blend carry a persona bundle
+// with `confirm_required`. The audience the content is FOR is resolved from the
+// client ICP but — per the ALWAYS-confirm rule — is NEVER written without operator
+// sign-off. `evaluateAudienceConfirmGate` is the pure decision the dispatcher calls
+// BEFORE its write step; the side-effecting helpers below apply the hold / deadline
+// fallback / confirmation. Non-content tasks (no bundle) are never gated → no
+// regression. NEVER-NAKED: unconfirmed past the deadline, we fall back to house-voice
+// governance ONLY (keeping the prompt visible) and never fabricate an audience.
+
+/** Confidence at/above which a single ICP audience is a "confirm" prompt rather
+ *  than an open "what audience?" ask. */
+export const AUDIENCE_HIGH_CONFIDENCE = 0.75;
+
+/** How long a task waits for operator audience confirmation before the never-naked
+ *  house-voice fallback releases it. Env-overridable; default 30 min. */
+export const AUDIENCE_CONFIRM_DEADLINE_MS = Math.max(
+  60_000,
+  parseInt(process.env.AUDIENCE_CONFIRM_DEADLINE_MS || '1800000', 10),
+);
+
+/** Quiet re-poll window while a task is held for confirmation (so sweeps don't
+ *  hammer it). Does NOT count toward the anti-furnace block cap — a legitimate
+ *  operator wait is not a dispatch failure. Env-overridable; default 5 min. */
+export const AUDIENCE_CONFIRM_POLL_MS = Math.max(
+  30_000,
+  parseInt(process.env.AUDIENCE_CONFIRM_POLL_MS || '300000', 10),
+);
+
+export interface AudienceConfirmDecision {
+  hold: boolean;
+  state: 'no_bundle' | 'not_required' | 'confirmed' | 'pending' | 'deadline_fallback';
+  reason: string;
+  audienceLabel: string | null;
+  candidates: string[];
+  /** Operator-facing prompt (never client spam). Present when hold or deadline_fallback. */
+  prompt: string | null;
+  /** True only on the FIRST hold — so the operator is surfaced ONCE, not every sweep. */
+  firstHold: boolean;
+}
+
+/**
+ * Build the operator-facing audience prompt. A single high-confidence ICP audience
+ * gets a CONFIRM prompt; multiple / low-confidence / none gets the exact
+ * "What audience are we dealing with?" ask enumerating the known ICP audiences.
+ */
+function buildAudiencePrompt(
+  label: string | null,
+  candidates: string[],
+  confidence: number,
+): string {
+  if (label && candidates.length <= 1 && confidence >= AUDIENCE_HIGH_CONFIDENCE) {
+    return `Confirm the audience for this content task: "${label}". This is the ICP we will write FOR — reply to change it if that's wrong before the task is dispatched.`;
+  }
+  const list = candidates.length
+    ? candidates.map((c) => `• ${c}`).join('\n')
+    : '(no ICP audiences on file — name the audience)';
+  return `What audience are we dealing with? This content task needs a confirmed audience before dispatch. Known ICP audiences:\n${list}`;
+}
+
+/**
+ * Decide whether a task's write must be HELD for operator audience confirmation.
+ * PURE (reads DB, no mutation) so it is unit-testable without the dispatcher.
+ *
+ *   no bundle / not_required / confirmed / deadline_fallback → hold:false (proceed)
+ *   pending within deadline                                  → hold:true  (block write)
+ *   pending past deadline                                    → hold:false, state
+ *                                                              deadline_fallback (NEVER-
+ *                                                              NAKED house-voice release)
+ */
+export function evaluateAudienceConfirmGate(
+  taskId: string,
+  nowMs: number = Date.now(),
+): AudienceConfirmDecision {
+  const none: AudienceConfirmDecision = {
+    hold: false, state: 'no_bundle', reason: 'no persona bundle',
+    audienceLabel: null, candidates: [], prompt: null, firstHold: false,
+  };
+
+  let row: TaskPersonaBundleRow | undefined;
+  try {
+    row = queryOne<TaskPersonaBundleRow>('SELECT * FROM task_persona_bundle WHERE task_id = ?', [taskId]);
+  } catch {
+    return none; // pre-090 DB — no gate
+  }
+  if (!row) return none;
+
+  let bundle: PersonaBundle | null = null;
+  try { bundle = JSON.parse(row.bundle_json) as PersonaBundle; } catch { bundle = null; }
+  const audience = bundle?.resolved_audience ?? null;
+  const candidates = audience?.candidates ?? [];
+  const audienceLabel = audience?.label ?? (candidates.length === 1 ? candidates[0] : null);
+
+  const state = String(row.confirm_state ?? '');
+  if (state === 'confirmed' || state === 'not_required' || state === 'deadline_fallback') {
+    return {
+      hold: false,
+      state: state as AudienceConfirmDecision['state'],
+      reason: `confirm_state=${state}`,
+      audienceLabel, candidates, prompt: null, firstHold: false,
+    };
+  }
+
+  // 'pending' (or any unknown state — fail-closed to a hold).
+  const created = Date.parse(row.created_at);
+  const pastDeadline = Number.isFinite(created) && nowMs - created >= AUDIENCE_CONFIRM_DEADLINE_MS;
+  const prompt = buildAudiencePrompt(audienceLabel, candidates, audience?.confidence ?? 0);
+
+  if (pastDeadline) {
+    return {
+      hold: false, state: 'deadline_fallback',
+      reason: 'unconfirmed past deadline — house-voice governance only (audience still unconfirmed)',
+      audienceLabel, candidates, prompt, firstHold: false,
+    };
+  }
+
+  let priorEvent = false;
+  try {
+    const ev = queryOne<{ n: number }>(
+      "SELECT COUNT(*) as n FROM events WHERE task_id = ? AND type = 'audience_confirm_pending'",
+      [taskId],
+    );
+    priorEvent = (ev?.n ?? 0) > 0;
+  } catch { priorEvent = false; }
+
+  return {
+    hold: true, state: 'pending',
+    reason: 'awaiting operator audience confirmation',
+    audienceLabel, candidates, prompt, firstHold: !priorEvent,
+  };
+}
+
+/**
+ * Apply a HOLD for audience confirmation: quietly defer the task (short poll window,
+ * NOT counted toward the anti-furnace block cap) and surface the prompt to the
+ * OPERATOR exactly once (never client spam — MOVE-IN-SILENCE). The dispatcher calls
+ * this then returns WITHOUT writing/dispatching.
+ */
+export function holdForAudienceConfirm(
+  taskId: string,
+  agentId: string | null,
+  decision: AudienceConfirmDecision,
+): void {
+  const now = new Date().toISOString();
+  const nextEligible = new Date(Date.now() + AUDIENCE_CONFIRM_POLL_MS).toISOString();
+  try {
+    run('UPDATE tasks SET next_dispatch_eligible_at = ? WHERE id = ?', [nextEligible, taskId]);
+  } catch { /* pre-migration tolerant */ }
+
+  if (decision.firstHold) {
+    try {
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'audience_confirm_pending', agentId, taskId, `[AUDIENCE-CONFIRM] ${decision.prompt ?? 'audience confirmation required'}`, now],
+      );
+    } catch { /* audit best-effort */ }
+    try {
+      // OPERATOR-facing (Rescue Rangers / server), never the client's chat.
+      notifySystem(`Audience check before dispatch — ${decision.prompt ?? 'confirm the audience for this content task'}`, {
+        agent: 'audience-confirm',
+        action: 'escalate',
+      });
+    } catch { /* notify best-effort */ }
+  }
+  console.log(`[audience-confirm] task ${taskId} HELD — awaiting operator audience confirmation`);
+}
+
+/**
+ * NEVER-NAKED deadline release: an unconfirmed task past the deadline is dispatched
+ * under house-voice GOVERNANCE only. We flip the bundle to 'deadline_fallback' (once)
+ * and record a visible event; `confirm_required` is left visible so the operator can
+ * still confirm afterwards. No audience is fabricated.
+ */
+export function markAudienceDeadlineFallback(taskId: string): void {
+  const now = new Date().toISOString();
+  try {
+    const res = run(
+      `UPDATE task_persona_bundle SET confirm_state = 'deadline_fallback' WHERE task_id = ? AND confirm_state = 'pending'`,
+      [taskId],
+    );
+    // Only emit the event on the transition (res.changes === 1), never every sweep.
+    if (res.changes === 1) {
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+        [uuidv4(), 'audience_confirm_deadline_fallback', taskId,
+          `[AUDIENCE-CONFIRM] unconfirmed past deadline — dispatching under house-voice governance ONLY; audience still unconfirmed (no audience fabricated).`, now],
+      );
+    }
+  } catch { /* best-effort — never block dispatch on the fallback bookkeeping */ }
+}
+
+/**
+ * Operator confirms (or changes) the audience for a task. Flips the bundle to
+ * 'confirmed', mirrors the confirmed audience onto tasks.audience_* with
+ * source='operator_confirmed', records a visible event, and re-broadcasts the row.
+ * On a CHANGE the caller should follow with a voice re-score (re-run
+ * resolvePersonaAndPin) so the blend reflects the new audience.
+ *
+ * Library-only (no route wired here) so the operator-facing API route can call it.
+ */
+export function confirmTaskAudience(
+  taskId: string,
+  opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean } = {},
+): void {
+  const now = new Date().toISOString();
+  try {
+    run(`UPDATE task_persona_bundle SET confirm_state = 'confirmed' WHERE task_id = ?`, [taskId]);
+  } catch { /* pre-090 tolerant */ }
+  try {
+    run(
+      `UPDATE tasks
+          SET audience_id = COALESCE(?, audience_id),
+              audience_label = COALESCE(?, audience_label),
+              audience_source = 'operator_confirmed'
+        WHERE id = ?`,
+      [opts.audienceId ?? null, opts.audienceLabel ?? null, taskId],
+    );
+  } catch { /* pre-090 tolerant */ }
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [uuidv4(), 'audience_confirmed', taskId,
+        `[AUDIENCE-CONFIRM] operator confirmed audience${opts.audienceLabel ? ` "${opts.audienceLabel}"` : ''}${opts.changed ? ' (changed — voice re-score recommended)' : ''}.`, now],
+    );
+  } catch { /* audit best-effort */ }
+  try {
+    const t = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (t) broadcast({ type: 'task_updated', payload: t });
+  } catch { /* broadcast best-effort */ }
 }
 
 
