@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
+import { resolveActiveCompanyId } from '@/lib/company';
 import type { Workspace, WorkspaceStats, TaskStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -13,12 +14,32 @@ function generateSlug(name: string): string {
     .replace(/^-|-$/g, '');
 }
 
+/**
+ * Active-company scoping for the Kanban board (floor invariant, fix #4).
+ *
+ * The board query previously had NO company filter, so a FOREIGN company's
+ * workspace rows (e.g. left over from a mis-attributed seed) leaked onto the
+ * board. We scope the board to the active client company. The `'default'`
+ * sentinel / NULL rows are the box's OWN unattributed workspaces (single-tenant),
+ * NOT a foreign company, so they are kept — this prevents a blank board on a box
+ * whose rows have not yet been re-homed while still excluding other companies.
+ * When no active company can be resolved (un-branded box) we DO NOT filter.
+ */
+function companyScopeClause(activeCompanyId: string | null): { sql: string; params: string[] } {
+  if (!activeCompanyId) return { sql: '', params: [] };
+  return {
+    sql: `WHERE (w.company_id = ? OR w.company_id = 'default' OR w.company_id IS NULL OR w.company_id = '')`,
+    params: [activeCompanyId],
+  };
+}
+
 // GET /api/workspaces - List all workspaces with stats
 export async function GET(request: NextRequest) {
   const includeStats = request.nextUrl.searchParams.get('stats') === 'true';
 
   try {
     const db = getDb();
+    const scope = companyScopeClause(resolveActiveCompanyId(db));
 
     if (includeStats) {
       // Get workspaces + dept-head agent details in one query so the dashboard
@@ -29,8 +50,9 @@ export async function GET(request: NextRequest) {
                a.avatar_emoji AS head_agent_avatar
           FROM workspaces w
           LEFT JOIN agents a ON a.id = w.head_agent_id
+          ${scope.sql}
           ORDER BY w.sort_order ASC, w.name ASC
-      `).all() as Array<Workspace & { head_agent_name: string | null; head_agent_avatar: string | null }>;
+      `).all(...scope.params) as Array<Workspace & { head_agent_name: string | null; head_agent_avatar: string | null }>;
 
       const stats: WorkspaceStats[] = workspaces.map(workspace => {
         // Get task counts by status
@@ -85,8 +107,9 @@ export async function GET(request: NextRequest) {
              a.avatar_emoji AS head_agent_avatar
         FROM workspaces w
         LEFT JOIN agents a ON a.id = w.head_agent_id
+        ${scope.sql}
         ORDER BY w.sort_order ASC, w.name ASC
-    `).all();
+    `).all(...scope.params);
     return NextResponse.json(workspaces);
   } catch (error) {
     console.error('Failed to fetch workspaces:', error);

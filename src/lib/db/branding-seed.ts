@@ -42,6 +42,30 @@ export interface BrandingSeedResult {
     | 'table-missing';               // companies table doesn't exist yet
 }
 
+/**
+ * Unpopulated-template sentinels for companyName.
+ *
+ * The repo ships config/company-config.json at "template state" — companyName
+ * "Your Company", empty industry, departments:[] — and `.github/workflows/
+ * config-guard.yml` ENFORCES that exact value on main. That template is NOT a
+ * real client: a box still carrying it has never had Skill-23 closeout write the
+ * client brand. Before this guard, `seedCompanyGuarded` treated "Your Company" as
+ * a valid name and seeded a bogus `your-company` company row, so every department
+ * seeded afterwards landed under the wrong `company_id` (attribution drift). We
+ * now treat these sentinels EXACTLY like a blank name: partial-config, fail-closed,
+ * nothing written — the box is flagged misconfigured rather than silently
+ * mis-attributed. Matching is trimmed + case-insensitive.
+ */
+const TEMPLATE_COMPANY_NAMES = new Set([
+  'your company',       // config/company-config.json template (config-guard.yml)
+  'your company name',  // README env-var placeholder (COMPANY_NAME="Your Company Name")
+]);
+
+/** True when `name` is the unpopulated repo/template placeholder, not a real brand. */
+export function isTemplateCompanyName(name: string | null | undefined): boolean {
+  return TEMPLATE_COMPANY_NAMES.has(String(name ?? '').trim().toLowerCase());
+}
+
 export interface CompanyBrandingConfig {
   companyName: string;
   companySlug?: string;
@@ -172,6 +196,19 @@ export function seedCompanyGuarded(
       console.warn(
         '[branding-seed] company-config.json exists but companyName is empty — ' +
           'box is MISCONFIGURED; seed aborted (partial-config)'
+      );
+      return { seeded: false, companyId: null, reason: 'partial-config' };
+    }
+
+    // Unpopulated template sentinel ("Your Company"): treat exactly like a blank
+    // name — the box still carries the repo template and has NOT been branded, so
+    // FAIL CLOSED rather than seed a bogus `your-company` row that would then own
+    // every department (attribution drift). Real client config replaces this value
+    // at Skill-23 closeout.
+    if (isTemplateCompanyName(name)) {
+      console.warn(
+        `[branding-seed] company-config.json companyName is the unpopulated template ("${name}") — ` +
+          'box is MISCONFIGURED (never branded); seed aborted (partial-config)'
       );
       return { seeded: false, companyId: null, reason: 'partial-config' };
     }

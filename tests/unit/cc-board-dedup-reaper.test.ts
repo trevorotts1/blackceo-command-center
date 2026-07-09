@@ -89,7 +89,11 @@ test('dedupeCanonicalWorkspaces merges `ceo` into `master-orchestrator` and reas
   assert.equal(dupSlugs.length, 0, 'no duplicate department slugs remain');
 });
 
-test('dedupeCanonicalWorkspaces collapses `app-development` into the canonical `engineering`', () => {
+test('dedupeCanonicalWorkspaces keeps `app-development` and `engineering` as DISTINCT lanes (2026-07-08 floor fix)', () => {
+  // Regression guard for the destructive alias: 'app-development' → 'engineering'
+  // was removed so App Development is its own chosen department with its own
+  // Kanban lane. A box that chose BOTH must keep BOTH rows — the dedup must NOT
+  // collapse them, because they canonicalize to different slugs now.
   const engId = seedWorkspace('engineering');
   const appId = seedWorkspace('app-development');
 
@@ -99,8 +103,21 @@ test('dedupeCanonicalWorkspaces collapses `app-development` into the canonical `
     'SELECT id, slug FROM workspaces WHERE id IN (?, ?)',
     [engId, appId],
   );
-  assert.equal(survivors.length, 1);
-  assert.equal(survivors[0].slug, 'engineering', 'engineering is the canonical keeper (2026-06-28 UNIT-ENG)');
+  assert.equal(survivors.length, 2, 'both App Development and Engineering survive — distinct departments');
+  const slugs = survivors.map((s) => s.slug).sort();
+  assert.deepEqual(slugs, ['app-development', 'engineering'], 'each keeps its own distinct slug/lane');
+
+  // And the seed-path guard must treat them as different departments too.
+  assert.equal(
+    findCanonicalWorkspaceId(db, 'engineering'),
+    engId,
+    'engineering resolves to the engineering row, not app-development',
+  );
+  assert.equal(
+    findCanonicalWorkspaceId(db, 'app-development'),
+    appId,
+    'app-development resolves to its OWN row, not engineering',
+  );
 });
 
 test('findCanonicalWorkspaceId recognises an aliased slug as an existing department', () => {

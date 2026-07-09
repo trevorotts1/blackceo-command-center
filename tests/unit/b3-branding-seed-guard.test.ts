@@ -342,6 +342,77 @@ test('(d) B.1 partial-config must NOT be the same branch as "no config" — diff
   }
 });
 
+// ─── fixture (d2): unpopulated template sentinel → partial-config (2026-07-08) ──
+
+test('(d2) template sentinel "Your Company" → partial-config, nothing written (fail-closed)', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    // The repo ships this exact companyName template (config-guard.yml enforces it).
+    // A box still carrying it has never been branded — seeding a `your-company`
+    // row here is the attribution-drift bug. Must fail closed like a blank name.
+    writeCompanyConfig(dir, { companyName: 'Your Company', industry: '', departments: [] });
+
+    const result = seedCompanyGuarded(db, { cwd: dir });
+
+    assert.strictEqual(result.reason, 'partial-config',
+      `Expected reason='partial-config' for the "Your Company" template, got '${result.reason}'`);
+    assert.strictEqual(result.seeded, false, 'template must not seed anything');
+    assert.strictEqual(result.companyId, null, 'companyId must be null for template');
+
+    const count = (db.prepare('SELECT COUNT(*) as c FROM companies').get() as { c: number }).c;
+    assert.strictEqual(count, 0, 'No company row may be written for the unpopulated template');
+    const bogus = db.prepare("SELECT id FROM companies WHERE slug = 'your-company'").get();
+    assert.strictEqual(bogus, undefined, 'must NEVER create a bogus your-company row');
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
+test('(d2) template sentinel is case/space-insensitive ("  your company  ")', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    writeCompanyConfig(dir, { companyName: '  Your Company  ' });
+    const result = seedCompanyGuarded(db, { cwd: dir });
+    assert.strictEqual(result.reason, 'partial-config');
+    assert.strictEqual(result.seeded, false);
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
+test('(d2) README env placeholder "Your Company Name" is also treated as template', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    writeCompanyConfig(dir, { companyName: 'Your Company Name' });
+    const result = seedCompanyGuarded(db, { cwd: dir });
+    assert.strictEqual(result.reason, 'partial-config');
+    assert.strictEqual(result.seeded, false);
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
+test('(d2) a REAL brand that merely contains the word "Company" still seeds (no false positive)', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    writeCompanyConfig(dir, { companyName: 'Riverside Company Holdings' });
+    const result = seedCompanyGuarded(db, { cwd: dir });
+    assert.strictEqual(result.reason, 'seeded-from-config',
+      'a real brand containing "Company" must NOT be misread as the template');
+    assert.strictEqual(result.seeded, true);
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
 // ─── table-missing guard ──────────────────────────────────────────────────────
 
 test('table-missing: companies table absent → returns table-missing, no crash', () => {

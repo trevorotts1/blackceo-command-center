@@ -1,3 +1,31 @@
+## [v4.70.0] — 2026-07-08 — fix(floor): board displays EXACTLY the chosen manifest − opt-outs (four seed/board bugs)
+
+Enforces a guaranteed match between a client's CHOSEN departments (departments.json manifest), the PROVISIONED workspaces, and what the Command Center Kanban DISPLAYS — honoring explicit opt-outs. Diagnosed live on a client box whose manifest listed 43 chosen departments but whose board rendered only 42/40, traced to FOUR bugs in this shared repo (so every client was exposed). The invariant, now enforced at the seed AND the board query: for the active company, displayed departments == chosen manifest − explicitly-opted-out.
+
+### fix #1 — department seeding runs every boot/converge (was first-boot-only)
+- **`src/lib/db/migrations.ts`** — `autoSeedFromDepartmentsJson()` early-returned the moment the workspaces table had any row, so a manifest that GREW after first boot never re-synced (stranded departments). It now delegates to `reseedWorkspacesFromConfig()` — the same idempotent, additive UPSERT the converge endpoint uses — so boot and converge enforce the invariant identically. Errors are swallowed on the boot path (never crashes startup) and re-thrown on converge (fails loud), preserving prior semantics.
+- **`reseedWorkspacesFromConfig()`** is now the single seeder: idempotent UPSERT keyed on dept id, NON-DESTRUCTIVE (never deletes a workspace or any task/agent data), re-homes each chosen dept's `company_id` to the resolved active company (mirrors `scripts/sync-departments-from-build-state.py`), fails closed on a template/partial company-config, and skips explicitly opted-out departments.
+- New exported `isDepartmentOptedOut()` predicate recognises every explicit opt-out spelling (`optOut`/`opted_out`/`enabled:false`/`active:false`/`status: opted-out|declined|disabled|inactive`).
+
+### fix #2 — App Development keeps its own lane (removed destructive alias)
+- **`src/lib/routing/canonical-slug.ts`** — removed the `'app-development' → 'engineering'` ALIAS_MAP entry. The seed dedup (`findCanonicalWorkspaceId`) skipped a dept whose canonical slug collided, so a client who chose BOTH App Development and Engineering only ever got one lane — even though `departments.config.ts` defines `app-development` as a distinct department and has no `engineering` entry. App Development and Engineering are now distinct canonical slugs; the `software-development`/`software-dev`/`apps` → engineering aliases are unchanged.
+- **`tests/unit/cc-board-dedup-reaper.test.ts`** — the dedup test now asserts the two survive as DISTINCT lanes (was asserting the collapse).
+
+### fix #3 — company attribution fails closed on the unpopulated template
+- **`src/lib/db/branding-seed.ts`** — `seedCompanyGuarded()` treated the repo template `companyName:"Your Company"` (enforced by `.github/workflows/config-guard.yml`) as a valid brand and seeded a bogus `your-company` company, so departments seeded afterward landed under the wrong `company_id`. New `isTemplateCompanyName()` treats the template sentinels as partial-config (fail-closed): nothing is written and the box is flagged misconfigured rather than mis-attributed. A real brand that merely contains the word "Company" still seeds.
+
+### fix #4 — board query scoped to the active company (no foreign leakage)
+- **`src/app/api/workspaces/route.ts`** — the GET board query (both the stats and plain branches — the single choke point every dashboard fetches) had no company filter, so a foreign company's workspace rows leaked onto the board. It now scopes to the active client company; the `default`/NULL sentinel (the box's own unattributed rows, single-tenant) is kept so the board never goes blank while other companies are excluded.
+- **`src/lib/company.ts`** — new shared `resolveActiveCompanyId()` (mirrors the `/api/company` pickCompany heuristic) used by BOTH the seed attribution and the board filter so the two always agree.
+
+### enforcement
+- **`scripts/qc-cc.sh`** (section 13) — drift sentinels for all four fixes plus a fixture-arithmetic gate (`scripts/floor-invariant-fixture-check.mjs`, node built-ins, no node_modules) asserting `expected-displayed == manifest − opt-outs`.
+- **`tests/unit/floor-department-invariant.test.ts`** (vitest, wired into CI) — the authoritative behavioral proof: runs the real reseed + resolver + scoped board query on a throwaway migrated DB and asserts displayed == manifest − opt-outs, App Development + Engineering distinct, foreign-company row excluded, and idempotent across two seed passes.
+- **`tests/fixtures/floor-invariant/{manifest.json,expected-displayed.json}`** — the shared golden the gate and the vitest suite both consume.
+
+### chore(qc): reconcile stale qc-cc.sh check 10.17 with the BUILD-04 deploy.sh deprecation
+- **`scripts/qc-cc.sh`** — after `BUILD-04` turned `deploy.sh` into a thin shim that FORWARDS to `atomic-deploy.sh`, check 10.17 (which greps `deploy.sh` for `pm2 save`) started failing on main even though the OOM/reboot-survival guarantee is fully preserved via the forward (atomic-deploy.sh's `pm2 save`, gated by 10.16). Check 10.17 now accepts EITHER an inline `pm2 save` OR the `atomic-deploy.sh` forward. Independent, revertable one-liner made to unblock the qc-cc CI gate on green — not part of the floor-invariant change.
+
 ## [v4.69.1] — 2026-07-08 — fix(tasks): idempotency key takes precedence over the title-window dedupe (anthology card collision)
 
 Fixes a real collision: one contact enrolled in two different anthologies produced two cards sharing the same title, and Command Center's generic Layer-2 dedupe (title + workspace window) was collapsing them into a single task row instead of the two distinct rows their distinct idempotency keys called for. A caller-supplied idempotency key (Layer 1) is an authoritative, deliberate identity and must never be overridden by the generic same-title safety net meant for keyless callers (operator UI, plain Telegram capture).

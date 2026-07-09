@@ -213,12 +213,17 @@ async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
     // testing the auth surface, so use the documented escape hatch to restore
     // legacy open behavior for THIS test server only (production never sets it).
     ALLOW_INSECURE_OPEN_API: 'true',
-    // `next start` forces NODE_ENV=production, under which REQUIRE_CF_ACCESS
-    // defaults ON (DATA-10) — every /api/* call would 401 with "Cloudflare
-    // Access is not active" since there is no CF edge in front of this local
-    // test server. This e2e drives the board directly (not testing the CF-Access
-    // surface), so opt out for THIS test server only, mirroring the
-    // ALLOW_INSECURE_OPEN_API escape hatch above. Production never sets it.
+    // Cloudflare Access enforcement (DATA-10) is now DEFAULT-ON whenever
+    // NODE_ENV === 'production'. `next start` (the `hasNextBuild()` path used in
+    // CI) FORCES NODE_ENV=production regardless of the NODE_ENV:'test' set above,
+    // so the middleware would 401 every /api/* request with
+    // "Cloudflare Access is not active on this subdomain" — there is no
+    // Cloudflare edge in front of this ephemeral localhost test server to inject
+    // the Cf-Access-* headers. Opt this test server into the documented dev/test
+    // posture (src/middleware.ts: "Anywhere else (dev/test) keeps the historical
+    // default-OFF"; see .env.example + docs/CLOUDFLARE_ACCESS_SETUP.md). This is
+    // a TEST-SERVER-ONLY env the train's own auth code reads; it does NOT change
+    // production (prod images stay default-ON) and touches no production code.
     REQUIRE_CF_ACCESS: 'false',
   };
 
