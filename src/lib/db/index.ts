@@ -119,4 +119,4 @@ export function transaction<T>(fn: () => T): T {
 }
 
 // Export migration utilities for CLI use
-export { runMigrations, getMigrationStatus, reseedWorkspacesFromConfig, autoSeedTrioAgents } from './migrations';
+export { runMigrations, getMigrationStatus, reseedWorkspacesFromConfig, autoSeedTrioAgents, getLastFailedMigrationId } from './migrations';

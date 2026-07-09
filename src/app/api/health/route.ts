@@ -3,7 +3,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
-import { getDb, getMigrationStatus, DB_PATH } from '@/lib/db';
+import { getDb, getMigrationStatus, getDbInitFailure, DB_PATH } from '@/lib/db';
+import type { DbInitFailure } from '@/lib/db';
 import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embeddings';
 
 export const dynamic = 'force-dynamic';
@@ -43,15 +44,56 @@ const execFileAsync = promisify(execFile);
  *     }
  *   }
  *
- * If the DB or migration runner itself errors we still return 200 with
- * status='degraded' so the System Status Panel can render a red light
- * without the homepage flipping to OFFLINE (the existing top-bar pill
- * only cares about HTTP 200). The `embeddings` block is ADDITIVE and its
- * degradation never flips the top-level `status` — asymmetric embedding
- * state is operational (keyword fallback still serves), not a downed box.
+ * DATA-02 — dedicated 503 for a captured DB-init / migration failure:
+ * When boot (src/instrumentation.ts) or a prior request tripped a schema-apply
+ * or migration failure, getDb() records it in module state (getDbInitFailure()).
+ * This route reads that FIRST and, when set, returns HTTP 503 with
+ * status='error', reason='migration_failed' (or 'db_init_failed' when the
+ * failure predates the migration loop), and failedMigration=<id>. That is a
+ * fail-CLOSED signal: a half-migrated DB is a downed box, so a load balancer /
+ * watchdog must see 503, not a green 200. The state is a durable snapshot of the
+ * boot-time failure, so repeated polls return the SAME 503 without re-running
+ * migrations — the health check never thrashes the DB or the watchdog.
+ *
+ * A TRANSIENT error (e.g. a probe hiccup) that is NOT a captured init failure
+ * still returns 200 with status='degraded' so the top-bar pill does not flap
+ * OFFLINE on a blip. The `embeddings` block is ADDITIVE and its degradation
+ * never flips the top-level `status` — asymmetric embedding state is operational
+ * (keyword fallback still serves), not a downed box.
  */
 
 const HEALTH_SCRIPT_TIMEOUT_MS = 4_000;
+
+/**
+ * DATA-02: build the fail-closed 503 body for a captured DB-init / migration
+ * failure. `failedMigration` is the migration id when the failure happened
+ * inside the migration loop; null when the DB failed to open/apply-schema
+ * (reason 'db_init_failed'). Never leaks a stack trace — just the message.
+ */
+function migrationFailureResponse(failure: DbInitFailure) {
+  return NextResponse.json(
+    {
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      reason: failure.failedMigrationId ? 'migration_failed' : 'db_init_failed',
+      failedMigration: failure.failedMigrationId,
+      migrations: { applied: [], expected: [], pending: [], gap: 0 },
+      embeddings: {
+        check: 'dual_store_embedding_health',
+        status: 'degraded',
+        degraded: true,
+        asymmetric: false,
+        asymmetric_detail: 'DB init failed — embedding health not probed',
+        source: 'error',
+        persona_index: null,
+        sop_index: null,
+      },
+      error: failure.message,
+      failedAt: failure.at,
+    },
+    { status: 503 },
+  );
+}
 
 function resolveHealthScript(): string {
   const override = process.env.EMBEDDING_HEALTH_SCRIPT;
@@ -151,6 +193,16 @@ async function getEmbeddingsBlock(): Promise<Record<string, unknown>> {
 }
 
 export async function GET() {
+  // DATA-02: fail CLOSED on a captured DB-init / migration failure BEFORE
+  // touching getDb() again. Reading the durable snapshot (rather than
+  // re-invoking getDb(), which would re-attempt the failing migration on every
+  // poll) keeps the 503 deterministic and stops the health check from thrashing
+  // the DB or the watchdog.
+  const bootFailure = getDbInitFailure();
+  if (bootFailure) {
+    return migrationFailureResponse(bootFailure);
+  }
+
   try {
     const db = getDb();
     const { applied, pending } = getMigrationStatus(db);
@@ -177,6 +229,14 @@ export async function GET() {
       embeddings,
     });
   } catch (error) {
+    // DATA-02: if THIS getDb() call is what surfaced the DB-init / migration
+    // failure, it is now captured — answer 503 fail-closed (not 200 degraded).
+    const initFailure = getDbInitFailure();
+    if (initFailure) {
+      return migrationFailureResponse(initFailure);
+    }
+    // Otherwise it was a transient, non-init error — keep the top-bar pill from
+    // flapping OFFLINE by returning 200 degraded.
     return NextResponse.json(
       {
         status: 'degraded',
