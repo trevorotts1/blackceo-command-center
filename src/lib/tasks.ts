@@ -1140,6 +1140,15 @@ export interface CreateTaskCoreInput {
   due_date?: string | null;
   sop_id?: string | null;
   /**
+   * Immutable board-producer provenance (migration 089 / INGEST-10). Stamped
+   * ONLY here, at creation, from the VALIDATED ingest `source` value — never
+   * from caller-editable text. Never accept this on an update path
+   * (UpdateTaskSchema has no `source` field and PATCH /api/tasks/[id] never
+   * writes it) or the immutability guarantee that /api/tasks/[id]/status's
+   * resolveBoardSource() relies on is broken.
+   */
+  source?: string | null;
+  /**
    * Free-text message stored on the `task_created` event row. When omitted a
    * default is composed. The ingest endpoint embeds its idempotency key here so
    * a retry/backfill can dedupe without a schema change.
@@ -1345,8 +1354,8 @@ export async function createTaskCore(
       : null;
 
   run(
-    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.title,
@@ -1360,6 +1369,7 @@ export async function createTaskCore(
       resolvedDepartment,
       input.due_date || null,
       sopId,
+      input.source || null,   // INGEST-10: immutable board-producer provenance, creation-only
       now,
       now,
     ]

@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- campaign_id, which is added by migration 017 (not present in this base
   -- CREATE on a fresh DB before migrations run).
   stage_slug TEXT,
+  -- Immutable board-producer provenance (migration 089 / INGEST-10). Stamped
+  -- ONLY at creation from the validated ingest 'source' field; never exposed
+  -- on UpdateTaskSchema / the PATCH surface. /api/tasks/[id]/status uses this
+  -- (never the caller-editable description) as the authoritative scope gate.
+  source TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

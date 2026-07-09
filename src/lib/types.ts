@@ -163,6 +163,11 @@ export interface Task {
   block_audience?: 'OWNER' | 'SYSTEM' | null;  // Who must act: 'OWNER' = human; 'SYSTEM' = operator/system fix
   sprint?: string;
   department?: string;
+  // Immutable board-producer provenance (migration 089 / INGEST-10). Stamped
+  // ONLY at creation from the validated ingest source; never on the PATCH
+  // surface (absent from UpdateTaskSchema). Authoritative scope key for
+  // /api/tasks/[id]/status — see resolveBoardSource() there.
+  source?: string | null;
   // FIX C — Presentations no-skip proof certificate sha (migration 080). Set when
   // a deck run registers its prove-deck.py PROCESS-CERTIFICATE; the done/delivered
   // gate in PATCH /api/tasks/[id] requires a presentations task to carry/match it.

@@ -87,8 +87,23 @@ const DEMO_MODE = process.env.DEMO_MODE === 'true';
  * default, an operator may set ALLOW_INSECURE_OPEN_API=true to restore the
  * legacy open behavior. This is logged loudly at startup and is NOT
  * recommended — it exists only as a documented, reversible bridge.
+ *
+ * INGEST-05 — NEUTERED IN PRODUCTION. The escape hatch was previously honored
+ * regardless of NODE_ENV: the documented posture was "production never sets
+ * it," but nothing in code enforced that, so a stray/inherited/mis-scoped
+ * ALLOW_INSECURE_OPEN_API=true reaching a production box (bad env template,
+ * copy-pasted CI/test env, compromised env store) would silently disable both
+ * the MC_API_TOKEN bearer gate and the WEBHOOK_SECRET HMAC gate in prod — the
+ * exact open-ingest/open-completion hole DATA-09/DATA-10 close. The flag is
+ * now hard-gated on NODE_ENV !== 'production' at this single source of truth,
+ * so every downstream check below (which already reads this constant) is
+ * neutered in prod even if the operator/deploy env sets the var. Test/dev
+ * runs are unaffected: the e2e (tests/e2e/duck-test.ts) and smoke-test
+ * (scripts/smoke-test-converge-and-dept.ts) harnesses that rely on this
+ * bridge run with NODE_ENV 'test' / unset, never 'production'.
  */
-const ALLOW_INSECURE_OPEN_API = process.env.ALLOW_INSECURE_OPEN_API === 'true';
+const ALLOW_INSECURE_OPEN_API =
+  process.env.NODE_ENV !== 'production' && process.env.ALLOW_INSECURE_OPEN_API === 'true';
 
 /**
  * Routes that accept EXTERNAL (non-Cloudflare-Access) webhook callers and
@@ -176,6 +191,12 @@ function isInterviewGateExempt(pathname: string): boolean {
 if (DEMO_MODE) {
   console.log('[DEMO] Running in demo mode, all write operations are blocked');
 } else {
+  // INGEST-05: flag it loudly when the raw env var is set but NODE_ENV=production
+  // neutered it, so an operator debugging "why is ALLOW_INSECURE_OPEN_API=true not
+  // working" gets a direct answer instead of silently-still-fail-closed confusion.
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_INSECURE_OPEN_API === 'true') {
+    console.error('[SECURITY] ALLOW_INSECURE_OPEN_API=true is set but NEUTERED in production (INGEST-05) — this escape hatch only works outside production. Fail-closed auth (MC_API_TOKEN / WEBHOOK_SECRET) remains fully enforced. Remove this var from the production env; it is a test/dev-only bridge.');
+  }
   // MC_API_TOKEN — external /api/* bearer auth.
   if (!MC_API_TOKEN) {
     if (ALLOW_INSECURE_OPEN_API) {
