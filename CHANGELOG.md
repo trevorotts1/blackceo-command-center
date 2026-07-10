@@ -1,3 +1,31 @@
+## [v4.73.0] — 2026-07-10 — feat(anthology-cc): producer Command Center — session-gated board door, producer card + 3-zone gate panel, assembly cockpit, board hygiene
+
+Lands the Anthology producer Command Center as a forward-merge onto v4.72.0 (`integration/anthology-cc`, 10 commits, base `afb9481`). Four feature bundles ship together behind the anthology gate; the existing task/board surface is untouched except for additive relay wiring, so a plain (non-anthology) participant status behaves byte-identically to v4.72.0.
+
+### feat — session-gated board door (`src/app/api/anthology/gate/route.ts`, `src/app/participant/_lib/gate-engine.ts`)
+- B10/U11: POST/GET `/api/anthology/gate` — a session-gated door for the producer board, with the pure `gate-engine` decision logic unit-tested standalone.
+
+### feat — producer card face + 3-zone Gate Panel (`src/components/anthology/AnthologyCardFace.tsx`, `GatePanel.tsx`, `anthology-card.ts`, `gate-actions.ts`)
+- B11/U12: producer card face + a 3-zone Gate Panel driving hold / exclude / finalize gate decisions. Order fields are ignored for non-finalize (hold/exclude) decisions and only relayed for the finalize-action set.
+
+### feat — assembly cockpit (`src/components/anthology/AssemblyCockpit.tsx`, `assembly-cockpit-logic.ts`, `finalize-action.ts`)
+- B12/U13: readiness → arm → order → sign-off cockpit; the finalize action relays the whole finalize-action order payload through to the board.
+
+### feat — board hygiene (`scripts/u14-anthology-board-hygiene.py`)
+- B13/U14: reversible archive + producer Welcome board hygiene.
+
+### wiring — additive relay (`src/app/api/tasks/ingest/route.ts`, `src/components/MissionQueue.tsx`, `src/components/TaskModal.tsx`)
+- Relay the assembly passthrough (`assembly_state` + readiness + ordering, also accepting the U9 `cockpit_view` alias), `confirm_order`, and `anthology_id` verbatim through the ingest/board-status path — never stripped; double-render fixed. A plain participant status carries no assembly passthrough keys.
+
+### tests — new anthology suites (`tests/unit/anthology-gate-route.test.ts`, `anthology-gate-panel.test.ts`, `anthology-assembly-cockpit.test.ts`)
+- 88 cases across the three suites covering the gate route/relay, gate-panel actions, and assembly-cockpit logic.
+
+### Verification (observed on the merged tree at the `--no-ff` merge commit, node v22.19.0)
+- `npx tsc --noEmit`: exit 0 — typecheck clean across all new anthology modules.
+- `npm run build` (`next build`): exit 0 — Compiled successfully.
+- `node --import tsx --test` on the 3 anthology suites: exit 0 — 88 tests, 88 pass, 0 fail.
+- Forward-merge onto `origin/main` (`afb9481`) was a clean `--no-ff` — origin/main is a strict ancestor of the branch (0 divergent commits, 10 ahead), no conflict markers. All 5 version locations agree at v4.73.0; annotated tag `v4.73.0` cut at the release (bump) commit. Repo stays fleet-wide — the client name was scrubbed from the anthology fixture in the final integration commit.
+
 ## [v4.72.0] — 2026-07-09 — fix(middleware): board loads its own data on plain-tunnel boxes without weakening ingest/external auth
 
 Fixes a board-blanking regression the operator-box test caught: on any box NOT fronted by Cloudflare Access (a plain Cloudflare Tunnel), v4.71.0's middleware returned 401 on every Command Center data read (`/api/tasks`, `/api/workspaces`, `/api/departments`, `/api/company-health`, `/api/persona-matrix`, `/api/org-chart`), so the board showed 0 tasks / "HTTP 401" / "Unauthorized" = data-blank. The board's browser fetches carry NO bearer token (MC_API_TOKEN is server-only, never exposed to the client — see `src/components/WorkspaceDashboard.tsx`), so they relied on the same-origin passthrough; v4.71.0's security train (DATA-10) hardened that passthrough to require a VERIFIED CF-Access assertion AND flipped `REQUIRE_CF_ACCESS` default-ON in production, neither of which a plain-tunnel box has. This restores v4.69.1's same-origin trust for the board's OWN data reads/writes WITHOUT re-opening what the train closed: the external ingest/webhook write surface (DATA-09/10/11) still requires its MC_API_TOKEN bearer + WEBHOOK_SECRET HMAC.
