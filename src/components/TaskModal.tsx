@@ -11,6 +11,8 @@ import { PlanningTab } from './PlanningTab';
 import { AgentModal } from './AgentModal';
 import { MicDictateButton } from './MicDictateButton';
 import { BLOCKED_REASONS, BLOCKED_AUDIENCES } from './kanban/BlockTaskModal';
+import { GatePanel } from './anthology/GatePanel';
+import { isAnthologyTask } from './anthology/anthology-card';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -387,6 +389,18 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
         <div className="flex-1 overflow-y-auto p-4 bg-white">
           {/* Overview Tab */}
           {activeTab === 'overview' && (
+            <>
+          {/* Anthology Gate Panel (SPEC B11 / U12) — the card detail IS the Gate
+              Panel for an anthology card: the current deliverable + EXACTLY the
+              actions gate_engine.py status returns for the open gate (via U11).
+              Rendered above the standard task form; non-anthology tasks skip it
+              entirely. It sits OUTSIDE the form so its Approve/Hold/etc. buttons
+              never submit the task edit form. */}
+          {task && isAnthologyTask(task) && (
+            <div className="mb-4">
+              <GatePanel task={task} />
+            </div>
+          )}
             <form onSubmit={handleSubmit} className="space-y-4">
           {/* Triad Rule error banner — surfaces when /api/tasks PATCH refuses
               a backlog → start transition because the task is missing one or
@@ -692,6 +706,7 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
             />
           </div>
             </form>
+            </>
           )}
 
           {/* Planning Tab */}
