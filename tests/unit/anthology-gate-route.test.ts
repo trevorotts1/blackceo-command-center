@@ -462,7 +462,34 @@ test('POST: confirm_order relays order/opener/closer from the body to the engine
   assert.equal(valueAfter(argv, '--producer-id'), 'real.producer@example.com');
 });
 
-test('POST: order/opener/closer are IGNORED for a non-confirm_order action (never leak onto the argv)', async () => {
+test('POST: a DIFFERENTLY-NAMED finalize action (finalize_order) STILL relays order/opener/closer', async () => {
+  // THE RECONCILED CONTRACT. The engine may name the finalize gate something other
+  // than the literal `confirm_order` (e.g. `finalize_order`), and the cockpit's
+  // pickConfirmOrderAction POSTs whatever finalize action the engine surfaced. The
+  // route relays the order payload for the WHOLE finalize-action set via the SHARED
+  // isFinalizeAction predicate — never one hardcoded literal — so the payload can
+  // never be silently DROPPED (the data-loss defect this closes).
+  setEngine(
+    { action: 'decide', ok: true, committed: true, door: 'dashboard', gate: null, decision: 'finalize_order' },
+    0,
+  );
+  const res = await POST(
+    postReq(
+      { subjectKey: ANTHOLOGY_ID, action: 'finalize_order', order: ORDER, opener: 'cB::a', closer: 'cC::a' },
+      { 'x-operator-email': 'real.producer@example.com' },
+    ),
+  );
+  assert.equal(res.status, 200);
+  const argv = readArgv();
+  assert.equal(valueAfter(argv, '--action'), 'finalize_order');
+  assert.deepEqual(JSON.parse(valueAfter(argv, '--order') ?? 'null'), ORDER);
+  assert.equal(valueAfter(argv, '--opener'), 'cB::a');
+  assert.equal(valueAfter(argv, '--closer'), 'cC::a');
+  // Producer identity still comes from the session, never the body.
+  assert.equal(valueAfter(argv, '--producer-id'), 'real.producer@example.com');
+});
+
+test('POST: order/opener/closer are IGNORED for a genuinely non-finalize action (approve) — never leak onto the argv', async () => {
   setEngine(
     { action: 'decide', ok: true, committed: true, door: 'dashboard', gate: 's1_producer', decision: 'approve' },
     0,
@@ -472,9 +499,26 @@ test('POST: order/opener/closer are IGNORED for a non-confirm_order action (neve
   );
   assert.equal(res.status, 200);
   const argv = readArgv();
-  assert.ok(!argv.includes('--order'), 'order args must never ride a non-confirm_order decision');
+  assert.ok(!argv.includes('--order'), 'order args must never ride a non-finalize decision');
   assert.ok(!argv.includes('--opener'));
   assert.ok(!argv.includes('--closer'));
+});
+
+test('POST: order fields are IGNORED for hold/exclude (non-finalize gate decisions)', async () => {
+  for (const action of ['hold', 'exclude']) {
+    setEngine(
+      { action: 'decide', ok: true, committed: true, door: 'dashboard', gate: 's1_producer', decision: action },
+      0,
+    );
+    const res = await POST(
+      postReq({ subjectKey: PARTICIPANT_KEY, action, reason: 'x', order: ORDER, opener: 'cB::a', closer: 'cC::a' }),
+    );
+    assert.equal(res.status, 200);
+    const argv = readArgv();
+    assert.ok(!argv.includes('--order'), `${action} must never carry --order`);
+    assert.ok(!argv.includes('--opener'));
+    assert.ok(!argv.includes('--closer'));
+  }
 });
 
 test('boardStatus: RELAYS assembly_state + readiness + ordering verbatim (never stripped)', () => {

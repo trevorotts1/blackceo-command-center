@@ -27,6 +27,8 @@
  * PASSTHROUGH_GAPS below for the engine-side production this relay depends on.
  */
 
+import { DEFAULT_FINALIZE_ACTION, isFinalizeAction } from './finalize-action';
+
 /**
  * PASSTHROUGH_GAPS — the wiring this cockpit is stacked on. The COMMAND CENTER
  * RELAY side of each is now landed in the integration branch (documented here so
@@ -409,13 +411,16 @@ export interface ConfirmOrderBody {
   closer: string | null;
 }
 export function pickConfirmOrderAction(actions: readonly string[]): string {
-  const found = actions.find((a) => /confirm_order|finaliz|order/i.test(a));
-  return found ?? 'confirm_order';
+  // Uses the SHARED finalize-action predicate (finalize-action.ts) — the exact
+  // same matcher the board-door route uses to decide when to relay the order
+  // payload, so the picker and the relay can never drift.
+  const found = actions.find((a) => isFinalizeAction(a));
+  return found ?? DEFAULT_FINALIZE_ACTION;
 }
 export function buildConfirmOrderBody(
   anthologyId: string,
   order: readonly string[],
-  action = 'confirm_order'
+  action = DEFAULT_FINALIZE_ACTION
 ): ConfirmOrderBody {
   return {
     subjectKey: anthologyId,
@@ -555,7 +560,7 @@ export function submitArm(
 export function submitConfirmOrder(
   anthologyId: string,
   order: readonly string[],
-  action = 'confirm_order',
+  action = DEFAULT_FINALIZE_ACTION,
   fetchImpl: FetchLike = fetch as unknown as FetchLike
 ): Promise<DecideResult> {
   return postDecide(buildConfirmOrderBody(anthologyId, order, action), fetchImpl);

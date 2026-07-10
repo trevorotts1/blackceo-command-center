@@ -47,7 +47,7 @@ const PARTICIPANT_DESC =
 
 const participantTask = {
   id: 'task-1',
-  title: 'Anthology chapter — Maria Anderson · anth_XYZ',
+  title: 'Anthology chapter — Jordan Rivers · anth_XYZ',
   description: PARTICIPANT_DESC,
   source: 'anthology',
   status: 'review',
@@ -130,8 +130,8 @@ test('parseAnthologyCard: participant card face fields', () => {
   assert.ok(c);
   assert.equal(c!.kind, 'participant');
   assert.equal(c!.subjectKey, 'contact_ABC123::anth_XYZ');
-  assert.equal(c!.displayName, 'Maria Anderson');
-  assert.equal(c!.firstName, 'Maria');
+  assert.equal(c!.displayName, 'Jordan Rivers');
+  assert.equal(c!.firstName, 'Jordan');
   assert.equal(c!.bookId, 'anth_XYZ');
   assert.equal(c!.isAssembly, false);
   assert.ok(c!.stage);
@@ -227,7 +227,7 @@ test('extractArtifacts: empty text yields no artifacts', () => {
 // --------------------------------------------------------------------------- //
 
 test('presentAction: producer-voice labels for the current producer gate', () => {
-  assert.equal(presentAction('approve').label('Maria'), 'Approve & Release to Maria');
+  assert.equal(presentAction('approve').label('Jordan'), 'Approve & Release to Jordan');
   assert.equal(presentAction('approve').tone, 'primary');
   assert.equal(presentAction('hold').label(null), 'Hold');
   assert.equal(presentAction('hold').field, 'reason');
@@ -246,7 +246,7 @@ test('select is the S3 title gate today, never dressed up as the cover picker', 
   const p = presentAction('select');
   assert.equal(p.field, 'title'); // title selection, requires a title
   assert.equal(p.engineGated, undefined); // NOT flagged as cover — that face is a separate future gate
-  const label = p.label('Maria');
+  const label = p.label('Jordan');
   assert.ok(!/four|cover/i.test(label), `"${label}" must not fake the cover picker`);
 });
 
@@ -279,7 +279,7 @@ test('orderedActions: never renders a done action even if returned', () => {
 test('every rendered label is producer voice: no "AI", no em-dash', () => {
   const all = ['approve', 'approve_as_is', 'sign_off', 'ready_to_assemble', 'select', 'hold', 'escalate', 'request_rewrite_with_notes', 'exclude'];
   for (const a of all) {
-    const label = presentAction(a).label('Maria');
+    const label = presentAction(a).label('Jordan');
     assert.ok(!/\bAI\b/.test(label), `"${label}" must not say AI`);
     assert.ok(!label.includes('—'), `"${label}" must not contain an em-dash`);
   }

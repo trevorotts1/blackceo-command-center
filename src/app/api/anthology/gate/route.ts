@@ -5,6 +5,7 @@ import {
   decideBoard,
   type BoardDecideFields,
 } from '@/app/participant/_lib/gate-engine';
+import { isFinalizeAction } from '@/components/anthology/finalize-action';
 
 /**
  * POST /api/anthology/gate  — the producer/assembly BOARD DOOR (SPEC B10 / Gap G8).
@@ -69,8 +70,10 @@ const DecideSchema = z.object({
   confirmName: z.string().trim().max(500).optional(),
   /** CONFIRM-ORDER (U9/U13 finalize + finale). The producer's finalized
    *  running order (participant keys / chapter ids in sequence) plus the explicit
-   *  opener + last co-author. Consumed ONLY when action==='confirm_order' and
-   *  passed through to the engine; ignored for every other action. `opener` /
+   *  opener + last co-author. Consumed for the FINALIZE-ACTION SET (any name the
+   *  engine gives the confirm/finalize gate — `confirm_order`, `finalize_order`,
+   *  … — matched by the shared isFinalizeAction predicate) and passed through to
+   *  the engine; ignored for every genuinely non-finalize action. `opener` /
    *  `closer` are nullish because the cockpit derives them from `order` and may
    *  send null when the order is empty (the engine still validates). */
   order: z.array(z.string().trim().min(1).max(256)).max(500).optional(),
@@ -170,10 +173,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   };
 
   // CONFIRM-ORDER (U9/U13): relay the producer's finalized order + opener + last
-  // co-author to the engine, but ONLY for the confirm_order action so these args
-  // can never leak onto an unrelated decision. The engine is authoritative — it
-  // validates the order against the finalized set and refuses a bad one.
-  if (action === 'confirm_order') {
+  // co-author to the engine for the WHOLE finalize-action SET — any name the
+  // engine gives the confirm/finalize gate (`confirm_order`, `finalize_order`, …),
+  // matched by the SAME shared predicate the cockpit's pickConfirmOrderAction uses
+  // (finalize-action.ts). Gating on a single hardcoded literal here would silently
+  // DROP order/opener/closer whenever the engine named the gate anything else —
+  // the data-loss defect this closes. The predicate excludes every genuinely
+  // non-finalize action (approve/hold/exclude/rewrite/…), so these args can never
+  // leak onto an unrelated decision. The engine stays authoritative — it validates
+  // the order against the finalized set and refuses a bad one.
+  if (isFinalizeAction(action)) {
     fields.order = order;
     fields.opener = opener ?? undefined;
     fields.closer = closer ?? undefined;

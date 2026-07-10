@@ -485,9 +485,10 @@ export interface BoardDecideFields {
   producerId?: string;
   /** CONFIRM-ORDER (U9/U13). The producer's finalized running order (participant
    *  keys / chapter ids in sequence) plus the explicit opener + last co-author.
-   *  Passed to `decide --action confirm_order`; the engine persists the adjusted
-   *  order and triggers the finale write. Ignored by the engine for other
-   *  actions. `order` is JSON-encoded onto the argv; opener/closer are ids. */
+   *  Passed to `decide --action <finalize action>` (confirm_order / finalize_order
+   *  / …); the engine persists the adjusted order and triggers the finale write.
+   *  Ignored by the engine for other actions. `order` is JSON-encoded onto the
+   *  argv; opener/closer are ids. */
   order?: string[];
   opener?: string | null;
   closer?: string | null;
@@ -553,9 +554,9 @@ export function decideBoard(
   if (fields.subtitle) args.push('--subtitle', fields.subtitle);
   if (fields.confirmName) args.push('--confirm-name', fields.confirmName);
   if (fields.producerId) args.push('--producer-id', fields.producerId);
-  // CONFIRM-ORDER fields (U9/U13). Only present for `confirm_order` (the route
-  // gates on the action before populating them). The finalized order is
-  // JSON-encoded so a single argv token carries the whole sequence; opener /
+  // CONFIRM-ORDER fields (U9/U13). Only present for the finalize-action set (the
+  // route gates on isFinalizeAction before populating them). The finalized order
+  // is JSON-encoded so a single argv token carries the whole sequence; opener /
   // closer are single ids. The engine validates them against the finalized set.
   if (fields.order && fields.order.length) args.push('--order', JSON.stringify(fields.order));
   if (fields.opener) args.push('--opener', fields.opener);
