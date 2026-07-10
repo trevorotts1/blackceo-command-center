@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -126,6 +126,24 @@ export default function HomePage() {
       gradient: 'from-fuchsia-500 via-pink-500 to-rose-500',
       route: '/conversational-ai',
       cta: 'View Conversations',
+    },
+    {
+      title: 'Anthology',
+      description: 'Producer approval board',
+      detail: 'Review each chapter and the final assembly, then approve or send back for a rewrite. The producer board for the Anthology engine — participant progress (S0→S9), the gate panel, and sign-off in one place.',
+      icon: <BookOpen className="w-7 h-7 text-white" />,
+      gradient: 'from-teal-400 via-cyan-500 to-sky-500',
+      route: '/workspace/anthology',
+      cta: 'Open Producer Board',
+    },
+    {
+      title: 'Podcast',
+      description: 'Episodes and production',
+      detail: 'The Podcast department board — episodes moving through production, from planning to publish. Manage and approve podcast work in one Kanban.',
+      icon: <Mic className="w-7 h-7 text-white" />,
+      gradient: 'from-orange-400 via-amber-500 to-red-500',
+      route: '/workspace/podcast',
+      cta: 'Open Podcast Board',
     },
     {
       title: 'Intelligence Settings',
