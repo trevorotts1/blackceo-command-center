@@ -48,6 +48,21 @@ interface EngineStatus {
   actions?: string[];
   reason?: string;
   note?: string;
+  // Board-door addition (SPEC B10): `kind` discriminates participant vs
+  // anthology (assembly) subjects so the operator panel can label the card.
+  kind?: string;
+  // ASSEMBLY passthrough (U9/U13). For an ASSEMBLY subject, cmd_status also
+  // emits the S9 assembly_state, the readiness summary (anthology_state
+  // `_readiness`), and U9's ordering view (`build_ordering_view` /
+  // `cockpit_view`). These are OPERATOR-facing data (chapter titles,
+  // contributor names, word counts, one-line rationale) and carry NO secret —
+  // the board bridge RELAYS them verbatim to the Assembly cockpit, whose parser
+  // (assembly-cockpit-logic.ts) is the source of truth for their shape. They are
+  // absent for participant subjects and on engines that do not yet surface them.
+  assembly_state?: string | null;
+  readiness?: unknown;
+  ordering?: unknown;
+  cockpit_view?: unknown;
 }
 interface EngineDecide {
   ok?: boolean;
@@ -59,6 +74,16 @@ interface EngineDecide {
   reason?: string;
   code?: string;
   secret_status?: string;
+  // Board-door additions (SPEC B10). All operator-facing and safe; NONE carry a
+  // secret. `detail`/`writer_rc` are DELIBERATELY not consumed by the board
+  // bridge below (they can echo a file path / raw writer error) — only the coarse
+  // `reason` + these structured hints cross back.
+  door?: string;
+  approval_id?: string | number | null;
+  stage_cursor?: string | number | null;
+  open_gate?: string | null;
+  fields?: unknown;
+  allowed?: unknown;
 }
 
 /** Engine exit codes (gate_engine.py house convention). */
@@ -350,4 +375,227 @@ export function decide(
   if (d.code === EX_GATE) return { ok: false, status: 'not_ready' };
   if (d.code === EX_REFUSE) return { ok: false, status: 'invalid' };
   return { ok: false, status: 'error' };
+}
+
+// --------------------------------------------------------------------------- //
+// SPEC B10 — the SECOND door: the producer/assembly board.
+//
+// The board door is the exact same both-door endpoint (`gate_engine.py`, the one
+// sole writer) reached with `--door board` instead of `--door token`. It carries
+// NO participant credential — the Command Center session (same-origin passthrough
+// in src/middleware.ts) authenticates the operator, and the engine records the
+// provenance as `dashboard`. These two functions REUSE the private runGateEngine /
+// findGateEngineScript / EX_* map above; they add no new script path and touch no
+// secret (the board door never even resolves ANTHOLOGY_GATE_TOKEN_SECRET — only
+// the token door does).
+//
+// Unlike the participant serializer, board results are OPERATOR-facing, so they
+// surface the engine's own reason vocabulary (e.g. `missing_fields`,
+// `validation_mismatch`, `action_not_allowed_at_gate`) — there is no token-oracle
+// concern for a session-authenticated producer. What they NEVER surface is the
+// secret, the argv, or the engine's raw `detail`/`writer_rc` plumbing.
+// --------------------------------------------------------------------------- //
+
+/** Producer/assembly board status (operator-facing; NOT the coarse public view). */
+export type BoardStatus =
+  | {
+      ok: true;
+      subjectKey: string;
+      /** The single open gate id (e.g. `s1_producer`, `s9_ready`), or null when
+       *  the subject is known but not currently at a gate (a writing stage). */
+      openGate: string | null;
+      kind: 'participant' | 'anthology' | null;
+      actor: string | null;
+      doors: string[];
+      /** The AUTHORITATIVE action set for the open gate — the panel renders
+       *  exactly these, never a hand-maintained table. */
+      actions: string[];
+      /** ASSEMBLY passthrough (U9/U13) — RELAYED verbatim from cmd_status for an
+       *  assembly subject, undefined otherwise. The board bridge does not reshape
+       *  them; the Assembly cockpit's parser (assembly-cockpit-logic.ts) is the
+       *  source of truth for their shape. None carries a secret. */
+      assemblyState?: string | null;
+      readiness?: unknown;
+      ordering?: unknown;
+    }
+  | { ok: false; reason: BoardStatusFailure };
+
+/** Board status failure buckets (operator-facing). */
+export type BoardStatusFailure =
+  | 'unknown_subject' // no such participant/anthology in the mirror
+  | 'not_ready' // engine not provisioned / mirror held
+  | 'error';
+
+/**
+ * Read-only: the open gate + its authoritative action set for a board subject.
+ * `subjectKey` is a participant_key (contains `::`) or an anthology_id — the
+ * engine discriminates it itself. Never writes; no credential; no secret.
+ */
+export function boardStatus(subjectKey: string): BoardStatus {
+  const key = subjectKey.trim();
+  if (!key) return { ok: false, reason: 'unknown_subject' };
+
+  const s = runGateEngine('status', ['--subject-key', key], 10_000);
+  const j = (s.json ?? null) as EngineStatus | null;
+
+  if (s.code === EX_OK && j && j.ok === true) {
+    const kind = j.kind === 'participant' || j.kind === 'anthology' ? j.kind : null;
+    const out: BoardStatus = {
+      ok: true,
+      subjectKey: key,
+      openGate: typeof j.open_gate === 'string' ? j.open_gate : null,
+      kind,
+      actor: typeof j.actor === 'string' ? j.actor : null,
+      doors: Array.isArray(j.doors) ? j.doors.filter((d): d is string => typeof d === 'string') : [],
+      actions: Array.isArray(j.actions)
+        ? j.actions.filter((a): a is string => typeof a === 'string')
+        : [],
+    };
+    // RELAY the ASSEMBLY passthrough verbatim (U9/U13) — never stripped, never
+    // reshaped. Only these three named, operator-facing fields cross back; the
+    // cockpit re-parses them. Attached only when present so a participant/plain
+    // status stays byte-identical to before. `ordering` accepts the engine's
+    // `cockpit_view` alias (U9's original key).
+    if (typeof j.assembly_state === 'string') out.assemblyState = j.assembly_state;
+    if (j.readiness && typeof j.readiness === 'object') out.readiness = j.readiness;
+    const ordering = j.ordering ?? j.cockpit_view;
+    if (ordering && typeof ordering === 'object') out.ordering = ordering;
+    return out;
+  }
+  // cmd_status emits EX_GATE + reason:"unknown_subject" for an absent subject, and
+  // runGateEngine returns EX_GATE + null json when the engine is not provisioned.
+  if (j && j.reason === 'unknown_subject') return { ok: false, reason: 'unknown_subject' };
+  if (s.code === EX_GATE) return { ok: false, reason: 'not_ready' };
+  return { ok: false, reason: 'error' };
+}
+
+/** Extra fields a board decision may carry. All optional; the engine enforces
+ *  which are required per action (no field-requirement table is duplicated here). */
+export interface BoardDecideFields {
+  /** hold reason (engine requires it for `hold`). */
+  reason?: string;
+  /** rewrite notes (engine requires them for `request_rewrite_with_notes`). */
+  notes?: string;
+  title?: string;
+  subtitle?: string;
+  /** typed anthology name confirming `ready_to_assemble`. */
+  confirmName?: string;
+  /** operator identity for the S9 gates; the route sources it from
+   *  `x-operator-email`. Harmlessly ignored by the engine for non-S9 gates. */
+  producerId?: string;
+  /** CONFIRM-ORDER (U9/U13). The producer's finalized running order (participant
+   *  keys / chapter ids in sequence) plus the explicit opener + last co-author.
+   *  Passed to `decide --action <finalize action>` (confirm_order / finalize_order
+   *  / …); the engine persists the adjusted order and triggers the finale write.
+   *  Ignored by the engine for other actions. `order` is JSON-encoded onto the
+   *  argv; opener/closer are ids. */
+  order?: string[];
+  opener?: string | null;
+  closer?: string | null;
+}
+
+/** Board decision result (operator-facing). */
+export type BoardDecide =
+  | {
+      ok: true;
+      committed: true;
+      gate: string | null;
+      decision: string | null;
+      /** Ledger provenance — always `dashboard` for the board door. */
+      door: string | null;
+      approvalId: string | null;
+      stageCursor: string | null;
+      /** base ledger unreachable → durably queued to the local mirror. */
+      queued: boolean;
+      noop: boolean;
+    }
+  | {
+      ok: false;
+      committed: false;
+      /** the engine's own reason code (operator-facing, secret-free). */
+      reason: string;
+      /** true for an EX_GATE-class result (gate not open / engine held). */
+      held: boolean;
+      openGate?: string | null;
+      /** the allowed action set, when the reason is `action_not_allowed_at_gate`. */
+      allowed?: string[];
+      /** the missing field names, when the reason is `missing_fields`. */
+      fields?: string[];
+    };
+
+function coerceIdish(v: string | number | null | undefined): string | null {
+  if (v === null || v === undefined) return null;
+  return typeof v === 'string' ? v : String(v);
+}
+
+/**
+ * Record a producer/assembly decision through the board door of the single
+ * both-door endpoint (`decide --door board`). The engine is the authority: it
+ * resolves the open gate, checks the action is legal there, enforces the S9
+ * own-producer/typed-name guards, and shells the sole ledger writer. This bridge
+ * only constructs argv and maps the exit-code contract — it re-derives no gate
+ * truth and touches no secret. The secret NEVER appears on the argv it builds.
+ */
+export function decideBoard(
+  subjectKey: string,
+  action: string,
+  fields: BoardDecideFields
+): BoardDecide {
+  const key = subjectKey.trim();
+  const act = action.trim();
+  if (!key || !act) {
+    return { ok: false, committed: false, reason: 'invalid_request', held: false };
+  }
+
+  const args = ['--door', 'board', '--subject-key', key, '--action', act];
+  if (fields.reason) args.push('--reason', fields.reason);
+  if (fields.notes) args.push('--notes', fields.notes);
+  if (fields.title) args.push('--title', fields.title);
+  if (fields.subtitle) args.push('--subtitle', fields.subtitle);
+  if (fields.confirmName) args.push('--confirm-name', fields.confirmName);
+  if (fields.producerId) args.push('--producer-id', fields.producerId);
+  // CONFIRM-ORDER fields (U9/U13). Only present for the finalize-action set (the
+  // route gates on isFinalizeAction before populating them). The finalized order
+  // is JSON-encoded so a single argv token carries the whole sequence; opener /
+  // closer are single ids. The engine validates them against the finalized set.
+  if (fields.order && fields.order.length) args.push('--order', JSON.stringify(fields.order));
+  if (fields.opener) args.push('--opener', fields.opener);
+  if (fields.closer) args.push('--closer', fields.closer);
+
+  // decide shells the sole writer (25s internal budget); give it headroom.
+  const d = runGateEngine('decide', args, 30_000);
+  const j = (d.json ?? null) as EngineDecide | null;
+
+  if (d.code === EX_OK && j && j.ok === true && j.committed === true) {
+    return {
+      ok: true,
+      committed: true,
+      gate: typeof j.gate === 'string' ? j.gate : null,
+      decision: typeof j.decision === 'string' ? j.decision : null,
+      door: typeof j.door === 'string' ? j.door : null,
+      approvalId: coerceIdish(j.approval_id),
+      stageCursor: coerceIdish(j.stage_cursor),
+      queued: j.base_queued === true,
+      noop: j.noop === true,
+    };
+  }
+
+  // Refusal / held. Surface the engine's coarse reason (never `detail`/argv), the
+  // exit-code class (EX_GATE ⇒ held), and the two structured hints the panel uses.
+  const reason =
+    j && typeof j.reason === 'string' ? j.reason : d.code === EX_GATE ? 'not_ready' : 'error';
+  const out: BoardDecide = {
+    ok: false,
+    committed: false,
+    reason,
+    held: d.code === EX_GATE,
+  };
+  if (j && typeof j.open_gate === 'string') out.openGate = j.open_gate;
+  if (j && Array.isArray(j.allowed)) {
+    out.allowed = (j.allowed as unknown[]).filter((a): a is string => typeof a === 'string');
+  }
+  if (j && Array.isArray(j.fields)) {
+    out.fields = (j.fields as unknown[]).filter((f): f is string => typeof f === 'string');
+  }
+  return out;
 }
