@@ -11,6 +11,10 @@ import { PlanningTab } from './PlanningTab';
 import { AgentModal } from './AgentModal';
 import { MicDictateButton } from './MicDictateButton';
 import { BLOCKED_REASONS, BLOCKED_AUDIENCES } from './kanban/BlockTaskModal';
+// U13 — B12 Assembly cockpit. Rendered only for the anthology's Assembly card;
+// self-contained in its own component so it stays isolated from other TaskModal work.
+import { AssemblyCockpit } from './anthology/AssemblyCockpit';
+import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -57,6 +61,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
   // Existing task's blocked-gate fields (see BlockedFields comment above).
   const taskBlocked = task as (Task & BlockedFields) | undefined;
+
+  // U13 — resolve the anthology assembly card behind this task (null for any
+  // non-assembly card). Drives whether the Assembly cockpit renders on overview.
+  const anthologyAssembly = resolveAnthologyAssembly(task);
 
   const [form, setForm] = useState({
     title: task?.title || '',
@@ -388,6 +396,14 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {/* Overview Tab */}
           {activeTab === 'overview' && (
             <form onSubmit={handleSubmit} className="space-y-4">
+          {/* U13 — B12 Assembly cockpit: readiness → arm (typed name) → order →
+              sign-off. Only for the anthology's Assembly card; its own component. */}
+          {anthologyAssembly && (
+            <AssemblyCockpit
+              anthologyId={anthologyAssembly.anthologyId}
+              anthologyName={anthologyAssembly.anthologyName}
+            />
+          )}
           {/* Triad Rule error banner — surfaces when /api/tasks PATCH refuses
               a backlog → start transition because the task is missing one or
               more of: description, SOP, persona. Each missing piece gets its
