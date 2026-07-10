@@ -1,3 +1,30 @@
+## [v5.1.0] — 2026-07-10 — fix(cc-writeback): task-API write-back auth + fail-loud + trapped-work recovery
+
+Closes the fleet-wide "carded-but-trapped" 401 defect. Department/main agents finished work but their write-backs (`POST /api/tasks/:id/activities`, `/deliverables`, `PATCH /api/tasks/:id`) carried no `Authorization` header, so the fail-closed middleware 401'd them and finished tasks froze `in_progress` until a sweep moved them to `blocked`/`backlog` — throwing the finished deck/site/asset away.
+
+### fix — canonical write-back auth (`src/lib/mc-auth.ts`, NEW)
+- The ONE place that builds `Authorization: Bearer $MC_API_TOKEN` write-back headers (`missionControlAuthHeaders`), the fail-loud dispatch preflight (`checkTaskWriteAuth`), `MissionControlWriteError`, and the shared write-back instruction block (`renderWriteBackInstructions`). Never logs/returns the token value.
+- `src/app/api/tasks/[id]/dispatch/route.ts` + `src/lib/task-dispatcher.ts`: both dispatch paths render the ONE shared write-back block (bearer on all three calls) and run the fail-loud preflight — a task is HELD with a SYSTEM report instead of dispatched into a silent-401 trap when `MC_API_TOKEN` is unprovisioned.
+- `src/lib/orchestration.ts`: server-side write-back helpers attach the bearer and throw `MissionControlWriteError` on 401/403 (fail loud) instead of the old silent `console.error` swallow.
+
+### fix — execution-watcher namespace (`src/lib/jobs/execution-watcher.ts`)
+- The late-completion reconcile probed only `agent:main:`, missing every dept agent's `TASK_COMPLETE:` (dept sessions live at `agent:dept-<slug>:`). It now resolves the dept session key exactly as dispatch does (`resolveSpecialistSessionKey`) and probes it FIRST, then falls back to `agent:main:`, so a late dept completion is found and advanced to `review` instead of swept to `blocked`.
+
+### fix — don't discard finished work (`src/lib/jobs/finished-work-recovery.ts`, NEW)
+- Shared recovery gate used by BOTH sweeps: on a stalled `in_progress` task it checks for a registered deliverable OR on-disk output (artifact / manual-dispatch dir) and recovers the card to `review` (redelivering on-disk output) instead of blocking/bouncing it.
+- `stuck-in-progress-sweep.ts` refactored onto the shared gate (behavior identical). `stale-task-sweep.ts` gains the same disk-recovery for `in_progress` before returning to backlog (the second demotion path that previously discarded work). `scheduler.ts` sweep logs surface recovered counts.
+
+### recovery — one-time blocked-pile sweep (`scripts/recover-blocked-deliverables.ts`, NEW)
+- DRY-RUN by default (read-only, zero writes): classifies every `blocked` card (ONBOARDING / TEST / DEMO / SEED / DUPLICATE / REAL) and proposes a per-card action; only evidenced REAL cards recover to `review`, never a blanket redeliver. APPLY is double-guarded (`--apply --yes` + `MC_API_TOKEN`) and dogfoods the write-back-auth fix via the HTTP API + bearer. Run APPLY only after this release is live on the box.
+
+### hardening + bundled
+- `ecosystem.config.cjs`: pass `MC_API_TOKEN` + `WEBHOOK_SECRET` through the PM2 env (conditional spread) so a cwd-drift restart can't silently drop them.
+- `src/lib/jobs/weekly-done-clear.ts`: soft-archive orphan EMPTY cards (strict criteria never touch finished/trapped work).
+- `src/lib/routing/departments.config.ts`: drop bare `pitch` from the Presentations keywords (misroute; `pitch deck` / `investor deck` still route here).
+
+### tests
+- New: `mc-auth`, `task-writeback-fail-loud`, `stuck-in-progress-recover`, `stale-task-recover`, `execution-watcher-namespace`, `recover-blocked-deliverables`, `writeback-pipeline-e2e` (26 tests, all green; includes negative 401 + fail-loud preflight + end-to-end recovery). `npm run test:unit` net-new failures = 0 vs baseline; `tsc --noEmit` clean.
+
 ## [v5.0.0] — 2026-07-10 — chore(release): v5.0.0 — major-version milestone (Anthology producer Command Center)
 
 Major-version milestone marker atop v4.73.0. **No functional change from v4.73.0** — the code tree is byte-identical; this release only advances the version number (and this CHANGELOG entry) to mark the 5.x line. Nothing is added, removed, or altered in application behavior.
