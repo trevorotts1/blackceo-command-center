@@ -1,3 +1,19 @@
+## [v5.0.0] — 2026-07-10 — chore(release): v5.0.0 — major-version milestone (Anthology producer Command Center)
+
+Major-version milestone marker atop v4.73.0. **No functional change from v4.73.0** — the code tree is byte-identical; this release only advances the version number (and this CHANGELOG entry) to mark the 5.x line. Nothing is added, removed, or altered in application behavior.
+
+### What v5.0.0 cumulatively represents
+The 5.0.0 line rolls up the Anthology producer Command Center delivered across the 4.7x series, on top of the same task/board surface the fleet has run all along:
+- **Session-gated board door** (`src/app/api/anthology/gate/route.ts`, `src/app/participant/_lib/gate-engine.ts`) — POST/GET `/api/anthology/gate` with the pure `gate-engine` decision logic (v4.73.0).
+- **Producer card face + 3-zone Gate Panel** (`src/components/anthology/AnthologyCardFace.tsx`, `GatePanel.tsx`, `anthology-card.ts`, `gate-actions.ts`) — hold / exclude / finalize gate decisions; order fields relayed only for the finalize-action set (v4.73.0).
+- **Assembly cockpit** (`src/components/anthology/AssemblyCockpit.tsx`, `assembly-cockpit-logic.ts`, `finalize-action.ts`) — readiness → arm → order → sign-off, relaying the whole finalize-action order payload to the board (v4.73.0).
+- **Board hygiene** (`scripts/u14-anthology-board-hygiene.py`) — reversible archive + producer Welcome board hygiene (v4.73.0).
+- **Additive relay wiring** (`src/app/api/tasks/ingest/route.ts`, `src/components/MissionQueue.tsx`, `src/components/TaskModal.tsx`) — assembly passthrough (`assembly_state` + readiness + ordering, incl. the `cockpit_view` alias), `confirm_order`, and `anthology_id` relayed verbatim; double-render fixed. A plain (non-anthology) participant status behaves byte-identically to v4.72.0 (v4.73.0).
+- **Recent board/middleware fixes carried in** — the v4.72.0 middleware fix (board loads its own data on plain-tunnel boxes without weakening ingest/external auth) and the additive board relay wiring above.
+
+### Verification
+- Version bump only: all 5 version-consistency locations (`/version`, `package.json`, `package-lock.json` root + `packages['']`, CHANGELOG top entry) set to v5.0.0 via `scripts/bump-version.sh`. Annotated tag `v5.0.0` cut for the release. No source files changed vs. v4.73.0.
+
 ## [v4.73.0] — 2026-07-10 — feat(anthology-cc): producer Command Center — session-gated board door, producer card + 3-zone gate panel, assembly cockpit, board hygiene
 
 Lands the Anthology producer Command Center as a forward-merge onto v4.72.0 (`integration/anthology-cc`, 10 commits, base `afb9481`). Four feature bundles ship together behind the anthology gate; the existing task/board surface is untouched except for additive relay wiring, so a plain (non-anthology) participant status behaves byte-identically to v4.72.0.
