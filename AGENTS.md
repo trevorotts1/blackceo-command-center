@@ -295,9 +295,9 @@ Isolated, safe demo environment for showing prospects the AI Workforce Interview
 - Google Doc (anyone can edit): https://docs.google.com/document/d/1DmY5ETnVGFrK64odFVReemN_cSNRIXxDfjygjMut53Q/edit
 
 
-## UPDATE PENDING -- Skill Update to v19.0.0
+## UPDATE PENDING -- Skill Update to v19.1.0
 
-A skill update was applied via update-skills.sh on 2026-07-08. Activate each new skill below,
+A skill update was applied via update-skills.sh on 2026-07-09. Activate each new skill below,
 run the verification gate, then remove this section from AGENTS.md when the gate passes.
 
 ### 🔴 THE GATE IS THE TRUTH -- NOT THIS PROSE, NOT YOUR OWN "done"
@@ -308,7 +308,7 @@ This update is **NOT complete** until the VERIFICATION GATE passes. Files on dis
 - **NEVER tell the owner "installed / done / onboarded" for any skill that is not `qc-passed` (or an explicit INTERVIEW_PENDING park).**
 
 ### What changed in this update
-- Onboarding version: v19.0.0
+- Onboarding version: v19.1.0
 - New skills installed (require ACTIVATION + GATE): none -- updates only
 
 ### How to process each skill that is NOT yet qc-passed
@@ -329,5 +329,5 @@ For each such skill folder under `~/.openclaw/skills/`:
 ### When the GATE passes (and ONLY then)
 - Remove this entire UPDATE PENDING section from AGENTS.md
 - Add to MEMORY.md under "## System Updates":
-  "v19.0.0 update applied on 2026-07-08. Verification gate PASSED. Skills activated: none."
+  "v19.1.0 update applied on 2026-07-09. Verification gate PASSED. Skills activated: none."
 
