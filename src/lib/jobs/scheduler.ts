@@ -392,9 +392,11 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       const result = await runStaleTaskSweep();
       if (result.skippedReason) {
         console.log(`[cron] stale-task-sweep: skipped -- ${result.skippedReason}`);
-      } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0) {
+      } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0 || (result.recovered ?? 0) > 0) {
+        const rec = result.recovered ?? 0;
         console.log(
-          `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, repinged ${result.repinged}`,
+          `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, ` +
+          `repinged ${result.repinged}, recovered ${rec}${rec > 0 ? ` (${(result.recoveredIds ?? []).join(', ')})` : ''}`,
         );
       }
     },
@@ -413,9 +415,11 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
     expr: STUCK_IN_PROGRESS_SWEEP_CRON,
     fn: async () => {
       const result = await runStuckInProgressSweep();
-      if (result.blocked > 0) {
+      if (result.blocked > 0 || result.recovered > 0) {
         console.log(
-          `[cron] stuck-in-progress-sweep: scanned ${result.scanned}, blocked ${result.blocked} (${result.blockedIds.join(', ')})`,
+          `[cron] stuck-in-progress-sweep: scanned ${result.scanned}, ` +
+          `recovered ${result.recovered}${result.recovered > 0 ? ` (${result.recoveredIds.join(', ')})` : ''}, ` +
+          `blocked ${result.blocked}${result.blocked > 0 ? ` (${result.blockedIds.join(', ')})` : ''}`,
         );
       }
     },

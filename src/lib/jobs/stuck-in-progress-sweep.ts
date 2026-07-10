@@ -56,6 +56,7 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { notifyByAudience } from '@/lib/notify';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 
@@ -108,7 +109,19 @@ export interface StuckSweepResult {
   scanned: number;
   blocked: number;
   blockedIds: string[];
+  /** Tasks recovered to `review` because finished work was found (SWEEP-RECOVER). */
+  recovered: number;
+  recoveredIds: string[];
 }
+
+/**
+ * SWEEP-RECOVER — the "don't block finished work" gate lives in the shared
+ * finished-work-recovery module (used by BOTH this sweep and the stale-task
+ * sweep so neither can discard finished work). Before blocking a silently-
+ * stalled `in_progress` task, recoverFinishedTaskToReview() checks for a
+ * registered deliverable OR on-disk output (the carded-but-trapped 401 defect)
+ * and, on either signal, recovers the card to `review` instead of blocking it.
+ */
 
 /** Block one stuck task, free its agent, and alert the operator once. */
 async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void> {
@@ -194,7 +207,7 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     process.env.DISABLE_STUCK_IN_PROGRESS_SWEEP === '1' ||
     process.env.DISABLE_STUCK_IN_PROGRESS_SWEEP === 'true'
   ) {
-    return { scanned: 0, blocked: 0, blockedIds: [] };
+    return { scanned: 0, blocked: 0, blockedIds: [], recovered: 0, recoveredIds: [] };
   }
 
   const cutoffMs = Date.now() - STUCK_IN_PROGRESS_MINUTES * 60_000;
@@ -218,6 +231,8 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
 
   let blocked = 0;
   const blockedIds: string[] = [];
+  let recovered = 0;
+  const recoveredIds: string[] = [];
 
   for (const task of rows) {
     // Progress signal: the last real lifecycle transition (last_progress_at),
@@ -235,6 +250,20 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     }
 
     const ageMinutes = (Date.now() - progressMs) / 60_000;
+
+    // SWEEP-RECOVER: never block FINISHED work. If the agent completed and only
+    // the write-back failed (the carded-but-trapped 401), recover the card to
+    // review + redeliver its on-disk output instead of blocking it.
+    try {
+      if (await recoverFinishedTaskToReview(task, 'stuck-in-progress-sweep')) {
+        recovered++;
+        recoveredIds.push(task.id);
+        continue;
+      }
+    } catch (err) {
+      console.error(`[stuck-in-progress-sweep] recovery check failed for ${task.id}:`, (err as Error).message);
+    }
+
     try {
       await blockStuckTask(task, ageMinutes);
       blocked++;
@@ -244,5 +273,5 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     }
   }
 
-  return { scanned: rows.length, blocked, blockedIds };
+  return { scanned: rows.length, blocked, blockedIds, recovered, recoveredIds };
 }

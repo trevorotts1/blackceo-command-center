@@ -29,6 +29,7 @@ import { queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { notifySystem } from '@/lib/notify';
+import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -63,6 +64,10 @@ export interface StaleSweepResult {
   scanned: number;
   returned: number;
   repinged: number;
+  /** in_progress tasks recovered to `review` (finished work found on disk /
+   *  registered) instead of being bounced to backlog (SWEEP-RECOVER). */
+  recovered?: number;
+  recoveredIds?: string[];
   skippedReason?: string;
 }
 
@@ -221,6 +226,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
 
   let returned = 0;
   let repinged = 0;
+  let recovered = 0;
+  const recoveredIds: string[] = [];
 
   for (const task of candidates) {
     try {
@@ -263,6 +270,22 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
         STALE_THRESHOLDS.backlog;
 
       if (ageHours >= thresholdHours) {
+        // SWEEP-RECOVER: never bounce FINISHED in_progress work back to backlog.
+        // If the agent completed and only the write-back failed (the carded-but-
+        // trapped MC_API_TOKEN 401), recover the card to `review` (redelivering
+        // on-disk output) instead of demoting it. Only in_progress can carry
+        // finished-but-unregistered work; review/backlog fall through unchanged.
+        if (task.status === 'in_progress') {
+          try {
+            if (await recoverFinishedTaskToReview(task, 'stale-task-sweep')) {
+              recovered++;
+              recoveredIds.push(task.id);
+              continue;
+            }
+          } catch (err) {
+            console.error(`[stale-task-sweep] recovery check failed for ${task.id}:`, (err as Error).message);
+          }
+        }
         returnToOrchestrator(
           task,
           `Task stale in '${task.status}' for ${Math.round(ageHours)}h (threshold: ${thresholdHours}h) with no progress`,
@@ -274,5 +297,5 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     }
   }
 
-  return { scanned: candidates.length, returned, repinged };
+  return { scanned: candidates.length, returned, repinged, recovered, recoveredIds };
 }

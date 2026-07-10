@@ -15,6 +15,7 @@ import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { recordDispatchFailure } from '@/lib/task-dispatcher';
+import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -428,13 +429,7 @@ ${skillsBlock}
 **OUTPUT DIRECTORY:** ${taskProjectDir}
 Create this directory and save all deliverables there.
 
-**IMPORTANT:** After completing work, you MUST call these APIs:
-1. Log activity: POST ${missionControlUrl}/api/tasks/${task.id}/activities
-   Body: {"activity_type": "completed", "message": "Description of what was done"}
-2. Register deliverable: POST ${missionControlUrl}/api/tasks/${task.id}/deliverables
-   Body: {"deliverable_type": "file", "title": "File name", "path": "${taskProjectDir}/filename.html"}
-3. Update status: PATCH ${missionControlUrl}/api/tasks/${task.id}
-   Body: {"status": "review"}
+${renderWriteBackInstructions(missionControlUrl, task.id, 'file', `${taskProjectDir}/filename.html`)}
 
 When complete, reply with:
 \`TASK_COMPLETE: [brief summary of what you did]\`
@@ -494,6 +489,29 @@ If you need help or clarification, ask the orchestrator.`;
           message: holdMsg,
         },
         { status: 202 },
+      );
+    }
+
+    // ── FAIL-LOUD write-back auth guard (PREVENTION, src/lib/mc-auth.ts) ──────
+    // Before flipping this task to in_progress, verify a dispatched agent can
+    // AUTHENTICATE its write-backs. If MC_API_TOKEN is unset on a box that will
+    // reject the agent's external POST/PATCH (src/middleware.ts Gate B), the
+    // agent finishes but every write-back 401s and the card freezes in_progress
+    // until the stuck sweep blocks it (the carded-but-trapped defect). Surface
+    // it NOW — HOLD + SYSTEM report — instead of dispatching work that cannot
+    // report back. Dev boxes in ALLOW_INSECURE_OPEN_API mode pass (ok:true).
+    const writeAuth = checkTaskWriteAuth();
+    if (!writeAuth.ok) {
+      console.error(`[Dispatch] HELD task ${task.id}: task-API write-back auth not provisioned — ${writeAuth.reason}`);
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'mc_api_token_unset',
+        audience: 'SYSTEM',
+        needs: writeAuth.reason,
+        context: 'manual-dispatch',
+      });
+      return NextResponse.json(
+        { success: false, held: true, reason: 'mc_api_token_unset', message: writeAuth.reason },
+        { status: 503 },
       );
     }
 

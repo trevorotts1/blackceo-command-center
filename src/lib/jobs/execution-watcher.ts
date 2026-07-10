@@ -30,8 +30,9 @@ import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { resolveSpecialistSessionKey } from '@/lib/task-dispatcher';
 import { v4 as uuidv4 } from 'uuid';
-import type { Task } from '@/lib/types';
+import type { Task, Agent } from '@/lib/types';
 
 // Matches the same completion marker the webhook + dispatch instructions use.
 const TASK_COMPLETE_RE = /TASK_COMPLETE:\s*(.+)/i;
@@ -42,7 +43,54 @@ interface InProgressRow {
   status: string;
   assigned_agent_id: string | null;
   assigned_agent_name: string | null;
+  assigned_agent_role: string | null;
+  workspace_id: string | null;
   openclaw_session_id: string | null;
+}
+
+/**
+ * NAMESPACE FIX — ordered, de-duplicated OpenClaw session keys to probe for a
+ * task's completion marker.
+ *
+ * A dispatched DEPARTMENT agent runs under `agent:dept-<slug>:<session>` (or a
+ * bare `agent:<slug>:<session>`), resolved EXACTLY as dispatch does — from the
+ * on-disk runtime dir via resolveSpecialistSessionKey — NOT the legacy
+ * `agent:main:<session>`. The reconcile previously read ONLY `agent:main:`, so
+ * it never saw a dept agent's `TASK_COMPLETE:`; the finished dept task was never
+ * advanced to `review` and got swept to `blocked` (the carded-but-trapped
+ * defect's late-completion sibling). We now probe the RESOLVED dept key FIRST,
+ * then fall back to `agent:main:` (covers the CEO/orchestrator and any dept whose
+ * runtime dir is not present on this box), so a late completion reconciles
+ * regardless of which namespace its session lives in. Reading a non-existent key
+ * is harmless (chat.history returns nothing / the call is caught), so trying both
+ * costs only a cheap RPC on the drop-path.
+ */
+export function candidateSessionKeys(task: InProgressRow): string[] {
+  const sessionId = task.openclaw_session_id;
+  if (!sessionId) return [];
+  const keys: string[] = [];
+  try {
+    // resolveSpecialistSessionKey only reads .name/.role/.workspace_id — pass a
+    // minimal agent shim (cast is localized + runtime-safe).
+    const agentLike = {
+      id: task.assigned_agent_id ?? '',
+      name: task.assigned_agent_name ?? '',
+      role: task.assigned_agent_role ?? '',
+      workspace_id: task.workspace_id ?? '',
+    } as unknown as Agent;
+    const resolved = resolveSpecialistSessionKey(
+      agentLike,
+      sessionId,
+      task.workspace_id ?? undefined,
+      'execution-watcher',
+    );
+    if (resolved) keys.push(resolved);
+  } catch (err) {
+    console.warn(`[execution-watcher] session-key resolve failed for ${task.id} (non-fatal):`, (err as Error).message);
+  }
+  const legacy = `agent:main:${sessionId}`;
+  if (!keys.includes(legacy)) keys.push(legacy);
+  return keys;
 }
 
 /**
@@ -84,8 +132,9 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
   }
 
   const rows = queryAll<InProgressRow>(
-    `SELECT t.id, t.title, t.status, t.assigned_agent_id,
+    `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.workspace_id,
             a.name as assigned_agent_name,
+            a.role as assigned_agent_role,
             s.openclaw_session_id
      FROM tasks t
      LEFT JOIN agents a ON t.assigned_agent_id = a.id
@@ -100,18 +149,28 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
   for (const task of rows) {
     if (!task.openclaw_session_id) continue;
     try {
-      const sessionKey = `agent:main:${task.openclaw_session_id}`;
-      const messages = await getMessagesFromOpenClaw(sessionKey);
-      // Scan most-recent messages for the completion marker.
+      // NAMESPACE FIX: probe the resolved dept session key first, then the legacy
+      // agent:main: key — so a dept agent's late TASK_COMPLETE is actually found.
       let match: string | null = null;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        if (m.role !== 'assistant') continue;
-        const found = m.content.match(TASK_COMPLETE_RE);
-        if (found) {
-          match = found[1].trim();
-          break;
+      for (const sessionKey of candidateSessionKeys(task)) {
+        let messages: Array<{ role: string; content: string }> = [];
+        try {
+          messages = await getMessagesFromOpenClaw(sessionKey);
+        } catch (err) {
+          console.warn(`[execution-watcher] history read failed for ${task.id} (${sessionKey}):`, (err as Error).message);
+          continue; // bad/absent key — try the next candidate.
         }
+        // Scan most-recent messages for the completion marker.
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (m.role !== 'assistant') continue;
+          const found = m.content.match(TASK_COMPLETE_RE);
+          if (found) {
+            match = found[1].trim();
+            break;
+          }
+        }
+        if (match) break; // found in this namespace — stop probing.
       }
       if (match) {
         console.log(`[execution-watcher] Reconcile detected TASK_COMPLETE for task ${task.id} ("${task.title}")`);

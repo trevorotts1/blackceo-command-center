@@ -86,7 +86,16 @@ module.exports = {
       ...(process.env.OPENCLAW_GATEWAY_TOKEN ? { OPENCLAW_GATEWAY_TOKEN: process.env.OPENCLAW_GATEWAY_TOKEN } : {}),
       ...(process.env.BCC_DEVICE_IDENTITY_DIR ? { BCC_DEVICE_IDENTITY_DIR: process.env.BCC_DEVICE_IDENTITY_DIR } : {}),
       ...(process.env.BCC_INSTALL_TYPE ? { BCC_INSTALL_TYPE: process.env.BCC_INSTALL_TYPE } : {}),
-      ...(process.env.OPENCLAW_PLATFORM ? { OPENCLAW_PLATFORM: process.env.OPENCLAW_PLATFORM } : {})
+      ...(process.env.OPENCLAW_PLATFORM ? { OPENCLAW_PLATFORM: process.env.OPENCLAW_PLATFORM } : {}),
+      // WRITE-BACK-401 hardening: pass the task-API write-back credentials into
+      // the pm2 child env explicitly. Next.js auto-loads .env.local from cwd, but
+      // a cwd-drift restart (or `pm2 restart` without --update-env) could silently
+      // drop them, re-opening the "carded-but-trapped" 401 trap — MC_API_TOKEN is
+      // the bearer the middleware requires on every external /api write-back, and
+      // WEBHOOK_SECRET signs the HMAC ingest/status routes. Conditional spread so
+      // an unset value never overrides the .env.local layer (never blanks it).
+      ...(process.env.MC_API_TOKEN ? { MC_API_TOKEN: process.env.MC_API_TOKEN } : {}),
+      ...(process.env.WEBHOOK_SECRET ? { WEBHOOK_SECRET: process.env.WEBHOOK_SECRET } : {})
     },
     instances: 1,
     exec_mode: 'fork',
