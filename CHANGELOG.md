@@ -1,3 +1,34 @@
+## [v4.73.0] — 2026-07-10 — feat(home): restore the seven welcome-cards home at `/`; overview grid stays at /overview, task board at /tasks/all
+
+Restores the operator's original landing page. `/` (`src/app/page.tsx`) is once again the seven-card **"Welcome / Choose where you want to go"** grid — the `'use client'` framer-motion `EntryCard` page — with the seven gradient cards: **View All Tasks** (→ `/tasks/all`), **Departments** (→ `/tasks/by-department`), **Performance Board** (→ `/ceo-board`), **Conversational AI** (→ `/conversational-ai`), **Intelligence Settings** (→ `/settings/intelligence`), **Operator Console** (→ `/operator`), and **Company Settings** (→ `/settings/company`). This **reverses BOTH** the v4.66.0 grid-home redesign AND the v4.72.1 `redirect('/tasks/all')`: `/` no longer redirects. The page is restored **verbatim** from commit `f7a5098` (the last cards version, 288 lines).
+
+Nothing was removed. The operations OVERVIEW grid (the v4.66.0 redesign — KPI strip, department pulse, view tiles, activity feed) stays UNCHANGED and reachable at `/overview` (`src/app/overview/page.tsx`); the cross-department MissionQueue task board stays at `/tasks/all` (the "View All Tasks" card destination). The interview-mode shell lock (`src/middleware.ts`) is untouched and still runs first, so an unprovisioned box is still gated to `/interview` before `/` renders.
+
+### changed — `src/app/page.tsx`
+- Replaced the `export default function Home() { redirect('/tasks/all'); }` server component with the 288-line welcome-cards client page, restored verbatim from `f7a5098`. `/` now renders the seven gradient `EntryCard`s instead of 307-ing to the board.
+
+### preserved (explicitly kept, untouched)
+- `src/app/overview/page.tsx` — the v4.66.0 operations overview grid, still served at `/overview`.
+- `src/app/tasks/all/page.tsx` — the cross-department task board, still the "View All Tasks" destination.
+- `src/middleware.ts` — interview shell-lock unchanged.
+
+### Verification (observed on the live box, node v22.19.0)
+- `npx tsc --noEmit`: exit 0 — the restored file type-checks clean against current deps (framer-motion ^12.38.0, lucide-react ^0.468.0, date-fns ^4.1.0; hooks `useLogoUrl`/`useCompanyBrand` and `Breadcrumb` all present in the tree).
+- Deployed manually, NOT via `scripts/atomic-deploy.sh`, for two box-specific reasons: (1) atomic-deploy Phase 1d `pm2 delete`s every pm2 app whose name contains `blackceo`/`command-center`/`mission-control` that is not the `--pm2-app` — which on this box would destroy the sibling `blackceo-cc-demo-interview` / `blackceo-cc-demo-dashboard` class-demo apps; and (2) Next 14.2 here does not honor its `NEXT_DIST_DIR` out-of-place build mechanism. Manual sequence: snapshot live `.next` → `.next.rollback` (0cvrc7y, rollback armed), `next build` (exit 0, v4.73.0), then `pm2 restart cc-prod` onto the fresh coherent build. Rollback path preserved: `mv .next .next.failed && mv .next.rollback .next && pm2 restart cc-prod`.
+- Live authenticated (interview-gate cookie) checks after restart: GET `/` → 200 containing "Choose where you want to go" + "View All Tasks" (7 gradient cards render, no redirect); GET `/tasks/all` → 200 ("Backlog"); GET `/overview` → 200. New `.next/BUILD_ID` `jRjpLM5DG4d5vqOB5m2-U` (was `0cvrc7y_EN1tybe_QiYgf`) served by a freshly-restarted pm2 `cc-prod`.
+
+## [v4.72.1] — 2026-07-10 — feat(home): `/` redirects to the /tasks/all task board; overview preserved at /overview
+
+The operator's main screen now lands directly on his task cards. `/` (`src/app/page.tsx`) is now a minimal server-side `redirect('/tasks/all')` to the cross-department MissionQueue board. The prior operations OVERVIEW grid — the v4.66.0 redesign (KPI strip, department pulse, view tiles, recent-activity feed) — is preserved UNCHANGED at the new route `/overview` (`src/app/overview/page.tsx`), which contains the former HomePage client component verbatim ('use client', all fetches and logic identical). `/kanban`'s existing 308→/tasks/all redirect is untouched.
+
+Non-destructive Path 2: no feature was removed or downgraded. The interview-mode shell lock (`src/middleware.ts`) still runs first, so an unprovisioned box is gated to `/interview` before the `/`→`/tasks/all` redirect is reached; a provisioned box (interview complete) lands on the board.
+
+### changed — `src/app/page.tsx`
+- Replaced the HomePage overview component with `export default function Home() { redirect('/tasks/all'); }` (`next/navigation` redirect). Server component; 307 to the board on a page GET.
+
+### added — `src/app/overview/page.tsx`
+- The former overview home, moved verbatim (the `HomePage` client component). Reachable at `/overview` and still linked from the board's breadcrumb/nav.
+
 ## [v4.72.0] — 2026-07-09 — fix(middleware): board loads its own data on plain-tunnel boxes without weakening ingest/external auth
 
 Fixes a board-blanking regression the operator-box test caught: on any box NOT fronted by Cloudflare Access (a plain Cloudflare Tunnel), v4.71.0's middleware returned 401 on every Command Center data read (`/api/tasks`, `/api/workspaces`, `/api/departments`, `/api/company-health`, `/api/persona-matrix`, `/api/org-chart`), so the board showed 0 tasks / "HTTP 401" / "Unauthorized" = data-blank. The board's browser fetches carry NO bearer token (MC_API_TOKEN is server-only, never exposed to the client — see `src/components/WorkspaceDashboard.tsx`), so they relied on the same-origin passthrough; v4.71.0's security train (DATA-10) hardened that passthrough to require a VERIFIED CF-Access assertion AND flipped `REQUIRE_CF_ACCESS` default-ON in production, neither of which a plain-tunnel box has. This restores v4.69.1's same-origin trust for the board's OWN data reads/writes WITHOUT re-opening what the train closed: the external ingest/webhook write surface (DATA-09/10/11) still requires its MC_API_TOKEN bearer + WEBHOOK_SECRET HMAC.
