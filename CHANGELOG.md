@@ -1,3 +1,12 @@
+## [v5.1.1] — 2026-07-10 — deploy(cc): reconcile v5.1.0 write-back-auth fix onto the operator box + preserve the welcome-cards home
+
+Deploys the v5.1.0 task-API write-back-auth fix (entry below) to a box whose live build (local v4.73.0 `6ab73df`) predated the fix. That build dispatched dept/main agents with NO `Authorization` header on their write-backs, so every write-back 401'd against `src/middleware.ts` Gate B and finished tasks froze `in_progress` until the stuck-in-progress sweep moved them to `blocked` (observed: 94 blocked / 39 backlog / 0 in_progress). Reconciled by cherry-picking the seven-welcome-cards home (`6ab73df`) on top of tag `v5.1.0` (`f200192`) so this build carries BOTH the write-back-auth backend fix AND the seven-card `/` home + `/overview` grid.
+
+### deploy — v5.1.0 backend fix + welcome-cards home (this box)
+- All v5.1.0 backend fixes intact: `src/lib/mc-auth.ts`, `src/lib/jobs/finished-work-recovery.ts`, `src/lib/jobs/execution-watcher.ts` (dept-namespace probe), `src/lib/jobs/stale-task-sweep.ts` + `stuck-in-progress-sweep.ts` disk-recovery, `scripts/recover-blocked-deliverables.ts`, `ecosystem.config.cjs` MC_API_TOKEN/WEBHOOK_SECRET passthrough.
+- `src/app/page.tsx` = the seven welcome cards (verbatim `f7a5098`); `src/app/overview/page.tsx` = the v4.66.0 overview grid at `/overview`; `src/app/tasks/all/page.tsx` unchanged.
+- Version bumped 5.1.0 → 5.1.1 across `version`, `package.json`, `package-lock.json`. Manual atomic swap deploy (NOT `scripts/atomic-deploy.sh`, which would pm2-delete the sibling demo apps).
+
 ## [v5.1.0] — 2026-07-10 — fix(cc-writeback): task-API write-back auth + fail-loud + trapped-work recovery
 
 Closes the fleet-wide "carded-but-trapped" 401 defect. Department/main agents finished work but their write-backs (`POST /api/tasks/:id/activities`, `/deliverables`, `PATCH /api/tasks/:id`) carried no `Authorization` header, so the fail-closed middleware 401'd them and finished tasks froze `in_progress` until a sweep moved them to `blocked`/`backlog` — throwing the finished deck/site/asset away.
@@ -68,6 +77,37 @@ Lands the Anthology producer Command Center as a forward-merge onto v4.72.0 (`in
 - `npm run build` (`next build`): exit 0 — Compiled successfully.
 - `node --import tsx --test` on the 3 anthology suites: exit 0 — 88 tests, 88 pass, 0 fail.
 - Forward-merge onto `origin/main` (`afb9481`) was a clean `--no-ff` — origin/main is a strict ancestor of the branch (0 divergent commits, 10 ahead), no conflict markers. All 5 version locations agree at v4.73.0; annotated tag `v4.73.0` cut at the release (bump) commit. Repo stays fleet-wide — the client name was scrubbed from the anthology fixture in the final integration commit.
+
+## [v4.73.0] — 2026-07-10 — feat(home): restore the seven welcome-cards home at `/`; overview grid stays at /overview, task board at /tasks/all
+
+Restores the operator's original landing page. `/` (`src/app/page.tsx`) is once again the seven-card **"Welcome / Choose where you want to go"** grid — the `'use client'` framer-motion `EntryCard` page — with the seven gradient cards: **View All Tasks** (→ `/tasks/all`), **Departments** (→ `/tasks/by-department`), **Performance Board** (→ `/ceo-board`), **Conversational AI** (→ `/conversational-ai`), **Intelligence Settings** (→ `/settings/intelligence`), **Operator Console** (→ `/operator`), and **Company Settings** (→ `/settings/company`). This **reverses BOTH** the v4.66.0 grid-home redesign AND the v4.72.1 `redirect('/tasks/all')`: `/` no longer redirects. The page is restored **verbatim** from commit `f7a5098` (the last cards version, 288 lines).
+
+Nothing was removed. The operations OVERVIEW grid (the v4.66.0 redesign — KPI strip, department pulse, view tiles, activity feed) stays UNCHANGED and reachable at `/overview` (`src/app/overview/page.tsx`); the cross-department MissionQueue task board stays at `/tasks/all` (the "View All Tasks" card destination). The interview-mode shell lock (`src/middleware.ts`) is untouched and still runs first, so an unprovisioned box is still gated to `/interview` before `/` renders.
+
+### changed — `src/app/page.tsx`
+- Replaced the `export default function Home() { redirect('/tasks/all'); }` server component with the 288-line welcome-cards client page, restored verbatim from `f7a5098`. `/` now renders the seven gradient `EntryCard`s instead of 307-ing to the board.
+
+### preserved (explicitly kept, untouched)
+- `src/app/overview/page.tsx` — the v4.66.0 operations overview grid, still served at `/overview`.
+- `src/app/tasks/all/page.tsx` — the cross-department task board, still the "View All Tasks" destination.
+- `src/middleware.ts` — interview shell-lock unchanged.
+
+### Verification (observed on the live box, node v22.19.0)
+- `npx tsc --noEmit`: exit 0 — the restored file type-checks clean against current deps (framer-motion ^12.38.0, lucide-react ^0.468.0, date-fns ^4.1.0; hooks `useLogoUrl`/`useCompanyBrand` and `Breadcrumb` all present in the tree).
+- Deployed manually, NOT via `scripts/atomic-deploy.sh`, for two box-specific reasons: (1) atomic-deploy Phase 1d `pm2 delete`s every pm2 app whose name contains `blackceo`/`command-center`/`mission-control` that is not the `--pm2-app` — which on this box would destroy the sibling `blackceo-cc-demo-interview` / `blackceo-cc-demo-dashboard` class-demo apps; and (2) Next 14.2 here does not honor its `NEXT_DIST_DIR` out-of-place build mechanism. Manual sequence: snapshot live `.next` → `.next.rollback` (0cvrc7y, rollback armed), `next build` (exit 0, v4.73.0), then `pm2 restart cc-prod` onto the fresh coherent build. Rollback path preserved: `mv .next .next.failed && mv .next.rollback .next && pm2 restart cc-prod`.
+- Live authenticated (interview-gate cookie) checks after restart: GET `/` → 200 containing "Choose where you want to go" + "View All Tasks" (7 gradient cards render, no redirect); GET `/tasks/all` → 200 ("Backlog"); GET `/overview` → 200. New `.next/BUILD_ID` `jRjpLM5DG4d5vqOB5m2-U` (was `0cvrc7y_EN1tybe_QiYgf`) served by a freshly-restarted pm2 `cc-prod`.
+
+## [v4.72.1] — 2026-07-10 — feat(home): `/` redirects to the /tasks/all task board; overview preserved at /overview
+
+The operator's main screen now lands directly on his task cards. `/` (`src/app/page.tsx`) is now a minimal server-side `redirect('/tasks/all')` to the cross-department MissionQueue board. The prior operations OVERVIEW grid — the v4.66.0 redesign (KPI strip, department pulse, view tiles, recent-activity feed) — is preserved UNCHANGED at the new route `/overview` (`src/app/overview/page.tsx`), which contains the former HomePage client component verbatim ('use client', all fetches and logic identical). `/kanban`'s existing 308→/tasks/all redirect is untouched.
+
+Non-destructive Path 2: no feature was removed or downgraded. The interview-mode shell lock (`src/middleware.ts`) still runs first, so an unprovisioned box is gated to `/interview` before the `/`→`/tasks/all` redirect is reached; a provisioned box (interview complete) lands on the board.
+
+### changed — `src/app/page.tsx`
+- Replaced the HomePage overview component with `export default function Home() { redirect('/tasks/all'); }` (`next/navigation` redirect). Server component; 307 to the board on a page GET.
+
+### added — `src/app/overview/page.tsx`
+- The former overview home, moved verbatim (the `HomePage` client component). Reachable at `/overview` and still linked from the board's breadcrumb/nav.
 
 ## [v4.72.0] — 2026-07-09 — fix(middleware): board loads its own data on plain-tunnel boxes without weakening ingest/external auth
 
