@@ -66,6 +66,7 @@ import {
   type MatchedSkill,
 } from '@/lib/context-pack';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
+import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 
 // Statuses where dispatch must not re-fire.
 // DISP-12: 'archived' is NOT a task status (it is not in any of the 4 canonical
@@ -886,13 +887,7 @@ ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
 ${personaSection}
 **Specialist Type:** ${specialistType}
 ${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
-**IMPORTANT:** After completing work, you MUST call these APIs:
-1. Log activity: POST ${missionControlUrl}/api/tasks/${task.id}/activities
-   Body: {"activity_type": "completed", "message": "Description of what was done"}
-2. Register deliverable: POST ${missionControlUrl}/api/tasks/${task.id}/deliverables
-   Body: {"deliverable_type": "artifact", "title": "File name", "path": "${taskArtifactDir}/filename.png"}
-3. Update status: PATCH ${missionControlUrl}/api/tasks/${task.id}
-   Body: {"status": "review"}
+${renderWriteBackInstructions(missionControlUrl, task.id, 'artifact', `${taskArtifactDir}/filename.png`)}
 
 When complete, reply with:
 \`TASK_COMPLETE: [brief summary of what you did]\`
@@ -952,6 +947,32 @@ If you need help or clarification, ask the orchestrator.`;
         reason: 'no_specialist_runtime',
         audience: 'SYSTEM',
         needs: `No OpenClaw runtime for "${agent.name}". Wire ~/.openclaw/agents/<dept-slug>/ to release this department.`,
+        context,
+      });
+      return;
+    }
+
+    // ── FAIL-LOUD write-back auth guard (PREVENTION, src/lib/mc-auth.ts) ──────
+    // Mirror of the dispatch/route.ts guard. Before the CAS below flips this
+    // task to in_progress, verify a dispatched agent can AUTHENTICATE its
+    // write-backs. MC_API_TOKEN unset on a box that rejects external POST/PATCH
+    // (src/middleware.ts Gate B) → the agent finishes but every write-back 401s
+    // and the card freezes in_progress until the stuck sweep blocks it (the
+    // carded-but-trapped defect). HOLD + SYSTEM report NOW instead of claiming
+    // and dispatching work that cannot report back. Dev insecure-open passes.
+    const writeAuth = checkTaskWriteAuth();
+    if (!writeAuth.ok) {
+      console.error(`[${context}] autoDispatchTask: HELD task ${task.id} — task-API write-back auth not provisioned: ${writeAuth.reason}`);
+      const nowAuth = new Date().toISOString();
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, `[mc_api_token_unset] ${writeAuth.reason}`, nowAuth],
+      );
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'mc_api_token_unset',
+        audience: 'SYSTEM',
+        needs: writeAuth.reason,
         context,
       });
       return;

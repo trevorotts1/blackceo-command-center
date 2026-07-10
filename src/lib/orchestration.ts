@@ -12,6 +12,11 @@
  */
 
 import { getMissionControlUrl } from './config';
+import {
+  missionControlAuthHeaders,
+  isAuthFailureStatus,
+  MissionControlWriteError,
+} from './mc-auth';
 
 const MISSION_CONTROL_URL = getMissionControlUrl();
 
@@ -264,10 +269,15 @@ export interface RegisterSubAgentParams {
  * This makes activities visible in the Command Center UI
  */
 export async function logActivity(params: LogActivityParams): Promise<void> {
+  const endpoint = `${MISSION_CONTROL_URL}/api/tasks/${params.taskId}/activities`;
   try {
-    const response = await fetch(`${MISSION_CONTROL_URL}/api/tasks/${params.taskId}/activities`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // Canonical write-back auth (src/lib/mc-auth.ts): a server-side fetch to
+      // the loopback is an EXTERNAL caller to src/middleware.ts (no same-origin
+      // Origin/Referer), so it MUST present Authorization: Bearer $MC_API_TOKEN
+      // or the write is rejected 401. Was Content-Type only → silent 401.
+      headers: { 'Content-Type': 'application/json', ...missionControlAuthHeaders() },
       body: JSON.stringify({
         activity_type: params.activityType,
         message: params.message,
@@ -278,11 +288,18 @@ export async function logActivity(params: LogActivityParams): Promise<void> {
 
     if (!response.ok) {
       const error = await response.text();
+      // FAIL LOUD on an auth rejection (401/403): a missing/wrong MC_API_TOKEN
+      // is a misconfiguration that silently trapped finished work — surface it
+      // at the moment of the bad write instead of the old console.error swallow.
+      if (isAuthFailureStatus(response.status)) {
+        throw new MissionControlWriteError(response.status, endpoint, error);
+      }
       console.error(`Failed to log activity: ${error}`);
     } else {
       console.log(`✓ Activity logged: ${params.message}`);
     }
   } catch (error) {
+    if (error instanceof MissionControlWriteError) throw error;
     console.error('Error logging activity:', error);
   }
 }
@@ -292,10 +309,12 @@ export async function logActivity(params: LogActivityParams): Promise<void> {
  * This makes deliverables visible in the Deliverables tab
  */
 export async function logDeliverable(params: LogDeliverableParams): Promise<void> {
+  const endpoint = `${MISSION_CONTROL_URL}/api/tasks/${params.taskId}/deliverables`;
   try {
-    const response = await fetch(`${MISSION_CONTROL_URL}/api/tasks/${params.taskId}/deliverables`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // Canonical write-back auth — see logActivity above.
+      headers: { 'Content-Type': 'application/json', ...missionControlAuthHeaders() },
       body: JSON.stringify({
         deliverable_type: params.deliverableType,
         title: params.title,
@@ -306,11 +325,15 @@ export async function logDeliverable(params: LogDeliverableParams): Promise<void
 
     if (!response.ok) {
       const error = await response.text();
+      if (isAuthFailureStatus(response.status)) {
+        throw new MissionControlWriteError(response.status, endpoint, error);
+      }
       console.error(`Failed to log deliverable: ${error}`);
     } else {
       console.log(`✓ Deliverable logged: ${params.title}`);
     }
   } catch (error) {
+    if (error instanceof MissionControlWriteError) throw error;
     console.error('Error logging deliverable:', error);
   }
 }
@@ -320,10 +343,12 @@ export async function logDeliverable(params: LogDeliverableParams): Promise<void
  * This makes the session visible in the Sessions tab and updates agent counters
  */
 export async function registerSubAgentSession(params: RegisterSubAgentParams): Promise<void> {
+  const endpoint = `${MISSION_CONTROL_URL}/api/tasks/${params.taskId}/subagent`;
   try {
-    const response = await fetch(`${MISSION_CONTROL_URL}/api/tasks/${params.taskId}/subagent`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // Canonical write-back auth — see logActivity above.
+      headers: { 'Content-Type': 'application/json', ...missionControlAuthHeaders() },
       body: JSON.stringify({
         openclaw_session_id: params.sessionId,
         agent_name: params.agentName,
@@ -332,11 +357,15 @@ export async function registerSubAgentSession(params: RegisterSubAgentParams): P
 
     if (!response.ok) {
       const error = await response.text();
+      if (isAuthFailureStatus(response.status)) {
+        throw new MissionControlWriteError(response.status, endpoint, error);
+      }
       console.error(`Failed to register sub-agent session: ${error}`);
     } else {
       console.log(`✓ Sub-agent session registered: ${params.sessionId}`);
     }
   } catch (error) {
+    if (error instanceof MissionControlWriteError) throw error;
     console.error('Error registering sub-agent session:', error);
   }
 }
@@ -346,10 +375,12 @@ export async function registerSubAgentSession(params: RegisterSubAgentParams): P
  * Updates the session status to 'completed' and sets ended_at timestamp
  */
 export async function completeSubAgentSession(sessionId: string, summary?: string): Promise<void> {
+  const endpoint = `${MISSION_CONTROL_URL}/api/openclaw/sessions/${sessionId}`;
   try {
-    const response = await fetch(`${MISSION_CONTROL_URL}/api/openclaw/sessions/${sessionId}`, {
+    const response = await fetch(endpoint, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      // Canonical write-back auth — see logActivity above.
+      headers: { 'Content-Type': 'application/json', ...missionControlAuthHeaders() },
       body: JSON.stringify({
         status: 'completed',
         ended_at: new Date().toISOString(),
@@ -358,11 +389,15 @@ export async function completeSubAgentSession(sessionId: string, summary?: strin
 
     if (!response.ok) {
       const error = await response.text();
+      if (isAuthFailureStatus(response.status)) {
+        throw new MissionControlWriteError(response.status, endpoint, error);
+      }
       console.error(`Failed to complete sub-agent session: ${error}`);
     } else {
       console.log(`✓ Sub-agent session completed: ${sessionId}`);
     }
   } catch (error) {
+    if (error instanceof MissionControlWriteError) throw error;
     console.error('Error completing sub-agent session:', error);
   }
 }
