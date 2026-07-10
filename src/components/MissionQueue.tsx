@@ -9,6 +9,8 @@ import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
 import { PersonaSlotChips } from './kanban/TaskCard';
+import { AnthologyCardFace } from './anthology/AnthologyCardFace';
+import { isAnthologyTask } from './anthology/anthology-card';
 import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
 import { BlockTaskModal, type BlockTaskDetails } from './kanban/BlockTaskModal';
 import { MoveTaskMenu } from './kanban/MoveTaskMenu';
@@ -838,6 +840,11 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns
           onSelect={(columnId) => onMove(task, columnId)}
         />
       </div>
+
+      {/* Anthology card face (SPEC B11 / U12) — participant name, book chip,
+          9-segment S0→S9 bar, stage badge, "waiting on you" age. Renders ONLY
+          for source==='anthology' cards; every other card is unaffected. */}
+      {isAnthologyTask(task) && <AnthologyCardFace task={task} />}
 
       {/* Pill Tags Row */}
       <div className="flex flex-wrap gap-1.5 mb-3">
