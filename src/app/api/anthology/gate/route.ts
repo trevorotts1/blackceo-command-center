@@ -67,6 +67,15 @@ const DecideSchema = z.object({
   subtitle: z.string().trim().max(500).optional(),
   /** typed anthology name confirming `ready_to_assemble`. */
   confirmName: z.string().trim().max(500).optional(),
+  /** CONFIRM-ORDER (U9/U13 finalize + finale). The producer's finalized
+   *  running order (participant keys / chapter ids in sequence) plus the explicit
+   *  opener + last co-author. Consumed ONLY when action==='confirm_order' and
+   *  passed through to the engine; ignored for every other action. `opener` /
+   *  `closer` are nullish because the cockpit derives them from `order` and may
+   *  send null when the order is empty (the engine still validates). */
+  order: z.array(z.string().trim().min(1).max(256)).max(500).optional(),
+  opener: z.string().trim().min(1).max(256).nullish(),
+  closer: z.string().trim().min(1).max(256).nullish(),
 });
 
 /** Resolve the operator identity for `--producer-id` on the S9 gates. Sourced
@@ -132,7 +141,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
-  const { subjectKey, action, reason, notes, title, subtitle, confirmName } = parsed.data;
+  const { subjectKey, action, reason, notes, title, subtitle, confirmName, order, opener, closer } =
+    parsed.data;
 
   // `done` is never reachable through the gate door (see FORBIDDEN_ACTIONS).
   if (FORBIDDEN_ACTIONS.has(action)) {
@@ -158,6 +168,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // from the session, never the body; ignored by the engine for other gates.
     producerId: operatorEmail(request) || undefined,
   };
+
+  // CONFIRM-ORDER (U9/U13): relay the producer's finalized order + opener + last
+  // co-author to the engine, but ONLY for the confirm_order action so these args
+  // can never leak onto an unrelated decision. The engine is authoritative — it
+  // validates the order against the finalized set and refuses a bad one.
+  if (action === 'confirm_order') {
+    fields.order = order;
+    fields.opener = opener ?? undefined;
+    fields.closer = closer ?? undefined;
+  }
 
   try {
     const result = decideBoard(subjectKey, action, fields);

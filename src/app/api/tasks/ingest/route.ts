@@ -7,6 +7,10 @@ import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
 import { notifyOwnerAssigned, notifyOwnerSchemaError } from '@/lib/owner-reports';
 import { getSelfClient } from '@/lib/clients';
+// ANTHOLOGY-CC — pure, framework-free helper that surfaces the anthology
+// sole-writer subject key onto the card's `Ref:` line (see below). Import-safe
+// server-side: anthology-card.ts has no React / client-only imports.
+import { resolveIngestSourceRef } from '@/components/anthology/anthology-card';
 // queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
@@ -631,7 +635,14 @@ export async function POST(request: NextRequest) {
     if (source) provenanceLines.push(`Source: ${source}`);
     if (persona) provenanceLines.push(`From persona: ${persona}`);
     if (externalSessionId) provenanceLines.push(`Session: ${externalSessionId}`);
-    if (sourceRef) provenanceLines.push(`Ref: ${sourceRef}`);
+    // ANTHOLOGY-CC: surface the anthology sole-writer subject key on the card.
+    // The board's card parsers (extractSubject / resolveAnthologyAssembly) read
+    // the anthology_id ONLY from this `Ref:` line. An explicit source_ref wins;
+    // otherwise an anthology-subject idempotency_key (`anthology:assembly:<aid>` /
+    // `anthology:card:<pk>`, as mc_board.py sends it) is surfaced so the aid
+    // reaches the card even when no separate source_ref was provided.
+    const effectiveSourceRef = resolveIngestSourceRef(sourceRef, idempotencyKey);
+    if (effectiveSourceRef) provenanceLines.push(`Ref: ${effectiveSourceRef}`);
     const provenanceBlock = provenanceLines.length
       ? `\n\n— Captured via task-ingest —\n${provenanceLines.join('\n')}`
       : '';

@@ -13,6 +13,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   resolveAnthologyAssembly,
   parseAssemblyStatus,
@@ -34,6 +36,15 @@ import {
   loadAssemblyStatus,
   type FetchLike,
 } from '../../src/components/anthology/assembly-cockpit-logic';
+// U12 parsers + the ingest write-side helper — used to prove the anthology_id
+// `Ref:` line the ingest now emits resolves via BOTH the U12 and U13 parsers, and
+// to prove the double-render precedence (Gate Panel vs cockpit) is mutually
+// exclusive by construction.
+import {
+  isAnthologyTask,
+  extractSubject,
+  resolveIngestSourceRef,
+} from '../../src/components/anthology/anthology-card';
 
 // --------------------------------------------------------------------------- //
 // A recording mock fetch. Returns a canned body; captures each call so tests can
@@ -113,6 +124,111 @@ test('resolveAnthologyAssembly: non-anthology card → null', () => {
   );
   assert.equal(resolveAnthologyAssembly(null), null);
   assert.equal(resolveAnthologyAssembly(undefined), null);
+});
+
+// --------------------------------------------------------------------------- //
+// anthology_id surfacing — the ingest folds the sole-writer subject key into a
+// `Ref:` line; BOTH the U13 (resolveAnthologyAssembly) and U12 (extractSubject)
+// parsers must resolve the aid from it.
+// --------------------------------------------------------------------------- //
+test('resolveIngestSourceRef: explicit source_ref wins, else an anthology idempotency key is surfaced', () => {
+  // Explicit source_ref always wins.
+  assert.equal(
+    resolveIngestSourceRef('anthology:assembly:anth_a', 'anthology:assembly:zzz'),
+    'anthology:assembly:anth_a'
+  );
+  // No source_ref → surface the anthology-subject idempotency key (assembly + card).
+  assert.equal(resolveIngestSourceRef(undefined, 'anthology:assembly:anth_b'), 'anthology:assembly:anth_b');
+  assert.equal(
+    resolveIngestSourceRef(null, 'anthology:card:contact1::anth_b'),
+    'anthology:card:contact1::anth_b'
+  );
+  // A non-anthology idempotency key (e.g. a synthesized sha256) is NOT surfaced.
+  assert.equal(resolveIngestSourceRef(undefined, 'auto:deadbeef'), undefined);
+  assert.equal(resolveIngestSourceRef(undefined, undefined), undefined);
+});
+
+test('anthology_id: the ingest `Ref:` line resolves via BOTH the U13 and U12 parsers', () => {
+  // Exactly the description the ingest now builds for an assembly card:
+  //   Source: anthology\n\n… — Captured via task-ingest —\nRef: anthology:assembly:<aid>
+  const sourceRef = resolveIngestSourceRef(undefined, 'anthology:assembly:anth_wired');
+  const description = `Source: anthology\n\n— Captured via task-ingest —\nRef: ${sourceRef}`;
+  const task = {
+    source: 'anthology',
+    title: 'Anthology assembly — Voices of Resilience',
+    description,
+  };
+
+  // U13 — the Assembly cockpit resolves the aid + name.
+  const ref = resolveAnthologyAssembly(task);
+  assert.ok(ref);
+  assert.equal(ref.anthologyId, 'anth_wired');
+  assert.equal(ref.anthologyName, 'Voices of Resilience');
+
+  // U12 — the Gate Panel card model resolves the same subject key + kind.
+  const subject = extractSubject(description);
+  assert.ok(subject);
+  assert.equal(subject.subjectKey, 'anth_wired');
+  assert.equal(subject.kind, 'anthology');
+});
+
+// --------------------------------------------------------------------------- //
+// DOUBLE-RENDER precedence (U12/U13). The Assembly card must show ONLY the
+// cockpit; a chapter/gate card must show ONLY the Gate Panel. TaskModal gates the
+// Gate Panel on `isAnthologyTask(task) && !anthologyAssembly` and the cockpit on
+// `anthologyAssembly`, where `anthologyAssembly = resolveAnthologyAssembly(task)`.
+// These predicates are the source of truth for both renders, so we prove them
+// mutually exclusive for every card class here.
+// --------------------------------------------------------------------------- //
+test('double-render precedence: assembly card shows cockpit ONLY, chapter card shows gate panel ONLY', () => {
+  // Mirror TaskModal's exact render conditions from the two pure predicates.
+  const cockpitRenders = (t: unknown) => resolveAnthologyAssembly(t as never) !== null;
+  const gatePanelRenders = (t: unknown) =>
+    isAnthologyTask(t as never) && resolveAnthologyAssembly(t as never) === null;
+
+  const assemblyCard = {
+    source: 'anthology',
+    title: 'Anthology assembly — Voices of Resilience',
+    description: 'Source: anthology\nRef: anthology:assembly:anth_1',
+  };
+  const chapterCard = {
+    source: 'anthology',
+    title: 'Anthology chapter — Jane Doe · anth_1',
+    description: 'Source: anthology\nRef: anthology:card:contact1::anth_1',
+  };
+  const plainCard = { source: 'funnel', title: 'Follow up with the lead' };
+
+  // Assembly card → cockpit only.
+  assert.equal(cockpitRenders(assemblyCard), true);
+  assert.equal(gatePanelRenders(assemblyCard), false);
+
+  // Chapter/gate card → gate panel only.
+  assert.equal(cockpitRenders(chapterCard), false);
+  assert.equal(gatePanelRenders(chapterCard), true);
+
+  // Non-anthology card → neither.
+  assert.equal(cockpitRenders(plainCard), false);
+  assert.equal(gatePanelRenders(plainCard), false);
+
+  // The two surfaces are NEVER both true for the same card (no double-render).
+  for (const t of [assemblyCard, chapterCard, plainCard]) {
+    assert.ok(!(cockpitRenders(t) && gatePanelRenders(t)), 'gate panel and cockpit must be mutually exclusive');
+  }
+});
+
+test('double-render precedence: TaskModal source gates the Gate Panel on !anthologyAssembly', () => {
+  // Wiring guard (mirrors the middleware-invariant test in the gate-route suite):
+  // the JSX must gate the Gate Panel on !anthologyAssembly so it never co-renders
+  // with the cockpit on the assembly card.
+  const src = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'components', 'TaskModal.tsx'),
+    'utf8'
+  );
+  assert.match(
+    src,
+    /isAnthologyTask\(task\)\s*&&\s*!anthologyAssembly/,
+    'the Gate Panel render must be gated on `isAnthologyTask(task) && !anthologyAssembly`'
+  );
 });
 
 // --------------------------------------------------------------------------- //
@@ -243,13 +359,24 @@ test('moveToFront / moveToEnd: producer picks the opener and the last co-author'
 // --------------------------------------------------------------------------- //
 // CONFIRM-ORDER (acceptance surface #3).
 // --------------------------------------------------------------------------- //
-test('buildConfirmOrderBody: carries the finalized order + derived opener/closer', () => {
+test('buildConfirmOrderBody: carries the finalized order + derived opener/closer (shared contract keys)', () => {
   const body = buildConfirmOrderBody('anth_1', ['c', 'a', 'b']);
   assert.equal(body.subjectKey, 'anth_1');
   assert.equal(body.action, 'confirm_order');
   assert.deepEqual(body.order, ['c', 'a', 'b']);
-  assert.equal(body.openerKey, 'c');
-  assert.equal(body.closerKey, 'b');
+  // Contract keys are `opener`/`closer` (NOT openerKey/closerKey) — the route's
+  // DecideSchema and the engine's confirm_order action consume exactly these.
+  assert.equal(body.opener, 'c');
+  assert.equal(body.closer, 'b');
+  assert.ok(!('openerKey' in body), 'legacy openerKey must not be sent');
+  assert.ok(!('closerKey' in body), 'legacy closerKey must not be sent');
+});
+
+test('buildConfirmOrderBody: empty order → null opener/closer', () => {
+  const body = buildConfirmOrderBody('anth_1', []);
+  assert.deepEqual(body.order, []);
+  assert.equal(body.opener, null);
+  assert.equal(body.closer, null);
 });
 
 test('pickConfirmOrderAction: uses an engine-surfaced finalize action, else confirm_order', () => {
@@ -258,14 +385,16 @@ test('pickConfirmOrderAction: uses an engine-surfaced finalize action, else conf
   assert.equal(pickConfirmOrderAction([]), 'confirm_order');
 });
 
-test('submitConfirmOrder: posts the finalized order to the gate door', async () => {
+test('submitConfirmOrder: posts the finalized order + opener/closer to the gate door', async () => {
   const { fn, calls } = mockFetch({ ok: true, committed: true, gate: 's9_ready', decision: 'confirm_order' });
   const res = await submitConfirmOrder('anth_1', ['b', 'a', 'c'], 'confirm_order', fn);
   assert.ok(res.ok);
   const sent = lastBody(calls);
+  assert.equal(sent.subjectKey, 'anth_1');
+  assert.equal(sent.action, 'confirm_order');
   assert.deepEqual(sent.order, ['b', 'a', 'c']);
-  assert.equal(sent.openerKey, 'b');
-  assert.equal(sent.closerKey, 'c');
+  assert.equal(sent.opener, 'b');
+  assert.equal(sent.closer, 'c');
 });
 
 // --------------------------------------------------------------------------- //

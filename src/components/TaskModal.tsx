@@ -400,12 +400,19 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {activeTab === 'overview' && (
             <>
           {/* Anthology Gate Panel (SPEC B11 / U12) — the card detail IS the Gate
-              Panel for an anthology card: the current deliverable + EXACTLY the
-              actions gate_engine.py status returns for the open gate (via U11).
-              Rendered above the standard task form; non-anthology tasks skip it
-              entirely. It sits OUTSIDE the form so its Approve/Hold/etc. buttons
-              never submit the task edit form. */}
-          {task && isAnthologyTask(task) && (
+              Panel for an anthology CHAPTER / gate card: the current deliverable +
+              EXACTLY the actions gate_engine.py status returns for the open gate
+              (via U11). Rendered above the standard task form; non-anthology tasks
+              skip it entirely. It sits OUTSIDE the form so its Approve/Hold/etc.
+              buttons never submit the task edit form.
+
+              DOUBLE-RENDER PRECEDENCE (U12/U13): the ASSEMBLY card must show ONLY
+              the Assembly cockpit, never the Gate Panel. `anthologyAssembly` is
+              non-null EXACTLY for the assembly card, so gating the Gate Panel on
+              `!anthologyAssembly` makes the two surfaces mutually exclusive by
+              construction — the SAME value drives both (cockpit renders iff
+              `anthologyAssembly`, Gate Panel iff anthology card AND not assembly). */}
+          {task && isAnthologyTask(task) && !anthologyAssembly && (
             <div className="mb-4">
               <GatePanel task={task} />
             </div>

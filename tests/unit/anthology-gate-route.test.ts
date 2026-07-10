@@ -402,3 +402,154 @@ test('middleware: /api/anthology/gate is NOT registered as a webhook-secret rout
     'the board door must not join WEBHOOK_SECRET_ROUTES — it is session-gated via the same-origin passthrough',
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIRM-ORDER (U9/U13) — the board action that carries the producer's finalized
+// running order + opener + last co-author to the engine, and the STATUS RELAY of
+// the assembly passthrough (assembly_state / readiness / ordering) back out.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ORDER = ['cB::a', 'cA::a', 'cC::a'];
+
+test('decideBoard: confirm_order carries --order (JSON) + --opener + --closer', () => {
+  setEngine(
+    { action: 'decide', ok: true, committed: true, door: 'dashboard', gate: null, decision: 'confirm_order' },
+    0,
+  );
+  const r = decideBoard(ANTHOLOGY_ID, 'confirm_order', {
+    order: ORDER,
+    opener: 'cB::a',
+    closer: 'cC::a',
+    producerId: 'p@x.com',
+  });
+  assert.equal(r.ok, true);
+  const argv = readArgv();
+  assert.equal(valueAfter(argv, '--action'), 'confirm_order');
+  // The whole sequence rides a single JSON argv token, not one flag per id.
+  assert.deepEqual(JSON.parse(valueAfter(argv, '--order') ?? 'null'), ORDER);
+  assert.equal(valueAfter(argv, '--opener'), 'cB::a');
+  assert.equal(valueAfter(argv, '--closer'), 'cC::a');
+});
+
+test('decideBoard: confirm_order with no order never fabricates --order/--opener/--closer', () => {
+  setEngine({ action: 'decide', ok: true, committed: true, door: 'dashboard', decision: 'confirm_order' }, 0);
+  decideBoard(ANTHOLOGY_ID, 'confirm_order', {});
+  const argv = readArgv();
+  assert.ok(!argv.includes('--order'));
+  assert.ok(!argv.includes('--opener'));
+  assert.ok(!argv.includes('--closer'));
+});
+
+test('POST: confirm_order relays order/opener/closer from the body to the engine argv', async () => {
+  setEngine(
+    { action: 'decide', ok: true, committed: true, door: 'dashboard', gate: null, decision: 'confirm_order' },
+    0,
+  );
+  const res = await POST(
+    postReq(
+      { subjectKey: ANTHOLOGY_ID, action: 'confirm_order', order: ORDER, opener: 'cB::a', closer: 'cC::a' },
+      { 'x-operator-email': 'real.producer@example.com' },
+    ),
+  );
+  assert.equal(res.status, 200);
+  const argv = readArgv();
+  assert.equal(valueAfter(argv, '--door'), 'board');
+  assert.equal(valueAfter(argv, '--action'), 'confirm_order');
+  assert.deepEqual(JSON.parse(valueAfter(argv, '--order') ?? 'null'), ORDER);
+  assert.equal(valueAfter(argv, '--opener'), 'cB::a');
+  assert.equal(valueAfter(argv, '--closer'), 'cC::a');
+  // Producer identity still comes from the session, never the body.
+  assert.equal(valueAfter(argv, '--producer-id'), 'real.producer@example.com');
+});
+
+test('POST: order/opener/closer are IGNORED for a non-confirm_order action (never leak onto the argv)', async () => {
+  setEngine(
+    { action: 'decide', ok: true, committed: true, door: 'dashboard', gate: 's1_producer', decision: 'approve' },
+    0,
+  );
+  const res = await POST(
+    postReq({ subjectKey: PARTICIPANT_KEY, action: 'approve', order: ORDER, opener: 'cB::a', closer: 'cC::a' }),
+  );
+  assert.equal(res.status, 200);
+  const argv = readArgv();
+  assert.ok(!argv.includes('--order'), 'order args must never ride a non-confirm_order decision');
+  assert.ok(!argv.includes('--opener'));
+  assert.ok(!argv.includes('--closer'));
+});
+
+test('boardStatus: RELAYS assembly_state + readiness + ordering verbatim (never stripped)', () => {
+  const readiness = { frozen_chapter_count: 7, active_members: 9, blocking: [{ reason: 'not_approved' }], excluded: 1, min_chapters: 2 };
+  const ordering = {
+    order: ['cB::a', 'cA::a'],
+    slots: [
+      { participant_key: 'cB::a', position: 1, chapter_title: 'T2', contributor_name: 'B', word_count: 2100, tone: 'wry', rationale: 'strong opener' },
+      { participant_key: 'cA::a', position: 2, chapter_title: 'T1', contributor_name: 'A', word_count: 3000, tone: 'warm', rationale: 'resonant close' },
+    ],
+    overall_rationale: 'opener/closer with a wry middle',
+  };
+  setEngine(
+    {
+      ok: true,
+      action: 'status',
+      subject_key: ANTHOLOGY_ID,
+      kind: 'anthology',
+      open_gate: null,
+      actor: 'producer',
+      doors: ['board'],
+      actions: [],
+      assembly_state: 'proposed',
+      readiness,
+      ordering,
+    },
+    0,
+  );
+  const s = boardStatus(ANTHOLOGY_ID);
+  assert.equal(s.ok, true);
+  if (!s.ok) return;
+  assert.equal(s.assemblyState, 'proposed');
+  assert.deepEqual(s.readiness, readiness);
+  assert.deepEqual(s.ordering, ordering);
+});
+
+test('boardStatus: also accepts U9 `cockpit_view` as the ordering alias', () => {
+  const ordering = { order: ['x'], slots: [{ participant_key: 'x', chapter_title: 'X' }], overall_rationale: '' };
+  setEngine(
+    { ok: true, action: 'status', subject_key: ANTHOLOGY_ID, kind: 'anthology', open_gate: null, actions: [], cockpit_view: ordering },
+    0,
+  );
+  const s = boardStatus(ANTHOLOGY_ID);
+  assert.equal(s.ok, true);
+  if (!s.ok) return;
+  assert.deepEqual(s.ordering, ordering);
+});
+
+test('boardStatus: a plain participant status carries NO assembly passthrough keys', () => {
+  setEngine(
+    { ok: true, action: 'status', subject_key: PARTICIPANT_KEY, kind: 'participant', open_gate: 's5_participant', actions: ['approve_as_is'] },
+    0,
+  );
+  const s = boardStatus(PARTICIPANT_KEY);
+  assert.equal(s.ok, true);
+  if (!s.ok) return;
+  assert.equal(s.assemblyState, undefined);
+  assert.equal(s.readiness, undefined);
+  assert.equal(s.ordering, undefined);
+});
+
+test('GET: relays the assembly passthrough (ordering) through to the client JSON', async () => {
+  const ordering = {
+    order: ['cB::a', 'cA::a'],
+    slots: [{ participant_key: 'cB::a', chapter_title: 'T2', contributor_name: 'B', word_count: 2100, tone: 'wry', rationale: 'strong opener' }],
+    overall_rationale: 'wry opener',
+  };
+  setEngine(
+    { ok: true, action: 'status', subject_key: ANTHOLOGY_ID, kind: 'anthology', open_gate: null, actions: [], assembly_state: 'proposed', ordering },
+    0,
+  );
+  const res = await GET(getReq(ANTHOLOGY_ID));
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.ok, true);
+  assert.equal(json.assemblyState, 'proposed');
+  assert.deepEqual(json.ordering, ordering);
+});

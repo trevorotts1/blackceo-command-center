@@ -51,6 +51,18 @@ interface EngineStatus {
   // Board-door addition (SPEC B10): `kind` discriminates participant vs
   // anthology (assembly) subjects so the operator panel can label the card.
   kind?: string;
+  // ASSEMBLY passthrough (U9/U13). For an ASSEMBLY subject, cmd_status also
+  // emits the S9 assembly_state, the readiness summary (anthology_state
+  // `_readiness`), and U9's ordering view (`build_ordering_view` /
+  // `cockpit_view`). These are OPERATOR-facing data (chapter titles,
+  // contributor names, word counts, one-line rationale) and carry NO secret —
+  // the board bridge RELAYS them verbatim to the Assembly cockpit, whose parser
+  // (assembly-cockpit-logic.ts) is the source of truth for their shape. They are
+  // absent for participant subjects and on engines that do not yet surface them.
+  assembly_state?: string | null;
+  readiness?: unknown;
+  ordering?: unknown;
+  cockpit_view?: unknown;
 }
 interface EngineDecide {
   ok?: boolean;
@@ -398,6 +410,13 @@ export type BoardStatus =
       /** The AUTHORITATIVE action set for the open gate — the panel renders
        *  exactly these, never a hand-maintained table. */
       actions: string[];
+      /** ASSEMBLY passthrough (U9/U13) — RELAYED verbatim from cmd_status for an
+       *  assembly subject, undefined otherwise. The board bridge does not reshape
+       *  them; the Assembly cockpit's parser (assembly-cockpit-logic.ts) is the
+       *  source of truth for their shape. None carries a secret. */
+      assemblyState?: string | null;
+      readiness?: unknown;
+      ordering?: unknown;
     }
   | { ok: false; reason: BoardStatusFailure };
 
@@ -421,7 +440,7 @@ export function boardStatus(subjectKey: string): BoardStatus {
 
   if (s.code === EX_OK && j && j.ok === true) {
     const kind = j.kind === 'participant' || j.kind === 'anthology' ? j.kind : null;
-    return {
+    const out: BoardStatus = {
       ok: true,
       subjectKey: key,
       openGate: typeof j.open_gate === 'string' ? j.open_gate : null,
@@ -432,6 +451,16 @@ export function boardStatus(subjectKey: string): BoardStatus {
         ? j.actions.filter((a): a is string => typeof a === 'string')
         : [],
     };
+    // RELAY the ASSEMBLY passthrough verbatim (U9/U13) — never stripped, never
+    // reshaped. Only these three named, operator-facing fields cross back; the
+    // cockpit re-parses them. Attached only when present so a participant/plain
+    // status stays byte-identical to before. `ordering` accepts the engine's
+    // `cockpit_view` alias (U9's original key).
+    if (typeof j.assembly_state === 'string') out.assemblyState = j.assembly_state;
+    if (j.readiness && typeof j.readiness === 'object') out.readiness = j.readiness;
+    const ordering = j.ordering ?? j.cockpit_view;
+    if (ordering && typeof ordering === 'object') out.ordering = ordering;
+    return out;
   }
   // cmd_status emits EX_GATE + reason:"unknown_subject" for an absent subject, and
   // runGateEngine returns EX_GATE + null json when the engine is not provisioned.
@@ -454,6 +483,14 @@ export interface BoardDecideFields {
   /** operator identity for the S9 gates; the route sources it from
    *  `x-operator-email`. Harmlessly ignored by the engine for non-S9 gates. */
   producerId?: string;
+  /** CONFIRM-ORDER (U9/U13). The producer's finalized running order (participant
+   *  keys / chapter ids in sequence) plus the explicit opener + last co-author.
+   *  Passed to `decide --action confirm_order`; the engine persists the adjusted
+   *  order and triggers the finale write. Ignored by the engine for other
+   *  actions. `order` is JSON-encoded onto the argv; opener/closer are ids. */
+  order?: string[];
+  opener?: string | null;
+  closer?: string | null;
 }
 
 /** Board decision result (operator-facing). */
@@ -516,6 +553,13 @@ export function decideBoard(
   if (fields.subtitle) args.push('--subtitle', fields.subtitle);
   if (fields.confirmName) args.push('--confirm-name', fields.confirmName);
   if (fields.producerId) args.push('--producer-id', fields.producerId);
+  // CONFIRM-ORDER fields (U9/U13). Only present for `confirm_order` (the route
+  // gates on the action before populating them). The finalized order is
+  // JSON-encoded so a single argv token carries the whole sequence; opener /
+  // closer are single ids. The engine validates them against the finalized set.
+  if (fields.order && fields.order.length) args.push('--order', JSON.stringify(fields.order));
+  if (fields.opener) args.push('--opener', fields.opener);
+  if (fields.closer) args.push('--closer', fields.closer);
 
   // decide shells the sole writer (25s internal budget); give it headroom.
   const d = runGateEngine('decide', args, 30_000);

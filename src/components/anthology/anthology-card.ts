@@ -163,6 +163,29 @@ export function extractSubject(
   return { subjectKey, kind: m[1] === 'assembly' ? 'anthology' : 'participant' };
 }
 
+/**
+ * INGEST WRITE-SIDE companion to extractSubject(). The board's card parsers read
+ * the sole-writer subject key ONLY from a `Ref: anthology:(card|assembly):<key>`
+ * description line (the tasks table has no source_ref column). mc_board.py carries
+ * that key as the ingest `idempotency_key` (`anthology:assembly:<aid>` /
+ * `anthology:card:<pk>`) but may not send a separate `source_ref`. This resolves
+ * the value the ingest route should fold into the `Ref:` line so the anthology_id
+ * reaches the card the client holds: an explicit `source_ref` wins; otherwise an
+ * anthology-subject idempotency_key is surfaced; otherwise undefined (the honest
+ * "not wired" state). Pure + framework-free so it is unit-testable and import-safe
+ * from the server route. Dedupe is unaffected — the dedupe key is computed
+ * independently of this Ref surfacing.
+ */
+export function resolveIngestSourceRef(
+  sourceRef: string | null | undefined,
+  idempotencyKey: string | null | undefined
+): string | undefined {
+  const explicit = (sourceRef ?? '').trim();
+  if (explicit) return explicit;
+  const key = (idempotencyKey ?? '').trim();
+  return /^anthology:(?:card|assembly):\S+$/i.test(key) ? key : undefined;
+}
+
 /** The LAST `stage_cursor=<value>` (participant) or `assembly_state=<value>`
  *  (assembly) note the status route appended. The latest note wins — a card is
  *  re-synced on every ledger move, so the final occurrence is the live cursor. */

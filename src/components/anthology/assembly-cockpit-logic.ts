@@ -18,42 +18,44 @@
  *
  * STACKED ON U11 + U9. The two functional gates (arm, sign-off) map to engine
  * actions that exist TODAY. The ordering panel (drag order + "Confirm the finalized
- * set & order") consumes U9's `cockpit_view`, which `cmd_status` does not yet
- * surface — so it renders ONLY when that data arrives and otherwise shows an honest
- * "pending" state. See PASSTHROUGH_GAPS below for the exact wiring still owed.
+ * set & order") consumes U9's `cockpit_view`. The Command Center RELAY for that
+ * data (status passthrough of assembly_state/readiness/ordering, the confirm_order
+ * board action + order/opener/closer route fields, and the anthology_id `Ref:`
+ * surfacing) is now wired in the integration branch — so the panel lights up as
+ * soon as the engine's `cmd_status` emits the data and the engine accepts the
+ * `confirm_order` action, and otherwise still shows an honest "pending" state. See
+ * PASSTHROUGH_GAPS below for the engine-side production this relay depends on.
  */
 
 /**
- * PASSTHROUGH_GAPS — the small engine/route wiring this cockpit is stacked on but
- * cannot itself land (documented, never faked):
+ * PASSTHROUGH_GAPS — the wiring this cockpit is stacked on. The COMMAND CENTER
+ * RELAY side of each is now landed in the integration branch (documented here so
+ * the remaining engine-side dependency stays explicit, never faked):
  *
- *  1. `cmd_status` (gate_engine.py) returns only {ok, kind, open_gate, actor,
- *     doors, actions}. It does NOT surface `assembly_state`, the S9 readiness
- *     report (anthology_state.py `_readiness`), or U9's `cockpit_view` ordering
- *     slots. The readiness ticker + drag-order list therefore render only when a
- *     future passthrough adds `assembly_state` / `readiness` / `ordering` to the
- *     status payload (this module already reads them if present).
+ *  1. status passthrough — RELAY DONE: boardStatus() + GET /api/anthology/gate now
+ *     pass `assembly_state` / `readiness` / `ordering` (U9 `cockpit_view` alias)
+ *     verbatim to this module, which already reads them. ENGINE DEPENDENCY:
+ *     `cmd_status` (gate_engine.py) must actually EMIT those fields for an assembly
+ *     subject (anthology_state.py `_readiness` + U9 `build_ordering_view`). Until
+ *     it does, the ticker + drag-order list stay in their honest "pending" state.
  *
- *  2. There is no engine board action for "Confirm the finalized set & order":
- *     gate_engine.py exposes ONLY `ready_to_assemble` (arm) and `sign_off`. The
- *     finalize+finale-write + the producer's adjusted-order persist live in
- *     anthology_state.py's assembly-advance subcommand, not a board gate. A new
- *     board action (e.g. `confirm_order`) + DecideSchema fields to carry the
- *     order/opener/closer are needed; until then the confirm button posts the
- *     best-available action and this module flags the refusal honestly.
+ *  2. confirm_order — RELAY DONE: the route's DecideSchema accepts
+ *     `order`/`opener`/`closer` and passes them to `decide --action confirm_order`.
+ *     ENGINE DEPENDENCY: gate_engine.py must expose the `confirm_order` board
+ *     action (the finalize+finale-write + adjusted-order persist that today lives
+ *     in anthology_state.py's assembly-advance). Until it does, the confirm button
+ *     posts the action and this module flags the engine's refusal honestly.
  *
- *  3. The board card cannot resolve the anthology_id from the Task it receives:
- *     the aid lives in the card's `source_ref` / idempotency key
- *     `anthology:assembly:<aid>`, embedded by the ingest ONLY in the task_created
- *     event marker `[ingest:...]` (the tasks table has no source_ref column; the
- *     description carries only "Source: anthology"). `resolveAnthologyAssembly`
- *     parses the aid from a widened `source_ref` / a description marker when
- *     present, and returns a null aid (→ honest "not wired" state) otherwise.
+ *  3. anthology_id — RELAY DONE: the ingest route now folds the anthology
+ *     sole-writer subject key (`anthology:(card|assembly):<key>`, carried as the
+ *     mc_board idempotency_key) into the card's `Ref:` description line, so
+ *     `resolveAnthologyAssembly` (and U12's extractSubject) resolve the aid. When
+ *     neither a source_ref nor an anthology-subject key is present it still returns
+ *     a null aid (→ honest "not wired" state).
  */
 export const PASSTHROUGH_GAPS = [
-  'status: assembly_state + readiness + ordering (U9 cockpit_view) not surfaced by cmd_status',
-  'engine: no board gate action for "Confirm the finalized set & order" (confirm_order) + no order/opener/closer fields on the gate route',
-  'card: anthology_id not surfaced on the Task (lives only in the ingest event marker)',
+  'engine: cmd_status must EMIT assembly_state + readiness + ordering (U9 build_ordering_view) for an assembly subject (CC relay landed)',
+  'engine: gate_engine.py must expose the confirm_order board action (CC route relay of order/opener/closer landed)',
 ] as const;
 
 // --------------------------------------------------------------------------- //
@@ -393,18 +395,18 @@ export function buildSignOffBody(anthologyId: string): SignOffBody {
 
 /**
  * "Confirm the finalized set & order" body. Carries the producer's finalized
- * order + opener + last co-author. The route's DecideSchema does not YET accept
- * `order`/`openerKey`/`closerKey` (gap #2) — they are sent so the cockpit is ready
- * the moment the passthrough lands, and dropped harmlessly until then. `action`
- * is taken from the engine's surfaced action set when it offers a finalize action,
+ * order + opener + last co-author under the SHARED board contract keys
+ * `{order, opener, closer}` — the route's DecideSchema and the engine's
+ * `confirm_order` action consume exactly these (gap #2 closed). `action` is taken
+ * from the engine's surfaced action set when it offers a finalize action,
  * defaulting to `confirm_order`.
  */
 export interface ConfirmOrderBody {
   subjectKey: string;
   action: string;
   order: string[];
-  openerKey: string | null;
-  closerKey: string | null;
+  opener: string | null;
+  closer: string | null;
 }
 export function pickConfirmOrderAction(actions: readonly string[]): string {
   const found = actions.find((a) => /confirm_order|finaliz|order/i.test(a));
@@ -419,8 +421,8 @@ export function buildConfirmOrderBody(
     subjectKey: anthologyId,
     action,
     order: order.slice(),
-    openerKey: order.length ? order[0] : null,
-    closerKey: order.length ? order[order.length - 1] : null,
+    opener: order.length ? order[0] : null,
+    closer: order.length ? order[order.length - 1] : null,
   };
 }
 
