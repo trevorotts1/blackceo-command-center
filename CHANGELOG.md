@@ -1,3 +1,23 @@
+## [v5.9.0] — 2026-07-11 — fix(demo): C8 — close the destructive-seed FAIL-OPEN that could wipe a real client's Command Center
+
+`scripts/demo/seed-demo.ts` is a DESTRUCTIVE seeder: it `DELETE`s from 14 tables (`tasks`, `agents`, `workspaces`, `companies`, `messages`, `conversations`, `kpi_snapshots`, `campaigns`, `dept_memory`, …) and then re-brands the `clients` `'self'` row to the fictional demo company. It resolved its target database as `arg('db') || process.env.DATABASE_PATH` — and that fallback was **FAIL-OPEN**.
+
+On every client box `DATABASE_PATH` points at the **LIVE Command Center database** (that is exactly how `src/lib/db/index.ts` locates it). So a bare `npx tsx scripts/demo/seed-demo.ts --profile dashboard`, run in any shell that had sourced the box's env (`set -a; source .env`, a pm2 or cron env, an ordinary operational shell), would have **silently wiped that real client's Command Center and re-branded it to the demo company**. This is the C8 failure class ("test residue in client surfaces") in its most destructive form — the same class as the `test-dept` residue rows fixed in v5.6.0 (cc-sop-ghost C2), but destructive rather than merely additive.
+
+Found while QC-ing `feat/demo-pack`. The demo pack's own fixtures are correctly isolated and were NOT the hazard — the landmine was already live on `main`. Judge 9.4.
+
+### fix — `--db` is now REQUIRED, with no `DATABASE_PATH` fallback (`scripts/demo/seed-demo.ts`)
+- The `|| process.env.DATABASE_PATH` fallback is **removed**. `--db` must be passed explicitly; the seeder refuses (exit 2) otherwise. Nothing relied on the fallback — the sole invoker, `scripts/demo/reset-demo.sh:71-73`, has always passed `--db` explicitly — so requiring it costs nothing and closes the hole outright.
+- **Belt-and-braces:** even an *explicit* `--db` is refused (exit 2) when it resolves to the same file as the live `$DATABASE_PATH`, catching the realistic accident of pasting the live path in by hand.
+
+### test — `tests/unit/demo-seed-sandbox-guard.test.ts` (new, 3 tests, all green)
+- Pins both refusals at the PROCESS boundary (exit code + stderr) and asserts the would-be victim database is left **byte-for-byte untouched**.
+- A third test pins the exact fail-open source shape so `arg('db') || process.env.DATABASE_PATH` cannot silently return.
+- **Proven failable in both directions:** restoring the fail-open line turns the suite RED (2 fail); the fix turns it GREEN (3 pass).
+
+### regression status — zero
+`npm run test:unit`: 840 tests, 826 pass, 14 fail — the SAME 14 known order-dependent flakes as the clean-`main` baseline (837/823/14; the +3 are this release's new tests). One flake member swapped in (`studio-registry-seed` "offline seed") and another swapped out, because 3 new tests shift suite ordering. Verified NOT a regression: on **unmodified** `main` with the change fully reverted, `studio-registry-seed` fails 3/3 consecutive isolated runs — it depends on ambient provider API keys (`KIE`/`OPENAI`/`FISH_AUDIO`) and is environment-sensitive, pre-existing, and unrelated to this change.
+
 ## [v5.8.0] — 2026-07-11 — chore(scripts): fleet-safe pristine-DB reset helper for duck-test runs (`reset-canary.sh`)
 
 Landed from `feat/sop-embeddings-gemini2-purge`, which was **257 commits stale** (v4.53.0 vs main v5.7.0). Its headline feature had ALREADY landed on main independently — `backfill-sop-embeddings.ts`'s non-active-model PURGE block and the `db:embed:sops` npm script are both present on main, so the branch contributed ZERO new lines there. The only net-new content was a test-instance reset helper, which is what this release lands (after two blocking defects were fixed). Judge 8.7.

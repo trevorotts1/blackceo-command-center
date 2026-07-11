@@ -46,14 +46,48 @@ const repoRoot = arg('repo-root') || process.cwd();
 const fixturePath = path.join(repoRoot, 'scripts', 'demo', 'fixtures', `${fixtureName}.json`);
 const impUrl = (rel: string) => pathToFileURL(path.join(repoRoot, rel)).href;
 
-const dbPath = arg('db') || process.env.DATABASE_PATH;
+/* ── DESTRUCTIVE-SEED SAFETY GATE (C8: "test residue in client surfaces") ─────
+ * This seeder is DESTRUCTIVE: it DELETEs from 14 tables (tasks, agents,
+ * workspaces, companies, messages, conversations, kpi_snapshots, campaigns,
+ * dept_memory, ...) and then re-brands `clients` row 'self' to the demo company.
+ *
+ * It therefore MUST NEVER be able to resolve to a real client's live database.
+ *
+ * The `--db` flag is REQUIRED and there is deliberately NO `DATABASE_PATH`
+ * fallback. That fallback used to exist and was a FAIL-OPEN footgun: on any
+ * client box `DATABASE_PATH` points at the LIVE Command Center DB (that is how
+ * src/lib/db/index.ts locates it), so a bare
+ *     npx tsx scripts/demo/seed-demo.ts --profile dashboard
+ * run in any shell that had sourced the box's env (`set -a; source .env`, a pm2
+ * or cron env, an operational shell) would have silently wiped that client's
+ * Command Center and re-branded it to the fictional demo company. No caller ever
+ * relied on the fallback — the only invoker, scripts/demo/reset-demo.sh, always
+ * passes --db explicitly — so requiring it costs nothing and closes the hole.
+ *
+ * Belt-and-braces: even an EXPLICIT --db is refused when it resolves to the same
+ * file as the live DATABASE_PATH, which catches the realistic accident of
+ * pasting the live path in by hand.
+ */
+const dbPath = arg('db');
 const workspaceRoot = arg('workspace') || process.env.OPENCLAW_WORKSPACE_ROOT;
 const companyRoot = arg('company-root') || process.env.OPENCLAW_COMPANY_ROOT;
 const configDir = arg('config-dir') || path.join(repoRoot, 'config');
 
 if (!dbPath) {
-  console.error('seed-demo: --db or DATABASE_PATH is required (refusing to guess).');
+  console.error('seed-demo: --db is REQUIRED (refusing to guess).');
+  console.error('  This seeder is DESTRUCTIVE (DELETEs 14 tables, re-brands the client row).');
+  console.error('  It does NOT fall back to $DATABASE_PATH, because on a client box that is');
+  console.error('  the LIVE Command Center database. Pass an explicit demo-sandbox DB path.');
   process.exit(2);
+}
+{
+  const livePath = process.env.DATABASE_PATH;
+  if (livePath && path.resolve(livePath) === path.resolve(dbPath)) {
+    console.error('seed-demo: REFUSING to seed — --db resolves to the same file as the live');
+    console.error(`  $DATABASE_PATH (${path.resolve(dbPath)}).`);
+    console.error('  This seeder is DESTRUCTIVE and must only ever target a demo sandbox DB.');
+    process.exit(2);
+  }
 }
 if (!workspaceRoot) {
   console.error('seed-demo: --workspace or OPENCLAW_WORKSPACE_ROOT is required.');
