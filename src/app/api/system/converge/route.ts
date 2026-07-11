@@ -52,6 +52,17 @@ import { getDb, reseedWorkspacesFromConfig } from '@/lib/db';
 // company the workspaces came from (Gap C ↔ Gap D lockstep, G12-FLOOR-CC-SEED).
 import { resolveDepartmentsTreePath } from '@/lib/db/migrations';
 import { importRoleLibrary } from '@/lib/role-library-import';
+import { resolveActiveCompanyId } from '@/lib/company';
+// C6 / AUD-16 — the eliminate path + its parity assertion.
+import {
+  readHonoredDeclinedIds,
+  syncDeclinedWorkspaceArchive,
+  listChosenDepartmentIds,
+  listProvisionedWorkspaceIds,
+  assertConvergeParity,
+  type ConvergeParity,
+} from '@/lib/workspaces/archive';
+import { listDisplayedWorkspaceIds } from '@/lib/workspaces/board-query';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -149,6 +160,16 @@ export async function POST(req: NextRequest): Promise<Response> {
     ran_at: string;
     scope: string;
     workspaces?: { created: number; updated: number };
+    // C6: what the honored declined set did to the board on this run.
+    declined_workspaces?: {
+      declined: string[];
+      archived: string[];
+      already_archived: string[];
+      unarchived: string[];
+      no_workspace: string[];
+    };
+    // C6: the chosen == provisioned == displayed proof.
+    converge_parity?: ConvergeParity;
     sops?: { imported: number; updated: number; active_total?: number };
     untagged_personas?: string[];
     deploy?: {
@@ -164,6 +185,73 @@ export async function POST(req: NextRequest): Promise<Response> {
       const db = getDb();
       const counts = reseedWorkspacesFromConfig(db, { force: true });
       result.workspaces = counts;
+
+      // ── Step 1b (C6 / AUD-16): honor the declined set — the ELIMINATE path ──
+      //
+      // MUST run AFTER the reseed. The reseed re-upserts every dept still listed in
+      // departments.json — including declined ones, whose manifest entry usually
+      // carries NO opt-out flag (the decline lives in build-state, not the manifest).
+      // So the archive pass has to come second, or the reseed would resurrect the
+      // column it just removed. The reseed's UPSERT deliberately never touches
+      // archived_at, so an archive survives it and this is a no-op at steady state.
+      //
+      // The declined set read here is the HONORED one — provenanced NOs only, via
+      // the same computeDecisionCoverage() the interview gate uses (mirroring
+      // canonical_decline.py). A bare-string / un-provenanced "no" is a REJECTION,
+      // never a decline, and can never archive a department.
+      const declined = readHonoredDeclinedIds();
+      const archive = syncDeclinedWorkspaceArchive(db, declined);
+      result.declined_workspaces = {
+        declined: archive.declined,
+        archived: archive.archived,
+        already_archived: archive.alreadyArchived,
+        unarchived: archive.unarchived,
+        no_workspace: archive.noWorkspace,
+      };
+
+      // ── Step 1c (C6): the converge ASSERTION — chosen == provisioned == displayed.
+      //
+      // This is what makes the decline PROVABLE instead of merely coded. If a
+      // declined department still holds a lane, `unexpectedly_provisioned` is
+      // non-empty and we FAIL LOUD (500) rather than return ok:true over a board
+      // that disagrees with the owner's own answers. `displayed` comes from the
+      // BOARD'S OWN query (shared boardWhereClause), so the assertion cannot pass
+      // against a re-implementation that has drifted from what users actually see.
+      const chosen = listChosenDepartmentIds(declined);
+      if (chosen !== null) {
+        const parity = assertConvergeParity({
+          chosen,
+          provisioned: listProvisionedWorkspaceIds(db),
+          displayed: listDisplayedWorkspaceIds(db, resolveActiveCompanyId(db)),
+        });
+        result.converge_parity = parity;
+
+        if (!parity.ok) {
+          return NextResponse.json(
+            {
+              ok: false,
+              ran_at,
+              scope,
+              error:
+                'CONVERGE PARITY FAILED — chosen != provisioned != displayed. The board does ' +
+                'not match the owner\'s decisions. ' +
+                `chosen=${parity.chosen.length} provisioned=${parity.provisioned.length} ` +
+                `displayed=${parity.displayed.length}; ` +
+                `missing_from_provisioned=[${parity.missingFromProvisioned.join(', ')}] ` +
+                `unexpectedly_provisioned=[${parity.unexpectedlyProvisioned.join(', ')}] ` +
+                `provisioned_not_displayed=[${parity.provisionedNotDisplayed.join(', ')}] ` +
+                `displayed_not_provisioned=[${parity.displayedNotProvisioned.join(', ')}]`,
+              converge_parity: parity,
+              declined_workspaces: result.declined_workspaces,
+            },
+            { status: 500 },
+          );
+        }
+      } else {
+        // No resolvable departments.json — assert nothing rather than assert wrong
+        // (an empty manifest would flag every live department as unexpected).
+        console.warn('[C6] No departments.json resolved — skipping converge parity assertion.');
+      }
     } catch (err) {
       return NextResponse.json(
         {

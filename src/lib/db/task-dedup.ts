@@ -26,6 +26,7 @@
 
 import type { Database } from 'better-sqlite3';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { assertArchivedBeforeHardDelete } from '@/lib/delete-guard';
 
 // ── Open-task predicate ──────────────────────────────────────────────────────
 // "Open" = not in a terminal/closed state and not archived. Used by the reaper.
@@ -176,6 +177,12 @@ export function dedupeCanonicalWorkspaces(db: Database): WorkspaceDedupResult {
               .run(keeper.id, loser.id);
             result.rows_reassigned += info.changes;
           }
+          // B8 / AUD-46 — same chokepoint, same named reason. Every task/agent row
+          // that pointed at the loser was just repointed onto the keeper above, so
+          // the loser is a true duplicate shell: nothing unique dies here.
+          assertArchivedBeforeHardDelete(db, 'workspaces', loser.id, {
+            sanctionedReason: 'duplicate-row-reaper',
+          });
           db.prepare('DELETE FROM workspaces WHERE id = ?').run(loser.id);
           result.rows_deleted += 1;
         }
@@ -257,6 +264,14 @@ function deleteTaskFkSafe(db: Database, taskId: string): void {
       /* table vanished / unreadable — best-effort */
     }
   }
+  // B8 / AUD-46 — routed through the ONE hard-delete chokepoint with an EXPLICIT,
+  // named, logged reason. This reaper collapses DUPLICATE rows onto a survivor that
+  // REMAINS, so no unique work is destroyed and no soft-archive is required. The
+  // bypass is declared, not implicit: `grep sanctionedReason` enumerates every path
+  // in the codebase allowed to hard-delete without an archive.
+  assertArchivedBeforeHardDelete(db, 'tasks', taskId, {
+    sanctionedReason: 'duplicate-row-reaper',
+  });
   db.prepare('DELETE FROM tasks WHERE id = ?').run(taskId);
 }
 

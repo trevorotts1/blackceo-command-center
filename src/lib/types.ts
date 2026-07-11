@@ -320,6 +320,16 @@ export interface Workspace {
   head_agent_id?: string | null;
   head_agent_name?: string | null;
   head_agent_avatar?: string | null;
+  /**
+   * C6 (migration 094): soft-archive marker — IS NOT NULL means the department is
+   * HIDDEN from the board but its row and history are PRESERVED. Stamped when the
+   * owner's provenanced NO lands in the honored declined set. Board queries filter
+   * on `archived_at IS NULL`; `?includeArchived=true` opts back in. Same contract as
+   * `Task.archived_at` — never a `status` value, always this timestamp.
+   */
+  archived_at?: string | null;
+  /** Why it was archived ('declined' = owner's NO; 'operator' = manual). */
+  archived_reason?: string | null;
   created_at: string;
   updated_at: string;
 }

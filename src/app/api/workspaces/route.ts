@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { resolveActiveCompanyId } from '@/lib/company';
+import { boardWhereClause } from '@/lib/workspaces/board-query';
 import type { Workspace, WorkspaceStats, TaskStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -25,21 +26,29 @@ function generateSlug(name: string): string {
  * whose rows have not yet been re-homed while still excluding other companies.
  * When no active company can be resolved (un-branded box) we DO NOT filter.
  */
-function companyScopeClause(activeCompanyId: string | null): { sql: string; params: string[] } {
-  if (!activeCompanyId) return { sql: '', params: [] };
-  return {
-    sql: `WHERE (w.company_id = ? OR w.company_id = 'default' OR w.company_id IS NULL OR w.company_id = '')`,
-    params: [activeCompanyId],
-  };
-}
+/**
+ * C6 / AUD-16 — the board hides soft-archived departments.
+ *
+ * `archived_at` is stamped when a department lands in the honored declined set
+ * (the owner's provenanced NO), so the `archived_at IS NULL` term inside
+ * `boardWhereClause` is what makes a decline actually take the department OFF the
+ * board. The row is PRESERVED, never deleted — `?includeArchived=true` opts back
+ * in so archived departments stay fully retrievable for audit / restore. Exactly
+ * the posture /api/tasks already takes for cards (migration 058).
+ *
+ * The clause itself lives in `@/lib/workspaces/board-query` because the converge
+ * parity assertion (`chosen == provisioned == displayed`) must compare against
+ * THIS query, not a copy of it that could drift.
+ */
 
 // GET /api/workspaces - List all workspaces with stats
 export async function GET(request: NextRequest) {
   const includeStats = request.nextUrl.searchParams.get('stats') === 'true';
+  const includeArchived = request.nextUrl.searchParams.get('includeArchived') === 'true';
 
   try {
     const db = getDb();
-    const scope = companyScopeClause(resolveActiveCompanyId(db));
+    const scope = boardWhereClause(resolveActiveCompanyId(db), { includeArchived });
 
     if (includeStats) {
       // Get workspaces + dept-head agent details in one query so the dashboard

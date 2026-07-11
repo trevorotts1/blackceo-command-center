@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
-import { queryOne, run, queryAll } from '@/lib/db';
+import { queryOne, run, queryAll, getDb } from '@/lib/db';
+import {
+  assertArchivedBeforeHardDelete,
+  HardDeleteWithoutArchiveError,
+  hardDeleteRefusedResponseBody,
+} from '@/lib/delete-guard';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
@@ -711,6 +716,23 @@ export async function DELETE(
 
     if (!existing) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+
+    // B8 / AUD-46 — a hard DELETE is REFUSED unless a soft-archive preceded it.
+    //
+    // Everything below this line is IRREVERSIBLE: the task row and its cascaded
+    // children (history, deliverables, QC results, events) are destroyed with no
+    // tombstone. `archived_at` already exists (migration 058) and the board already
+    // hides archived cards — a soft-archive is ALREADY the lossless way to take a
+    // card off the board, there was just nothing forcing its use. This forces it,
+    // and fails CLOSED. Archive first via POST /api/tasks/<id>/archive, then delete.
+    try {
+      assertArchivedBeforeHardDelete(getDb(), 'tasks', id);
+    } catch (err) {
+      if (err instanceof HardDeleteWithoutArchiveError) {
+        return NextResponse.json(hardDeleteRefusedResponseBody(err), { status: 409 });
+      }
+      throw err;
     }
 
     // Delete or nullify related records first (foreign key constraints).

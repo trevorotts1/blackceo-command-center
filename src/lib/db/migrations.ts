@@ -3589,6 +3589,62 @@ const migrations: Migration[] = [
       );
     },
   },
+  {
+    // NOTE ON NUMBERING (merge-train serialization): 092 is taken by cc-c3-dedup
+    // (merged). The in-flight cc-c8-c10 branch also authored a '092' and must
+    // rebase to 093 when it lands. This branch therefore claims 094 and NOT 093,
+    // so the three branches can land in order (c3 → c8-c10 → this) without a
+    // duplicate id — which the DATA-03 fail-fast below would reject at module load.
+    id: '094',
+    name: 'add_workspace_archived_at',
+    // Purely ADDITIVE (two nullable columns + an index). No data is moved or
+    // destroyed, so it is safe to apply during request-time additive self-heal.
+    up: (db) => {
+      // C6 / AUD-16 — the ELIMINATE path.
+      //
+      // A department the owner provenance-DECLINED kept its workspace row and kept
+      // rendering as a live Kanban column: canonical_decline.py (C1) classified the
+      // NO correctly, but nothing on the read side ever consumed the honored
+      // declined set. This column is what lets a decline actually take a department
+      // OFF the board — SOFT: the row and all its history are PRESERVED, exactly as
+      // tasks.archived_at (migration 058) does for cards. A decline is a display
+      // decision, not a data-destruction decision; the owner can flip NO → YES and
+      // the department comes back intact.
+      //
+      // It is ALSO the row `delete-guard.ts` (B8 / AUD-46) reads to refuse a hard
+      // DELETE of a workspace that was never archived first.
+      console.log('[Migration 094] Adding workspaces.archived_at / archived_reason (C6)...');
+
+      const cols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+
+      // schema.ts declares both columns on fresh installs, so the ALTERs are
+      // guarded — this migration only heals an EXISTING pre-094 database.
+      if (!cols.includes('archived_at')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN archived_at TEXT`);
+        console.log('[Migration 094] workspaces.archived_at added');
+      } else {
+        console.log('[Migration 094] workspaces.archived_at already present, skipping');
+      }
+
+      if (!cols.includes('archived_reason')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN archived_reason TEXT`);
+        console.log('[Migration 094] workspaces.archived_reason added');
+      } else {
+        console.log('[Migration 094] workspaces.archived_reason already present, skipping');
+      }
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_workspaces_archived_at ON workspaces(archived_at)`);
+      console.log('[Migration 094] idx_workspaces_archived_at index ready');
+
+      // Deliberately does NOT back-fill any archive here. Archiving is driven by
+      // the honored declined set at converge time (syncDeclinedWorkspaceArchive),
+      // which reads build-state — the canonical provenance source. A migration
+      // guessing at which departments were declined would be exactly the kind of
+      // unprovenanced decline that gate #8 exists to reject.
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
