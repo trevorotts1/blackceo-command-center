@@ -1,3 +1,24 @@
+## [v5.2.0] — 2026-07-11 — fix(cc-kanban): kanban lifecycle cluster — timestamp-dialect, session-liveness, completion-chain (B2/B3/B5/B6/B9)
+
+Repairs the task-completion lifecycle across the sweep/reconcile cluster. Judge 9.0. Sixteen dedicated unit tests (`tests/unit/b2-timestamp-dialect.test.ts`, `b3-b6-liveness-and-churn.test.ts`, `b5-completion-chain.test.ts`) all pass in isolation and inside the full suite; the merged full-suite failure count did not rise above the pre-existing order-dependent flake set (14 ≤ baseline 15).
+
+### fix — B2 timestamp-dialect normalization (`src/lib/db/index.ts` + every sweep predicate)
+- `mission-control.db` stores timestamps in TWO dialects inside the SAME TEXT columns (ISO-8601 `T…Z` from Node writers; SQLite space-separated from `datetime('now')`). A naive TEXT compare is wrong — `'T'` (0x54) sorts after `' '` (0x20) at index 10 — so every time window silently degenerated (a 10-minute QC window became "the rest of the UTC day"). New canonical helpers `timeNow()` / `sqlTime()` / `parseDbTime()` give writers one format and every window predicate a dialect-safe compare, applied in `intake-advance-sweep.ts`, `qc-review-sweep.ts`, `stale-task-sweep.ts`, and `stuck-in-progress-sweep.ts`.
+
+### fix — B3 stuck-in-progress session-liveness probe (`stuck-in-progress-sweep.ts`, `execution-watcher.ts`)
+- The `events` table has no mid-turn activity type, so a legitimately long-running turn left no liveness signal and was falsely force-blocked (real turns were observed finishing 6h+ after a 45-min false block). New `probeSessionLiveness()` is a best-effort, never-throw read of the agent's OpenClaw `chat.history`: only a message newer than the cutoff (confirmed alive) skips the block; an unreachable gateway / no timestamp falls through to the existing block path, so the silent-death safety net is fully preserved. Default no-progress threshold raised 45 → 180 min, read at call time so a runtime env override actually takes effect.
+
+### fix — B5 completion chain (`task-lifecycle.ts`, `task-dispatcher.ts`, `execution-watcher.ts`, `api/webhooks/agent-completion/route.ts`)
+- `registerDeliverable` no longer INSERTs `updated_at`: DBs created before that column was added never got a migration for it, so naming it made EVERY call throw "no column named updated_at" and silently broke the completion chain.
+- `deterministicOpenclawSessionId()` — the session id is a pure function of the agent name, so a purged `openclaw_sessions` row no longer strands a finished task: the dispatcher UPSERTs the active session (self-healing a drifted row + binding `task_id`), and both the completion webhook and the execution reconcile re-derive the id and recreate the row instead of 404-ing / sweeping a genuine completion to blocked.
+- The unblock PATCH now also clears the SYSTEM block-metadata columns (`block_reason` / `block_needs` / `block_audience`) in the same UPDATE, so an unblocked card no longer reads as SYSTEM-blocked on the board.
+
+### fix — B6 review-churn spare + cap-out surfacing (`stale-task-sweep.ts`, `intake-advance-sweep.ts`)
+- The stale sweep now leaves a review task deliberately parked by QC (heuristic no-key / provider-down) alone instead of churning it back to the orchestrator. A task that hit the QC-reroute cap is surfaced to the operator exactly once (a `task_capped` event + one SYSTEM-audience alert, never a client channel) instead of rotting invisibly in backlog.
+
+### fix — B9 truthful sweep logging (`qc-review-sweep.ts`)
+- The sweep logged `FAIL→backlog` for every non-pass, but a heuristic score HOLDS the task in review for human promotion (only an `llm` fail reroutes). The log now reports the outcome the task actually took.
+
 ## [v5.1.1] — 2026-07-10 — deploy(cc): reconcile v5.1.0 write-back-auth fix onto the operator box + preserve the welcome-cards home
 
 Deploys the v5.1.0 task-API write-back-auth fix (entry below) to a box whose live build (local v4.73.0 `6ab73df`) predated the fix. That build dispatched dept/main agents with NO `Authorization` header on their write-backs, so every write-back 401'd against `src/middleware.ts` Gate B and finished tasks froze `in_progress` until the stuck-in-progress sweep moved them to `blocked` (observed: 94 blocked / 39 backlog / 0 in_progress). Reconciled by cherry-picking the seven-welcome-cards home (`6ab73df`) on top of tag `v5.1.0` (`f200192`) so this build carries BOTH the write-back-auth backend fix AND the seven-card `/` home + `/overview` grid.
