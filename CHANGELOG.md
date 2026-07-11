@@ -1,3 +1,22 @@
+## [v5.12.0] — 2026-07-11 — fix(cc-c3): idempotent trio de-duplication + headless-workspace reaper (migration 092)
+
+Finding C3: re-provisioning a Command Center **multiplied** its agents and workspaces. Each re-provision re-seeded the trio roles instead of converging on them, so duplicate trio agents accumulated, and ~13 workspaces ended up **headless** (no `head_agent_id`, or one pointing at a deleted agent). Judge 9.0 (independent adversarial judge), independently re-proven here. Migration **092** — no collision (main's highest was 091).
+
+### fix — seeding is now CONVERGENT, not additive (`src/lib/qc-scorer.ts`, `src/lib/db/migrations.ts`)
+- `canonicalTrioRole()` folds Skill-23's `deep-research` onto `research`, so the same logical role stops being seeded twice under two names. Non-trio roles return `null` and are left alone — they are legitimately many-per-department.
+- Seeding now fills **only the missing trio slot** on a partially-seeded workspace. Seeding N times yields the same trio.
+- `dedupeTrioAgents()` reconciles workspaces that ALREADY accumulated duplicates: it picks a survivor, **re-points every foreign-key reference onto the survivor before deleting the loser** (discovered dynamically from `sqlite_master`, so no table is missed and no row is orphaned), then removes the duplicate. Identity outranks reference count — the work is repointed, not the survivor swapped — so a stray reference cannot hijack which agent survives.
+- `ensureWorkspaceHeadAgents()` materialises a head for any headless workspace, **promotes an existing leadership agent rather than inventing a new one**, and re-materialises a head whose `head_agent_id` dangles at a deleted agent. The head is **never** a trio agent (the Devil's Advocate must not surface as department head).
+
+### safety — the destructive path is narrowly scoped
+The only `DELETE` is `DELETE FROM agents WHERE id = ?` against a specific duplicate loser, and it runs **after** that agent's FK references have been repointed onto the survivor. De-dup is scoped to the three canonical TRIO roles and is proven never to touch non-trio roles (verified against a 17-specialist department). Both `dedupeTrioAgents` and `ensureWorkspaceHeadAgents` are **idempotent** and do not churn existing heads.
+
+### test — `tests/unit/cc-c3-trio-dedup-headless.test.ts` (new, 18 tests, all green)
+Covers convergent re-provisioning, the non-trio safety boundary, FK repointing vs orphaning, survivor-hijack regression, idempotency of both passes, dangling-head re-materialisation, and an **EXIT TEST**: after reconciliation — zero duplicate trio agents, zero headless workspaces.
+
+### regression status — zero
+`npm run test:unit`: 862 / 848 pass / 14 fail — the failure set is a strict subset of the 14 known order-dependent flakes on clean `main`, with **zero new failures**. `tsc --noEmit` clean. Rebased cleanly onto `main` @ v5.11.0.
+
 ## [v5.11.0] — 2026-07-11 — fix(skill6): route producer status writes through the lifecycle guard + map survey/form/quiz to web-development
 
 Reconciled from `feat/skill6-survey-visibility` (branch was **256 commits stale**). Two of its three changes landed; the third was **rejected because `main` already solves it more strictly**. Judge 9.2.
