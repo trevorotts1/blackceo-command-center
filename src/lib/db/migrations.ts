@@ -3629,7 +3629,7 @@ const migrations: Migration[] = [
     // reason as 091/093 — run on the next controlled boot, never racing live
     // ingest.
     //
-    // MUST run AFTER 093: the fixture workspaces 092 purges may still carry
+    // MUST run AFTER 093: the fixture workspaces 093 purges may still carry
     // company_id = testco, and purgeTestResidueCompanies refuses (correctly) to
     // delete a company any workspace still references. Array order IS run order.
     deferInAdditiveSelfHeal: true,
@@ -4450,9 +4450,9 @@ export function detectTestResidue(db: Database.Database): TestResidueReport {
 
   // All three branches use isTestResidueSlug (pattern OR exact allowlist).
   // Pattern-ONLY would be BLIND to `no-script-dept`: it is on
-  // TEST_RESIDUE_WORKSPACE_SLUGS and IS hard-deleted by migration 092, yet it
+  // TEST_RESIDUE_WORKSPACE_SLUGS and IS hard-deleted by migration 093, yet it
   // carries no test-shaped token, so a pattern-only gate would never fail loud
-  // on it — letting known residue ride onto a client board whenever 092 is
+  // on it — letting known residue ride onto a client board whenever 093 is
   // deferred (it is `deferInAdditiveSelfHeal`) or skipped.
   if (tableExists('workspaces')) {
     const rows = db.prepare('SELECT slug FROM workspaces').all() as { slug: string | null }[];
@@ -4616,7 +4616,7 @@ export function purgeTestResidueCompanies(db: Database.Database): TestResidueCom
           slug,
           reason:
             `${refs.c} workspace(s) still reference this company — left untouched. ` +
-            `Purge/re-home those workspaces first (migration 092 handles the fixture ones).`,
+            `Purge/re-home those workspaces first (migration 093 handles the fixture ones).`,
         });
         continue;
       }
@@ -4940,7 +4940,7 @@ export function reseedWorkspacesFromConfig(
       // stale departments.json. EXACT slug match only (see ../test-residue.ts);
       // a client dept named "testing-lab" is untouched.
       //
-      // Without this, the C8 loop is unbreakable: migration 092 hard-deletes
+      // Without this, the C8 loop is unbreakable: migration 093 hard-deletes
       // `smoke-test-dept` on boot, then the very next converge re-seeds it right
       // back from the manifest, and converge's own residue assertion 500s on the
       // row converge itself just created — a permanent brick no migration can
