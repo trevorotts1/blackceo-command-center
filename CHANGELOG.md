@@ -1,3 +1,22 @@
+## [v5.5.0] — 2026-07-11 — fix(cc-duality-tail): persona-blend duality TAIL — deadline voice-fallback gate, full-blend credit, config validation, rescore invalidation (D5/D7/D8/D9)
+
+Closes the remaining P2/P3 "duality tail" findings on top of the D1–D4 persona-blend core (v5.3.0), so the never-naked house-voice guarantees actually hold at the deadline, credit, config, and rescore seams. Judge 9.0. QC re-confirmed from RAW gate output: `npm run test:vitest` 137/137 green + `tsc --noEmit` clean; `npm run test:unit` 814 pass / 14 fail, with the failing set independently reproduced byte-for-byte in a pristine v5.4.0 worktree (parent baseline 793 pass / 14 fail — merged adds exactly this branch's new assertions, zero new failures).
+
+### fix — D5 deadline fallback no longer ships the unconfirmed audience VOICE (`src/lib/tasks.ts`)
+- The never-naked house-voice release was fictional: `markAudienceDeadlineFallback` only flipped `confirm_state`, but `buildPersonaBlock` kept delivering the stored `blend_directive` ("Write in X's VOICE") + `tasks.persona_id` verbatim, because the blend mirrors the voice persona onto `persona_id` (D1) — so the assumed "neutralize only when `persona_id` is NULL" branch never fired. The pending → deadline_fallback transition now rewrites `blend_directive` to an explicit neutral house-voice directive (+ `ensureBlendGuardrail`), NULLs `voice_persona_id`, and repoints `persona_id`/`persona_name` to the bundle's TOPIC persona when the task was pinned to the unconfirmed audience persona.
+
+### fix — D7 adaptive learning credits every blended persona (`src/app/api/tasks/[id]/route.ts`, `src/lib/qc-scorer.ts`, `src/lib/persona-selector.ts`)
+- The learning loop credited only the primary voice-mirror persona (`tasks.persona_id`); the bundle's topic persona and any `task_subtask_persona` decomposition rows got no completion signal. New `collectCreditablePersonaIds` (pure dedup/cap) + `recordPersonaCompletions` (fire-and-forget) replace the single `spawnRecordCompletion` call at BOTH done-transition sites (PATCH `status=done` and QC auto-approve). `spawnRecordCompletion` gained an optional `--persona-role` analytics tag with graceful fallback on boxes predating the flag.
+
+### fix — D8 OPENCLAW_COMPANY_CONFIG forwarding validates the file (Command Center side) (`src/lib/persona-selector.ts`)
+- `resolveCompanyConfigHint` now VALIDATES the override (exists + parses as JSON) before forwarding it as a grounding hint, so a corrupt / mid-write config is never handed to the selector. NOTE: this closes only the Command Center half of D8 — the companion onboarding-side defect (the installer / detect path never reading this override) is tracked and fixed separately.
+
+### fix — D9 dispatch-time SOP rescore invalidates the stale blend mirror (`src/lib/tasks.ts`, `src/lib/task-dispatcher.ts`)
+- A dispatch-time SOP rescore that changed the pinned persona left the OLD `blend_directive` riding the NEW persona (the dispatcher patched `persona_id`/`name`/`mode` in memory but never the directive). `rescorePersonaWithSOP` now invalidates the stale blend mirror (NULLs the voice/topic mirror columns, sets `confirm_state → not_required`, emits an audit event) on a changed rescore when a bundle exists, and returns the neutralized `blend_directive` so the dispatcher patches it onto the in-memory row before `buildPersonaBlock` renders the dispatch message.
+
+### test (`tests/unit/persona-blend-audience-confirm.test.ts`, `record-completion-spawn.test.ts`, `dep2-sop-aware-matching.test.ts`, `d8-company-config-hint.test.ts`)
+- 43 new/extended assertions across 4 Node-runner unit files (3 extended + 1 new) covering the D5 fallback rewrite, D7 multi-persona credit set + role-tag fallback, D8 config validation, and D9 stale-mirror invalidation.
+
 ## [v5.4.0] — 2026-07-11 — feat(cc-empty-board): A7 empty-vs-idle board drift signal (NON-GATING advisory)
 
 Makes an empty Anthology board distinguishable between healthy-idle (nothing queued right now) and a dead board (the S0→mc_board mirror silently dropped every card while the engine ledger kept accumulating — the confirmed A7 failure: 5 ledger participants sat invisible for 3 days against 0 cards, with no distinguishing signal). Judge 9.0 (REFIXED — the earlier deploy-rollback regression is closed and proven). Gates re-confirmed from RAW output: vitest 137/137, deep-health 79/79 (incl. 2 route-level A7 regression tests), `tsc --noEmit` clean; baseline vitest was 123/123, merged 137/137 (+14 = exactly this branch's new A7 tests, zero regressions).
