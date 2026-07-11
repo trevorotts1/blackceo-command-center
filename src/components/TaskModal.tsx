@@ -221,19 +221,43 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
     }
   };
 
+  /**
+   * B8 / AUD-46 — "Remove from board" SOFT-ARCHIVES; it never hard-deletes.
+   *
+   * This button used to issue a hard DELETE, which irreversibly destroyed the task
+   * and its whole history (deliverables, QC results, events) on one click of a
+   * browser confirm(). That is the accidental-purge vector B8 exists to close, and
+   * the hard-delete route now REFUSES an un-archived row (409) anyway.
+   *
+   * Soft-archive does what the operator actually means by "delete this card": it
+   * leaves the board (GET /api/tasks filters archived_at IS NULL) while the row
+   * stays fully recoverable (?includeArchived=true, or POST the archive route's
+   * DELETE to restore). A genuine irreversible purge is still available — it is
+   * simply a deliberate, separately-audited second step, not a stray click.
+   */
   const handleDelete = async () => {
-    if (!task || !confirm(`Delete "${task.title}"?`)) return;
+    if (
+      !task ||
+      !confirm(
+        `Remove "${task.title}" from the board?\n\n` +
+          `It will be archived — hidden from the board, but preserved and recoverable.`,
+      )
+    )
+      return;
 
     try {
-      const res = await fetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/tasks/${task.id}/archive`, { method: 'POST' });
       if (res.ok) {
         useMissionControl.setState((state) => ({
           tasks: state.tasks.filter((t) => t.id !== task.id),
         }));
         onClose();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        console.error('Failed to archive task:', data);
       }
     } catch (error) {
-      console.error('Failed to delete task:', error);
+      console.error('Failed to archive task:', error);
     }
   };
 
@@ -778,13 +802,15 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
             <div className="flex gap-2">
               {task && (
                 <>
+                  {/* B8: archives (off the board, row preserved) — labelled honestly. */}
                   <button
                     type="button"
                     onClick={handleDelete}
+                    title="Archive this task — hidden from the board, but preserved and recoverable"
                     className="flex items-center gap-2 px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg text-sm font-medium transition-colors"
                   >
                     <Trash2 className="w-4 h-4" />
-                    Delete
+                    Archive
                   </button>
                 </>
               )}

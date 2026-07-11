@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { resolveActiveCompanyId } from '@/lib/company';
+import { boardWhereClause } from '@/lib/workspaces/board-query';
 import type { Workspace, WorkspaceStats, TaskStatus } from '@/lib/types';
-import { TEST_RESIDUE_WORKSPACE_SLUGS } from '@/lib/test-residue';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -32,27 +32,35 @@ function generateSlug(name: string): string {
  * never show a QC smoke-test workspace just because company attribution
  * hasn't run yet.
  */
-function companyScopeClause(activeCompanyId: string | null): { sql: string; params: string[] } {
-  const residuePlaceholders = TEST_RESIDUE_WORKSPACE_SLUGS.map(() => '?').join(',');
-  const residueClause = `w.slug NOT IN (${residuePlaceholders})`;
-  const residueParams: string[] = [...TEST_RESIDUE_WORKSPACE_SLUGS];
-
-  if (!activeCompanyId) {
-    return { sql: `WHERE ${residueClause}`, params: residueParams };
-  }
-  return {
-    sql: `WHERE (w.company_id = ? OR w.company_id = 'default' OR w.company_id IS NULL OR w.company_id = '') AND ${residueClause}`,
-    params: [activeCompanyId, ...residueParams],
-  };
-}
+/**
+ * C6 / AUD-16 — the board hides soft-archived departments.
+ *
+ * `archived_at` is stamped when a department lands in the honored declined set
+ * (the owner's provenanced NO), so the `archived_at IS NULL` term inside
+ * `boardWhereClause` is what makes a decline actually take the department OFF the
+ * board. The row is PRESERVED, never deleted — `?includeArchived=true` opts back
+ * in so archived departments stay fully retrievable for audit / restore. Exactly
+ * the posture /api/tasks already takes for cards (migration 058).
+ *
+ * The clause itself lives in `@/lib/workspaces/board-query` because the converge
+ * parity assertion (`chosen == provisioned == displayed`) must compare against
+ * THIS query, not a copy of it that could drift.
+ *
+ * C8 note (merge of cc-c8-c10 + cc-archive-lifecycle): the test/fixture-residue
+ * slug exclusion that used to live here as a local `companyScopeClause` now lives
+ * INSIDE `boardWhereClause`, unconditionally. It was moved rather than dropped —
+ * folding it into the shared clause is what keeps the board AND the converge
+ * `displayed` set agreeing on residue, instead of only the board excluding it.
+ */
 
 // GET /api/workspaces - List all workspaces with stats
 export async function GET(request: NextRequest) {
   const includeStats = request.nextUrl.searchParams.get('stats') === 'true';
+  const includeArchived = request.nextUrl.searchParams.get('includeArchived') === 'true';
 
   try {
     const db = getDb();
-    const scope = companyScopeClause(resolveActiveCompanyId(db));
+    const scope = boardWhereClause(resolveActiveCompanyId(db), { includeArchived });
 
     if (includeStats) {
       // Get workspaces + dept-head agent details in one query so the dashboard

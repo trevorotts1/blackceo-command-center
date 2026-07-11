@@ -36,12 +36,21 @@ CREATE TABLE IF NOT EXISTS workspaces (
   user_md TEXT,
   sort_order INTEGER DEFAULT 1000,
   head_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  -- C6 (migration 095): soft-archive marker. IS NOT NULL = the department is off
+  -- the board but its row (and all its history) is PRESERVED. Stamped when the
+  -- owner's provenanced NO lands in the honored declined set. archived_reason
+  -- scopes the converge un-archive to declines only, so an operator's manual
+  -- archive is never undone by a resync. Mirrors tasks.archived_at (migration 058).
+  archived_at TEXT,
+  archived_reason TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
 -- Index for workspaces by company
 CREATE INDEX IF NOT EXISTS idx_workspaces_company ON workspaces(company_id);
+-- Board query filters on archived_at IS NULL on every render.
+CREATE INDEX IF NOT EXISTS idx_workspaces_archived_at ON workspaces(archived_at);
 
 -- Agents table
 -- NOTE: agents.role_type TEXT column is added by migration 060.
