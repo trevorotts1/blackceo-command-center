@@ -10,14 +10,32 @@ import { useMissionControl } from '@/lib/store';
 import { debug } from '@/lib/debug';
 import type { SSEEvent, Task } from '@/lib/types';
 
-export function useSSE() {
+interface UseSSEOptions {
+  /**
+   * MSG-07: invoked on every genuine SSE RE-open (not the first connect) so the
+   * consumer can refetch board state that changed while the stream was down.
+   * A department-scoped page should pass its own workspace_id-scoped refetch
+   * here; when omitted, useSSE falls back to a scope-safe global refetch.
+   */
+  onReconnect?: () => void | Promise<void>;
+}
+
+export function useSSE(options?: UseSSEOptions) {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   // Use ref to track selectedTask ID without causing re-renders
   const selectedTaskIdRef = useRef<string | undefined>();
+  // MSG-07: distinguishes the first connect (page already loaded a fresh
+  // snapshot) from a genuine reconnect (deltas may have been missed while down).
+  const hasConnectedRef = useRef(false);
+  // Keep the latest onReconnect callback in a ref so the SSE effect stays
+  // mount-stable (mirrors the selectedTaskIdRef pattern) instead of tearing the
+  // stream down whenever the consumer passes a new inline callback.
+  const onReconnectRef = useRef<UseSSEOptions['onReconnect']>(options?.onReconnect);
   const {
     updateTask,
     addTask,
+    removeTask,
     setIsOnline,
     selectedTask,
     setSelectedTask,
@@ -28,8 +46,42 @@ export function useSSE() {
     selectedTaskIdRef.current = selectedTask?.id;
   }, [selectedTask]);
 
+  // Keep the onReconnect ref current without re-running the SSE effect.
+  useEffect(() => {
+    onReconnectRef.current = options?.onReconnect;
+  }, [options?.onReconnect]);
+
   useEffect(() => {
     let isConnecting = false;
+
+    // MSG-07: on reconnect, reconcile the whole board so the UI can't sit stale
+    // (waiting up to the 60s fallback poll) on deltas that fired while the
+    // stream was down. Only the UNSCOPED board can be blanket-refetched here: a
+    // department-scoped page fetches /api/tasks?workspace_id=…, so replacing its
+    // list with ALL tasks would leak cross-department cards. Scoped pages should
+    // pass an onReconnect callback with their scoped refetch instead.
+    const catchUpBoardState = async () => {
+      try {
+        if (useMissionControl.getState().selectedDepartment !== null) return;
+        const res = await fetch('/api/tasks', { cache: 'no-store' });
+        if (!res.ok) return;
+        const fresh: Task[] = await res.json();
+        const current = useMissionControl.getState().tasks;
+        const changed =
+          fresh.length !== current.length ||
+          fresh.some((t) => {
+            const c = current.find((ct) => ct.id === t.id);
+            return !c || c.status !== t.status;
+          });
+        if (changed) {
+          debug.sse('Reconnect catch-up: board changed, reconciling store');
+          useMissionControl.getState().setTasks(fresh);
+        }
+      } catch (error) {
+        // Keep last-known state; the page's periodic poll remains the backstop.
+        debug.sse('Reconnect catch-up refetch failed', error);
+      }
+    };
 
     const connect = () => {
       if (isConnecting || eventSourceRef.current?.readyState === EventSource.OPEN) {
@@ -50,6 +102,20 @@ export function useSSE() {
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
+
+        // MSG-07: catch up on any deltas missed while the stream was down. The
+        // very first open needs no catch-up (the page's initial load already
+        // fetched a fresh snapshot); only a genuine RE-open does. Prefer the
+        // consumer-supplied scoped refetch, else the scope-safe global one.
+        if (hasConnectedRef.current) {
+          const onReconnect = onReconnectRef.current;
+          if (onReconnect) {
+            void onReconnect();
+          } else {
+            void catchUpBoardState();
+          }
+        }
+        hasConnectedRef.current = true;
       };
 
       eventSource.onmessage = (event) => {
@@ -83,6 +149,14 @@ export function useSSE() {
                 debug.sse('Also updating selectedTask for modal');
                 setSelectedTask(incomingTask);
               }
+              break;
+
+            case 'task_deleted':
+              // Broadcast by DELETE /api/tasks/[id] as { id }. Without this case
+              // a deletion made elsewhere never disappeared from an open board
+              // until the next full page load/refetch.
+              debug.sse('Task deleted', sseEvent.payload);
+              removeTask((sseEvent.payload as { id: string }).id);
               break;
 
             case 'activity_logged':
@@ -159,5 +233,5 @@ export function useSSE() {
     };
   // selectedTask removed from deps to prevent re-connection loop
   // We use selectedTaskIdRef to check the current selected task ID without triggering re-renders
-  }, [addTask, updateTask, setIsOnline, setSelectedTask]);
+  }, [addTask, updateTask, removeTask, setIsOnline, setSelectedTask]);
 }

@@ -3,14 +3,19 @@
 // White-label deployments must not ship with any "Command Center" / demo
 // company / placeholder content. The seed therefore:
 //
-//   1. ALWAYS inserts the structural master orchestrator agent. Every
-//      install needs this regardless of branding.
-//   2. ONLY inserts demo agents, tasks, messages, and events when
-//      `SKIP_DEMO_SEED` is NOT set to 'true'. The demo content is intended
-//      for the public github.com/crshdn/mission-control demo deployment.
-//      Real client deployments set `SKIP_DEMO_SEED=true` in their env so
-//      the database boots structurally empty and Skill 23 (AI Workforce
-//      Interview) populates it for that specific client.
+//   1. Inserts the structural master orchestrator agent — but GUARDED: it
+//      first checks for an existing is_master=1 'Orchestrator' and only
+//      inserts when none exists. Re-running the seed (e.g. on every
+//      `--update-only` install pass) can therefore NEVER create a second
+//      master. A client box must have exactly one master.
+//   2. Demo content (agents, tasks, messages, events) is OPT-IN: it seeds
+//      ONLY when `DEMO_SEED === 'true'`. The default — env unset — is NO
+//      demo, so a client database boots structurally empty and Skill 23
+//      (AI Workforce Interview) populates it for that specific client. The
+//      demo is intended purely for the public github.com/crshdn/mission-control
+//      demo deployment, which sets DEMO_SEED=true. (Replaces the old
+//      SKIP_DEMO_SEED opt-out, which was set NOWHERE and so shipped demo
+//      content onto every real client board — audit ISSUE #1.)
 //   3. NEVER inserts a "Command Center" / "BlackCEO" / placeholder company
 //      row. The companies table stays empty until Skill 23 writes the real
 //      one. The bootstrap page handles the empty-state UX.
@@ -109,48 +114,75 @@ async function seed() {
 
   const db = getDb();
   const now = new Date().toISOString();
-  const skipDemoSeed = process.env.SKIP_DEMO_SEED === 'true';
+  const seedDemo = process.env.DEMO_SEED === 'true';
 
-  // Structural seed: master orchestrator agent always exists.
+  // Structural seed: master orchestrator agent — GUARDED.
+  //
+  // Check for an existing master first and only insert when none exists, so
+  // re-running the seed (every install/update pass calls it) can never create
+  // a duplicate master (audit ISSUE #1).
   //
   // No hardcoded company or business entries here. Companies are created
   // by Skill 23 (AI Workforce Interview) or by the auto-seed from
   // departments.json on first boot (migrations.ts). Until then the
   // bootstrap page renders.
-  const orchestratorId = uuidv4();
+  // Structural prerequisite: agents.workspace_id defaults to 'default' with a
+  // FOREIGN KEY on workspaces(id), but nothing seeds a 'default' workspace
+  // (migration 002 deliberately seeds no departments — those come from Skill 23
+  // / departments.json). On a fresh database the Orchestrator INSERT below
+  // therefore failed with SQLITE_CONSTRAINT_FOREIGNKEY before any output.
+  // Guarantee the structural 'default' workspace exists (idempotent; carries no
+  // client/demo content — it is the schema's own DEFAULT target, not a
+  // department).
   db.prepare(
-    `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, specialist_type, soul_md, user_md, agents_md, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    orchestratorId,
-    'Orchestrator',
-    'Team Lead & Orchestrator',
-    'The master orchestrator who coordinates all agents and manages the mission queue',
-    '🦞',
-    'standby',
-    1,
-    'permanent',
-    ORCHESTRATOR_SOUL_MD,
-    ORCHESTRATOR_USER_MD,
-    ORCHESTRATOR_AGENTS_MD,
-    now,
-    now
-  );
+    `INSERT OR IGNORE INTO workspaces (id, name, slug, description, sort_order, created_at, updated_at)
+     VALUES ('default', 'General', 'default', 'Structural default workspace (schema DEFAULT target)', 50000, ?, ?)`
+  ).run(now, now);
+
+  const existingMaster = db
+    .prepare("SELECT id FROM agents WHERE is_master = 1 AND name = 'Orchestrator'")
+    .get() as { id: string } | undefined;
+
+  let orchestratorId: string;
+  if (existingMaster) {
+    orchestratorId = existingMaster.id;
+    console.log(`   - Master Orchestrator already present: ${orchestratorId} (skipping insert)`);
+  } else {
+    orchestratorId = uuidv4();
+    db.prepare(
+      `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, specialist_type, soul_md, user_md, agents_md, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      orchestratorId,
+      'Orchestrator',
+      'Team Lead & Orchestrator',
+      'The master orchestrator who coordinates all agents and manages the mission queue',
+      '🦞',
+      'standby',
+      1,
+      'permanent',
+      ORCHESTRATOR_SOUL_MD,
+      ORCHESTRATOR_USER_MD,
+      ORCHESTRATOR_AGENTS_MD,
+      now,
+      now
+    );
+    console.log(`   - Created Orchestrator (master agent): ${orchestratorId}`);
+  }
 
   // Seed department memories (structural, no demo content).
   seedDeptMemory();
 
-  if (skipDemoSeed) {
-    console.log('SKIP_DEMO_SEED=true, skipping demo agents, tasks, conversations, events.');
-    console.log('Database seeded structurally.');
-    console.log(`   - Created Orchestrator (master agent): ${orchestratorId}`);
+  if (!seedDemo) {
+    console.log('DEMO_SEED not set — skipping demo agents, tasks, conversations, events.');
+    console.log('Database seeded structurally (no demo content).');
     closeDb();
     return;
   }
 
-  // Demo seed (only when SKIP_DEMO_SEED is unset). This is for the public
-  // demo deployment only. Client installs MUST set SKIP_DEMO_SEED=true.
-  console.log('SKIP_DEMO_SEED not set, inserting demo agents, tasks, and conversations.');
+  // Demo seed (OPT-IN via DEMO_SEED=true). This is for the public demo
+  // deployment only — real client installs leave DEMO_SEED unset.
+  console.log('DEMO_SEED=true — inserting demo agents, tasks, and conversations.');
 
   const businessId = 'default';
 
@@ -228,8 +260,8 @@ async function seed() {
     now
   );
 
-  console.log('Database seeded successfully.');
-  console.log(`   - Created Orchestrator (master agent): ${orchestratorId}`);
+  console.log('Database seeded successfully (with demo content).');
+  console.log(`   - Master Orchestrator: ${orchestratorId}`);
   console.log(`   - Created ${agents.length} additional demo agents`);
   console.log(`   - Created ${tasks.length} sample demo tasks`);
   console.log(`   - Created team conversation`);

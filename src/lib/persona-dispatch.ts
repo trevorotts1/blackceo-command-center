@@ -1,0 +1,333 @@
+/**
+ * persona-dispatch.ts — the ONE place a dispatch message's persona block is built.
+ *
+ * FOUNDATION train FDN-3 / finding F4.1 (the single most valuable fix in the
+ * persona system): both dispatch paths — `src/lib/task-dispatcher.ts`
+ * (fast-loop auto-dispatch) and `src/app/api/tasks/[id]/dispatch/route.ts`
+ * (operator-click dispatch) — used to render `settings.persona` and, when it was
+ * the string `'auto'`, a block of prose telling the DOER to "AUTO-SELECT. Run the
+ * 5-Layer Persona Matching Protocol before starting". That prose duplicated and
+ * CONTRADICTED the persona the selector already matched and stored on the task
+ * row (`tasks.persona_id / .persona_name / .persona_mode`). The computed match
+ * never reached the doer.
+ *
+ * This module deletes that AUTO-SELECT prose and instead DELIVERS the matched
+ * persona: it reads the task row's persona identity and emits the same Section-4
+ * (A–D) + §7B load contract that `persona-matching-protocol.md` Step 5 defines —
+ * but with the id already resolved, never self-selected.
+ *
+ * Fail-closed consumer (Skill-23 SOP-07 posture): every branch of
+ * `buildPersonaBlock` returns a concrete persona OR an explicit governance
+ * oversight pointer. It NEVER emits `'auto'`, NEVER emits a self-selection
+ * protocol, and NEVER returns an empty block — a task is never dispatched
+ * "naked". When selection has not landed yet, the doer is governed by the house
+ * governance persona rather than told to invent one.
+ *
+ * Both callers import `buildPersonaBlock` so the two dispatch messages are
+ * guaranteed byte-identical for the persona section (the message spec is
+ * declared "identical spec to dispatch/route.ts" in task-dispatcher.ts).
+ */
+
+import type { ResolvedSettings } from './intelligence-resolver';
+
+/**
+ * Governance oversight pointer for mechanical / operational tasks
+ * (`no_persona_required: true`). Mirrors `GOVERNANCE_PERSONA_FALLBACK` in
+ * `persona-selector-v2.py` (q1 resolved decision). A `chmod` does not need
+ * coaching — but it still runs under principle-centered operating discipline.
+ * Resolution order for a mechanical task: the selector-supplied
+ * `task.governance_persona_id` (which itself honors any per-client
+ * `company-config.json.governance_persona_id` override) → this constant.
+ */
+export const GOVERNANCE_PERSONA_FALLBACK = 'covey-7-habits';
+
+/** Interaction mode string used when the task row / settings carry none. */
+const DEFAULT_PERSONA_MODE = 'leadership';
+
+// ─── MANDATORY STYLE-INSPIRED (NEVER IMPERSONATION) GUARDRAIL ─────────────────
+// A persona is a CRAFT LENS, not an identity to assume. Every voice-blend
+// directive the doer receives MUST carry this clause, and it is NON-REMOVABLE:
+// `ensureBlendGuardrail` re-injects it if a stored/emitted directive somehow lacks
+// it, and `renderBlendDirective` re-runs that guarantee at the render layer. This
+// is the single most important safety property of the blend feature — a blended
+// voice must never tip into pretending to BE the author.
+export const STYLE_INSPIRED_GUARDRAIL =
+  'STYLE-INSPIRED ONLY — NEVER IMPERSONATION: write in a voice INSPIRED BY this ' +
+  "persona's public style, cadence, and methodology. Do NOT claim to be this " +
+  'person, do NOT sign as them, do NOT speak in the first person AS them, and do ' +
+  'NOT fabricate quotes, biography, or endorsements. The persona is a craft lens ' +
+  'applied to OUR message for OUR audience — not an identity to assume.';
+
+/**
+ * Guarantee the mandatory style-inspired-NOT-impersonation clause is present in a
+ * blend directive. Idempotent: if the directive already carries the guardrail
+ * (detected by the two load-bearing markers), it is returned unchanged; otherwise
+ * the clause is appended. An empty/absent directive yields the guardrail alone —
+ * the guardrail can never be stripped by an upstream that omits it.
+ */
+export function ensureBlendGuardrail(directive: string | null | undefined): string {
+  const base = (directive ?? '').trim();
+  const hasGuardrail = /style-inspired/i.test(base) && /impersonation/i.test(base);
+  if (hasGuardrail) return base;
+  return base ? `${base}\n\n${STYLE_INSPIRED_GUARDRAIL}` : STYLE_INSPIRED_GUARDRAIL;
+}
+
+/**
+ * Render the doer-facing voice-blend directive block. Fail-closed + never-naked:
+ * even a null/empty directive renders the mandatory guardrail (a decided voice
+ * always ships with its safety clause). The guardrail is re-injected here so the
+ * render layer is the last, non-bypassable line of defense.
+ */
+export function renderBlendDirective(directive: string | null | undefined): string {
+  const withGuardrail = ensureBlendGuardrail(directive);
+  return `**Voice blend directive (MANDATORY):**\n${withGuardrail}`;
+}
+
+/**
+ * Workspace-relative path to a persona's blueprint. Matches the coaching-personas
+ * skill layout the doer's workspace installs (see the `coaching-personas/...`
+ * resolution in `src/app/api/personas/route.ts`). Kept relative on purpose so the
+ * doer resolves it against its OWN workspace, never an operator-absolute path.
+ */
+export function personaBlueprintPath(personaId: string): string {
+  return `coaching-personas/personas/${personaId}/persona-blueprint.md`;
+}
+
+/**
+ * Minimal task shape this module reads. All fields optional/nullable so it is
+ * tolerant of older DB rows (persona columns absent) and of columns added by
+ * sibling foundation trains (`no_persona_required`, `governance_persona_id`,
+ * `secondary_persona_*`) that may not exist yet on every box.
+ */
+export interface PersonaDispatchTask {
+  persona_id?: string | null;
+  persona_name?: string | null;
+  persona_mode?: string | null;
+  /** Hybrid blend: supporting persona surfaced alongside the primary. */
+  secondary_persona_id?: string | null;
+  secondary_persona_name?: string | null;
+  /** Selector flag: a mechanical/operational task that needs no full persona. */
+  no_persona_required?: boolean | number | null;
+  /** Selector-supplied governance oversight pointer for mechanical tasks. */
+  governance_persona_id?: string | null;
+  /**
+   * Voice-blend directive (migration 090 mirror column). When present, the doer is
+   * told to write in the audience persona's VOICE while carrying the topic persona's
+   * EXPERTISE. Rendered by `buildPersonaBlock` with the mandatory, non-removable
+   * style-inspired-NOT-impersonation guardrail. Absent on a non-content / no-blend
+   * task, in which case the persona block renders exactly as before.
+   */
+  blend_directive?: string | null;
+}
+
+type PersonaSettings = Pick<
+  ResolvedSettings,
+  'persona' | 'personaSource' | 'personaMode'
+>;
+
+/** SQLite stores booleans as 0/1; a JSON fixture may send a real boolean. */
+function isTruthy(v: boolean | number | null | undefined): boolean {
+  return v === true || v === 1;
+}
+
+/**
+ * The mandatory Task-Mode load contract — identical to
+ * `persona-matching-protocol.md` Step 5, but the id is already resolved so the
+ * doer OPERATES as the persona instead of re-selecting one.
+ */
+function loadContract(personaId: string, mode: string): string {
+  return `**Persona load contract (MANDATORY — before any work):**
+1. Read the blueprint: ${personaBlueprintPath(personaId)}
+2. Internalize Section 4 (A–D) and §7B — this is the voice, methodology, and decision lens you operate under for THIS task.
+3. If PERSONA-ROUTER.md flags this persona for an appendix, ALSO load its [+APPENDIX] block.
+Operate AS this persona (${mode} mode). Do NOT run any self-selection protocol — the persona is already assigned.`;
+}
+
+/** Full-persona block: header line + load contract + optional hybrid secondary. */
+function primaryBlock(opts: {
+  label: string;
+  personaId: string;
+  personaName: string;
+  mode: string;
+  secondaryId?: string | null;
+  secondaryName?: string | null;
+}): string {
+  const { label, personaId, personaName, mode, secondaryId, secondaryName } = opts;
+  let block = `**Persona (${label}):** ${personaName} (${personaId}, ${mode} mode)
+${loadContract(personaId, mode)}`;
+  if (secondaryId) {
+    const secName = secondaryName || secondaryId;
+    block += `
+**Secondary persona (hybrid blend):** ${secName} (${secondaryId}) — supporting voice only; blend per §7B while ${personaName} leads.`;
+  }
+  return block;
+}
+
+/** Mechanical / unresolved block: a governance oversight pointer, never a load. */
+function governanceBlock(governanceId: string, opts?: { unresolved?: boolean }): string {
+  if (opts?.unresolved) {
+    return `**Persona:** not yet resolved — governing under the house fallback.
+**Governance oversight:** ${governanceId} — apply as a light operating-discipline pointer only; do NOT load a full Section-4 persona. Escalate if this task genuinely needs a specialist voice.`;
+  }
+  return `**Persona:** none required — this is a mechanical / operational task.
+**Governance oversight:** ${governanceId} — apply as a light operating-discipline pointer only; do NOT load a full Section-4 persona.`;
+}
+
+/**
+ * Build the persona section for a dispatch message.
+ *
+ * Precedence (highest first):
+ *   1. Mechanical (`no_persona_required`)  → governance oversight pointer.
+ *   2. Operator lock (agent_settings pinned a specific, non-`auto` persona via
+ *      `role_override` / `department_default`) → that persona wins, hard.
+ *   3. Matched persona on the task row (`persona_id`) → THE F4.1 fix; full load
+ *      contract, plus a hybrid secondary when the selector surfaced one.
+ *   4. Resolver-supplied persona with no task id (sticky assignment, etc.) →
+ *      still a real, non-`auto` persona; render it with the load contract.
+ *   5. Nothing resolved → governance fallback pointer (never naked, never
+ *      `'auto'`, never a self-selection protocol).
+ */
+export function buildPersonaBlock(
+  task: PersonaDispatchTask,
+  settings: PersonaSettings,
+): string {
+  const base = buildBasePersonaBlock(task, settings);
+  // A decided voice blend rides ON TOP of whichever persona branch fired, so the
+  // audience-voice / topic-expertise directive (and its mandatory guardrail) reaches
+  // the doer alongside the load contract. Absent on a non-blend task → base unchanged.
+  const directive = (task.blend_directive ?? '').trim();
+  if (directive) {
+    return `${base}\n${renderBlendDirective(directive)}`;
+  }
+  return base;
+}
+
+/** The persona-branch precedence (pre-blend). Split out so the blend directive can
+ *  be appended uniformly regardless of which branch fired. */
+function buildBasePersonaBlock(
+  task: PersonaDispatchTask,
+  settings: PersonaSettings,
+): string {
+  // 1. Mechanical task — truthful `no_persona_required` + governance pointer.
+  if (isTruthy(task.no_persona_required)) {
+    const governanceId = task.governance_persona_id || GOVERNANCE_PERSONA_FALLBACK;
+    return governanceBlock(governanceId);
+  }
+
+  // 2. Operator lock — an operator explicitly pinned a persona in agent_settings.
+  //    This is the ONLY role agent_settings.persona still plays: a hard override
+  //    lock, never the default source. `'auto'` no longer means "self-select" —
+  //    it means "defer to the task's matched persona" (branch 3+).
+  const operatorLocked =
+    !!settings.persona &&
+    settings.persona !== 'auto' &&
+    (settings.personaSource === 'role_override' ||
+      settings.personaSource === 'department_default');
+  if (operatorLocked) {
+    return primaryBlock({
+      label: 'operator-locked',
+      personaId: settings.persona,
+      personaName: settings.persona,
+      mode: settings.personaMode || DEFAULT_PERSONA_MODE,
+    });
+  }
+
+  // 3. THE F4.1 FIX — deliver the persona the selector matched onto the task row.
+  if (task.persona_id) {
+    return primaryBlock({
+      label: 'assigned',
+      personaId: task.persona_id,
+      personaName: task.persona_name || task.persona_id,
+      mode: task.persona_mode || settings.personaMode || DEFAULT_PERSONA_MODE,
+      secondaryId: task.secondary_persona_id,
+      secondaryName: task.secondary_persona_name,
+    });
+  }
+
+  // 4. Resolver landed a real persona (e.g. sticky assignment) without a task id.
+  if (settings.persona && settings.persona !== 'auto') {
+    return primaryBlock({
+      label: 'assigned',
+      personaId: settings.persona,
+      personaName: settings.persona,
+      mode: settings.personaMode || DEFAULT_PERSONA_MODE,
+    });
+  }
+
+  // 5. Never naked, never AUTO-SELECT — govern under the house fallback.
+  return governanceBlock(GOVERNANCE_PERSONA_FALLBACK, { unresolved: true });
+}
+
+/**
+ * One sub-task's persona plan row (DEP-5 / F3.7). Shape mirrors a
+ * `task_subtask_persona` row + the SOP `slot` it filled (F3.9). All fields
+ * optional/nullable so it tolerates older rows and rows written by a CLI-run
+ * decompose that predates the `slot` column.
+ */
+export interface PersonaPlanSubtask {
+  seq: number;
+  subtask_text?: string | null;
+  persona_id?: string | null;
+  persona_name?: string | null;
+  persona_mode?: string | null;
+  slot?: string | null;
+  department?: string | null;
+  task_category?: string | null;
+  /** Human "why this persona for this part" — from the plan, shown inline. */
+  why?: string | null;
+  /** A mechanical sub-task (send/deploy) needs a governance pointer, not a load. */
+  no_persona_required?: boolean | number | null;
+  governance_persona_id?: string | null;
+}
+
+/**
+ * Build the multi-persona PERSONA PLAN block for a decomposed task (F3.7 dispatch
+ * side). One Section-4 load pointer per NON-mechanical sub-task — each rendered by
+ * REUSING `buildPersonaBlock` (the FDN-3 mechanism ×N), so a plan sub-task and a
+ * single-persona task deliver byte-identical persona contracts, and every
+ * fail-closed guarantee (never `'auto'`, never naked, mechanical → governance
+ * pointer) holds per sub-task automatically.
+ *
+ * Returns '' when there is no real multi-persona plan (0 or 1 sub-task) so the
+ * caller keeps the single-persona block unchanged (no regression).
+ */
+export function buildPersonaPlanBlock(
+  subtasks: PersonaPlanSubtask[],
+  settings: PersonaSettings,
+): string {
+  if (!Array.isArray(subtasks) || subtasks.length < 2) return '';
+
+  const ordered = [...subtasks].sort((a, b) => (a.seq || 0) - (b.seq || 0));
+  const distinctPersonas = new Set(
+    ordered.map((s) => s.persona_id).filter((id): id is string => !!id),
+  );
+
+  const sections = ordered.map((st) => {
+    const label = st.slot ? `${st.slot} slot` : (st.task_category || 'sub-task');
+    const heading = `**${st.seq}. ${label}${st.subtask_text ? ` — ${st.subtask_text}` : ''}**`;
+    // Reuse the SINGLE-persona renderer for each sub-task: a mechanical sub-task
+    // yields a governance pointer, a matched one yields the full Section-4 load
+    // contract, an unresolved one yields the house fallback — never naked.
+    const body = buildPersonaBlock(
+      {
+        persona_id: st.persona_id,
+        persona_name: st.persona_name,
+        persona_mode: st.persona_mode,
+        no_persona_required: st.no_persona_required,
+        governance_persona_id: st.governance_persona_id,
+      },
+      // The per-agent operator lock must NOT hijack every sub-task's matched
+      // persona — neutralize it locally (persona 'auto' + a non-lock source) so
+      // branch 3 (task persona) / branch 5 (fallback) governs each sub-task by
+      // its OWN plan row.
+      { ...settings, persona: 'auto', personaSource: 'hardcoded_default' },
+    );
+    const why = st.why ? `\n_Why this persona:_ ${st.why}` : '';
+    return `${heading}\n${body}${why}`;
+  });
+
+  return `**PERSONA PLAN (multi-persona task — ${ordered.length} sub-tasks, ${distinctPersonas.size} distinct persona${distinctPersonas.size === 1 ? '' : 's'}):**
+Operate EACH sub-task as its OWN assigned persona below — load that sub-task's blueprint before you start that sub-task. Do NOT run any self-selection protocol; every sub-task's persona is already assigned.
+
+${sections.join('\n\n')}`;
+}

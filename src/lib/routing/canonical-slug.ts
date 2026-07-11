@@ -49,6 +49,8 @@ export const CANONICAL_SLUGS = new Set([
   // Reached only via the confidence-floor fallback in comDispatch(); never
   // wins keyword / semantic routing on merit (priority 1, empty keywords).
   'general-task',
+  // Engineering — promoted to CORE/FLOOR dept (UNIT ENG — 2026-06-28).
+  'engineering',
 ]);
 
 /**
@@ -71,10 +73,23 @@ const ALIAS_MAP: Record<string, string> = {
   'web-dev':           'web-development',
   'web':               'web-development',
 
-  // app-dev variants
-  'appdev':            'app-development',
-  'app-dev':           'app-development',
-  'mobile':            'app-development',
+  // app-dev variants → app-development (a DISTINCT chosen department with its own
+  // Kanban lane). App Development and Engineering are two separate canonical
+  // departments (both live in CANONICAL_SLUGS and departments.config.ts uses
+  // 'app-development'); a client that chose BOTH must get BOTH lanes. Mapping
+  // 'app-development' → 'engineering' here (removed 2026-07-08) collapsed the two
+  // during the seed dedup (findCanonicalWorkspaceId), so App Development never got
+  // a lane on a box that also had Engineering. 'app-development' is therefore left
+  // to resolve to itself (Step-4 canonical passthrough), never aliased away.
+  'appdev':             'app-development',
+  'app-dev':            'app-development',
+  'mobile':             'app-development',
+  // engineering aliases → engineering (canonical CORE slug). These stay pointed at
+  // 'engineering' — only the destructive 'app-development' → 'engineering' entry was
+  // removed, because App Development is its own chosen department.
+  'software-development': 'engineering',
+  'software-dev':         'engineering',
+  'apps':                 'engineering',
 
   // video variants
   'video-production':  'video',
@@ -89,6 +104,10 @@ const ALIAS_MAP: Record<string, string> = {
   // customer-support variants
   'support':           'customer-support',
   'customer-service':  'customer-support',
+
+  // communications variants
+  'comms':             'communications',
+  'communication':     'communications',
 
   // social-media variants
   'social':            'social-media',

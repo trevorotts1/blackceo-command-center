@@ -47,7 +47,7 @@ test('resolveOwnerChatId: returns client ID and skips operator ID', () => {
   const agentsDir = path.join(TMP_WS, 'agents', 'main', 'sessions');
   fs.mkdirSync(agentsDir, { recursive: true });
 
-  const CLIENT_ID = '8981578265'; // a client chat ID
+  const CLIENT_ID = '1000000001'; // synthetic client chat ID (not a real client)
   const TREVOR_ID = '5252140759'; // operator — should be skipped
   const sessions: Record<string, unknown> = {
     [`agent:main:telegram:direct:${TREVOR_ID}`]: { ts: 1 },

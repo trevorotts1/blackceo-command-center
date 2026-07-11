@@ -81,7 +81,7 @@ test('(a) config present + empty companies table → seeded from config, NEVER D
   const db = makeTestDb();
   try {
     writeCompanyConfig(dir, {
-      companyName: 'Sheila Reynolds Enterprises',
+      companyName: 'Riverside Media Enterprises',
       industry: 'Media',
       logoUrl: 'https://cdn.example.com/logo.png',
       primaryColor: '#FF5733',
@@ -100,7 +100,7 @@ test('(a) config present + empty companies table → seeded from config, NEVER D
       id: string; name: string; slug: string; industry: string; logo_url: string;
     };
     assert.ok(row, `Company row not found for id '${result.companyId}'`);
-    assert.strictEqual(row.name, 'Sheila Reynolds Enterprises', 'name must be real brand');
+    assert.strictEqual(row.name, 'Riverside Media Enterprises', 'name must be real brand');
     assert.notStrictEqual(row.name, 'Default', 'name must NEVER be Default');
     assert.notStrictEqual(row.name, 'Command Center', 'name must not be generic fallback');
     assert.strictEqual(row.industry, 'Media', 'industry must be from config');
@@ -136,12 +136,12 @@ test('(a) explicit companySlug in config takes precedence over derived slug', ()
   const db = makeTestDb();
   try {
     writeCompanyConfig(dir, {
-      companyName: 'Karen Vaughn Enterprises',
-      companySlug: 'karen-vaughn',
+      companyName: 'Summit Retail Group',
+      companySlug: 'summit-retail',
     });
     const result = seedCompanyGuarded(db, { cwd: dir });
     assert.strictEqual(result.reason, 'seeded-from-config');
-    assert.strictEqual(result.companyId, 'karen-vaughn',
+    assert.strictEqual(result.companyId, 'summit-retail',
       'explicit companySlug must be used as-is');
   } finally {
     db.close();
@@ -157,7 +157,7 @@ test('(b) existing non-Default company row → seed is a strict NO-OP, never ove
   try {
     // Pre-insert a real company row
     db.prepare(
-      "INSERT INTO companies (id, name, slug, industry, config) VALUES ('aurelia', 'Aurelia Gardner Media', 'aurelia', 'Media', '{}')"
+      "INSERT INTO companies (id, name, slug, industry, config) VALUES ('coastal', 'Coastal Ventures Media', 'coastal', 'Media', '{}')"
     ).run();
 
     // Even if config is present on disk (with a different name), seed must not touch it
@@ -168,11 +168,11 @@ test('(b) existing non-Default company row → seed is a strict NO-OP, never ove
     assert.strictEqual(result.reason, 'already-exists-non-default',
       `Expected reason='already-exists-non-default', got '${result.reason}'`);
     assert.strictEqual(result.seeded, false, 'seeded must be false — NO-OP');
-    assert.strictEqual(result.companyId, 'aurelia', 'companyId must be the existing row id');
+    assert.strictEqual(result.companyId, 'coastal', 'companyId must be the existing row id');
 
     // Verify the original row is untouched
-    const row = db.prepare('SELECT name FROM companies WHERE id = ?').get('aurelia') as { name: string };
-    assert.strictEqual(row.name, 'Aurelia Gardner Media', 'Existing row must not be overwritten');
+    const row = db.prepare('SELECT name FROM companies WHERE id = ?').get('coastal') as { name: string };
+    assert.strictEqual(row.name, 'Coastal Ventures Media', 'Existing row must not be overwritten');
 
     // Verify no new row was created
     const count = (db.prepare('SELECT COUNT(*) as c FROM companies').get() as { c: number }).c;
@@ -188,7 +188,7 @@ test('(b) NO-OP also applies when no config exists on disk — existing row is s
   const db = makeTestDb();
   try {
     db.prepare(
-      "INSERT INTO companies (id, name, slug, config) VALUES ('corey', 'Corey Johnson Group', 'corey', '{}')"
+      "INSERT INTO companies (id, name, slug, config) VALUES ('northgate', 'Northgate Group', 'northgate', '{}')"
     ).run();
 
     // No config file in dir
@@ -198,8 +198,8 @@ test('(b) NO-OP also applies when no config exists on disk — existing row is s
     assert.strictEqual(result.seeded, false);
 
     // Existing row unchanged
-    const row = db.prepare('SELECT name FROM companies WHERE id = ?').get('corey') as { name: string };
-    assert.strictEqual(row.name, 'Corey Johnson Group');
+    const row = db.prepare('SELECT name FROM companies WHERE id = ?').get('northgate') as { name: string };
+    assert.strictEqual(row.name, 'Northgate Group');
   } finally {
     db.close();
     cleanup(dir);
@@ -342,6 +342,77 @@ test('(d) B.1 partial-config must NOT be the same branch as "no config" — diff
   }
 });
 
+// ─── fixture (d2): unpopulated template sentinel → partial-config (2026-07-08) ──
+
+test('(d2) template sentinel "Your Company" → partial-config, nothing written (fail-closed)', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    // The repo ships this exact companyName template (config-guard.yml enforces it).
+    // A box still carrying it has never been branded — seeding a `your-company`
+    // row here is the attribution-drift bug. Must fail closed like a blank name.
+    writeCompanyConfig(dir, { companyName: 'Your Company', industry: '', departments: [] });
+
+    const result = seedCompanyGuarded(db, { cwd: dir });
+
+    assert.strictEqual(result.reason, 'partial-config',
+      `Expected reason='partial-config' for the "Your Company" template, got '${result.reason}'`);
+    assert.strictEqual(result.seeded, false, 'template must not seed anything');
+    assert.strictEqual(result.companyId, null, 'companyId must be null for template');
+
+    const count = (db.prepare('SELECT COUNT(*) as c FROM companies').get() as { c: number }).c;
+    assert.strictEqual(count, 0, 'No company row may be written for the unpopulated template');
+    const bogus = db.prepare("SELECT id FROM companies WHERE slug = 'your-company'").get();
+    assert.strictEqual(bogus, undefined, 'must NEVER create a bogus your-company row');
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
+test('(d2) template sentinel is case/space-insensitive ("  your company  ")', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    writeCompanyConfig(dir, { companyName: '  Your Company  ' });
+    const result = seedCompanyGuarded(db, { cwd: dir });
+    assert.strictEqual(result.reason, 'partial-config');
+    assert.strictEqual(result.seeded, false);
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
+test('(d2) README env placeholder "Your Company Name" is also treated as template', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    writeCompanyConfig(dir, { companyName: 'Your Company Name' });
+    const result = seedCompanyGuarded(db, { cwd: dir });
+    assert.strictEqual(result.reason, 'partial-config');
+    assert.strictEqual(result.seeded, false);
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
+test('(d2) a REAL brand that merely contains the word "Company" still seeds (no false positive)', () => {
+  const dir = makeTmpDir();
+  const db = makeTestDb();
+  try {
+    writeCompanyConfig(dir, { companyName: 'Riverside Company Holdings' });
+    const result = seedCompanyGuarded(db, { cwd: dir });
+    assert.strictEqual(result.reason, 'seeded-from-config',
+      'a real brand containing "Company" must NOT be misread as the template');
+    assert.strictEqual(result.seeded, true);
+  } finally {
+    db.close();
+    cleanup(dir);
+  }
+});
+
 // ─── table-missing guard ──────────────────────────────────────────────────────
 
 test('table-missing: companies table absent → returns table-missing, no crash', () => {
@@ -365,7 +436,7 @@ test('idempotency: calling seedCompanyGuarded twice with the same config does no
   const dir = makeTmpDir();
   const db = makeTestDb();
   try {
-    writeCompanyConfig(dir, { companyName: 'Maria Anderson Consulting' });
+    writeCompanyConfig(dir, { companyName: 'Brightline Consulting' });
 
     const r1 = seedCompanyGuarded(db, { cwd: dir });
     const r2 = seedCompanyGuarded(db, { cwd: dir });
@@ -427,10 +498,10 @@ test('readCompanyConfigFromDisk returns null for malformed JSON (does not throw)
 
 test('slugifyCompanyName produces valid URL-safe slugs', () => {
   const cases: [string, string][] = [
-    ['Sheila Reynolds Enterprises', 'sheila-reynolds-enterprises'],
+    ['Riverside Media Enterprises', 'riverside-media-enterprises'],
     ['Acme Corp & Partners LLC', 'acme-corp-partners-llc'],
     ['  Leading/Trailing Spaces  ', 'leading-trailing-spaces'],
-    ['Maria\'s Consulting – Group', 'maria-s-consulting-group'],
+    ['Nadia\'s Consulting – Group', 'nadia-s-consulting-group'],
     ['', 'company'],  // empty → fallback
   ];
   for (const [input, expected] of cases) {

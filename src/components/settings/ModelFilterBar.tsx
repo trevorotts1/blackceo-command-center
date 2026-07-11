@@ -128,7 +128,7 @@ export function ModelFilterBar({ models, state, onChange, visibleCount }: ModelF
     <div className="bg-white border border-gray-200 rounded-xl shadow-sm">
       {/* Search + summary */}
       <div className="px-4 py-3 flex items-center gap-3 flex-wrap border-b border-gray-100">
-        <div className="flex-1 min-w-[200px] relative">
+        <div className="w-full sm:flex-1 sm:min-w-[200px] relative">
           <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="search"

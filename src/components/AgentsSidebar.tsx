@@ -262,10 +262,23 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
   if (focusSlug) {
     const current = departments.find((d) => d.id === focusSlug);
     return (
+      <>
+      {/* Mobile drawer scrim (v4.66.0): below lg the rail is an overlay
+          drawer toggled from the Header hamburger — it used to render inline
+          full-width and push the whole board below the fold. */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/30 lg:hidden"
+          aria-hidden="true"
+          onClick={onClose}
+        />
+      )}
       <aside
-        className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
-          isMinimized ? 'w-12' : 'w-72'
-        }`}
+        className={`bg-white border-r border-gray-200 flex-col transition-all duration-300 ease-in-out ${
+          isOpen
+            ? 'flex fixed inset-y-0 left-0 z-50 w-80 max-w-[85vw] shadow-2xl lg:static lg:z-auto lg:shadow-none'
+            : 'hidden lg:flex'
+        } ${isMinimized ? 'lg:w-12' : 'lg:w-72'}`}
         aria-label="Department focus rail"
       >
         <div className="p-3 border-b border-gray-100 flex items-center">
@@ -330,14 +343,27 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
           )}
         </div>
       </aside>
+      </>
     );
   }
 
   return (
+    <>
+    {/* Mobile drawer scrim — see focus-mode note above (v4.66.0). */}
+    {isOpen && (
+      <div
+        className="fixed inset-0 z-40 bg-black/30 lg:hidden"
+        aria-hidden="true"
+        onClick={onClose}
+      />
+    )}
     <aside
-      className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out ${
-        isMinimized ? 'w-12' : 'w-72'
-      }`}
+      className={`bg-white border-r border-gray-200 flex-col transition-all duration-300 ease-in-out ${
+        isOpen
+          ? 'flex fixed inset-y-0 left-0 z-50 w-80 max-w-[85vw] shadow-2xl lg:static lg:z-auto lg:shadow-none'
+          : 'hidden lg:flex'
+      } ${isMinimized ? 'lg:w-12' : 'lg:w-72'}`}
+      aria-label="All departments navigation"
     >
       {/* Header */}
       <div className="p-3 border-b border-gray-100">
@@ -518,5 +544,6 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
         })}
       </div>
     </aside>
+    </>
   );
 }

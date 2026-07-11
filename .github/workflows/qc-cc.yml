@@ -75,7 +75,7 @@ jobs:
             exit 1
           fi
           # Also verify a normal 200 app body does NOT trigger the guard
-          NORMAL_BODY='<!DOCTYPE html><html><head><title>Karen Vaughn Enterprises</title></head><body><div id="root"></div></body></html>'
+          NORMAL_BODY='<!DOCTYPE html><html><head><title>Summit Retail Enterprises</title></head><body><div id="root"></div></body></html>'
           if printf '%s' "$NORMAL_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
             echo "ERROR: normal app body falsely triggered the CF-challenge guard — false UNKNOWN"
             exit 1
@@ -128,6 +128,11 @@ jobs:
           NODE_ENV: test
           # No DB or server needed — tests use mocks and temp dirs
           DATABASE_PATH: ""
+
+      - name: F3.1 no-naked-dispatch contract test (persona invariant)
+        run: bash tests/unit/no-naked-dispatch.test.sh
+        env:
+          NODE_ENV: test
 
   # ── B.1 thin-probe fixture run ─────────────────────────────────────────────
   # Exercises cc-health-check.sh against a real Next.js build + pm2-less fixture
@@ -197,6 +202,17 @@ jobs:
         env:
           DATABASE_PATH: /tmp/probe-fixture.db
           PORT: 4000
+          # Cloudflare Access enforcement (DATA-10) is OPT-IN and defaults OFF on
+          # every box (v4.72.0), so this is belt-and-suspenders: there is NO
+          # Cloudflare edge in front of this fixture server to inject the
+          # Cf-Access-* headers, and setting it true would 401 every page GET
+          # (including cc-health-check.sh's CF public-URL probe and outside-in
+          # asset probe, which hit 127.0.0.1 directly) with "Cloudflare Access is
+          # not active on this subdomain" → the probe would read RED. Pinning it
+          # false keeps the fixture on the documented default posture regardless of
+          # any inherited env. No production code or the health-check script is
+          # modified.
+          REQUIRE_CF_ACCESS: "false"
 
       - name: Run cc-health-check.sh — expect GREEN (exit 0)
         run: |
@@ -351,3 +367,165 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+
+  # ── Authoritative client-name scan (PRD P0-3 / P2-5) ──────────────────────
+  # qc-blocked-gate.sh Assertion 5 only scans the git DIFF, so client names that
+  # were ALREADY committed never trip it. This job runs the tracked-file gate
+  # (scripts/qc-assert-no-client-names.sh) which walks EVERY tracked file on
+  # disk — the authoritative scan. A planted-fixture self-test proves the gate
+  # actually bites before the real scan runs.
+  no-client-names:
+    name: No client names in tracked files (authoritative scan)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Self-test — planted placeholder name MUST fail the gate (box mode)
+        run: |
+          # Hermetic: copy the planted fixture (which holds an obviously-fake
+          # PLACEHOLDER name + the operator path) into an isolated temp repo-root
+          # under a NON-excluded name and confirm the gate exits 1. Point the gate
+          # at the committed .example roster (fake placeholder names) so BOX-mode
+          # detection is exercised without any real client roster. The denylisted
+          # literal lives only in the self-excluded fixture, never inline here.
+          TMP="$(mktemp -d)"
+          cp tests/fixtures/no-client-names/planted-client-name.txt "$TMP/leak.ts"
+          if OPENCLAW_CLIENT_ROSTER="$PWD/scripts/client-roster.example.txt" \
+               bash scripts/qc-assert-no-client-names.sh --repo-root "$TMP"; then
+            echo "ERROR: gate passed on a planted placeholder name — the check is broken"
+            rm -rf "$TMP"
+            exit 1
+          fi
+          echo "OK: gate correctly failed (exit 1) on the planted fixture"
+          rm -rf "$TMP"
+
+      # Roster absent in CI → STRUCTURAL mode: the gate must NOT fail-open. It
+      # scans for the operator path + any leaked .example placeholder names,
+      # WARNS that the full roster-specific scan was skipped, and passes (exit 0)
+      # only when the tree is clean. The authoritative roster scan runs on
+      # operator boxes / pre-commit where the roster exists.
+      - name: Assert no operator paths / placeholder leaks in any tracked file (structural)
+        run: bash scripts/qc-assert-no-client-names.sh
+
+  # ── Shell script syntax guard (PRD P0-1 regression guard) ─────────────────
+  # bash -n every shell script so a broken heredoc / quoting error can never
+  # ship. Covers scripts/*.sh and every nested scripts dir (install/, cloudflare/,
+  # integration-tests/, conversational-ai/, fleet-heartbeat/scripts/, .claude/).
+  shell-syntax:
+    name: Shell script syntax (bash -n) guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: bash -n every tracked shell script
+        run: |
+          FAIL=0
+          while IFS= read -r f; do
+            if bash -n "$f"; then
+              echo "OK   $f"
+            else
+              echo "FAIL $f"
+              FAIL=1
+            fi
+          done < <(find . -type d \( -name node_modules -o -name .git \) -prune \
+                     -o -type f -name '*.sh' -print)
+          if [ "$FAIL" -ne 0 ]; then
+            echo "One or more shell scripts failed bash -n"
+            exit 1
+          fi
+          echo "All shell scripts parsed cleanly."
+
+  prove-zhe-web-e2e:
+    name: prove-zhe web e2e + interview ZHE gates (P3-8)
+    runs-on: ubuntu-latest
+    # Proves a completed interview through THIS app produces a Zero-Human-Everything
+    # -compliant build state, and FAILS loudly if any ZHE gate (consent/exit-87,
+    # decision-coverage/exit-88, provenanced-decline, expected-set equality) is
+    # bypassable from the web path. Runs the harness against a SANDBOXED throwaway
+    # HOME so the real Skill-23 enforcers never touch a live workspace.
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The gate proof drives the REAL Skill-23 enforcers (build-workforce.py,
+      # department-floor.py, list-canonical-departments.py, prove-zhe.py). Point
+      # OPENCLAW_SKILL23_SCRIPTS at an onboarding-skill checkout to run the FULL
+      # gate; without it the harness SKIPS loudly (never a false pass). Example:
+      #   - uses: actions/checkout@v4
+      #     with:
+      #       repository: ${{ vars.ONBOARDING_REPO }}
+      #       path: _onboarding
+      #   then set OPENCLAW_SKILL23_SCRIPTS below to
+      #   ${{ github.workspace }}/_onboarding/23-ai-workforce-blueprint/scripts
+      - name: Run prove-zhe web e2e (interview -> ZHE gate proof)
+        run: npm run test:prove-zhe-web
+        timeout-minutes: 6
+        env:
+          # Empty -> harness resolves the default skill path; if the enforcers are
+          # not installed on the runner the suite SKIPS loudly rather than fake-pass.
+          OPENCLAW_SKILL23_SCRIPTS: ${{ vars.OPENCLAW_SKILL23_SCRIPTS || '' }}
+
+  # ── Interview-mode shell-lock e2e (WG-6 / WG-10c command-center half) ──────
+  # Drives the REAL Edge middleware + sanctioned Node cookie-setter through a live
+  # Next server in a real browser (Playwright/Chromium), proving the P0-5 / WG-9
+  # lock end-to-end: locked while the interview is incomplete, exempt routes open,
+  # and the dashboard unlocks once completion is signalled the sanctioned way.
+  #
+  # The suite is self-contained: playwright.interview-lock.config.ts stands up its
+  # OWN `next dev` server (webServer{}) against a THROWAWAY fixture workspace under
+  # test-results/ — never ~/.openclaw, never the operator's canonical files. It
+  # runs in dev on purpose (a production build would mint a `secure` cookie that
+  # http://127.0.0.1 drops, so the unlock could never be observed). GitHub Actions
+  # sets CI=true, so the config uses retries: 2 + trace-on-first-retry for flake
+  # control; the job timeout keeps a hung server from stalling the whole run.
+  interview-lock-e2e:
+    name: Interview-unlock shell-lock e2e (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser (Chromium + OS deps)
+        # Only Chromium is needed (config runs headless Chromium); --with-deps
+        # pulls the apt libs the runner is missing so the browser launches.
+        run: npx playwright install --with-deps chromium
+
+      - name: Run interview-unlock e2e (config boots its own dev server)
+        # `test:e2e:interview-lock` -> playwright test --config=playwright.interview-lock.config.ts
+        # Playwright's webServer{} builds-on-demand, starts `next dev` on :4123
+        # with the fixture env, waits for /api/health, runs the specs, then tears
+        # the server down. GitHub sets CI=true automatically (enables retries +
+        # reuseExistingServer:false). Job-level timeout guards against a stuck boot.
+        run: npm run test:e2e:interview-lock
+        timeout-minutes: 12
+
+      - name: Upload Playwright trace + fixture artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interview-lock-e2e-traces
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore

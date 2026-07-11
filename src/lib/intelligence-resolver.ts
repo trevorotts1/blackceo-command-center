@@ -4,12 +4,27 @@
  * Resolves which model and persona should be used for a given agent + department.
  *
  * MODEL resolution order (highest wins):
+ *   0. Task pin — tasks.model_id set before dispatch (CEO/owner-sanctioned; GOAL-5 Item 5)
  *   1. SOP pin — sops.model_pin for task.sop_id (explicit author intent)
- *   2. Task-time selector — selectTaskModel() from model-selector.ts
+ *   2. Role-level override in agent_settings (role_id = agent.id)
+ *   3. Department-level default in agent_settings (role_id IS NULL)
+ *   4. Task-time selector — selectTaskModel() from model-selector.ts
  *      (nature + difficulty + modality → cascade Ollama Cloud → OpenRouter OSS → Free)
- *   3. Role-level override in agent_settings (role_id = agent.id)
- *   4. Department-level default in agent_settings (role_id IS NULL)
+ *   4b. Sovereign DEFAULT (W8.5) — non-null/non-free/non-forbidden fallback
  *   5. needs_owner_input — NEVER 'openrouter/free'
+ *
+ * ORDER-FIX (BUG 2): role/department overrides previously sat BELOW the
+ * task-time selector (layers 3/4 after layer 2), so an operator's explicit
+ * Intelligence Settings pick almost never applied — the selector nearly
+ * always resolves to SOMETHING as soon as any model_registry inventory
+ * exists, which starves the explicit override of a chance to win. The
+ * Settings UI advertises these as authoritative overrides, so they now
+ * outrank the automatic selector (moved to layers 2/3, above the selector
+ * at layer 4). Every explicit pick still passes through the full
+ * `checkModelSovereignty` gate (not just a literal 'openrouter/free' string
+ * match) — a forbidden/free/wrong-modality explicit pick is skipped with a
+ * logged reason and falls through to the next layer, rather than either
+ * silently winning or silently being skipped without a trace.
  *
  * PERSONA resolution order (Hop 10 — bread-and-butter persona pipeline):
  *   1. Task-pinned persona (tasks.persona_id / tasks.persona_name written by
@@ -28,7 +43,13 @@
  */
 
 import { queryOne, queryAll, run } from '@/lib/db';
-import { selectTaskModel, NEEDS_OWNER_INPUT, detectModality } from '@/lib/model-selector';
+import {
+  selectTaskModel,
+  NEEDS_OWNER_INPUT,
+  detectModality,
+  resolveSovereignDefault,
+  checkModelSovereignty,
+} from '@/lib/model-selector';
 import type { TaskModality } from '@/lib/model-selector';
 import type { ModelRegistryEntry } from '@/lib/model-registry-types';
 
@@ -55,6 +76,7 @@ export type ModelSource =
   | 'task_selector'
   | 'role_override'
   | 'department_default'
+  | 'sovereign_default'
   | 'needs_owner_input';
 
 export interface ResolvedSettings {
@@ -160,8 +182,18 @@ interface PersonaAssignmentRow {
  * (department_id, task_category) pair this categorizer produces; any drift here
  * re-introduces the RESOLVER-CATEGORY misroute (Gap E) where an unpinned task
  * inherits the wrong category's persona.
+ *
+ * PERS-02 — TIE-BREAK CONTRACT (pinned, must match Python): declaration ORDER is
+ * load-bearing. `inferTaskCategory` selects with a strict `>` (see below), so on
+ * a score tie the FIRST category declared here wins. Python's infer_task_category
+ * iterates this same dict in insertion order and also compares with `>`, so the
+ * two engines break ties identically ONLY while this key order matches the Python
+ * dict's key order. Do not reorder keys without reordering the Python dict too.
+ * The golden-parity corpus in tests/unit/pers02-category-parity.test.ts locks the
+ * TS side (including tie cases); run the same corpus through the Python engine to
+ * close cross-repo parity.
  */
-const CATEGORY_KEYWORDS: Record<string, string[]> = {
+export const CATEGORY_KEYWORDS: Record<string, string[]> = {
   'email-outreach':   ['email', 'outreach', 'follow-up', 'follow up', 'cold email', 'send to', 'newsletter'],
   'social-post':      ['social', 'instagram', 'linkedin', 'facebook', 'twitter', 'tiktok', 'pinterest', 'post on', 'reel', 'story'],
   'content-write':    ['article', 'blog', 'essay', 'long form', 'long-form', 'story', 'write a', 'writeup'],
@@ -184,8 +216,14 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
  * wins; defaults to 'general'. Determinism is REQUIRED — this must reproduce the
  * exact category the selector computed so the sticky (department_id,
  * task_category) lookup hits the right persona_assignment row.
+ *
+ * PERS-02 tie-break: the `> bestScore` comparison is strict, so the FIRST
+ * category (in CATEGORY_KEYWORDS declaration order) to reach the maximum score
+ * wins a tie. This is the pinned contract shared with the Python engine — see the
+ * CATEGORY_KEYWORDS docstring. Exported so PERS-11's category-aware sticky lookup
+ * (tasks.ts, L7) and the golden-parity test can reuse the exact same computation.
  */
-function inferTaskCategory(taskText: string | null | undefined): string {
+export function inferTaskCategory(taskText: string | null | undefined): string {
   const text = (taskText || '').toLowerCase();
   let bestCat = 'general';
   let bestScore = 0;
@@ -201,6 +239,7 @@ function inferTaskCategory(taskText: string | null | undefined): string {
         if (pattern.test(text)) score += 1;
       }
     }
+    // Strict `>`: on a tie the earlier-declared category holds (pinned tie-break).
     if (score > bestScore) {
       bestScore = score;
       bestCat = cat;
@@ -226,7 +265,8 @@ export function resolveSettings(
   departmentId: string,
   taskId?: string
 ): ResolvedSettings {
-  // ── MODEL RESOLUTION (5-layer precedence) ──────────────────────────────────
+  // ── MODEL RESOLUTION (precedence, highest wins — see order in the file-top
+  //    docstring) ────────────────────────────────────────────────────────────
 
   // Load task context for selector and SOP-pin lookup.
   let taskContext: TaskContextRow | null = null;
@@ -245,12 +285,38 @@ export function resolveSettings(
   let difficulty: 'heavy' | 'mid' | 'fast' | null = null;
   let model_tier: 1 | 2 | 3 | null = null;
 
+  // Modality is computed once, up front (MODEL-02: moved ABOVE Layer 0) so it
+  // can gate EVERY model source — the CEO pin (Layer 0) and SOP pin (Layer 1)
+  // included, not only the role/department overrides and task-time selector
+  // below. Detecting it once keeps every layer looking at the same
+  // classification for this dispatch.
+  const detectedModality: TaskModality = taskContext
+    ? detectModality(taskContext.title, taskContext.description)
+    : 'text';
+
+  // Inventory is loaded lazily and cached for the remainder of this call —
+  // several of the layers below may each need it (Layer 0/1 pin sovereignty
+  // check, role/dept sovereignty check, task selector, sovereign default) but a
+  // single resolution should only hit model_registry once.
+  let inventoryCache: ModelRegistryEntry[] | null = null;
+  const getInventory = (): ModelRegistryEntry[] => {
+    if (inventoryCache === null) inventoryCache = loadInventory();
+    return inventoryCache;
+  };
+
   // Layer 0: CEO model choice (GOAL-5 Item 5). The CEO is gated from EXECUTING
   // work but PRESERVES the right to pick which model a department runs the task
   // on. That choice is persisted onto `tasks.model_id` by the ingest route
   // (requested_model) and survives re-emit/re-dispatch. When a non-empty
   // `tasks.model_id` is already set BEFORE dispatch resolution runs, it is an
   // explicit, owner-/CEO-sanctioned model and outranks every other source.
+  //
+  // MODEL-02: the CEO/task pin is now gated through the SAME checkModelSovereignty
+  // check as the role/department overrides (Layers 2/3). A pin that is forbidden
+  // (Anthropic — including the MODEL-01 dot-route / future-generation forms),
+  // free, or wrong-modality is skipped with a logged reason and falls through,
+  // rather than silently winning and defeating model sovereignty. This makes the
+  // resolver self-sovereign regardless of what a downstream consumer re-checks.
   if (taskId) {
     try {
       const pinned = queryOne<{ model_id: string | null }>(
@@ -258,15 +324,24 @@ export function resolveSettings(
         [taskId],
       );
       if (pinned?.model_id && pinned.model_id !== NEEDS_OWNER_INPUT) {
-        model = pinned.model_id;
-        modelSource = 'role_override'; // explicit pin; treated as a hard override
+        const violation = checkModelSovereignty(pinned.model_id, getInventory(), detectedModality);
+        if (!violation) {
+          model = pinned.model_id;
+          modelSource = 'role_override'; // explicit pin; treated as a hard override
+        } else {
+          console.warn(
+            `[intelligence-resolver] CEO/task model pin rejected (task=${taskId} reason=${violation.reason}): ${pinned.model_id}`,
+          );
+        }
       }
     } catch { /* tasks.model_id may be absent on very old DBs — tolerant */ }
   }
 
   // Layer 1: SOP pin — sops.model_pin for task.sop_id (author intent wins).
   // Guarded on needs_owner_input so a Layer-0 CEO model pin (GOAL-5 Item 5) is
-  // never clobbered by an SOP pin.
+  // never clobbered by an SOP pin. MODEL-02: also gated through
+  // checkModelSovereignty — a forbidden/free/wrong-modality SOP pin is skipped
+  // with a logged reason instead of silently winning.
   const sopId = taskContext?.sop_id ?? null;
   if (modelSource === 'needs_owner_input' && sopId) {
     try {
@@ -275,20 +350,80 @@ export function resolveSettings(
         [sopId],
       );
       if (sopPin?.model_pin) {
-        model = sopPin.model_pin;
-        modelSource = 'sop_pin';
+        const violation = checkModelSovereignty(sopPin.model_pin, getInventory(), detectedModality);
+        if (!violation) {
+          model = sopPin.model_pin;
+          modelSource = 'sop_pin';
+        } else {
+          console.warn(
+            `[intelligence-resolver] SOP model pin rejected (task=${taskId} sop=${sopId} reason=${violation.reason}): ${sopPin.model_pin}`,
+          );
+        }
       }
     } catch { /* sops.model_pin column may not exist on older DBs yet */ }
   }
 
-  // Layer 2: Task-time selector (skipped if SOP pin already won)
+  // Layer 2: Role-level override in agent_settings (role_id = agent.id).
+  // BUG-FIX (ORDER): this used to run AFTER the task-time selector (old Layer
+  // 3), so the operator's explicit Intelligence Settings pick almost never
+  // applied — the selector nearly always resolves to something first. It now
+  // outranks the selector. The explicit pick is gated on the FULL
+  // checkModelSovereignty check (not just a literal REJECTED_FREE_DEFAULT
+  // string match) so a forbidden/free/wrong-modality override is skipped
+  // with a logged reason and falls through, rather than either winning
+  // outright or being silently dropped without a trace.
+  if (modelSource === 'needs_owner_input') {
+    const roleModel = queryOne<AgentSettingRow>(
+      `SELECT value FROM agent_settings
+       WHERE department_id = ? AND role_id = ? AND setting_type = 'model'`,
+      [departmentId, agentId],
+    );
+    if (roleModel?.value) {
+      const violation = checkModelSovereignty(roleModel.value, getInventory(), detectedModality);
+      if (!violation) {
+        model = roleModel.value;
+        modelSource = 'role_override';
+      } else {
+        console.warn(
+          `[intelligence-resolver] role override rejected (agent=${agentId} dept=${departmentId} reason=${violation.reason}): ${roleModel.value}`,
+        );
+      }
+    }
+  }
+
+  // Layer 3: Department-level default in agent_settings (role_id IS NULL).
+  // Same sovereignty gate as Layer 2.
+  if (modelSource === 'needs_owner_input') {
+    const deptModel = queryOne<AgentSettingRow>(
+      `SELECT value FROM agent_settings
+       WHERE department_id = ? AND role_id IS NULL AND setting_type = 'model'`,
+      [departmentId],
+    );
+    if (deptModel?.value) {
+      const violation = checkModelSovereignty(deptModel.value, getInventory(), detectedModality);
+      if (!violation) {
+        model = deptModel.value;
+        modelSource = 'department_default';
+      } else {
+        console.warn(
+          `[intelligence-resolver] department default rejected (dept=${departmentId} reason=${violation.reason}): ${deptModel.value}`,
+        );
+      }
+    }
+  }
+
+  // Layer 4: Task-time selector — only runs when no explicit override above
+  // (Layers 0-3) already won. Previously this ran BEFORE Layers 2/3 (see
+  // ORDER-FIX note above); moved here so it is strictly the fallback it was
+  // always documented to be.
   if (modelSource === 'needs_owner_input' && taskContext) {
-    const inventory = loadInventory();
+    const inventory = getInventory();
     if (inventory.length > 0) {
       const sel = selectTaskModel({
         title: taskContext.title,
         description: taskContext.description,
         department: taskContext.department,
+        required_modality: detectedModality,
         inventory,
       });
       if (!sel.needs_owner_input && sel.model_id !== NEEDS_OWNER_INPUT) {
@@ -299,33 +434,25 @@ export function resolveSettings(
         model_tier = sel.tier;
       }
     }
-  } else if (modelSource === 'needs_owner_input' && taskId && !taskContext) {
-    // No task context available — fall through to role/dept overrides below.
   }
 
-  // Layer 3: Role-level override in agent_settings
+  // Layer 4b: Sovereign DEFAULT (W8.5). Applied ONLY when every express source
+  // above declined (modelSource still needs_owner_input) so dispatch's model_id
+  // is never NULL — the 172/183-null-model_id board-stall root cause. Sovereignty
+  // is preserved: this is a default, never a substitution of an owner/CEO/SOP/
+  // role/dept express model (those already won at Layers 0-3). Modality is
+  // respected — a generic text default is only applied to text tasks; an
+  // image/video/audio task with no matching model stays needs_owner_input so
+  // the owner adds the right modality model rather than running on a
+  // wrong-modality default.
   if (modelSource === 'needs_owner_input') {
-    const roleModel = queryOne<AgentSettingRow>(
-      `SELECT value FROM agent_settings
-       WHERE department_id = ? AND role_id = ? AND setting_type = 'model'`,
-      [departmentId, agentId],
-    );
-    if (roleModel?.value && roleModel.value !== REJECTED_FREE_DEFAULT) {
-      model = roleModel.value;
-      modelSource = 'role_override';
-    }
-  }
-
-  // Layer 4: Department-level default in agent_settings
-  if (modelSource === 'needs_owner_input') {
-    const deptModel = queryOne<AgentSettingRow>(
-      `SELECT value FROM agent_settings
-       WHERE department_id = ? AND role_id IS NULL AND setting_type = 'model'`,
-      [departmentId],
-    );
-    if (deptModel?.value && deptModel.value !== REJECTED_FREE_DEFAULT) {
-      model = deptModel.value;
-      modelSource = 'department_default';
+    const inv = getInventory();
+    const mod: TaskModality = required_modality ?? detectedModality;
+    const sovereignDefault = resolveSovereignDefault(inv, mod);
+    if (sovereignDefault) {
+      model = sovereignDefault;
+      modelSource = 'sovereign_default';
+      if (!required_modality) required_modality = mod;
     }
   }
 

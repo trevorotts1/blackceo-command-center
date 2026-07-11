@@ -1,0 +1,21 @@
+PLANTED FIXTURE — do not "fix" this file.
+
+Sole purpose: the CI self-test for scripts/qc-assert-no-client-names.sh copies
+this file into an isolated temp repo-root and confirms the gate exits 1. It
+deliberately contains an obviously-fake PLACEHOLDER name from the committed
+roster template (scripts/client-roster.example.txt) AND the operator machine
+path so the self-test proves the gate actually bites on BOTH categories —
+without embedding any real client name.
+
+The self-test points OPENCLAW_CLIENT_ROSTER at scripts/client-roster.example.txt
+(which lists "ExampleClientAlpha"), so the gate loads that placeholder as its
+denylist and must FAIL on the line below. Clean content (no placeholder, no
+operator path) must PASS. This proves the detector without depending on the
+operator's real roster.
+
+This exact path is path-anchored-excluded from the gate's own scan (see the
+_is_excluded predicate) because it holds the tokens as detection TEST DATA, not
+as a real leak.
+
+  const owner = "ExampleClientAlpha";
+  const key   = "/Users/blackceomacmini/.ssh/id_ed25519";

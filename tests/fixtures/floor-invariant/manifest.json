@@ -1,0 +1,9 @@
+[
+  { "id": "master-orchestrator", "name": "CEO", "slug": "master-orchestrator", "emoji": "🧠" },
+  { "id": "marketing", "name": "Marketing", "slug": "marketing", "emoji": "📣" },
+  { "id": "sales", "name": "Sales", "slug": "sales", "emoji": "💰" },
+  { "id": "app-development", "name": "App Development", "slug": "app-development", "emoji": "📱" },
+  { "id": "engineering", "name": "Engineering", "slug": "engineering", "emoji": "💻" },
+  { "id": "podcast", "name": "Podcast", "slug": "podcast", "emoji": "🎙️", "optOut": true },
+  { "id": "general-task", "name": "General Tasks", "slug": "general-task", "emoji": "📥" }
+]

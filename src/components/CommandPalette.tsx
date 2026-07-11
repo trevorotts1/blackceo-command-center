@@ -15,7 +15,29 @@ interface PaletteAction {
   placeholder?: boolean;
 }
 
-function buildActions(): PaletteAction[] {
+/**
+ * App-wide top-level destinations. Cmd+K used to only surface the 11
+ * operator sub-routes (built from OPERATOR_NAV below) — everything else in
+ * the app (Home, Tasks, the CEO board, Personas, SOPs, Settings...) had no
+ * keyboard-driven way to jump to it. This group is the fix; it's rendered
+ * ahead of the operator group so the most common destinations sort first.
+ */
+const TOP_LEVEL_NAV: PaletteAction[] = [
+  { id: 'topnav:/', label: 'Home', hint: '/', href: '/' },
+  { id: 'topnav:/tasks/all', label: 'All Tasks', hint: '/tasks/all', href: '/tasks/all' },
+  { id: 'topnav:/tasks/by-department', label: 'Departments', hint: '/tasks/by-department', href: '/tasks/by-department' },
+  { id: 'topnav:/ceo-board', label: 'Performance Board', hint: '/ceo-board', href: '/ceo-board' },
+  { id: 'topnav:/conversational-ai', label: 'Conversational AI', hint: '/conversational-ai', href: '/conversational-ai' },
+  { id: 'topnav:/personas', label: 'Personas', hint: '/personas', href: '/personas' },
+  // NB: /sops has no page.tsx of its own (only /sops/proposals does) — routing
+  // here would just recreate the /agent-roster 404 this pass exists to fix.
+  { id: 'topnav:/sops/proposals', label: 'SOP Library', hint: '/sops/proposals', href: '/sops/proposals' },
+  { id: 'topnav:/settings/intelligence', label: 'Intelligence Settings', hint: '/settings/intelligence', href: '/settings/intelligence' },
+  { id: 'topnav:/settings/company', label: 'Company Settings', hint: '/settings/company', href: '/settings/company' },
+  { id: 'topnav:/settings', label: 'Settings', hint: '/settings', href: '/settings' },
+];
+
+function buildOperatorActions(): PaletteAction[] {
   return OPERATOR_NAV.map((item) => ({
     id: `nav:${item.href}`,
     label: `Open ${item.label}`,
@@ -28,7 +50,7 @@ function buildActions(): PaletteAction[] {
 export default function CommandPalette() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const actions = useMemo(buildActions, []);
+  const operatorActions = useMemo(buildOperatorActions, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -82,10 +104,27 @@ export default function CommandPalette() {
                   No matches.
                 </Command.Empty>
                 <Command.Group
-                  heading="Navigation"
+                  heading="Navigate"
                   className="text-[10px] uppercase tracking-[0.18em] text-bcc-text-muted px-3 py-2"
                 >
-                  {actions.map((action) => (
+                  {TOP_LEVEL_NAV.map((action) => (
+                    <Command.Item
+                      key={action.id}
+                      value={`${action.label} ${action.hint}`}
+                      onSelect={() => execute(action)}
+                      className="flex items-center gap-3 px-3 py-2 rounded-md cursor-pointer text-bcc-text aria-selected:bg-bcc-primary-light"
+                    >
+                      <span className="flex-1 text-[14px]">{action.label}</span>
+                      <span className="text-[11px] text-bcc-text-muted">{action.hint}</span>
+                      <ChevronRight size={12} className="text-bcc-text-muted" />
+                    </Command.Item>
+                  ))}
+                </Command.Group>
+                <Command.Group
+                  heading="Operator Console"
+                  className="text-[10px] uppercase tracking-[0.18em] text-bcc-text-muted px-3 py-2"
+                >
+                  {operatorActions.map((action) => (
                     <Command.Item
                       key={action.id}
                       value={`${action.label} ${action.hint}`}

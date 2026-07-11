@@ -18,6 +18,7 @@
 import * as cron from 'node-cron';
 import { refreshModels } from './refresh-models';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
+import { resolveProviderApiKey } from '@/lib/provider-key-detection'; // MODEL-08 (usage-refresh key resolution)
 import { runExecutionCompletionReconcile } from './execution-watcher';
 import { runCeoDelegationSweep } from './ceo-delegation-sweep';
 import { detectPatternsAndPropose } from '@/lib/sop-learning';
@@ -34,7 +35,11 @@ import {
 import { runGeneralTaskRecurrenceDetection } from './general-task-recurrence';
 import { runQCReviewSweep } from './qc-review-sweep';
 import { runStaleTaskSweep, STALE_TASK_SWEEP_CRON } from './stale-task-sweep';
+import { runStuckInProgressSweep, STUCK_IN_PROGRESS_SWEEP_CRON } from './stuck-in-progress-sweep';
+import { runInterviewNudgeSweep, INTERVIEW_NUDGE_SWEEP_CRON } from './interview-nudge-sweep';
 import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
+import { runPersonaBackfillSweep } from './persona-backfill-sweep';
+import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -108,17 +113,30 @@ async function runUsageRefresh(): Promise<void> {
   // No persistence target exists yet for usage snapshots. Track B6 owns the
   // table + writer. For now we simply confirm the connector responds so a
   // missing API key surfaces in the logs.
+  //
+  // MODEL-08: the API key is resolved with resolveProviderApiKey(p) — the SAME
+  // multi-store, multi-alias detection the model-refresh job uses
+  // (refresh-models.ts). The previous manual derivation
+  // (`SLUG.toUpperCase().replace(/-/g,'_') + '_API_KEY'`) only checked the ONE
+  // canonical env var, so a provider whose key lives under an alias
+  // (envCandidates), in an .env file, or in openclaw.json was wrongly reported
+  // as "no key" and silently skipped.
   await Promise.allSettled(
     providersWithUsage.map(async (p) => {
       const slug = p.slug;
-      const envKey = slug.toUpperCase().replace(/-/g, '_') + '_API_KEY';
-      const apiKey = process.env[envKey];
-      if (!apiKey) {
-        console.log(`[cron] usage-refresh: ${slug} skipped (no ${envKey})`);
+      const keyResult = resolveProviderApiKey(p);
+      if ('localEndpoint' in keyResult) {
+        // Local-endpoint providers authenticate via a daemon and are unmetered —
+        // no usage quota to refresh.
+        console.log(`[cron] usage-refresh: ${slug} skipped (local endpoint, no usage quota)`);
+        return;
+      }
+      if (!keyResult.found) {
+        console.log(`[cron] usage-refresh: ${slug} skipped (no key; checked ${keyResult.checked.join(', ')})`);
         return;
       }
       try {
-        await p.fetchUsage?.(apiKey);
+        await p.fetchUsage?.(keyResult.value);
         console.log(`[cron] usage-refresh: ${slug} ok`);
       } catch (error) {
         console.warn(`[cron] usage-refresh: ${slug} failed:`, (error as Error).message);
@@ -253,9 +271,11 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // These two are NOT the primary mechanism. The primary B2 path is the instant
   // agent-completion webhook (which now broadcasts task_updated immediately),
   // and the primary B4/B8 path is in-process routing in createTaskCore. These
-  // crons only catch DROPPED events / pre-existing backlog. To disable, delete
-  // the entry here (or set EXECUTION_WATCHER_ENABLED=0 /
-  // CEO_DELEGATION_SWEEP_ENABLED=0). Kept low-frequency on purpose.
+  // crons only catch DROPPED events / pre-existing backlog. Kept low-frequency
+  // on purpose. Their JOBS entries stay registered but the two legacy ADVANCERS
+  // (ceo-delegation + backlog-redispatch) are PAUSED BY DEFAULT (SWEEP-01) — they
+  // return immediately unless opted in per box (CEO_DELEGATION_SWEEP_ENABLED=1 /
+  // BACKLOG_REDISPATCH_SWEEP_ENABLED=1). intake-advance is the single live advancer.
   //
   // execution-reconcile: every 2 minutes, catch in_progress tasks whose
   // TASK_COMPLETE report never reached the webhook.
@@ -278,8 +298,34 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   },
   // ceo-delegation: every 5 minutes, push CEO-stranded backlog tasks down to
   // the right department (mostly relevant for tasks created before in-process
-  // routing shipped).
+  // routing shipped). PAUSED BY DEFAULT (SWEEP-01) — opt in with
+  // CEO_DELEGATION_SWEEP_ENABLED=1; intake-advance is the live advancer.
   { name: 'ceo-delegation', expr: '*/5 * * * *', fn: () => runCeoDelegationSweep() },
+
+  // intake-advance: every 2 minutes — THE single board-advancement authority
+  // (W8.1). Drains every intake lane (inbox/backlog/planning/pending_dispatch/
+  // assigned): routes unassigned tasks, feeds the campaign board, and fires
+  // autoDispatchTask so cards actually move instead of freezing in `inbox`.
+  // Furnace-proof by construction — it only selects tasks under the QC cap, under
+  // the dispatch attempt cap, and past their backoff window. This REPLACES the
+  // backlog-redispatch + ceo-delegation sweeps as the live advancer — those two
+  // are now PAUSED BY DEFAULT in-repo (SWEEP-01): each returns immediately unless
+  // opted in with its *_ENABLED=1 flag (no longer relying on an env override to
+  // stay off). Disable this one with INTAKE_ADVANCE_SWEEP_ENABLED=0.
+  {
+    name: 'intake-advance',
+    expr: '*/2 * * * *',
+    fn: async () => {
+      const result = await runIntakeAdvanceSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] intake-advance: skipped — ${result.skippedReason}`);
+      } else if (result.scanned > 0) {
+        console.log(
+          `[cron] intake-advance: scanned ${result.scanned}, routed ${result.routed}, dispatched ${result.dispatched}`,
+        );
+      }
+    },
+  },
 
   // backlog-redispatch: every 2 minutes, rescue tasks that were ASSIGNED a
   // specialist but never left backlog because their single autoDispatchTask
@@ -289,7 +335,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // it flips to in_progress (SKIP_STATUSES), and the failing path burns no
   // tokens (guards return before chat.send). A 120s grace window + batch cap
   // prevent a re-dispatch storm / double-invocation of just-assigned tasks.
-  // Disable with BACKLOG_REDISPATCH_SWEEP_ENABLED=0.
+  // PAUSED BY DEFAULT (SWEEP-01) — opt in with BACKLOG_REDISPATCH_SWEEP_ENABLED=1.
   {
     name: 'backlog-redispatch',
     expr: '*/2 * * * *',
@@ -300,6 +346,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else if (result.scanned > 0) {
         console.log(
           `[cron] backlog-redispatch: scanned ${result.scanned} stuck task(s), re-dispatched ${result.dispatched}`,
+        );
+      }
+    },
+  },
+
+  // persona-backfill: every 5 minutes, HEAL any non-terminal task still carrying
+  // no persona (F3.1 no-naked-tasks invariant). Re-runs resolvePersonaAndPin,
+  // which pins a matched persona, pins the deterministic fallback chain, or (for a
+  // genuine mechanical task) records the governance pointer and leaves it NULL by
+  // design. Furnace/loop-proof: one attempt per task ever (guarded by a
+  // persona_backfill_attempt event), a 120s grace window, and a batch cap.
+  // Disable with PERSONA_BACKFILL_SWEEP_ENABLED=0.
+  {
+    name: 'persona-backfill',
+    expr: '*/5 * * * *',
+    fn: async () => {
+      const result = await runPersonaBackfillSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] persona-backfill: skipped — ${result.skippedReason}`);
+      } else if (result.scanned > 0) {
+        console.log(
+          `[cron] persona-backfill: scanned ${result.scanned} naked task(s), ` +
+            `pinned ${result.pinned}, left ${result.leftPersonaless} personaless (mechanical)`,
         );
       }
     },
@@ -323,14 +392,63 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       const result = await runStaleTaskSweep();
       if (result.skippedReason) {
         console.log(`[cron] stale-task-sweep: skipped -- ${result.skippedReason}`);
-      } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0) {
+      } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0 || (result.recovered ?? 0) > 0) {
+        const rec = result.recovered ?? 0;
         console.log(
-          `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, repinged ${result.repinged}`,
+          `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, ` +
+          `repinged ${result.repinged}, recovered ${rec}${rec > 0 ? ` (${(result.recoveredIds ?? []).join(', ')})` : ''}`,
         );
       }
     },
   },
 
+  // stuck-in-progress-sweep: every 5 minutes, catch a task that was dispatched
+  // to in_progress and then died silently mid-turn (agent looped/aborted without
+  // reporting TASK_COMPLETE or any terminal status). The success reconcile
+  // (execution-watcher) and the 24h stale-task-sweep never mark such a task
+  // blocked nor alert the operator within a useful window — this is that missing
+  // supervisor: block + free the agent + alert the operator once. Tune with
+  // STUCK_IN_PROGRESS_MINUTES (default 45); disable with
+  // DISABLE_STUCK_IN_PROGRESS_SWEEP=1.
+  {
+    name: 'stuck-in-progress-sweep',
+    expr: STUCK_IN_PROGRESS_SWEEP_CRON,
+    fn: async () => {
+      const result = await runStuckInProgressSweep();
+      if (result.blocked > 0 || result.recovered > 0) {
+        console.log(
+          `[cron] stuck-in-progress-sweep: scanned ${result.scanned}, ` +
+          `recovered ${result.recovered}${result.recovered > 0 ? ` (${result.recoveredIds.join(', ')})` : ''}, ` +
+          `blocked ${result.blocked}${result.blocked > 0 ? ` (${result.blockedIds.join(', ')})` : ''}`,
+        );
+      }
+    },
+  },
+
+
+  // interview-nudge: hourly (:23) — re-engage an owner who STARTED the Skill-23
+  // interview and went quiet, with ONE Telegram resume link matching the P0-7
+  // slug contract (${OPENCLAW_DASHBOARD_URL}/onboarding/resume/<slug>). Reads
+  // interview progress from the canonical files only (never writes
+  // interviewComplete); idempotent per (session, tier) via an events ledger row;
+  // silent/operator-safe (owner-only send). OPT-IN: dormant unless
+  // INTERVIEW_NUDGE_SWEEP_ENABLED=1 (repo-only until fleet rollout is released).
+  // Disable outright with DISABLE_INTERVIEW_NUDGE_SWEEP=1.
+  {
+    name: 'interview-nudge',
+    expr: INTERVIEW_NUDGE_SWEEP_CRON,
+    fn: async () => {
+      const result = await runInterviewNudgeSweep();
+      if (result.skippedReason) {
+        // Quiet by design — only log the interesting (would-have-sent) skips.
+        if (result.tier) {
+          console.log(`[cron] interview-nudge: skipped — ${result.skippedReason}`);
+        }
+      } else if (result.nudged > 0) {
+        console.log(`[cron] interview-nudge: sent tier ${result.tier}h resume nudge`);
+      }
+    },
+  },
 
   // weekly-done-clear: Sunday 07:00 America/New_York — soft-archive all done
   // tasks (sets archived_at, never hard-deletes). Idempotent: a second run in

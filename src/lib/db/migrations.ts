@@ -12,7 +12,13 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { seedStarterSOPs } from '../sops-seed';
+import { canonicalDeptSlug } from '../routing/canonical-slug';
 import { seedCompanyGuarded } from './branding-seed';
+import {
+  dedupeCanonicalWorkspaces,
+  reapDuplicateOpenAuthoringTasks,
+  findCanonicalWorkspaceId,
+} from './task-dedup';
 
 interface Migration {
   id: string;
@@ -29,6 +35,17 @@ interface Migration {
    * transaction. (Bug 1, v4.0.2.)
    */
   useOuterTransaction?: boolean;
+  /**
+   * INGEST-07: when true, this migration performs a DESTRUCTIVE data operation
+   * (row dedup / reap / merge) that must NOT run during the request-time schema
+   * self-heal path — that path races data mutations against live ingest. When
+   * `OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY` is set (the self-heal sets it for
+   * the duration of its one-shot migrate), the runner DEFERS these migrations:
+   * it neither runs `up` nor records them as applied, so they stay pending and
+   * run normally on the next controlled boot. Only additive schema DDL should
+   * be applied during self-heal.
+   */
+  deferInAdditiveSelfHeal?: boolean;
 }
 
 // All migrations in order - NEVER remove or reorder existing migrations
@@ -1439,7 +1456,7 @@ const migrations: Migration[] = [
     up: (db) => {
       // Bug 3 cleanup (v4.0.2): deletes orphan rows in persona_selection_log
       // whose task_id is null/empty/sentinel/no-longer-exists. These rows
-      // were the trigger for the migration-034 FK breakage on the Evelyn
+      // were the trigger for the migration-034 FK breakage on a client
       // canary deploy.
       console.log('[Migration 045] Cleaning persona_selection_log orphans...');
       const info = db.prepare(`SELECT COUNT(*) as c FROM persona_selection_log`).get() as { c: number } | undefined;
@@ -2108,11 +2125,16 @@ const migrations: Migration[] = [
       const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
       if (!cols.includes('archived_at')) {
         db.exec(`ALTER TABLE tasks ADD COLUMN archived_at TEXT`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at)`);
-        console.log('[Migration 058] tasks.archived_at + index added');
+        console.log('[Migration 058] tasks.archived_at column added');
       } else {
-        console.log('[Migration 058] tasks.archived_at already present, skipping');
+        console.log('[Migration 058] tasks.archived_at already present, skipping column add');
       }
+      // Index must be created unconditionally (outside the column-absence guard):
+      // schema.ts already defines archived_at on fresh installs, so the ALTER TABLE
+      // branch above is skipped there — but the index still needs to exist.
+      // IF NOT EXISTS makes this safe/idempotent on every database, old or new.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at)`);
+      console.log('[Migration 058] idx_tasks_archived_at index ready');
     },
   },
 
@@ -2935,7 +2957,651 @@ const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '077',
+    name: 'add_dispatch_attempt_accounting',
+    up: (db) => {
+      // W8.2 anti-furnace: per-task dispatch attempt-accounting so an
+      // unadvanceable task is NEVER re-fired every 2-5 min forever.
+      //   dispatch_attempts        — incremented on every FAILED advance attempt
+      //                              (gateway down / sovereignty / no-runtime);
+      //                              reset to 0 on a successful advance.
+      //   last_dispatch_attempt_at — wall-clock of the most recent attempt.
+      //   next_dispatch_eligible_at — exponential-backoff gate; a task is not
+      //                              re-selected/re-fired until now >= this.
+      // All additive + nullable; non-dispatch rows keep them NULL. The
+      // intake-advance / backlog-redispatch sweeps filter on these so the
+      // furnace can't reignite.
+      console.log('[Migration 077] Adding tasks dispatch attempt-accounting columns...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('dispatch_attempts')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN dispatch_attempts INTEGER DEFAULT 0`);
+      }
+      if (!cols.includes('last_dispatch_attempt_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN last_dispatch_attempt_at TEXT`);
+      }
+      if (!cols.includes('next_dispatch_eligible_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN next_dispatch_eligible_at TEXT`);
+      }
+      // Partial index so the sweeps' "eligible now" scan stays cheap.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_next_dispatch_eligible
+               ON tasks(next_dispatch_eligible_at) WHERE next_dispatch_eligible_at IS NOT NULL`);
+      console.log('[Migration 077] dispatch attempt-accounting columns ready');
+    },
+  },
+  {
+    id: '078',
+    name: 'add_block_reason',
+    up: (db) => {
+      // W8 fix (v4.55.1): recordDispatchFailure's block-on-N UPDATE path and the
+      // QC-scorer's QC-BLOCKED UPDATE path both write `block_reason = ?`. Migration
+      // 077 added the three dispatch-attempt-accounting columns but omitted
+      // block_reason. Without this column the UPDATE throws SQLITE_ERROR "no such
+      // column: block_reason"; the throw is caught and swallowed → the task is
+      // NEVER transitioned to 'blocked', NEVER notifies the owner, and the attempt
+      // counter stalls at MAX_DISPATCH_ATTEMPTS - 1 causing an infinite re-loop on
+      // every backoff window.
+      //
+      // Idempotent: PRAGMA table_info guard before ALTER so this is safe on fresh
+      // installs (schema.ts may pre-create the column in future) AND on existing
+      // DBs that already ran migration 077.
+      console.log('[Migration 078] Adding tasks.block_reason column...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('block_reason')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN block_reason TEXT`);
+        console.log('[Migration 078] block_reason column added');
+      } else {
+        console.log('[Migration 078] block_reason already present — skipping');
+      }
+    },
+  },
+  {
+    id: '079',
+    name: 'ensure_tasks_stage_slug',
+    up: (db) => {
+      // Self-heal for a migration-ID-074 collision. An earlier source revision
+      // numbered a now-removed migration as id '074'; the current source assigns
+      // id '074' to `add_tasks_stage_slug_for_ad_campaigns`. Because the runner
+      // keys applied-state on id alone (`_migrations.id`), any DB that recorded
+      // the OLD 074 will SKIP the current 074 forever — so `tasks.stage_slug`
+      // (and its two indexes) never get created on those DBs.
+      //
+      // The visible failure is identical in class to migration 056 (sop_id) and
+      // 078 (block_reason): the ad-campaign assembly-line INSERT in
+      // `src/lib/ad-campaigns.ts` writes `stage_slug`, so on an affected DB it
+      // throws SQLITE_ERROR "table tasks has no column named stage_slug" → the
+      // ad-run card-create path 500s.
+      //
+      // This migration carries a NEW id (079) so it always runs on the affected
+      // DBs, and is fully idempotent (PRAGMA table_info guard + IF NOT EXISTS on
+      // both indexes) so it is a no-op on DBs that already have the column from
+      // migration 074. Additive + nullable — never touches existing rows/routes.
+      // Mirrors migration 074's body exactly.
+      console.log('[Migration 079] Ensuring tasks.stage_slug column + ad-campaign indexes exist...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('stage_slug')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN stage_slug TEXT`);
+        console.log('[Migration 079] tasks.stage_slug column added (074 id-collision repaired)');
+      } else {
+        console.log('[Migration 079] tasks.stage_slug already present — ensuring indexes only');
+      }
+      // One card per (campaign_id, stage_slug); NULLs excluded so normal tasks never collide.
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_campaign_stage
+               ON tasks(campaign_id, stage_slug)
+               WHERE campaign_id IS NOT NULL AND stage_slug IS NOT NULL`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_stage_slug
+               ON tasks(stage_slug) WHERE stage_slug IS NOT NULL`);
+      console.log('[Migration 079] tasks.stage_slug ready');
+    },
+  },
+  {
+    id: '080',
+    name: 'add_tasks_process_certificate_sha',
+    up: (db) => {
+      // FIX C (CC done-gate): the Presentations no-skip proof certificate
+      // (`prove-deck.py` → PROCESS-CERTIFICATE.json) is enforced at the board by
+      // requiring a matching `process_certificate_sha` before a presentations
+      // task may move to done/delivered (see src/app/api/tasks/[id]/route.ts).
+      // This column STORES the certificate sha registered with the deck run so
+      // the gate can both require it and verify the mover presents the same one.
+      //
+      // Additive + nullable: every non-presentations task and every legacy row
+      // keeps NULL and is unaffected. Idempotent PRAGMA guard so it is a no-op on
+      // fresh installs and on DBs that already have it.
+      console.log('[Migration 080] Adding tasks.process_certificate_sha column...');
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('process_certificate_sha')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN process_certificate_sha TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_process_cert
+                 ON tasks(process_certificate_sha) WHERE process_certificate_sha IS NOT NULL`);
+        console.log('[Migration 080] process_certificate_sha column added');
+      } else {
+        console.log('[Migration 080] process_certificate_sha already present — skipping');
+      }
+    },
+  },
+  {
+    id: '081',
+    name: 'dedupe_canonical_workspaces',
+    // INGEST-07: destructive workspace merge — defer during additive-only self-heal.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // FM-6 (board single-source): de-dup workspace rows that canonicalize to the
+      // SAME department (e.g. `ceo` + `master-orchestrator`, `app-development` +
+      // `engineering`). Each duplicate split one department across two Kanban
+      // columns and two agent rosters. The keeper is the canonical-slug row;
+      // agents/tasks/all workspace_id-bearing rows are reassigned to it and the
+      // duplicate rows are deleted. Idempotent — a clean board is left untouched.
+      console.log('[Migration 081] De-duplicating canonical workspace rows...');
+      const r = dedupeCanonicalWorkspaces(db);
+      console.log(
+        `[Migration 081] merged ${r.groups_merged} group(s), deleted ${r.rows_deleted} duplicate row(s), reassigned ${r.rows_reassigned} referencing row(s)`,
+      );
+    },
+  },
+  {
+    id: '082',
+    name: 'reap_duplicate_open_authoring_tasks',
+    // INGEST-07: destructive task reap — defer during additive-only self-heal.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // FM-6b (furnace heal): collapse the duplicate open "Author SOP: …" sub-tasks
+      // the SOP-authoring fast loop re-created on every dispatch sweep (300+ stuck
+      // in_progress on the affected box). Keeps the oldest of each group and
+      // FK-safely deletes the spurious clones. The matching RUNTIME idempotency
+      // guard (src/lib/sop-authoring.ts) prevents new duplicates from forming.
+      console.log('[Migration 082] Reaping duplicate open "Author SOP" tasks...');
+      const r = reapDuplicateOpenAuthoringTasks(db);
+      console.log(`[Migration 082] reaped ${r.deleted} duplicate task(s) across ${r.groups} group(s)`);
+    },
+  },
+  {
+    id: '083',
+    name: 'add_task_persona_fallback',
+    up: (db) => {
+      // Point 10 fix 1: resolvePersonaAndPin now pins a deterministic
+      // department-default persona when the selector exhausts its attempts, so
+      // no task is ever personaless. This boolean flags those defaulted pins for
+      // audit (vs a genuine matched persona). Idempotent ADD COLUMN.
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!tasksInfo.find((c) => c.name === 'persona_fallback')) {
+        db.prepare('ALTER TABLE tasks ADD COLUMN persona_fallback INTEGER DEFAULT 0').run();
+      }
+      console.log('[Migration 083] tasks.persona_fallback audit column ready');
+    },
+  },
+  {
+    id: '084',
+    name: 'add_task_redispatch_count',
+    up: (db) => {
+      // Point 6 fix 2: backlog-redispatch-sweep counts its own cheap retries here
+      // so a permanently-stuck-in-backlog task (config problem / SOP-authoring hold
+      // that never clears — paths that never go through recordDispatchFailure) is
+      // eventually escalated to `blocked` after REDISPATCH_MAX_ATTEMPTS retries over
+      // REDISPATCH_ESCALATE_HOURS, instead of re-looping forever. Idempotent.
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!tasksInfo.find((c) => c.name === 'redispatch_count')) {
+        db.prepare('ALTER TABLE tasks ADD COLUMN redispatch_count INTEGER DEFAULT 0').run();
+      }
+      console.log('[Migration 084] tasks.redispatch_count accounting column ready');
+    },
+  },
+  {
+    id: '085',
+    name: 'create_sop_feedback',
+    up: (db) => {
+      // ISSUE #5 (audit 2026-07-03): the SOP feedback/learning loop was dead on
+      // arrival — src/app/api/sops/feedback/route.ts and src/lib/sop-learning.ts
+      // read/write `sop_feedback`, but no CREATE TABLE existed anywhere, so the
+      // endpoint 500'd with "no such table: sop_feedback" and recordFeedback ->
+      // detectPatternsAndPropose never fired.
+      //
+      // Columns are the EXACT set the code touches:
+      //   recordFeedback INSERT (sop-learning.ts:110): id, sop_id, task_id, rating, notes, agent_id
+      //   SOPFeedbackRow (sop-learning.ts:20-28):      + created_at
+      //   route.ts:27 validates rating in [1, -1, 0]  -> rating is an INTEGER
+      //     (1 = thumbs up, -1 = thumbs down, 0 = skip), NOT a text enum.
+      // created_at is not written by recordFeedback, so it carries a DEFAULT.
+      // Idempotent: IF NOT EXISTS so this is safe on fresh installs and re-runs.
+      console.log('[Migration 085] Creating sop_feedback table...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sop_feedback (
+          id TEXT PRIMARY KEY,
+          sop_id TEXT NOT NULL REFERENCES sops(id) ON DELETE CASCADE,
+          task_id TEXT,
+          agent_id TEXT,
+          rating INTEGER NOT NULL CHECK (rating IN (1, -1, 0)),
+          notes TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      // computePerformance() filters `WHERE sop_id = ? AND created_at >= ?` and
+      // the GET route orders by created_at DESC — a (sop_id, created_at) index
+      // covers both. task_id is filtered alone by the GET dedupe check.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_sop ON sop_feedback(sop_id, created_at DESC)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sop_feedback_task ON sop_feedback(task_id)`);
+      console.log('[Migration 085] sop_feedback table + indexes ready');
+    },
+  },
+  {
+    id: '086',
+    name: 'remove_demo_seed_rows',
+    up: (db) => {
+      // ISSUE #1 (audit 2026-07-03): older installs (and every pre-fix
+      // `--update-only` pass) ran the unguarded seed which (a) inserted a NEW
+      // master Orchestrator every time and (b) defaulted to demo agents/tasks/
+      // conversations on the client's real board. seed.ts is now guarded +
+      // demo-opt-in, but boxes provisioned before the fix already carry the
+      // contamination. This migration cleans it up idempotently.
+      //
+      // Safe to re-run: after the first pass there is exactly one master and no
+      // demo rows, so every subsequent run is a no-op. Wrapped section-by-section
+      // in try/catch (mirrors migration 030) so an edge case can never brick
+      // app startup.
+      console.log('[Migration 086] De-duping masters + removing legacy demo seed rows...');
+
+      // Discover every column that FK-references agents(id), with its ON DELETE
+      // action, so we can repoint/detach robustly instead of hardcoding a list
+      // that drifts as the schema grows.
+      const agentRefs: { table: string; column: string; onDelete: string }[] = [];
+      try {
+        const tables = db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+          .all() as { name: string }[];
+        for (const t of tables) {
+          const fks = db.prepare(`PRAGMA foreign_key_list("${t.name}")`).all() as {
+            table: string;
+            from: string;
+            on_delete: string;
+          }[];
+          for (const fk of fks) {
+            if (fk.table === 'agents') {
+              agentRefs.push({ table: t.name, column: fk.from, onDelete: (fk.on_delete || '').toUpperCase() });
+            }
+          }
+        }
+      } catch (e) {
+        console.log('[Migration 086] FK discovery skipped:', (e as Error).message);
+      }
+
+      // Repoint every reference to `fromId` onto `toId`. OR IGNORE survives the
+      // handful of refs with a UNIQUE/PK on the agent column (e.g.
+      // conversation_participants PK, agent_memory_logs UNIQUE); any row that
+      // could not be repointed still points at fromId and is cleaned up by the
+      // subsequent DELETE (those refs are ON DELETE CASCADE).
+      const repointAgent = (fromId: string, toId: string) => {
+        for (const r of agentRefs) {
+          db.prepare(`UPDATE OR IGNORE "${r.table}" SET "${r.column}" = ? WHERE "${r.column}" = ?`).run(toId, fromId);
+        }
+      };
+
+      // Detach an agent about to be deleted: NULL out only the RESTRICT/NO ACTION
+      // refs (those columns are all nullable). CASCADE / SET NULL / SET DEFAULT
+      // refs are handled by the DB on DELETE.
+      const detachAgent = (id: string) => {
+        for (const r of agentRefs) {
+          if (r.onDelete === 'CASCADE' || r.onDelete === 'SET NULL' || r.onDelete === 'SET DEFAULT') continue;
+          db.prepare(`UPDATE "${r.table}" SET "${r.column}" = NULL WHERE "${r.column}" = ?`).run(id);
+        }
+      };
+
+      // 1) De-dupe masters — keep the OLDEST is_master=1 'Orchestrator', re-point
+      //    every FK from the duplicates onto the keeper, then delete the dupes.
+      try {
+        const masters = db
+          .prepare(
+            "SELECT id FROM agents WHERE is_master = 1 AND name = 'Orchestrator' ORDER BY datetime(created_at) ASC, id ASC"
+          )
+          .all() as { id: string }[];
+        if (masters.length > 1) {
+          const keeper = masters[0].id;
+          for (const dup of masters.slice(1)) {
+            repointAgent(dup.id, keeper);
+            db.prepare('DELETE FROM agents WHERE id = ?').run(dup.id);
+          }
+          console.log(`[Migration 086] Collapsed ${masters.length} masters -> 1 (kept ${keeper})`);
+        } else {
+          console.log('[Migration 086] Master orchestrator already unique — nothing to de-dupe');
+        }
+      } catch (e) {
+        console.log('[Migration 086] Master de-dupe skipped:', (e as Error).message);
+      }
+
+      // 2) Remove demo content — ONLY when a real (non-placeholder) company row
+      //    exists, so a genuine demo deployment is left untouched. Same
+      //    real-company predicate as migration 030.
+      try {
+        const real = db
+          .prepare(
+            "SELECT COUNT(*) AS c FROM companies WHERE slug NOT IN ('default','command-center') AND slug NOT LIKE 'acme-%'"
+          )
+          .get() as { c: number };
+        if (real.c > 0) {
+          // 2a) Demo agents (Developer/Researcher/Writer/Designer, on-call,
+          //     non-master) that never did real work (no completed tasks).
+          const demoAgentNames = ['Developer', 'Researcher', 'Writer', 'Designer'];
+          let removedAgents = 0;
+          for (const name of demoAgentNames) {
+            const rows = db
+              .prepare("SELECT id FROM agents WHERE name = ? AND specialist_type = 'on-call' AND is_master = 0")
+              .all(name) as { id: string }[];
+            for (const row of rows) {
+              const done = db
+                .prepare("SELECT COUNT(*) AS c FROM tasks WHERE assigned_agent_id = ? AND status = 'done'")
+                .get(row.id) as { c: number };
+              if (done.c > 0) continue; // has real completed work — keep it
+              detachAgent(row.id);
+              db.prepare('DELETE FROM agents WHERE id = ?').run(row.id);
+              removedAgents++;
+            }
+          }
+
+          // 2b) The 4 seeded demo tasks — scoped to the demo business_id so a
+          //     real client task that happens to share a title is never touched.
+          const demoTaskTitles = [
+            'Set up development environment',
+            'Create project documentation',
+            'Research competitor features',
+            'Design new dashboard layout',
+          ];
+          let removedTasks = 0;
+          for (const title of demoTaskTitles) {
+            const res = db
+              .prepare("DELETE FROM tasks WHERE title = ? AND business_id = 'default'")
+              .run(title);
+            removedTasks += res.changes;
+          }
+
+          // 2c) The demo "Team Chat" group conversation (+ its messages and
+          //     participant rows).
+          let removedConvos = 0;
+          const convos = db
+            .prepare("SELECT id FROM conversations WHERE title = 'Team Chat' AND type = 'group'")
+            .all() as { id: string }[];
+          for (const c of convos) {
+            db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(c.id);
+            db.prepare('DELETE FROM conversation_participants WHERE conversation_id = ?').run(c.id);
+            db.prepare('DELETE FROM conversations WHERE id = ?').run(c.id);
+            removedConvos++;
+          }
+
+          console.log(
+            `[Migration 086] Real company present — removed ${removedAgents} demo agent(s), ${removedTasks} demo task(s), ${removedConvos} demo conversation(s)`
+          );
+        } else {
+          console.log('[Migration 086] No real company yet — leaving any demo content in place');
+        }
+      } catch (e) {
+        console.log('[Migration 086] Demo cleanup skipped:', (e as Error).message);
+      }
+    },
+  },
+  {
+    id: '087',
+    name: 'add_interview_sessions',
+    up: (db) => {
+      // Wave 5 (AI Workforce Interview APP): a READ-MIRROR / fast-UI index for the
+      // /interview surface. The FILES stay the single source of truth — the three
+      // canonical artifacts (.workforce-build-state.json, workforce-interview-
+      // answers.md, interview-handoff.md) are written ONLY through the Skill-23
+      // shell scripts. These two tables are NEVER a write authority for
+      // interviewComplete or for canonicalReconciliation.decisions; they only
+      // cache what the canonical files already say so the UI can render progress /
+      // an answer list without re-parsing on every request. If the mirror and the
+      // files ever disagree, the FILES WIN (same posture as department-floor.py) —
+      // src/lib/interview/store.ts reconciles from the files, never the reverse.
+      console.log('[Migration 087] Adding interview_sessions + interview_answers mirror tables...');
+
+      // interview_sessions — one row per interviewSessionId (the stable id the
+      // seam persists into build-state). status/phase/percent are UI-facing mirror
+      // fields derived from the handoff + build-state; NONE of them is authoritative.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS interview_sessions (
+          id TEXT PRIMARY KEY,
+          client_id TEXT,
+          owner_id TEXT,
+          channel TEXT NOT NULL DEFAULT 'web',
+          status TEXT NOT NULL DEFAULT 'in_progress',
+          phase TEXT,
+          last_question_number INTEGER,
+          percent INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+
+      // interview_answers — a mirror of the Q/A blocks that live (canonically) in
+      // workforce-interview-answers.md. `provenance` mirrors any provenance note
+      // (e.g. confirmed-from-context / updated-on) captured in the file. UNIQUE on
+      // (session_id, question_number) so a re-answer/edit upserts the same row
+      // rather than duplicating it.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS interview_answers (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          question_number INTEGER,
+          phase TEXT,
+          question TEXT,
+          answer TEXT,
+          provenance TEXT,
+          asked_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE (session_id, question_number)
+        )
+      `);
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_interview_sessions_status ON interview_sessions(status)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_interview_sessions_client ON interview_sessions(client_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_interview_answers_session ON interview_answers(session_id, question_number)`);
+
+      console.log('[Migration 087] interview_sessions + interview_answers ready');
+    },
+  },
+  {
+    id: '088',
+    name: 'add_task_subtask_persona',
+    up: (db) => {
+      // DEP-5 / findings F3.7 + F3.9 — wire multi-persona decomposition into the CC.
+      //
+      // `decompose-task.py --combined` (the matcher-side engine) picks a best-fit
+      // persona PER sub-task and writes one row per sub-task into
+      // `task_subtask_persona`, keyed (task_id, seq). The table is the row source
+      // the kanban card (slot chips) and the dispatcher (PERSONA PLAN block) read.
+      //
+      // Schema is EXACTLY `_SUBTASK_PERSONA_DDL` (decompose-task.py) plus:
+      //   - a `slot` column (F3.9 SOP persona slots — which declared slot filled
+      //     this sub-task; NULL for pure text-decomposition sub-tasks), and
+      //   - an index on task_id (the only lookup key the readers use).
+      //
+      // The decompose script ships its OWN defensive `CREATE TABLE IF NOT EXISTS`
+      // (with the base columns, no `slot`) for hand-run CLI use, so the table may
+      // already exist on a box where someone ran the CLI before this migration.
+      // We therefore (a) CREATE IF NOT EXISTS with the full schema for a fresh DB,
+      // then (b) ALTER-add `slot` when an older CLI-created table lacks it. Both
+      // steps are idempotent — the DDL tolerates a table with extra columns and the
+      // script's explicit-column INSERT never writes `slot`, so the two converge.
+      console.log('[Migration 088] Adding task_subtask_persona (multi-persona plan rows)...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_subtask_persona (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          subtask_text TEXT,
+          persona_id TEXT,
+          persona_name TEXT,
+          score REAL,
+          department TEXT,
+          task_category TEXT,
+          slot TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      // Older CLI-created table (script DDL has no `slot`) → add it. Additive,
+      // nullable, never touches existing rows.
+      const cols = db.prepare("PRAGMA table_info(task_subtask_persona)").all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'slot')) {
+        db.prepare('ALTER TABLE task_subtask_persona ADD COLUMN slot TEXT').run();
+      }
+
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_subtask_persona_task ON task_subtask_persona(task_id)').run();
+
+      console.log('[Migration 088] task_subtask_persona + idx_subtask_persona_task ready');
+    },
+  },
+  {
+    id: '089',
+    name: 'add_tasks_source_column',
+    up: (db) => {
+      // INGEST-10 — the board-producer scope gate in
+      // /api/tasks/[id]/status/route.ts (resolveBoardSource) was designed to key
+      // off an IMMUTABLE, server-stamped `tasks.source` column, but that column
+      // never actually landed: it existed only as a comment referencing "a future
+      // migration". Until now `task.source` was always undefined, so the resolver
+      // silently fell through to its legacy fallback — a "Source: <value>" line
+      // matched out of the CALLER-EDITABLE `description` field — which a PATCH
+      // caller can forge on any task to grant itself board-producer scope.
+      //
+      // This migration adds the column (idempotent, additive, nullable — existing
+      // rows get NULL and keep using the legacy description-marker fallback,
+      // exactly as resolveBoardSource already handles). The write side
+      // (createTaskCore / src/app/api/tasks/ingest/route.ts) now stamps this
+      // column from the VALIDATED ingest `source` at creation time only; it is
+      // NOT on UpdateTaskSchema and the PATCH route never writes it, so it stays
+      // non-forgeable after creation.
+      console.log('[Migration 089] Adding tasks.source column (INGEST-10 authoritative scope column)...');
+      const cols = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'source')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN source TEXT`);
+        console.log('[Migration 089] Added tasks.source');
+      } else {
+        console.log('[Migration 089] tasks.source already present, skipping');
+      }
+    },
+  },
+  {
+    id: '090',
+    name: 'add_persona_blend_bundle',
+    up: (db) => {
+      // PERSONA-BLEND / AUDIENCE-CONFIRM — persist the matcher's persona-bundle
+      // SUPERSET so the CC can (a) render the audience-voice / topic-expertise blend
+      // directive at dispatch and (b) gate the write on operator audience confirmation.
+      //
+      // Two additive changes, both idempotent:
+      //   1. New mirror columns on `tasks` (nullable) — the resolved VOICE decision
+      //      + the confirmed audience, so the board + dispatcher read them without
+      //      re-parsing bundle_json. tasks.persona_id/name/mode remain the mirror of
+      //      the resolved VOICE persona (back-compat with buildPersonaBlock).
+      //   2. New table `task_persona_bundle` — one row per task holding the full
+      //      bundle JSON, the catalog schemaVersion it was reasoned over, and the
+      //      audience confirm lifecycle state (pending gates dispatch).
+      //
+      // ADDITIVE ONLY — never drops/renames a column or persona key. A pre-089 row
+      // simply lacks these columns/rows and the CC degrades to its prior behaviour.
+      console.log('[Migration 090] Adding persona-blend mirror columns + task_persona_bundle...');
+
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      const columnNames = tasksInfo.map((c) => c.name);
+      const adds: Record<string, string> = {
+        voice_persona_id: 'TEXT',
+        topic_persona_id: 'TEXT',
+        audience_id: 'TEXT',
+        audience_label: 'TEXT',
+        audience_source: 'TEXT',
+        voice_collapsed: 'INTEGER',
+        blend_directive: 'TEXT',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.includes(col)) {
+          db.prepare(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_persona_bundle (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+          bundle_json TEXT,
+          catalog_version TEXT,
+          confirm_state TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      db.prepare(
+        'CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id)',
+      ).run();
+      db.prepare(
+        'CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_confirm ON task_persona_bundle(confirm_state)',
+      ).run();
+
+      console.log('[Migration 090] persona-blend columns + task_persona_bundle ready');
+    },
+  },
+  {
+    id: '091',
+    name: 'rekey_and_purge_ghost_sops',
+    // DESTRUCTIVE data cleanup (re-key + soft-delete + hard-delete). Defer during
+    // request-time additive self-heal so it never races live ingest; it runs on
+    // the next controlled boot instead.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // C2 — the CC SOP library was a "ghost": the pre-C2 starter seed keyed rows
+      // to LEGACY alias slugs (webdev, support, comms, billing, appdev, openclaw,
+      // social, paid-ads) and to DEPRECATED departments (ceo, security, hr-people,
+      // finance-accounting, operations, data-analytics, executive-assistant), and
+      // test harnesses that wrote to the LIVE DB left ~30 `test-dept` residue rows.
+      // A `/api/sops?department=<canonical>` query could never match the alias-keyed
+      // rows, so the library read as empty even with 54 rows on disk.
+      //
+      // This migration, on an existing DB, brings those rows into line with the
+      // rewritten canonical sops-seed.ts:
+      //   1. PURGE the test-dept residue (exact slug — never pattern-match).
+      //   2. SOFT-DELETE the deprecated-department rows (deleted_at set) by their
+      //      ORIGINAL department value, BEFORE re-key, so 'ceo' is retired rather
+      //      than silently rescued to master-orchestrator.
+      //   3. RE-KEY every remaining active row to its canonical slug via
+      //      canonicalDeptSlug(), PRESERVING each sop id — dispatch_rules.sop_id
+      //      and Triad matching key off the id, so the id must never change.
+      // Idempotent + safe on a fresh DB (sops empty → all three steps no-op, then
+      // autoSeedStarterSOPs seeds the 16 canonical starter SOPs).
+      console.log('[Migration 091] Re-keying legacy SOP rows + purging ghost residue (C2)...');
+      const r = rekeyAndPurgeGhostSops(db);
+      console.log(
+        `[Migration 091] re-keyed ${r.rekeyed} row(s) to canonical slugs, ` +
+          `retired ${r.deprecatedRetired} deprecated-dept row(s), ` +
+          `purged ${r.testPurged} test-dept row(s)`,
+      );
+    },
+  },
 ];
+
+// DATA-03: fail-fast at module load if two migrations share an id. The runner
+// keys applied-state on `_migrations.id` and snapshots the applied set ONCE at
+// the top of a run, so a duplicate id is a latent land-mine: depending on order
+// it either double-applies (the second INSERT throws a PRIMARY KEY violation and
+// aborts the whole run) or — history-attested — the second definition is treated
+// as already-applied and SILENTLY never runs on any box (its heal ships but never
+// executes). A renumbering mistake must break the build here, not on a client
+// box at boot. Runs at import time, before any migration can execute.
+(() => {
+  const ids = migrations.map((m) => m.id);
+  if (new Set(ids).size !== ids.length) {
+    const dupes = Array.from(new Set(ids.filter((id, i) => ids.indexOf(id) !== i)));
+    throw new Error(
+      `[migrations] duplicate migration id(s) detected: ${dupes.join(', ')} — each migration id must be unique`,
+    );
+  }
+})();
+
+// DATA-02: the id of the migration that most recently failed in this process,
+// exported so a health endpoint can surface a precise "migration <id> failed"
+// 503 instead of an opaque boot crash. Cleared on any fully-successful run.
+let lastFailedMigrationId: string | null = null;
+export function getLastFailedMigrationId(): string | null {
+  return lastFailedMigrationId;
+}
 
 /**
  * Run all pending migrations
@@ -2965,11 +3631,27 @@ export function runMigrations(db: Database.Database): void {
     return a.id.localeCompare(b.id);
   });
 
+  // INGEST-07: the request-time schema self-heal sets this flag so ONLY additive
+  // schema DDL is applied — destructive data migrations (dedup/reap/merge) that
+  // would race live ingest are DEFERRED (skipped without recording) and run on
+  // the next controlled boot.
+  const additiveOnlySelfHeal =
+    process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY === '1';
+
   for (const migration of ordered) {
     if (applied.has(migration.id)) {
       continue;
     }
-    
+
+    if (additiveOnlySelfHeal && migration.deferInAdditiveSelfHeal) {
+      console.warn(
+        `[DB] Migration ${migration.id} (${migration.name}) DEFERRED — ` +
+          `OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY set (destructive migration not run during ` +
+          `request-time self-heal; stays pending for the next controlled boot).`,
+      );
+      continue;
+    }
+
     console.log(`[DB] Running migration ${migration.id}: ${migration.name}`);
 
     const useOuter = migration.useOuterTransaction !== false;
@@ -2982,18 +3664,39 @@ export function runMigrations(db: Database.Database): void {
           db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
         })();
       } else {
-        // Migration owns its own transaction boundary. Runner only records
-        // the apply (in a tiny independent txn) AFTER up succeeds.
-        migration.up(db);
-        db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
+        // Migration owns its own transaction boundary (e.g. a 12-step table
+        // rebuild that must toggle PRAGMA foreign_keys OUTSIDE a transaction).
+        // The runner records the apply in a tiny independent statement AFTER
+        // up() succeeds.
+        try {
+          migration.up(db);
+          db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
+        } finally {
+          // DATA-06: a non-outer migration disables FK enforcement for its
+          // rebuild (`PRAGMA foreign_keys=OFF`) and re-enables it on the happy
+          // path. If up() threw AFTER the OFF but BEFORE the ON, enforcement
+          // would stay OFF for the rest of this connection's life — every later
+          // migration AND all runtime writes would then silently accept
+          // orphaned foreign keys. Re-assert ON here so a failed/partial rebuild
+          // can never leave the connection with FK checks disabled.
+          db.pragma('foreign_keys = ON');
+        }
       }
 
       console.log(`[DB] Migration ${migration.id} completed`);
     } catch (error) {
+      // DATA-02: record WHICH migration failed so a health endpoint can surface
+      // a precise "migration <id> failed" 503, then re-throw (fail-closed — a
+      // half-migrated schema must never serve traffic; see getDb() in db/index.ts).
+      lastFailedMigrationId = migration.id;
       console.error(`[DB] Migration ${migration.id} failed:`, error);
       throw error;
     }
   }
+
+  // DATA-02: every pending migration applied cleanly — clear any stale failure
+  // marker left by an earlier failed attempt in this process.
+  lastFailedMigrationId = null;
 
   // Auto-seed from departments.json if workspaces table is empty
   autoSeedFromDepartmentsJson(db);
@@ -3077,6 +3780,115 @@ export function autoSeedTrioAgents(db: Database.Database): void {
     // Non-fatal: log and continue.
     console.log('[Auto-seed Trio] Skipped:', (err as Error).message);
   }
+}
+
+// ── C2: ghost SOP-library cleanup ────────────────────────────────────────────
+// Deprecated department slugs whose starter SOP rows are retired (dropped from
+// sops-seed.ts; soft-deleted here on DBs that already seeded them). Matched
+// against each row's ORIGINAL department value BEFORE canonicalization so 'ceo'
+// is retired rather than rescued to master-orchestrator.
+const DEPRECATED_SOP_DEPARTMENTS: readonly string[] = [
+  'ceo',
+  'security',
+  'hr-people',
+  'finance-accounting',
+  'operations',
+  'data-analytics',
+  'executive-assistant',
+];
+
+// Exact test-residue department slug. EXACT match only — never a LIKE/pattern
+// match (a 'testing-lab' or 'contest-dept' client dept must never be purged).
+const TEST_RESIDUE_SOP_DEPARTMENTS: readonly string[] = ['test-dept'];
+
+export interface SopGhostCleanupResult {
+  rekeyed: number;
+  deprecatedRetired: number;
+  testPurged: number;
+}
+
+/**
+ * C2 — retire the ghost SOP-library residue and re-key legacy alias rows to the
+ * canonical ZHC department slug set.
+ *
+ * PRESERVES every surviving row's sop id: dispatch_rules.sop_id (an FK by
+ * convention) and Triad SOP matching key off the id, so re-keying only ever
+ * UPDATEs the `department` column, never re-inserts.
+ *
+ * Order matters:
+ *   1. PURGE test-dept residue (hard DELETE, exact slug). FK-safe: sop_proposals
+ *      may reference sops(id) and foreign_keys is ON at connection, so any stray
+ *      reference to a test-dept row is nulled out first (test rows are never real
+ *      proposals, but this makes the DELETE impossible to trip an FK).
+ *   2. SOFT-DELETE deprecated-dept rows (set deleted_at) by ORIGINAL department.
+ *   3. RE-KEY remaining active rows: department := canonicalDeptSlug(department).
+ *
+ * Idempotent: a second run purges/retires nothing and re-keys nothing (all
+ * active rows already canonical).
+ */
+export function rekeyAndPurgeGhostSops(db: Database.Database): SopGhostCleanupResult {
+  const empty: SopGhostCleanupResult = { rekeyed: 0, deprecatedRetired: 0, testPurged: 0 };
+
+  const hasTable = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sops'")
+    .get();
+  if (!hasTable) return empty;
+
+  const cols = db.prepare('PRAGMA table_info(sops)').all() as { name: string }[];
+  const hasDeletedAt = cols.some((c) => c.name === 'deleted_at');
+  const now = new Date().toISOString();
+
+  // ── 1. PURGE test-dept residue ─────────────────────────────────────────────
+  const testPlaceholders = TEST_RESIDUE_SOP_DEPARTMENTS.map(() => '?').join(',');
+  const testRows = db
+    .prepare(`SELECT id FROM sops WHERE department IN (${testPlaceholders})`)
+    .all(...TEST_RESIDUE_SOP_DEPARTMENTS) as { id: string }[];
+  let testPurged = 0;
+  if (testRows.length > 0) {
+    const hasProposals = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sop_proposals'")
+      .get();
+    if (hasProposals) {
+      const clearApproved = db.prepare('UPDATE sop_proposals SET approved_sop_id = NULL WHERE approved_sop_id = ?');
+      const clearReplaces = db.prepare('UPDATE sop_proposals SET replaces_sop_id = NULL WHERE replaces_sop_id = ?');
+      for (const { id } of testRows) {
+        clearApproved.run(id);
+        clearReplaces.run(id);
+      }
+    }
+    testPurged = db
+      .prepare(`DELETE FROM sops WHERE department IN (${testPlaceholders})`)
+      .run(...TEST_RESIDUE_SOP_DEPARTMENTS).changes;
+  }
+
+  // ── 2. SOFT-DELETE deprecated-department rows (by original department) ──────
+  let deprecatedRetired = 0;
+  if (hasDeletedAt) {
+    const depPlaceholders = DEPRECATED_SOP_DEPARTMENTS.map(() => '?').join(',');
+    deprecatedRetired = db
+      .prepare(
+        `UPDATE sops SET deleted_at = ?, updated_at = ?
+         WHERE department IN (${depPlaceholders}) AND deleted_at IS NULL`,
+      )
+      .run(now, now, ...DEPRECATED_SOP_DEPARTMENTS).changes;
+  }
+
+  // ── 3. RE-KEY remaining active rows to canonical slugs (id preserved) ──────
+  const activeClause = hasDeletedAt ? 'WHERE deleted_at IS NULL' : '';
+  const activeRows = db
+    .prepare(`SELECT id, department FROM sops ${activeClause}`)
+    .all() as { id: string; department: string | null }[];
+  const rekeyStmt = db.prepare('UPDATE sops SET department = ?, updated_at = ? WHERE id = ?');
+  let rekeyed = 0;
+  for (const row of activeRows) {
+    const canon = canonicalDeptSlug(row.department);
+    if (canon && canon !== (row.department ?? '')) {
+      rekeyStmt.run(canon, now, row.id);
+      rekeyed++;
+    }
+  }
+
+  return { rekeyed, deprecatedRetired, testPurged };
 }
 
 // Auto-seed starter SOPs on boot (B6). Non-fatal: a missing `sops` table or any
@@ -3196,9 +4008,18 @@ function newestZhcChild(rel: string): string | null {
 
 /**
  * Resolve the active departments.json from the robust candidate set. Returns the
- * first existing file, else the newest ZHC company departments.json the writer
- * materialized, else null. Order keeps the legacy/repo paths FIRST so boxes that
- * already work are untouched; new env/cwd/ZHC candidates only fill the gap.
+ * first existing file from the ordered candidate list, else null.
+ *
+ * Priority order (highest → lowest):
+ *   1. ZERO_HUMAN_COMPANY_DIR env — explicit active-company folder.
+ *   2. BLACKCEO_COMMAND_CENTER_ROOT env — explicit CC root.
+ *   3. Newest ZHC company build discovered on disk — a real client's
+ *      departments.json written by the build process; preferred over the
+ *      repo-committed template so a freshly-built client never seeds the
+ *      17-demo generic defaults.
+ *   4. process.cwd()/config (or /data) — the repo-committed template; only
+ *      wins when no real company build exists on disk.
+ *   5. Legacy hard-coded install locations (preserved verbatim).
  */
 export function resolveDepartmentsConfigPath(): string | null {
   const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
@@ -3206,8 +4027,6 @@ export function resolveDepartmentsConfigPath(): string | null {
   const candidates: string[] = [];
 
   // 1. Explicit active-company folder — the strongest signal of the live client.
-  //    Wins over a possibly-stale repo-committed config/departments.json so a
-  //    freshly-built client never seeds generic defaults.
   if (explicitCompany) candidates.push(path.join(explicitCompany, DEPARTMENTS_JSON));
   // 2. Explicit Command Center root (same env the writer's CC copy honors).
   if (ccRoot) {
@@ -3217,20 +4036,25 @@ export function resolveDepartmentsConfigPath(): string | null {
       path.join(ccRoot, DEPARTMENTS_JSON)
     );
   }
-  // 3. The running Command Center itself (process.cwd() === CC root in prod).
+  // 3. Discovered real ZHC company build — probed BEFORE the repo-committed
+  //    template so the newest client departments.json takes precedence over
+  //    the 17-demo config/departments.json checked into the repo.
+  const zhcBuild = newestZhcChild(DEPARTMENTS_JSON);
+  if (zhcBuild) candidates.push(zhcBuild);
+  // 4. The running Command Center itself (process.cwd() === CC root in prod).
+  //    Falls AFTER the real company build so the repo template is only a
+  //    last-resort fallback, never shadowing a real client's departments.json.
   candidates.push(
     path.join(process.cwd(), 'config', DEPARTMENTS_JSON),
     path.join(process.cwd(), 'data', DEPARTMENTS_JSON)
   );
-  // 4. Legacy hard-coded install locations (preserved verbatim).
+  // 5. Legacy hard-coded install locations (preserved verbatim).
   candidates.push(...legacyConfigCandidates());
 
   for (const p of candidates) {
     if (isExistingFile(p)) return p;
   }
-  // 5. Last resort: whatever the writer most-recently dropped into a ZHC company
-  //    folder — the guaranteed write location on every build.
-  return newestZhcChild(DEPARTMENTS_JSON);
+  return null;
 }
 
 /**
@@ -3260,10 +4084,48 @@ export function resolveDepartmentsTreePath(): string | null {
 }
 
 /**
- * Re-seed workspaces from departments.json + build-state, without the
- * first-boot guard. Idempotent: upserts each dept row, never deletes.
- * Called by the converge endpoint (POST /api/system/converge) to re-sync
- * after a new dept/role is added post-build.
+ * Is this departments.json entry EXPLICITLY opted out?
+ *
+ * The floor invariant is: displayed departments == chosen manifest MINUS any
+ * explicitly opted-out department. A client can decline a department the
+ * interview otherwise offered (the interview seam calls these "declined"); when
+ * that decision is carried into the manifest as an explicit flag rather than by
+ * omission, the seed MUST NOT give it a Kanban lane. This predicate recognises
+ * every explicit opt-out spelling so the seed and the QC gate agree:
+ *   { optOut: true } | { opted_out: true } | { enabled: false } | { active: false }
+ *   | { status: "opted-out" | "opted_out" | "declined" | "disabled" | "inactive" }
+ * A plain manifest entry (no flag) is NOT opted out — omission is the usual path.
+ */
+export function isDepartmentOptedOut(dept: unknown): boolean {
+  if (!dept || typeof dept !== 'object') return false;
+  const d = dept as Record<string, unknown>;
+  if (d.optOut === true || d.opted_out === true) return true;
+  if (d.enabled === false || d.active === false) return true;
+  const status = typeof d.status === 'string' ? d.status.trim().toLowerCase() : '';
+  if (['opted-out', 'opted_out', 'declined', 'disabled', 'inactive'].includes(status)) return true;
+  return false;
+}
+
+/**
+ * Re-seed workspaces from departments.json + build-state — the SINGLE idempotent
+ * upsert used by BOTH the every-boot path (autoSeedFromDepartmentsJson) and the
+ * converge endpoint (POST /api/system/converge). Runs on every boot/converge so
+ * manifest GROWTH (a department added after first boot) re-syncs instead of being
+ * stranded by a first-boot-only guard.
+ *
+ * Floor invariant (enforced here + at the board query in /api/workspaces):
+ *   for the active company, displayed departments == chosen manifest − opt-outs.
+ *
+ * Guarantees:
+ *   • Idempotent UPSERT keyed on dept id — re-running never duplicates a lane.
+ *   • Additive / NON-DESTRUCTIVE — INSERT missing depts, UPDATE display fields +
+ *     company_id; NEVER deletes a workspace or any task/agent data.
+ *   • Company attribution — every chosen dept is (re-)homed to the ACTIVE company
+ *     resolved by seedCompanyGuarded (mirrors sync-departments-from-build-state.py),
+ *     so the active-company board filter never hides a chosen lane.
+ *   • Fail-closed — a template / partial company-config aborts the reseed rather
+ *     than mis-attributing departments to a bogus fallback company.
+ *   • Opt-outs honored — an explicitly opted-out dept never gets a lane.
  *
  * Returns counts of created + updated rows.
  */
@@ -3271,6 +4133,7 @@ export function reseedWorkspacesFromConfig(
   db: Database.Database,
   opts: { force: boolean } = { force: true }
 ): { created: number; updated: number } {
+  void opts; // reserved; the upsert is always idempotent so `force` is a no-op today
   let created = 0;
   let updated = 0;
 
@@ -3286,30 +4149,64 @@ export function reseedWorkspacesFromConfig(
     const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
 
-    // Ensure company row exists
+    // Ensure company row exists / resolve the ACTIVE company. seedCompanyGuarded
+    // returns partial-config for a blank OR unpopulated-template ("Your Company")
+    // company-config — in which case we FAIL CLOSED: do not seed departments under
+    // a fallback company (that is the attribution-drift bug this guards against).
     const seedResult = seedCompanyGuarded(db);
     if (seedResult.reason === 'partial-config') {
-      console.warn('[reseed] Aborting workspace reseed: partial company config');
+      console.warn('[reseed] Aborting workspace reseed: partial/template company config (fail-closed, no mis-attribution)');
       return { created, updated };
     }
+    // Pin every seeded dept to the resolved active company id (re-homes rows that
+    // were created under the pre-064 'default' sentinel or a stale company_id).
+    const companyId = seedResult.companyId ?? 'default';
 
     const upsertStmt = db.prepare(`
-      INSERT INTO workspaces (id, name, slug, description, icon, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         slug = excluded.slug,
         icon = excluded.icon,
+        company_id = excluded.company_id,
         sort_order = excluded.sort_order
     `);
 
     const existsCheck = db.prepare('SELECT id FROM workspaces WHERE id = ?');
 
     for (const dept of depts) {
+      // Robustness guard (mirrors autoSeedFromDepartmentsJson): a bare-string or
+      // slug/id-less entry would throw and abort the whole reseed, dropping every
+      // department that follows it. Skip malformed entries, seed the rest.
+      if (!dept || typeof dept !== 'object' || (!dept.id && !dept.slug)) {
+        console.log('[reseed] Skipping malformed departments.json entry (no slug/id):', JSON.stringify(dept).slice(0, 80));
+        continue;
+      }
+
+      // Floor invariant: an EXPLICITLY opted-out department never gets a lane.
+      if (isDepartmentOptedOut(dept)) {
+        console.log(`[reseed] Skipping "${dept.id || dept.slug}" — explicitly opted out (honored decline)`);
+        continue;
+      }
+
       const slugLower = String(dept.slug || dept.id || '').toLowerCase();
-      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo';
+      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
       const isGeneralTask = slugLower === 'general-task';
       const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
+
+      // Slug-uniqueness guard (FM-6): never (re)create a SECOND workspace whose
+      // slug canonicalizes to a department a DIFFERENT row already represents
+      // (e.g. seeding `ceo` when `master-orchestrator` exists). Skip the dupe so
+      // converge can't re-split a department across two Kanban columns. NOTE: as of
+      // 2026-07-08 'app-development' and 'engineering' are DISTINCT canonical slugs
+      // (the destructive app-development→engineering alias was removed), so two
+      // chosen depts App Development + Engineering no longer collide here.
+      const canonOwner = findCanonicalWorkspaceId(db, dept.slug || dept.id);
+      if (canonOwner && canonOwner !== dept.id) {
+        console.log(`[reseed] Skipping "${dept.id}" — department already represented by workspace "${canonOwner}"`);
+        continue;
+      }
 
       const existing = existsCheck.get(dept.id);
       upsertStmt.run(
@@ -3318,6 +4215,7 @@ export function reseedWorkspacesFromConfig(
         dept.slug || dept.id,
         dept.name + ' department workspace',
         dept.emoji || '📁',
+        companyId,
         sortOrder
       );
       if (existing) {
@@ -3331,7 +4229,7 @@ export function reseedWorkspacesFromConfig(
     autoSeedTrioAgents(db);
     autoSeedStarterSOPs(db);
 
-    console.log(`[reseed] workspaces: created=${created} updated=${updated}`);
+    console.log(`[reseed] workspaces: created=${created} updated=${updated} company=${companyId}`);
   } catch (err) {
     console.error('[reseed] Failed:', (err as Error).message);
     throw err; // Re-throw so converge endpoint can FAIL LOUD
@@ -3355,70 +4253,23 @@ export function getMigrationStatus(db: Database.Database): { applied: string[]; 
   return { applied, pending };
 }
 
-// Auto-seed company + workspaces from config/departments.json on first boot
+// Auto-seed company + workspaces from config/departments.json on EVERY boot.
+//
+// Historically this ran ONLY on first boot: it early-returned the moment the
+// workspaces table had any row, so a manifest that GREW after the first boot (a
+// department added post-build) never re-synced and the board stayed short of the
+// client's chosen count. It is now an idempotent, additive, opt-out-honoring,
+// company-attributed UPSERT delegated to reseedWorkspacesFromConfig() — the SAME
+// function the converge endpoint uses — so boot and converge enforce the floor
+// invariant identically. reseedWorkspacesFromConfig re-throws on error (so
+// converge can fail loud); here we swallow so a seed hiccup never crashes app
+// startup, exactly as the previous first-boot seeder did.
 function autoSeedFromDepartmentsJson(db: Database.Database) {
   try {
-    // Check if workspaces table is empty
-    const count = db.prepare('SELECT COUNT(*) as c FROM workspaces').get() as { c: number } | undefined;
-    if (count && count.c > 0) return; // Already has data
-
-    // Look for departments.json across the robust candidate set (CC root + env
-    // override + legacy installs + the ZHC company folder the floor wrote to).
-    const configPath = resolveDepartmentsConfigPath();
-    if (!configPath) return;
-    console.log('[Auto-seed] Using departments.json:', configPath);
-
-    const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    if (!Array.isArray(depts) || depts.length === 0) return;
-
-    console.log('[Auto-seed] Found departments.json with', depts.length, 'departments');
-
-    // B.3 guard: seed the company row through the guarded function.
-    // It reads company-config.json first; if present + valid it uses that.
-    // If the config is present but companyName is blank (partial-config per B.1),
-    // we abort the entire workspace seed — a misconfigured box must not silently
-    // get a "Command Center" / "Default" company row.
-    const seedResult = seedCompanyGuarded(db);
-    if (seedResult.reason === 'partial-config') {
-      console.warn('[Auto-seed] Aborting workspace seed: company-config.json exists but companyName is blank (partial-config — box is misconfigured)');
-      return;
+    const { created, updated } = reseedWorkspacesFromConfig(db, { force: true });
+    if (created > 0 || updated > 0) {
+      console.log(`[Auto-seed] Departments synced on boot — created=${created} updated=${updated}`);
     }
-    console.log('[Auto-seed] Company seed result:', seedResult.reason, '—', seedResult.companyId);
-
-    // Use the company id that seedCompanyGuarded resolved/created.
-    const companySlug = seedResult.companyId ?? 'default';
-
-    for (const dept of depts) {
-      // Board layout guarantee — two anchor rows on every seed:
-      //   CEO / master-orchestrator → sort_order = 0   (always FIRST)
-      //   General Tasks             → sort_order = 99999 (always LAST)
-      // All other depts default to 1000 and will sort alphabetically between.
-      // Display names are free text (the client's persona name), so we match
-      // only on slugs / well-known id variants.
-      const slugLower = String(dept.slug || dept.id || '').toLowerCase();
-      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
-      const isGeneralTask = slugLower === 'general-task';
-      const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
-      db.prepare(
-        'INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(
-        dept.id,
-        dept.name,
-        dept.slug || dept.id,
-        dept.name + ' department workspace',
-        dept.emoji || '📁',
-        companySlug,
-        sortOrder
-      );
-      console.log('[Auto-seed] Created workspace:', dept.id, dept.name, isCeo ? '(CEO → sort_order 0)' : '');
-    }
-
-    // ── PRD 2.11: seed the trio (QC + research + DA) for every workspace ──────
-    // Called here so any workspace created on first-boot via autoSeedFromDepartmentsJson
-    // also gets its trio, even when migration 065 ran before any workspaces existed.
-    autoSeedTrioAgents(db);
-
-    console.log('[Auto-seed] Done. Seeded company +', depts.length, 'workspaces');
   } catch (err) {
     console.log('[Auto-seed] Skipped:', (err as Error).message);
   }

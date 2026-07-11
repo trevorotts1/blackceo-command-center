@@ -39,6 +39,16 @@ next-env.d.ts
 *.db-journal
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+# Rescue Rangers durable ticket store (runtime client data — never commit)
+fleet-heartbeat/state/rescue-tickets.sqlite*
+# Rescue Rangers return-leg verification ledger (keys are client box aliases — never commit)
+fleet-heartbeat/state/rescue-return-verify.json*
+# Rescue Rangers cross-restart answer guard (ticket ids embed client slugs — never commit) [FIX-RESCUE-11]
+fleet-heartbeat/state/rescue-answered-tickets.json*
 
 # claude code local files
 .claude/settings.local.json
@@ -50,7 +60,16 @@ next-env.d.ts
 # Backups
 *.backup
 *.bak
+*.bak-*
 *.db.backup
+
+# FIX-RESCUE-12: retired backups/archive + legacy bridge live outside git.
+# _archive/ holds relocated *.bak* and the retired rescue-rangers-bridge.py
+# (a historical secret carrier); it must never be committed to this
+# fleet-wide repo. Belt-and-braces alongside the *.bak rules above.
+fleet-heartbeat/scripts/_archive/
+fleet-heartbeat/scripts/rescue-rangers-bridge.py
+fleet-heartbeat/scripts/rescue-rangers-bridge.py.*
 
 # Build backups
 .next-backup/
@@ -58,3 +77,10 @@ test-results/
 
 # graphify (knowledge-graph map) — generated output, never committed
 graphify-out/
+__pycache__/
+
+# operator-local client roster — the REAL client name/chat-ID/GHL-ID denylist
+# consumed at runtime by the leak-detection gates. Must NEVER be committed; only
+# the scripts/client-roster.example.txt template (fake placeholders) is tracked.
+.openclaw-client-roster.txt
+client-roster.txt

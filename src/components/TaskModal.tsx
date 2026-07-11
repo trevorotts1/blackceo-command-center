@@ -10,17 +10,46 @@ import { SessionsList } from './SessionsList';
 import { PlanningTab } from './PlanningTab';
 import { AgentModal } from './AgentModal';
 import { MicDictateButton } from './MicDictateButton';
+import { BLOCKED_REASONS, BLOCKED_AUDIENCES } from './kanban/BlockTaskModal';
+// U12 — B11 Gate Panel. Rendered for anthology gate cards (isAnthologyTask).
+import { GatePanel } from './anthology/GatePanel';
+import { isAnthologyTask } from './anthology/anthology-card';
+// U13 — B12 Assembly cockpit. Rendered only for the anthology's Assembly card;
+// self-contained in its own component so it stays isolated from other TaskModal work.
+import { AssemblyCockpit } from './anthology/AssemblyCockpit';
+import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
+// D3 — audience-confirm panel (persona-blend / W7 --blend). Rendered only for
+// a task that actually went through the blend (task.blend_directive present)
+// so a plain non-content task never fires the extra gate-status fetch.
+import { AudienceConfirmPanel } from './AudienceConfirmPanel';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
+
+// The `blocked_reason` / `blocked_on_human` / `ask` columns (migration 071 —
+// the human-only Blocked gate enforced by PATCH /api/tasks/[id]) exist on the
+// tasks row and are returned by the API, but are not yet declared on the
+// shared `Task` interface in src/lib/types.ts (out of scope for this file).
+// This local type lets us read/write them without an `any` cast.
+type BlockedFields = {
+  blocked_reason?: string | null;
+  blocked_on_human?: string | null;
+  ask?: string | null;
+};
 
 interface TaskModalProps {
   task?: Task;
   onClose: () => void;
   workspaceId?: string;
+  /**
+   * Seeds the create form's status when opened from a column's "+" button
+   * (MissionQueue passes the column's underlying status). Ignored when
+   * editing an existing task, which always keeps its own status.
+   */
+  initialStatus?: TaskStatus;
 }
 
-export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
+export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskModalProps) {
   const { agents, addTask, updateTask, addEvent } = useMissionControl();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
@@ -37,32 +66,66 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
     window.location.reload();
   }, []);
 
+  // Existing task's blocked-gate fields (see BlockedFields comment above).
+  const taskBlocked = task as (Task & BlockedFields) | undefined;
+
+  // U13 — resolve the anthology assembly card behind this task (null for any
+  // non-assembly card). Drives whether the Assembly cockpit renders on overview.
+  const anthologyAssembly = resolveAnthologyAssembly(task);
+
   const [form, setForm] = useState({
     title: task?.title || '',
     description: task?.description || '',
     priority: task?.priority || 'medium' as TaskPriority,
-    status: task?.status || 'backlog' as TaskStatus,
+    // New-task creation seeds from `initialStatus` (set by MissionQueue's
+    // per-column "+" button); editing always keeps the task's own status.
+    status: task?.status || initialStatus || 'backlog' as TaskStatus,
     assigned_agent_id: task?.assigned_agent_id || '',
     due_date: task?.due_date || '',
+    // Blocked-gate fields — only meaningful when status === 'blocked', but
+    // kept in form state unconditionally so the inline fields are controlled
+    // inputs from the first render.
+    blocked_reason: taskBlocked?.blocked_reason || '',
+    blocked_on_human: taskBlocked?.blocked_on_human || '',
+    ask: taskBlocked?.ask || '',
   });
 
   // Triad gate error — populated when the backend refuses a backlog → start
   // transition because the task is missing description / SOP / persona.
   // Wired to a banner with inline remediation CTAs.
   const [triadError, setTriadError] = useState<{ missing: string[] } | null>(null);
+  // Client-side mirror of the API's Blocked gate (PATCH /api/tasks/[id] 400s
+  // "Blocked requires a human-only reason" without these) — validated before
+  // the request goes out so the user gets inline feedback instead of a round
+  // trip. `touchedBlocked` gates the message so it doesn't show before the
+  // user has tried to submit once.
+  const [touchedBlocked, setTouchedBlocked] = useState(false);
   const [suggestingPersona, setSuggestingPersona] = useState(false);
   const [suggestingSop, setSuggestingSop] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Client-side mirror of the API's Blocked gate (see BlockedFields comment
+    // above) — catches the missing-fields case before a round trip instead of
+    // relying solely on the server's 400.
+    if (form.status === 'blocked') {
+      const missingBlocked = !form.blocked_reason || !form.blocked_on_human || !form.ask.trim();
+      if (missingBlocked) {
+        setTouchedBlocked(true);
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     setTriadError(null);
+    setTouchedBlocked(false);
 
     try {
       const url = task ? `/api/tasks/${task.id}` : '/api/tasks';
       const method = task ? 'PATCH' : 'POST';
 
-      const payload = {
+      const payload: Record<string, unknown> = {
         ...form,
         // Planning mode doesn't change status - it just creates a planning session
         // New tasks always start in 'backlog'
@@ -70,6 +133,14 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
         due_date: form.due_date || null,
         workspace_id: workspaceId || task?.workspace_id || 'default',
       };
+      // The blocked_reason/blocked_on_human/ask fields only mean anything on a
+      // ->'blocked' transition (the API ignores them otherwise) — drop them
+      // rather than send stale/empty values for every non-blocked save.
+      if (form.status !== 'blocked') {
+        delete payload.blocked_reason;
+        delete payload.blocked_on_human;
+        delete payload.ask;
+      }
 
       const res = await fetch(url, {
         method,
@@ -166,7 +237,36 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
     }
   };
 
-  const statuses: TaskStatus[] = ['backlog', 'in_progress', 'review', 'blocked', 'done'];
+  // Widened from the original 5 (backlog/in_progress/review/blocked/done) to
+  // the full set of underlying statuses the board actually uses, including
+  // the ones that get bucketed into synthetic columns (inbox/planning/
+  // assigned -> To-Do, testing -> Review/QC — see MissionQueue's
+  // BOARD_PRESETS comment). `pending_dispatch` is intentionally omitted: it's
+  // a transient internal state set by the dispatcher, not something a human
+  // should pick from a create/edit form.
+  const statuses: TaskStatus[] = [
+    'backlog',
+    'inbox',
+    'planning',
+    'assigned',
+    'in_progress',
+    'review',
+    'testing',
+    'blocked',
+    'done',
+  ];
+  const statusLabels: Record<TaskStatus, string> = {
+    backlog: 'Backlog',
+    inbox: 'Inbox (new)',
+    planning: 'Planning',
+    assigned: 'Assigned (queued)',
+    pending_dispatch: 'Pending Dispatch',
+    in_progress: 'In Progress',
+    review: 'Review / QC',
+    testing: 'Testing',
+    blocked: 'Blocked',
+    done: 'Done',
+  };
   const priorities: TaskPriority[] = ['low', 'medium', 'high', 'critical'];
 
   /**
@@ -302,7 +402,45 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
         <div className="flex-1 overflow-y-auto p-4 bg-white">
           {/* Overview Tab */}
           {activeTab === 'overview' && (
+            <>
+          {/* Anthology Gate Panel (SPEC B11 / U12) — the card detail IS the Gate
+              Panel for an anthology CHAPTER / gate card: the current deliverable +
+              EXACTLY the actions gate_engine.py status returns for the open gate
+              (via U11). Rendered above the standard task form; non-anthology tasks
+              skip it entirely. It sits OUTSIDE the form so its Approve/Hold/etc.
+              buttons never submit the task edit form.
+
+              DOUBLE-RENDER PRECEDENCE (U12/U13): the ASSEMBLY card must show ONLY
+              the Assembly cockpit, never the Gate Panel. `anthologyAssembly` is
+              non-null EXACTLY for the assembly card, so gating the Gate Panel on
+              `!anthologyAssembly` makes the two surfaces mutually exclusive by
+              construction — the SAME value drives both (cockpit renders iff
+              `anthologyAssembly`, Gate Panel iff anthology card AND not assembly). */}
+          {task && isAnthologyTask(task) && !anthologyAssembly && (
+            <div className="mb-4">
+              <GatePanel task={task} />
+            </div>
+          )}
+          {/* D3 — Audience-confirm panel (persona-blend / W7 --blend). A content
+              task carries a persisted `blend_directive` mirror column iff it
+              went through --blend (D1); that cheap presence check gates the
+              panel's mount so a plain task never fires the extra gate-status
+              fetch. The panel itself GETs /api/tasks/[id]/audience and renders
+              nothing unless the gate is actively HOLDing the task. Sits outside
+              the form, same as GatePanel, so its Confirm button never submits
+              the task-edit form. */}
+          {task && task.blend_directive && (
+            <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
+          )}
             <form onSubmit={handleSubmit} className="space-y-4">
+          {/* U13 — B12 Assembly cockpit: readiness → arm (typed name) → order →
+              sign-off. Only for the anthology's Assembly card; its own component. */}
+          {anthologyAssembly && (
+            <AssemblyCockpit
+              anthologyId={anthologyAssembly.anthologyId}
+              anthologyName={anthologyAssembly.anthologyName}
+            />
+          )}
           {/* Triad Rule error banner — surfaces when /api/tasks PATCH refuses
               a backlog → start transition because the task is missing one or
               more of: description, SOP, persona. Each missing piece gets its
@@ -485,7 +623,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
               >
                 {statuses.map((s) => (
                   <option key={s} value={s}>
-                    {s.replace('_', ' ').toUpperCase()}
+                    {statusLabels[s]}
                   </option>
                 ))}
               </select>
@@ -507,6 +645,68 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
               </select>
             </div>
           </div>
+
+          {/* Blocked details — PATCH /api/tasks/[id] 400s "Blocked requires a
+              human-only reason" without these 3 fields whenever status is set
+              to 'blocked'. Shown inline the moment the status select above is
+              set to Blocked so the requirement is visible before submit,
+              instead of only surfacing as a server error. */}
+          {form.status === 'blocked' && (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-4 space-y-3">
+              <p className="text-xs font-semibold text-red-800 uppercase tracking-wide">
+                Blocked details (required)
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Reason</label>
+                  <select
+                    value={form.blocked_reason}
+                    onChange={(e) => setForm({ ...form, blocked_reason: e.target.value })}
+                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  >
+                    <option value="">Select a reason...</option>
+                    {BLOCKED_REASONS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Who is needed?</label>
+                  <select
+                    value={form.blocked_on_human}
+                    onChange={(e) => setForm({ ...form, blocked_on_human: e.target.value })}
+                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  >
+                    <option value="">Select...</option>
+                    {BLOCKED_AUDIENCES.map((a) => (
+                      <option key={a.value} value={a.value}>
+                        {a.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">What do you need?</label>
+                <textarea
+                  value={form.ask}
+                  onChange={(e) => setForm({ ...form, ask: e.target.value })}
+                  rows={2}
+                  required
+                  placeholder="One line stating exactly what the human must do"
+                  className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                />
+              </div>
+              {touchedBlocked &&
+                (!form.blocked_reason || !form.blocked_on_human || !form.ask.trim()) && (
+                  <p className="text-xs text-red-700">
+                    Reason, audience, and ask are all required to save a task as Blocked.
+                  </p>
+                )}
+            </div>
+          )}
 
           {/* Assigned Agent */}
           <div>
@@ -545,6 +745,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
             />
           </div>
             </form>
+            </>
           )}
 
           {/* Planning Tab */}

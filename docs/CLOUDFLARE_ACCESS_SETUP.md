@@ -11,7 +11,7 @@ The recommended path is the automated script. The manual dashboard path is docum
   - No password to manage. The client receives a 6-digit code by email at sign-in.
   - Session length is configurable per Access app. Our default is 336 hours (14 days).
 
-The Cloudflare Access JWT is independent of any in-app session. If you ever need to bypass Access in local development, set `REQUIRE_CF_ACCESS=false` in the local env file. Production deployments MUST keep it true.
+The Cloudflare Access JWT is independent of any in-app session. `REQUIRE_CF_ACCESS` is OPT-IN and defaults OFF on every box (v4.72.0). Set `REQUIRE_CF_ACCESS=true` ONLY on a box that is genuinely fronted by Cloudflare Access — it adds a page-level edge gate (defense-in-depth) on top of the always-on MC_API_TOKEN bearer / WEBHOOK_SECRET HMAC gates. Do NOT set it true on a plain Cloudflare Tunnel box with no Access app: with no edge injecting `Cf-Access-Jwt-Assertion`, enforcement 401s every route and blanks the board. The board's own data always renders via the same-origin passthrough regardless of this flag.
 
 ## Prerequisites
 
@@ -144,7 +144,7 @@ The Cloudflare Tunnel does NOT need to be touched to revoke. The Tunnel is the d
 
 ### Operator override for local development
 
-  - Set `REQUIRE_CF_ACCESS=false` in the local `.env` to skip the JWT verification middleware. NEVER do this in production. The middleware logs a warning at boot when this is false.
+  - `REQUIRE_CF_ACCESS` defaults OFF (opt-in, v4.72.0), so local dev needs no override to skip the JWT verification middleware. Set `REQUIRE_CF_ACCESS=true` only on a box actually fronted by Cloudflare Access. The middleware logs an informational notice at boot when it is off (the default).
 
 ## References
 

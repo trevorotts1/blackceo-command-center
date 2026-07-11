@@ -177,6 +177,16 @@ blue "── 5. No Anthropic models in non-orchestrator code (QC.md #8 cost poli
 # FIX (Issue 6): exclusion widened from '-i orchestrator' to
 # '-iE orchestrat(or|ion)' to cover sibling file names / module paths that
 # contain "orchestration" rather than just "orchestrator".
+#
+# FIX (sovereignty parity): model-selector.ts's FORBIDDEN_PREFIXES is the
+# ban-list that ENFORCES "no Anthropic" — its bare `claude-*` family PREFIXES
+# (and the doc-comments that explain them) are the guard's own declaration, not
+# hardcoded inference targets. Mirror 5.2's declaration-exclusion idiom, but
+# NARROWLY: exclude only (a) bare denylist array elements
+# (`^\s*'claude-…',$`) and (b) the explanatory comment lines, BOTH scoped to
+# model-selector.ts. A genuine assignment (`const m = 'claude-…'`) — even inside
+# model-selector.ts — has an `=`/`:` before the literal, is not a bare element,
+# and is NOT a comment, so it is still caught. The whole file is NOT excluded.
 check_claude_literals() {
   local pat='claude-'
   local results
@@ -185,6 +195,8 @@ check_claude_literals() {
     | grep -vEi 'orchestrat(or|ion)' \
     | grep -v 'model-providers/anthropic.ts' \
     | grep -v 'web-agent/runner.ts' \
+    | grep -vE "model-selector\.ts:[0-9]+:[[:space:]]*'claude-[a-z0-9-]+',[[:space:]]*\$" \
+    | grep -vE "model-selector\.ts:[0-9]+:[[:space:]]*(\*|//)" \
     || true)
   [[ -z "$results" ]]  # exit 0 (pass) when no matches; exit 1 (fail) when matches found
 }
@@ -193,10 +205,14 @@ check "5.1" "no hardcoded claude-* model id in src/lib (excl. orchestrat(or|ion)
 # 5.2 detects an 'anthropic/' provider-id literal being USED as a value. The one
 # legitimate occurrence is the FORBIDDEN_PREFIXES negative-list in model-selector.ts
 # (the guard that BANS Anthropic) — exclude that declaration so the check does not
-# flag its own definition. Real usage (e.g. model: 'anthropic/claude-…') has no
-# FORBIDDEN_PREFIXES on the line and is still caught.
+# flag its own definition. The bare denylist element is `  'anthropic/',` (a quoted
+# string immediately followed by a comma); we exclude exactly that element in
+# model-selector.ts. Real usage (e.g. model: 'anthropic/claude-…') has extra chars
+# after 'anthropic/' before the closing quote, is not the bare element, and is
+# still caught. (The legacy `grep -v FORBIDDEN_PREFIXES` line filter is kept for
+# any same-line declaration idiom.)
 check "5.2" "no 'anthropic/' provider id in src/lib (excl. FORBIDDEN_PREFIXES guard decl)" \
-  "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v 'FORBIDDEN_PREFIXES' | grep ."
+  "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v 'FORBIDDEN_PREFIXES' | grep -vE \"model-selector\.ts:[[:space:]]*'anthropic/',\" | grep ."
 
 blue ""
 blue "── 5b. Embedding model hygiene (PRD 1.8c) ──"
@@ -445,6 +461,24 @@ check "10.14" "atomic-deploy.sh: exit-3 health check retries (never rolls back o
 check "10.15" "tests/unit/b2-atomic-deploy.test.ts fixture test exists" \
   "[ -f tests/unit/b2-atomic-deploy.test.ts ]"
 
+# 10.16 atomic-deploy.sh persists the pm2 process list (pm2 save) so BOTH the CC
+#       app AND the co-resident cloudflared tunnel connector are in the pm2 dump
+#       and auto-resurrect after an OOM/reboot. Root cause of the CF-1033
+#       "tunnel has no healthy origin" outage: the app was (re)started under pm2
+#       but the dump was never saved, so `pm2 resurrect` on the next boot
+#       restored nothing and the dashboard stayed dark.
+check "10.16" "atomic-deploy.sh: pm2 save on green (CC + cloudflared persist for auto-resurrect)" \
+  "grep -q 'pm2 save' scripts/atomic-deploy.sh"
+
+# 10.17 deploy.sh (legacy operator deploy path per DEPLOYMENT.md) must ALSO
+#       persist via pm2 save on green — same OOM/reboot-survival guarantee.
+#       As of BUILD-04 deploy.sh is a thin shim that FORWARDS to atomic-deploy.sh,
+#       so it inherits atomic-deploy.sh's `pm2 save` (already gated by 10.16).
+#       Accept EITHER an inline `pm2 save` OR the atomic-deploy.sh forward — both
+#       preserve the OOM/reboot-survival guarantee for the legacy caller.
+check "10.17" "deploy.sh: pm2 save on green (inline, or via the atomic-deploy.sh forward)" \
+  "grep -q 'pm2 save' scripts/deploy.sh || grep -q 'atomic-deploy.sh' scripts/deploy.sh"
+
 blue ""
 blue "── 11. Port-pin and env-bleed guard (v4.42.0+) ──"
 #
@@ -503,6 +537,175 @@ check "11.12" "vps-docker-bootstrap.sh Step 8b uses cc-start.sh (not bare next s
 # non-comment filter must still detect it.
 check "11.13" "planted fixture bleeding-ecosystem.cjs IS detectable by guard 11.1 (self-proof)" \
   'grep -E "process\.env\.PORT" tests/fixtures/port-guard/bleeding-ecosystem.cjs | grep -vE "^\s*(//|\*)" | grep -q .'
+
+blue ""
+blue "── 12. Cross-store embedding contract validate (SOP_EMBEDDING_PROVIDER=google / gemini-embedding-2 / 3072) ──"
+#
+# CONTRACT: SOP_EMBEDDING_PROVIDER=google is the SINGLE embedding contract for
+# this installation. gemini-embedding-2 at 3072 dims must be consistent across:
+#   (a) the CODE contract  — sop-embeddings.ts auto-detect puts Google first
+#   (b) the ENV store      — .env.local pins SOP_EMBEDDING_PROVIDER=google
+#   (c) the DB persona-index — sop_embeddings table has ONLY gemini-embedding-2 rows
+#
+# Any drift between these three stores means the routing layer is silently using
+# a different embedding space than the stored index, corrupting cosine similarity.
+# This gate must pass before every deploy.
+
+# 12.1: CODE contract — auto-detect in resolveEmbeddingProvider() puts Google FIRST
+#   (OpenAI is demoted to explicit optional fallback, never auto-selected over Google)
+check "12.1" "sop-embeddings.ts: Google auto-detect runs BEFORE OpenAI (single-contract order)" \
+  'awk "/Auto-detect/,/OPTIONAL FALLBACK/" src/lib/sop-embeddings.ts | grep -q "googleKey = resolveGoogleKey"'
+
+# 12.2: CODE contract — OpenAI is labelled as OPTIONAL FALLBACK, not default
+check "12.2" "sop-embeddings.ts: OpenAI demoted to OPTIONAL FALLBACK (not default auto-detect)" \
+  "grep -q 'OPTIONAL FALLBACK' src/lib/sop-embeddings.ts"
+
+# 12.3: ENV store — .env.local pins SOP_EMBEDDING_PROVIDER=google
+# Skip gracefully when .env.local is absent (CI / fresh clone) — it is a
+# gitignored runtime file that only exists on a provisioned box.
+if [ -f .env.local ]; then
+  check "12.3" ".env.local pins SOP_EMBEDDING_PROVIDER=google (single contract env)" \
+    'grep -q "^SOP_EMBEDDING_PROVIDER=google" .env.local'
+else
+  yellow "  ! 12.3  .env.local pins SOP_EMBEDDING_PROVIDER=google (skip — .env.local absent in CI/fresh clone)"
+  WARN=$((WARN+1))
+fi
+
+# 12.4: CODE + ENV agree — forced-google override is the first override branch
+check "12.4" "sop-embeddings.ts: SOP_EMBEDDING_PROVIDER=google is the FIRST override branch (CONTRACT path)" \
+  "grep -n \"override === 'google'\" src/lib/sop-embeddings.ts | head -1 | grep -q ."
+
+# 12.5: DB persona-index — sop_embeddings table has no OpenAI (text-embedding-3-small) rows
+# Skip gracefully when sqlite3 is absent or DB doesn't exist yet (CI / fresh clone).
+DB_PATH="$(dirname "$ROOT")/data/mission-control.db"
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$DB_PATH" ]; then
+  check "12.5" "DB sop_embeddings: zero OpenAI (text-embedding-3-small) rows (cross-store provider agreement)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_model='text-embedding-3-small';\" 2>/dev/null)\" = \"0\" ]"
+  check "12.6" "DB sop_embeddings: all rows use gemini-embedding-2 model (persona-index == CC active provider)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_model != 'gemini-embedding-2';\" 2>/dev/null)\" = \"0\" ]"
+  check "12.7" "DB sop_embeddings: all rows have dims=3072 (gemini-embedding-2 output dimensionality)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_dims != 3072;\" 2>/dev/null)\" = \"0\" ]"
+else
+  yellow "  ! 12.5  DB sop_embeddings OpenAI-row count (skip — sqlite3 not found or DB absent)"
+  yellow "  ! 12.6  DB sop_embeddings gemini-embedding-2 model agreement (skip — sqlite3 not found or DB absent)"
+  yellow "  ! 12.7  DB sop_embeddings dims=3072 agreement (skip — sqlite3 not found or DB absent)"
+  WARN=$((WARN+3))
+fi
+
+blue ""
+blue "── 13. Floor invariant: displayed depts == chosen manifest − opt-outs ──"
+#
+# INVARIANT (2026-07-08): for the ACTIVE client company, the Kanban board displays
+# EXACTLY the client's chosen departments.json manifest MINUS any explicitly
+# opted-out department — with no first-boot staleness, no destructive slug
+# collapse, no foreign-company leakage, and no silent cap. Diagnosed live on a
+# client box: a 43-dept manifest rendered only 42/40 due to FOUR shared-repo bugs.
+# These checks are the drift sentinels for each fix; the AUTHORITATIVE behavioral
+# proof (real seed + board query on a throwaway DB) is
+# tests/unit/floor-department-invariant.test.ts, wired into CI via `npm run test:vitest`.
+
+# 13.1: board query is scoped to the active company in BOTH GET branches (fix #4:
+#       no foreign-company leakage). resolveActiveCompanyId is the shared resolver.
+check "13.1" "/api/workspaces GET filters by active company (both branches)" \
+  '[ "$(grep -c "scope.sql" src/app/api/workspaces/route.ts)" -ge 2 ] && grep -q "resolveActiveCompanyId" src/app/api/workspaces/route.ts' \
+  "scope the board SELECT to the active client company"
+
+check "13.1b" "resolveActiveCompanyId exported from src/lib/company.ts (shared seed+board resolver)" \
+  "grep -q 'export function resolveActiveCompanyId' src/lib/company.ts"
+
+# 13.2: the destructive 'app-development' → 'engineering' alias is GONE (fix #2:
+#       App Development keeps its own distinct lane). Both remain canonical slugs.
+check "13.2" "canonical-slug.ts does NOT collapse app-development into engineering" \
+  "! grep -qE \"'app-development'[[:space:]]*:[[:space:]]*'engineering'\" src/lib/routing/canonical-slug.ts" \
+  "remove the app-development->engineering ALIAS_MAP entry"
+
+check "13.2b" "app-development and engineering are both canonical department slugs" \
+  "grep -qE \"'app-development',\" src/lib/routing/canonical-slug.ts && grep -qE \"'engineering',\" src/lib/routing/canonical-slug.ts"
+
+# 13.3: company seed fails CLOSED on the unpopulated template (fix #3: no
+#       attribution drift under a bogus your-company / fallback company).
+check "13.3" "branding-seed fails closed on the 'Your Company' template (partial-config)" \
+  "grep -q 'isTemplateCompanyName' src/lib/db/branding-seed.ts && grep -qi 'your company' src/lib/db/branding-seed.ts" \
+  "treat companyName='Your Company' as partial-config (do not seed a fallback company)"
+
+# 13.4: department seeding is an idempotent, opt-out-honoring, company-attributed
+#       UPSERT that runs on every boot/converge (fix #1: no first-boot staleness).
+check "13.4" "autoSeed delegates to the idempotent reseed — first-boot-only guard removed" \
+  "grep -q 'reseedWorkspacesFromConfig(db' src/lib/db/migrations.ts && ! grep -q 'Already has data' src/lib/db/migrations.ts" \
+  "make department seeding run every boot (delegate autoSeed to reseedWorkspacesFromConfig)"
+
+check "13.4b" "reseed honors explicit opt-outs and re-homes company_id (additive)" \
+  "grep -q 'isDepartmentOptedOut' src/lib/db/migrations.ts && grep -q 'company_id = excluded.company_id' src/lib/db/migrations.ts" \
+  "skip opted-out depts; set company_id in the upsert"
+
+# 13.5: DYNAMIC fixture-arithmetic — expected-displayed == manifest − opt-outs, with
+#       a real opt-out exercised and app-development + engineering both present.
+check "13.5" "fixture golden == manifest − opt-outs (subtraction contract, node built-ins)" \
+  "node scripts/floor-invariant-fixture-check.mjs" \
+  "run scripts/floor-invariant-fixture-check.mjs and reconcile tests/fixtures/floor-invariant/*"
+
+check "13.6" "floor-invariant behavioral test is present + wired into vitest (CI-gated proof)" \
+  "[ -f tests/unit/floor-department-invariant.test.ts ] && grep -q 'floor-department-invariant.test.ts' vitest.config.ts" \
+  "keep the DB-backed invariant test and its vitest.config.ts include entry"
+
+blue ""
+blue "── 14. Persona blend + audience-confirm gate (migration 090) ──"
+#
+# CONTRACT (persona-blend/cc): the Command Center consumes the matcher's
+# persona-bundle SUPERSET. It must (a) persist the bundle additively (migration
+# 090), (b) render the doer-facing blend directive with a NON-REMOVABLE
+# style-inspired-NOT-impersonation guardrail, and (c) gate the dispatcher's write
+# step on operator audience confirmation. These are static drift sentinels; the
+# AUTHORITATIVE behavioral proof is tests/unit/persona-blend-audience-confirm.test.ts
+# (+ fdn3 / prd-1.6 / point10 / dep5 extensions), run by `npm run test:unit`.
+
+# 14.1: migration 090 exists (additive persona-blend bundle) and is the latest id.
+check "14.1" "migration 090 add_persona_blend_bundle present in migrations.ts" \
+  "grep -q \"id: '090'\" src/lib/db/migrations.ts && grep -q 'add_persona_blend_bundle' src/lib/db/migrations.ts" \
+  "add migration 090 (additive tasks cols + task_persona_bundle table)"
+
+# 14.2: migration 090 is ADDITIVE — no destructive DROP/rename of the new columns/table.
+check "14.2" "migration 090 is additive (task_persona_bundle table + ALTER ADD COLUMN, no DROP)" \
+  "awk \"/id: '090'/,/^];/\" src/lib/db/migrations.ts | grep -q 'CREATE TABLE IF NOT EXISTS task_persona_bundle' && awk \"/id: '090'/,/^];/\" src/lib/db/migrations.ts | grep -q 'ADD COLUMN'"
+
+# 14.3: fresh-DB schema.ts mirrors the new task_persona_bundle table + blend_directive col.
+check "14.3" "schema.ts fresh-DB mirrors blend_directive + task_persona_bundle" \
+  "grep -q 'blend_directive TEXT' src/lib/db/schema.ts && grep -q 'CREATE TABLE IF NOT EXISTS task_persona_bundle' src/lib/db/schema.ts" \
+  "mirror the migration-090 columns/table in schema.ts (fresh-DB parity)"
+
+# 14.4: types.ts Task mirrors the blend cols + the PersonaBundle SUPERSET interfaces.
+check "14.4" "types.ts carries blend mirror cols + PersonaBundle interfaces" \
+  "grep -q 'blend_directive?: string | null' src/lib/types.ts && grep -q 'interface PersonaBundle' src/lib/types.ts && grep -q 'interface TaskPersonaBundleRow' src/lib/types.ts"
+
+# 14.5: persona-selector.ts parses + persists the bundle (both exported).
+check "14.5" "persona-selector.ts exports parsePersonaBundle + persistPersonaBundle" \
+  "grep -q 'export function parsePersonaBundle' src/lib/persona-selector.ts && grep -q 'export function persistPersonaBundle' src/lib/persona-selector.ts"
+
+# 14.6: the MANDATORY guardrail is defined + rendered (persona-dispatch.ts).
+check "14.6" "persona-dispatch.ts defines STYLE_INSPIRED_GUARDRAIL + renderBlendDirective + ensureBlendGuardrail" \
+  "grep -q 'STYLE_INSPIRED_GUARDRAIL' src/lib/persona-dispatch.ts && grep -q 'export function renderBlendDirective' src/lib/persona-dispatch.ts && grep -q 'export function ensureBlendGuardrail' src/lib/persona-dispatch.ts"
+
+# 14.7: the guardrail is NON-REMOVABLE — ensureBlendGuardrail asserts BOTH load-bearing markers.
+check "14.7" "ensureBlendGuardrail re-injects the style-inspired + impersonation clause (non-removable)" \
+  "awk '/function ensureBlendGuardrail/,/^}/' src/lib/persona-dispatch.ts | grep -qi 'style-inspired' && awk '/function ensureBlendGuardrail/,/^}/' src/lib/persona-dispatch.ts | grep -qi 'impersonation'"
+
+# 14.8: the audience-confirm gate runs BEFORE the dispatcher's write step (CAS claim).
+check "14.8" "task-dispatcher: audience-confirm gate runs BEFORE the in_progress write step" \
+  "GATE=\$(grep -n evaluateAudienceConfirmGate src/lib/task-dispatcher.ts | head -1 | cut -d: -f1); WRITE=\$(grep -nE \"SET status = .in_progress., updated_at\" src/lib/task-dispatcher.ts | head -1 | cut -d: -f1); [ -n \"\$GATE\" ] && [ -n \"\$WRITE\" ] && [ \"\$GATE\" -lt \"\$WRITE\" ]" \
+  "call evaluateAudienceConfirmGate before the DISP-02 CAS claim in autoDispatchTask"
+
+# 14.9: the gate helpers exist in tasks.ts (evaluate / hold / deadline / confirm).
+check "14.9" "tasks.ts exports the audience-confirm gate helpers" \
+  "grep -q 'export function evaluateAudienceConfirmGate' src/lib/tasks.ts && grep -q 'export function holdForAudienceConfirm' src/lib/tasks.ts && grep -q 'export function markAudienceDeadlineFallback' src/lib/tasks.ts && grep -q 'export function confirmTaskAudience' src/lib/tasks.ts"
+
+# 14.10: the audience-confirm surface is OPERATOR-facing (notifySystem), never the client (MOVE-IN-SILENCE).
+check "14.10" "audience-confirm holds surface via notifySystem (operator), not notifyOwner (client)" \
+  "awk '/function holdForAudienceConfirm/,/^}/' src/lib/tasks.ts | grep -q 'notifySystem' && ! awk '/function holdForAudienceConfirm/,/^}/' src/lib/tasks.ts | grep -q 'notifyOwner'"
+
+# 14.11: the behavioral proof suite exists under tests/unit (so `npm run test:unit` runs it).
+check "14.11" "persona-blend-audience-confirm behavioral test present (test:unit-gated proof)" \
+  "[ -f tests/unit/persona-blend-audience-confirm.test.ts ]" \
+  "keep the DB-backed persona-blend / audience-confirm behavioral test"
 
 blue ""
 blue "════════════════════════════════════════════════════════════"

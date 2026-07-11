@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Settings, ChevronDown } from 'lucide-react';
@@ -125,6 +125,21 @@ export default function CEOPerformanceBoardPage() {
     }
   }
 
+  // Shared by the desktop pill nav and the mobile tab-scroll row (below md).
+  const handleTabClick = useCallback((tab: string) => {
+    setActiveTab(tab);
+    if (tab === 'Departments') {
+      router.push('/ceo-board/departments');
+      return;
+    }
+    if (tab === 'Agents') {
+      // '/agent-roster' does not exist (404). This page already renders an
+      // "Active Agents" section further down (Agent Performance lens) — jump
+      // to it instead of navigating to a dead route.
+      document.getElementById('agents-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [router]);
+
   const currentDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
     year: 'numeric',
@@ -133,14 +148,11 @@ export default function CEOPerformanceBoardPage() {
   });
 
   return (
+    /* v4.66.0: dropped the url('/holo-bg.png') backdrop — the file was never
+       shipped (404 on every load) so the board rendered on a broken-image
+       background. A quiet bcc-bg surface is the intended look. */
     <motion.div
-      className="min-h-screen relative"
-      style={{
-        backgroundImage: `url('/holo-bg.png')`,
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundRepeat: 'no-repeat',
-      }}
+      className="min-h-dvh relative bg-bcc-bg"
       variants={pageVariants}
       initial="hidden"
       animate="visible"
@@ -148,37 +160,30 @@ export default function CEOPerformanceBoardPage() {
       {/* Navigation Header */}
       <motion.header
         variants={sectionVariants}
-        className="sticky top-0 z-50 h-16 flex items-center justify-between px-6"
-        style={{
-          backgroundColor: '#F0F0F0',
-          boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-        }}
+        className="sticky top-0 z-50 h-16 flex items-center justify-between gap-2 px-4 sm:px-6 bg-white/90 backdrop-blur border-b border-gray-200"
       >
         {/* LEFT - Company name pill */}
-        <div className="flex items-center">
+        <div className="flex items-center min-w-0">
           <button
             onClick={() => router.push('/')}
-            className="px-4 py-2 rounded-full bg-white hover:bg-gray-50 transition-colors"
-            style={{ border: '1px solid #CCCCCC' }}
+            className="px-4 py-2 rounded-full bg-white border border-gray-300 hover:bg-gray-50 transition-colors truncate"
           >
-            <span className="text-sm font-medium text-[#1A1A1A]">{companyName}</span>
+            <span className="text-sm font-medium text-gray-900">{companyName}</span>
           </button>
         </div>
 
-        {/* CENTER - Text-only pill tabs */}
-        <nav className="flex items-center gap-1">
+        {/* CENTER - Text-only pill tabs (desktop). Below md this collides
+            with the left/right clusters, so it's hidden in favor of the
+            horizontally-scrollable tab row rendered under the header. */}
+        <nav className="hidden md:flex items-center gap-1">
           {NAV_TABS.map((tab) => (
             <button
               key={tab}
-              onClick={() => {
-                setActiveTab(tab);
-                if (tab === 'Departments') router.push('/ceo-board/departments');
-                if (tab === 'Agents') router.push('/agent-roster');
-              }}
+              onClick={() => handleTabClick(tab)}
               className={`px-4 py-2 text-sm transition-colors ${
                 activeTab === tab
-                  ? 'bg-[#1A1A1A] text-white rounded-full font-medium'
-                  : 'text-[#666666] hover:text-[#1A1A1A]'
+                  ? 'bg-gray-900 text-white rounded-full font-medium'
+                  : 'text-gray-500 hover:text-gray-900'
               }`}
             >
               {tab}
@@ -187,14 +192,16 @@ export default function CEOPerformanceBoardPage() {
         </nav>
 
         {/* RIGHT - New Campaign + Date + separator + LIVE + settings + avatar */}
-        <div className="flex items-center gap-4">
-            {/* New Campaign button */}
+        <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+            {/* New Campaign button — icon-only below sm to make room for the
+                rest of the cluster. */}
             <button
               onClick={() => setShowCampaignModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+              aria-label="New Campaign"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300"
             >
               <span className="text-base leading-none">+</span>
-              New Campaign
+              <span className="hidden sm:inline">New Campaign</span>
             </button>
           <span className="text-base text-gray-500 hidden sm:block">
             {currentDate}
@@ -210,11 +217,11 @@ export default function CEOPerformanceBoardPage() {
             onClick={() => router.push('/settings/intelligence')}
             title="Intelligence settings"
             aria-label="Open Intelligence settings"
-            className="flex items-center justify-center w-10 h-10 rounded-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+            className="flex items-center justify-center w-10 h-10 rounded-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
           >
             <Settings className="h-5 w-5" />
           </button>
-          <div className="flex items-center gap-1">
+          <div className="hidden sm:flex items-center gap-1">
             <div className="h-9 w-9 rounded-full bg-emerald-600 flex items-center justify-center">
               <span className="text-white text-sm font-semibold">TO</span>
             </div>
@@ -223,8 +230,27 @@ export default function CEOPerformanceBoardPage() {
         </div>
       </motion.header>
 
+      {/* Mobile tab row (md:hidden) — same tabs as the desktop center pill
+          nav, in a horizontally-scrollable strip so they never collide with
+          the header's left/right clusters below 768px. */}
+      <div className="md:hidden flex items-center gap-2 overflow-x-auto px-4 py-2 bg-white border-b border-gray-200">
+        {NAV_TABS.map((tab) => (
+          <button
+            key={tab}
+            onClick={() => handleTabClick(tab)}
+            className={`shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+              activeTab === tab
+                ? 'bg-gray-900 text-white'
+                : 'bg-gray-100 text-gray-600'
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
       {/* Main Content */}
-      <main className="relative z-10 p-8">
+      <main className="relative z-10 px-4 py-6 sm:p-6 lg:p-8">
         <div className="max-w-[1600px] mx-auto space-y-6">
           {/* Breadcrumb */}
           <Breadcrumb
@@ -322,8 +348,11 @@ export default function CEOPerformanceBoardPage() {
             </div>
           </motion.div>
 
-          {/* 4. Active Agents Strip */}
-          <motion.section variants={sectionVariants}>
+          {/* 4. Active Agents Strip — anchor target for the header's "Agents"
+              tab (that tab used to router.push('/agent-roster'), a route
+              that doesn't exist; it now scrolls here instead). scroll-mt-24
+              offsets the sticky header so the section isn't tucked under it. */}
+          <motion.section id="agents-section" variants={sectionVariants} className="scroll-mt-24">
             <SectionContainer title="Active Agents" accentColor="bg-emerald-500">
               <ActiveAgentsStrip />
             </SectionContainer>

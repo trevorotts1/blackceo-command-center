@@ -18,7 +18,7 @@
 
 import { NextResponse } from 'next/server';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
-import { resolveProviderApiKey, envCandidatesForProvider } from '@/lib/provider-key-detection';
+import { envCandidatesForProvider } from '@/lib/provider-key-detection';
 import { INTEGRATION_CATALOG } from '@/lib/integration-catalog';
 import {
   candidateEnvFiles,

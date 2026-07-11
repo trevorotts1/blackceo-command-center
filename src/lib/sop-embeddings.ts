@@ -25,13 +25,18 @@
  *    - PINNED_GOOGLE_MODEL      — the ONE canonical Google embedding model (gemini-embedding-2)
  *    - PINNED_GOOGLE_DIMS       — the canonical output dim (3072)
  *
+ * PROVIDER CONTRACT — SOP_EMBEDDING_PROVIDER=google is the SINGLE CONTRACT.
+ *   It must be set in .env.local. OpenAI is an EXPLICIT OPTIONAL FALLBACK only —
+ *   it must never be auto-selected when a Google key is present. The QC cross-store
+ *   validate gate (qc-cc.sh section 12) enforces this at every deploy.
+ *
  * PROVIDER RESOLUTION ORDER (configurable via SOP_EMBEDDING_PROVIDER env):
- *   1. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim)
- *   2. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-2 @3072-dim)
+ *   1. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-2 @3072-dim) [CONTRACT]
+ *   2. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim) [EXPLICIT OPTIONAL FALLBACK]
  *   3. SOP_EMBEDDING_PROVIDER absent → auto-detect:
- *        OPENAI_API_KEY present  → openai
- *        ELSE Google key present → google (gemini-embedding-2)
- *        ELSE                   → none (keyword fallback)
+ *        Google key present       → google (gemini-embedding-2) [PRIMARY]
+ *        ELSE OPENAI_API_KEY present → openai [OPTIONAL FALLBACK]
+ *        ELSE                     → none (keyword fallback)
  *
  * PINNED GOOGLE MODEL — gemini-embedding-2 (GA as of 2025; output_dimensionality=3072):
  *   POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=<KEY>
@@ -58,8 +63,8 @@
  *   GOOGLE_API_KEY            — enables Google embeddings (gemini-embedding-2, 3072-dim)
  *   GOOGLE_AI_STUDIO_API_KEY  — alternate Google key name
  *   GEMINI_API_KEY            — alternate Google key name
- *   SOP_EMBEDDING_PROVIDER    — optional override: "openai" | "google"
- *   When absent: all semantic paths degrade gracefully to keyword-only.
+ *   SOP_EMBEDDING_PROVIDER    — PINNED to "google" (single contract); "openai" is explicit optional fallback only
+ *   When absent: auto-detect selects Google first, OpenAI as optional fallback, then keyword-only.
  */
 
 import { queryAll, queryOne, run, getDb } from '@/lib/db';
@@ -149,27 +154,33 @@ export function resolveEmbeddingProvider(): EmbeddingProvider {
   const override = process.env.SOP_EMBEDDING_PROVIDER?.toLowerCase().trim();
 
   // ── Forced override ────────────────────────────────────────────────────────
-  if (override === 'openai') {
-    const key = process.env.OPENAI_API_KEY?.trim() || null;
-    return { name: 'openai', apiKey: key, model: OPENAI_MODEL, dims: OPENAI_DIMS };
-  }
+  // CONTRACT: SOP_EMBEDDING_PROVIDER=google is the pinned single contract.
+  // google is checked first so the contract path is unambiguous.
   if (override === 'google') {
     const key = resolveGoogleKey();
     return { name: 'google', apiKey: key, model: GOOGLE_MODEL, dims: GOOGLE_DIMS };
   }
-
-  // ── Auto-detect ────────────────────────────────────────────────────────────
-  // 1. OpenAI takes precedence when its key is present (existing clients
-  //    already have OpenAI indexes; don't switch them silently).
-  const openaiKey = process.env.OPENAI_API_KEY?.trim();
-  if (openaiKey && openaiKey.length > 10) {
-    return { name: 'openai', apiKey: openaiKey, model: OPENAI_MODEL, dims: OPENAI_DIMS };
+  // EXPLICIT OPTIONAL FALLBACK: openai is only reached when operator explicitly
+  // sets SOP_EMBEDDING_PROVIDER=openai. Never auto-selected when Google key present.
+  if (override === 'openai') {
+    const key = process.env.OPENAI_API_KEY?.trim() || null;
+    return { name: 'openai', apiKey: key, model: OPENAI_MODEL, dims: OPENAI_DIMS };
   }
 
-  // 2. Google key present (Google-only clients: Sheila, Corey, Kofi)
+  // ── Auto-detect (no SOP_EMBEDDING_PROVIDER set) ────────────────────────────
+  // PRIMARY: Google (gemini-embedding-2 @3072-dim) — the pinned single contract.
+  // In production SOP_EMBEDDING_PROVIDER=google is always set; this path is a
+  // safety net only.
   const googleKey = resolveGoogleKey();
   if (googleKey) {
     return { name: 'google', apiKey: googleKey, model: GOOGLE_MODEL, dims: GOOGLE_DIMS };
+  }
+
+  // OPTIONAL FALLBACK: OpenAI — only reached when no Google key is present.
+  // This is an explicit optional fallback, not the default path.
+  const openaiKey = process.env.OPENAI_API_KEY?.trim();
+  if (openaiKey && openaiKey.length > 10) {
+    return { name: 'openai', apiKey: openaiKey, model: OPENAI_MODEL, dims: OPENAI_DIMS };
   }
 
   // 3. No key → keyword-only fallback
@@ -616,6 +627,120 @@ export function countStaleGoogleEmbeddings(): {
     pinnedModel: GOOGLE_MODEL,
     retiredModel: GOOGLE_RETIRED_MODEL,
   };
+}
+
+/**
+ * Health snapshot of the SOP / routing embedding store (F2.3 / DEP-11).
+ *
+ * This is the TypeScript-side half of the dual-store embedding health surface.
+ * It reports the SOP store's active provider, per-row model histogram, stale
+ * count and semantic-readiness so the CC `/api/health` endpoint can present it
+ * side-by-side with the persona index (reported by shared-utils/embedding_health.py).
+ *
+ * FAIL-CLOSED / DEGRADE-LOUDLY: this function NEVER throws. A missing table,
+ * empty store, or DB error is reported as `available:false` + `degraded:true`
+ * with a human note — never an exception that would 500 the health route. It is
+ * also the last-resort fallback the health route uses when the Python probe is
+ * unavailable (no python3, timeout), so it must stand on its own.
+ */
+export interface SOPEmbeddingHealth {
+  store: 'sop_index';
+  available: boolean;
+  provider: EmbeddingProviderName;
+  activeModel: string;
+  activeDims: number;
+  totalRows: number;
+  modelHistogram: Record<string, number>;
+  staleRows: number;
+  semanticReady: boolean;
+  degraded: boolean;
+  notes: string[];
+}
+
+export function getSOPEmbeddingHealth(): SOPEmbeddingHealth {
+  const notes: string[] = [];
+  let provider: EmbeddingProvider;
+  try {
+    provider = resolveEmbeddingProvider();
+  } catch {
+    provider = { name: 'none', apiKey: null, model: '', dims: 0 };
+  }
+
+  const health: SOPEmbeddingHealth = {
+    store: 'sop_index',
+    available: false,
+    provider: provider.name,
+    activeModel: provider.model,
+    activeDims: provider.dims,
+    totalRows: 0,
+    modelHistogram: {},
+    staleRows: 0,
+    semanticReady: false,
+    degraded: true,
+    notes,
+  };
+
+  try {
+    const db = getDb();
+    const tableExists = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sop_embeddings'")
+      .get();
+    if (!tableExists) {
+      notes.push('sop_index: table sop_embeddings missing (migration 057 not run) — keyword-only fallback.');
+      return health;
+    }
+
+    health.available = true;
+
+    const hist: Record<string, number> = {};
+    const rows = queryAll<{ model: string | null; cnt: number }>(
+      `SELECT COALESCE(NULLIF(embedding_model, ''), '(unknown)') AS model, COUNT(*) AS cnt
+         FROM sop_embeddings GROUP BY model`,
+      []
+    );
+    for (const r of rows) hist[r.model ?? '(unknown)'] = r.cnt;
+    health.modelHistogram = hist;
+    health.totalRows = Object.values(hist).reduce((a, b) => a + b, 0);
+
+    // Stale rows = the retired Google model (gemini-embedding-001), reused from
+    // the single source of truth so the two paths never drift.
+    health.staleRows = countStaleGoogleEmbeddings().stale;
+
+    if (provider.name === 'none') {
+      health.semanticReady = false;
+      notes.push('sop_index: no embedding provider key configured — SOP routing is keyword-only.');
+    } else {
+      const canonicalRows = hist[provider.model] ?? 0;
+      health.semanticReady = canonicalRows > 0;
+      if (canonicalRows === 0 && health.totalRows > 0) {
+        notes.push(
+          `sop_index: ZERO rows match the active model ${provider.model} ` +
+          `(stored: [${Object.keys(hist).join(', ')}]) — semantic routing DISABLED (keyword-only).`
+        );
+      }
+    }
+
+    if (health.totalRows === 0) {
+      notes.push('sop_index: table present but EMPTY — run the backfill to build the SOP index.');
+    }
+    if (health.staleRows > 0) {
+      notes.push(
+        `sop_index: ${health.staleRows} row(s) on retired gemini-embedding-001 — ` +
+        `re-embed with ${PINNED_GOOGLE_MODEL} before the 2026-07-14 shutdown.`
+      );
+    }
+
+    // degraded when no usable semantic rows OR any stale rows poison the space.
+    health.degraded = !health.semanticReady || health.staleRows > 0;
+    return health;
+  } catch (err) {
+    health.available = false;
+    health.degraded = true;
+    notes.push(
+      `sop_index: could not read store (${(err as Error).message}) — treating as degraded/keyword-only.`
+    );
+    return health;
+  }
 }
 
 /** Fetch the stored embedding for a SOP, or null if not embedded yet. */

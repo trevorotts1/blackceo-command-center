@@ -77,7 +77,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   description TEXT,
-  status TEXT DEFAULT 'backlog' CHECK (status IN ('backlog', 'in_progress', 'review', 'blocked', 'done')),
+  -- 10-status board model, in lockstep with TaskStatus (src/lib/types.ts) and
+  -- validation.ts. Fresh databases get the widened CHECK directly; existing
+  -- databases were rebuilt by migration 076, which detects this widened form
+  -- and skips (its explicit "a future schema.ts ships the widened CHECK" path).
+  status TEXT DEFAULT 'backlog' CHECK (status IN ('backlog', 'inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'review', 'testing', 'blocked', 'done')),
   priority TEXT DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high', 'critical')),
   assigned_agent_id TEXT REFERENCES agents(id),
   created_by_agent_id TEXT REFERENCES agents(id),
@@ -109,9 +113,60 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- campaign_id, which is added by migration 017 (not present in this base
   -- CREATE on a fresh DB before migrations run).
   stage_slug TEXT,
+  -- DATA-01: dispatch/board attempt-accounting columns. These are read by HOT
+  -- runtime paths (task-dispatcher.ts, the intake-advance / backlog-redispatch /
+  -- stale-task sweeps) on every board tick. They were previously added ONLY by
+  -- late ALTERs (migrations 077/078/083/084), so a fresh install that began
+  -- serving traffic before those migrations completed would throw
+  -- "no such column" on the very first dispatch read. Declaring them in the base
+  -- CREATE makes a fresh DB self-sufficient. Existing DBs still receive them via
+  -- the (idempotent, PRAGMA-guarded) migrations — this CREATE is a no-op there.
+  -- NOTE: no CREATE INDEX for these is added to this base schema — schema.ts runs
+  -- BEFORE migrations, so an index referencing one of these columns would throw
+  -- on a pre-migration existing DB. Migration 077 creates
+  -- idx_tasks_next_dispatch_eligible unconditionally (safe on both paths).
+  dispatch_attempts INTEGER DEFAULT 0,        -- migration 077
+  last_dispatch_attempt_at TEXT,              -- migration 077
+  next_dispatch_eligible_at TEXT,             -- migration 077 (backoff gate)
+  block_reason TEXT,                          -- migration 078
+  redispatch_count INTEGER DEFAULT 0,         -- migration 084
+  persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
+  -- Immutable board-producer provenance (migration 089 / INGEST-10). Stamped
+  -- ONLY at creation from the validated ingest 'source' field; never exposed
+  -- on UpdateTaskSchema / the PATCH surface. /api/tasks/[id]/status uses this
+  -- (never the caller-editable description) as the authoritative scope gate.
+  source TEXT,
+  -- Persona-blend + audience-confirm mirror columns (migration 090 owns these for
+  -- existing DBs; this base CREATE covers fresh installs). Nullable + additive:
+  -- the resolved VOICE decision (voice_persona_id / topic_persona_id / voice_collapsed
+  -- / blend_directive) and the confirmed audience (audience_id / label / source). The
+  -- full bundle lives in task_persona_bundle; tasks.persona_id/name/mode stay the
+  -- back-compat mirror of the resolved VOICE persona.
+  voice_persona_id TEXT,
+  topic_persona_id TEXT,
+  audience_id TEXT,
+  audience_label TEXT,
+  audience_source TEXT,
+  voice_collapsed INTEGER,
+  blend_directive TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Persona-blend bundle (migration 090 also creates this for existing DBs;
+-- CREATE TABLE IF NOT EXISTS is idempotent). One row per task: the matcher's
+-- persona-bundle SUPERSET (bundle_json), the catalog schemaVersion it reasoned
+-- over, and the audience confirm lifecycle state (pending gates dispatch).
+CREATE TABLE IF NOT EXISTS task_persona_bundle (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+  bundle_json TEXT,
+  catalog_version TEXT,
+  confirm_state TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_confirm ON task_persona_bundle(confirm_state);
 
 -- Task history table — every status transition is recorded here for
 -- performance analytics (avg completion time, throughput, agent attribution).

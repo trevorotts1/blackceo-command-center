@@ -52,6 +52,22 @@ export interface CompanyConfig {
   /** PRD 2.10: rolling window in days for grading computations (default 30) */
   gradingWindowDays?: number;
   departments: CompanyDepartment[];
+  /**
+   * Brand fields (read-back fix, v4.63). POST /api/company/config has always
+   * written these into company-config.json, but loadCompanyConfig() never
+   * surfaced them back out — every caller except the settings form itself
+   * (which bypassed this loader with its own raw fs.readFileSync/JSON.parse)
+   * had no way to read the persisted branding, and the form's "Saved!" state
+   * was not actually verified against what got read back. Empty string when
+   * unset (there is no sensible non-empty default for a brand color/logo).
+   * Falls back to the legacy nested `branding.{primaryColor,secondaryColor,
+   * logoUrl}` shape for configs written before these became top-level keys.
+   * NOTE: the CLIENT tenant record (clients.brand_color/logo_url) still wins
+   * at render time via <BrandTheme/> — these are just what's on disk here.
+   */
+  brandPrimaryColor: string;
+  brandSecondaryColor: string;
+  logoUrl: string;
 }
 
 /** Cached config to avoid repeated file reads */
@@ -66,7 +82,10 @@ export function loadCompanyConfig(): CompanyConfig {
 
   const configPath = path.join(process.cwd(), 'config', 'company-config.json');
 
-  let raw: Partial<CompanyConfig> = {};
+  let raw: Partial<CompanyConfig> & {
+    /** Legacy nested branding shape — see brandPrimaryColor doc above. */
+    branding?: { primaryColor?: string; secondaryColor?: string; logoUrl?: string };
+  } = {};
 
   try {
     if (fs.existsSync(configPath)) {
@@ -111,6 +130,9 @@ export function loadCompanyConfig(): CompanyConfig {
     departments: Array.isArray(raw.departments) && raw.departments.length > 0
       ? raw.departments
       : [],
+    brandPrimaryColor: raw.brandPrimaryColor || raw.branding?.primaryColor || '',
+    brandSecondaryColor: raw.brandSecondaryColor || raw.branding?.secondaryColor || '',
+    logoUrl: raw.logoUrl || raw.branding?.logoUrl || '',
   };
 
   cachedConfig = config;

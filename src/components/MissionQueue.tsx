@@ -1,13 +1,19 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Search, Inbox as InboxIcon } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
+import { PersonaSlotChips } from './kanban/TaskCard';
+import { AnthologyCardFace } from './anthology/AnthologyCardFace';
+import { isAnthologyTask } from './anthology/anthology-card';
+import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
+import { BlockTaskModal, type BlockTaskDetails } from './kanban/BlockTaskModal';
+import { MoveTaskMenu } from './kanban/MoveTaskMenu';
 import { formatDistanceToNow } from 'date-fns';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
@@ -83,6 +89,32 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
   ],
 };
 
+/**
+ * Reverse of the six-column bucketing rule below (backlog / todo / review are
+ * synthetic UI columns that aggregate several underlying TaskStatus values).
+ * Single source of truth for "which column is this task visually in" — used
+ * by both getTasksByStatus (filtering) and the per-card Move menu (so the
+ * touch affordance's "current column" always agrees with where the card is
+ * actually rendered).
+ */
+function taskToColumnId(task: Pick<Task, 'status'>): string {
+  if (task.status === 'backlog') return 'backlog';
+  if (['inbox', 'planning', 'assigned', 'pending_dispatch'].includes(task.status)) return 'todo';
+  if (['review', 'testing'].includes(task.status)) return 'review';
+  return task.status; // in_progress, blocked, done map 1:1
+}
+
+/**
+ * The inverse mapping, used when a NEW task is seeded from a column's "+"
+ * button or the touch Move menu: 'todo' is synthetic (no such TaskStatus), so
+ * it becomes 'assigned' — the same target handleDrop uses for a card dropped
+ * on To-Do (groomed/queued but not started).
+ */
+function columnIdToStatus(columnId: string): TaskStatus {
+  if (columnId === 'todo') return 'assigned';
+  return columnId as TaskStatus; // backlog/in_progress/review/blocked/done map 1:1
+}
+
 const departmentEmojis: Record<string, string> = {
   'ceo-com': '👔', 'ceo': '👔',
   'marketing': '📢',
@@ -132,6 +164,26 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
+  // Free-text board search (title/description substring, case-insensitive),
+  // applied alongside whichever filter chip is active.
+  const [searchQuery, setSearchQuery] = useState('');
+  // Which column's "+" button opened the create modal — seeds the new task's
+  // status instead of always defaulting to backlog. Null = the header-level
+  // "New Task" button, which keeps the original backlog default.
+  const [createColumnId, setCreateColumnId] = useState<string | null>(null);
+  // Non-blocking error/info toasts for the board (drag-drop + Move-menu status
+  // changes that the server rejected). See kanban/BoardToast.tsx.
+  const [toasts, setToasts] = useState<BoardToastMessage[]>([]);
+  // The task currently in the Blocked confirmation modal (dropped/moved onto
+  // Blocked but not yet confirmed with the required human-only fields).
+  const [blockingTask, setBlockingTask] = useState<Task | null>(null);
+
+  const pushToast = useCallback((toast: Omit<BoardToastMessage, 'id'>) => {
+    setToasts((prev) => [...prev, { id: crypto.randomUUID(), ...toast }]);
+  }, []);
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   // ── Bug board state (boardKind === 'bug') ─────────────────────────────────
   // Bug tickets live in their own table (/api/bugs), not in tasks.
@@ -203,26 +255,22 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
   const getTasksByStatus = (statusId: string) => {
     const filteredByDept = tasks.filter(matchesScope);
-    const byColumn = filteredByDept.filter((task) => {
-      // Six-column mapping:
-      //   backlog  -> raw inbox (status === 'backlog')
-      //   todo     -> groomed (inbox / planning / assigned / pending_dispatch)
-      //   review   -> review/testing
-      //   anything else: 1:1 match with status
-      if (statusId === 'backlog') {
-        return task.status === 'backlog';
-      }
-      if (statusId === 'todo') {
-        return ['inbox', 'planning', 'assigned', 'pending_dispatch'].includes(task.status);
-      }
-      if (statusId === 'review') {
-        return ['review', 'testing'].includes(task.status);
-      }
-      return task.status === statusId;
-    });
+    // Six-column mapping (backlog / todo / review are synthetic UI columns
+    // that aggregate several underlying statuses) — see taskToColumnId.
+    const byColumn = filteredByDept.filter((task) => taskToColumnId(task) === statusId);
+
+    // Apply the board search box (title/description substring match).
+    const searchLower = searchQuery.trim().toLowerCase();
+    const bySearch = !searchLower
+      ? byColumn
+      : byColumn.filter(
+          (task) =>
+            task.title.toLowerCase().includes(searchLower) ||
+            (task.description || '').toLowerCase().includes(searchLower)
+        );
 
     // Apply the active filter chip (was previously decorative).
-    return byColumn.filter((task) => {
+    return bySearch.filter((task) => {
       switch (activeFilter) {
         case 'due':
           // Only tasks with a due date in the next 7 days OR overdue
@@ -235,7 +283,6 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           return !!task.assigned_agent_id;
         case 'completed':
           return task.status === 'done';
-        case 'status':
         case 'total':
         default:
           return true;
@@ -253,69 +300,140 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     e.dataTransfer.dropEffect = 'move';
   };
 
-  const handleDrop = async (e: React.DragEvent, targetColumnId: TaskStatus | 'todo') => {
-    e.preventDefault();
-    // The "To-Do" column is a synthetic UI column — when a card lands there,
-    // the actual underlying task status becomes 'assigned' (groomed/queued
-    // but not started). The API enforces Triad Rule at the backlog → !backlog
-    // boundary, so dropping into To-Do also triggers that check.
-    const targetStatus: TaskStatus = targetColumnId === 'todo' ? 'assigned' : (targetColumnId as TaskStatus);
-
-    if (!draggedTask || draggedTask.status === targetStatus) {
-      setDraggedTask(null);
-      return;
-    }
-
-    updateTaskStatus(draggedTask.id, targetStatus);
+  /**
+   * Shared status-change path used by drag-drop, the touch "Move to..." menu
+   * (item 9), and the Blocked-confirmation modal (item 2). Optimistically
+   * updates the store, then PATCHes the server.
+   *
+   * Previously only `res.status === 400` was handled at all — any 403/422/500
+   * left the optimistic move in place with no explanation, silently
+   * desyncing the board from the server. Now ANY non-ok response reverts the
+   * optimistic move and surfaces the server's {error, message/remediation/
+   * hint} via a toast. The 'Triad incomplete' 400 keeps its existing special
+   * case (open the edit modal instead of a toast).
+   */
+  const applyStatusChange = async (
+    task: Task,
+    targetStatus: TaskStatus,
+    blockedDetails?: BlockTaskDetails,
+  ) => {
+    const previousStatus = task.status;
+    updateTaskStatus(task.id, targetStatus);
 
     try {
-      const res = await fetch(`/api/tasks/${draggedTask.id}`, {
+      const body: Record<string, unknown> = { status: targetStatus };
+      if (blockedDetails) {
+        body.blocked_reason = blockedDetails.blocked_reason;
+        body.blocked_on_human = blockedDetails.blocked_on_human;
+        body.ask = blockedDetails.ask;
+      }
+
+      const res = await fetch(`/api/tasks/${task.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: targetStatus }),
+        body: JSON.stringify(body),
       });
 
       if (res.ok) {
         addEvent({
           id: crypto.randomUUID(),
           type: targetStatus === 'done' ? 'task_completed' : 'task_status_changed',
-          task_id: draggedTask.id,
-          message: `Task "${draggedTask.title}" moved to ${targetStatus}`,
+          task_id: task.id,
+          message: `Task "${task.title}" moved to ${targetStatus}`,
           created_at: new Date().toISOString(),
         });
 
-        if (shouldTriggerAutoDispatch(draggedTask.status, targetStatus, draggedTask.assigned_agent_id)) {
+        if (shouldTriggerAutoDispatch(previousStatus, targetStatus, task.assigned_agent_id)) {
           const result = await triggerAutoDispatch({
-            taskId: draggedTask.id,
-            taskTitle: draggedTask.title,
-            agentId: draggedTask.assigned_agent_id,
-            agentName: draggedTask.assigned_agent?.name || 'Unknown Agent',
-            workspaceId: draggedTask.workspace_id
+            taskId: task.id,
+            taskTitle: task.title,
+            agentId: task.assigned_agent_id,
+            agentName: task.assigned_agent?.name || 'Unknown Agent',
+            workspaceId: task.workspace_id,
           });
 
           if (!result.success) {
             console.error('Auto-dispatch failed:', result.error);
           }
         }
-      } else if (res.status === 400) {
-        // Triad incomplete — revert the optimistic update and surface the error.
-        updateTaskStatus(draggedTask.id, draggedTask.status);
-        try {
-          const errBody = await res.json();
-          if (errBody?.error === 'Triad incomplete' && Array.isArray(errBody.missing)) {
-            // Open the task modal so the user can resolve the Triad inline.
-            setEditingTask(draggedTask);
-          }
-        } catch {
-          // ignore body parse errors
-        }
+        return;
       }
+
+      // Non-ok response: revert the optimistic move and surface why.
+      updateTaskStatus(task.id, previousStatus);
+
+      let errBody: { error?: string; message?: string; missing?: string[]; remediation?: string; hint?: string } | null = null;
+      try {
+        errBody = await res.json();
+      } catch {
+        // non-JSON body — fall through to a generic toast below
+      }
+
+      if (res.status === 400 && errBody?.error === 'Triad incomplete' && Array.isArray(errBody.missing)) {
+        // Unchanged behavior: open the task modal so the user can resolve the Triad inline.
+        setEditingTask(task);
+        return;
+      }
+
+      pushToast({
+        tone: 'error',
+        title: errBody?.error || `Couldn't move "${task.title}" (HTTP ${res.status})`,
+        detail: errBody?.message || errBody?.remediation || errBody?.hint,
+      });
     } catch (error) {
       console.error('Failed to update task status:', error);
-      updateTaskStatus(draggedTask.id, draggedTask.status);
+      updateTaskStatus(task.id, previousStatus);
+      pushToast({
+        tone: 'error',
+        title: `Couldn't move "${task.title}"`,
+        detail: 'Network error — the board move was reverted. Please retry.',
+      });
+    }
+  };
+
+  /**
+   * Column-level move entry point shared by drag-drop (handleDrop below) and
+   * the touch-friendly Move menu on each card (item 9). The Blocked column is
+   * never PATCHed directly here — PATCH /api/tasks/[id] requires 3 human-only
+   * fields (blocked_reason, blocked_on_human, ask) that a drag/tap alone
+   * can't supply, so this opens BlockTaskModal instead and only PATCHes on
+   * confirm (item 2). This is also what makes Blocked reachable at all: before
+   * this, dropping on Blocked always 400'd and silently snapped back.
+   */
+  const handleColumnMove = (task: Task, targetColumnId: string) => {
+    const targetStatus = columnIdToStatus(targetColumnId);
+    if (task.status === targetStatus) return;
+
+    if (targetStatus === 'blocked') {
+      // Move the card into Blocked immediately, matching the feedback of
+      // every other column; the modal collects the required fields before
+      // the PATCH actually persists it. Cancelling reverts this.
+      updateTaskStatus(task.id, 'blocked');
+      setBlockingTask(task); // snapshot still carries the ORIGINAL status for revert-on-cancel
+      return;
     }
 
+    void applyStatusChange(task, targetStatus);
+  };
+
+  const handleDrop = (e: React.DragEvent, targetColumnId: TaskStatus | 'todo') => {
+    e.preventDefault();
+    if (!draggedTask) return;
+    const task = draggedTask;
     setDraggedTask(null);
+    handleColumnMove(task, targetColumnId);
+  };
+
+  const cancelBlockedMove = () => {
+    if (blockingTask) updateTaskStatus(blockingTask.id, blockingTask.status);
+    setBlockingTask(null);
+  };
+
+  const confirmBlockedMove = (details: BlockTaskDetails) => {
+    if (!blockingTask) return;
+    const task = blockingTask;
+    setBlockingTask(null);
+    void applyStatusChange(task, 'blocked', details);
   };
 
   // Filter tasks by selected department/workspace for accurate counts.
@@ -327,7 +445,6 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   const COLUMNS = BOARD_PRESETS[boardKind];
 
   const filters = [
-    { id: 'status', label: 'By Status' },
     {
       id: 'total',
       label: 'By Total Tasks',
@@ -339,7 +456,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   ];
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-bcc-bg">
+    /* min-w-0 + min-h-0 (v4.66.0): flex items default to min-size:auto, which
+       let this region silently grow past the dvh shell and clip the bottom
+       card row with no scroll affordance — the reported bottom-cutoff bug. */
+    <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden bg-bcc-bg">
       {/* Header */}
       <header className="bg-white h-auto lg:h-20 px-4 lg:px-8 py-3 lg:py-0 flex flex-col lg:flex-row items-start lg:items-center justify-between border-b border-gray-100 shrink-0 gap-3 lg:gap-0">
         <div className="flex items-center gap-3 w-full lg:w-auto">
@@ -366,7 +486,12 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         <div className="flex items-center gap-2 lg:gap-3 w-full lg:w-auto justify-end">
           <button
             data-walkthrough="new-task"
-            onClick={() => setShowCreateModal(true)}
+            onClick={() => {
+              // Header-level create has no column context — falls back to
+              // TaskModal's own default (backlog).
+              setCreateColumnId(null);
+              setShowCreateModal(true);
+            }}
             className="flex items-center gap-1.5 lg:gap-2 px-3 lg:px-5 py-2 lg:py-2.5 rounded-xl bg-brand-600 text-white font-semibold text-sm hover:bg-brand-700 transition-all shadow-md shadow-brand-200"
           >
             <Plus className="w-4 h-4" />
@@ -399,6 +524,33 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
             </button>
           ))}
         </div>
+
+        {/* Board search — title/description substring, case-insensitive,
+            applied alongside whichever filter chip is active (see
+            getTasksByStatus). Bug board has no search per its own scope. */}
+        {boardKind === 'task' && (
+          <div className="relative w-full sm:w-64">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search tasks..."
+              aria-label="Search tasks by title or description"
+              className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-9 pr-8 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Kanban Columns — scroll wrapper with always-visible scrollbar + affordances */}
@@ -410,7 +562,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         The fade overlays use pointer-events:none so they never block card drag+drop.
         Chevron buttons have pointer-events:all and sit centred within each fade zone.
       */}
-      <div className="flex-1 relative overflow-hidden">
+      <div className="flex-1 min-h-0 relative overflow-hidden">
         {/* Left scroll affordance — fade + chevron */}
         {canScrollLeft && (
           <div className="kanban-fade-left hidden lg:block" aria-hidden="true">
@@ -444,7 +596,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         {/* Actual scrollable column strip */}
         <div
           ref={scrollRef}
-          className="kanban-scroll overflow-x-auto overflow-y-auto lg:overflow-y-hidden h-full p-4 lg:p-8"
+          className="kanban-scroll overflow-x-auto overflow-y-auto lg:overflow-y-hidden overscroll-contain h-full p-4 lg:p-6"
           role="region"
           aria-label="Task board columns — scroll left or right to see more"
           tabIndex={0}
@@ -461,7 +613,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                     <div
                       key={column.id}
                       data-walkthrough={`bug-column-${column.id}`}
-                      className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                      className="w-full lg:w-80 flex flex-col gap-4 lg:min-h-0"
                     >
                       {/* Column Header */}
                       <div className="flex items-center justify-between shrink-0">
@@ -473,8 +625,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                         </div>
                       </div>
 
-                      {/* Bug Cards */}
-                      <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
+                      {/* Bug Cards — lg:min-h-0 keeps the list constrained so
+                          it scrolls internally instead of clipping; lg:pb-6
+                          gives the last card breathing room at the shell edge. */}
+                      <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto lg:min-h-0 lg:pb-6 overscroll-contain pr-0 lg:pr-2">
                         {columnBugs.map((bug) => (
                           <BugCard key={bug.id} bug={bug} />
                         ))}
@@ -491,7 +645,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                   <div
                     key={column.id}
                     data-walkthrough={`column-${column.id}`}
-                    className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6"
+                    className="w-full lg:w-80 flex flex-col gap-4 lg:min-h-0"
                     onDragOver={handleDragOver}
                     onDrop={(e) => handleDrop(e, column.id as TaskStatus | 'todo')}
                   >
@@ -506,29 +660,53 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                         </span>
                         <span className="text-sm font-bold">{column.label}</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowCreateModal(true)}
-                        title={`Add a task to ${column.label}`}
-                        aria-label={`Add a task to ${column.label}`}
-                        className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
+                      {/* No "+" on the Blocked column: a task can only ENTER
+                          Blocked by being moved there (it needs a reason +
+                          audience + ask), never created there — the API rejects
+                          create-as-blocked. Hiding the button keeps it from
+                          being a control that always errors. */}
+                      {column.id !== 'blocked' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            // Seed the create form's status from this column
+                            // instead of always defaulting to backlog.
+                            setCreateColumnId(column.id);
+                            setShowCreateModal(true);
+                          }}
+                          title={`Add a task to ${column.label}`}
+                          aria-label={`Add a task to ${column.label}`}
+                          className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-gray-100 text-gray-400 hover:text-gray-900 hover:shadow-sm transition-all"
+                        >
+                          <Plus className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
 
-                    {/* Tasks */}
-                    <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto pr-0 lg:pr-2">
-                      {columnTasks.map((task) => (
-                        <TaskCard
-                          key={task.id}
-                          task={task}
-                          onDragStart={handleDragStart}
-                          onClick={() => setEditingTask(task)}
-                          isDragging={draggedTask?.id === task.id}
-                          isCompleted={column.id === 'done'}
-                        />
-                      ))}
+                    {/* Tasks — lg:min-h-0 keeps the list constrained so it
+                        scrolls internally instead of clipping; lg:pb-6 gives
+                        the last card breathing room at the shell edge. */}
+                    <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto lg:min-h-0 lg:pb-6 overscroll-contain pr-0 lg:pr-2">
+                      {columnTasks.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-10 text-gray-300 select-none">
+                          <InboxIcon className="w-7 h-7 mb-2" aria-hidden="true" />
+                          <span className="text-xs font-medium text-gray-400">No tasks</span>
+                        </div>
+                      ) : (
+                        columnTasks.map((task) => (
+                          <TaskCard
+                            key={task.id}
+                            task={task}
+                            onDragStart={handleDragStart}
+                            onClick={() => setEditingTask(task)}
+                            isDragging={draggedTask?.id === task.id}
+                            isCompleted={column.id === 'done'}
+                            columns={COLUMNS}
+                            currentColumnId={column.id}
+                            onMove={handleColumnMove}
+                          />
+                        ))
+                      )}
                     </div>
                   </div>
                 );
@@ -540,11 +718,30 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
       {/* Modals */}
       {showCreateModal && (
-        <TaskModal onClose={() => setShowCreateModal(false)} workspaceId={workspaceId} />
+        <TaskModal
+          onClose={() => {
+            setShowCreateModal(false);
+            setCreateColumnId(null);
+          }}
+          workspaceId={workspaceId}
+          initialStatus={createColumnId ? columnIdToStatus(createColumnId) : undefined}
+        />
       )}
       {editingTask && (
         <TaskModal task={editingTask} onClose={() => setEditingTask(null)} workspaceId={workspaceId} />
       )}
+      {/* Blocked-column confirmation (item 2) — collects the human-only
+          fields PATCH /api/tasks/[id] requires before the move is persisted. */}
+      {blockingTask && (
+        <BlockTaskModal
+          taskTitle={blockingTask.title}
+          onConfirm={confirmBlockedMove}
+          onCancel={cancelBlockedMove}
+        />
+      )}
+
+      {/* Non-blocking error/info toasts (item 1) */}
+      <BoardToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
@@ -555,9 +752,15 @@ interface TaskCardProps {
   onClick: () => void;
   isDragging: boolean;
   isCompleted?: boolean;
+  /** Board columns, for the touch-friendly Move menu (item 9). */
+  columns: { id: string; label: string }[];
+  /** Which column this card is currently rendered under (from the parent's render loop). */
+  currentColumnId: string;
+  /** Fires the shared status-change path (same one drag-drop uses, including the Blocked modal). */
+  onMove: (task: Task, targetColumnId: string) => void;
 }
 
-function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskCardProps) {
+function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns, currentColumnId, onMove }: TaskCardProps) {
   // Status pill styles
   const statusPillStyles: Record<string, string> = {
     backlog: 'bg-gray-100 text-gray-600',
@@ -622,10 +825,26 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         isDragging ? 'opacity-50 scale-95' : ''
       } ${isCompleted ? 'opacity-75' : ''}`}
     >
-      {/* Title */}
-      <h3 className={`text-base font-semibold text-gray-900 mb-1 leading-snug ${isCompleted ? 'line-through text-gray-400' : ''}`}>
-        {task.title}
-      </h3>
+      {/* Title + touch-friendly Move affordance — native HTML5 drag-and-drop
+          (used elsewhere on this card) doesn't fire on touch devices, so this
+          real button + real menu is the only way to change columns on
+          mobile/tablet (item 9). */}
+      <div className="flex items-start justify-between gap-2 mb-1">
+        <h3 className={`text-base font-semibold text-gray-900 leading-snug flex-1 min-w-0 ${isCompleted ? 'line-through text-gray-400' : ''}`}>
+          {task.title}
+        </h3>
+        <MoveTaskMenu
+          columns={columns}
+          currentColumnId={currentColumnId}
+          taskTitle={task.title}
+          onSelect={(columnId) => onMove(task, columnId)}
+        />
+      </div>
+
+      {/* Anthology card face (SPEC B11 / U12) — participant name, book chip,
+          9-segment S0→S9 bar, stage badge, "waiting on you" age. Renders ONLY
+          for source==='anthology' cards; every other card is unaffected. */}
+      {isAnthologyTask(task) && <AnthologyCardFace task={task} />}
 
       {/* Pill Tags Row */}
       <div className="flex flex-wrap gap-1.5 mb-3">
@@ -679,6 +898,9 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted }: TaskC
         {/* Skill 35 — Marketing-dept Publish button (no-op for non-marketing) */}
         <MarketingPublishButton task={task} />
       </div>
+
+      {/* DEP-5 / F3.7 + F3.9 — per-sub-task persona slot chips (multi-persona tasks only) */}
+      <PersonaSlotChips task={task} />
 
       {/* Sprint and Due Date */}
       {(task.sprint || task.due_date) && (

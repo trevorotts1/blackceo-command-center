@@ -62,6 +62,57 @@ export interface WeeklyDoneClearResult {
   /** Why the job exited without archiving (only when archivedCount === 0 and
    *  it was a deliberate skip, not an absence of eligible rows). */
   skippedReason?: string;
+  /** Orphan EMPTY cards soft-archived this run (see archiveOrphanEmptyCards). */
+  orphanEmptyArchivedCount?: number;
+}
+
+/** Default age (days) before an orphan empty card becomes archivable. */
+const ORPHAN_EMPTY_ARCHIVE_DAYS_DEFAULT = 14;
+
+/**
+ * Soft-archive ORPHAN EMPTY cards — the board clutter left when a card was
+ * created but never got an owner or any content: no assigned agent, an empty
+ * description, no deliverables, and no activities, sitting untouched in
+ * backlog/inbox past the age threshold. Non-destructive (stamps archived_at;
+ * board reads already hide archived rows) and idempotent.
+ *
+ * STRICT criteria protect real work: a card with ANY deliverable or activity —
+ * e.g. the "carded-but-trapped" tasks that actually FINISHED (their deliverable
+ * is on disk / registered) — is NEVER archived here; those are recovered to
+ * review by the stuck-in-progress sweep instead. A card with any description is
+ * likewise skipped, which also excludes signed board-producer cards (their
+ * "Source: …" marker lives in the description).
+ *
+ * Knobs: DISABLE_ORPHAN_EMPTY_ARCHIVE=1 (skip), ORPHAN_EMPTY_ARCHIVE_DAYS (age).
+ */
+export function archiveOrphanEmptyCards(): { archivedCount: number; ranAt: string; skippedReason?: string } {
+  const ranAt = new Date().toISOString();
+  if (
+    process.env.DISABLE_ORPHAN_EMPTY_ARCHIVE === '1' ||
+    process.env.DISABLE_ORPHAN_EMPTY_ARCHIVE === 'true'
+  ) {
+    return { archivedCount: 0, ranAt, skippedReason: 'DISABLE_ORPHAN_EMPTY_ARCHIVE env is set' };
+  }
+
+  const parsed = parseInt(process.env.ORPHAN_EMPTY_ARCHIVE_DAYS || '', 10);
+  const days = Number.isFinite(parsed) && parsed >= 1 ? parsed : ORPHAN_EMPTY_ARCHIVE_DAYS_DEFAULT;
+
+  const db = getDb();
+  const result = db
+    .prepare(
+      `UPDATE tasks
+          SET archived_at = datetime('now')
+        WHERE archived_at IS NULL
+          AND status IN ('backlog','inbox')
+          AND assigned_agent_id IS NULL
+          AND (description IS NULL OR TRIM(description) = '')
+          AND created_at <= datetime('now', ?)
+          AND id NOT IN (SELECT task_id FROM task_deliverables)
+          AND id NOT IN (SELECT task_id FROM task_activities)`,
+    )
+    .run(`-${days} days`);
+
+  return { archivedCount: result.changes, ranAt };
 }
 
 /**
@@ -90,7 +141,16 @@ export function archiveDoneTasks(): WeeklyDoneClearResult {
     )
     .run();
 
-  return { archivedCount: result.changes, ranAt };
+  // Same weekly maintenance window also clears orphan EMPTY cards (board
+  // clutter with no owner and no content). Self-gated by its own env knobs;
+  // strict criteria never touch finished/trapped work.
+  const orphan = archiveOrphanEmptyCards();
+
+  return {
+    archivedCount: result.changes,
+    ranAt,
+    orphanEmptyArchivedCount: orphan.archivedCount,
+  };
 }
 
 /**

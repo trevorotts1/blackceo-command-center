@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryAll } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
+import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -18,6 +19,14 @@ export async function GET(request: NextRequest) {
     const department = searchParams.get('department');
     const departmentId = searchParams.get('department_id');
     const campaignId = searchParams.get('campaign_id');
+    // Board default: HIDE soft-archived tasks. `archived_at` is stamped by the
+    // weekly Done-clear job and the manual archive path (migration 058); it is
+    // the canonical "this card is off the board" marker. Every board consumer
+    // (main queue, all-tasks, workspace/department/campaign boards, analytics)
+    // reads this route, so filtering here hides archived cards everywhere in one
+    // place. ESCAPE HATCH: `?includeArchived=true` skips the filter so archived
+    // tasks stay fully retrievable (audit, restore) — they are hidden, not gone.
+    const includeArchived = searchParams.get('includeArchived') === 'true';
 
     let sql = `
       SELECT
@@ -37,6 +46,11 @@ export async function GET(request: NextRequest) {
       WHERE 1=1
     `;
     const params: unknown[] = [];
+
+    // Default board fetch hides soft-archived tasks; ?includeArchived=true opts in.
+    if (!includeArchived) {
+      sql += ' AND t.archived_at IS NULL';
+    }
 
     if (status) {
       // Support comma-separated status values (e.g., status=inbox,testing,in_progress)
@@ -104,6 +118,11 @@ export async function GET(request: NextRequest) {
               avatar_emoji: task.assigned_agent_emoji,
             }
           : undefined,
+      // DEP-5 / F3.7 — attach the multi-persona plan rows so the kanban card can
+      // render slot chips on reload (SSE carries them live at selection time).
+      // loadSubtaskPersonas is tolerant: [] on a single-persona task or a
+      // pre-migration-088 box, so this never breaks the board.
+      subtask_personas: loadSubtaskPersonas(task.id),
     }));
 
     return NextResponse.json(transformedTasks);
@@ -129,6 +148,30 @@ export async function POST(request: NextRequest) {
     }
 
     const validatedData = validation.data;
+
+    // A task can never be CREATED directly in `blocked`. Blocked is a transition
+    // state a task reaches only once it is in flight and waiting on a specific
+    // human action (decision/approval/credential/payment) — and that transition
+    // is gated by PATCH /api/tasks/[id], which requires blocked_reason +
+    // blocked_on_human + ask. CreateTaskSchema/createTaskCore do not carry those
+    // three fields, so accepting status:'blocked' here would silently persist a
+    // "blocked" row with NO reason — a card parked in Blocked that no one can act
+    // on. Reject it with a descriptive 400 pointing at the correct flow instead
+    // of dropping the fields. (Surfaced by the kanban CRUD audit, v4.63.0.)
+    if (validatedData.status === 'blocked') {
+      return NextResponse.json(
+        {
+          error: 'A task cannot be created directly as blocked',
+          message:
+            'Blocked is a human-wait state a task enters after it is in flight. ' +
+            'Create the task in backlog/inbox first, then move it to Blocked (which ' +
+            'requires a reason, an audience, and what you need from the human).',
+          hint: 'Set status to backlog, inbox, planning, assigned, or in_progress on create; ' +
+            'reach Blocked via PATCH /api/tasks/{id} with blocked_reason, blocked_on_human, and ask.',
+        },
+        { status: 400 },
+      );
+    }
 
     // Delegate to the shared task-creation core so the UI create path and the
     // universal ingest endpoint (POST /api/tasks/ingest) can never drift.

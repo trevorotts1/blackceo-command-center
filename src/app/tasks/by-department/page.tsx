@@ -132,7 +132,7 @@ function DepartmentPickerInner() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
+      <div className="min-h-screen bg-bcc-bg flex items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-gray-500">
           <Loader2 className="h-8 w-8 animate-spin" />
           <span className="text-sm font-medium">Loading departments...</span>
@@ -147,7 +147,7 @@ function DepartmentPickerInner() {
     : null;
 
   return (
-    <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
+    <div className="min-h-screen bg-bcc-bg flex flex-col">
       <header className="h-16 bg-white border-b border-gray-200 px-6 flex items-center justify-between">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
@@ -334,7 +334,7 @@ function DepartmentPickerInner() {
 export default function DepartmentPickerPage() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
+      <div className="min-h-screen bg-bcc-bg flex items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
       </div>
     }>

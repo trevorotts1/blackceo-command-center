@@ -115,7 +115,8 @@ mkdir -p "$HOME/operator-scratch"
 # hand-tuned config is not silently lost.
 #
 # KEY CHANGES vs prior template:
-#   - name: "mission-control" (canonical; was "command-center" — converges app name)
+#   - name: "blackceo-command-center" (fleet-canonical; legacy "mission-control"
+#     and "command-center" are reconciled away — converges app name)
 #   - script: "bash" + args: "scripts/cc-start.sh --port 4000" (hardened launcher)
 #     cc-start.sh performs env-bleed strip + orphan-port kill before exec-ing next.
 #   - CC_PORT: "4000" in env (never PORT: — prevents OpenClaw gateway PORT bleed)
@@ -131,7 +132,7 @@ mkdir -p "$ECOSYSTEM_DIR"
 # Build the canonical ecosystem content (used for both fresh install and reconciliation).
 CANONICAL_ECOSYSTEM="module.exports = {
   apps: [{
-    name: \"mission-control\",
+    name: \"blackceo-command-center\",
     cwd: \"$ECOSYSTEM_DIR\",
     script: \"bash\",
     args: \"scripts/cc-start.sh --port 4000\",
@@ -161,11 +162,15 @@ else
   # Idempotent-healing: check if the existing file matches canonical.
   # Compare the critical fields rather than byte-exact (comments may differ).
   NEEDS_UPDATE=0
-  grep -q '"mission-control"' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q '"blackceo-command-center"' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
   grep -q 'cc-start.sh' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
   grep -q 'min_uptime' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
   grep -q 'CC_PORT' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
-  # Also fail if old vulnerable pattern still present
+  # Also reconcile if a LEGACY app name is still present (mission-control or the
+  # bare command-center), or the vulnerable literal PORT key — note the
+  # '"command-center"' pattern's leading quote does NOT match
+  # '"blackceo-command-center"' (preceded by a hyphen, not a quote).
+  grep -q '"mission-control"' "$ECOSYSTEM_FILE" && NEEDS_UPDATE=1 || true
   grep -q '"command-center"' "$ECOSYSTEM_FILE" && NEEDS_UPDATE=1 || true
   grep -q '"PORT"' "$ECOSYSTEM_FILE" && NEEDS_UPDATE=1 || true
 
@@ -173,7 +178,7 @@ else
     echo "[8b/9] Reconciling stale/vulnerable PM2 ecosystem at $ECOSYSTEM_FILE (backing up to .bak)..."
     cp "$ECOSYSTEM_FILE" "${ECOSYSTEM_FILE}.bak"
     printf '%s\n' "$CANONICAL_ECOSYSTEM" > "$ECOSYSTEM_FILE"
-    echo "[8b/9] Ecosystem reconciled to canonical (mission-control + cc-start.sh + circuit-breaker)"
+    echo "[8b/9] Ecosystem reconciled to canonical (blackceo-command-center + cc-start.sh + circuit-breaker)"
   else
     echo "[8b/9] PM2 ecosystem already canonical at $ECOSYSTEM_FILE — no update needed"
   fi

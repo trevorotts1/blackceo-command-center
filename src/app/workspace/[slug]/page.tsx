@@ -16,6 +16,7 @@ import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import { resolveDepartment } from '@/lib/routing/resolve-department';
+import { AnthologyBoardDriftBanner } from '@/components/anthology/BoardDriftBanner';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -208,7 +209,7 @@ export default function WorkspacePage() {
 
   if (notFound) {
     return (
-      <div className="min-h-screen bg-[#F8F9FB] flex items-center justify-center">
+      <div className="min-h-screen bg-bcc-bg flex items-center justify-center">
         <div className="text-center">
           <div className="text-6xl mb-4">🔍</div>
           <h1 className="text-2xl font-bold text-gray-900 mb-2">Department Not Found</h1>
@@ -229,7 +230,7 @@ export default function WorkspacePage() {
 
   if (isLoading || !workspace) {
     return (
-      <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
+      <div className="min-h-screen bg-bcc-bg flex flex-col">
         {/* Header skeleton */}
         <div className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4 shrink-0">
           <div className="flex items-center gap-4">
@@ -300,11 +301,13 @@ export default function WorkspacePage() {
   const showTaskBoard = true;
 
   return (
-    <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
+    /* Shell contract (v4.66.0 bottom-cutoff fix) — see /tasks/all: dvh-sized
+       shell + min-h-0 scroll chain so the board never clips unreachable rows. */
+    <div className="min-h-dvh lg:h-dvh flex flex-col bg-bcc-bg lg:overflow-hidden">
       <Header workspace={workspace} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
 
       {/* Breadcrumb: shows Home > CEO Board > [Dept Name] > Focus View */}
-      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100">
+      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100 shrink-0">
         <Breadcrumb
           items={[
             { label: 'Home', href: '/' },
@@ -322,6 +325,10 @@ export default function WorkspacePage() {
         />
       </div>
 
+      {/* A7 — board projection drift banner (Anthology board only). Read-only,
+          fail-soft; renders nothing unless the ledger shows confirmed drift. */}
+      {workspace.slug === 'anthology' && <AnthologyBoardDriftBanner />}
+
       {/* Department head banner — migration 028. Surfaces the agent designated
           as the head of this workspace so visitors immediately know who owns it. */}
       {workspace.head_agent_name && (
@@ -338,7 +345,7 @@ export default function WorkspacePage() {
         </div>
       )}
 
-      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Agents Sidebar — focus mode (scoped rail) for a single department,
             full all-departments list only on the CEO / default workspace. */}
         <AgentsSidebar

@@ -4,8 +4,10 @@
  * Scores a completed task against the assigned SOP's success_criteria using a
  * 1–10 rubric. Called automatically when a task transitions to `review` status.
  *
- * Gate: ≥8.5 → auto-approve (mark done); <8.5 → kick back to in_progress with
- * specific gap notes as a task event.
+ * Gate: ≥8.5 → auto-approve (mark done); <8.5 → kick back to `backlog`
+ * (the task re-enters intake / auto-route from there) with specific gap notes
+ * as a task event. NOTE: the kickback target is `backlog`, NOT `in_progress` —
+ * the raw status writers below all write `status = 'backlog'` on a QC fail.
  *
  * Per-department QC: the scorer resolves the ITEM'S OWN department QC agent
  * (role_type='qc', workspace_id = task's workspace) and uses that agent's
@@ -15,18 +17,27 @@
  * library (one QC specialist per department).
  *
  * Scoring paths:
- *   1. LLM-backed (primary): uses OPENAI_API_KEY / GOOGLE_API_KEY to call the
- *      configured model and score the work against success_criteria.
- *      Model selection: dept QC agent's model field → QC_SCORER_MODEL env →
- *      TIEBREAK_MODEL env → gpt-4o-mini (OpenAI) or gemini-2.5-flash (Google).
- *   2. Heuristic fallback (no API key / LLM error): structural checks on the
+ *   1. LLM-backed (primary): the JUDGE runs on the CLIENT's OWN Ollama Cloud
+ *      model (QC-08 operator decision) — the dept QC agent's model or
+ *      QC_JUDGE_MODEL, which MUST be an ollama-cloud / :cloud model, called via
+ *      the client's OLLAMA_CLOUD_API_KEY. The judge is NEVER an operator/shared
+ *      paid OpenAI/Google key, and NEVER the same model that wrote the content
+ *      (JUDGE != WRITER). No client judge configured → fail CLOSED to (2).
+ *   2. Heuristic fallback (no client judge / judge error): structural checks on the
  *      deliverable meta (description non-empty, SOP assigned, persona assigned,
  *      title non-trivial). Returns a conservative score in [6.0, 8.0].
- *      IMPORTANT: heuristic mode NEVER triggers the auto-reroute loop. The task
- *      stays in `review` with a "QC ran in heuristic mode (no LLM key); human
- *      review required" event. Reroutes are ONLY triggered by a real LLM score
- *      below the 8.5 gate. This prevents keyless installs from spinning every
- *      task through 3 reroutes and into `blocked` (PRD 2.4).
+ *      IMPORTANT: heuristic mode NEVER triggers the auto-reroute loop. Reroutes
+ *      are ONLY triggered by a real LLM score below the 8.5 gate. This prevents
+ *      keyless installs from spinning every task through 3 reroutes and into
+ *      `blocked` (PRD 2.4). The heuristic fallback splits by `heuristicReason`:
+ *        - 'no-key'        → keyless install by design: task stays in `review`
+ *                            with a "[QC-HEURISTIC] … human review required" event.
+ *        - 'provider-down' → a key exists but every LLM call failed (outage/blip):
+ *                            task is DEFERRED in `review` with a distinct
+ *                            "[QC-DEFERRED-PROVIDER-DOWN]" marker and auto-rescored
+ *                            by qc-review-sweep when the provider returns, so a
+ *                            provider blip does NOT storm the board into human
+ *                            review (Point 6 fix 1).
  *
  * Artifact-aware QC (duck-fix):
  *   When a task has file deliverables, the QC scorer shifts from "did the brief
@@ -51,8 +62,13 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { getMissionControlUrl } from '@/lib/config';
-import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { notifyOwner } from '@/lib/notify';
+import { notifyOwnerDone } from '@/lib/owner-reports';
+import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
+import { getProvider } from '@/lib/model-providers';
+import { chatCompletion as ollamaCloudChat } from '@/lib/model-providers/ollama-cloud';
+import { resolveProviderApiKey } from '@/lib/provider-key-detection';
 
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
@@ -239,6 +255,99 @@ function af_i14NativeImageToolCalled(rawTrace: string): boolean {
 }
 
 /**
+ * AF-I14 VIOLATION-B/C — STRUCTURED extraction of the command / argument
+ * surfaces of every tool call in the trace.
+ *
+ * Hole-fix (QC-12): VIOLATION-B (dead endpoint invoked) and VIOLATION-C (the
+ * KIE.ai pipeline was NOT invoked) used to key on a naive lowercased substring
+ * scan over the WHOLE trace. That is wrong in both directions:
+ *   - false-positive: a trace that merely QUOTES `/api/v1/image/gpt-image` in
+ *     assistant prose tripped VIOLATION-B even though nothing was called.
+ *   - EVASION (false-negative): a trace that merely QUOTES `api.kie.ai` /
+ *     `kie_generate.py` in prose (e.g. echoing the SOP) satisfied the
+ *     `kiePresent` check, so VIOLATION-C did NOT fire even though the KIE
+ *     pipeline was never actually run.
+ *
+ * This walker mirrors af_i14NativeImageToolCalled (VIOLATION-A): it parses each
+ * JSONL line and collects ONLY the EXECUTION surfaces of real tool activity —
+ * the input/arguments of a tool CALL (the shell command / HTTP url the agent
+ * issued) AND the content/output of a tool RESULT (the HTTP response the call
+ * actually produced, which legitimately echoes the endpoint that was hit). It
+ * deliberately does NOT collect user/assistant message `content` (prose), so B/C
+ * key on what the agent DID, not on what it merely quoted.
+ *
+ * `parsedAnyLine` tells the caller whether ANY JSONL line parsed as JSON; when
+ * it did not, the caller MUST fall back to the legacy whole-trace scan so
+ * detection is never weaker than the prior behaviour.
+ */
+function af_i14ToolCallSurfaces(rawTrace: string): { surfaces: string; parsedAnyLine: boolean } {
+  const parts: string[] = [];
+
+  // A tool CALL node (the command the agent issued).
+  const isToolCallNode = (o: Record<string, unknown>): boolean => {
+    if (o.type === 'tool_use' || o.type === 'tool_call' || o.type === 'function_call') return true;
+    if (typeof o.tool_name === 'string' || typeof o.tool === 'string') return true;
+    if (typeof o.name === 'string' && (o.input !== undefined || o.arguments !== undefined || o.parameters !== undefined)) return true;
+    if (o.function && typeof o.function === 'object') return true;
+    return false;
+  };
+
+  // A tool RESULT node (the output of an actually-executed call). Its content is
+  // a real execution surface — e.g. an HTTP response echoing the endpoint hit —
+  // NOT prose. Assistant/user message `content` is NOT collected (that is prose).
+  const isToolResultNode = (o: Record<string, unknown>): boolean => {
+    if (o.type === 'tool_result' || o.type === 'function_call_output' || o.type === 'tool_output') return true;
+    if (o.role === 'tool') return true;
+    return false;
+  };
+
+  const pushSurface = (v: unknown): void => {
+    if (v === undefined || v === null) return;
+    parts.push(typeof v === 'string' ? v : JSON.stringify(v));
+  };
+
+  const collectFromToolCallNode = (o: Record<string, unknown>): void => {
+    pushSurface(o.input);
+    pushSurface(o.arguments);
+    pushSurface(o.parameters);
+    if (o.function && typeof o.function === 'object') {
+      // OpenAI function-call shape: function.arguments is usually a JSON string.
+      pushSurface((o.function as Record<string, unknown>).arguments);
+    }
+  };
+
+  const collectFromToolResultNode = (o: Record<string, unknown>): void => {
+    pushSurface(o.content);
+    pushSurface(o.output);
+  };
+
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node && typeof node === 'object') {
+      const o = node as Record<string, unknown>;
+      if (isToolCallNode(o)) collectFromToolCallNode(o);
+      if (isToolResultNode(o)) collectFromToolResultNode(o);
+      Object.values(o).forEach(walk);
+    }
+  };
+
+  let parsedAnyLine = false;
+  for (const line of rawTrace.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      parsedAnyLine = true;
+      walk(obj);
+    } catch {
+      /* non-JSON line — skip; whole-trace fallback covers it when nothing parses */
+    }
+  }
+
+  return { surfaces: parts.join('\n').toLowerCase(), parsedAnyLine };
+}
+
+/**
  * AF-I14 guardrail result.
  * When `violated` is true, `violations` lists the specific AF-I14 sub-rules
  * that were breached. The caller should auto-fail with these as gaps.
@@ -368,6 +477,13 @@ export function runAFI14Guardrail(
   const lower = trace.toLowerCase();
   const violations: string[] = [];
 
+  // STRUCTURED tool-call surfaces for VIOLATION-B/C (QC-12). We scan what the
+  // agent actually EXECUTED (tool-call command/args), not prose. When no JSONL
+  // line parses as JSON we fall back to the whole-trace scan so detection is
+  // never weaker than the legacy behaviour.
+  const { surfaces: toolSurfaces, parsedAnyLine } = af_i14ToolCallSurfaces(trace);
+  const bcScan = parsedAnyLine ? toolSurfaces : lower;
+
   // VIOLATION-A: native image_generate tool was called.
   // STRUCTURED detection (parses tool_use blocks) — no longer a naive substring
   // scan, so quoting `image_generate` in prose no longer false-fails.
@@ -379,23 +495,24 @@ export function runAFI14Guardrail(
     );
   }
 
-  // VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in trace
-  if (lower.includes('/api/v1/image/gpt-image')) {
+  // VIOLATION-B: dead endpoint /api/v1/image/gpt-image was actually CALLED
+  // (present in a tool-call command/arg surface), not merely quoted in prose.
+  if (bcScan.includes('/api/v1/image/gpt-image')) {
     violations.push(
-      'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image appeared in session trace. ' +
+      'AF-I14 VIOLATION-B: dead endpoint /api/v1/image/gpt-image was invoked in the session trace. ' +
       'This endpoint returns HTTP 404 — images were not generated. ' +
       'Fix: use kie_generate.py which calls the live /api/v1/jobs/createTask endpoint.',
     );
   }
 
-  // VIOLATION-C: kie_generate.py was never invoked
-  // The script must appear via exec/shell calls. We check for both the script
-  // name and the live KIE.ai endpoint it calls.
+  // VIOLATION-C: kie_generate.py / KIE.ai was never actually invoked.
+  // Keyed on real tool-call surfaces (structured), so merely QUOTING the script
+  // name or `api.kie.ai` in assistant prose no longer masks a missing call.
   const kiePresent =
-    lower.includes('kie_generate.py') ||
-    lower.includes('kie_generate') ||
-    lower.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
-    lower.includes('api.kie.ai');                   // KIE.ai domain
+    bcScan.includes('kie_generate.py') ||
+    bcScan.includes('kie_generate') ||
+    bcScan.includes('/api/v1/jobs/createtask') ||    // KIE.ai submit endpoint (lowercased)
+    bcScan.includes('api.kie.ai');                   // KIE.ai domain
   if (!kiePresent) {
     violations.push(
       'AF-I14 VIOLATION-C: kie_generate.py was not invoked and no KIE.ai API calls detected in session trace. ' +
@@ -526,6 +643,14 @@ export interface QCScorerInput {
   qcAgentName?: string | null;
   qcAgentModel?: string | null;
   /**
+   * QC-08 — the model that WROTE the content being judged (the task's assigned
+   * agent / content model). Used to enforce JUDGE != WRITER: the client's Ollama
+   * Cloud judge model must differ from this. Optional; when unknown the equality
+   * guard is skipped (the primary control — client-owned judge, no operator key —
+   * still holds).
+   */
+  writerModel?: string | null;
+  /**
    * When the task has file deliverables, the caller populates this manifest.
    * Presence of a non-empty manifest switches the LLM prompt from
    * "brief completeness" to "deliverable fulfillment" mode.
@@ -539,6 +664,16 @@ export interface QCResult {
   reason: string; // human-readable explanation (shown in event)
   gaps: string[]; // specific gaps when !pass
   scoringPath: 'llm' | 'heuristic' | 'no-criteria'; // which path was used
+  /**
+   * When scoringPath === 'heuristic', WHY the heuristic fallback ran (Point 6 fix 1):
+   *   - 'no-key':        no scoring API key is configured (keyless install by design)
+   *                      → genuine human-review fallback (task stays in review).
+   *   - 'provider-down': a key IS configured but every LLM call failed (outage /
+   *                      network blip) → DEFER and auto-rescore when the provider
+   *                      returns, rather than presenting as human-required.
+   * Undefined for the 'llm' / 'no-criteria' paths.
+   */
+  heuristicReason?: 'no-key' | 'provider-down';
 }
 
 // ---------------------------------------------------------------------------
@@ -702,42 +837,80 @@ If score ≥8.5, "gaps" should be [] or contain only minor polish notes.
 If score <8.5, "gaps" must list specific, actionable rework items.`;
 }
 
+// ---------------------------------------------------------------------------
+// QC-08 (operator decision) — the QC JUDGE runs on the CLIENT's OWN Ollama
+// Cloud model, NEVER an operator/shared paid OpenAI/Google key, and NEVER the
+// same model that wrote the content (JUDGE != WRITER). The prior OpenAI /
+// Google operator-key scorers were removed so nothing can re-wire the judge to
+// a shared paid key.
+// ---------------------------------------------------------------------------
+
 /**
- * Call the LLM API to score the task.
- * Returns null on any error (caller falls back to heuristic).
- * @param modelOverride - Per-dept QC agent's model field (beats env vars)
+ * True when a model id targets the client's Ollama Cloud provider — the ONLY
+ * sanctioned QC-judge provider. Matches the registry shape `ollama-cloud/<m>`,
+ * the legacy `ollama/<m>:cloud` shape, and a bare `<m>:cloud` tag (the ':cloud'
+ * suffix is authoritative). Mirrors model-selector.tierOf()'s tier-1 detection.
  */
-async function llmScoreViaOpenAI(
+function isOllamaCloudModel(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  const id = modelId.trim().toLowerCase();
+  return id.startsWith('ollama-cloud/') || id.includes(':cloud');
+}
+
+/**
+ * Resolve the CLIENT-OWNED Ollama Cloud judge model. Sources, in order:
+ *   1. the per-department QC agent's configured model (input.qcAgentModel)
+ *   2. QC_JUDGE_MODEL (a client-configured judge model id)
+ * Returns the id ONLY when it is an Ollama Cloud model; otherwise null so the
+ * caller fails CLOSED (never an operator/shared paid key).
+ */
+function resolveClientJudgeModel(input: QCScorerInput): string | null {
+  for (const c of [input.qcAgentModel, process.env.QC_JUDGE_MODEL]) {
+    if (c && isOllamaCloudModel(c)) return c.trim();
+  }
+  return null;
+}
+
+/** Resolve the client's Ollama Cloud API key across all env/file/config stores. */
+function resolveOllamaCloudApiKey(): string | null {
+  try {
+    const provider = getProvider('ollama-cloud');
+    if (!provider) return null;
+    const res = resolveProviderApiKey(provider);
+    if ('found' in res && res.found && res.value) return res.value;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Score the task with the client's Ollama Cloud judge model (OpenAI-compatible
+ * via the ollama-cloud connector). Returns null on any error so the caller can
+ * treat it as provider-down (defer + retry). Temperature 0 for a stable verdict.
+ */
+async function llmScoreViaOllamaCloud(
   prompt: string,
   apiKey: string,
-  modelOverride?: string | null,
+  judgeModelId: string,
 ): Promise<QCResult | null> {
   try {
-    const model = modelOverride || process.env.QC_SCORER_MODEL || process.env.TIEBREAK_MODEL || 'gpt-4o-mini';
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: 'You are a precise QC agent. Reply only with valid JSON.' },
-          { role: 'user', content: prompt },
-        ],
-        max_tokens: 300,
-        temperature: 0,
-      }),
+    // The connector wants the raw Ollama model name; strip the registry
+    // 'ollama-cloud/' prefix but keep any ':cloud' tag (that IS the raw name).
+    const rawModel = judgeModelId.startsWith('ollama-cloud/')
+      ? judgeModelId.slice('ollama-cloud/'.length)
+      : judgeModelId;
+    const resp = await ollamaCloudChat(apiKey, {
+      model: rawModel,
+      messages: [
+        { role: 'system', content: 'You are a precise QC agent. Reply only with valid JSON.' },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 300,
+      temperature: 0,
     });
 
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => resp.statusText);
-      console.warn(`[QCScorer] OpenAI API error ${resp.status}: ${errText}`);
-      return null;
-    }
-
-    const data = (await resp.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const raw = data.choices?.[0]?.message?.content?.trim() ?? '';
+    const raw = resp?.choices?.[0]?.message?.content?.trim() ?? '';
     if (!raw) return null;
 
     // Strip markdown code fences if present
@@ -753,68 +926,16 @@ async function llmScoreViaOpenAI(
     return {
       score,
       pass: score >= QC_PASS_THRESHOLD,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : `Score: ${score.toFixed(1)}/10`,
+      // QC-06: the reason is LLM-authored prose, not a deterministic verdict.
+      // Mark it [model-stated] at the source so every downstream surface (board
+      // event, Telegram, owner report) shows the owner it is the model's claim,
+      // while the numeric score/criteria line stays the authoritative signal.
+      reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
     };
   } catch (err) {
-    console.warn('[QCScorer] OpenAI scoring failed:', (err as Error).message);
-    return null;
-  }
-}
-
-/**
- * Call the Google Gemini API to score the task.
- * Returns null on any error.
- * @param modelOverride - Per-dept QC agent's model field (beats env vars)
- */
-async function llmScoreViaGoogle(
-  prompt: string,
-  apiKey: string,
-  modelOverride?: string | null,
-): Promise<QCResult | null> {
-  try {
-    const model = modelOverride || process.env.QC_SCORER_MODEL || 'gemini-2.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, maxOutputTokens: 4096 }, // gemini-2.5-flash uses ~1000 thinking tokens; need headroom
-      }),
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => resp.statusText);
-      console.warn(`[QCScorer] Google Gemini API error ${resp.status} (model: ${model}): ${errText}`);
-      return null;
-    }
-
-    const data = (await resp.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
-    };
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
-    if (!raw) return null;
-
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const parsed = JSON.parse(cleaned) as {
-      score: number;
-      pass: boolean;
-      reason: string;
-      gaps: string[];
-    };
-
-    const score = typeof parsed.score === 'number' ? Math.max(1, Math.min(10, parsed.score)) : 5;
-    return {
-      score,
-      pass: score >= QC_PASS_THRESHOLD,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : `Score: ${score.toFixed(1)}/10`,
-      gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
-      scoringPath: 'llm',
-    };
-  } catch (err) {
-    console.warn('[QCScorer] Google scoring failed:', (err as Error).message);
+    console.warn('[QCScorer] Ollama Cloud judge scoring failed:', (err as Error).message);
     return null;
   }
 }
@@ -826,14 +947,24 @@ async function llmScoreViaGoogle(
 /**
  * Score a task for QC auto-approval.
  *
- * Resolution order for LLM:
- *   1. OPENAI_API_KEY → OpenAI gpt-4o-mini (or QC_SCORER_MODEL)
- *   2. GOOGLE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY → Gemini flash
- *   3. No key → heuristic fallback
+ * QC-08 (operator decision) — the QC JUDGE runs ONLY on the CLIENT's OWN Ollama
+ * Cloud model. Resolution:
+ *   1. client judge model = dept QC agent's model OR QC_JUDGE_MODEL, and it MUST
+ *      be an Ollama Cloud model (ollama-cloud/… or a :cloud tag); else fail closed
+ *   2. JUDGE != WRITER — judge model id must differ from input.writerModel
+ *   3. client Ollama Cloud API key (OLLAMA_CLOUD_API_KEY / OLLAMA_API_KEY)
+ *   4. no client judge configured → fail CLOSED to human review (heuristic
+ *      'no-key'); NEVER an operator/shared paid OpenAI/Google key
  *
- * Falls back to heuristic on any LLM error (never throws).
+ * Falls back to heuristic on any judge error (never throws).
  */
 export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
+  // QC-11: hard-fail if any fixture/simulate bypass env var is set in
+  // production. Both QC_FIXTURE_JSON_PATH (below) and QC_SIMULATE_PROVIDER_DOWN
+  // (further down) would otherwise let a canned "pass" verdict skip real
+  // scoring on a live box. No-op in dev/test, so fixtures keep working there.
+  assertNoFixtureEnvInProduction();
+
   // Fixture path for testing — no live cost. Set QC_FIXTURE_JSON_PATH to a JSON
   // file with shape { score, pass, reason, gaps } to force a deterministic result.
   const qcFixturePath = process.env.QC_FIXTURE_JSON_PATH;
@@ -867,30 +998,65 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
 
   const prompt = buildQCPrompt(input);
 
-  // Model selection: per-dept QC agent's model field beats env vars.
-  // Only use the agent's model when it looks like an OpenAI model id
-  // (starts with 'gpt-' or 'o1' etc.) for the OpenAI path; otherwise
-  // let the env-var defaults handle provider routing.
-  const agentModel = input.qcAgentModel || null;
+  // PROVIDER-DOWN vs FAIL-CLOSED: a heuristic fallback means one of two very
+  // different things. If the client has NO Ollama Cloud judge model/key
+  // configured, this box cannot auto-score → fail CLOSED to human review
+  // ('no-key'); we NEVER borrow an operator/shared paid key. If a judge IS
+  // configured but the call failed (outage / blip), DEFER and auto-rescore when
+  // it returns ('provider-down') so a blip doesn't storm the board into review.
+  //
+  // QC_SIMULATE_PROVIDER_DOWN forces the provider-down branch (when a judge is
+  // configured) for a known outage window or deterministic tests.
+  const simulateProviderDown =
+    process.env.QC_SIMULATE_PROVIDER_DOWN === '1' ||
+    process.env.QC_SIMULATE_PROVIDER_DOWN === 'true';
 
-  // Try LLM paths
-  const openAiKey = process.env.OPENAI_API_KEY;
-  if (openAiKey) {
-    const result = await llmScoreViaOpenAI(prompt, openAiKey, agentModel);
+  // QC-08 (operator decision): the QC JUDGE runs on the CLIENT's OWN Ollama
+  // Cloud model — NEVER an operator/shared paid OpenAI/Google key, and NEVER the
+  // same model that WROTE the content (JUDGE != WRITER). Fail CLOSED to human
+  // review when no client judge is configured; do not silently borrow a key.
+  const failClosed = (why: string): QCResult => {
+    const h = heuristicScore(input);
+    // 'no-key' routes to human review and never auto-approves (see runQCOnReview
+    // + QC-02 terminal escalation). It also benefits from the manual-promote lane.
+    h.heuristicReason = 'no-key';
+    h.reason = `QC judge unavailable — ${why}. Task held for human review; no operator/shared key is ever used as the judge. ${h.reason}`;
+    console.warn(`[QCScorer] QC-08 fail-closed (no client judge): ${why}`);
+    return h;
+  };
+
+  const judgeModel = resolveClientJudgeModel(input);
+  if (!judgeModel) {
+    return failClosed(
+      'no client Ollama Cloud judge model configured (set the dept QC agent model or QC_JUDGE_MODEL to an ollama-cloud / :cloud model)',
+    );
+  }
+
+  // JUDGE != WRITER: the judge model must differ from the model that wrote the
+  // content it grades. Enforced whenever the writer model is known (optional).
+  if (
+    input.writerModel &&
+    input.writerModel.trim().toLowerCase() === judgeModel.toLowerCase()
+  ) {
+    return failClosed(`judge model equals writer model (${judgeModel}) — JUDGE != WRITER violated`);
+  }
+
+  const ollamaKey = resolveOllamaCloudApiKey();
+  if (!ollamaKey) {
+    return failClosed('no client Ollama Cloud API key found (OLLAMA_CLOUD_API_KEY / OLLAMA_API_KEY)');
+  }
+
+  if (!simulateProviderDown) {
+    const result = await llmScoreViaOllamaCloud(prompt, ollamaKey, judgeModel);
     if (result) return result;
   }
 
-  const googleKey =
-    process.env.GOOGLE_API_KEY ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-    process.env.GEMINI_API_KEY;
-  if (googleKey) {
-    const result = await llmScoreViaGoogle(prompt, googleKey, agentModel);
-    if (result) return result;
-  }
-
-  // Fallback: heuristic
-  return heuristicScore(input);
+  // Judge IS configured and a key is present, but the call failed (or was
+  // simulated down): DEFER + auto-rescore when the provider returns — not
+  // human-required. This is a transient outage, distinct from fail-closed.
+  const heuristic = heuristicScore(input);
+  heuristic.heuristicReason = 'provider-down';
+  return heuristic;
 }
 
 // ---------------------------------------------------------------------------
@@ -2104,17 +2270,32 @@ export async function evaluateCriteria(
       }
 
       case 'vision_match': {
-        // Try vision-model check; skip gracefully on no key or error.
         const subject = typeof c.params?.subject === 'string' ? c.params.subject : '';
         const visionResult = await visionMatchCheck(manifest, subject);
         if (visionResult === null) {
-          // No key / error — skip (do NOT fail the criterion)
+          // Not applicable / NO vision key configured — neutral skip (do NOT
+          // penalise). This is the keyless-heuristic path, not an error.
           visionSkipped = true;
           results.push({
             id: c.id,
             description: c.description,
             pass: true, // skip = neutral (don't penalise)
             reason: 'Vision check skipped (no LLM key available) — criterion treated as pass',
+          });
+        } else if ('unverifiable' in visionResult) {
+          // QC-05 FAIL-CLOSED: a vision key IS configured but the check errored,
+          // so the subject match is UNVERIFIED. Block the criterion (this drops
+          // the aggregate score below the 8.5 gate — see evaluateCriteria) rather
+          // than passing blind. Distinct from the no-key neutral skip above, and
+          // consistent with the fail-closed AF-LANG / AF-NUM / AF-SPELL gates.
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            reason:
+              'AF-VISION FAIL-CLOSED: a vision key is configured but the vision-model check could not be ' +
+              `completed (${visionResult.reason}), so the subject match is unverified. Blocking until a vision ` +
+              'pass confirms the artifact depicts the required subject (auto-retries once the vision provider is reachable).',
           });
         } else {
           results.push({
@@ -2335,13 +2516,26 @@ export async function evaluateCriteria(
 
 /**
  * Call the LLM with a vision prompt: "Does this image depict X?"
- * Returns { yes, confidence, explanation } or null on error / no key.
+ *
+ * Three-way return (QC-05 discriminates no-key from an errored call):
+ *   - { yes, confidence, explanation } — a real vision verdict.
+ *   - null                             — the check is NOT APPLICABLE / cannot run
+ *                                        for a benign reason (no subject, NO vision
+ *                                        key configured, or no image to inspect).
+ *                                        The caller treats this as a NEUTRAL SKIP —
+ *                                        this is the keyless-heuristic path, not an
+ *                                        error.
+ *   - { unverifiable: true, reason }   — a vision key IS configured but the call
+ *                                        errored (unreadable artifact / provider
+ *                                        error / non-200). The caller FAILS CLOSED
+ *                                        (never passes an unverified subject match),
+ *                                        mirroring AF-LANG / AF-NUM / AF-SPELL.
  */
 async function visionMatchCheck(
   manifest: DeliverableManifestItem[],
   subject: string,
-): Promise<{ yes: boolean; confidence: number; explanation: string } | null> {
-  if (!subject.trim()) return null;
+): Promise<{ yes: boolean; confidence: number; explanation: string } | { unverifiable: true; reason: string } | null> {
+  if (!subject.trim()) return null; // criterion not applicable — neutral skip
 
   const openAiKey = process.env.OPENAI_API_KEY;
   const googleKey =
@@ -2349,11 +2543,17 @@ async function visionMatchCheck(
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
     process.env.GEMINI_API_KEY;
 
+  // NO-KEY path: a keyless box cannot run a vision check. This is a separate
+  // heuristic, NOT an error — return null so the caller treats it as a neutral
+  // skip. Fail-closed (below) applies ONLY when a key IS configured.
   if (!openAiKey && !googleKey) return null;
+
+  // A vision key IS configured from here on. Any FAILURE below is an error that
+  // must fail closed (QC-05) — never a silent pass of an unverified subject.
 
   // Find first valid image in manifest
   const imageItem = manifest.find((m) => m.valid && m.type === 'image' && m.path);
-  if (!imageItem?.path) return null;
+  if (!imageItem?.path) return null; // no image to inspect — existence criterion covers this; neutral
 
   // Read file as base64
   let b64: string;
@@ -2361,7 +2561,10 @@ async function visionMatchCheck(
     const buf = readFileSync(imageItem.path);
     b64 = buf.toString('base64');
   } catch {
-    return null;
+    return {
+      unverifiable: true,
+      reason: `the artifact could not be read for subject verification (${imageItem.path})`,
+    };
   }
 
   const prompt = `Look at this image. Does it depict: "${subject}"?
@@ -2429,7 +2632,13 @@ Reply with ONLY this JSON (no other text):
     } catch { /* no vision key or error */ }
   }
 
-  return null;
+  // A vision key was configured but EVERY call failed / returned non-200.
+  // Fail closed (QC-05): the subject match is unverified, so the caller must
+  // NOT pass it blind.
+  return {
+    unverifiable: true,
+    reason: 'every configured vision-model call failed (provider error / non-200 response)',
+  };
 }
 
 /**
@@ -3017,6 +3226,12 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       console.log(`[QCScorer] No dept QC agent found for task "${task.title}" — using global heuristic fallback`);
     }
 
+    // QC-08: resolve the WRITER model (the content author's model) so the scorer
+    // can enforce JUDGE != WRITER. Best-effort — null when the writer is unknown.
+    const writerModel = task.assigned_agent_id
+      ? (queryOne<{ model: string | null }>('SELECT model FROM agents WHERE id = ?', [task.assigned_agent_id])?.model ?? null)
+      : null;
+
     // Fetch SOP if assigned
     let sopRow: SOPRowForQC | null = null;
     if (task.sop_id) {
@@ -3151,7 +3366,66 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         // ceo-delegation-sweep re-assigns correctly.  Does NOT increment the
         // QC reroute counter — this is an agent registration failure, not a
         // quality failure.
+        // QC-09: the handback endpoint URL defaults to http://localhost:4000 when
+        // MISSION_CONTROL_URL is unset. On a production box that default is almost
+        // never reachable, so the fetch fails and the SQL fallback runs. Warn so
+        // the misconfig is visible, and make the fallback write the SAME structured
+        // handback (multi-line Problem/Tried/Needs/Suggested-dept note + a
+        // task_returned audit event + a last_progress_at bump) the endpoint writes,
+        // so the ceo-delegation-sweep can re-route correctly either way — instead
+        // of the old degraded one-line `[QC-NO-ARTIFACT] <reason>` note.
+        //
+        // NOTE (cross-lane): the return-to-orchestrator endpoint ALSO increments
+        // qc_reroute_attempts. This QC-scorer path is documented (above) as a
+        // registration failure that must NOT consume a quality-reroute attempt, so
+        // the SQL fallback deliberately leaves qc_reroute_attempts UNCHANGED. That
+        // endpoint-increments-vs-scorer-does-not discrepancy predates this fix and
+        // belongs to the return-to-orchestrator route owner to reconcile.
         const baseUrl = getMissionControlUrl();
+        if (!process.env.MISSION_CONTROL_URL && process.env.NODE_ENV === 'production') {
+          console.warn(
+            `[QCScorer] MISSION_CONTROL_URL is unset in production — the return-to-orchestrator handback ` +
+            `endpoint defaults to ${baseUrl}, which is likely unreachable; using the in-process SQL handback ` +
+            `fallback (set MISSION_CONTROL_URL to silence this).`,
+          );
+        }
+
+        // Structured handback note mirroring the return-to-orchestrator endpoint
+        // format so the ceo-delegation-sweep reads the same diagnosis fields.
+        const structuredHandbackNote = [
+          `[QC-NO-ARTIFACT HANDBACK] ${now}`,
+          `Problem: ${noArtifactReason}`,
+          'Tried: QC auto-scorer attempted to evaluate the artifact but found zero registered deliverables in task_deliverables.',
+          'Needs: The executing agent must register the output file via POST /api/tasks/[id]/deliverables before transitioning to review status.',
+          task.department ? `Suggested dept: ${task.department}` : null,
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        const writeStructuredHandbackFallback = (): void => {
+          run(
+            `UPDATE tasks SET status = 'backlog',
+               description = CASE
+                 WHEN description IS NULL OR description = '' THEN ?
+                 ELSE ? || char(10) || char(10) || '---' || char(10) || char(10) || description
+               END,
+               last_progress_at = ?,
+               updated_at = ?
+             WHERE id = ? AND status = 'review'`,
+            [structuredHandbackNote, structuredHandbackNote, now, now, taskId],
+          );
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'task_returned',
+              taskId,
+              `[RETURN] ${noArtifactReason} — suggests: ${task.department ?? 'general'}`,
+              now,
+            ],
+          );
+        };
+
         try {
           const handbackBody = {
             problem: noArtifactReason,
@@ -3166,28 +3440,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             body: JSON.stringify(handbackBody),
           });
           if (!returnResp.ok) {
-            // Fallback: write backlog status directly if the endpoint is unavailable.
-            const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
-            run(
-              `UPDATE tasks SET status = 'backlog',
-                 description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-                 updated_at = ?
-               WHERE id = ? AND status = 'review'`,
-              [handbackNote, handbackNote, now, taskId],
-            );
-            console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote backlog directly`);
+            // Endpoint reachable but rejected/failed — write the structured handback directly.
+            writeStructuredHandbackFallback();
+            console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote structured handback directly`);
           }
         } catch (returnErr) {
-          // Endpoint unreachable: write backlog directly.
-          const handbackNote = `[QC-NO-ARTIFACT] ${noArtifactReason}`;
-          run(
-            `UPDATE tasks SET status = 'backlog',
-               description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-               updated_at = ?
-             WHERE id = ? AND status = 'review'`,
-            [handbackNote, handbackNote, now, taskId],
-          );
-          console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal):', (returnErr as Error).message);
+          // Endpoint unreachable — write the structured handback directly.
+          writeStructuredHandbackFallback();
+          console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal) — wrote structured handback directly:', (returnErr as Error).message);
         }
 
         return {
@@ -3342,6 +3602,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           qcAgentId: qcAgent?.id ?? null,
           qcAgentName: qcAgent?.name ?? null,
           qcAgentModel: qcAgent?.model ?? null,
+          writerModel,
           deliverableManifest: deliverableManifest,
         };
         result = await scoreTaskForQC(input);
@@ -3362,6 +3623,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         qcAgentId: qcAgent?.id ?? null,
         qcAgentName: qcAgent?.name ?? null,
         qcAgentModel: qcAgent?.model ?? null,
+        writerModel,
         deliverableManifest: null,
       };
       result = await scoreTaskForQC(input);
@@ -3419,8 +3681,104 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     if (result.scoringPath === 'heuristic') {
       const scoredBy = qcAgent ? ` [scorer:${qcAgent.name}]` : ' [scorer:global-heuristic]';
       const gapNote = result.gaps.length > 0 ? ` Gaps: ${result.gaps.join('; ')}` : '';
+
+      // ── Provider-down deferral (Point 6 fix 1) ────────────────────────────
+      // A scoring key IS configured but every LLM scorer failed → transient
+      // provider outage, NOT a keyless install. Hold in `review` with a DISTINCT
+      // [QC-DEFERRED-PROVIDER-DOWN] marker (never [QC-HEURISTIC]) so the task is
+      // NOT presented as human-required. The qc-review-sweep retries deferred
+      // tasks on a short cadence and auto-rescores them the moment the provider
+      // returns (an `llm` score then drives the normal pass / fail / reroute
+      // path). This is what prevents a human-escalation storm on a provider blip.
+      if (result.heuristicReason === 'provider-down') {
+        const deferredMsg =
+          `[QC-DEFERRED-PROVIDER-DOWN] Score: ${result.score.toFixed(1)}/10 | QC scorer provider is down — ` +
+          `holding in review and auto-rescoring when it returns (NOT human-required). ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'qc_review', taskId, deferredMsg, now],
+        );
+
+        console.log(
+          `[QCScorer] Task "${task.title}" (${taskId}): provider-down — DEFERRED in review, will auto-rescore when the scorer returns (qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
+        );
+
+        return result;
+      }
+      // ── End provider-down deferral ────────────────────────────────────────
+
+      // ── No-key heuristic (keyless install by design) ─────────────────────
+      // QC-02: a keyless box can NEVER auto-advance review→done, so without an
+      // escape hatch the qc-review-sweep re-scores this task every ~10 min
+      // FOREVER — each pass writing a fresh [QC-HEURISTIC] event while the card
+      // rots in Review with no terminal signal (the second "nothing moves" trap).
+      // Fix: after N passes, escalate ONCE to a TERMINAL [QC-HEURISTIC-FINAL]
+      // "needs-key / manually promote" state that the sweep excludes PERMANENTLY.
+      // This is kept strictly DISTINCT from the provider-down deferral above,
+      // which KEEPS retrying on the short cadence (a key exists; the provider is
+      // expected to return). The card stays in `review` — the board's
+      // manual-review lane — now flagged terminally instead of silently churning.
+      const noKeyMaxPasses = Math.max(
+        1,
+        parseInt(process.env.QC_HEURISTIC_NO_KEY_MAX_PASSES || '3', 10) || 3,
+      );
+
+      // Already escalated? Idempotent no-op (defensive — the sweep should already
+      // be permanently excluding this task once the -FINAL marker exists).
+      const alreadyFinal = queryOne<{ one: number }>(
+        `SELECT 1 AS one FROM events
+         WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%[QC-HEURISTIC-FINAL]%'
+         LIMIT 1`,
+        [taskId],
+      );
+      if (alreadyFinal) {
+        console.log(
+          `[QCScorer] Task "${task.title}" (${taskId}): already [QC-HEURISTIC-FINAL] (needs-key / manual-promote) — no re-score, stays in review`,
+        );
+        return result;
+      }
+
+      // Count prior no-key heuristic passes. NOTE: SQLite LIKE treats '[' / ']'
+      // literally (no bracket classes), so '%[QC-HEURISTIC]%' matches ONLY the
+      // per-pass marker and NOT '[QC-HEURISTIC-FINAL]' or '[QC-DEFERRED-PROVIDER-DOWN]'.
+      const priorPassesRow = queryOne<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%[QC-HEURISTIC]%'`,
+        [taskId],
+      );
+      const thisPass = (priorPassesRow?.c ?? 0) + 1;
+
+      if (thisPass >= noKeyMaxPasses) {
+        // Terminal escalation — write the [QC-HEURISTIC-FINAL] marker ONCE. The
+        // qc-review-sweep excludes tasks carrying it permanently, so no more
+        // re-scores. Task remains board-visible in the Review / QC (manual-review)
+        // column awaiting a manual promotion or an LLM key.
+        const finalMsg =
+          `[QC-HEURISTIC-FINAL] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode ${thisPass} time(s) ` +
+          `with NO client Ollama Cloud judge configured — this box cannot auto-advance review→done. MANUAL REVIEW ` +
+          `REQUIRED: promote this task to done manually, or configure a client Ollama Cloud judge model (set the ` +
+          `department QC agent's model, or QC_JUDGE_MODEL, to an ollama-cloud / :cloud model ≠ the writer, called via ` +
+          `OLLAMA_CLOUD_API_KEY) and it will be re-scored. It is now excluded from the QC review sweep permanently. ` +
+          `${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'qc_review', taskId, finalMsg, now],
+        );
+
+        console.warn(
+          `[QCScorer] Task "${task.title}" (${taskId}): no-key heuristic reached pass ${thisPass}/${noKeyMaxPasses} — ` +
+            `escalated ONCE to [QC-HEURISTIC-FINAL] (manual-promote); permanently excluded from qc-review-sweep`,
+        );
+
+        return result;
+      }
+
       const heuristicEventMsg =
-        `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+        `[QC-HEURISTIC] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode (no LLM key); human review required (pass ${thisPass}/${noKeyMaxPasses}). ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
 
       run(
         `INSERT INTO events (id, type, task_id, message, created_at)
@@ -3429,7 +3787,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       );
 
       console.log(
-        `[QCScorer] Task "${task.title}" (${taskId}): heuristic mode — task stays in review, human review required (score ${result.score.toFixed(1)}/10, qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
+        `[QCScorer] Task "${task.title}" (${taskId}): heuristic mode — task stays in review, human review required (score ${result.score.toFixed(1)}/10, pass ${thisPass}/${noKeyMaxPasses}, qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
       );
 
       return result;
@@ -3464,30 +3822,30 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         return result;
       }
 
-      // Auto-approve: move to done
-      run(
-        `UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ? AND status = 'review'`,
-        [now, taskId],
-      );
-      run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), 'task_completed', taskId, `[QC-AUTO] Task "${task.title}" auto-approved (score ${result.score.toFixed(1)}/10 ≥ ${QC_PASS_THRESHOLD})`, now],
-      );
-      console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
-
-      // ── OWNER NOTIFICATION (DONE — QC auto-approve) ────────────────────
-      // Guaranteed board-side action: always attempt after writing done state.
-      // Failure is logged and NEVER reverts the done transition.
+      // Auto-approve: move review → done through the ONE authoritative lifecycle
+      // path (DISP-10). transition() performs the review→done compare-and-swap,
+      // writes the structured `task_events` audit row AND the legacy
+      // `task_completed` event atomically, broadcasts `task_updated`, and fires
+      // the 5-field DONE owner report (notifyOwnerDone) — replacing the raw
+      // UPDATE + hand-rolled event + separate notify that bypassed the audit sink.
       try {
-        const deptLabel = task.department ?? 'your team';
-        notifyOwner(
-          `✅ Done: "${task.title}" — completed and QC-approved by ${deptLabel} (score ${result.score.toFixed(1)}/10).`,
-        );
-      } catch (notifyErr) {
-        console.error('[QCScorer] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
+        await transition(taskId, 'done', {
+          actor: 'qc-auto-scorer',
+          reason: `QC auto-approved (score ${result.score.toFixed(1)}/10 ≥ ${QC_PASS_THRESHOLD})`,
+          expectedFrom: 'review',
+        });
+      } catch (txErr) {
+        if (txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT') {
+          // Another writer already advanced the task out of `review` in the
+          // score→write window — do not double-complete or double-report.
+          console.warn(
+            `[QCScorer] Task ${taskId}: review→done CAS conflict (already advanced) — skipping done write`,
+          );
+          return result;
+        }
+        throw txErr;
       }
-      // ── End OWNER NOTIFICATION (DONE — QC auto-approve) ─────────────────
+      console.log(`[QCScorer] Task "${task.title}" (${taskId}): PASS ${result.score.toFixed(1)}/10 → done`);
 
       // ── Persona completion feedback loop (PRD 1.4) ─────────────────────
       // Spawn record-completion async so persona_performance accumulates.
@@ -3513,8 +3871,22 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
         // Pass task title + description as --task-output so the Python
         // record_completion() function can write the persona_performance row.
+        // D7: credit EVERY blended persona (voice + topic + any subtask-decomposition
+        // personas), not just the primary voice mirror — see recordPersonaCompletions.
+        // Dynamic import: qc-scorer.ts is statically imported by task-dispatcher.ts,
+        // which is statically imported by tasks.ts — a static import here would close
+        // a tasks.ts <-> qc-scorer.ts cycle (same reasoning as the dynamic imports
+        // already used elsewhere in tasks.ts/task-dispatcher.ts for this same pair).
         const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');
-        spawnRecordCompletion(taskId, task.persona_id, deptSlug, taskOutput);
+        try {
+          const { recordPersonaCompletions } = await import('@/lib/tasks');
+          recordPersonaCompletions(taskId, task.persona_id, deptSlug, taskOutput);
+        } catch (creditErr) {
+          console.warn(
+            `[QCScorer] recordPersonaCompletions failed for task ${taskId} (non-fatal):`,
+            (creditErr as Error).message,
+          );
+        }
       }
     } else {
       // FAIL path

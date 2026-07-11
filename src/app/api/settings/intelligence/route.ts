@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '@/lib/db';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { openclawConfigPath } from '@/lib/platform';
+import { isForbidden, isFree } from '@/lib/model-selector';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -94,6 +95,42 @@ function loadModelsFromRegistry(): AvailableModel[] {
     console.warn('[Intelligence] Failed to load model_registry, returning empty list:', err);
     return [];
   }
+}
+
+/**
+ * MODEL-07: the set of model ids the operator may legitimately assign — the
+ * SAME catalog GET renders: active/preview `model_registry` rows PLUS any models
+ * declared in the OpenClaw config's `models.providers`. Used by PUT to reject a
+ * phantom model id that is not in the client's real inventory. When the catalog
+ * is empty (fresh box before the first registry refresh AND no config models)
+ * membership is NOT enforced — only the forbidden/free checks apply — so a brand
+ * new box can still be configured without being bricked.
+ */
+function catalogModelIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const m of loadModelsFromRegistry()) ids.add(m.id);
+  try {
+    const configPath = openclawConfigPath();
+    if (existsSync(configPath)) {
+      const stats = statSync(configPath);
+      if (stats.size < 1024 * 1024) {
+        const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+        const providerModels = config?.models?.providers as
+          | Record<string, { models?: Array<{ id: string }> }>
+          | undefined;
+        if (providerModels) {
+          for (const [prov, p] of Object.entries(providerModels)) {
+            for (const m of p.models ?? []) {
+              if (m?.id) ids.add(`${prov}/${m.id}`);
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Config missing/unreadable — registry ids only.
+  }
+  return ids;
 }
 
 /* ── Persona details: loaded at runtime from persona-categories.json ── */
@@ -405,8 +442,32 @@ export async function GET() {
       // Fall through with whatever the registry gave us.
     }
 
-    // Try to enrich personas from persona-matrix.md
-    const enrichedPersonas = [...AVAILABLE_PERSONAS];
+    // Build the persona-lock picker from the FULL coaching-personas library
+    // (persona-categories.json — the same 99-persona universe the matcher picks
+    // from and the /personas page renders), NOT the hardcoded curated subset.
+    // Previously the operator-lock dropdown seeded from AVAILABLE_PERSONAS (~38
+    // slugs) and only grew if a per-company persona-matrix.md happened to exist
+    // at one of three exact paths; on every box without that file the picker
+    // showed a stale short list missing 60+ personas (incl. blackceo-house-voice
+    // and hunt-thomas-pragmatic-programmer). 'auto' stays first (defer-to-matcher
+    // default). AVAILABLE_PERSONAS is retained ONLY as an empty-file fallback so
+    // the dropdown is never empty. persona-matrix.md still supplements below.
+    const personaLibrary = loadPersonaCategories();
+    const enrichedPersonas: { id: string; label: string }[] = [
+      { id: 'auto', label: 'Auto-assign (recommended)' },
+    ];
+    for (const slug of Object.keys(personaLibrary).sort()) {
+      const e = personaLibrary[slug];
+      enrichedPersonas.push({
+        id: slug,
+        label: `${e.author} - ${e.book} (${getPersonaCategory(e)})`,
+      });
+    }
+    if (enrichedPersonas.length === 1) {
+      // persona-categories.json missing/unreadable — fall back to the curated
+      // hardcoded list so the picker is never empty on an unprovisioned box.
+      enrichedPersonas.push(...AVAILABLE_PERSONAS.filter((p) => p.id !== 'auto'));
+    }
     try {
       const { existsSync, readFileSync } = await import('fs');
       const { homedir } = await import('os');
@@ -453,9 +514,14 @@ export async function GET() {
       // Use static list
     }
 
+    // MODEL-07: never render a forbidden (Anthropic) model as a selectable
+    // option — filter BOTH the registry rows and the config-enriched rows
+    // through isForbidden so a forbidden option can never reach the dropdown.
+    const sovereignModels = enrichedModels.filter((m) => !isForbidden(m.id));
+
     return NextResponse.json({
       departments: departmentsWithRoles,
-      models: enrichedModels,
+      models: sovereignModels,
       personas: enrichedPersonas,
       defaults: { model: DEFAULT_MODEL, persona: DEFAULT_PERSONA },
     });
@@ -473,6 +539,14 @@ export async function GET() {
  *
  * Saves model/persona assignments.
  * Body: { assignments: Array<{ department_id, role_id?, setting_type, value }> }
+ *
+ * BUG 3 FIX — clear semantics: `value === null` (or `''`) is an explicit
+ * instruction to CLEAR the matching agent_settings row (DELETE it), so a
+ * role/department reverts to inheriting the next layer up. Previously any
+ * falsy value (including an intentional clear) was silently skipped — there
+ * was no way to remove a saved override once set. A missing `value` key
+ * (`undefined`) is still a no-op for that assignment, same as before. Both
+ * upserts AND clears respect the same lock check below.
  */
 export async function PUT(request: NextRequest) {
   try {
@@ -482,7 +556,8 @@ export async function PUT(request: NextRequest) {
         department_id: string;
         role_id?: string | null;
         setting_type: 'model' | 'persona';
-        value: string;
+        /** `null` or `''` clears (deletes) the saved override. */
+        value: string | null;
       }>;
     };
 
@@ -495,10 +570,61 @@ export async function PUT(request: NextRequest) {
 
     const db = getDb();
 
+    // An assignment is actionable (upsert OR clear) when it targets a real
+    // department + setting_type and carries an explicit value (including
+    // null/'' for a clear). `value === undefined` means "nothing to do".
+    const isActionable = (a: { department_id?: string; setting_type?: string; value?: string | null }) =>
+      !!a.department_id &&
+      (a.setting_type === 'model' || a.setting_type === 'persona') &&
+      a.value !== undefined;
+    const isClear = (value: string | null) => value === null || value === '';
+
+    // ── MODEL-07: model-sovereignty validation on the WRITE path ────────
+    // The write path previously persisted ANY string as a model override. A
+    // forbidden (Anthropic — including the MODEL-01 dot-route / future-generation
+    // forms), free-sentinel, or phantom (absent-from-catalog) value could be
+    // stored — and, before the GET filter, rendered — even though the resolver's
+    // sovereignty gate would later skip it. Reject such values here (422) so they
+    // can never be persisted as a role/department override. Clears (null/'') and
+    // persona assignments are unaffected. Catalog membership is enforced ONLY when
+    // a catalog exists (see catalogModelIds) so a fresh box is not bricked.
+    const knownModelIds = catalogModelIds();
+    const invalidModels: Array<{
+      department_id: string;
+      role_id: string | null;
+      value: string;
+      reason: 'forbidden_anthropic' | 'free_default' | 'unknown_model';
+    }> = [];
+    for (const a of assignments) {
+      if (!isActionable(a) || a.setting_type !== 'model') continue;
+      if (isClear(a.value)) continue;
+      const value = (a.value as string).trim();
+      let reason: 'forbidden_anthropic' | 'free_default' | 'unknown_model' | null = null;
+      if (isForbidden(value)) reason = 'forbidden_anthropic';
+      else if (isFree(value)) reason = 'free_default';
+      else if (knownModelIds.size > 0 && !knownModelIds.has(value)) reason = 'unknown_model';
+      if (reason) {
+        invalidModels.push({ department_id: a.department_id, role_id: a.role_id || null, value, reason });
+      }
+    }
+    if (invalidModels.length > 0) {
+      return NextResponse.json(
+        {
+          error: 'InvalidModel',
+          message:
+            'One or more model assignments are not sovereign-valid (forbidden Anthropic model, a free sentinel, or a model absent from the catalog).',
+          invalid: invalidModels,
+        },
+        { status: 422 },
+      );
+    }
+
     // ── Model Lock Protocol ────────────────────────────────────────────
     // If the target setting is locked, the caller MUST present the matching
     // X-Lock-Token. Otherwise we 423 Locked with the lock_by/lock_reason so
     // the UI can render a clear "Locked by X for Y, request unlock?" CTA.
+    // Applies to clears exactly like upserts — a lock protects the row from
+    // being REMOVED without the token just as much as from being overwritten.
     const providedToken = request.headers.get('x-lock-token');
 
     const lockedConflict: Array<{
@@ -510,8 +636,7 @@ export async function PUT(request: NextRequest) {
     }> = [];
 
     for (const a of assignments) {
-      if (!a.department_id || !a.setting_type || !a.value) continue;
-      if (a.setting_type !== 'model' && a.setting_type !== 'persona') continue;
+      if (!isActionable(a)) continue;
       const roleId = a.role_id || null;
       const existing = db
         .prepare(
@@ -545,14 +670,19 @@ export async function PUT(request: NextRequest) {
 
     const upsert = db.transaction(() => {
       for (const a of assignments) {
-        if (!a.department_id || !a.setting_type || !a.value) {
-          continue;
-        }
-        if (a.setting_type !== 'model' && a.setting_type !== 'persona') {
-          continue;
-        }
+        if (!isActionable(a)) continue;
 
         const roleId = a.role_id || null;
+
+        if (isClear(a.value)) {
+          // BUG 3: explicit clear — delete the row so the department/role
+          // reverts to inheriting the next layer up (department default, or
+          // the auto-selector). A no-op if no override existed.
+          db.prepare(
+            'DELETE FROM agent_settings WHERE department_id = ? AND role_id IS ? AND setting_type = ?'
+          ).run(a.department_id, roleId, a.setting_type);
+          continue;
+        }
 
         // Check if setting already exists
         const existing = db.prepare(

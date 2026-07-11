@@ -736,7 +736,11 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
       'keynote',
       'google slides',
       'slide show',
-      'pitch',
+      // NOTE: bare 'pitch' removed (presentation-reflex misfire) — it is a Sales
+      // keyword too (a "sales pitch" / marketing pitch), and keywordScore does a
+      // substring match, so bare 'pitch' let a Marketing/Sales ask misroute to
+      // Presentations. The specific 'pitch deck' + 'investor deck' below keep a
+      // genuine investor-deck ask routing here.
       'boardroom',
       'investor deck',
     ],

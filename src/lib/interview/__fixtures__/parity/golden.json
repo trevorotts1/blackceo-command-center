@@ -1,0 +1,391 @@
+{
+  "meta": {
+    "generatedBy": "scripts/seam-parity-golden.py",
+    "pythonVersion": "3.14.5",
+    "namingMapVersion": "2.6.1",
+    "canonicalSource": "department-naming-map.json",
+    "note": "Regenerate ONLY via scripts/regen-seam-parity-golden.sh (sandboxed HOME). Do not hand-edit."
+  },
+  "canonical": {
+    "source": "department-naming-map.json",
+    "naming_map_version": "2.6.1",
+    "mandatory_count": 22,
+    "mandatory": [
+      {
+        "id": "marketing",
+        "display_name": "Marketing",
+        "one_liner": "Getting the word out about your business"
+      },
+      {
+        "id": "sales",
+        "display_name": "Sales",
+        "one_liner": "Turning interested people into paying customers"
+      },
+      {
+        "id": "billing-finance",
+        "display_name": "Billing & Finance",
+        "one_liner": "Invoices, payments, tracking your money"
+      },
+      {
+        "id": "customer-support",
+        "display_name": "Customer Support",
+        "one_liner": "Helping your existing customers when they need it"
+      },
+      {
+        "id": "web-development",
+        "display_name": "Web Development",
+        "one_liner": "Your website, funnels, landing pages, SEO"
+      },
+      {
+        "id": "app-development",
+        "display_name": "App Development",
+        "one_liner": "Desktop apps, mobile apps, PWAs"
+      },
+      {
+        "id": "graphics",
+        "display_name": "Graphics",
+        "one_liner": "Visual content — logos, images, ads, slides"
+      },
+      {
+        "id": "video",
+        "display_name": "Video",
+        "one_liner": "Video production, editing, AI video, YouTube optimization"
+      },
+      {
+        "id": "audio",
+        "display_name": "Audio",
+        "one_liner": "Podcasts, voiceovers, AI voice, music, sound design"
+      },
+      {
+        "id": "research",
+        "display_name": "Research",
+        "one_liner": "Market research, competitor analysis, data insights"
+      },
+      {
+        "id": "communications",
+        "display_name": "Communications",
+        "one_liner": "PR, announcements, internal and external messaging"
+      },
+      {
+        "id": "crm",
+        "display_name": "CRM",
+        "one_liner": "Manages your contact management, email, automations"
+      },
+      {
+        "id": "openclaw-maintenance",
+        "display_name": "OpenClaw Maintenance",
+        "one_liner": "Keeps your AI system healthy and up to date"
+      },
+      {
+        "id": "legal",
+        "display_name": "Legal",
+        "one_liner": "Contracts, regulations, keeping you protected"
+      },
+      {
+        "id": "social-media",
+        "display_name": "Social Media",
+        "one_liner": "Organic posting and community across all platforms"
+      },
+      {
+        "id": "paid-advertisement",
+        "display_name": "Paid Advertisement",
+        "one_liner": "Paid ads across every platform — search, social, audio"
+      },
+      {
+        "id": "personal-assistant",
+        "display_name": "Personal Assistant",
+        "one_liner": "Inbox, scheduling, travel, personal life — the owner's right hand"
+      },
+      {
+        "id": "general-task",
+        "display_name": "General Task",
+        "one_liner": "Catches any task that doesn't fit a dedicated department, so nothing is ever dropped"
+      },
+      {
+        "id": "project-architecture-office",
+        "display_name": "Project Architecture Office",
+        "one_liner": "Governs every project from trigger to verifiable completion — creates PRDs, runs loops, hands off to building departments"
+      },
+      {
+        "id": "bugs",
+        "display_name": "Bugs",
+        "one_liner": "The front desk and medical records for every defect: logs, triages, dedupes, and tracks every bug to verified closure"
+      },
+      {
+        "id": "healer",
+        "display_name": "Healer",
+        "one_liner": "The company doctors: root-cause diagnosis, fix-forward, SOP surgery, and teachings so the same bug never happens twice"
+      },
+      {
+        "id": "quality-control",
+        "display_name": "Quality Control",
+        "one_liner": "Owns and operates the system analyzer: holds every other department's roles and procedures to the standard on two axes (is it real, is it specific enough to follow) and routes the failures it finds to the Healer"
+      }
+    ],
+    "universal_primary_count": 6,
+    "universal_primary_vertical": [
+      {
+        "id": "presentations",
+        "display_name": "Presentations",
+        "one_liner": "End-to-end branded webinar/slide decks: copy, price ladder, images, QC, delivery",
+        "pack": "personal-pro-dev"
+      },
+      {
+        "id": "scheduling-dispatch",
+        "display_name": "Scheduling & Dispatch",
+        "one_liner": "Booking, routing, technician/staff scheduling",
+        "pack": "service-industry"
+      },
+      {
+        "id": "logistics-fulfillment",
+        "display_name": "Logistics & Fulfillment",
+        "one_liner": "Inventory, shipping, returns",
+        "pack": "ecommerce"
+      },
+      {
+        "id": "engineering",
+        "display_name": "Software Development / Engineering",
+        "one_liner": "Builds your software, apps & web products",
+        "pack": "saas"
+      },
+      {
+        "id": "account-management",
+        "display_name": "Account Management",
+        "one_liner": "Client relationships, deliverables, retention",
+        "pack": "agency"
+      },
+      {
+        "id": "podcast",
+        "display_name": "Podcast",
+        "one_liner": "Production, distribution, sponsor management",
+        "pack": "content-creator"
+      }
+    ],
+    "floor": 28,
+    "floor_label": "22 mandatory + 6 universal-primary vertical = 28"
+  },
+  "norm": [
+    {
+      "in": "Billing-Finance",
+      "out": "billingfinance"
+    },
+    {
+      "in": "billing_finance",
+      "out": "billingfinance"
+    },
+    {
+      "in": "Video",
+      "out": "video"
+    },
+    {
+      "in": "  Web Dev! ",
+      "out": "webdev"
+    },
+    {
+      "in": "CRM",
+      "out": "crm"
+    },
+    {
+      "in": "paid-advertisement",
+      "out": "paidadvertisement"
+    },
+    {
+      "in": "project-architecture-office",
+      "out": "projectarchitectureoffice"
+    },
+    {
+      "in": "General Task",
+      "out": "generaltask"
+    },
+    {
+      "in": "MixedCASE_123",
+      "out": "mixedcase123"
+    },
+    {
+      "in": "",
+      "out": ""
+    },
+    {
+      "in": "Açaí-Bowls",
+      "out": "aabowls"
+    },
+    {
+      "in": "已经abc123",
+      "out": "abc123"
+    },
+    {
+      "in": "a.b.c-d",
+      "out": "abcd"
+    },
+    {
+      "in": "UPPER lower 99",
+      "out": "upperlower99"
+    },
+    {
+      "in": "drone-operations",
+      "out": "droneoperations"
+    }
+  ],
+  "expectedSet": [
+    {
+      "name": "no-customs",
+      "tsCustomDeptIds": [],
+      "tsImplicitYesCustomIds": [],
+      "ids": [
+        "marketing",
+        "sales",
+        "billing-finance",
+        "customer-support",
+        "web-development",
+        "app-development",
+        "graphics",
+        "video",
+        "audio",
+        "research",
+        "communications",
+        "crm",
+        "openclaw-maintenance",
+        "legal",
+        "social-media",
+        "paid-advertisement",
+        "personal-assistant",
+        "general-task",
+        "project-architecture-office",
+        "bugs",
+        "healer",
+        "quality-control",
+        "presentations",
+        "scheduling-dispatch",
+        "logistics-fulfillment",
+        "engineering",
+        "account-management",
+        "podcast"
+      ]
+    },
+    {
+      "name": "with-customs",
+      "tsCustomDeptIds": [
+        "drone-operations",
+        "podcast-editing"
+      ],
+      "tsImplicitYesCustomIds": [],
+      "ids": [
+        "marketing",
+        "sales",
+        "billing-finance",
+        "customer-support",
+        "web-development",
+        "app-development",
+        "graphics",
+        "video",
+        "audio",
+        "research",
+        "communications",
+        "crm",
+        "openclaw-maintenance",
+        "legal",
+        "social-media",
+        "paid-advertisement",
+        "personal-assistant",
+        "general-task",
+        "project-architecture-office",
+        "bugs",
+        "healer",
+        "quality-control",
+        "presentations",
+        "scheduling-dispatch",
+        "logistics-fulfillment",
+        "engineering",
+        "account-management",
+        "podcast",
+        "drone-operations",
+        "podcast-editing"
+      ]
+    }
+  ],
+  "decline": [
+    {
+      "name": "mixed-provenance-object-and-bare",
+      "expectedIds": [
+        "marketing",
+        "billing-finance",
+        "video",
+        "sales",
+        "crm",
+        "legal"
+      ],
+      "missing": [
+        "crm",
+        "legal",
+        "sales"
+      ],
+      "covered": [
+        "billing-finance",
+        "marketing",
+        "video"
+      ],
+      "declinedNorm": [
+        "billingfinance"
+      ],
+      "rejections": [
+        "crm",
+        "sales"
+      ],
+      "noUnprovenancedDeclines": false
+    },
+    {
+      "name": "all-covered-no-rejections",
+      "expectedIds": [
+        "marketing",
+        "sales",
+        "billing-finance"
+      ],
+      "missing": [],
+      "covered": [
+        "billing-finance",
+        "marketing",
+        "sales"
+      ],
+      "declinedNorm": [
+        "billingfinance"
+      ],
+      "rejections": [],
+      "noUnprovenancedDeclines": true
+    },
+    {
+      "name": "empty-decisions-all-missing",
+      "expectedIds": [
+        "marketing",
+        "sales"
+      ],
+      "missing": [
+        "marketing",
+        "sales"
+      ],
+      "covered": [],
+      "declinedNorm": [],
+      "rejections": [],
+      "noUnprovenancedDeclines": true
+    },
+    {
+      "name": "normalization-cross-form",
+      "expectedIds": [
+        "billing-finance",
+        "paid-advertisement",
+        "web-development"
+      ],
+      "missing": [
+        "web-development"
+      ],
+      "covered": [
+        "billing-finance",
+        "paid-advertisement"
+      ],
+      "declinedNorm": [
+        "paidadvertisement"
+      ],
+      "rejections": [],
+      "noUnprovenancedDeclines": true
+    }
+  ]
+}

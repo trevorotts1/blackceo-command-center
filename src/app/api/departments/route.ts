@@ -5,6 +5,7 @@ import { execFileSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { getDb } from '@/lib/db';
+import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -99,10 +100,18 @@ function createDepartmentInDbDirect(args: {
 }): { status: 'created' | 'already_exists'; workspace_id: string; head_agent_id?: string; starter_task_id?: string } {
   const db = getDb();
 
-  // Idempotency check
+  // Idempotency check (exact slug/id).
   const existing = db.prepare('SELECT id FROM workspaces WHERE slug = ? OR id = ?').get(args.slug, args.slug) as { id: string } | undefined;
   if (existing) {
     return { status: 'already_exists', workspace_id: existing.id };
+  }
+  // Slug-uniqueness guard (FM-6): also treat a slug that CANONICALIZES to an
+  // existing department as already-present (e.g. creating `ceo` when
+  // `master-orchestrator` exists), so even the operator override path can never
+  // split one department across two Kanban columns.
+  const canonOwner = findCanonicalWorkspaceId(db, args.slug);
+  if (canonOwner) {
+    return { status: 'already_exists', workspace_id: canonOwner };
   }
 
   const wsId = args.slug;
@@ -111,6 +120,8 @@ function createDepartmentInDbDirect(args: {
 
   const maxOrder = (db.prepare('SELECT MAX(sort_order) as max_order FROM workspaces').get() as { max_order: number | null }).max_order;
   const nextOrder = (maxOrder || 0) + 10;
+
+  let starterTaskId = taskId;
 
   const tx = db.transaction(() => {
     db.prepare(`
@@ -135,19 +146,31 @@ function createDepartmentInDbDirect(args: {
       isMasterOrchestrator ? 1 : 0,
     );
 
-    db.prepare(`
-      INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id)
-      VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?)
-    `).run(
-      taskId, wsId, args.slug,
-      `Welcome to ${args.name}`,
-      `This is your ${args.name} department's first task. Click to edit. Your AI workforce will populate real tasks as work comes in.`,
-      headAgentId, headAgentId,
-    );
+    // FM-6: idempotency guard — skip the INSERT if a starter task already exists
+    // for this workspace (e.g. a parallel request, an external script, or a
+    // previous transaction that rolled back after the workspace was committed).
+    // Matches on the deterministic title + workspace_id pair — the natural key
+    // without requiring a schema change.
+    const existingStarterTask = db.prepare(
+      `SELECT id FROM tasks WHERE workspace_id = ? AND title = ? LIMIT 1`
+    ).get(wsId, `Welcome to ${args.name}`) as { id: string } | undefined;
+    if (existingStarterTask) {
+      starterTaskId = existingStarterTask.id;
+    } else {
+      db.prepare(`
+        INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id)
+        VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?)
+      `).run(
+        taskId, wsId, args.slug,
+        `Welcome to ${args.name}`,
+        `This is your ${args.name} department's first task. Click to edit. Your AI workforce will populate real tasks as work comes in.`,
+        headAgentId, headAgentId,
+      );
+    }
   });
   tx();
 
-  return { status: 'created', workspace_id: wsId, head_agent_id: headAgentId, starter_task_id: taskId };
+  return { status: 'created', workspace_id: wsId, head_agent_id: headAgentId, starter_task_id: starterTaskId };
 }
 
 // POST /api/departments

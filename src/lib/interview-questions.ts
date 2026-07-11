@@ -22,6 +22,12 @@
  */
 
 import { createRequire } from 'node:module';
+import {
+  IDENTITY_QUESTIONS,
+  OPERATIONS_QUESTIONS,
+  type InterviewAnswerKind,
+  type InterviewQuestion,
+} from './interview/base-questions';
 
 const _require = createRequire(import.meta.url);
 const brandingQuestionsRaw: {
@@ -29,42 +35,11 @@ const brandingQuestionsRaw: {
   [key: string]: unknown;
 } = _require('./interview-questions.branding-questions.json');
 
-export type InterviewAnswerKind = 'text' | 'color' | 'url' | 'choice';
-
-export interface InterviewQuestion {
-  /** Stable id used when persisting the answer. */
-  id: string;
-  /** Which interview section it belongs to. */
-  section: 'identity' | 'branding' | 'operations';
-  /** The question shown to the client. */
-  prompt: string;
-  /** Helper / clarifying text shown under the prompt. */
-  help?: string;
-  kind: InterviewAnswerKind;
-  /**
-   * Where the answer is stored. `client.<col>` → clients tenant record;
-   * `company.<col>` → company-level config.
-   */
-  storeOn:
-    | 'client.name'
-    | 'client.brand_color'
-    | 'client.logo_url'
-    | 'company.industry'
-    | 'company.commandCenterName'
-    | 'company.brand_voice'
-    | 'company.brand_evokes'
-    | 'company.customer_feeling'
-    | 'company.brand_descriptors'
-    | 'company.ideal_customer'
-    | 'company.unique_differentiator';
-  required?: boolean;
-  /** Guidance for the interviewer agent (not shown to the client). */
-  interviewGuidance?: string;
-  /** Hint for the value resolver (e.g. resolveBrandColor). */
-  resolverHint?: string;
-  /** Interview phase this question belongs to. */
-  phase?: string;
-}
+// The question/kind types + the CC-owned (identity/operations) question arrays
+// live in the client-safe src/lib/interview/base-questions.ts so the browser
+// bundle and this Node module can never drift. Re-exported for compatibility.
+export type { InterviewAnswerKind, InterviewQuestion };
+export { IDENTITY_QUESTIONS, OPERATIONS_QUESTIONS };
 
 /**
  * Branding questions sourced from the vendored onboarding canonical file.
@@ -74,24 +49,9 @@ export interface InterviewQuestion {
 export const BRANDING_QUESTIONS: InterviewQuestion[] =
   brandingQuestionsRaw.questions;
 
-/** The full ordered interview question set (branding section included). */
+/** The full ordered interview question set: identity → branding → operations. */
 export const INTERVIEW_QUESTIONS: InterviewQuestion[] = [
-  {
-    id: 'company_name',
-    section: 'identity',
-    prompt: 'What is your company name?',
-    kind: 'text',
-    storeOn: 'client.name',
-    required: true,
-  },
-  {
-    id: 'industry',
-    section: 'identity',
-    prompt: 'What industry are you in?',
-    help: 'e.g. SaaS, e-commerce, healthcare, real estate.',
-    kind: 'text',
-    storeOn: 'company.industry',
-    required: true,
-  },
+  ...IDENTITY_QUESTIONS,
   ...BRANDING_QUESTIONS,
+  ...OPERATIONS_QUESTIONS,
 ];

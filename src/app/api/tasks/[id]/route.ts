@@ -8,9 +8,12 @@ import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/type
 import { checkTriad, getBestSOPForTask } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { spawnRecordCompletion, selectPersonaForTask } from '@/lib/persona-selector';
+import { selectPersonaForTask } from '@/lib/persona-selector';
+import { recordPersonaCompletions } from '@/lib/tasks';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
+import { notifyOwnerDone } from '@/lib/owner-reports';
+import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -55,6 +58,20 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
+
+    // ── Trust-boundary operator identity (INGEST-11) ─────────────────────────
+    // Cloudflare Access injects `Cf-Access-Authenticated-User-Email` ONLY after
+    // it has verified the operator's SSO identity at the edge. We derive the
+    // approving human's identity from that verified header — NEVER from a payload
+    // field (updated_by_agent_id) nor a bare, forgeable `x-operator-email`.
+    //
+    // CROSS-LANE DEPENDENCY (L6 · src/middleware.ts): the middleware MUST strip
+    // any inbound copy of the `Cf-Access-*` headers from external callers at the
+    // trust boundary, so a request that did NOT traverse Cloudflare Access cannot
+    // forge this identity. This route consumes the boundary-guaranteed value.
+    const cfAccessEmail =
+      request.headers.get('cf-access-authenticated-user-email')?.trim() || null;
+
     const body: UpdateTaskRequest & { updated_by_agent_id?: string } = await request.json();
 
     // Validate input with Zod
@@ -97,8 +114,32 @@ export async function PATCH(
     // role_type='qc' — is a self-grade conflict of interest and is rejected
     // with 403. This kills the builder self-grade bypass at the gate.
     //
-    // User-initiated moves (no updated_by_agent_id) are always allowed so
-    // human operators are never blocked.
+    // Human review → done approvals (no updated_by_agent_id) are NO LONGER
+    // auto-trusted (INGEST-11): they MUST carry a verified Cloudflare Access
+    // identity. This guard rejects an anonymous scripted "human" that simply
+    // omits updated_by_agent_id; a genuine operator authenticated through CF
+    // Access carries Cf-Access-Authenticated-User-Email and passes — its value
+    // is recorded as the approver in the audit trail below.
+    if (
+      validatedData.status === 'done' &&
+      existing.status === 'review' &&
+      !validatedData.updated_by_agent_id &&
+      !cfAccessEmail
+    ) {
+      return NextResponse.json(
+        {
+          error: 'Forbidden: review → done requires a verified operator identity.',
+          hint:
+            'A human approval must arrive through Cloudflare Access (which sets a ' +
+            'verified Cf-Access-Authenticated-User-Email at the trust boundary). An ' +
+            'agent approval must set updated_by_agent_id to the department QC ' +
+            'Specialist or a master agent. review → done is otherwise decided only ' +
+            'by the independent QC auto-scorer (runQCOnReview).',
+        },
+        { status: 403 },
+      );
+    }
+
     if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
       const updatingAgent = queryOne<Agent & { role_type?: string }>(
         'SELECT id, is_master, role_type, workspace_id FROM agents WHERE id = ?',
@@ -168,7 +209,9 @@ export async function PATCH(
 
       const approved = hasDeptQCAgent
         ? isAuthorizedQC || isMasterInWorkspace || isGlobalMaster
-        : isGlobalMaster; // Pre-QC-migration fallback: any master can approve
+        // Pre-QC-migration (pre-060) fallback: a legit DEPT master must be able
+        // to approve too, not only a global master (INGEST-12).
+        : isMasterInWorkspace || isGlobalMaster;
 
       if (!approved) {
         return NextResponse.json(
@@ -292,6 +335,13 @@ export async function PATCH(
       // Clear blocked fields when the card moves out of Blocked.
       updates.push('blocked_reason = ?', 'blocked_on_human = ?', 'ask = ?');
       values.push(null, null, null);
+      // B3: also clear the SYSTEM block-metadata columns the stuck-in-progress
+      // sweep / recordDispatchFailure write (block_reason / block_needs /
+      // block_audience). Leaving them populated made an unblocked card still read
+      // as SYSTEM-blocked on the board and in audience routing. Cleared in the
+      // SAME UPDATE so the unblock is atomic.
+      updates.push('block_reason = ?', 'block_needs = ?', 'block_audience = ?');
+      values.push(null, null, null);
     }
 
     // Track if we need to dispatch task
@@ -409,6 +459,42 @@ export async function PATCH(
         }
       }
 
+      // ── FIX C v2 — PRESENTATIONS NO-SKIP PROOF GATE (matching; supersedes v4.56.0 v1) ──
+      // v4.56.0 shipped a v1 PRESENCE-only check and explicitly deferred
+      // "verification against a stored certificate hash" to v2. This IS that v2:
+      // the presented cert is MATCHED against the one registered on the task
+      // (tasks.process_certificate_sha, migration 080) — anti-spoof — and a newly
+      // presented cert is persisted as the certificate of record. Presence is still
+      // required (no regression vs v1). The decision is the pure, unit-tested
+      // evaluatePresentationsDoneGate(); failures keep the v1 422 + requires_* contract.
+      {
+        const certGate = evaluatePresentationsDoneGate({
+          department: (existing as Task).department,
+          currentStatus: existing.status,
+          targetStatus: validatedData.status,
+          storedCert: (existing as Task).process_certificate_sha,
+          providedCert: (validatedData as typeof validatedData & {
+            process_certificate_sha?: string | null;
+          }).process_certificate_sha,
+        });
+        if (certGate.applies && !certGate.ok) {
+          return NextResponse.json(
+            {
+              error: certGate.error,
+              code: certGate.code,
+              requires_process_certificate: true,
+              remediation: certGate.remediation,
+            },
+            { status: 422 },
+          );
+        }
+        if (certGate.applies && certGate.ok && certGate.persistCert) {
+          updates.push('process_certificate_sha = ?');
+          values.push(certGate.persistCert);
+        }
+      }
+      // ── End presentations no-skip proof gate ────────────────────────────────────────────
+
       updates.push('status = ?');
       values.push(validatedData.status);
 
@@ -417,23 +503,39 @@ export async function PATCH(
         shouldDispatch = true;
       }
 
-      // Log status change event
+      // ── Provenance (INGEST-14): resolve the actor ONCE and stamp it on BOTH
+      // the events row (agent_id) AND the task_history row (changed_by_agent_id
+      // + agent_name) so the two audit sinks never diverge. For a human
+      // review → done approval with no agent id, the verified CF-Access operator
+      // email (INGEST-11) is the approver of record. The canonical consolidation
+      // is the shared transition() (task-lifecycle.ts, owned by L3): this route,
+      // the status route, and the return-to-orchestrator route should all funnel
+      // through it — see integrator note.
+      const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
+      let actorName: string | null = null;
+      if (!validatedData.updated_by_agent_id && cfAccessEmail) {
+        actorName = cfAccessEmail; // verified human operator (INGEST-11)
+      } else if (actingAgentId) {
+        const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
+        actorName = a?.name ?? null;
+      }
+      const approverSuffix =
+        !validatedData.updated_by_agent_id && cfAccessEmail ? ` (approved by ${cfAccessEmail})` : '';
+
+      // Log status change event (with actor agent_id for a complete audit trail).
       const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
       run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`, now]
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), eventType, actingAgentId, id, `Task "${existing.title}" moved to ${validatedData.status}${approverSuffix}`, now]
       );
 
       // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
-      // Guaranteed board-side action: fires synchronously after the DB write.
-      // Failure is logged and NEVER prevents the 200 response or any DB state.
+      // W5.4: replaced bare 2-field string with notifyOwnerDone (all 5 fields:
+      // who/role + where + SOP + persona). Best-effort; gateway-routed.
       if (validatedData.status === 'done' && existing.status !== 'done') {
         try {
-          const deptLabel = (existing as Task & { department?: string | null }).department ?? 'your team';
-          notifyOwner(
-            `✅ Done: "${existing.title}" — completed by ${deptLabel}.`,
-          );
+          notifyOwnerDone(id);
         } catch (notifyErr) {
           console.error('[tasks PATCH] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
         }
@@ -444,16 +546,12 @@ export async function PATCH(
       // compute durations + agent attribution per transition. Best-effort:
       // older DBs without the table won't have this row.
       try {
-        const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
-        let actingAgentName: string | null = null;
-        if (actingAgentId) {
-          const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
-          actingAgentName = a?.name ?? null;
-        }
+        // Reuse the single actor resolution stamped on the events row above so
+        // the two audit sinks agree on WHO performed the transition (INGEST-14).
         run(
           `INSERT INTO task_history (id, task_id, status_from, status_to, changed_at, changed_by_agent_id, agent_name)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), id, existing.status, validatedData.status, now, actingAgentId, actingAgentName]
+          [uuidv4(), id, existing.status, validatedData.status, now, actingAgentId, actorName]
         );
       } catch (err) {
         // task_history table missing on older DBs — just log and move on.
@@ -555,8 +653,10 @@ export async function PATCH(
       if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
       // Pass task title + description as --task-output so the Python
       // record_completion() function can write the persona_performance row.
+      // D7: credit EVERY blended persona (voice + topic + any subtask-decomposition
+      // personas), not just the primary voice mirror — see recordPersonaCompletions.
       const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');
-      spawnRecordCompletion(id, task.persona_id, deptSlug, taskOutput);
+      recordPersonaCompletions(id, task.persona_id, deptSlug, taskOutput);
     }
 
     // ── QC-Agent auto-scorer ────────────────────────────────────────────────
@@ -565,7 +665,10 @@ export async function PATCH(
     //   1. Fetches the task's assigned SOP + success_criteria.
     //   2. Uses the configured LLM (OPENAI/GOOGLE key) or a heuristic fallback.
     //   3. Score ≥8.5 → moves task to `done` + writes task_completed event.
-    //      Score <8.5 → returns to `in_progress` + appends gap notes.
+    //      Score <8.5 → returns to `backlog` (re-enters intake/auto-route) +
+    //      appends gap notes. (QC-01: the scorer writes `backlog`, not
+    //      `in_progress` — a failed task re-routes through intake, it does not
+    //      resume the old dispatch.)
     //   4. Always writes a `qc_review` event for the audit trail.
     //
     // Disable with DISABLE_QC_AUTO_SCORER=1 (env).
@@ -610,14 +713,35 @@ export async function DELETE(
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // Delete or nullify related records first (foreign key constraints)
-    // Note: task_activities and task_deliverables have ON DELETE CASCADE
+    // Delete or nullify related records first (foreign key constraints).
+    //
+    // Tables with `ON DELETE CASCADE` (task_history, planning_questions,
+    // planning_specs, task_activities, task_deliverables, task_events,
+    // task_qc_results) and `ON DELETE SET NULL` (execution_queue) are handled
+    // automatically by SQLite. The rows below are the ones whose FK to tasks(id)
+    // carries NO action clause — with `PRAGMA foreign_keys=ON` those references
+    // HARD-BLOCK the task delete, which is why DELETE returned a generic 500
+    // once a task had any persona-selection / persona-performance history (every
+    // task acquires those the moment the persona backfill sweep runs).
     run('DELETE FROM openclaw_sessions WHERE task_id = ?', [id]);
     run('DELETE FROM events WHERE task_id = ?', [id]);
-    // Conversations reference tasks - nullify or delete
+    // Conversations reference tasks - nullify (task_id is nullable there).
     run('UPDATE conversations SET task_id = NULL WHERE task_id = ?', [id]);
+    // persona_selection_log / persona_performance carry a plain (no-action) FK
+    // and a NOT NULL task_id, so they cannot be nullified — delete the
+    // task-scoped analytics rows. Guarded: older DBs may predate these tables.
+    try {
+      run('DELETE FROM persona_selection_log WHERE task_id = ?', [id]);
+    } catch (err) {
+      console.warn('[tasks DELETE] persona_selection_log cleanup skipped:', (err as Error).message);
+    }
+    try {
+      run('DELETE FROM persona_performance WHERE task_id = ?', [id]);
+    } catch (err) {
+      console.warn('[tasks DELETE] persona_performance cleanup skipped:', (err as Error).message);
+    }
 
-    // Now delete the task (cascades to task_activities and task_deliverables)
+    // Now delete the task (cascades to the ON DELETE CASCADE children above).
     run('DELETE FROM tasks WHERE id = ?', [id]);
 
     // Broadcast deletion via SSE

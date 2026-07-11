@@ -66,10 +66,14 @@ export async function POST(
 
     const { deliverable_type, title, path, description } = validation.data;
 
-    // Validate file existence for file deliverables
+    // Validate file existence for file-backed deliverables (QC-04).
+    // Both 'file' and 'artifact' types carry a filesystem path the QC scorer
+    // later probes (see qc-scorer FILE_BACKED_DELIVERABLE_TYPES); the old guard
+    // only checked 'file', so an artifact registered at a non-existent path was
+    // accepted silently and only failed much later inside the QC manifest build.
     let fileExists = true;
     let normalizedPath = path;
-    if (deliverable_type === 'file' && path) {
+    if ((deliverable_type === 'file' || deliverable_type === 'artifact') && path) {
       // Expand tilde
       normalizedPath = path.replace(/^~/, process.env.HOME || '');
       fileExists = existsSync(normalizedPath);
@@ -107,8 +111,8 @@ export async function POST(
       payload: deliverable,
     });
 
-    // Return with warning if file doesn't exist
-    if (deliverable_type === 'file' && !fileExists) {
+    // Return with warning if the file-backed deliverable doesn't exist (QC-04).
+    if ((deliverable_type === 'file' || deliverable_type === 'artifact') && !fileExists) {
       return NextResponse.json(
         {
           ...deliverable,

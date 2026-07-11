@@ -45,11 +45,13 @@ ALTER TABLE openclaw_sessions ADD COLUMN task_id TEXT REFERENCES tasks(id);
 ALTER TABLE openclaw_sessions ADD COLUMN ended_at TEXT;
 ```
 
-### 2. WebSocket Server
+### 2. Realtime Transport
 
-#### Implementation
+> **NOT SHIPPED — superseded by SSE.** The WebSocket design below was the initial proposal. It was **not** implemented: the app ships Server-Sent Events instead (see "Recommendation: Use SSE" and "SSE Endpoint: /api/events/stream" further down). There is no `/api/ws` route in the codebase; realtime is served by `src/app/api/events/stream/route.ts`. This section is retained only to record the design decision.
+
+#### WebSocket implementation (rejected alternative)
 - Use Next.js API route with WebSocket upgrade
-- Endpoint: `/api/ws`
+- Endpoint: `/api/ws` — *never shipped; SSE `/api/events/stream` is the live transport*
 - Broadcast events to all connected clients
 
 #### Events to broadcast
@@ -111,9 +113,10 @@ Add tabs:
 - **Deliverables** (list of output files/links with download/open buttons)
 - **Sessions** (list of OpenClaw sub-agent sessions)
 
-#### WebSocket Client
+#### WebSocket Client (rejected alternative — not shipped)
+> The client below was **not** implemented. The shipped client is the SSE hook `src/hooks/useSSE.ts` connecting to `/api/events/stream`. Kept for design-history only.
 ```typescript
-// Connect to WebSocket
+// Connect to WebSocket  — NOT SHIPPED; use the SSE hook against /api/events/stream instead
 const ws = new WebSocket('ws://localhost:4000/api/ws');
 
 // Listen for events

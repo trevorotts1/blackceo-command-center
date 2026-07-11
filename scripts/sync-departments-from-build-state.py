@@ -15,10 +15,19 @@ WHY THIS EXISTS:
   client dashboard showed the same 17 departments regardless of their interview.
 
 SOURCE OF TRUTH (priority order):
-  1. Build-state companySlug -> ~/clawd/zero-human-company/<slug>/departments.json
-  2. Most-recently-modified ~/clawd/zero-human-company/<slug>/departments.json
-  3. ~/clawd/zhc/<slug>/departments.json (short-alias)
-  4. $COMPANY_SLUG env override of (1)
+  Canonical master-files roots (where build-workforce.py actually writes, PRD 1.9
+  resolve_company_paths / detect_platform.py get_openclaw_paths()['company_root']):
+    - $MASTER_FILES_DIR/zero-human-company/<slug>/departments.json (env override)
+    - VPS:  /data/openclaw-master-files/zero-human-company/<slug>/departments.json
+    - Mac:  ~/Downloads/openclaw-master-files/zero-human-company/<slug>/departments.json
+  Legacy roots (backward-compat READS only, never written):
+    - ~/clawd/zero-human-company/<slug>/departments.json
+    - ~/clawd/zhc/<slug>/departments.json (short alias)
+    - /data/clawd/zero-human-company/<slug>/departments.json (VPS legacy)
+  Company selection within the resolved roots:
+    1. --company-slug / $COMPANY_SLUG
+    2. build-state companySlug (fallback: clientSlug)
+    3. Most-recently-modified departments.json (last resort; emits a loud warning)
 
 USAGE:
   python3 sync-departments-from-build-state.py
@@ -36,6 +45,16 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+
+# DATA-08: single shared DB resolver (shared-utils/resolve_db.py) so this script
+# and the Command Center app always resolve the SAME mission-control.db.
+_SHARED_UTILS = Path(__file__).resolve().parent.parent / "shared-utils"
+sys.path.insert(0, str(_SHARED_UTILS))
+try:
+    from resolve_db import find_dashboard_db as _shared_find_dashboard_db, is_db_found as _shared_is_db_found  # type: ignore
+    _HAS_SHARED_RESOLVER = True
+except ImportError:
+    _HAS_SHARED_RESOLVER = False
 
 
 def _oc_root():
@@ -59,10 +78,48 @@ def _load_build_state():
 
 
 def _zhc_roots():
-    return [
-        Path.home() / "clawd" / "zero-human-company",
-        Path.home() / "clawd" / "zhc",
-    ]
+    """Zero-Human-Company roots to scan for <slug>/departments.json, priority order.
+
+    SOURCE OF TRUTH: onboarding/shared-utils/detect_platform.py
+      get_openclaw_paths()['company_root'] (canonical) + get_legacy_company_roots()
+      (backward-compat). This CC-repo script CANNOT import that module at runtime
+      (different install trees), so the resolution is REPLICATED inline here.
+      KEEP IN SYNC with detect_platform.py.
+
+    Canonical master-files roots FIRST -- this is where build-workforce.py
+    (PRD 1.9 resolve_company_paths) actually writes the client's real build:
+      1. $MASTER_FILES_DIR/zero-human-company  (same override the resolver honors)
+      2. VPS:  /data/openclaw-master-files/zero-human-company
+      3. Mac:  ~/Downloads/openclaw-master-files/zero-human-company
+    Both platform defaults are always listed; only the root that exists on this
+    box is scanned, so a single list works on Mac and VPS alike.
+
+    THEN legacy roots (READ-ONLY backward-compat; never written by new builds):
+      4. ~/clawd/zero-human-company        (v9.6.0+ canonical, legacy)
+      5. ~/clawd/zhc                       (short alias, legacy)
+      6. /data/clawd/zero-human-company    (VPS pre-master-files workforces)
+    """
+    roots = []
+    # 1. Canonical: honor MASTER_FILES_DIR before any default (matches resolver).
+    env_master = os.environ.get("MASTER_FILES_DIR", "").strip()
+    if env_master:
+        roots.append(Path(env_master) / "zero-human-company")
+    # 2-3. Canonical platform defaults (VPS + Mac).
+    roots.append(Path("/data/openclaw-master-files") / "zero-human-company")
+    roots.append(Path.home() / "Downloads" / "openclaw-master-files" / "zero-human-company")
+    # 4-6. Legacy read-only roots (backward-compat).
+    roots.append(Path.home() / "clawd" / "zero-human-company")
+    roots.append(Path.home() / "clawd" / "zhc")
+    roots.append(Path("/data/clawd") / "zero-human-company")
+
+    # De-dup while preserving priority order (MASTER_FILES_DIR may equal a default).
+    seen = set()
+    deduped = []
+    for r in roots:
+        if r not in seen:
+            seen.add(r)
+            deduped.append(r)
+    return deduped
 
 
 def _scan_zhc_companies():
@@ -82,19 +139,26 @@ def find_departments(company_slug=None):
     """Locate the client's real ZHC departments.json. Returns (data, path) or (None, None)."""
     target = company_slug or os.environ.get("COMPANY_SLUG", "").strip()
     if not target:
-        target = _load_build_state().get("companySlug", "").strip()
+        # Honor build-state companySlug; fall back to clientSlug. Onboarding is
+        # standardizing on companySlug, but older build-states only wrote
+        # clientSlug -- support both during the transition.
+        state = _load_build_state()
+        target = (state.get("companySlug") or state.get("clientSlug") or "").strip()
 
     companies = _scan_zhc_companies()
 
-    # 1. Exact slug match
+    # 1. Exact slug match (deterministic, preferred).
     if target:
         for slug, dj in companies:
             if slug == target:
                 data = _read_json(dj)
                 if data:
                     return data, str(dj)
+        print(f"  [sync] WARNING: build-state slug '{target}' not found under any ZHC "
+              f"root; falling back to the most-recently-modified departments.json.",
+              file=sys.stderr)
 
-    # 2. Most-recently-modified ZHC departments.json
+    # 2. Most-recently-modified ZHC departments.json (last-resort fallback).
     with_mtime = sorted(
         ((dj.stat().st_mtime, dj) for _, dj in companies),
         reverse=True,
@@ -102,6 +166,11 @@ def find_departments(company_slug=None):
     for _, dj in with_mtime:
         data = _read_json(dj)
         if data:
+            if not target:
+                print("  [sync] WARNING: no companySlug/clientSlug in build-state and no "
+                      "--company-slug/$COMPANY_SLUG override; using most-recently-modified "
+                      f"departments.json ({dj}). Set companySlug for deterministic sync.",
+                      file=sys.stderr)
             return data, str(dj)
 
     return None, None
@@ -120,11 +189,25 @@ def _read_json(path):
 def find_db(explicit=None):
     if explicit:
         return explicit
-    if os.environ.get("DATABASE_PATH"):
-        return os.environ["DATABASE_PATH"]
+    # DATA-08: honor the app's DB path FIRST — DASHBOARD_DB_PATH (forwarded by the
+    # CC app to subprocesses) then DATABASE_PATH (src/lib/db/index.ts) — so this
+    # re-seed can never write to a decoy DB the dashboard never reads.
+    for _ev in ("DASHBOARD_DB_PATH", "DATABASE_PATH"):
+        _v = os.environ.get(_ev)
+        if _v:
+            return _v
+    if _HAS_SHARED_RESOLVER:
+        p = _shared_find_dashboard_db()
+        if _shared_is_db_found(p):
+            return str(p)
     candidates = [
         Path.cwd() / "mission-control.db",
         Path.home() / "projects" / "command-center" / "mission-control.db",
+        # VPS canonical: vps-docker-bootstrap.sh pins DATABASE_PATH here and
+        # watchdog-cc.sh / atomic-deploy.sh resolve the /data install dir. Placed
+        # right after the Mac ~/projects/command-center path (mirrors watchdog-cc.sh
+        # which checks $HOME/projects/command-center then /data/projects/command-center).
+        Path("/data/projects/command-center") / "mission-control.db",
         Path.home() / "projects" / "mission-control" / "mission-control.db",
         Path("/opt/mission-control/mission-control.db"),
         Path("/app/mission-control.db"),
@@ -185,7 +268,25 @@ def write_config(config_path, departments):
     print(f"  [sync] wrote {len(departments)} departments to {config_path}")
 
 
-def reseed_workspaces(db_path, departments, company_info):
+# Reserved system/infrastructure workspaces that are NOT department-build rows
+# and must NEVER be pruned even when absent from the client's departments.json.
+# Mirrors the reserved ids seeded by the dashboard itself (migrations.ts): the
+# inbox/general-task/bugs/default infra columns and every CEO/master-orchestrator
+# alias. Compared case-insensitively.
+RESERVED_WORKSPACE_IDS = frozenset({
+    "default", "general-task", "bugs", "inbox",
+    "master-orchestrator", "ceo", "dept-ceo", "ceo-com",
+})
+
+
+def _table_exists(cur, name):
+    row = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def reseed_workspaces(db_path, departments, company_info, prune=False):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute("""
@@ -207,37 +308,90 @@ def reseed_workspaces(db_path, departments, company_info):
         "accent": company_info["brand_accent"],
         "text": company_info["brand_text"],
     }})
-    cur.execute("""
-        INSERT INTO companies (id, name, slug, industry, config)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          name=excluded.name, industry=excluded.industry, config=excluded.config
-    """, (slug, company_info["name"], slug, company_info["industry"], company_config))
+    # Issue #13: companies.slug is UNIQUE. A plain INSERT ... ON CONFLICT(id) crashes
+    # with a UNIQUE(slug) violation when an earlier seed created this company under a
+    # DIFFERENT id (e.g. a uuid) with the same slug. Pre-query by slug and branch
+    # UPDATE/INSERT so the upsert is safe on every SQLite version (no dependency on
+    # multi-target ON CONFLICT, which needs SQLite >= 3.35).
+    existing_company = cur.execute(
+        "SELECT id FROM companies WHERE slug=?", (slug,)).fetchone()
+    if existing_company:
+        cur.execute(
+            "UPDATE companies SET name=?, industry=?, config=? WHERE slug=?",
+            (company_info["name"], company_info["industry"], company_config, slug))
+    else:
+        cur.execute(
+            "INSERT INTO companies (id, name, slug, industry, config) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (slug, company_info["name"], slug, company_info["industry"], company_config))
 
-    existing = {row[0] for row in cur.execute(
-        "SELECT id FROM workspaces WHERE company_id=?", (slug,)).fetchall()}
-    inserted = skipped = 0
+    # Issue #11: widen the existing-set to ALL workspaces (any company_id), not just
+    # rows already under this slug. Rows seeded under a stale company_id (e.g. the
+    # pre-064 'default') are then ADOPTED (re-homed to the real slug + refreshed)
+    # instead of being duplicated or crashing on the PRIMARY KEY(id) INSERT.
+    existing = {row[0]: row[1] for row in cur.execute(
+        "SELECT id, company_id FROM workspaces").fetchall()}
+    build_ids = set()
+    inserted = updated = 0
     for dept in departments:
         raw_id = dept.get("id", "")
         dept_id = raw_id[5:] if raw_id.startswith("dept-") else raw_id
         if not dept_id:
             continue
+        build_ids.add(dept_id)
+        name = dept["name"]
+        description = f"{name} department workspace"
+        icon = dept.get("emoji", "\U0001f4c1")
         if dept_id in existing:
-            skipped += 1
-            continue
-        cur.execute("""
-            INSERT INTO workspaces (id, name, slug, description, icon, company_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (dept_id, dept["name"], dept_id,
-              f"{dept['name']} department workspace",
-              dept.get("emoji", "\U0001f4c1"), slug))
-        inserted += 1
-        print(f"  [sync] inserted workspace: {dept_id} ({dept['name']})")
+            cur.execute("""
+                UPDATE workspaces
+                SET name=?, slug=?, description=?, icon=?, company_id=?
+                WHERE id=?
+            """, (name, dept_id, description, icon, slug, dept_id))
+            updated += 1
+            if existing[dept_id] != slug:
+                print(f"  [sync] re-homed workspace {dept_id}: company_id "
+                      f"{existing[dept_id]!r} -> {slug!r}")
+        else:
+            cur.execute("""
+                INSERT INTO workspaces (id, name, slug, description, icon, company_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (dept_id, name, dept_id, description, icon, slug))
+            inserted += 1
+            print(f"  [sync] inserted workspace: {dept_id} ({name})")
+
+    # Issue #11 prune (default OFF): remove stale workspaces that are no longer in
+    # the build. NEVER delete a valid client row -- reserved system workspaces and
+    # any workspace that still holds tasks are kept, the latter logged for operator
+    # review. Only invoked with --prune (run-full-install Phase 6c) so ad-hoc syncs
+    # can never over-delete.
+    pruned = kept_nonempty = 0
+    if prune:
+        has_tasks = _table_exists(cur, "tasks")
+        for wid, _cid in list(existing.items()):
+            if wid in build_ids:
+                continue
+            if wid.lower() in RESERVED_WORKSPACE_IDS:
+                continue
+            task_count = 0
+            if has_tasks:
+                task_count = cur.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE workspace_id=?", (wid,)
+                ).fetchone()[0]
+            if task_count > 0:
+                kept_nonempty += 1
+                print(f"  [sync] KEPT stale workspace {wid!r} (not in build) -- "
+                      f"has {task_count} task(s); operator review needed")
+                continue
+            cur.execute("DELETE FROM workspaces WHERE id=?", (wid,))
+            pruned += 1
+            print(f"  [sync] pruned stale workspace: {wid}")
 
     conn.commit()
     conn.close()
-    print(f"  [sync] workspaces re-seeded. inserted={inserted} skipped={skipped} "
-          f"total_in_build={len(departments)}")
+    print(f"  [sync] workspaces re-seeded. inserted={inserted} updated={updated} "
+          f"pruned={pruned} kept_nonempty={kept_nonempty} "
+          f"total_in_build={len(build_ids)}")
 
 
 def main():
@@ -248,6 +402,11 @@ def main():
     ap.add_argument("--db", default=None, help="Path to mission-control.db")
     ap.add_argument("--config", default=None,
                     help="Path to config/departments.json to regenerate")
+    ap.add_argument("--prune", action="store_true", default=False,
+                    help="Delete stale workspaces no longer in the build "
+                         "(skips reserved system workspaces and any workspace "
+                         "that still holds tasks). Default OFF; enable from "
+                         "run-full-install Phase 6c.")
     args = ap.parse_args()
 
     departments, source = find_departments(args.company_slug)
@@ -272,7 +431,7 @@ def main():
     print(f"[sync] DB: {db_path}")
     print(f"[sync] Company: {company_info['name']} (slug={company_info['slug']}, "
           f"industry={company_info['industry'] or 'n/a'})")
-    reseed_workspaces(db_path, departments, company_info)
+    reseed_workspaces(db_path, departments, company_info, prune=args.prune)
     print("[sync] Done. Dashboard now reflects the client's real build-state.")
 
 

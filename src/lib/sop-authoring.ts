@@ -58,9 +58,12 @@ import {
   findClientChatId,
   notifyTelegram,
   WORKSPACE_BASE,
+  groundDraftedSOP,
 } from '@/lib/sop-auto-replace';
 import { scoreTaskForQC, resolveTrioAgents, QC_PASS_THRESHOLD } from '@/lib/qc-scorer';
 import type { QCScorerInput } from '@/lib/qc-scorer';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { notifyOwnerDone } from '@/lib/owner-reports';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,11 +76,13 @@ export interface CanonicalContextResult {
 
 export type AuthorStatus =
   | 'authored'
+  | 'deduped'
   | 'refused-canonical'
   | 'escalated'
   | 'no-research-specialist'
   | 'qc-heuristic-pending'
   | 'qc-fail-pending'
+  | 'qc-ungrounded-pending'
   | 'parse-fail-pending'
   | 'error';
 
@@ -287,6 +292,74 @@ function sopToHowToMd(opts: {
 // §1.3 — The authoring entry point (custom path only)
 // ---------------------------------------------------------------------------
 
+// ─── F3.9 — PERSONA SLOT EMISSION (authored multi-craft SOPs) ────────────────
+// An authored SOP that spans multiple crafts (e.g. a website build: CONTENT copy,
+// CODE build, IMAGE hero) declares one `persona_slot` per craft STEP so the
+// matcher fills each slot with a distinct best-fit persona (F3.7 `--combined`).
+// Slot vocabulary is the EXISTING taxonomy — `infer-task-category` slugs +
+// `CRAFT_PRIMARY_DOMAINS` families — never a new taxonomy.
+//
+// Q3 (ratified): the CODE family resolves to the `software-craft` domain
+// (hunt-thomas-pragmatic-programmer, added matcher-side by F3.8/DEP-6); the IMAGE
+// family resolves to `visual-storytelling` (budelmann-brand-identity-essentials +
+// opara-color-works, surfaced matcher-side). CONTENT resolves to `copywriting`.
+
+interface AuthoredStepSlot {
+  slot: string;
+  task_category: string;
+  domains: string[];
+  audience_from: 'task' | 'none';
+  required: boolean;
+}
+
+const _SLOT_FAMILIES: Array<{ family: string; keywords: RegExp; slot: AuthoredStepSlot }> = [
+  {
+    family: 'content',
+    keywords: /\b(copy|copywrit|content|headline|messaging|caption|script|voice|narrative)\b/i,
+    slot: { slot: 'content', task_category: 'content-write', domains: ['copywriting'], audience_from: 'task', required: true },
+  },
+  {
+    family: 'code',
+    keywords: /\b(code|build the (site|page|funnel|app)|develop|implement|frontend|back[- ]?end|api|deploy the (site|app)|engineer|program)\b/i,
+    slot: { slot: 'code', task_category: 'code', domains: ['software-craft'], audience_from: 'none', required: true },
+  },
+  {
+    family: 'image',
+    keywords: /\b(image|hero shot|visual|graphic|illustration|photo|art\s?direction|design the (hero|banner|graphic))\b/i,
+    slot: { slot: 'image', task_category: 'design', domains: ['visual-storytelling'], audience_from: 'task', required: false },
+  },
+];
+
+/**
+ * Annotate drafted SOP steps with `persona_slot` for a MULTI-CRAFT SOP. Returns a
+ * NEW steps array (never mutates the input); a step that already declares a slot
+ * or matches no craft family is passed through untouched. Slots are emitted ONLY
+ * when ≥2 DISTINCT craft families are detected across the steps — a single-craft
+ * SOP is left alone (it will match a single persona the normal way).
+ *
+ * Exported for the contract test.
+ */
+export function emitPersonaSlots<T extends { name: string; persona_slot?: unknown }>(
+  steps: T[],
+): T[] {
+  if (!Array.isArray(steps) || steps.length === 0) return steps;
+
+  // First pass: which family (if any) does each step map to?
+  const perStepFamily = steps.map((s) => {
+    const name = s?.name || '';
+    return _SLOT_FAMILIES.find((f) => f.keywords.test(name)) ?? null;
+  });
+  const distinctFamilies = new Set(perStepFamily.filter(Boolean).map((f) => f!.family));
+  if (distinctFamilies.size < 2) return steps; // not multi-craft — leave untouched
+
+  return steps.map((step, i) => {
+    const fam = perStepFamily[i];
+    if (!fam) return step;
+    if (step.persona_slot) return step; // author already declared one — respect it
+    return { ...step, persona_slot: { ...fam.slot } };
+  });
+}
+
 export interface AuthorSOPInput {
   originalTaskId: string;
   title: string;
@@ -364,6 +437,37 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
         });
       }
       return { status: 'no-research-specialist', reason: msg };
+    }
+
+    // ── FM-6b — IDEMPOTENCY GUARD (no duplicate open authoring sub-tasks) ──────
+    // The dispatch sweep re-enters authorSOPForTask every ~2 min for an
+    // un-authored backlog task. Without this guard each pass INSERTED a fresh
+    // "Author SOP: X" sub-task, flooding the board with stuck `in_progress`
+    // clones (300+ on the affected box). If an OPEN authoring sub-task already
+    // exists for this original task (or an identical title+department), reuse it
+    // instead of creating another. Migration 082 reaps any pre-existing clones.
+    const authorTitle = `Author SOP: ${input.title}`;
+    const existingAuthoring = queryOne<{ id: string }>(
+      `SELECT id FROM tasks
+        WHERE status != 'done' AND (archived_at IS NULL OR archived_at = '')
+          AND (
+            sop_authoring_for_task_id = ?
+            OR (title = ? AND COALESCE(department, '') = COALESCE(?, ''))
+          )
+        ORDER BY created_at ASC, rowid ASC
+        LIMIT 1`,
+      [input.originalTaskId, authorTitle, deptSlug],
+    );
+    if (existingAuthoring) {
+      console.log(
+        `[sop-authoring] Idempotency guard: open authoring sub-task ${existingAuthoring.id} already exists ` +
+          `for "${input.title}" (dept ${deptSlug}) — NOT creating a duplicate.`,
+      );
+      return {
+        status: 'deduped',
+        sub_task_id: existingAuthoring.id,
+        reason: 'reused existing open authoring sub-task (idempotency guard)',
+      };
     }
 
     // §2: Create the linked authoring sub-task.
@@ -611,7 +715,56 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       };
     }
 
-    // §5: QC passed (or heuristic path handled above) — file to BOTH stores.
+    // QC-07: grounding gate BEFORE auto-file. A fluent LLM draft can pass the
+    // 8.5 self-score while being ungrounded in the actual research (or produced
+    // with no research / sub-floor confidence). Such a draft must never become
+    // QC-authoritative ('auto-authored-filed'). If it fails the grounding gate,
+    // file it as a pending proposal for human review instead of auto-filing.
+    const grounding = groundDraftedSOP(finalDrafted, tavily.results);
+    if (!grounding.grounded) {
+      const ungroundedProposalId = uuidv4();
+      const sourcesG = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+      const ungroundedEvidence = [
+        `[QC-UNGROUNDED — needs human review]`,
+        `QC score ${finalQcResult.score.toFixed(1)}/10 passed, but the draft failed the grounding gate.`,
+        `Grounding: ${grounding.reason}`,
+        grounding.ungroundedSteps.length > 0
+          ? `Ungrounded steps: ${grounding.ungroundedSteps.join('; ')}`
+          : '',
+        `Research query: ${researchQuery}`,
+        ...sourcesG.map((s, i) => `  [${i + 1}] ${s.title} (${s.url})`),
+      ].filter(Boolean).join('\n');
+      try {
+        run(
+          `INSERT INTO sop_proposals
+             (id, proposed_name, proposed_department, draft_steps, based_on_task_ids,
+              evidence_summary, status, created_at, confidence, auto_research_attempts, research_sources)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+          [
+            ungroundedProposalId,
+            finalDrafted.name,
+            finalDrafted.department || deptSlug,
+            JSON.stringify(finalDrafted.steps),
+            JSON.stringify([input.originalTaskId]),
+            ungroundedEvidence,
+            new Date().toISOString(),
+            finalDrafted.confidence ?? null,
+            recentAttempts + 1,
+            JSON.stringify(sourcesG),
+          ],
+        );
+      } catch { /* non-fatal */ }
+      emitEvent('sop_authoring_ungrounded_pending', ungroundedEvidence, input.originalTaskId);
+      return {
+        status: 'qc-ungrounded-pending',
+        proposal_id: ungroundedProposalId,
+        qc_score: finalQcResult.score,
+        sub_task_id: subTaskId,
+        reason: ungroundedEvidence,
+      };
+    }
+
+    // §5: QC passed AND grounded — file to BOTH stores.
     const sopId = uuidv4();
     const fileNow = new Date().toISOString();
 
@@ -625,6 +778,13 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
         .slice(0, 60) || `authored-${sopId.slice(0, 8)}`;
     const collision = queryOne<{ id: string }>('SELECT id FROM sops WHERE slug = ? AND deleted_at IS NULL', [baseSlug]);
     const finalSlug = collision ? `${baseSlug}-${sopId.slice(0, 6)}` : baseSlug;
+
+    // F3.9 — emit per-step persona slots for a multi-craft authored SOP so the
+    // matcher fills each craft slot with a distinct best-fit persona at task time.
+    const stepsWithSlots = emitPersonaSlots(
+      finalDrafted.steps as Array<{ name: string; persona_slot?: unknown }>,
+    );
+    const stepsJson = JSON.stringify(stepsWithSlots);
 
     const sources3 = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
     const evidenceSummary = [
@@ -650,7 +810,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
           finalDept,
           input.agentRoleSlug ?? null,
           finalDrafted.task_keywords ?? null,
-          JSON.stringify(finalDrafted.steps),
+          stepsJson,
           finalDrafted.success_criteria ?? null,
           fileNow,
           fileNow,
@@ -676,7 +836,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
           proposalId,
           finalName,
           finalDept,
-          JSON.stringify(finalDrafted.steps),
+          stepsJson,
           JSON.stringify([input.originalTaskId]),
           evidenceSummary,
           fileNow,
@@ -724,22 +884,42 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     } catch { /* non-fatal */ }
 
     // §2: Mark the authoring sub-task as done.
+    // DISP-10: this synthetic "Author SOP" sub-task completes from `in_progress`
+    // — an edge the lifecycle state machine does NOT model (in_progress→done is
+    // not a legal transition, and this write sets `completed_at`), so routing it
+    // through transition() would throw ILLEGAL_TRANSITION. We instead use the
+    // spec-sanctioned raw-write alternative: a compare-and-swap on the current
+    // status, the structured `task_events` audit row (so the audit sink is
+    // COMPLETE), and the owner DONE report.
     if (subTaskId) {
       try {
-        run(
-          `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ?`,
+        const subFrom =
+          queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [subTaskId])?.status ??
+          'in_progress';
+        const res = run(
+          `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ? AND status NOT IN ('done')`,
           [fileNow, fileNow, subTaskId],
         );
-        run(
-          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-          [
-            uuidv4(),
-            'task_completed',
-            subTaskId,
-            `[sop-authoring] SOP "${finalName}" authored and filed. QC: ${finalQcResult.score.toFixed(1)}/10 PASS.`,
-            fileNow,
-          ],
-        );
+        if (res.changes > 0) {
+          recordStatusEvent(subTaskId, subFrom, 'done', {
+            actor: 'sop-authoring',
+            reason: `SOP "${finalName}" authored and filed (QC ${finalQcResult.score.toFixed(1)}/10 PASS)`,
+          });
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'task_completed',
+              subTaskId,
+              `[sop-authoring] SOP "${finalName}" authored and filed. QC: ${finalQcResult.score.toFixed(1)}/10 PASS.`,
+              fileNow,
+            ],
+          );
+          // DONE owner report (5-field). Best-effort; gateway-routed; never throws.
+          try {
+            notifyOwnerDone(subTaskId);
+          } catch { /* non-fatal */ }
+        }
       } catch { /* non-fatal */ }
     }
 

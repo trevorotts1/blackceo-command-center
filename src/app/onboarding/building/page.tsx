@@ -52,9 +52,9 @@ export default function OnboardingBuildingPage() {
 
   if (!progress) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 flex items-center justify-center">
+      <div className="iv-root flex items-center justify-center">
         <div className="text-center">
-          <Loader2 className="h-12 w-12 text-indigo-500 animate-spin mx-auto mb-4" />
+          <Loader2 className="h-12 w-12 text-brand-500 animate-spin mx-auto mb-4" />
           <p className="text-gray-600">Connecting to build status...</p>
         </div>
       </div>
@@ -68,13 +68,13 @@ export default function OnboardingBuildingPage() {
   const isComplete = progress.stage === 'complete';
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 p-8">
+    <div className="iv-root p-8">
       <div className="max-w-3xl mx-auto">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-100 mb-4">
+          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-brand-50 mb-4">
             {isComplete
               ? <CheckCircle2 className="h-9 w-9 text-emerald-600" />
-              : <Building2 className="h-9 w-9 text-indigo-600 animate-pulse" />}
+              : <Building2 className="h-9 w-9 text-brand-600 animate-pulse" />}
           </div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
             {isComplete ? 'Your AI workforce is ready' : 'Building your AI workforce...'}
@@ -85,13 +85,13 @@ export default function OnboardingBuildingPage() {
         <div className="bg-white rounded-2xl shadow-sm border p-6 mb-6">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm font-medium text-gray-700">Overall progress</span>
-            <span className="text-sm font-semibold text-indigo-600">
+            <span className="text-sm font-semibold text-brand-600">
               {progress.documents_complete} of {progress.documents_total} documents
             </span>
           </div>
           <div className="w-full h-3 bg-gray-100 rounded-full overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full transition-all duration-500"
+              className="h-full bg-gradient-to-r from-brand-500 to-brand-600 rounded-full transition-all duration-500"
               style={{ width: `${pct}%` }}
             />
           </div>
@@ -120,7 +120,7 @@ export default function OnboardingBuildingPage() {
                       <div
                         className={`h-full rounded-full transition-all duration-500 ${
                           dept.status === 'complete' ? 'bg-emerald-500' :
-                          dept.status === 'in_progress' ? 'bg-indigo-500' :
+                          dept.status === 'in_progress' ? 'bg-brand-500' :
                           'bg-gray-300'
                         }`}
                         style={{ width: `${deptPct}%` }}
@@ -140,7 +140,7 @@ export default function OnboardingBuildingPage() {
           <div className="text-center">
             <button
               onClick={() => router.push('/ceo-board')}
-              className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition-colors"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-brand-600 text-white font-semibold rounded-lg hover:bg-brand-700 transition-colors"
             >
               Open Command Center
               <CheckCircle2 className="h-5 w-5" />

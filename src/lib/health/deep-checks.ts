@@ -15,11 +15,13 @@
  *   Rows 23-24, 35, 35b  disk_headroom (incl. REDO #1 wrong-mount DATABASE_PATH
  *                         variant, REDO-REDO wrong-mount CWD variant)
  *   Rows 31-32, 40  next_public_app_url (incl. Round-4: IPv6 [::1] false-fail fix)
+ *   (new)           anthology_board_projection (A7 — empty-vs-idle board drift)
  */
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, DB_PATH } from '@/lib/db';
 
 // ── constants ────────────────────────────────────────────────────────────────
@@ -752,7 +754,7 @@ export function checkMigrations(): CheckResult {
 // Truth-table rows 23-24. Threshold: 500 MB.
 
 // Well-known large bind-mount paths that must NOT be used as the disk check
-// target (Sheila-class wrong-mount false-green: /data is a separate large
+// target (wrong-mount-class false-green: /data is a separate large
 // mount; probing it returns 80 GB free while the CC partition has <500 MB).
 // When DATABASE_PATH resolves into one of these mounts, fall back to
 // process.cwd() instead.
@@ -802,7 +804,7 @@ export async function checkDiskHeadroom(): Promise<CheckResult> {
   try {
     // Resolve check path — NEVER from /data presence alone.
     // resolveCheckPath() returns null when both DATABASE_PATH dir and
-    // process.cwd() resolve into a WRONG_MOUNT_PREFIXES path (Sheila-class
+    // process.cwd() resolve into a WRONG_MOUNT_PREFIXES path (wrong-mount-class
     // false-green, truth-table Row 35, incl. CWD variant from REDO-REDO fix).
     const checkPath = resolveCheckPath();
     if (checkPath === null) {
@@ -852,4 +854,200 @@ export async function checkDiskHeadroom(): Promise<CheckResult> {
       detail: `disk_headroom: could not determine disk space — ${err instanceof Error ? err.message : String(err)} (UNKNOWN)`,
     };
   }
+}
+
+// ── check: Anthology board projection drift (A7) ────────────────────────────
+//
+// PROBLEM: an empty Kanban board (0 anthology cards) is visually IDENTICAL
+// whether (a) there is genuinely no anthology work queued right now, or
+// (b) the S0→mc_board mirror silently dropped every card while the engine's
+// own ledger kept accumulating participants. Case (b) went unnoticed for 3
+// days (5 ledger participants, 0 cards, no alert — see A7 evidence). This
+// check makes the two cases DISTINGUISHABLE by comparing counts on both
+// sides of the mirror:
+//   - the Anthology Engine's own read-only ledger mirror (participants +
+//     anthologies rows in ~/.anthology-engine/state/anthology_state.db, or
+//     wherever ANTHOLOGY_STATE_DIR / OPENCLAW_DATA_DIR points — the SAME
+//     resolution order mc_board.py itself uses, see resolve_state_dir()), vs
+//   - this box's own card count (tasks.source = 'anthology', with a legacy
+//     description-marker fallback for pre-migration rows — mirrors
+//     resolveBoardSource() in api/tasks/[id]/status/route.ts).
+//
+// DESIGN NOTE — unlike the universal checks above (branding, migrations),
+// the Anthology Engine is OPTIONAL per-box tooling: most Command Center
+// installs never run it. So "no ledger mirror on disk at all" is a
+// legitimate PASS (not applicable to this box), never UNKNOWN/FAIL — this
+// check must never turn a healthy non-anthology box red. Only a ledger that
+// EXISTS with rows in it, sitting next to zero board cards, is drift.
+
+export interface BoardProjectionResult extends CheckResult {
+  ledger_participants?: number;
+  ledger_anthologies?: number;
+  board_cards?: number;
+}
+
+/**
+ * Resolve the Anthology Engine's ledger mirror DB path. Mirrors
+ * resolve_state_dir() in 59-anthology-engine/scripts/mc_board.py exactly
+ * (ANTHOLOGY_STATE_DIR > OPENCLAW_DATA_DIR/anthology-engine/state >
+ * ~/.anthology-engine/state) so this check reads the SAME file the engine
+ * itself projects from — never a second, possibly-stale, guess.
+ */
+export function resolveAnthologyStateDbPath(): string {
+  const explicit = (process.env.ANTHOLOGY_STATE_DIR || '').trim();
+  if (explicit) return path.join(explicit, 'anthology_state.db');
+
+  const dataDir = (process.env.OPENCLAW_DATA_DIR || '').trim();
+  if (dataDir) return path.join(dataDir, 'anthology-engine', 'state', 'anthology_state.db');
+
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, '.anthology-engine', 'state', 'anthology_state.db');
+}
+
+/**
+ * Locate mc_board.py so an AUTHENTICATED caller (a CLI/diagnostic surface, not
+ * the unauthenticated /api/health/deep endpoint) can render a copy-pasteable
+ * reconcile command with the resolved absolute path. Mirrors the candidate-list
+ * convention in src/app/participant/_lib/gate-engine.ts (findGateEngineScript)
+ * — same skill, same house pattern, own script name. Returns null (fail-soft)
+ * when not found.
+ *
+ * NOTE: checkAnthologyBoardProjection() intentionally does NOT call this for its
+ * `detail` string — that detail is exposed through the unauthenticated endpoint
+ * bypass, so it uses a generic, path-free command form instead (see the drift
+ * branch). This function is retained and unit-tested for the authenticated
+ * callers that legitimately want the real path.
+ */
+export function findMcBoardScript(): string | null {
+  const candidates = [
+    process.env.ANTHOLOGY_MC_BOARD_SCRIPT,
+    '/data/.openclaw/skills/59-anthology-engine/scripts/mc_board.py',
+    `${process.env.HOME || os.homedir()}/.openclaw/skills/59-anthology-engine/scripts/mc_board.py`,
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+    } catch {
+      /* ignore and try the next candidate */
+    }
+  }
+  return null;
+}
+
+export function checkAnthologyBoardProjection(): BoardProjectionResult {
+  // resolveAnthologyStateDbPath() returns an absolute path under $HOME (or a
+  // configured data dir). This result is surfaced through /api/health/deep,
+  // which middleware.ts bypasses (unauthenticated subtree). Keep that absolute
+  // path — and the resolved mc_board.py script path — OUT of the `detail`
+  // string (see the drift branch below): the endpoint must not leak filesystem
+  // layout beyond the posture the other checks already set. Small integer row
+  // counts are surfaced (as migrations/asset_manifest already surface counts)
+  // because the operator banner needs them to distinguish drift from idle.
+  const ledgerDbPath = resolveAnthologyStateDbPath();
+
+  if (!fs.existsSync(ledgerDbPath)) {
+    // Not provisioned on this box at all — legitimate PASS, not UNKNOWN.
+    return {
+      pass: true,
+      detail: 'anthology_board_projection: OK — Anthology Engine not provisioned on this box; not applicable',
+    };
+  }
+
+  // 1. Read the engine's OWN ledger, read-only. Fail-soft: a present-but-
+  //    unreadable ledger (locked, mid-write, corrupt) IS worth flagging —
+  //    it exists, so this box does run the engine — but as UNKNOWN, not a
+  //    confirmed drift (we cannot compare against a count we couldn't read).
+  let ledgerParticipants: number;
+  let ledgerAnthologies: number;
+  try {
+    const ledgerDb = new BetterSqlite3(ledgerDbPath, { readonly: true, fileMustExist: true });
+    try {
+      ledgerDb.pragma('busy_timeout = 5000');
+      const p = ledgerDb.prepare('SELECT COUNT(*) AS n FROM participants').get() as
+        | { n: number }
+        | undefined;
+      const a = ledgerDb.prepare('SELECT COUNT(*) AS n FROM anthologies').get() as
+        | { n: number }
+        | undefined;
+      ledgerParticipants = p?.n ?? 0;
+      ledgerAnthologies = a?.n ?? 0;
+    } finally {
+      ledgerDb.close();
+    }
+  } catch {
+    // Do NOT echo the raw driver error or ledgerDbPath: on a corrupt/locked
+    // file better-sqlite3 embeds the absolute path in its message, which would
+    // leak through the unauthenticated endpoint.
+    return {
+      pass: false,
+      indeterminate: true,
+      detail: 'anthology_board_projection: ledger mirror present but could not be read (locked, mid-write, or corrupt) — UNKNOWN',
+    };
+  }
+
+  // 2. Count this box's own anthology cards. Prefer the immutable
+  //    tasks.source column; fall back to the legacy description marker for
+  //    pre-migration rows (same precedence as resolveBoardSource() in
+  //    api/tasks/[id]/status/route.ts). The LIKE pre-filter is a coarse
+  //    superset of ANTHOLOGY_DESCRIPTION_MARKER — acceptable here because
+  //    this check only ever reports a count, it never gates a write.
+  let boardCards: number;
+  try {
+    const db = getDb();
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM tasks
+         WHERE lower(source) = 'anthology'
+            OR ((source IS NULL OR source = '') AND description LIKE '%Source: anthology%')`
+      )
+      .get() as { n: number } | undefined;
+    boardCards = row?.n ?? 0;
+  } catch {
+    // Generic message — the raw driver error can embed the DB file path.
+    return {
+      pass: false,
+      indeterminate: true,
+      ledger_participants: ledgerParticipants,
+      ledger_anthologies: ledgerAnthologies,
+      detail: "anthology_board_projection: could not read this box's task board (locked or unavailable) — UNKNOWN",
+    };
+  }
+
+  const ledgerTotal = ledgerParticipants + ledgerAnthologies;
+
+  if (ledgerTotal === 0) {
+    return {
+      pass: true,
+      ledger_participants: ledgerParticipants,
+      ledger_anthologies: ledgerAnthologies,
+      board_cards: boardCards,
+      detail: 'anthology_board_projection: OK — ledger is empty, no anthology work queued (healthy-idle, not drift)',
+    };
+  }
+
+  if (boardCards === 0) {
+    // Generic, path-free reconcile command. We deliberately do NOT embed the
+    // resolved absolute mc_board.py path (findMcBoardScript()) here — that path
+    // reveals the skill install layout and $HOME, and this detail is exposed
+    // through the unauthenticated /api/health/deep bypass. The operator viewing
+    // the board banner runs mc_board.py from their own known install location;
+    // findMcBoardScript() is retained (exported, unit-tested) for authenticated
+    // CLI/diagnostic callers that are not this endpoint.
+    return {
+      pass: false,
+      indeterminate: false,
+      ledger_participants: ledgerParticipants,
+      ledger_anthologies: ledgerAnthologies,
+      board_cards: 0,
+      detail: `anthology_board_projection: DRIFT — ledger holds ${ledgerParticipants} participant(s) + ${ledgerAnthologies} anthology row(s) but the board shows 0 anthology card(s) (dead board, not idle). Run: mc_board.py reconcile --json`,
+    };
+  }
+
+  return {
+    pass: true,
+    ledger_participants: ledgerParticipants,
+    ledger_anthologies: ledgerAnthologies,
+    board_cards: boardCards,
+    detail: `anthology_board_projection: OK — ledger holds ${ledgerTotal} row(s), board shows ${boardCards} anthology card(s) (projecting)`,
+  };
 }

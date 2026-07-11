@@ -18,6 +18,12 @@ function findActiveBuildProgress(): any | null {
   if (process.env.OPENCLAW_COMPANY_ROOT) {
     candidates.push(process.env.OPENCLAW_COMPANY_ROOT);
   }
+  // Canonical ZHC company root that build-workforce.py writes to (via
+  // shared-utils/detect_platform.get_openclaw_paths → master_files/
+  // zero-human-company). Kept in sync with the producer so the page finds
+  // build-progress.json even when OPENCLAW_COMPANY_ROOT is not exported.
+  candidates.push('/data/openclaw-master-files/zero-human-company'); // VPS
+  candidates.push(path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'zero-human-company')); // Mac
   if (fs.existsSync('/data/.openclaw/workspace/zero-human-company')) {
     candidates.push('/data/.openclaw/workspace/zero-human-company');
   }

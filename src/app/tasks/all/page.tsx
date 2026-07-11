@@ -26,6 +26,7 @@ import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import { Breadcrumb } from '@/components/Breadcrumb';
+import type { Task } from '@/lib/types';
 
 export default function AllTasksPage() {
   const {
@@ -89,17 +90,56 @@ export default function AllTasksPage() {
     checkHealth();
     const interval = setInterval(checkHealth, 60000);
 
+    // SSE-fallback task refetch (mirrors src/app/workspace/[slug]/page.tsx):
+    // this page previously had no polling fallback at all for tasks — only
+    // the 60s /api/health ping above — so if SSE was blocked (proxy/firewall)
+    // the cross-department board would go stale indefinitely with no way to
+    // self-heal short of a manual reload. Reconcile the store only when the
+    // fetched set actually differs (count or any status) to avoid needless
+    // re-renders.
+    const taskPoll = setInterval(async () => {
+      try {
+        const res = await fetch('/api/tasks');
+        if (res.ok) {
+          const newTasks: Task[] = await res.json();
+          const currentTasks = useMissionControl.getState().tasks;
+
+          const hasChanges =
+            newTasks.length !== currentTasks.length ||
+            newTasks.some((t) => {
+              const current = currentTasks.find((ct) => ct.id === t.id);
+              return !current || current.status !== t.status;
+            });
+
+          if (hasChanges) {
+            debug.api('[FALLBACK] Task changes detected via polling, updating store');
+            setTasks(newTasks);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to poll tasks:', error);
+      }
+    }, 60000);
+
     return () => {
       cancelled = true;
       clearInterval(interval);
+      clearInterval(taskPoll);
     };
   }, [setAgents, setTasks, setEvents, setIsOnline, setIsLoading]);
 
   return (
-    <div className="min-h-screen lg:h-screen flex flex-col bg-[#F8F9FB] lg:overflow-hidden">
+    /* Shell contract (v4.66.0 bottom-cutoff fix):
+       • lg:h-dvh — dynamic viewport height, so mobile-Safari/short-window
+         chrome never hides the last row (100vh over-measured the viewport).
+       • min-h-0 on the flex row — without it the board region's flex children
+         keep min-height:auto and silently overflow the h-dvh shell, clipping
+         the bottom of the columns with no way to reach it.
+       • Below lg the page is a normal min-h-dvh document scroll. */
+    <div className="min-h-dvh lg:h-dvh flex flex-col bg-bcc-bg lg:overflow-hidden">
       <Header onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
 
-      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100">
+      <div className="px-4 sm:px-6 lg:px-8 bg-white border-b border-gray-100 shrink-0">
         <Breadcrumb
           items={[
             { label: 'Home', href: '/' },
@@ -108,7 +148,7 @@ export default function AllTasksPage() {
         />
       </div>
 
-      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
         <AgentsSidebar navigateOnSelect isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <MissionQueue departmentFilter={null} />
         <LiveFeed />

@@ -111,7 +111,43 @@ const KANBAN_DECK: WalkthroughDeck = {
   ],
 };
 
-export const WALKTHROUGH_DECKS: WalkthroughDeck[] = [KANBAN_DECK];
+/**
+ * Interview — first-run walkthrough deck. Route: /interview (first open).
+ */
+const INTERVIEW_DECK: WalkthroughDeck = {
+  id: 'interview',
+  routePrefix: '/interview',
+  label: 'Interview walkthrough',
+  cards: [
+    {
+      id: 'what-is-this',
+      title: 'Your AI Workforce Interview',
+      summary: "We're about to have a real conversation.",
+      body: 'This is a short interview about your business — your goals, your brand, how you work. We turn your answers into a full AI workforce designed just for you. No templates, no jargon, just your own words.',
+      accent: '#7C3AED',
+    },
+    {
+      id: 'save-and-resume',
+      title: 'You can save and continue later',
+      summary: 'Life happens. Just step away whenever you need to.',
+      body: 'Every answer you give is saved instantly on your own box. If you need to leave, just close this tab — we\'ll send you a link to pick up exactly where you stopped. No progress is lost.',
+      accent: '#3B82F6',
+      route: '/interview',
+      target: 'interview-progress-rail',
+    },
+    {
+      id: 'how-long',
+      title: 'How long does it take?',
+      summary: 'Plan for about 15–20 minutes.',
+      body: 'Most of this conversation takes around 15 to 20 minutes. You set the pace — take your time with the questions that matter, and if you need a moment to think, that\'s perfectly fine. The progress bar at the right shows how far you\'ve come.',
+      accent: '#059669',
+      route: '/interview',
+      target: 'interview-progress-rail',
+    },
+  ],
+};
+
+export const WALKTHROUGH_DECKS: WalkthroughDeck[] = [KANBAN_DECK, INTERVIEW_DECK];
 
 /**
  * Pick the deck whose routePrefix is the longest match for the given pathname.

@@ -1,0 +1,144 @@
+{
+  "_comment": [
+    "SHARED PARITY FIXTURE (P3-7). Read by BOTH the Python golden generator",
+    "(scripts/seam-parity-golden.py) and the CC vitest test",
+    "(src/lib/interview/__tests__/seam-parity.test.ts). This file holds ONLY the",
+    "authored inputs; the pinned expected outputs live in golden.json, derived from",
+    "the onboarding Python enforcers (canonical_decline.py + build-workforce.py).",
+    "DOCTRINE: every decision object here uses the OBJECT form record-dept-decision.sh",
+    "writes (decision/source/decidedAt/decidedBy) or a bare string WITHOUT",
+    "ownerDeclineConfirmed. The Telegram-legacy honoring paths (ownerDeclineConfirmed",
+    "bare strings, declinedDepartments[]) are intentionally NOT exercised: the web",
+    "seam only writes object-form decisions, so those paths are out of scope for the",
+    "web-seam parity claim (see README.md)."
+  ],
+
+  "normInputs": [
+    "Billing-Finance",
+    "billing_finance",
+    "Video",
+    "  Web Dev! ",
+    "CRM",
+    "paid-advertisement",
+    "project-architecture-office",
+    "General Task",
+    "MixedCASE_123",
+    "",
+    "Açaí-Bowls",
+    "已经abc123",
+    "a.b.c-d",
+    "UPPER lower 99",
+    "drone-operations"
+  ],
+
+  "expectedSetCases": [
+    {
+      "name": "no-customs",
+      "departmentsConfig": {},
+      "tsCustomDeptIds": [],
+      "tsImplicitYesCustomIds": []
+    },
+    {
+      "name": "with-customs",
+      "departmentsConfig": {
+        "drone-operations": { "enabled": true },
+        "podcast-editing": { "enabled": true },
+        "disabled-extra": { "enabled": false }
+      },
+      "tsCustomDeptIds": ["drone-operations", "podcast-editing"],
+      "tsImplicitYesCustomIds": []
+    }
+  ],
+
+  "declineCases": [
+    {
+      "name": "mixed-provenance-object-and-bare",
+      "expectedIds": ["marketing", "billing-finance", "video", "sales", "crm", "legal"],
+      "buildState": {
+        "canonicalReconciliation": {
+          "decisions": {
+            "marketing": {
+              "decision": "yes",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            },
+            "Billing-Finance": {
+              "decision": "no",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            },
+            "video": {
+              "decision": "later",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            },
+            "sales": {
+              "decision": "no",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z"
+            },
+            "crm": "no"
+          }
+        }
+      }
+    },
+    {
+      "name": "all-covered-no-rejections",
+      "expectedIds": ["marketing", "sales", "billing-finance"],
+      "buildState": {
+        "canonicalReconciliation": {
+          "decisions": {
+            "marketing": {
+              "decision": "yes",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            },
+            "sales": {
+              "decision": "later",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            },
+            "billing-finance": {
+              "decision": "no",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "empty-decisions-all-missing",
+      "expectedIds": ["marketing", "sales"],
+      "buildState": { "canonicalReconciliation": { "decisions": {} } }
+    },
+    {
+      "name": "normalization-cross-form",
+      "expectedIds": ["billing-finance", "paid-advertisement", "web-development"],
+      "buildState": {
+        "canonicalReconciliation": {
+          "decisions": {
+            "billing_finance": {
+              "decision": "yes",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            },
+            "PaidAdvertisement": {
+              "decision": "no",
+              "source": "owner-interview",
+              "decidedAt": "2026-07-04T00:00:00Z",
+              "decidedBy": "owner-1"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -8,6 +8,12 @@
  *   4. Same title but outside the dedup window → 2 tasks (no dedup)
  *   5. idempotency_key: second call with same key returns prior task, deduped:true
  *   6. idempotency_key: different key → 2 tasks
+ *   7. Layer-1 precedence: different idempotency_key + IDENTICAL title within the
+ *      window → 2 tasks (the anthology two-anthologies-one-contact regression:
+ *      a distinct idempotency key must NOT be collapsed by the title window)
+ *   8. same idempotency_key still dedups across the title window (Layer 1 intact)
+ *   9. keyless same-title within window STILL dedups (Layer 2 preserved for
+ *      callers that supply no idempotency key)
  *
  * Runs via the Node built-in test runner under tsx (`npm run test:unit`).
  *
@@ -238,4 +244,93 @@ test('idempotency_key: different key → 2 tasks', async () => {
   assert.equal(r1!.deduped, false, 'first must not be deduped');
   assert.equal(r2!.deduped, false, 'second must not be deduped (different key + title)');
   assert.notEqual(r1!.task.id, r2!.task.id, 'must produce 2 distinct tasks');
+});
+
+test('different idempotency_key + IDENTICAL title within window → 2 tasks (Layer 1 beats Layer 2)', async () => {
+  // The W5.6 canary bug: one contact enrolled in TWO different anthologies
+  // produces two cards with the SAME title but DISTINCT idempotency keys. The
+  // generic title+workspace window (Layer 2) must NOT collapse them — a present,
+  // distinct idempotency key (Layer 1) takes precedence.
+  const wsId = `ws-dedup-${RUN_ID}`;
+  const title = `Anthology chapter — Same Contact [${RUN_ID}-t6]`; // identical title
+  const keyA = `anthology:card:CONTACT-${RUN_ID}::ANTH-A`;
+  const keyB = `anthology:card:CONTACT-${RUN_ID}::ANTH-B`;
+
+  const r1 = await createTaskCoreImpl(
+    {
+      title,
+      workspace_id: wsId,
+      status: 'backlog',
+      idempotency_key: keyA,
+      eventMessage: `Task captured via anthology: ${title} [ingest:${keyA}]`,
+    },
+    { notifyGateway: false },
+  );
+  const r2 = await createTaskCoreImpl(
+    {
+      title, // SAME title, within the window
+      workspace_id: wsId,
+      status: 'backlog',
+      idempotency_key: keyB,
+      eventMessage: `Task captured via anthology: ${title} [ingest:${keyB}]`,
+    },
+    { notifyGateway: false },
+  );
+
+  assert.ok(r1 && r2, 'both calls must succeed');
+  assert.equal(r1!.deduped, false, 'first must not be deduped');
+  assert.equal(
+    r2!.deduped,
+    false,
+    'second MUST NOT be deduped: a distinct idempotency key (Layer 1) must beat the title window (Layer 2)',
+  );
+  assert.notEqual(
+    r1!.task.id,
+    r2!.task.id,
+    'two anthologies for one contact must produce 2 distinct task rows, not one shared row',
+  );
+});
+
+test('same idempotency_key still dedups across the title window (Layer 1 intact)', async () => {
+  // Guard against over-correction: a genuine retry with the SAME key must still
+  // return the prior task, even though Layer 2 is now skipped for keyed calls.
+  const wsId = `ws-dedup-${RUN_ID}`;
+  const key = `anthology:card:CONTACT-${RUN_ID}::ANTH-SAME`;
+  const title = `Anthology chapter — Repeat Contact [${RUN_ID}-t7]`;
+
+  const r1 = await createTaskCoreImpl(
+    { title, workspace_id: wsId, status: 'backlog', idempotency_key: key, eventMessage: `x [ingest:${key}]` },
+    { notifyGateway: false },
+  );
+  const r2 = await createTaskCoreImpl(
+    { title, workspace_id: wsId, status: 'backlog', idempotency_key: key, eventMessage: `x [ingest:${key}]` },
+    { notifyGateway: false },
+  );
+
+  assert.ok(r1 && r2, 'both calls must succeed');
+  assert.equal(r1!.deduped, false, 'first must not be deduped');
+  assert.equal(r2!.deduped, true, 'same idempotency key MUST still dedupe (Layer 1 unchanged)');
+  assert.equal(r2!.task.id, r1!.task.id, 'deduped result must point to the first task');
+});
+
+test('keyless same-title within window STILL dedups (Layer 2 preserved for keyless callers)', async () => {
+  // The fix must NOT weaken Layer 2 for callers WITHOUT an idempotency key
+  // (operator UI, plain Telegram capture): accidental same-title dupes still fold
+  // onto the existing row.
+  const wsId = `ws-dedup-${RUN_ID}`;
+  const title = `Keyless same-title capture [${RUN_ID}-t8]`;
+
+  const r1 = await createTaskCoreImpl(
+    { title, workspace_id: wsId, status: 'backlog' }, // no idempotency_key
+    { notifyGateway: false },
+  );
+  const r2 = await createTaskCoreImpl(
+    { title, workspace_id: wsId, status: 'backlog' }, // no idempotency_key
+    { notifyGateway: false },
+  );
+
+  assert.ok(r1 && r2, 'both calls must succeed');
+  assert.equal(r1!.deduped, false, 'first must not be deduped');
+  assert.equal(r2!.deduped, true, 'keyless same-title within window MUST still dedupe (Layer 2 intact)');
+  assert.equal(r2!.task.id, r1!.task.id, 'deduped result must point to the first task');
 });

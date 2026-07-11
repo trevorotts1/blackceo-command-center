@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -40,6 +40,10 @@ export default function HomePage() {
   // PRD 3.7: initial state must be empty so white-label deployments never flash "BlackCEO".
   const [companyName, setCompanyName] = useState('');
   const [companyLoaded, setCompanyLoaded] = useState(false);
+  // Slugs of the workspaces this deployment actually has seeded. Used to gate
+  // producer-board cards (below) so a CC without a given engine never renders a
+  // dead-link card. Empty until /api/workspaces resolves.
+  const [presentSlugs, setPresentSlugs] = useState<Set<string>>(new Set());
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
   const cardBackground = hasBrand
@@ -86,6 +90,29 @@ export default function HomePage() {
     checkConnection();
     const interval = setInterval(checkConnection, 60000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    // Discover which workspaces this deployment has so producer-board cards only
+    // render when their engine is actually present. /api/workspaces is a
+    // same-origin board-read API (no bearer needed from the browser); on any
+    // failure we leave presentSlugs empty and simply show no producer cards.
+    async function loadWorkspaceSlugs() {
+      try {
+        const res = await fetch('/api/workspaces', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const list: Array<{ slug?: string }> = Array.isArray(data) ? data : [];
+        setPresentSlugs(
+          new Set(
+            list
+              .map((w) => String(w?.slug ?? '').toLowerCase())
+              .filter(Boolean),
+          ),
+        );
+      } catch {}
+    }
+    loadWorkspaceSlugs();
   }, []);
 
   // PRD 3.8 + v4.0.1 P0-1: landing layout. Operator Console is the 5th card.
@@ -156,8 +183,49 @@ export default function HomePage() {
     },
   ];
 
+  // Producer-board cards. These are approval/production surfaces that exist ONLY
+  // on a deployment whose matching workspace is seeded (e.g. the Anthology or
+  // Podcast engine). They are gated on workspace-slug presence — NEVER hardcoded
+  // on — so a Command Center without that engine shows no dead-link card. Add a
+  // new entry here (slug must match the seeded workspace slug) to surface any
+  // future producer board the same way.
+  const producerBoardCandidates: Array<EntryCard & { slug: string }> = [
+    {
+      slug: 'anthology',
+      title: 'Anthology',
+      description: 'Producer approval board',
+      detail: 'Review each chapter and the final assembly, then approve or send back for a rewrite. Participant progress (S0→S9), the gate panel, and sign-off in one place.',
+      icon: <BookOpen className="w-7 h-7 text-white" />,
+      gradient: 'from-teal-400 via-cyan-500 to-sky-500',
+      route: '/workspace/anthology',
+      cta: 'Open Producer Board',
+    },
+    {
+      slug: 'podcast',
+      title: 'Podcast',
+      description: 'Episodes and production',
+      detail: 'The Podcast department board — episodes moving through production, from planning to publish. Manage and approve podcast work in one Kanban.',
+      icon: <Mic className="w-7 h-7 text-white" />,
+      gradient: 'from-orange-400 via-amber-500 to-red-500',
+      route: '/workspace/podcast',
+      cta: 'Open Podcast Board',
+    },
+  ];
+
+  const producerCards: EntryCard[] = producerBoardCandidates
+    .filter((c) => presentSlugs.has(c.slug))
+    .map(({ slug: _slug, ...card }) => card);
+
+  // Slot any present producer cards in right after Conversational AI, preserving
+  // the core seven-card order. Falls back to appending if that card ever moves.
+  const conversationalIdx = cards.findIndex((c) => c.route === '/conversational-ai');
+  const insertAt = conversationalIdx >= 0 ? conversationalIdx + 1 : cards.length;
+  const visibleCards: EntryCard[] = producerCards.length
+    ? [...cards.slice(0, insertAt), ...producerCards, ...cards.slice(insertAt)]
+    : cards;
+
   return (
-    <div className="min-h-screen bg-[#F8F9FB] flex flex-col">
+    <div className="min-h-screen bg-bcc-bg flex flex-col">
       {/* Header */}
       <header className="h-16 bg-white border-b border-gray-200 px-6 flex items-center justify-between">
         <div className="flex items-center gap-4">
@@ -232,7 +300,7 @@ export default function HomePage() {
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-stretch"
             variants={containerVariants}
           >
-            {cards.map((card) => (
+            {visibleCards.map((card) => (
               <motion.div
                 key={card.route}
                 className="group relative w-full h-full"

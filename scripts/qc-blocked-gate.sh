@@ -15,6 +15,10 @@
 
 set -uo pipefail
 
+_QC_BLOCKED_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/client-roster-lib.sh
+source "$_QC_BLOCKED_SCRIPT_DIR/client-roster-lib.sh"
+
 REPO_ROOT="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
 if [[ "$REPO_ROOT" == "--repo-root" ]]; then
   REPO_ROOT="${2:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -91,22 +95,58 @@ if [[ "${SKIP_SCHEDULER:-0}" != "1" ]]; then
 fi
 
 # ── Assertion 5: No client names in changed files (fleet-wide guard) ──────────
+# SCOPE: DIFF-ONLY fast-path. This assertion greps only the uncommitted git diff
+# (added `+` lines), so it catches a client name being introduced in the CURRENT
+# change set but CANNOT catch names that were ALREADY committed to tracked files.
+#
+# AUTHORITATIVE SCAN: scripts/qc-assert-no-client-names.sh walks EVERY tracked
+# file on disk (not just the diff) and is the source of truth for the fleet-wide
+# "no client names" invariant (wired into CI as the `no-client-names` job). This
+# diff check is kept only as a fast local pre-commit signal; a green result here
+# does NOT imply the tree is clean — run qc-assert-no-client-names.sh for that.
+# The client-name denylist is EXTERNALIZED (no real names live in this file) —
+# it is loaded at runtime from the operator-local roster via client-roster-lib.sh
+# ($OPENCLAW_CLIENT_ROSTER, else ~/.openclaw/client-roster.txt).
+#   * BOX mode (roster present): scan the diff for real roster names.
+#   * STRUCTURAL mode (roster absent, e.g. CI): scan the diff for the obviously-
+#     fake .example placeholder names instead (never fail-open) and WARN that the
+#     full roster-specific diff name-check was skipped.
+# Roster machinery holds the denylist DATA / placeholder template legitimately —
+# exclude those paths from the diff scan (mirrors qc-assert's _is_excluded set)
+# so the template's own placeholder lines never trip the structural check.
+_ROSTER_EXCLUDES=(
+  ':(exclude)scripts/client-roster.example.txt'
+  ':(exclude)scripts/client-roster-lib.sh'
+  ':(exclude)scripts/qc-assert-no-client-names.sh'
+  ':(exclude)scripts/qc-blocked-gate.sh'
+  ':(exclude)tests/fixtures/no-client-names/planted-client-name.txt'
+)
 if command -v git &>/dev/null && git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null; then
   # Only scan the diff if we're in a git repo.
-  DIFF_FILES=$(git -C "$REPO_ROOT" diff --name-only HEAD 2>/dev/null || true)
+  DIFF_FILES=$(git -C "$REPO_ROOT" diff --name-only HEAD -- . "${_ROSTER_EXCLUDES[@]}" 2>/dev/null || true)
   if [[ -n "$DIFF_FILES" ]]; then
-    # Grep for common client names that must never appear in NEW diff lines (+ lines).
-    # Only scans added lines (git diff lines starting with +, excluding +++ headers).
-    CLIENT_NAMES_PATTERN='(Corey|Lyric|Karen Vaughn|Sheila Reynolds|Aurelia|Beverly|Evelyn|Angeleen|Monique|Barret|Maria Anderson|Teresa Pelham|Kofi Bryant|Cassandra|Coach Kaz|Coach Cass)'
-    DIFF_ADDED=$(git -C "$REPO_ROOT" diff HEAD 2>/dev/null | grep '^+[^+]' || true)
-    if echo "$DIFF_ADDED" | grep -qE "$CLIENT_NAMES_PATTERN"; then
-      HITS=$(echo "$DIFF_ADDED" | grep -E "$CLIENT_NAMES_PATTERN" | head -3)
-      check "no-client-names-in-diff" "fail" "Client name in new diff lines: $HITS"
+    if roster_available; then
+      NAME_MODE="box"
+      mapfile -t _DENY_NAMES < <(roster_names)
     else
-      check "no-client-names-in-diff" "pass"
+      NAME_MODE="structural"
+      mapfile -t _DENY_NAMES < <(roster_example_names)
+      echo "[qc-blocked-gate] WARNING: client roster not found ($(roster_resolve_path)); skipping the full roster-specific diff name-check — scanning only for .example placeholder leaks. Set OPENCLAW_CLIENT_ROSTER or create ~/.openclaw/client-roster.txt to enable the authoritative diff check." >&2
+    fi
+    if [[ "${#_DENY_NAMES[@]}" -gt 0 ]]; then
+      CLIENT_NAMES_PATTERN="($(printf '%s\n' "${_DENY_NAMES[@]}" | paste -sd'|' -))"
+      DIFF_ADDED=$(git -C "$REPO_ROOT" diff HEAD -- . "${_ROSTER_EXCLUDES[@]}" 2>/dev/null | grep '^+[^+]' || true)
+      if echo "$DIFF_ADDED" | grep -qE "$CLIENT_NAMES_PATTERN"; then
+        HITS=$(echo "$DIFF_ADDED" | grep -E "$CLIENT_NAMES_PATTERN" | head -3)
+        check "no-client-names-in-diff" "fail" "Client name in new diff lines: $HITS"
+      else
+        check "no-client-names-in-diff ($NAME_MODE-scope; authoritative scan = qc-assert-no-client-names.sh)" "pass"
+      fi
+    else
+      check "no-client-names-in-diff (no denylist entries loaded; authoritative scan = qc-assert-no-client-names.sh)" "pass"
     fi
   else
-    check "no-client-names-in-diff" "pass" "(no diff to scan)"
+    check "no-client-names-in-diff (diff-scope; authoritative scan = qc-assert-no-client-names.sh)" "pass" "(no diff to scan)"
   fi
 fi
 

@@ -33,11 +33,11 @@ console.log(`[Demo Seed] Workspace: ${wsId} (${wsSlug})`);
 
 // --- Agents ---
 const agents = [
-  { name: 'Charlie', role: 'orchestrator', status: 'working', avatar: '🦞', model: 'claude-sonnet-4-5' },
-  { name: 'Builder', role: 'builder', status: 'working', avatar: '🔨', model: 'claude-sonnet-4-5' },
-  { name: 'Tester', role: 'tester', status: 'standby', avatar: '🧪', model: 'claude-sonnet-4-5' },
-  { name: 'Reviewer', role: 'reviewer', status: 'standby', avatar: '👁️', model: 'claude-sonnet-4-5' },
-  { name: 'Researcher', role: 'researcher', status: 'standby', avatar: '🔍', model: 'claude-sonnet-4-5' },
+  { name: 'Charlie', role: 'orchestrator', status: 'working', avatar: '🦞', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Builder', role: 'builder', status: 'working', avatar: '🔨', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Tester', role: 'tester', status: 'standby', avatar: '🧪', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Reviewer', role: 'reviewer', status: 'standby', avatar: '👁️', model: 'ollama/deepseek-v4-pro:cloud' },
+  { name: 'Researcher', role: 'researcher', status: 'standby', avatar: '🔍', model: 'ollama/deepseek-v4-pro:cloud' },
 ];
 
 const agentIds = {};
@@ -50,30 +50,33 @@ for (const agent of agents) {
 }
 
 // --- Tasks across multiple statuses ---
+// priority values MUST match the tasks.priority CHECK constraint
+// ('low','medium','high','critical') — 'normal'/'urgent' previously used here
+// failed the CHECK and aborted the demo seed with SQLITE_CONSTRAINT.
 const tasks = [
   // Planning
   { title: 'Design webhook retry system', desc: 'Implement exponential backoff for failed webhook deliveries with configurable max retries', status: 'planning', priority: 'high' },
   
   // Inbox
-  { title: 'Add dark/light theme toggle', desc: 'User preference for theme with system default detection and localStorage persistence', status: 'inbox', priority: 'normal' },
+  { title: 'Add dark/light theme toggle', desc: 'User preference for theme with system default detection and localStorage persistence', status: 'inbox', priority: 'medium' },
   { title: 'Create API rate limiter', desc: 'Token bucket rate limiting middleware with per-IP and per-token tracking', status: 'inbox', priority: 'high' },
   
   // Assigned
   { title: 'Build notification system', desc: 'Real-time browser notifications for task updates, agent status changes, and system alerts', status: 'assigned', priority: 'high', agent: 'Builder' },
   
   // In Progress
-  { title: 'Implement task dependencies', desc: 'Allow tasks to declare prerequisites. Block dispatch until dependencies are resolved. Show dependency graph in UI.', status: 'in_progress', priority: 'urgent', agent: 'Builder' },
+  { title: 'Implement task dependencies', desc: 'Allow tasks to declare prerequisites. Block dispatch until dependencies are resolved. Show dependency graph in UI.', status: 'in_progress', priority: 'critical', agent: 'Builder' },
   { title: 'Add WebSocket reconnection logic', desc: 'Auto-reconnect with exponential backoff when Gateway connection drops. Show connection status in header.', status: 'in_progress', priority: 'high', agent: 'Charlie' },
   
   // Testing
-  { title: 'Implement file preview endpoint', desc: 'Render markdown, images, and code files inline in the deliverables panel', status: 'testing', priority: 'normal', agent: 'Tester' },
+  { title: 'Implement file preview endpoint', desc: 'Render markdown, images, and code files inline in the deliverables panel', status: 'testing', priority: 'medium', agent: 'Tester' },
   
   // Review
-  { title: 'Add agent performance metrics', desc: 'Track task completion time, success rate, and token usage per agent. Display in agent modal.', status: 'review', priority: 'normal', agent: 'Reviewer' },
+  { title: 'Add agent performance metrics', desc: 'Track task completion time, success rate, and token usage per agent. Display in agent modal.', status: 'review', priority: 'medium', agent: 'Reviewer' },
   
   // Done (recent)
-  { title: 'Security hardening — auth middleware', desc: 'Bearer token authentication, Zod validation, path traversal protection, security headers', status: 'done', priority: 'urgent', agent: 'Builder' },
-  { title: 'Redesign kanban board layout', desc: 'Wider columns, better card design, smooth drag animations, status indicators', status: 'done', priority: 'normal', agent: 'Builder' },
+  { title: 'Security hardening — auth middleware', desc: 'Bearer token authentication, Zod validation, path traversal protection, security headers', status: 'done', priority: 'critical', agent: 'Builder' },
+  { title: 'Redesign kanban board layout', desc: 'Wider columns, better card design, smooth drag animations, status indicators', status: 'done', priority: 'medium', agent: 'Builder' },
   { title: 'Set up CI/CD pipeline', desc: 'GitHub Actions for lint, build, and test on every PR. Auto-deploy to staging.', status: 'done', priority: 'high', agent: 'Charlie' },
 ];
 

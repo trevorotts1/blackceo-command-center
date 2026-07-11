@@ -62,8 +62,10 @@ interface DepartmentData {
   name: string;
   emoji: string;
   headTitle: string;
-  grade: 'A' | 'B' | 'C' | 'D' | 'F';
-  gradeScore: number;
+  /** Real grade from computeDepartmentGrade; null = insufficient data — never a fabricated letter */
+  grade: 'A' | 'B' | 'C' | 'D' | 'F' | null;
+  /** Real grade score; null = insufficient data — never 0 or 72 */
+  gradeScore: number | null;
   insight: string;
 }
 
@@ -72,8 +74,10 @@ interface DepartmentData {
   name: string;
   emoji: string;
   headTitle: string;
-  grade: 'A' | 'B' | 'C' | 'D' | 'F';
-  gradeScore: number;
+  /** Real grade from computeDepartmentGrade; null = insufficient data — never a fabricated letter */
+  grade: 'A' | 'B' | 'C' | 'D' | 'F' | null;
+  /** Real grade score; null = insufficient data — never 0 or 72 */
+  gradeScore: number | null;
   insight: string;
 }
 
@@ -843,7 +847,9 @@ export default function DepartmentSubBoardPage() {
     loadDepartmentData();
   }, [deptId]);
 
-  const gradeColors = getGradeColor(department?.grade || 'B');
+  // never-72 doctrine: no fake 'B' fallback — unresolved/null grade falls
+  // through getGradeColor's default (neutral gray), not a fabricated letter's color.
+  const gradeColors = getGradeColor(department?.grade ?? '');
 
   if (isLoading) {
     return <PageSkeleton />;
@@ -969,20 +975,36 @@ export default function DepartmentSubBoardPage() {
                 <div className="flex items-center gap-4 px-6 py-4 rounded-2xl bg-white/10">
                   <div className="text-center">
                     <p className="text-sm font-medium uppercase tracking-wide text-white/70">Grade</p>
-                    <p className="text-display text-white">{department.grade}</p>
+                    {/* never-72 doctrine: null grade renders as a muted "—", never a fabricated letter */}
+                    <p className={`text-display ${department.grade ? 'text-white' : 'text-white/40'}`}>
+                      {department.grade ?? '—'}
+                    </p>
                   </div>
                   <div className="h-12 w-px bg-white/20" />
                   <div>
                     <p className="text-sm font-medium text-white/70">Performance Score</p>
-                    <p className="text-kpi-value text-white">{department.gradeScore}%</p>
+                    {department.gradeScore !== null ? (
+                      <p className="text-kpi-value text-white">{department.gradeScore}%</p>
+                    ) : (
+                      <p className="mt-1 text-sm font-medium text-white/50">Insufficient data</p>
+                    )}
                   </div>
                 </div>
               </div>
             </div>
             <div className="mt-6 p-4 bg-white/10 rounded-xl">
               <p className="text-white/90">
-                <span className="font-semibold text-white">{department.name}</span> earned a{' '}
-                <span className="font-semibold text-white">{department.grade}</span> this week.{' '}
+                {department.grade ? (
+                  <>
+                    <span className="font-semibold text-white">{department.name}</span> earned a{' '}
+                    <span className="font-semibold text-white">{department.grade}</span> this week.{' '}
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold text-white">{department.name}</span> doesn&apos;t have enough
+                    data yet for a performance grade.{' '}
+                  </>
+                )}
                 {department.insight}
               </p>
             </div>

@@ -13,7 +13,14 @@ import { z } from 'zod';
 // blocked gate, and the QC review->done gate are all enforced separately in
 // src/app/api/tasks/[id]/route.ts and remain authoritative regardless of which
 // values appear here. Adding the real statuses below does not open any gate.
-const TaskStatus = z.enum([
+//
+// AUTHORITATIVE terminal transition: a presentations deck closes via 'done'
+// (with a matching process_certificate_sha, enforced by the cert gate) — NOT
+// 'delivered'. 'delivered' is intentionally absent: it is a note, not a status,
+// so a status='delivered' PATCH is rejected here with a 400. Exported so the
+// presentations cert-gate contract test can assert the gate's terminal-status
+// set is a SUBSET of these values (see presentations-cert-gate.ts).
+export const TaskStatus = z.enum([
   'backlog',
   'inbox',
   'planning',
@@ -36,7 +43,11 @@ const ActivityType = z.enum([
   'status_changed'
 ]);
 
-const DeliverableType = z.enum(['file', 'url', 'artifact']);
+// QC-03: 'image' is a first-class deliverable type. Without it a mis-instructed
+// agent that registers an image deliverable is rejected by the Zod enum, falls
+// into the empty-manifest → heuristic-cap → stuck trap. Keep in lockstep with
+// the DeliverableType TS union in types.ts.
+const DeliverableType = z.enum(['file', 'url', 'artifact', 'image']);
 
 // Task validation schemas
 export const CreateTaskSchema = z.object({
@@ -69,6 +80,11 @@ export const UpdateTaskSchema = z.object({
   blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),
   blocked_on_human: z.enum(['owner', 'operator']).optional().nullable(),
   ask: z.string().max(500).optional().nullable(),
+  // Presentations done-gate (v4.56.0 / no-skip proof).
+  // Required when transitioning a `presentations` department task to `done`.
+  // The API route enforces presence; Zod accepts it as optional so other
+  // departments are completely unaffected by this field.
+  process_certificate_sha: z.string().optional(),
 });
 
 // Activity validation schema

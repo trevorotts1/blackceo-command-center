@@ -1,22 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs';
 import * as path from 'path';
+import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
+import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { recordDispatchFailure } from '@/lib/task-dispatcher';
+import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
+import { notifyOwnerStarted } from '@/lib/owner-reports';
+import { matchSkillsForTask, renderMatchedSkillsSection } from '@/lib/context-pack';
 
-const AGENTS_ROOT = path.join(
-  process.env.HOME ?? '/Users/blackceomacmini',
-  '.openclaw',
-  'agents',
-);
+/**
+ * P1-5 FIX — no hardcoded operator home.
+ *
+ * Was `process.env.HOME ?? <hardcoded operator absolute path>`: when HOME is
+ * unset (PM2/systemd/container contexts), a CLIENT box silently resolved the
+ * OPERATOR's own home path — wrong runtime dir AND an operator-identifying
+ * string baked into a fleet-wide repo.
+ *
+ * Mirrors the established platform convention (src/lib/platform.ts
+ * detectPlatform() + src/lib/context-pack.ts agentsRoot()): VPS Docker
+ * installs keep `/data/.openclaw` as the persistent-volume marker, and any
+ * home-relative fallback resolves via `os.homedir()`, never a literal path.
+ */
+function homeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || os.homedir();
+}
+
+const AGENTS_ROOT = detectPlatform() === 'vps-docker'
+  ? '/data/.openclaw/agents'
+  : path.join(homeDir(), '.openclaw', 'agents');
 
 /**
  * FIX 1 — resolveSpecialistSessionKey (route handler copy)
@@ -67,7 +91,29 @@ function resolveSpecialistSessionKey(
           console.log(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → bare runtime found → key ${key}`);
           return key;
         }
-        console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying role slug`);
+        // Attempt 1b — legacy/aliased slug → CANONICAL runtime. DISP-06: ported
+        // from task-dispatcher.ts so the route (manual "Send to Agent") copy no
+        // longer DRIFTS from the auto-dispatch copy. A workspace slug like `ceo`
+        // or `app-development` has its runtime dir under the canonical name
+        // (`master-orchestrator`, `engineering`); probe the canonical slug before
+        // giving up so an aliased department DISPATCHES instead of falsely
+        // reporting no_specialist_runtime.
+        const canonicalSlug = canonicalDeptSlug(candidateSlug);
+        if (canonicalSlug && canonicalSlug !== candidateSlug) {
+          const canonDeptDir = path.join(AGENTS_ROOT, `dept-${canonicalSlug}`);
+          const canonBareDir = path.join(AGENTS_ROOT, canonicalSlug);
+          if (fs.existsSync(canonDeptDir)) {
+            const key = `agent:dept-${canonicalSlug}:${openclawSessionId}`;
+            console.log(`[Dispatch] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → dept-prefixed runtime → key ${key}`);
+            return key;
+          }
+          if (fs.existsSync(canonBareDir)) {
+            const key = `agent:${canonicalSlug}:${openclawSessionId}`;
+            console.log(`[Dispatch] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → bare runtime → key ${key}`);
+            return key;
+          }
+        }
+        console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalDeptSlug(candidateSlug)}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying role slug`);
       }
     } catch (err) {
       console.warn(`[Dispatch] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
@@ -243,6 +289,29 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
 
+    // ── SYNCHRONOUS PERSONA DISPATCH GATE (F3.1 / F4.1 — heal, not stall) ────
+    // Mirror of the auto-dispatch path: resolveAndLog delivers a pinned persona
+    // (Hop 10). If the task is naked, settings.persona is the 'auto' self-select
+    // sentinel — heal it deterministically here and deliver the pinned persona
+    // instead of telling the doer to self-select (F3.6). Never stalls the board.
+    if (settings.persona === 'auto') {
+      try {
+        const { ensurePersonaForDispatch } = await import('@/lib/tasks');
+        const { canonicalDeptSlug } = await import('@/lib/routing/canonical-slug');
+        const healDept =
+          canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+        const healed = ensurePersonaForDispatch(task.id, healDept);
+        settings.persona = healed.persona_name;
+        settings.personaMode = healed.persona_mode;
+        console.warn(
+          `[Dispatch] persona gate: task ${task.id} was naked — delivering ` +
+            `${healed.healed ? 'healed' : 'pinned'} persona "${healed.persona_name}".`,
+        );
+      } catch (healErr) {
+        console.error(`[Dispatch] persona gate failed for task ${task.id}:`, healErr);
+      }
+    }
+
     const dispatchInventory = listModels();
     const dispatchModality = settings.required_modality ??
       detectModality(task.title, task.description);
@@ -277,12 +346,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // JOIN sops on task.sop_id and embed name + steps + success_criteria so the
     // specialist has actionable instructions, not just raw task metadata.
     let sopBlock = '';
+    let resolvedSopName: string | null = null; // W5.3: captured for START notification
     if (task.sop_id) {
       const sop = queryOne<SOP>(
         `SELECT id, name, steps, success_criteria, department, role FROM sops WHERE id = ? AND deleted_at IS NULL`,
         [task.sop_id]
       );
       if (sop) {
+        resolvedSopName = sop.name;
         let parsedSteps: SOPStep[] = [];
         try {
           parsedSteps = typeof sop.steps === 'string' ? JSON.parse(sop.steps) : (sop.steps as unknown as SOPStep[]);
@@ -319,6 +390,31 @@ ${stepLines.join('\n')}
     const taskProjectDir = `${projectsPath}/${projectDir}`;
     const missionControlUrl = getMissionControlUrl();
 
+    // DEP-5 / F3.7 — mirror the fast-loop dispatcher: deliver the PERSONA PLAN
+    // block for a decomposed multi-persona task. buildPersonaPlanBlock returns ''
+    // for a single-persona task, so this path is a no-op regression there. Keeps
+    // the two dispatch messages byte-identical for the persona section (FDN-3).
+    const subtaskPlan = loadSubtaskPersonas(task.id);
+    const personaPlanBlock = buildPersonaPlanBlock(subtaskPlan, settings);
+    const personaSection = personaPlanBlock
+      ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
+      : buildPersonaBlock(task, settings);
+
+    // Layer A (departments-that-use-skills): match installed SKILL.md files to
+    // the task and deliver the top-3 to the doer — parity with the auto path.
+    // Never throws (degrades to '').
+    let skillsBlock = '';
+    try {
+      const matchedSkills = await matchSkillsForTask({
+        title: task.title,
+        description: task.description,
+        department: task.department,
+      });
+      skillsBlock = renderMatchedSkillsSection(matchedSkills);
+    } catch {
+      skillsBlock = '';
+    }
+
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 
 **Title:** ${task.title}
@@ -327,28 +423,13 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
-**Agent Persona:** ${settings.persona === 'auto' ? 'AUTO-SELECT. Run the 5-Layer Persona Matching Protocol before starting:' : settings.persona}
-${settings.persona === 'auto' ? `
-1. **Layer 1 (Company Mission):** Does this persona align with the company's stated mission?
-2. **Layer 2 (Owner Values):** Does this persona match the owner's beliefs and style (see USER.md)?
-3. **Layer 3 (Company Goals):** Does this persona support the company's current goals/KPIs?
-4. **Layer 4 (Department Goals):** Does this persona fit this department's objectives/KPIs?
-5. **Layer 5 (Task Fit):** Is this persona the right guide for THIS specific task?
-
-After selecting, log your choice to persona-selection-log.md:
-[date] [task-id] [candidates-considered] [selected-persona] [layer-3-reason] [layer-4-reason] [layer-5-reason]` : ''}
+${personaSection}
 **Specialist Type:** ${specialistType}
-
+${skillsBlock}
 **OUTPUT DIRECTORY:** ${taskProjectDir}
 Create this directory and save all deliverables there.
 
-**IMPORTANT:** After completing work, you MUST call these APIs:
-1. Log activity: POST ${missionControlUrl}/api/tasks/${task.id}/activities
-   Body: {"activity_type": "completed", "message": "Description of what was done"}
-2. Register deliverable: POST ${missionControlUrl}/api/tasks/${task.id}/deliverables
-   Body: {"deliverable_type": "file", "title": "File name", "path": "${taskProjectDir}/filename.html"}
-3. Update status: PATCH ${missionControlUrl}/api/tasks/${task.id}
-   Body: {"status": "review"}
+${renderWriteBackInstructions(missionControlUrl, task.id, 'file', `${taskProjectDir}/filename.html`)}
 
 When complete, reply with:
 \`TASK_COMPLETE: [brief summary of what you did]\`
@@ -388,6 +469,17 @@ If you need help or clarification, ask the orchestrator.`;
          VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
       );
+      // DISP-07: this HOLD previously returned 202 with NO attempt-accounting,
+      // so repeated dispatches of an un-wireable dept were never capped. Share
+      // the auto path's anti-furnace accounting (recordDispatchFailure): back
+      // off + BLOCK with a SYSTEM "wire the dept runtime" report once the cap is
+      // hit, instead of returning an uncapped soft HOLD every time.
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'no_specialist_runtime',
+        audience: 'SYSTEM',
+        needs: `No OpenClaw runtime for "${agent.name}". Wire ~/.openclaw/agents/<dept-slug>/ to release this department.`,
+        context: 'manual-dispatch',
+      });
       // Leave task in backlog (no status change) so the misroute is visible on the board.
       return NextResponse.json(
         {
@@ -397,6 +489,29 @@ If you need help or clarification, ask the orchestrator.`;
           message: holdMsg,
         },
         { status: 202 },
+      );
+    }
+
+    // ── FAIL-LOUD write-back auth guard (PREVENTION, src/lib/mc-auth.ts) ──────
+    // Before flipping this task to in_progress, verify a dispatched agent can
+    // AUTHENTICATE its write-backs. If MC_API_TOKEN is unset on a box that will
+    // reject the agent's external POST/PATCH (src/middleware.ts Gate B), the
+    // agent finishes but every write-back 401s and the card freezes in_progress
+    // until the stuck sweep blocks it (the carded-but-trapped defect). Surface
+    // it NOW — HOLD + SYSTEM report — instead of dispatching work that cannot
+    // report back. Dev boxes in ALLOW_INSECURE_OPEN_API mode pass (ok:true).
+    const writeAuth = checkTaskWriteAuth();
+    if (!writeAuth.ok) {
+      console.error(`[Dispatch] HELD task ${task.id}: task-API write-back auth not provisioned — ${writeAuth.reason}`);
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'mc_api_token_unset',
+        audience: 'SYSTEM',
+        needs: writeAuth.reason,
+        context: 'manual-dispatch',
+      });
+      return NextResponse.json(
+        { success: false, held: true, reason: 'mc_api_token_unset', message: writeAuth.reason },
+        { status: 503 },
       );
     }
 
@@ -418,10 +533,13 @@ If you need help or clarification, ask the orchestrator.`;
       // message body (Agent Model / Agent Persona above) and pinned on the task
       // as the INTENDED model (see the 🤖 pill relabel in MissionQueue). We do
       // NOT claim it is the model that actually ran.
+      // DISP-01: stable idempotency key (was `Date.now()`). Keyed on the attempt
+      // counter so a genuine retry gets a fresh key while two sends racing the
+      // same window share one → the gateway can dedup a concurrent double-send.
       await client.call('chat.send', {
         sessionKey,
         message: taskMessage,
-        idempotencyKey: `dispatch-${task.id}-${Date.now()}`,
+        idempotencyKey: `dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
       });
 
       // Update task status to in_progress, and pin the resolved model_id so
@@ -443,6 +561,18 @@ If you need help or clarification, ask the orchestrator.`;
           payload: updatedTask,
         });
       }
+
+      // W5.3 — START owner notification (spec §5): persona + dept + specialist + SOP + role.
+      // All five values are in local scope. Best-effort; gateway-routed; never blocks response.
+      try {
+        notifyOwnerStarted(id, {
+          persona: settings.persona !== 'auto' ? settings.persona : null,
+          department: task.department ?? null,
+          specialist: agent.name,
+          role: agent.role ?? null,
+          sop: resolvedSopName,
+        });
+      } catch { /* non-fatal */ }
 
       // Update agent status to working
       run(

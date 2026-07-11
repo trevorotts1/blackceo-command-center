@@ -253,11 +253,11 @@ resolve_api_key() {
   for store in "${stores[@]}"; do
     [[ -f "$store" ]] || continue
     local k
-    k="$(grep -m1 '^OPENAI_API_KEY=' "$store" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' | tr -d '[:space:]')"
+    k="$(grep -m1 '^OPENAI_API_KEY=' "$store" 2>/dev/null | cut -d= -f2- | tr -d "\"'" | tr -d '[:space:]')"
     [[ -n "$k" ]] && echo "openai:$k" && return 0
-    k="$(grep -m1 '^GOOGLE_AI_API_KEY=' "$store" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' | tr -d '[:space:]')"
+    k="$(grep -m1 '^GOOGLE_AI_API_KEY=' "$store" 2>/dev/null | cut -d= -f2- | tr -d "\"'" | tr -d '[:space:]')"
     [[ -n "$k" ]] && echo "google:$k" && return 0
-    k="$(grep -m1 '^GEMINI_API_KEY=' "$store" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' | tr -d '[:space:]')"
+    k="$(grep -m1 '^GEMINI_API_KEY=' "$store" 2>/dev/null | cut -d= -f2- | tr -d "\"'" | tr -d '[:space:]')"
     [[ -n "$k" ]] && echo "google:$k" && return 0
   done
 

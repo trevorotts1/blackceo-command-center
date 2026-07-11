@@ -17,6 +17,20 @@ export default defineConfig({
     include: [
       'tests/unit/deep-health.test.ts',
       'tests/unit/cc-probe-pm2.test.ts',
+      // Floor invariant: displayed departments == chosen manifest − opt-outs, for
+      // the active company (no first-boot staleness / destructive slug collapse /
+      // foreign-company leakage / silent cap). DB-backed vitest suite; the Node
+      // built-in `npm run test:unit` glob skips it (see below) so it only runs here.
+      'tests/unit/floor-department-invariant.test.ts',
+      // P3-7: seam <-> onboarding-Python parity harness. Lives under src/ (not
+      // tests/unit/) so `npm run test:unit` (tsx --test glob) does NOT also pick it
+      // up — it uses vitest globals and only runs here via `npm run test:vitest`.
+      'src/lib/interview/__tests__/seam-parity.test.ts',
+      // v4.72.0 board-blank fix: middleware auth matrix (same-origin board reads
+      // pass through with no CF assertion / bearer; external + ingest/webhook paths
+      // still require auth). Uses vitest globals + vi.resetModules re-import, so it
+      // only runs here via `npm run test:vitest`, never the tsx --test glob.
+      'tests/unit/middleware-same-origin-board.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

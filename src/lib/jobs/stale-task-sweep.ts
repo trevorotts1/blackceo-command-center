@@ -25,9 +25,11 @@
  * Disable with DISABLE_STALE_TASK_SWEEP=1.
  */
 
-import { queryAll, run } from '@/lib/db';
+import { queryAll, queryOne, run, sqlTime, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
+import { notifySystem } from '@/lib/notify';
+import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -62,6 +64,10 @@ export interface StaleSweepResult {
   scanned: number;
   returned: number;
   repinged: number;
+  /** in_progress tasks recovered to `review` (finished work found on disk /
+   *  registered) instead of being bounced to backlog (SWEEP-RECOVER). */
+  recovered?: number;
+  recoveredIds?: string[];
   skippedReason?: string;
 }
 
@@ -72,6 +78,30 @@ function hoursAgo(hours: number): string {
 
 function progressTimestamp(row: StaleTaskRow): string {
   return row.last_progress_at ?? row.updated_at;
+}
+
+/**
+ * B6: is this review task DELIBERATELY parked by QC (a heuristic no-key /
+ * provider-down score), rather than idle-stale? Such a task carries a
+ * `[QC-HEURISTIC…]` or `[QC-DEFERRED-PROVIDER-DOWN]` qc_review event and is held
+ * in review ON PURPOSE (awaiting a human promote or provider recovery). Bouncing
+ * it back to the orchestrator just churns the review lane (the 1,958 task_returned
+ * / 5,616 stale_repinged furnace), so the stale sweep must leave it alone.
+ * NOTE: SQLite LIKE treats '[' literally (no bracket char-classes), so the
+ * '%[QC-HEURISTIC%' pattern matches both [QC-HEURISTIC] and [QC-HEURISTIC-FINAL].
+ */
+function isParkedInReview(taskId: string): boolean {
+  try {
+    const row = queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE task_id = ? AND type = 'qc_review'
+          AND (message LIKE '%[QC-HEURISTIC%' OR message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%')`,
+      [taskId],
+    );
+    return (row?.n ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -86,23 +116,10 @@ async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
     `Reminder: ${task.ask ?? '(no ask specified)'}`;
 
   if (who === 'operator') {
-    // Notify via Rescue Rangers webhook (per AGENTS.md Rescue Rangers section).
-    const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
-    if (webhookUrl) {
-      try {
-        await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'escalate',
-            agent: 'stale-task-sweep',
-            message,
-          }),
-        });
-      } catch (err) {
-        console.warn('[stale-task-sweep] Rescue Rangers re-ping failed:', (err as Error).message);
-      }
-    }
+    // SWEEP-06 / MSG-06: an operator re-ping is a SYSTEM concern — route it
+    // through the single notifySystem() path (Rescue Rangers webhook, or a
+    // server log when unset). It must NEVER reach a client Telegram.
+    notifySystem(message, { agent: 'stale-task-sweep', action: 'escalate' });
   } else {
     // Owner: notify via the Command Center's internal message route (which
     // triggers Telegram if wired). Best-effort -- no throw on failure.
@@ -143,6 +160,19 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
     ? `${handbackNote}\n\n---\n\n${task.description}`
     : handbackNote;
 
+  // SWEEP-03 (drag-back trap): a task returning to backlog FROM blocked would
+  // otherwise keep dispatch_attempts >= cap and a stale backoff window, so every
+  // advancer (intake-advance / backlog-redispatch) would filter it out and it
+  // would rot in backlog forever. Reset the dispatch accounting ONLY on the
+  // from-blocked transition — a non-blocked stale return (in_progress/review →
+  // backlog) is left untouched so a genuinely looping task still stays capped.
+  const fromBlocked = task.status === 'blocked';
+  const dispatchResetClause = fromBlocked
+    ? `,
+        dispatch_attempts = 0,
+        next_dispatch_eligible_at = NULL`
+    : '';
+
   try {
     run(
       `UPDATE tasks SET
@@ -150,7 +180,7 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
         description = ?,
         qc_reroute_attempts = ?,
         last_progress_at = ?,
-        updated_at = ?
+        updated_at = ?${dispatchResetClause}
        WHERE id = ?`,
       [updatedDescription, newAttempts, now, now, task.id],
     );
@@ -209,8 +239,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
        FROM tasks
        WHERE archived_at IS NULL
          AND status NOT IN ('done')
-         AND ${progressCol} < ?
-       ORDER BY ${progressCol} ASC
+         AND ${sqlTime(progressCol)} < ${sqlTime('?')}
+       ORDER BY ${sqlTime(progressCol)} ASC
        LIMIT 100`,
       [hoursAgo(Math.min(STALE_THRESHOLDS.review, oldestThreshold))],
     );
@@ -220,11 +250,16 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
 
   let returned = 0;
   let repinged = 0;
+  let recovered = 0;
+  const recoveredIds: string[] = [];
 
   for (const task of candidates) {
     try {
       const progressTs = progressTimestamp(task);
-      const progressDate = new Date(progressTs).getTime();
+      // B2: parseDbTime corrects the space-dialect misparse — new Date('YYYY-MM-DD
+      // HH:MM:SS') reads as LOCAL time and shifts the age by the box's UTC offset.
+      const progressDate = parseDbTime(progressTs);
+      if (Number.isNaN(progressDate)) continue;
       const ageHours = (Date.now() - progressDate) / (1000 * 60 * 60);
 
       if (task.status === 'blocked') {
@@ -262,6 +297,28 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
         STALE_THRESHOLDS.backlog;
 
       if (ageHours >= thresholdHours) {
+        // B6: a review task deliberately parked by QC (heuristic no-key /
+        // provider-down) is NOT idle-stale — leave it for the QC sweep or an
+        // operator promote instead of churning it back to the orchestrator.
+        if (task.status === 'review' && isParkedInReview(task.id)) {
+          continue;
+        }
+        // SWEEP-RECOVER: never bounce FINISHED in_progress work back to backlog.
+        // If the agent completed and only the write-back failed (the carded-but-
+        // trapped MC_API_TOKEN 401), recover the card to `review` (redelivering
+        // on-disk output) instead of demoting it. Only in_progress can carry
+        // finished-but-unregistered work; review/backlog fall through unchanged.
+        if (task.status === 'in_progress') {
+          try {
+            if (await recoverFinishedTaskToReview(task, 'stale-task-sweep')) {
+              recovered++;
+              recoveredIds.push(task.id);
+              continue;
+            }
+          } catch (err) {
+            console.error(`[stale-task-sweep] recovery check failed for ${task.id}:`, (err as Error).message);
+          }
+        }
         returnToOrchestrator(
           task,
           `Task stale in '${task.status}' for ${Math.round(ageHours)}h (threshold: ${thresholdHours}h) with no progress`,
@@ -273,5 +330,5 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     }
   }
 
-  return { scanned: candidates.length, returned, repinged };
+  return { scanned: candidates.length, returned, repinged, recovered, recoveredIds };
 }

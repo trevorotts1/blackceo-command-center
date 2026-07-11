@@ -27,6 +27,7 @@ import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -111,6 +112,15 @@ export async function POST(
        WHERE id = ?`,
       [updatedDescription, newAttempts, now, now, id],
     );
+
+    // DISP-10: complete the structured task_events audit sink for this return.
+    // The UPDATE above also rewrites description / qc_reroute_attempts /
+    // last_progress_at, so it stays a raw multi-column write; this only closes
+    // the task_events gap (backlog is a legal target from every non-terminal state).
+    recordStatusEvent(id, existing.status, 'backlog', {
+      actor: data.returned_by_agent_id ?? 'return-to-orchestrator',
+      reason: `returned to orchestrator: ${data.problem}`,
+    });
 
     // Write the task_returned event (audit trail).
     run(
