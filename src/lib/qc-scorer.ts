@@ -3758,9 +3758,11 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         // column awaiting a manual promotion or an LLM key.
         const finalMsg =
           `[QC-HEURISTIC-FINAL] Score: ${result.score.toFixed(1)}/10 | QC ran in heuristic mode ${thisPass} time(s) ` +
-          `with NO LLM key — this box cannot auto-advance review→done. MANUAL REVIEW REQUIRED: promote this task to ` +
-          `done manually, or configure an LLM scoring key (OPENAI_API_KEY / GOOGLE_API_KEY) and it will be re-scored. ` +
-          `It is now excluded from the QC review sweep permanently. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+          `with NO client Ollama Cloud judge configured — this box cannot auto-advance review→done. MANUAL REVIEW ` +
+          `REQUIRED: promote this task to done manually, or configure a client Ollama Cloud judge model (set the ` +
+          `department QC agent's model, or QC_JUDGE_MODEL, to an ollama-cloud / :cloud model ≠ the writer, called via ` +
+          `OLLAMA_CLOUD_API_KEY) and it will be re-scored. It is now excluded from the QC review sweep permanently. ` +
+          `${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
 
         run(
           `INSERT INTO events (id, type, task_id, message, created_at)

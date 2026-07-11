@@ -556,10 +556,17 @@ export function registerDeliverable(
   const id = uuidv4();
   const now = new Date().toISOString();
 
+  // B5: DO NOT reference `updated_at` here. It exists in the current schema.ts
+  // CREATE TABLE, but DBs created before it was added never got a migration to
+  // ADD the column (migration 070 only adds mime_type/file_size_bytes/sha256), so
+  // on those live boxes the column is ABSENT and naming it made EVERY
+  // registerDeliverable() throw "no column named updated_at" — silently breaking
+  // the completion chain. `updated_at` is nullable with a DEFAULT where it does
+  // exist, so omitting it is correct on both old and new schemas.
   run(
     `INSERT INTO task_deliverables
-       (id, task_id, deliverable_type, title, path, mime_type, file_size_bytes, sha256, created_at, updated_at)
-     VALUES (?, ?, 'artifact', ?, ?, ?, ?, ?, ?, ?)`,
+       (id, task_id, deliverable_type, title, path, mime_type, file_size_bytes, sha256, created_at)
+     VALUES (?, ?, 'artifact', ?, ?, ?, ?, ?, ?)`,
     [
       id,
       taskId,
@@ -568,7 +575,6 @@ export function registerDeliverable(
       reg.mime,
       reg.bytes,
       reg.sha256,
-      now,
       now,
     ],
   );

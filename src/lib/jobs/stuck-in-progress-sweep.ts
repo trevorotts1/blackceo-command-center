@@ -52,19 +52,32 @@
  *   • DISABLE_STUCK_IN_PROGRESS_SWEEP=1  — turn the sweep off entirely
  */
 
-import { queryAll, queryOne, run } from '@/lib/db';
+import { queryAll, queryOne, run, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { notifyByAudience } from '@/lib/notify';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { probeSessionLiveness } from './execution-watcher';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 
 export const STUCK_IN_PROGRESS_SWEEP_CRON = '*/5 * * * *';
 
-/** No-progress threshold, in minutes. Generous by default to avoid blocking a
- * legitimately long-running turn; a silent-dead task is caught within the hour. */
-const STUCK_IN_PROGRESS_MINUTES = parseFloat(process.env.STUCK_IN_PROGRESS_MINUTES || '45');
+/** Default no-progress threshold, in minutes. Deliberately GENEROUS: the `events`
+ * table has no mid-turn activity type, so the only pre-block liveness signals are
+ * (a) this threshold and (b) the direct session probe (B3). Real turns were
+ * observed finishing 6h+ after a 45-min false block, so the floor is raised to 180
+ * (env STUCK_IN_PROGRESS_MINUTES overrides; the box also sets 240 as a zero-code
+ * mitigation). A genuinely silent-dead task is still caught, just later — and the
+ * session probe catches confirmed-alive long turns immediately. */
+const DEFAULT_STUCK_IN_PROGRESS_MINUTES = 180;
+
+/** Read the threshold at CALL time (not module load) so a runtime env override
+ * actually takes effect — the env is read on every sweep tick. */
+function stuckThresholdMinutes(): number {
+  const parsed = parseFloat(process.env.STUCK_IN_PROGRESS_MINUTES || String(DEFAULT_STUCK_IN_PROGRESS_MINUTES));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STUCK_IN_PROGRESS_MINUTES;
+}
 
 /**
  * SWEEP-05: `events` types that are periodic SWEEP / SYSTEM bookkeeping, NOT
@@ -100,6 +113,9 @@ interface StuckRow {
   title: string;
   assigned_agent_id: string | null;
   assigned_agent_name: string | null;
+  assigned_agent_role: string | null;
+  workspace_id: string | null;
+  openclaw_session_id: string | null;
   last_progress_at: string | null;
   updated_at: string;
   last_event_at: string | null;
@@ -210,7 +226,7 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     return { scanned: 0, blocked: 0, blockedIds: [], recovered: 0, recoveredIds: [] };
   }
 
-  const cutoffMs = Date.now() - STUCK_IN_PROGRESS_MINUTES * 60_000;
+  const cutoffMs = Date.now() - stuckThresholdMinutes() * 60_000;
 
   // SWEEP-05: the liveness subquery ignores SWEEP/SYSTEM-noise event types so
   // periodic system writes cannot mask a silently-dead task.
@@ -218,6 +234,11 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
   const rows = queryAll<StuckRow>(
     `SELECT t.id, t.title, t.assigned_agent_id,
             a.name AS assigned_agent_name,
+            a.role AS assigned_agent_role,
+            t.workspace_id,
+            (SELECT s.openclaw_session_id FROM openclaw_sessions s
+               WHERE s.agent_id = t.assigned_agent_id AND s.status = 'active'
+               ORDER BY s.updated_at DESC LIMIT 1) AS openclaw_session_id,
             t.last_progress_at, t.updated_at,
             (SELECT MAX(e.created_at) FROM events e
                WHERE e.task_id = t.id
@@ -239,13 +260,16 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     // else updated_at. Only bumped by genuine status changes, so it stays
     // frozen at dispatch time for a silently-dead task.
     const progressAt = task.last_progress_at ?? task.updated_at;
-    const progressMs = Date.parse(progressAt);
+    // B2: parseDbTime corrects the space-dialect misparse (a 'YYYY-MM-DD HH:MM:SS'
+    // value read as LOCAL time shifts the age by the box's UTC offset — enough to
+    // flip a fresh task to "stuck" or vice-versa).
+    const progressMs = parseDbTime(progressAt);
     if (Number.isNaN(progressMs) || progressMs > cutoffMs) continue; // still fresh
 
     // Liveness guard: a genuinely working agent leaves activity in `events`. If
     // there is a recent event for this task, it is not silently dead — skip it.
     if (task.last_event_at) {
-      const evMs = Date.parse(task.last_event_at);
+      const evMs = parseDbTime(task.last_event_at);
       if (!Number.isNaN(evMs) && evMs > cutoffMs) continue;
     }
 
@@ -262,6 +286,24 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
       }
     } catch (err) {
       console.error(`[stuck-in-progress-sweep] recovery check failed for ${task.id}:`, (err as Error).message);
+    }
+
+    // B3: session-liveness probe. The events table has no mid-turn activity type,
+    // so a legitimately long-running turn leaves no `events` row and would be
+    // falsely blocked here. Probe the agent's OpenClaw session directly — a
+    // message newer than the cutoff proves the turn is ALIVE, so skip it. Only a
+    // confirmed-alive signal skips; an unreachable gateway / no timestamp falls
+    // through to the block path, preserving the silent-death safety net.
+    try {
+      const liveness = await probeSessionLiveness(task, cutoffMs);
+      if (liveness === 'alive') {
+        console.log(
+          `[stuck-in-progress-sweep] task ${task.id} skipped — OpenClaw session shows activity newer than the cutoff (alive)`,
+        );
+        continue;
+      }
+    } catch (err) {
+      console.warn(`[stuck-in-progress-sweep] liveness probe failed for ${task.id} (non-fatal):`, (err as Error).message);
     }
 
     try {

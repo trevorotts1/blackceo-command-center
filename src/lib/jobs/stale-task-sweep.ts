@@ -25,7 +25,7 @@
  * Disable with DISABLE_STALE_TASK_SWEEP=1.
  */
 
-import { queryAll, run } from '@/lib/db';
+import { queryAll, queryOne, run, sqlTime, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { notifySystem } from '@/lib/notify';
@@ -78,6 +78,30 @@ function hoursAgo(hours: number): string {
 
 function progressTimestamp(row: StaleTaskRow): string {
   return row.last_progress_at ?? row.updated_at;
+}
+
+/**
+ * B6: is this review task DELIBERATELY parked by QC (a heuristic no-key /
+ * provider-down score), rather than idle-stale? Such a task carries a
+ * `[QC-HEURISTIC…]` or `[QC-DEFERRED-PROVIDER-DOWN]` qc_review event and is held
+ * in review ON PURPOSE (awaiting a human promote or provider recovery). Bouncing
+ * it back to the orchestrator just churns the review lane (the 1,958 task_returned
+ * / 5,616 stale_repinged furnace), so the stale sweep must leave it alone.
+ * NOTE: SQLite LIKE treats '[' literally (no bracket char-classes), so the
+ * '%[QC-HEURISTIC%' pattern matches both [QC-HEURISTIC] and [QC-HEURISTIC-FINAL].
+ */
+function isParkedInReview(taskId: string): boolean {
+  try {
+    const row = queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE task_id = ? AND type = 'qc_review'
+          AND (message LIKE '%[QC-HEURISTIC%' OR message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%')`,
+      [taskId],
+    );
+    return (row?.n ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -215,8 +239,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
        FROM tasks
        WHERE archived_at IS NULL
          AND status NOT IN ('done')
-         AND ${progressCol} < ?
-       ORDER BY ${progressCol} ASC
+         AND ${sqlTime(progressCol)} < ${sqlTime('?')}
+       ORDER BY ${sqlTime(progressCol)} ASC
        LIMIT 100`,
       [hoursAgo(Math.min(STALE_THRESHOLDS.review, oldestThreshold))],
     );
@@ -232,7 +256,10 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
   for (const task of candidates) {
     try {
       const progressTs = progressTimestamp(task);
-      const progressDate = new Date(progressTs).getTime();
+      // B2: parseDbTime corrects the space-dialect misparse — new Date('YYYY-MM-DD
+      // HH:MM:SS') reads as LOCAL time and shifts the age by the box's UTC offset.
+      const progressDate = parseDbTime(progressTs);
+      if (Number.isNaN(progressDate)) continue;
       const ageHours = (Date.now() - progressDate) / (1000 * 60 * 60);
 
       if (task.status === 'blocked') {
@@ -270,6 +297,12 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
         STALE_THRESHOLDS.backlog;
 
       if (ageHours >= thresholdHours) {
+        // B6: a review task deliberately parked by QC (heuristic no-key /
+        // provider-down) is NOT idle-stale — leave it for the QC sweep or an
+        // operator promote instead of churning it back to the orchestrator.
+        if (task.status === 'review' && isParkedInReview(task.id)) {
+          continue;
+        }
         // SWEEP-RECOVER: never bounce FINISHED in_progress work back to backlog.
         // If the agent completed and only the write-back failed (the carded-but-
         // trapped MC_API_TOKEN 401), recover the card to `review` (redelivering
