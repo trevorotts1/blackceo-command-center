@@ -19,6 +19,7 @@ import { probeAgents } from './probes/agents';
 import { probeCli } from './probes/cli-probe';
 import { probeCloudflareTunnel } from './probes/cloudflare-tunnel-probe';
 import { probeCloudflareAccess } from './probes/cloudflare-access-probe';
+import { probeUnauthorized401 } from './probes/unauthorized-401-probe';
 import {
   ProbeResult,
   SystemStatus,
@@ -73,6 +74,7 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     cli,
     cloudflareTunnel,
     cloudflareAccess,
+    unauthorized401,
   ] = await Promise.all([
     probeDatabase(),
     probeOpenClawGateway(),
@@ -85,6 +87,11 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     probeCli(),
     probeCloudflareTunnel(),
     probeCloudflareAccess(),
+    // FLEET-FIX 2.3 / AUD-71 — the CONSUMER of the middleware 401 counter. The
+    // spec clause is "increment a counter exposed via the existing health
+    // endpoint"; registering the probe HERE is what exposes it. Without this
+    // line the counter is a producer with no consumer and the clause is unmet.
+    probeUnauthorized401(),
   ]);
 
   const components: ProbeResult[] = [
@@ -99,6 +106,7 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     cli,
     cloudflareTunnel,
     cloudflareAccess,
+    unauthorized401,
   ];
 
   for (const c of components) persistSnapshot(c);
@@ -242,6 +250,7 @@ function labelFor(component: string): string {
     cli: 'Operator CLIs',
     cloudflare_tunnel: 'Cloudflare Tunnel',
     cloudflare_access: 'Cloudflare Access',
+    unauthorized_401: 'Unauthorized 401s',
     provider_openrouter: 'OpenRouter',
     provider_anthropic: 'Anthropic',
     provider_openai: 'OpenAI',
