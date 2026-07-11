@@ -18,7 +18,7 @@
 
 import { NextResponse } from 'next/server';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
-import { envCandidatesForProvider } from '@/lib/provider-key-detection';
+import { envCandidatesForProvider, lookupKeyInOpenClawAuthStore } from '@/lib/provider-key-detection';
 import { INTEGRATION_CATALOG } from '@/lib/integration-catalog';
 import {
   candidateEnvFiles,
@@ -41,7 +41,7 @@ export interface ProviderStatusEntry {
   /** The env-var name the key was found under. null for local_endpoint or not found. */
   foundEnvVar: string | null;
   /** Where the key was found. null when not found or local_endpoint. */
-  foundInStore: 'process.env' | 'env_file' | 'openclaw_json' | null;
+  foundInStore: 'process.env' | 'env_file' | 'openclaw_json' | 'openclaw_auth_store' | null;
   /** For local_endpoint providers: the base URL being used. */
   localEndpointUrl?: string;
   /** All candidate env-var names checked (for tooltip). */
@@ -55,7 +55,7 @@ export interface IntegrationStatusEntry {
   description: string;
   configured: boolean;
   foundEnvVar: string | null;
-  foundInStore: 'process.env' | 'env_file' | 'openclaw_json' | null;
+  foundInStore: 'process.env' | 'env_file' | 'openclaw_json' | 'openclaw_auth_store' | null;
   envCandidates: string[];
 }
 
@@ -69,12 +69,20 @@ function safeReadFile(p: string): string | null {
 }
 
 /**
- * Detect whether any of `candidates` is present in any env store.
- * Returns the found env-var name, its value, and the source; or null if absent.
+ * Detect whether any of `candidates` is present in any key store.
+ * Returns the found env-var name and the source; or null if absent.
+ *
+ * `providerSlug` (model providers only) additionally enables source (4): OpenClaw's
+ * SQLite auth-profile store — the store the GATEWAY resolves keys from at runtime.
+ * For Ollama Cloud the key lives ONLY there, so without it this endpoint reported
+ * `configured=false` for a key that demonstrably exists and works. Integrations
+ * (Notion, etc.) pass no slug and are unaffected.
+ *
+ * NEVER returns or logs the key VALUE — only the env-var name and the source label.
  */
-function detectKey(candidates: readonly string[]): {
+function detectKey(candidates: readonly string[], providerSlug?: string): {
   envVar: string;
-  source: 'process.env' | 'env_file' | 'openclaw_json';
+  source: 'process.env' | 'env_file' | 'openclaw_json' | 'openclaw_auth_store';
 } | null {
   // 1. process.env
   for (const c of candidates) {
@@ -110,6 +118,18 @@ function detectKey(candidates: readonly string[]): {
     }
   }
 
+  // 4. OpenClaw's SQLite auth-profile store (model providers only). Deliberately
+  //    LAST so every env source still wins — no regression for boxes that carry
+  //    the key in env. Read-only; the value is hydrated but NEVER logged.
+  if (providerSlug) {
+    const storeKey = lookupKeyInOpenClawAuthStore(providerSlug);
+    if (storeKey) {
+      const envVar = candidates[0];
+      if (envVar) process.env[envVar] = storeKey;
+      return { envVar: envVar ?? providerSlug, source: 'openclaw_auth_store' };
+    }
+  }
+
   return null;
 }
 
@@ -137,7 +157,8 @@ export async function GET() {
       }
 
       const candidates = envCandidatesForProvider(p);
-      const found = detectKey(candidates);
+      // Pass the slug so source (4) — OpenClaw's SQLite auth store — is consulted.
+      const found = detectKey(candidates, p.slug);
       return {
         slug: p.slug,
         displayName: p.displayName,

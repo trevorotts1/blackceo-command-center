@@ -59,7 +59,7 @@ const MIGRATE_ENTRY = path.join(REPO, 'src/lib/db/migrate.ts');
 const OLD_DB_FIXTURE = path.join(REPO, 'tests/fixtures/db-v4.72.0-era.sql');
 
 /** The migration id every database must land on once fully upgraded. */
-const HEAD_MIGRATION = '096';
+const HEAD_MIGRATION = '097';
 
 /**
  * Every index the app creates anywhere (schema.ts + migrations.ts).
@@ -238,7 +238,7 @@ test('upgrade: a v4.72.0-era database (migrations stopped at 090) boots clean an
   // Migrations 091-096 actually ran.
   const lastAfter = db.prepare('SELECT id FROM _migrations ORDER BY id DESC LIMIT 1').get() as { id: string };
   assert.equal(lastAfter.id, HEAD_MIGRATION, `expected the upgraded database to reach migration ${HEAD_MIGRATION}`);
-  for (const id of ['091', '092', '093', '094', '095', '096']) {
+  for (const id of ['091', '092', '093', '094', '095', '096', '097']) {
     const row = db.prepare('SELECT id FROM _migrations WHERE id = ?').get(id);
     assert.ok(row, `migration ${id} must have been applied by the upgrade`);
   }

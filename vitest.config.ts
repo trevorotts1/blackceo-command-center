@@ -41,6 +41,12 @@ export default defineConfig({
       // count is real, the reasons are discriminated, and a misconfiguration 401
       // does not move it. vi.mock of the sibling probes, so vitest-only.
       'tests/unit/unauthorized-401-health-surface.test.ts',
+      // v5.16.2 FIX 4: Command Center resolves a provider key from OpenClaw's
+      // SQLite auth_profile_store (where the gateway itself keeps the Ollama Cloud
+      // key) — env still wins, the value is never logged, the store is read-only.
+      // Uses vi.doMock + dynamic import of an '@/...'-aliased dep tree, so it only
+      // runs here via `npm run test:vitest`, never the tsx --test glob.
+      'tests/unit/provider-key-auth-store.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

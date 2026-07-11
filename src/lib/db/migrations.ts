@@ -55,6 +55,45 @@ interface Migration {
   deferInAdditiveSelfHeal?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// DATA-01 / DISPATCH-LEDGER — the ONE source of truth for the tasks columns +
+// index the dispatch/board HOT paths read on every tick (intake-advance /
+// backlog-redispatch / stale sweeps, task-dispatcher). Migrations 077 + 078 own
+// them for existing DBs; schema.ts owns them for fresh installs. Used by THREE
+// things so they can never drift: migration 097 (reconcile), the post-migration
+// self-verification in runMigrations (fail loud), and checkDispatchSchemaHealth
+// (inspect the LIVE schema, NEVER the ledger).
+// ---------------------------------------------------------------------------
+const CRITICAL_TASKS_DISPATCH_COLUMNS: { name: string; ddl: string; owner: string }[] = [
+  { name: 'dispatch_attempts', ddl: 'ALTER TABLE tasks ADD COLUMN dispatch_attempts INTEGER DEFAULT 0', owner: '077' },
+  { name: 'last_dispatch_attempt_at', ddl: 'ALTER TABLE tasks ADD COLUMN last_dispatch_attempt_at TEXT', owner: '077' },
+  { name: 'next_dispatch_eligible_at', ddl: 'ALTER TABLE tasks ADD COLUMN next_dispatch_eligible_at TEXT', owner: '077' },
+  { name: 'block_reason', ddl: 'ALTER TABLE tasks ADD COLUMN block_reason TEXT', owner: '078' },
+];
+
+const CRITICAL_TASKS_DISPATCH_INDEXES: { name: string; column: string; ddl: string; owner: string }[] = [
+  {
+    name: 'idx_tasks_next_dispatch_eligible',
+    column: 'next_dispatch_eligible_at',
+    ddl: `CREATE INDEX IF NOT EXISTS idx_tasks_next_dispatch_eligible
+          ON tasks(next_dispatch_eligible_at) WHERE next_dispatch_eligible_at IS NOT NULL`,
+    owner: '077',
+  },
+];
+
+/** DATA-01: the LIVE-schema health of the dispatch/board columns + index. */
+export interface DispatchSchemaHealth {
+  /** True only when every critical dispatch column AND its index are genuinely present. */
+  ok: boolean;
+  tasksTablePresent: boolean;
+  /** Critical tasks columns absent from the LIVE schema (PRAGMA table_info). */
+  missingColumns: string[];
+  /** Critical indexes absent from the LIVE schema (their column exists but the index does not). */
+  missingIndexes: string[];
+  /** Migration id(s) the _migrations ledger CLAIMS applied while their columns are absent — the falsely-healed tell. */
+  ledgerClaimsAppliedButAbsent: string[];
+}
+
 // All migrations in order - NEVER remove or reorder existing migrations
 const migrations: Migration[] = [
   {
@@ -3841,6 +3880,78 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '097',
+    name: 'reconcile_missing_dispatch_columns',
+    // Purely ADDITIVE: PRAGMA-guarded `ALTER TABLE tasks ADD COLUMN` + a single
+    // `CREATE INDEX IF NOT EXISTS`. No row is read, written, moved or destroyed,
+    // so it is safe under the additive self-heal path and a no-op on healthy boxes.
+    //
+    // WHY THIS EXISTS (DATA-01 ledger-lie — confirmed live on a v5.16.1 box, v5.16.2)
+    // The runner keys applied-state on `_migrations.id` ALONE and snapshots the
+    // applied set ONCE per run (runMigrations + the DATA-03 duplicate-id guard).
+    // Migrations 077 (dispatch_attempts / last_dispatch_attempt_at /
+    // next_dispatch_eligible_at + idx_tasks_next_dispatch_eligible) and 078
+    // (block_reason) each add their columns INSIDE a `if (!cols.includes(x))`
+    // guard. On any box where id '077'/'078' was already recorded applied while
+    // the column was ABSENT, the guarded ALTER is SKIPPED FOREVER — the ledger
+    // says "applied", the box climbs to HEAD and reports healthy, but the columns
+    // never existed. Every dispatch/board tick (intake-advance / backlog-
+    // redispatch / stale sweeps, task-dispatcher) then throws
+    // "no such column: t.dispatch_attempts" and task dispatch is SILENTLY DEAD.
+    // This is the SAME class migration 079 fixes for id '074' and 096 for a
+    // guard-skipped index: fixing 077/078 in place can never reach an already-
+    // applied box, so only a NEW migration can. This one inspects the LIVE schema
+    // (never the ledger) and adds whatever is genuinely missing.
+    //
+    // Every ALTER is guarded by a fresh PRAGMA table_info read and the index by
+    // IF NOT EXISTS + a column-presence check, so this migration can NEVER become
+    // the next silent abort (096's philosophy: skipping costs one column, throwing
+    // costs the whole box — so it never throws on an unforeseen shape).
+    up: (db) => {
+      console.log('[Migration 097] Reconciling missing dispatch attempt-accounting columns...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 097] tasks table absent — nothing to reconcile');
+        return;
+      }
+
+      const presentCols = () =>
+        new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+
+      const added: string[] = [];
+      for (const { name, ddl, owner } of CRITICAL_TASKS_DISPATCH_COLUMNS) {
+        if (!presentCols().has(name)) {
+          db.exec(ddl);
+          added.push(`${name} (owed by migration ${owner})`);
+        }
+      }
+
+      const cols = presentCols();
+      const createdIdx: string[] = [];
+      for (const { name, column, ddl } of CRITICAL_TASKS_DISPATCH_INDEXES) {
+        // Only index a column that actually exists — CREATE INDEX on a missing
+        // column throws and would deadlock the box (the whole class we are fixing).
+        if (!cols.has(column)) continue;
+        const existed = db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?")
+          .get(name);
+        db.exec(ddl);
+        if (!existed) createdIdx.push(name);
+      }
+
+      console.log(
+        added.length > 0
+          ? `[Migration 097] Restored ${added.length} missing dispatch column(s): ${added.join(', ')}`
+          : '[Migration 097] All dispatch columns already present — nothing to restore',
+      );
+      if (createdIdx.length > 0) {
+        console.log(`[Migration 097] Restored missing index(es): ${createdIdx.join(', ')}`);
+      }
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -3963,6 +4074,37 @@ export function runMigrations(db: Database.Database): void {
   // DATA-02: every pending migration applied cleanly — clear any stale failure
   // marker left by an earlier failed attempt in this process.
   lastFailedMigrationId = null;
+
+  // DATA-01: MAKE THE LEDGER HONEST. A migration is recorded "applied" by id
+  // ALONE (DATA-03 duplicate-id guard), so a guarded ALTER whose guard was
+  // satisfied by a PRIOR body under the same id records applied WITHOUT its
+  // column ever existing — the falsely-healed box climbs to HEAD and reports
+  // healthy while task dispatch is dead. Migration 097 reconciles that by
+  // inspecting the LIVE schema; we ALSO verify the effect HERE and log LOUDLY
+  // if a critical dispatch column/index is STILL absent, so a ledger-lie can
+  // never again pass silently. We do NOT throw — throwing would brick a box in
+  // an unforeseen shape (exactly what migration 096 refuses to do); the loud
+  // line + checkDispatchSchemaHealth() / scripts/cc-schema-health.ts surface it.
+  // (The deeper redesign — verify EVERY migration's effect before recording it
+  // applied, e.g. a per-migration `verify` hook — is intentionally out of scope
+  // for this release; this covers the one HOT, confirmed-broken invariant.)
+  try {
+    const health = checkDispatchSchemaHealth(db);
+    if (!health.ok) {
+      console.error(
+        '[DB] SCHEMA-INTEGRITY (DATA-01): after all migrations, tasks is STILL missing ' +
+          `column(s) [${health.missingColumns.join(', ') || 'none'}] / index(es) ` +
+          `[${health.missingIndexes.join(', ') || 'none'}]. ` +
+          (health.ledgerClaimsAppliedButAbsent.length
+            ? `The _migrations ledger FALSELY claims migration(s) ${health.ledgerClaimsAppliedButAbsent.join(', ')} applied. `
+            : '') +
+          'Task dispatch will fail with "no such column: t.dispatch_attempts". ' +
+          'Run `npx tsx scripts/cc-schema-health.ts` to audit this box.',
+      );
+    }
+  } catch (verifyErr) {
+    console.error('[DB] SCHEMA-INTEGRITY check errored (non-fatal):', (verifyErr as Error).message);
+  }
 
   // Auto-seed from departments.json if workspaces table is empty
   autoSeedFromDepartmentsJson(db);
@@ -5210,6 +5352,70 @@ export function getMigrationStatus(db: Database.Database): { applied: string[]; 
   });
   const pending = sorted.filter(m => !applied.includes(m.id)).map(m => m.id);
   return { applied, pending };
+}
+
+/**
+ * DATA-01: A REAL schema health check — "is THIS box's dispatch schema ACTUALLY
+ * correct?" — answered by inspecting the LIVE schema (PRAGMA table_info +
+ * sqlite_master), NEVER the `_migrations` ledger.
+ *
+ * The ledger lies: it records a migration applied by id alone, so a box can show
+ * 077/078 (and climb to HEAD) while the columns those migrations own were never
+ * created — task dispatch is then silently dead ("no such column:
+ * t.dispatch_attempts"). This function is how you tell a TRULY-healed box from a
+ * FALSELY-healed one: `ok:false` with a non-empty `ledgerClaimsAppliedButAbsent`
+ * is the exact falsely-healed signature. Use it to re-audit boxes a ledger-only
+ * check called healthy. Read-only; never mutates.
+ */
+export function checkDispatchSchemaHealth(db: Database.Database): DispatchSchemaHealth {
+  const tasksTablePresent = !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+    .get();
+  if (!tasksTablePresent) {
+    return {
+      ok: false,
+      tasksTablePresent: false,
+      missingColumns: [],
+      missingIndexes: [],
+      ledgerClaimsAppliedButAbsent: [],
+    };
+  }
+
+  const cols = new Set(
+    (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name),
+  );
+  const idxNames = new Set(
+    (db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all() as { name: string }[]).map(
+      (r) => r.name,
+    ),
+  );
+
+  const missingColumns = CRITICAL_TASKS_DISPATCH_COLUMNS.filter((c) => !cols.has(c.name)).map((c) => c.name);
+  // An index is only "expected" once its column exists; a box that is missing the
+  // column is reported via missingColumns, not double-counted as a missing index.
+  const missingIndexes = CRITICAL_TASKS_DISPATCH_INDEXES.filter(
+    (i) => cols.has(i.column) && !idxNames.has(i.name),
+  ).map((i) => i.name);
+
+  // Which migration id(s) does the ledger CLAIM applied while their owned columns
+  // are absent? That set being non-empty is the falsely-healed fingerprint.
+  const owedByGap = new Set<string>();
+  for (const c of CRITICAL_TASKS_DISPATCH_COLUMNS) if (!cols.has(c.name)) owedByGap.add(c.owner);
+  const migrationTableExists = !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='_migrations'")
+    .get();
+  const ledgerApplied = migrationTableExists
+    ? new Set((db.prepare('SELECT id FROM _migrations').all() as { id: string }[]).map((m) => m.id))
+    : new Set<string>();
+  const ledgerClaimsAppliedButAbsent = Array.from(owedByGap).filter((id) => ledgerApplied.has(id)).sort();
+
+  return {
+    ok: missingColumns.length === 0 && missingIndexes.length === 0,
+    tasksTablePresent: true,
+    missingColumns,
+    missingIndexes,
+    ledgerClaimsAppliedButAbsent,
+  };
 }
 
 // Auto-seed company + workspaces from config/departments.json on EVERY boot.

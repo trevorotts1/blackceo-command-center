@@ -196,4 +196,5 @@ export function parseDbTime(ts: string | null | undefined): number {
 }
 
 // Export migration utilities for CLI use
-export { runMigrations, getMigrationStatus, reseedWorkspacesFromConfig, autoSeedTrioAgents, getLastFailedMigrationId } from './migrations';
+export { runMigrations, getMigrationStatus, reseedWorkspacesFromConfig, autoSeedTrioAgents, getLastFailedMigrationId, checkDispatchSchemaHealth } from './migrations';
+export type { DispatchSchemaHealth } from './migrations';

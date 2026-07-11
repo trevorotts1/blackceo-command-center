@@ -1,15 +1,22 @@
 /**
  * Ollama Cloud connector per PRD Section 3.3 (Fix #3).
  *
- * Ollama Cloud is OpenAI-compatible (verified). The base URL is
- * `https://ollama.com/api`. The operator uses Ollama Cloud daily, so this
- * connector is a flagship integration.
+ * Ollama Cloud is OpenAI-compatible. The OpenAI-compatible base URL is the bare
+ * host `https://ollama.com` (NOT `https://ollama.com/api`). The operator uses
+ * Ollama Cloud daily, so this connector is a flagship integration.
  *
- * Endpoints (subject to refresh by Track C2 once the official docs URL is
- * pinned, see Section 5):
- *   - GET  /api/v1/models                 list models
- *   - GET  /api/v1/usage                  current usage / quota
- *   - POST /api/v1/chat/completions       OpenAI-compatible chat
+ * Endpoints (VERIFIED live 2026-07-11 against https://docs.ollama.com/cloud):
+ *   - GET  /v1/models                 list models -> 200, {object:"list",data:[{id,...}]}
+ *   - POST /v1/chat/completions       OpenAI-compatible chat
+ *
+ * The previous base (`https://ollama.com/api`) produced `/api/v1/models`, which
+ * returns 404 {"error":"path \"/api/v1/models\" not found"} — this is why boxes
+ * that chose Ollama Cloud as their sovereign provider had ZERO models register
+ * (and silently ran on another provider). Fixed: the base is the bare host.
+ *
+ * NOTE: there is no `/v1/usage` endpoint upstream (404). `fetchUsage()` therefore
+ * has no working upstream and is left AS-IS — it was equally broken before this
+ * fix, so leaving it is not a regression.
  *
  * Auth: Bearer token in the `Authorization` header.
  *
@@ -33,7 +40,7 @@ import type {
 const PROVIDER_SLUG = 'ollama-cloud';
 const PROVIDER_DISPLAY_NAME = 'Ollama Cloud';
 
-const BASE_URL = process.env.OLLAMA_CLOUD_BASE_URL || 'https://ollama.com/api';
+const BASE_URL = process.env.OLLAMA_CLOUD_BASE_URL || 'https://ollama.com';
 const MODELS_ENDPOINT = `${BASE_URL}/v1/models`;
 const USAGE_ENDPOINT = `${BASE_URL}/v1/usage`;
 const CHAT_ENDPOINT = `${BASE_URL}/v1/chat/completions`;
