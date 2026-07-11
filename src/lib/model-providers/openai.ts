@@ -53,24 +53,79 @@ function authHeaders(apiKey: string): Record<string, string> {
 /**
  * Best-effort capability inference for OpenAI model ids. OpenAI does not
  * publish capability metadata on /v1/models, so we encode public knowledge.
+ *
+ * ── MODEL-07: KIND-FIRST CLASSIFICATION (fixed) ──────────────────────────────
+ * `vision` in this registry means IMAGE UNDERSTANDING (the model accepts an
+ * image as INPUT). It does NOT mean "image-related".
+ *
+ * The previous version tested `lower.includes('gpt-4o')` for vision BEFORE it
+ * checked what kind of endpoint the model actually was, and the media checks at
+ * the bottom were unreachable for anything whose id embedded a chat-family name.
+ * So `gpt-4o-mini-tts` — a SPEECH SYNTHESIZER — matched `includes('gpt-4o')` and
+ * was written into the registry as an active, vision-capable, tool-using chat
+ * model. It landed in the live catalog as one of only two "vision" models on the
+ * box. Had the dispatcher selected it for a modality=vision task, it would have
+ * handed image-comprehension work to a text-to-speech endpoint. (The model
+ * sovereignty gate refusing to guess is the only thing that prevented that.)
+ *
+ * The fix: classify the model's KIND first and RETURN EARLY. A single-purpose
+ * media / embedding endpoint is never eligible for chat-capability inference, so
+ * a chat family name buried in its id can no longer claim capabilities it does
+ * not have.
  */
 function inferCapabilities(modelId: string): ModelCapability[] {
+  // Ids arrive provider-prefixed ('openai/gpt-4o'); classify on the bare id.
   const lower = modelId.toLowerCase();
+  const base = lower.includes('/') ? lower.slice(lower.lastIndexOf('/') + 1) : lower;
+
+  // ── 1. SINGLE-PURPOSE ENDPOINTS — kind first, early return. ────────────────
+  // Each of these does exactly one thing and is NOT an image-understanding chat
+  // model, regardless of which family name appears in its id.
+  if (base.includes('embedding')) return ['embeddings'];
+  if (base.includes('moderation')) return ['text'];
+  // Speech-to-text: whisper-*, gpt-4o-transcribe, gpt-4o-mini-transcribe.
+  if (base.includes('whisper') || base.includes('transcribe')) return ['audio_transcription'];
+  // Text-to-speech: tts-1, tts-1-hd, gpt-4o-mini-tts.  ← the fake "vision" model.
+  if (base.includes('tts')) return ['audio_generation'];
+  // Image GENERATION (output), which is the opposite of vision (input):
+  // dall-e-2, dall-e-3, gpt-image-1.
+  if (base.startsWith('dall-e') || base.includes('gpt-image')) return ['image_generation'];
+  if (base.startsWith('sora')) return ['video_generation'];
+
+  // ── 2. AUDIO-IO CHAT (realtime / audio-preview). Speaks and listens; we do
+  // NOT claim vision for these — conservative, and the sovereignty gate would
+  // rather block than mis-route.
+  if (base.includes('realtime') || base.includes('audio')) {
+    return ['text', 'streaming', 'tool_use', 'audio_input', 'audio_generation'];
+  }
+
+  // ── 3. TEXT / MULTIMODAL CHAT. Only now is family inference safe. ──────────
   const caps: ModelCapability[] = ['text', 'streaming'];
-  if (lower.includes('gpt-4') || lower.includes('gpt-5') || lower.includes('o1') || lower.includes('o3') || lower.includes('o4')) {
+  const isModernChat =
+    base.includes('gpt-4') ||
+    base.includes('gpt-5') ||
+    base.startsWith('o1') ||
+    base.startsWith('o3') ||
+    base.startsWith('o4');
+  if (isModernChat) {
     caps.push('tool_use', 'structured_output', 'long_context');
   }
-  if (lower.includes('vision') || lower.includes('gpt-4o') || lower.includes('gpt-4.1') || lower.includes('gpt-5')) {
+  // Image UNDERSTANDING. The media endpoints above already returned, so a
+  // surviving gpt-4o / gpt-4.1 / gpt-5 id really is the multimodal chat model.
+  if (
+    base.includes('vision') ||
+    base.includes('gpt-4o') ||
+    base.includes('gpt-4.1') ||
+    base.includes('gpt-4-turbo') ||
+    base.includes('gpt-5') ||
+    base.startsWith('o1') ||
+    base.startsWith('o3') ||
+    base.startsWith('o4')
+  ) {
     caps.push('vision');
   }
-  if (lower.includes('o1') || lower.includes('o3') || lower.includes('o4') || lower.startsWith('gpt-5')) {
+  if (base.startsWith('o1') || base.startsWith('o3') || base.startsWith('o4') || base.startsWith('gpt-5')) {
     caps.push('reasoning');
-  }
-  if (lower.includes('embedding')) {
-    return ['embeddings'];
-  }
-  if (lower.includes('whisper') || lower.includes('transcribe')) {
-    return ['audio_transcription'];
   }
   return caps;
 }

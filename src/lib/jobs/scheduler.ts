@@ -96,6 +96,19 @@ function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise
  * Job: weekly model registry refresh. Sundays at 03:00 server local time.
  */
 async function runModelRefresh(): Promise<void> {
+  // MODEL-07 KILL SWITCH. Every other job in JOBS has one; this — the only job
+  // that can DESTRUCTIVELY rewrite the model catalog — had none. The sole lever
+  // was DISABLE_CRON, which kills *all* cron on the box and so was never a real
+  // option. When the self-destruct bug was live, that meant there was no way to
+  // stop the Sunday run from re-wiping the catalog short of disabling every job.
+  // Disable with DISABLE_MODEL_REFRESH_CRON=1.
+  if (
+    process.env.DISABLE_MODEL_REFRESH_CRON === '1' ||
+    process.env.DISABLE_MODEL_REFRESH_CRON === 'true'
+  ) {
+    console.log('[cron] model-refresh: DISABLE_MODEL_REFRESH_CRON set, skipping');
+    return;
+  }
   await refreshModels(ALL_PROVIDERS);
 }
 
@@ -259,6 +272,8 @@ async function runSopLearning(): Promise<void> {
 }
 
 const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezone?: string }> = [
+  // model-refresh: Sundays 03:00 server local. DESTRUCTIVE — it can deprecate
+  // catalog rows. Kill switch: DISABLE_MODEL_REFRESH_CRON=1 (see runModelRefresh).
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
   { name: 'usage-refresh', expr: '0 */6 * * *', fn: runUsageRefresh },
   { name: 'memory-index', expr: '0 * * * *', fn: runMemoryIndexRebuild },

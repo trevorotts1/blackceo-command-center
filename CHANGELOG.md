@@ -1,3 +1,81 @@
+## [v5.16.0] — 2026-07-11 — fix(models,notify): MODEL-07 + MSG-07 — the model catalog was deprecating itself on every refresh, and the alarm that should have said so was never connected
+
+Two defects, one silent death. A task Trevor sent at 11:31 went stuck and told nobody, four times. The chain: the word "screenshot" in prose stamped the task `required_modality=vision` → **there were no vision models, because the registry had been deleting itself every Sunday for a month** → the model-sovereignty gate correctly refused to substitute a model → it called `notifyOwner()` to say so → **`notifyOwner()` dropped the message on the floor.** The alarm was pulled and the bell was not connected.
+
+This release fixes the catalog self-destruct (MODEL-07) and the mute notification path (MSG-07). `detectModality()`'s prose-keyword false-positives — the *trigger*, not the cause — are deferred to v5.17.0.
+
+### the catalog was deprecating every model it had just refreshed — every run, on every box (`src/lib/jobs/refresh-models.ts`, `src/lib/db/index.ts`)
+`deprecateMissingModels()` compared `last_seen_at < cutoff` **as raw TEXT**. `last_seen_at` was written by SQLite `datetime('now')` → `2026-07-11 16:02:42` (**SPACE** separator). The cutoff came from JS `.toISOString()` → `2026-07-11T16:02:41.637Z` (**`T`** separator). The cutoff *is* the run's own start, so both sides always land on the **same date** — which means the separator alone decided every comparison. `' '` is `0x20`; `'T'` is `0x54`. Space sorts lower. **So every model the refresh had just stamped satisfied `last_seen_at < cutoff` and instantly re-deprecated itself.**
+
+Not theoretical. `model_registry_refresh_log` on the operator's box, weekly, via the Sunday 03:00 cron:
+
+| run | deprecated |
+|---|---|
+| 2026-07-11 | 525 |
+| 2026-07-05 | 515 |
+| 2026-06-28 | ~510 |
+| 2026-06-21 | ~584 |
+
+Live registry at time of fix: **20 active / 597 deprecated** — and the 20 were image/video/TTS endpoints, i.e. **zero language-capable models**. A boot-time re-seed of ~20 Studio rows was masking the damage: a box could report "20 active models" and look healthy while its entire provider catalog was dead. **Nothing may treat `active > 0` as healthy.**
+
+The repo already had the right tool and this code never used it: `sqlTime()` (the B2 timestamp-dialect fix) exists precisely for this bug class. The predicate now parses **both** sides to a real datetime instead of sorting them as bytes. It uses a new **`sqlTimePrecise()`** — the sub-second sibling of `sqlTime()` — because `sqlTime()` wraps `datetime(...)`, which truncates to whole **seconds**: the cutoff here is "now" and a row may have been stamped moments earlier in the same second, so truncation would collapse them to equal and a model that genuinely *vanished* would escape tombstoning. `julianday(...)` keeps fractional seconds, so **both** directions stay correct. No fudge factor, no tolerance window — the type mismatch is fixed at the source. Writers now stamp `last_seen_at` in the canonical ISO dialect (one dialect, not two), and one `seenAt` is shared across a whole pass.
+
+### ONE refresh now fully self-heals a wiped catalog — this is the fleet remediation plan, and it is pinned by a test
+The upsert sets a re-seen model back to `active`. So on a box whose catalog the bug had zeroed, **a single post-fix refresh restores it** — no database surgery, no manual re-entry, no restore-from-backup. That property is now a test (`ONE refresh fully SELF-HEALS a catalog the bug had wiped`: 8 models → all deprecated → one refresh → 8 active). If a future change breaks it, the fleet loses its recovery path, so it fails the build instead.
+
+### a refresh can no longer mass-deprecate as a silent no-op (`src/lib/jobs/refresh-models.ts`)
+A cleanup that kills 557 models should never have run four Sundays in a row without anyone knowing. `deprecateMissingModels()` now **counts first and mutates second**: if a pass would deprecate ≥10 rows AND ≥50% of a provider's active catalog, that is a **wipe, not a cleanup** — it is **refused**, the catalog is left intact, `notifySystem()` fires, and the refusal is written to `model_registry_refresh_log` where it is visible on the Model Configuration screen. A genuine mass-retirement opts in explicitly with `MODEL_REFRESH_ALLOW_MASS_DEPRECATION=1`. Refusing is always the safe side: a stale `active` row is recoverable; a wiped catalog takes every task's model resolution down with it.
+
+### the only job that can destroy the catalog was the only job with no kill switch (`src/lib/jobs/scheduler.ts`)
+`{ name: 'model-refresh', expr: '0 3 * * 0' }` was registered unconditionally at every boot. Every other job in `JOBS` has a guard (`DISABLE_SOP_LEARNING_CRON`, `DISABLE_STALE_TASK_SWEEP`, `*_ENABLED=0`…); this one had none. The only lever was `DISABLE_CRON`, which kills *all* cron on the box — so while the self-destruct was live there was no way to stop the Sunday run short of disabling every job. Now: **`DISABLE_MODEL_REFRESH_CRON=1`**.
+
+### reading the catalog no longer rewrites it (`src/app/api/cron/refresh-models/route.ts`, `src/app/api/models/route.ts`, `src/app/settings/intelligence/page.tsx`)
+Four paths reached the destructive refresh, and two of them were **reads**:
+- `GET /api/cron/refresh-models` was literally `return POST(req)` — **a browser visit to that URL wiped the model registry.** GET is now `405`, `Allow: POST`. Nothing in the codebase ever called it (the "Refresh now" button correctly uses POST; the weekly job runs in-process).
+- The Intelligence settings page fetched `/api/models?refresh=1` **on page load**, so **simply OPENING the settings page kicked a full destructive refresh** — no button, no intent, no trace. The page now just reads. Rendering a "last refreshed" badge must never *trigger* a refresh.
+- `/api/models` dropped its 6-hour stale-debounce background refresh. The only remaining trigger is a genuinely **empty** registry (fresh install), where there is nothing to deprecate and the first paint needs a catalog. Every deliberate refresh goes through `POST /api/cron/refresh-models`.
+
+### a speech synthesizer and an image generator were registered as vision models (`src/lib/model-providers/openai.ts`, `src/lib/model-providers/google.ts`)
+`vision` means **image understanding** — the model takes an image as *input*. Both connectors inferred it by substring, *before* checking what kind of endpoint the model was:
+
+```
+openai.ts   lower.includes('gpt-4o')  → gpt-4o-mini-tts        → tagged VISION
+google.ts   lower.includes('gemini')  → gemini-2.5-flash-image → tagged VISION
+```
+
+`gpt-4o-mini-tts` is **text-to-speech**. `gemini-2.5-flash-image` is an image **generator**. Neither can read an image. They were the only two "active vision models" on the operator's box — **both fake**. `gpt-4o-mini-tts` was being written into the registry with `text, streaming, tool_use, structured_output, long_context, vision`. Had the dispatcher auto-selected it for a `modality=vision` task, it would have handed image-comprehension work to a speech synthesizer; the sovereignty gate refusing to guess is the only thing that prevented it.
+
+Both connectors now classify the model's **kind first and return early**, so a chat-family name buried in a media endpoint's id can no longer claim capabilities it does not have. Google prefers the **structural evidence** its API actually provides (`supportedGenerationMethods`) over name substrings. The real multimodal chat models (`gpt-4o`, `gemini-2.5-pro`) keep `vision` — no over-correction. **No model was added, removed, or substituted**: only the classification is corrected. Sovereignty is Trevor's call.
+
+### `notifyOwner()` must never silently drop — and the operator's own board was structurally MUTE (`src/lib/notify.ts`)
+`notifyOwner()` ended in a `console.warn` + `return false`. Every **automated** caller throws that boolean away — `task-dispatcher.ts`, `qc-scorer.ts` (×2), all five helpers in `owner-reports.ts` — so an undeliverable alert simply **ceased to exist**. `grep -c "no owner chat ID found"` in the live `cc-prod` error log: **501**. One of those 501 was Trevor's own blocked-task notification, dropped at 12:04.
+
+**Why it was always null on the operator's box:** every chat-id source rejects OPERATOR ids — correctly, because that guardrail stops an agent DMing an operator as if they were the client. But the operator's own `openclaw.json` lists **only** operator ids in `allowFrom`; there is no client on that box. So every source rejected every candidate and `resolveOwnerChatId()` returned `null` — *forever*. **The rail built to stop operators spamming clients had made the operator's own board silent.**
+
+**The seam** is two mirror-image guards that partition the chat-id space, so the operator gets loud without clients getting loud:
+
+```
+validOwnerChatId    → clients only    (operator ids rejected)   [UNCHANGED]
+validOperatorChatId → operators only  (client ids rejected)     [new]
+```
+
+A SYSTEM alert therefore **cannot** reach a client — not by convention, but by construction. The client-spam guardrail is not weakened anywhere; it gains an inverse twin.
+
+- `notifyOwner()` now **escalates** to `notifySystem()` when it cannot deliver, instead of dropping. Fixing it *at the source* repairs all eight automated callers at once rather than patching eight call sites. It still returns `false`, so callers that *do* check (`interview/send-link`, which already did this right) keep reporting "owner not reachable" to the user — the escalation is additive.
+- `notifySystem()` gains a real **escalation ladder**: Rescue Rangers webhook → the **operator's** Telegram (gateway-only, via `openclaw message send`; never a direct call to `api.telegram.org`) → a **durable append-only record** (`notification-failures.jsonl` + an error-level `[notify][UNDELIVERABLE]` line). Previously it hit a `console.warn` and dropped the alert whenever no webhook was configured.
+- **Failing to notify is now itself an alarm.** An alert can no longer evaporate: if nothing is reachable, it still lands on disk.
+- An explicit mute (`OWNER_NOTIFY_TELEGRAM_DISABLED=1`, used by CI) is treated as a deliberate suppression, not a delivery failure — it does not raise a false alarm.
+
+### tests — the ones that would have caught all of this, and did not exist (`tests/unit/model-catalog-self-destruct.test.ts` [new], `tests/unit/model-capability-inference.test.ts` [new], `tests/unit/notify-undeliverable-escalation.test.ts` [new])
+There was **no test over `refreshOneProvider()` at all**. +17 tests, every one verified to **FAIL against the pre-fix code** — a test that passes with the bug present is not a test:
+- catalog self-destruct: refreshed models are still active afterward (active-count before/after — `expected: 3, actual: 0` against the old code, the exact zeroing signature); legacy SPACE-dialect rows survive; a genuinely-vanished model is **still** deprecated (no over-correction); repeated refreshes do not erode the catalog; a wipe is refused and recorded; an ordinary small retirement still proceeds; **one refresh self-heals a wiped catalog**; `GET /api/cron/refresh-models` does not mutate.
+- capability inference: a TTS model and an image generator are **not** vision-capable; no media-IO endpoint is ever tagged vision; the real multimodal chat models keep vision.
+- notification: an undeliverable owner notification **escalates and reaches the operator**; a SYSTEM alert is **never** sent to a client chat id (including when a client id is forced into `CC_OPERATOR_CHAT_ID`); an operator id still never resolves as the client owner; with nothing reachable at all, the alert still leaves a durable record.
+
+**Gates:** `tsc --noEmit` exit 0 · `test:unit` **930 tests / 917 pass / 13 fail** vs main's baseline **913 / 900 / 13** — **+17 tests, +17 pass, ZERO new failures** (failure set byte-identical to main's, subset proven by `comm`) · `vitest` 158/158 · `qc-cc.sh` 133 green · `qc-blocked-gate.sh` 8/8.
+
+**Deferred to v5.17.0:** `detectModality()` keyword precision (`VISION_SIGNALS` contains `'screenshot'` and `'inspect'`, so "inspect the config" stamps a task `vision` on prose alone) and terminal-vs-retryable dispatch classification (a condition that can never change is fed into a 120s→960s retry ladder and only blocks on attempt 5). Both are real; neither is on fire now that the catalog heals and an undeliverable task screams.
+
 ## [v5.15.0] — 2026-07-11 — fix(middleware): AUD-71 — every credential-failure 401 emits a structured log line and increments a counter the health endpoint actually serves
 
 FLEET-FIX 2.3. A rejected department-agent write-back used to vanish silently: the middleware answered a bare `401 {"error":"Unauthorized"}` and recorded **nothing**. No log line, no counter, no way for an operator to tell that anything was being turned away at all. Independent adversarial judge **9.0**, reproduced in the judge's own worktree. Rebased onto `main` @ v5.14.0 (clean — the branch was cut before the archive-lifecycle train and carries **zero** overlap with it; see *merge-train serialization* below).

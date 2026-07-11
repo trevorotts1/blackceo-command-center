@@ -126,7 +126,13 @@ export default function IntelligenceSettingsPage() {
     try {
       const [settingsRes, modelsRes] = await Promise.all([
         fetch('/api/settings/intelligence', { cache: 'no-store' }),
-        fetch('/api/models?refresh=1', { cache: 'no-store' }),
+        // MODEL-07: READ, do not refresh. This used to be `?refresh=1`, so simply
+        // OPENING this settings page kicked a destructive catalog refresh — the
+        // very refresh that (with the self-destruct bug) deprecated the whole
+        // registry. Rendering a "last refreshed" badge must never TRIGGER a
+        // refresh. The explicit "Refresh now" button (IntelligenceProviderList)
+        // still does it deliberately via POST /api/cron/refresh-models.
+        fetch('/api/models', { cache: 'no-store' }),
       ]);
       if (!settingsRes.ok) throw new Error('Failed to load settings');
       const settingsJson = (await settingsRes.json()) as IntelligenceData;
