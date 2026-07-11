@@ -376,20 +376,29 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  /**
+   * C6 / B8 — removing a department from the board SOFT-ARCHIVES it.
+   *
+   * The row (and every task, agent and SOP attached to it) is PRESERVED; the
+   * department simply stops rendering as a Kanban column. This is the same
+   * mechanism the honored declined set uses when an owner answers NO, and the
+   * hard-delete route now refuses an un-archived workspace (409) regardless.
+   * Restore with DELETE /api/workspaces/<id>/archive.
+   */
   const handleDelete = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDeleting(true);
     try {
-      const res = await fetch(`/api/workspaces/${workspace.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/workspaces/${workspace.id}/archive`, { method: 'POST' });
       if (res.ok) {
         onDelete(workspace.id);
       } else {
-        const data = await res.json();
-        alert(data.error || 'Failed to delete department');
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Failed to archive department');
       }
     } catch {
-      alert('Failed to delete department');
+      alert('Failed to archive department');
     } finally {
       setDeleting(false);
       setShowDeleteConfirm(false);
@@ -510,21 +519,25 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
             <div className="p-3 bg-red-100 rounded-full">
               <AlertTriangle className="w-6 h-6 text-red-600" />
             </div>
+            {/* C6/B8: this archives — the copy must say so. It previously claimed
+                "cannot be undone", which is no longer true and was never a promise
+                worth keeping for a board-removal action. */}
             <div>
-              <h3 className="font-semibold text-lg text-gray-900">Delete Department</h3>
-              <p className="text-sm text-gray-500">This action cannot be undone</p>
+              <h3 className="font-semibold text-lg text-gray-900">Archive Department</h3>
+              <p className="text-sm text-gray-500">Hidden from the board — nothing is deleted</p>
             </div>
           </div>
-          
+
           <p className="text-gray-600 mb-6">
-            Are you sure you want to delete <strong className="text-gray-900">{workspace.name}</strong>? 
+            Remove <strong className="text-gray-900">{workspace.name}</strong> from the board?
             {safeTaskCounts.total > 0 && (
-              <span className="block mt-2 text-red-600">
-                This department has {safeTaskCounts.total} task(s). Delete them first.
+              <span className="block mt-2 text-gray-500">
+                Its {safeTaskCounts.total} task(s) and {workspace.agentCount || 0} agent(s) are
+                preserved and come back if you restore it.
               </span>
             )}
           </p>
-          
+
           <div className="flex justify-end gap-3">
             <button
               onClick={() => setShowDeleteConfirm(false)}
@@ -532,12 +545,14 @@ function WorkspaceCard({ workspace, onDelete, index }: { workspace: WorkspaceSta
             >
               Cancel
             </button>
+            {/* No longer gated on task/agent count: archiving a POPULATED department
+                is the normal case (it is exactly what an owner's declined NO does). */}
             <button
               onClick={handleDelete}
-              disabled={deleting || safeTaskCounts.total > 0 || (workspace.agentCount || 0) > 0}
+              disabled={deleting}
               className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
             >
-              {deleting ? 'Deleting...' : 'Delete Department'}
+              {deleting ? 'Archiving...' : 'Archive Department'}
             </button>
           </div>
         </div>
