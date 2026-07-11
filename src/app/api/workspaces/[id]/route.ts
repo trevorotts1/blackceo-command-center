@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
+import {
+  assertArchivedBeforeHardDelete,
+  HardDeleteWithoutArchiveError,
+  hardDeleteRefusedResponseBody,
+} from '@/lib/delete-guard';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -126,15 +131,29 @@ export async function DELETE(
     ).get(id) as { count: number };
     
     if (taskCount.count > 0 || agentCount.count > 0) {
-      return NextResponse.json({ 
+      return NextResponse.json({
         error: 'Cannot delete workspace with existing tasks or agents',
         taskCount: taskCount.count,
         agentCount: agentCount.count
       }, { status: 400 });
     }
-    
+
+    // B8 / AUD-46 — a hard DELETE is REFUSED unless a soft-archive preceded it.
+    // Archiving is the pause button: it takes the department off the board while
+    // PRESERVING the row, so destruction becomes a deliberate two-step act instead
+    // of a one-keystroke accident. Fails CLOSED (a DB without archived_at cannot
+    // prove an archive, so it is refused, not waved through).
+    try {
+      assertArchivedBeforeHardDelete(db, 'workspaces', id);
+    } catch (err) {
+      if (err instanceof HardDeleteWithoutArchiveError) {
+        return NextResponse.json(hardDeleteRefusedResponseBody(err), { status: 409 });
+      }
+      throw err;
+    }
+
     db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
-    
+
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Failed to delete workspace:', error);
