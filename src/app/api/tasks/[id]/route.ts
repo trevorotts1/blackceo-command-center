@@ -8,7 +8,8 @@ import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/type
 import { checkTriad, getBestSOPForTask } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { spawnRecordCompletion, selectPersonaForTask } from '@/lib/persona-selector';
+import { selectPersonaForTask } from '@/lib/persona-selector';
+import { recordPersonaCompletions } from '@/lib/tasks';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
@@ -652,8 +653,10 @@ export async function PATCH(
       if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
       // Pass task title + description as --task-output so the Python
       // record_completion() function can write the persona_performance row.
+      // D7: credit EVERY blended persona (voice + topic + any subtask-decomposition
+      // personas), not just the primary voice mirror — see recordPersonaCompletions.
       const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');
-      spawnRecordCompletion(id, task.persona_id, deptSlug, taskOutput);
+      recordPersonaCompletions(id, task.persona_id, deptSlug, taskOutput);
     }
 
     // ── QC-Agent auto-scorer ────────────────────────────────────────────────

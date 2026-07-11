@@ -805,6 +805,16 @@ ${stepLines.join('\n')}
           task.persona_id = rescored.persona_id;
           task.persona_name = rescored.persona_name;
           task.persona_mode = rescored.persona_mode;
+          // D9: a CHANGED rescore that invalidated a stale blend directive
+          // (rescorePersonaWithSOP neutralized it — see invalidateStaleBlendOnRescore
+          // in tasks.ts) returns the NEW mirror value here. Patch it onto the
+          // in-memory row too — otherwise buildPersonaBlock below would still render
+          // the STALE directive (computed against the OLD persona) riding on top of
+          // the newly-rescored persona_id. `undefined` (no bundle existed) leaves
+          // task.blend_directive untouched — unchanged pre-D9 behavior.
+          if (rescored.blend_directive !== undefined) {
+            task.blend_directive = rescored.blend_directive;
+          }
           if (rescored.changed) {
             console.log(
               `[${context}] SOP-aware rescore: task ${task.id} persona → ${rescored.persona_id} ` +
