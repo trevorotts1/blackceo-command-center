@@ -61,6 +61,7 @@ import * as path from 'path';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { TRIO_ROLE_ALIASES } from '@/lib/db/migrations';
 import { getMissionControlUrl } from '@/lib/config';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
@@ -1186,11 +1187,29 @@ export function resolveTrioAgents(
     if (!cols.some((c) => c.name === 'role_type')) return empty;
 
     const resolveRole = (roleType: string): QCAgentRow | null => {
+      // C3: match EVERY alias spelling of the role, not just CC's own.
+      // Skill 23 seeds the research agent as role_type='deep-research'; this
+      // resolver matched role_type='research' exactly, so those rows were
+      // invisible — which is what convinced the seeder the slot was empty and made
+      // it insert a duplicate. Migration 092 canonicalises the existing rows; this
+      // keeps the resolver correct if Skill 23 writes the alias again.
+      const aliases = Object.keys(TRIO_ROLE_ALIASES).filter(
+        (a) => TRIO_ROLE_ALIASES[a] === roleType,
+      );
+      // An unknown role has no aliases, and `IN ()` is a SQLite syntax error.
+      if (aliases.length === 0) return null;
+      const placeholders = aliases.map(() => '?').join(',');
+
+      // ORDER BY is load-bearing: a bare LIMIT 1 let SQLite return an ARBITRARY row
+      // whenever duplicates existed, so the trio could resolve to a different agent
+      // between calls. Oldest-then-id is stable and prefers the richer Skill-23 row.
       // 1. Direct workspace_id match
       if (workspaceId) {
         const row = queryOne<QCAgentRow>(
-          'SELECT id, name, model FROM agents WHERE workspace_id = ? AND role_type = ? LIMIT 1',
-          [workspaceId, roleType],
+          `SELECT id, name, model FROM agents
+            WHERE workspace_id = ? AND lower(role_type) IN (${placeholders})
+            ORDER BY created_at ASC, id ASC LIMIT 1`,
+          [workspaceId, ...aliases],
         );
         if (row) return row;
       }
@@ -1199,8 +1218,10 @@ export function resolveTrioAgents(
       if (deptSlug) {
         const canonical = canonicalDeptSlug(deptSlug);
         const row = queryOne<QCAgentRow>(
-          'SELECT id, name, model FROM agents WHERE lower(workspace_id) = ? AND role_type = ? LIMIT 1',
-          [canonical, roleType],
+          `SELECT id, name, model FROM agents
+            WHERE lower(workspace_id) = ? AND lower(role_type) IN (${placeholders})
+            ORDER BY created_at ASC, id ASC LIMIT 1`,
+          [canonical, ...aliases],
         );
         if (row) return row;
       }
