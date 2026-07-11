@@ -92,17 +92,25 @@ const migrations: Migration[] = [
       const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
       if (!tasksInfo.some(col => col.name === 'workspace_id')) {
         db.exec(`ALTER TABLE tasks ADD COLUMN workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id)`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id)`);
         console.log('[Migration 002] Added workspace_id to tasks');
       }
-      
+
       // Add workspace_id to agents if not exists
       const agentsInfo = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
       if (!agentsInfo.some(col => col.name === 'workspace_id')) {
         db.exec(`ALTER TABLE agents ADD COLUMN workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id)`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id)`);
         console.log('[Migration 002] Added workspace_id to agents');
       }
+
+      // v5.16.1: these two indexes USED to live in schema.ts. They cannot — schema.ts
+      // runs BEFORE migrations, so indexing workspace_id there deadlocks any database
+      // that predates this migration (the idx_workspaces_archived_at class). They are
+      // created here, UNCONDITIONALLY and OUTSIDE the ALTER guards above: on a fresh
+      // install schema.ts already declared workspace_id, so the guards skip the ALTER —
+      // if the CREATE INDEX sat inside the guard (as it used to), a fresh database would
+      // silently never get the index at all.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id)`);
     }
   },
   {
@@ -1125,7 +1133,15 @@ const migrations: Migration[] = [
           db.exec(`INSERT INTO agents_new (${colList}) SELECT ${colList} FROM agents;`);
           db.exec('DROP TABLE agents;');
           db.exec('ALTER TABLE agents_new RENAME TO agents;');
+          // DROP TABLE agents destroyed EVERY index on it. Recreate all of them.
+          // v5.16.1: idx_agents_workspace was missing from this list. It survived only
+          // because schema.ts re-ran `CREATE INDEX ... idx_agents_workspace` on every
+          // getDb() call — an accidental, load-bearing self-heal. The moment that index
+          // moved out of schema.ts (it had to: workspace_id is ALTER-added by migration
+          // 002, so indexing it in the pre-migration schema deadlocks old databases),
+          // this rebuild silently dropped it for good. A rebuild MUST replay its indexes.
           db.exec('CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status)');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id)');
         });
         rebuild();
 
@@ -2192,11 +2208,19 @@ const migrations: Migration[] = [
       const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
       if (!cols.includes('qc_reroute_attempts')) {
         db.exec(`ALTER TABLE tasks ADD COLUMN qc_reroute_attempts INTEGER DEFAULT 0`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_qc_reroute ON tasks(qc_reroute_attempts) WHERE qc_reroute_attempts > 0`);
-        console.log('[Migration 061] tasks.qc_reroute_attempts + index added');
+        console.log('[Migration 061] tasks.qc_reroute_attempts column added');
       } else {
-        console.log('[Migration 061] tasks.qc_reroute_attempts already present, skipping');
+        console.log('[Migration 061] tasks.qc_reroute_attempts already present, skipping column add');
       }
+      // v5.16.1: this CREATE INDEX used to live INSIDE the guard above. schema.ts
+      // already declares qc_reroute_attempts in the base tasks CREATE, so on a FRESH
+      // install the guard is skipped — and the index was therefore never created. Every
+      // client box is a fresh install, so idx_tasks_qc_reroute was missing FLEET-WIDE,
+      // and because 061 is recorded in _migrations it could never come back. Creating
+      // it unconditionally (IF NOT EXISTS) is correct on both paths. Migration 096
+      // back-fills the boxes that already recorded 061 as applied.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_qc_reroute ON tasks(qc_reroute_attempts) WHERE qc_reroute_attempts > 0`);
+      console.log('[Migration 061] idx_tasks_qc_reroute index ready');
     },
   },
 
@@ -3704,6 +3728,117 @@ const migrations: Migration[] = [
       // which reads build-state — the canonical provenance source. A migration
       // guessing at which departments were declined would be exactly the kind of
       // unprovenanced decline that gate #8 exists to reject.
+    },
+  },
+
+  // ── Migration 096 — Reconcile indexes the fleet is silently missing (v5.16.1) ──
+  {
+    id: '096',
+    name: 'reconcile_missing_indexes',
+    // Purely ADDITIVE: nothing but `CREATE INDEX IF NOT EXISTS`. No data is read,
+    // written, moved or destroyed, so it is safe under the additive self-heal path.
+    //
+    // WHY THIS EXISTS
+    // Two defects (found by the v5.16.1 same-class audit) left indexes missing on
+    // live boxes, and neither could ever self-repair — the owning migration is
+    // already recorded in _migrations, so fixing that migration in place does
+    // nothing for a box that already ran it. Only a NEW migration can reach them.
+    //
+    //   1. Index created INSIDE a column-absence guard.
+    //      `if (!cols.includes(x)) { ALTER TABLE ... ADD COLUMN x; CREATE INDEX ON (x); }`
+    //      schema.ts already declares x in the base CREATE TABLE, so on a FRESH install
+    //      the guard is skipped — and the index is never created. Every client box is a
+    //      fresh install. Verified against a pristine v5.16.0 database:
+    //      idx_tasks_qc_reroute was MISSING. (migration 061; 058 had the same shape
+    //      before it was fixed, so boxes built before that fix also lack
+    //      idx_tasks_archived_at.)
+    //
+    //   2. A 12-step table rebuild that does not replay every index it dropped.
+    //      `DROP TABLE agents` (migration 034) destroys every index on agents, and 034
+    //      only recreated idx_agents_status. idx_agents_workspace survived purely because
+    //      schema.ts re-issued it on every getDb() — an accidental self-heal that had to
+    //      end, because that same schema.ts index is what deadlocked upgrades.
+    //
+    // Every column referenced below is guaranteed to exist by migration 096 (002, 012,
+    // 058, 061, 095 all precede it), so this migration cannot itself deadlock.
+    up: (db) => {
+      console.log('[Migration 096] Reconciling missing indexes...');
+
+      // name, table, the columns the index depends on, DDL.
+      // The columns are declared explicitly so this migration can VERIFY they exist
+      // before issuing the CREATE INDEX. That guard is the whole point: a migration
+      // that indexes a column which turns out not to exist throws, boot fail-closes,
+      // and the box is deadlocked — precisely the bug this release fixes. Migration
+      // 096 must never be able to become the next one.
+      const wanted: { name: string; table: string; cols: string[]; ddl: string }[] = [
+        // Family A — moved out of schema.ts (indexing there deadlocked old databases).
+        // Ensure they exist regardless of which migrations a given box has run.
+        { name: 'idx_workspaces_archived_at', table: 'workspaces', cols: ['archived_at'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_workspaces_archived_at ON workspaces(archived_at)' },
+        { name: 'idx_workspaces_company', table: 'workspaces', cols: ['company_id'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_workspaces_company ON workspaces(company_id)' },
+        { name: 'idx_tasks_workspace', table: 'tasks', cols: ['workspace_id'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id)' },
+
+        // Family B — the index was created INSIDE a column-absence guard, so a fresh
+        // install (schema.ts already declared the column -> guard skipped) never got
+        // it. idx_tasks_qc_reroute was missing on EVERY box in the fleet this way.
+        { name: 'idx_tasks_qc_reroute', table: 'tasks', cols: ['qc_reroute_attempts'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_tasks_qc_reroute ON tasks(qc_reroute_attempts) WHERE qc_reroute_attempts > 0' },
+        { name: 'idx_tasks_archived_at', table: 'tasks', cols: ['archived_at'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at)' },
+
+        // Family C — a table rebuild dropped the table (and every index on it) without
+        // replaying them. Migration 034 (agents) replayed only idx_agents_status;
+        // migration 020 defers a legacy da_challenges to 024, which reconciles the
+        // table but never recreates 020's three indexes.
+        { name: 'idx_agents_workspace', table: 'agents', cols: ['workspace_id'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id)' },
+        { name: 'idx_da_task', table: 'da_challenges', cols: ['task_id'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_da_task ON da_challenges(task_id)' },
+        { name: 'idx_da_status', table: 'da_challenges', cols: ['status'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_da_status ON da_challenges(status)' },
+        { name: 'idx_da_severity', table: 'da_challenges', cols: ['severity'],
+          ddl: 'CREATE INDEX IF NOT EXISTS idx_da_severity ON da_challenges(severity)' },
+      ];
+
+      const created: string[] = [];
+      const skipped: string[] = [];
+
+      for (const { name, table, cols, ddl } of wanted) {
+        const tableExists = db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?")
+          .get(table);
+        if (!tableExists) {
+          skipped.push(`${name} (no ${table} table)`);
+          continue;
+        }
+        const present = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name),
+        );
+        const absent = cols.filter((c) => !present.has(c));
+        if (absent.length > 0) {
+          // Do NOT throw. A missing column here means a box is in a shape we did not
+          // predict; skipping costs one index, throwing costs the entire box.
+          skipped.push(`${name} (${table}.${absent.join('/')} absent)`);
+          continue;
+        }
+
+        const existed = db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?")
+          .get(name);
+        db.exec(ddl);
+        if (!existed) created.push(name);
+      }
+
+      console.log(
+        created.length > 0
+          ? `[Migration 096] Restored ${created.length} missing index(es): ${created.join(', ')}`
+          : '[Migration 096] All indexes already present — nothing to restore',
+      );
+      if (skipped.length > 0) {
+        console.log(`[Migration 096] Skipped (shape not present, not an error): ${skipped.join(', ')}`);
+      }
     },
   },
 ];

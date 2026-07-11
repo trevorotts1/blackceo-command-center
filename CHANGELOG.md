@@ -1,3 +1,65 @@
+## [v5.16.1] — 2026-07-11 — fix(db): the migration deadlock — every box below v5.14.0 was physically unable to upgrade, and three more index defects were hiding behind it
+
+**The fleet roll was blocked by a boot deadlock, not by the model catalog.** Upgrading Command Center to v5.14.0–v5.16.0 on any pre-existing database aborted at boot:
+
+```
+[instrumentation] FATAL: DB init failed (db open/schema) — aborting boot wiring;
+/api/health will report 503 fail-closed. NOT registering cron/bridge against a broken DB:
+SqliteError: no such column: archived_at
+```
+
+### Why it was a DEADLOCK, not a crash
+
+`getDb()` (`src/lib/db/index.ts`) boots in a fixed order — base schema first, migrations second:
+
+```
+handle.exec(schema);      // index.ts:61
+runMigrations(handle);    // index.ts:69
+```
+
+On an existing database every `CREATE TABLE IF NOT EXISTS` in `schema.ts` is a no-op, so each table keeps its OLD column set. `schema.ts` nonetheless carried `CREATE INDEX idx_workspaces_archived_at ON workspaces(archived_at)`, while `workspaces.archived_at` is only ALTER-added by **migration 095**. On any database that had not yet run 095 the index threw `no such column` — and because `db.exec()` aborts the entire script at the first failing statement, the DB layer never came up. Boot fail-closed, `/api/health` went 503, and **migration 095 — the thing that would have added the column — could never run.** The fix shipped inside the very migration the broken boot prevented from running. A box could not upgrade its way out.
+
+Fresh installs were unaffected (`schema.ts` creates `workspaces` *with* the column), which is exactly why this survived release: **nothing ever tested upgrading a real old database.**
+
+### Blast radius (measured, not estimated)
+
+A database was built from **every one of the 138 tags in this repo's history**, then booted against v5.16.0:
+
+| source version | result |
+|---|---|
+| v3.2.0 → v5.13.0 (**135 tags**) | **FAIL** — `SqliteError: no such column: archived_at` |
+| v5.14.0, v5.15.0, v5.16.0 | pass (already at migration 095) |
+
+Every box below v5.14.0 was bricked on upgrade — not only the v4.72.0 box the roll surfaced it on.
+
+### The fix
+
+An index in `schema.ts` on a migration-added column is *never* correct, because `schema.ts` runs before every migration. Making the schema step "resilient" was rejected: `db.exec()` aborts the remainder of the script on any error, so swallowing the throw would silently skip the rest of the schema and would mask real errors. Instead the index moves to the migration that owns its column — already this repo's documented convention (`sops.role`/`source` → migration 050; the dispatch columns → migration 077).
+
+- `idx_workspaces_archived_at` removed from `schema.ts`; **migration 095** already created it unconditionally.
+- Same class, also removed from `schema.ts`: `idx_workspaces_company` (column added by 012), `idx_tasks_workspace` and `idx_agents_workspace` (column added by 002). Migration 002 now creates its two indexes **outside** the column-absence guard, so fresh installs still get them.
+
+### Three more index defects the audit turned up
+
+The deadlock masked them — `db.exec()` aborts at the first bad statement, so nothing behind it ever ran. With the deadlock fixed, they surfaced:
+
+- **`idx_tasks_qc_reroute` was missing on EVERY box in the fleet.** Migration 061 created it *inside* its `if (column missing)` guard, but `schema.ts` already declares `tasks.qc_reroute_attempts` — so on a fresh install (which is how every client box is built) the guard was skipped and the index was never created. Verified absent on a pristine v5.16.0 database. It backs the QC loop guard.
+- **Migration 034 rebuilds `agents` (`DROP TABLE`) and replayed only `idx_agents_status`**, destroying `idx_agents_workspace` and never restoring it. It survived only because `schema.ts` re-issued `CREATE INDEX` on every `getDb()` call — an accidental, load-bearing self-heal. The moment that index had to leave `schema.ts` (see above), the rebuild dropped it for good. A rebuild must replay every index it drops. (Migration 076 does this correctly: it captures and replays from `sqlite_master`.)
+- **`idx_da_task` / `idx_da_status` / `idx_da_severity` missing on v3.x-era databases.** Migration 020 defers a legacy `da_challenges` table to migration 024, which reconciles the table without recreating 020's three indexes.
+
+An index whose owning migration is already recorded in `_migrations` can never be repaired by fixing that migration — it will not run again. Only a NEW migration can reach those boxes.
+
+### Added
+
+- **Migration 096 `reconcile_missing_indexes`** — back-fills all of the above on existing boxes. `CREATE INDEX IF NOT EXISTS` only: no data is read, written, moved or destroyed. Every index is guarded by an explicit table + column existence check, so 096 **cannot itself become the next deadlock** — a shape it does not recognize is skipped and logged, never thrown.
+- **`tests/unit/db-upgrade-migration-ordering.test.ts`** — the test that would have caught this and did not exist:
+  - **An UPGRADE test**, not just a fresh-install test. It builds a genuine v4.72.0-era database (`tests/fixtures/db-v4.72.0-era.sql`, generated from this repo's own history — 87 `_migrations` rows, last applied 090, `workspaces.archived_at` absent, `tasks.archived_at` present; never copied from a client box), runs the real boot path, and asserts it comes up clean and applies 091–096 while preserving existing rows.
+  - A **fresh-install** test — the old path must not be fixed by breaking the new one.
+  - A **static invariant**: `schema.ts` may never index a column that any migration ALTER-adds. Scoped precisely — `CREATE INDEX`, `CREATE UNIQUE INDEX` and partial-index `WHERE` clauses throw on a missing column, whereas `CREATE TRIGGER` and `CREATE VIEW` resolve lazily in SQLite and cannot deadlock boot.
+  - An **index-completeness** assertion on both paths: every index the code creates must exist. This is what catches the guard-skipped and rebuild-dropped families.
+
+All three tests fail against v5.16.0 and pass on v5.16.1. Re-verified end to end: all **138** historical versions now boot, migrate to head, and land with a complete index set.
+
 ## [v5.16.0] — 2026-07-11 — fix(models,notify): MODEL-07 + MSG-07 — the model catalog was deprecating itself on every refresh, and the alarm that should have said so was never connected
 
 Two defects, one silent death. A task Trevor sent at 11:31 went stuck and told nobody, four times. The chain: the word "screenshot" in prose stamped the task `required_modality=vision` → **there were no vision models, because the registry had been deleting itself every Sunday for a month** → the model-sovereignty gate correctly refused to substitute a model → it called `notifyOwner()` to say so → **`notifyOwner()` dropped the message on the floor.** The alarm was pulled and the bell was not connected.
