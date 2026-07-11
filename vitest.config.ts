@@ -36,6 +36,11 @@ export default defineConfig({
       // re-import pattern as middleware-same-origin-board.test.ts above, so it
       // only runs here via `npm run test:vitest`, never the tsx --test glob.
       'tests/unit/middleware-401-telemetry.test.ts',
+      // FLEET-FIX 2.3 / AUD-71: the CONSUMER side — the counter is actually
+      // exposed on the health surface (runAllProbes -> /api/system/status), the
+      // count is real, the reasons are discriminated, and a misconfiguration 401
+      // does not move it. vi.mock of the sibling probes, so vitest-only.
+      'tests/unit/unauthorized-401-health-surface.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
