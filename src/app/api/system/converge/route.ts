@@ -149,7 +149,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     ran_at: string;
     scope: string;
     workspaces?: { created: number; updated: number };
-    sops?: { imported: number; updated: number };
+    sops?: { imported: number; updated: number; active_total?: number };
     untagged_personas?: string[];
     deploy?: {
       rebuild_required_after_code_change: boolean;
@@ -185,12 +185,44 @@ export async function POST(req: NextRequest): Promise<Response> {
       // OPENCLAW_WORKSPACE_PATH default when no ZHC company tree is present.
       const departmentsPath = resolveDepartmentsTreePath() ?? undefined;
       const sopResult = importRoleLibrary({ pruneMissing: false, departmentsPath });
+
+      // C2 — ASSERT scope=sops actually produced an SOP library. The live failure
+      // this guards: the on-disk role library was never wired into the installer,
+      // so importRoleLibrary reads 0 rows and the `sops` table stays empty/stale
+      // while converge still returns ok:true — a "ghost library" that silently
+      // blocks the Triad Rule on every task. Fail LOUD (500) when a scope=sops
+      // converge leaves zero active SOP rows, so the ingest wiring gets fixed
+      // instead of shipping a dead board. (Deprecated + test-dept rows carry
+      // deleted_at and are excluded, matching every downstream `deleted_at IS
+      // NULL` reader.)
+      const db = getDb();
+      const activeSopCount =
+        (db.prepare('SELECT COUNT(*) AS c FROM sops WHERE deleted_at IS NULL').get() as
+          | { c: number }
+          | undefined)?.c ?? 0;
+      if (activeSopCount === 0) {
+        return NextResponse.json(
+          {
+            ok: false,
+            ran_at,
+            scope,
+            error:
+              'converge scope=sops produced an EMPTY SOP library (0 active rows). ' +
+              'The on-disk role library was not ingested into `sops` — the Triad Rule ' +
+              'will block every task. Verify the ingest wiring (Phase 6c ingest-sop-library.sh) ' +
+              'and re-run converge scope=sops.',
+          },
+          { status: 500 }
+        );
+      }
+
       // ImportResult has inserted + updated + skipped. Map:
       //   inserted → imported (new rows created)
       //   updated  → updated  (existing rows refreshed)
       result.sops = {
         imported: sopResult.inserted,
         updated: sopResult.updated,
+        active_total: activeSopCount,
       };
     } catch (err) {
       return NextResponse.json(
