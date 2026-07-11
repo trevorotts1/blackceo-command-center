@@ -35,7 +35,7 @@ yourself honestly.
 
 A pattern match **cannot** tell a client's real name from a book-persona name. It will either miss real leaks or block legitimate product PRs forever — and it has already done both. Do not "fix" a missed name by widening a regex, and do not add an identifier scan pass to any guard.
 
-- **Names → LLM review.** The authoritative name check is `scripts/qc-llm-diff-review.py`, run on every PR by `.github/workflows/qc-llm-diff-review.yml`. It reads the diff's added lines and blocks on the three rules above. It **fails closed**: reviewer error, malformed response, API error, or timeout is a **BLOCK**.
+- **Names → LLM review.** The authoritative name check is `scripts/qc-llm-diff-review.py`, run on every PR by `.github/workflows/qc-llm-diff-review.yml`. It reads the diff's added lines and blocks on the three rules above. It **fails closed**: reviewer error, malformed response, API error, or timeout is a **BLOCK**. The reviewer calls **Google Gemini Flash** (the fleet's own provider) via the `GEMINI_API_KEY` repo secret — **never Anthropic**. This CI-only reviewer is unrelated to Check #8's model-cost policy for shipped `src/lib` code; if it were ever run on a client box it must use that client's own provider.
 - **Secrets → regex is correct.** A secret has a literal shape; a human name does not. The reviewer runs a `pit-`/token secret regex pre-filter in addition to the model.
 - The legacy shell gates (`qc-assert-no-client-names.sh`, `qc-blocked-gate.sh` Assertion 5) survive only as a cheap always-on scan for the operator machine path and `.example` placeholder leaks. Their roster is **human names only** — `client-roster-lib.sh` filters opaque identifiers out at load time.
 
