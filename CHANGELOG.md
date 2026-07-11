@@ -1,3 +1,16 @@
+## [v5.8.0] — 2026-07-11 — chore(scripts): fleet-safe pristine-DB reset helper for duck-test runs (`reset-canary.sh`)
+
+Landed from `feat/sop-embeddings-gemini2-purge`, which was **257 commits stale** (v4.53.0 vs main v5.7.0). Its headline feature had ALREADY landed on main independently — `backfill-sop-embeddings.ts`'s non-active-model PURGE block and the `db:embed:sops` npm script are both present on main, so the branch contributed ZERO new lines there. The only net-new content was a test-instance reset helper, which is what this release lands (after two blocking defects were fixed). Judge 8.7.
+
+### fixed before merge — two defects that would have damaged main
+- **Operator-path leak (would have turned the fleet gate RED).** `scripts/reset-canary.sh` hardcoded the operator's home directory in 2 places. This repo is FLEET-WIDE and is cloned to every box; `scripts/qc-assert-no-client-names.sh` scans tracked files for exactly that operator path and FAILS on it. Merging as-shipped would have broken the invariant restored in v5.7.0 one release earlier.
+- **Version regression.** The branch carried `4.53.2 → 4.53.0` in `package.json` and would have REVERTED main's version. Conflict resolved in main's favour.
+
+### add — `scripts/reset-canary.sh` (fleet-safe)
+- Restores a Command Center test instance to a pristine DB snapshot between duck-test runs: stops the pm2 process, clears WAL/SHM leftovers, restores the snapshot, restarts, then health-checks the instance and reports the workspace count.
+- **Hardcodes no machine-specific path.** Every location resolves from an env var with a `$HOME`-relative default — `CC_TEST_DIR`, `CC_TEST_DB`, `CC_TEST_PRISTINE`, `CC_TEST_PM2`, `CC_TEST_URL` — so it runs unmodified on any box. `bash -n` clean; `qc-assert-no-client-names.sh` PASS.
+- Standalone utility: wired into no app code path and no CI gate, so it carries zero regression surface.
+
 ## [v5.7.0] — 2026-07-11 — fix(fleet-repo): scrub the one real client human-name leak from a test fixture
 
 This repo is FLEET-WIDE — it is cloned to every client box, so no real human name (client, roster member, individual) may appear in any tracked file. An authoritative roster-driven scan of every tracked file on `main` (`scripts/qc-assert-no-client-names.sh`, run in BOX mode against a real roster) found exactly ONE genuine violation: a real client's first name used as fixture text in a unit-test task title. It is now a neutral string. The gate goes FAIL → PASS. Judge 9.5.
