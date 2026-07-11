@@ -18,6 +18,10 @@ import { isAnthologyTask } from './anthology/anthology-card';
 // self-contained in its own component so it stays isolated from other TaskModal work.
 import { AssemblyCockpit } from './anthology/AssemblyCockpit';
 import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
+// D3 — audience-confirm panel (persona-blend / W7 --blend). Rendered only for
+// a task that actually went through the blend (task.blend_directive present)
+// so a plain non-content task never fires the extra gate-status fetch.
+import { AudienceConfirmPanel } from './AudienceConfirmPanel';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -416,6 +420,17 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
             <div className="mb-4">
               <GatePanel task={task} />
             </div>
+          )}
+          {/* D3 — Audience-confirm panel (persona-blend / W7 --blend). A content
+              task carries a persisted `blend_directive` mirror column iff it
+              went through --blend (D1); that cheap presence check gates the
+              panel's mount so a plain task never fires the extra gate-status
+              fetch. The panel itself GETs /api/tasks/[id]/audience and renders
+              nothing unless the gate is actively HOLDing the task. Sits outside
+              the form, same as GatePanel, so its Confirm button never submits
+              the task-edit form. */}
+          {task && task.blend_directive && (
+            <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
           )}
             <form onSubmit={handleSubmit} className="space-y-4">
           {/* U13 — B12 Assembly cockpit: readiness → arm (typed name) → order →

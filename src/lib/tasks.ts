@@ -424,6 +424,11 @@ export function loadSopSelectorContextById(
  * updated task over SSE so the board chip lands. Retry-backed and bounded.
  *
  * @param sopContext Optional SOP context (F3.4) folded into the match at creation.
+ * @param opts.blend D1 — when true, run the voice-first audience+topic BLEND
+ *   (`--blend`) instead of the legacy single-persona select. createTaskCore
+ *   passes this for content tasks (isContentTask) INSTEAD of routing to
+ *   `--combined`. persistPersonaBundle (below, once `persona.bundle` lands)
+ *   already handles the resulting bundle — no other call site change needed.
  * @returns the pinned persona_id (a matched persona OR, on selector exhaustion, a
  *          deterministic department-default flagged persona_fallback=true), or null
  *          ONLY when the selector explicitly returned no_persona_required.
@@ -433,10 +438,13 @@ export async function resolvePersonaAndPin(
   taskDescription: string,
   departmentForSelector: string,
   sopContext?: SopSelectorContext,
+  opts?: { blend?: boolean },
 ): Promise<string | null> {
   for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
     try {
-      const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext);
+      const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext, {
+        blend: opts?.blend,
+      });
 
       // PRD 3.4 SENTINEL GUARD: loudly flag bad ids from a stale selector install.
       if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
@@ -684,6 +692,66 @@ export function isMechanicalTask(text: string): boolean {
   if (_MECH_SINGLEWORD.some((m) => new RegExp(`\\b${m}\\b`).test(t))) return true;
   if (_MECH_DELIVERY.some((m) => t.includes(m))) return true;
   return false;
+}
+
+// ─── D1 — TS MIRROR OF persona_blend.is_content_task (persona_blend.py:92-108,
+// 318-337) ────────────────────────────────────────────────────────────────
+// createTaskCore uses this to decide `--blend` (voice-first audience+topic,
+// D1) vs `--combined` (plain multi-persona decomposition): a content task's
+// bundle already decomposes into up to 10 task_personas INTERNALLY
+// (persona_blend.py's build_bundle() calls decompose-task.py's combined_select
+// under the hood), so running --combined too would double-decompose the same
+// job. Word-set values are byte-for-byte copies of the Python source so the
+// two never silently drift; see pers01-fallback-pins.test.ts for the sibling
+// value-parity pattern this mirrors.
+const _CONTENT_WORDS = new Set([
+  'email', 'newsletter', 'broadcast', 'blast', 'sequence',
+  'social', 'post', 'caption', 'tweet', 'thread', 'reel', 'story',
+  'instagram', 'facebook', 'linkedin', 'tiktok', 'youtube',
+  'podcast', 'episode', 'script', 'voiceover', 'vsl',
+  'blog', 'article', 'essay',
+  'ad', 'advert', 'advertisement', 'headline', 'hook',
+  'copy', 'copywriting', 'bio',
+  'video', 'short', 'carousel', 'slide', 'deck', 'webinar',
+  'write', 'draft', 'rewrite', 'ghostwrite', 'compose', 'pitch',
+  'message', 'dm', 'outreach', 'nurture', 'announcement',
+]);
+
+const _CONTENT_PHRASES = [
+  'e-mail', 'x post', 'show notes', 'op-ed', 'guest post',
+  'landing page', 'sales page', 'sales letter', 'opt-in', 'lead magnet',
+  'ad copy', 'web copy', 'about page',
+];
+
+/** Mirror of persona_blend.py `_stem` — light singular/gerund stemmer. */
+function _blendStem(tok: string): string {
+  if (tok.length > 5 && tok.endsWith('ing')) return tok.slice(0, -3);
+  if (tok.length > 4 && tok.endsWith('es')) return tok.slice(0, -2);
+  if (tok.length > 3 && tok.endsWith('s')) return tok.slice(0, -1);
+  return tok;
+}
+
+const _CONTENT_WORD_STEMS = new Set(Array.from(_CONTENT_WORDS, _blendStem));
+
+/**
+ * TS mirror of persona_blend.py `is_content_task` (lines 318-337). True when
+ * the task is a content/communication job (audience voice matters). Matches
+ * WORD-WISE against the task's token set (or a token's light stem), never as a
+ * raw substring — so 'ad' matches the token 'ad'/'ads' but not
+ * 'read'/'download'/'admin'/'grade', and 'post' matches 'post'/'posts' but not
+ * 'compost' — exactly the Python rationale. Multi-word / hyphenated signals
+ * are matched as a space-bounded phrase.
+ */
+export function isContentTask(taskText: string): boolean {
+  if (!taskText) return false;
+  const text = taskText.toLowerCase();
+  // Array.from (not a for..of over the Set) — this repo's tsconfig has no
+  // explicit `target`, so bare Set iteration needs --downlevelIteration.
+  const words = Array.from(new Set(text.match(/[a-z0-9]+/g) || []));
+  if (words.some((w) => _CONTENT_WORDS.has(w))) return true;
+  if (words.some((w) => _CONTENT_WORD_STEMS.has(_blendStem(w)))) return true;
+  const padded = ` ${text} `;
+  return _CONTENT_PHRASES.some((ph) => padded.includes(ph));
 }
 
 /**
@@ -1284,6 +1352,75 @@ export function confirmTaskAudience(
   } catch { /* broadcast best-effort */ }
 }
 
+/**
+ * D3 — re-run the voice-first blend WITH the operator-confirmed audience so the
+ * VOICE decision (audience persona / collapse / blend_directive) actually
+ * reflects it. Without this, confirming the audience only flips confirm_state
+ * (release the write) while the doer-facing directive keeps reading "Audience
+ * not yet confirmed — draft in a neutral house voice" forever.
+ *
+ * Called by the audience-confirm API route AFTER confirmTaskAudience has
+ * already flipped confirm_state -> 'confirmed' (so the dispatcher's gate
+ * releases the write immediately even if THIS re-score is slow or fails —
+ * never-naked; the confirmed audience_id/audience_label mirror columns already
+ * stand regardless). Single-shot + bounded (PERSONA_RESCORE_TIMEOUT_MS) so the
+ * confirm action stays responsive. Never throws.
+ *
+ * @returns rescored:true + the new bundle when the re-run selector emitted a
+ *          bundle (persisted); rescored:false (bundle:null) on any failure or
+ *          a non-bundle (legacy) result — the caller proceeds regardless, the
+ *          confirm itself already landed.
+ */
+export async function rescoreAudienceBlend(
+  taskId: string,
+  taskDescription: string,
+  departmentForSelector: string,
+  audienceLabel: string,
+): Promise<{ rescored: boolean; bundle: PersonaBundle | null }> {
+  try {
+    const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, null, {
+      blend: true,
+      audienceOverride: audienceLabel,
+      timeoutMs: PERSONA_RESCORE_TIMEOUT_MS,
+    });
+    if (!persona?.bundle) {
+      console.warn(`[rescoreAudienceBlend] task ${taskId}: re-run selector returned no bundle — confirm stands, voice unchanged.`);
+      return { rescored: false, bundle: null };
+    }
+    persistPersonaBundle(taskId, persona.bundle);
+    // persistPersonaBundle derives confirm_state from THIS bundle's own
+    // `confirm_required` (correct for a fresh/creation-time bundle land) — and
+    // an OPENCLAW_AUDIENCE-driven re-run legitimately reports
+    // confirm_required:false now that the audience is resolved, which would
+    // write 'not_required'. rescoreAudienceBlend is ONLY ever called AFTER an
+    // operator has just confirmed (confirmTaskAudience already ran), so the
+    // state must land as 'confirmed', not silently regress to 'not_required'
+    // (functionally equivalent for evaluateAudienceConfirmGate's hold:false,
+    // but 'confirmed' is the accurate audit label — an operator DID act here).
+    try {
+      run(`UPDATE task_persona_bundle SET confirm_state = 'confirmed' WHERE task_id = ?`, [taskId]);
+    } catch { /* pre-090 tolerant */ }
+    const updatedTask = queryOne<Task>(
+      `SELECT t.*,
+          aa.name as assigned_agent_name,
+          aa.avatar_emoji as assigned_agent_emoji,
+          ca.name as created_by_agent_name,
+          ca.avatar_emoji as created_by_agent_emoji
+         FROM tasks t
+         LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+        WHERE t.id = ?`,
+      [taskId],
+    );
+    if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
+    console.log(`[rescoreAudienceBlend] task ${taskId}: voice re-scored for confirmed audience "${audienceLabel}".`);
+    return { rescored: true, bundle: persona.bundle };
+  } catch (err) {
+    console.warn(`[rescoreAudienceBlend] non-fatal for task ${taskId}:`, (err as Error).message);
+    return { rescored: false, bundle: null };
+  }
+}
+
 
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
 
@@ -1712,17 +1849,31 @@ export async function createTaskCore(
   // way; combined mode additionally persists the per-sub-task plan rows.
   // F3.4 (DEP-2): the single-persona path stays SOP-aware by folding the resolved
   // SOP context into the creation-time match.
+  //
+  // D1 (persona-blend) — a CONTENT task (isContentTask, the TS mirror of
+  // persona_blend.is_content_task) routes to `--blend` INSTEAD of `--combined`,
+  // even when the heuristic probe / SOP slots would otherwise call for combined
+  // decomposition: the blend bundle already decomposes the job into up to 10
+  // task_personas INTERNALLY (persona_blend.py's build_bundle() calls
+  // decompose-task.py's combined_select under the hood), so running --combined
+  // too would double-decompose the same task. Non-content tasks are entirely
+  // unaffected — decideMultiPersona still governs them exactly as before.
   const personaSlots = loadSopPersonaSlots(sopId);
+  const contentTask = isContentTask(personaTaskDescription);
   const { combined: useCombinedPersona, reason: decompReason } = decideMultiPersona(
     personaTaskDescription,
     personaSlots,
   );
-  if (useCombinedPersona) {
+  let personaPinPromise: Promise<string | null>;
+  if (contentTask) {
+    console.log(`[createTaskCore] task ${id}: content task — routing to --blend (voice-first audience+topic, D1)`);
+    personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext, { blend: true });
+  } else if (useCombinedPersona) {
     console.log(`[createTaskCore] task ${id}: multi-persona decomposition (${decompReason})`);
+    personaPinPromise = resolvePersonaPlanAndPin(id, personaTaskDescription, personaDepartment, personaSlots);
+  } else {
+    personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext);
   }
-  const personaPinPromise = useCombinedPersona
-    ? resolvePersonaPlanAndPin(id, personaTaskDescription, personaDepartment, personaSlots)
-    : resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext);
   // Swallow at the source so a background failure never becomes an unhandled
   // rejection — both resolvers log internally and never throw to callers.
   void personaPinPromise.catch(() => null);
