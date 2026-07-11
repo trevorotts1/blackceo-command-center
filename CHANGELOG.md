@@ -1,3 +1,19 @@
+## [v5.3.0] — 2026-07-11 — feat(cc-persona): persona-blend duality — --blend wiring, candidate-object parsing, confidence scale, audience-confirm UI (D1–D4)
+
+Wires the persona-blend "duality" end-to-end so a content task's voice-first audience+topic blend actually reaches production. Judge 8.9; lands atomically (D1–D4 as one release). New unit suite `tests/unit/d1-d4-persona-blend-wiring.test.ts` — 31 tests pass in isolation and all persona assertions pass in the full suite; the merged full-suite failure count did not rise above the pre-existing order-dependent flake set (14 = baseline 14).
+
+### fix — D1 `--blend` reaches the selector (`src/lib/persona-selector.ts`, `src/lib/tasks.ts`)
+- `buildSelectorArgv` gains a `blend` param that appends `--blend`; `selectPersonaForTask` runs the argv through a generalized tier fallback (`runSelectorWithFallback`) that drops flags ONLY on an unknown-argument rejection (a box predating W7 `--blend` or DEP-1 `--sop-*`), never on a real error — fail-closed, degrade toward a plainer match, never to a naked persona. TS `isContentTask()` (a byte-for-byte mirror of `persona_blend.is_content_task`, word-wise/stemmed) routes content tasks through `--blend` INSTEAD of `--combined` (the bundle already decomposes internally, so running both would double-decompose).
+
+### fix — D2 candidate OBJECTS mapped to labels (`src/lib/persona-selector.ts`)
+- The real matcher emits `resolved_audience.candidates[]` as `{label, audience_persona_id, …}` OBJECTS; the prior parser kept only bare strings, so every real `--blend` run filtered candidates to `[]` (the audience prompt was permanently "no ICP audiences on file"). New `candidateLabel()` extracts the display label from an object; bare strings are still accepted for back-compat.
+
+### fix — D4 confidence enum → numeric scale (`src/lib/persona-selector.ts`)
+- `resolve_audience()` emits confidence as `'high' | 'medium' | 'none'` strings; the prior `typeof === 'number'` check coerced every real result to 0, making the single-high-confidence CONFIRM-prompt branch unreachable. `normalizeAudienceConfidence()` maps high→0.9 / medium→0.6 / none→0 (numeric passthrough kept for fixtures/future selectors).
+
+### feat — D3 audience-confirm route + Kanban UI (`src/app/api/tasks/[id]/audience/route.ts`, `src/components/AudienceConfirmPanel.tsx`, `src/components/TaskModal.tsx`, `src/lib/tasks.ts`)
+- New GET/POST `/api/tasks/[id]/audience` — the missing caller for `confirmTaskAudience` (which previously had ZERO callers outside its own tests, so every gated content task unconditionally 30-min timed out). POST confirms the audience and mirrors it onto the task IMMEDIATELY (so the dispatcher gate releases the write even if the re-score is slow or fails — never-naked), then re-runs `--blend` with `OPENCLAW_AUDIENCE` (`rescoreAudienceBlend`) so the VOICE decision reflects the confirmed audience instead of the neutral-house-voice directive. New `AudienceConfirmPanel` renders inside `TaskModal` only for a task carrying `blend_directive` (a cheap presence gate so a plain task never fires the extra fetch); it is fail-quiet (renders nothing unless the gate actively HOLDs the task) and inherits the same operator gate as its sibling task routes.
+
 ## [v5.2.0] — 2026-07-11 — fix(cc-kanban): kanban lifecycle cluster — timestamp-dialect, session-liveness, completion-chain (B2/B3/B5/B6/B9)
 
 Repairs the task-completion lifecycle across the sweep/reconcile cluster. Judge 9.0. Sixteen dedicated unit tests (`tests/unit/b2-timestamp-dialect.test.ts`, `b3-b6-liveness-and-churn.test.ts`, `b5-completion-chain.test.ts`) all pass in isolation and inside the full suite; the merged full-suite failure count did not rise above the pre-existing order-dependent flake set (14 ≤ baseline 15).
