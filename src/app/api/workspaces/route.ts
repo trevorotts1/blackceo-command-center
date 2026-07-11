@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { resolveActiveCompanyId } from '@/lib/company';
 import type { Workspace, WorkspaceStats, TaskStatus } from '@/lib/types';
+import { TEST_RESIDUE_WORKSPACE_SLUGS } from '@/lib/test-residue';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -23,13 +24,25 @@ function generateSlug(name: string): string {
  * sentinel / NULL rows are the box's OWN unattributed workspaces (single-tenant),
  * NOT a foreign company, so they are kept — this prevents a blank board on a box
  * whose rows have not yet been re-homed while still excluding other companies.
- * When no active company can be resolved (un-branded box) we DO NOT filter.
+ * When no active company can be resolved (un-branded box) we DO NOT company-filter.
+ *
+ * C8 — regardless of company scoping (even on an un-branded box), EXACT
+ * test/fixture-residue workspace slugs (smoke-test-dept, no-script-dept — see
+ * ../../../lib/test-residue.ts) are ALWAYS excluded. A client's board must
+ * never show a QC smoke-test workspace just because company attribution
+ * hasn't run yet.
  */
 function companyScopeClause(activeCompanyId: string | null): { sql: string; params: string[] } {
-  if (!activeCompanyId) return { sql: '', params: [] };
+  const residuePlaceholders = TEST_RESIDUE_WORKSPACE_SLUGS.map(() => '?').join(',');
+  const residueClause = `w.slug NOT IN (${residuePlaceholders})`;
+  const residueParams: string[] = [...TEST_RESIDUE_WORKSPACE_SLUGS];
+
+  if (!activeCompanyId) {
+    return { sql: `WHERE ${residueClause}`, params: residueParams };
+  }
   return {
-    sql: `WHERE (w.company_id = ? OR w.company_id = 'default' OR w.company_id IS NULL OR w.company_id = '')`,
-    params: [activeCompanyId],
+    sql: `WHERE (w.company_id = ? OR w.company_id = 'default' OR w.company_id IS NULL OR w.company_id = '') AND ${residueClause}`,
+    params: [activeCompanyId, ...residueParams],
   };
 }
 

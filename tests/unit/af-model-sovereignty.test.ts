@@ -22,20 +22,31 @@
  * Uses a temp SQLite DB (process.env.DATABASE_PATH) — no network, no side effects.
  */
 
+// ── Temp DB isolation ──────────────────────────────────────────────────────
+// C8 FIX — this MUST be the first import, and it MUST be an import.
+//
+// This file used to do:
+//     const TMP_DB = path.join(TMP_DIR, 'sovereignty-test.db');
+//     process.env.DATABASE_PATH = TMP_DB;          // ← in the module BODY
+//     import { run, closeDb } from '../../src/lib/db';
+//
+// with a comment asserting the env was "set BEFORE the first @/lib/db import".
+// It was not. ES `import` declarations are HOISTED: '../../src/lib/db' was
+// evaluated — freezing `export const DB_PATH = process.env.DATABASE_PATH ||
+// <cwd>/mission-control.db` from the un-isolated env — BEFORE the assignment
+// ever ran. The isolation silently did nothing and this suite opened, migrated
+// and wrote the LIVE mission-control.db. Proven: deleting mission-control.db
+// and running this file alone re-created it in the repo root.
+//
+// Setting the env var inside an IMPORTED module is the fix — imports are
+// evaluated in order, so this runs before '../../src/lib/db' below.
+// tests/unit/c8-db-isolation-guard.test.ts fails the build if this regresses.
+import './_isolated-db';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 
-// ── Temp DB isolation ──────────────────────────────────────────────────────
-// Must be set BEFORE the first @/lib/db import so the module singleton picks
-// up the temp path.
-const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-af-sovereignty-'));
-const TMP_DB = path.join(TMP_DIR, 'sovereignty-test.db');
-process.env.DATABASE_PATH = TMP_DB;
-
-// ── Imports (after env is set) ─────────────────────────────────────────────
 import {
   REJECTED_FREE_DEFAULT,
   NEEDS_OWNER_INPUT_SENTINEL,
@@ -241,8 +252,18 @@ test('checkModelSovereignty: valid OpenRouter OSS model → passes', () => {
 });
 
 // ── Cleanup ────────────────────────────────────────────────────────────────
-test('cleanup: close DB and remove temp directory', () => {
+test('cleanup: close DB and remove the isolated temp database', () => {
   closeDb();
-  fs.rmSync(TMP_DIR, { recursive: true, force: true });
-  assert.ok(!fs.existsSync(TMP_DB), 'Temp DB should be removed after cleanup');
+  // Remove the FILE only — never rmSync its parent directory. The isolated path
+  // comes from './_isolated-db' (or an explicit DATABASE_PATH the runner set),
+  // and its parent may be a shared temp root; recursively deleting that would
+  // blow away far more than this suite owns.
+  const dbPath = process.env.DATABASE_PATH ?? '';
+  assert.ok(dbPath, 'DATABASE_PATH must be set by ./_isolated-db — otherwise this suite is on the LIVE DB');
+  assert.ok(
+    !dbPath.endsWith('mission-control.db'),
+    `isolation failed: this suite is pointed at the live DB (${dbPath})`,
+  );
+  fs.rmSync(dbPath, { force: true });
+  assert.ok(!fs.existsSync(dbPath), 'Temp DB should be removed after cleanup');
 });

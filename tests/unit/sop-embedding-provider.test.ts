@@ -27,6 +27,17 @@
  * No network calls are made — provider resolution is pure env-var logic.
  */
 
+// C8 — DB isolation MUST happen in an IMPORTED module, and this MUST stay the
+// first import. Assigning process.env.DATABASE_PATH in this file's BODY does not
+// work: ES `import` declarations are HOISTED, so any statically-imported project
+// module that transitively reaches '@/lib/db' is evaluated FIRST — freezing
+// `export const DB_PATH = process.env.DATABASE_PATH || <cwd>/mission-control.db`
+// from the un-isolated env. This suite did exactly that and silently opened,
+// migrated and wrote the LIVE mission-control.db. Proven by deleting the file and
+// re-running this suite alone: it came back.
+// Enforced by tests/unit/c8-db-isolation-guard.test.ts.
+import './_isolated-db';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

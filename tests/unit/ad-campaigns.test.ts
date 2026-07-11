@@ -1,12 +1,24 @@
 /**
  * ad-campaigns.test.ts — Skill 48 → board lib (createAdCampaign / moveAdStage).
  *
- * Runs against a THROWAWAY DB. The harness MUST set DATABASE_PATH to a scratch
- * file BEFORE this process imports @/lib/db (getDb() is a lazy singleton keyed
- * on DATABASE_PATH at first call). Never point this at mission-control.db.
+ * Runs against a THROWAWAY DB — enforced HERE, in the file itself.
  *
- *   DATABASE_PATH=/tmp/scratch-cc.db node --import tsx --test tests/unit/ad-campaigns.test.ts
+ * C8 FIX: this suite used to merely DOCUMENT that "the harness MUST set
+ * DATABASE_PATH ... Never point this at mission-control.db" and then rely on the
+ * caller to do it. No caller did — `npm run test:unit` sets no DATABASE_PATH, so
+ * `DB_PATH = process.env.DATABASE_PATH || <cwd>/mission-control.db` resolved to
+ * the LIVE database and this suite wrote its campaign/task fixtures straight
+ * into a production board. That is the C8 leak (test-dept SOPs,
+ * smoke-test-dept/no-script-dept workspaces, the testco company row).
+ *
+ * Isolation is now UNCONDITIONAL and self-contained: './_isolated-db' points
+ * DATABASE_PATH at a unique temp file. It MUST stay the FIRST import — ES
+ * `import` declarations are hoisted and evaluated in order, so anything that
+ * pulls in '@/lib/db' before it would freeze DB_PATH from the un-isolated env.
+ * tests/unit/c8-db-isolation-guard.test.ts fails the build if this regresses.
  */
+
+import './_isolated-db';
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

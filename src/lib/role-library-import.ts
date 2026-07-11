@@ -38,6 +38,7 @@
  */
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'node:fs';
+import { isTestResidueIngestSlug } from './test-residue';
 import os from 'node:os';
 import path from 'node:path';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
@@ -184,6 +185,26 @@ export function discoverRoleHowTos(departmentsPath: string): RoleHowTo[] {
     const deptDir = path.join(departmentsPath, deptName);
     if (!isDir(deptDir)) continue;
     const department = deptName.replace(/-dept$/, '');
+
+    // C8 INGEST GUARD — never ingest a leftover test/fixture department
+    // DIRECTORY back into `sops`. EXACT slug match only (see ./test-residue.ts).
+    //
+    // Checked against BOTH the raw directory name and the `-dept`-stripped
+    // department value, because this loop strips the suffix: the on-disk
+    // `smoke-test-dept/` folder would otherwise land in the DB as
+    // department='smoke-test'. The un-isolated QC harness left that directory in
+    // the real departments tree, so WITHOUT this guard every converge re-creates
+    // the SOP rows from disk and converge's own residue assertion 500s on rows
+    // converge itself just ingested — a permanent brick that no migration can
+    // clear, since the source is the filesystem, not the DB. A real client dept
+    // ("testing-lab", "contest-dept") is never on the allowlist and ingests
+    // normally.
+    if (isTestResidueIngestSlug(deptName) || isTestResidueIngestSlug(department)) {
+      console.log(
+        `[role-library-import] Skipping "${deptName}/" — test/fixture residue directory (C8); never ingested into sops`,
+      );
+      continue;
+    }
 
     for (const roleDirName of fs.readdirSync(deptDir)) {
       const roleDir = path.join(deptDir, roleDirName);
