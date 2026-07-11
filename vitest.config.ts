@@ -31,6 +31,11 @@ export default defineConfig({
       // still require auth). Uses vitest globals + vi.resetModules re-import, so it
       // only runs here via `npm run test:vitest`, never the tsx --test glob.
       'tests/unit/middleware-same-origin-board.test.ts',
+      // FLEET-FIX 2.3 / AUD-71: every 401 `unauthorized()` returns emits one
+      // structured log line and increments a counter. Same vi.resetModules
+      // re-import pattern as middleware-same-origin-board.test.ts above, so it
+      // only runs here via `npm run test:vitest`, never the tsx --test glob.
+      'tests/unit/middleware-401-telemetry.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
