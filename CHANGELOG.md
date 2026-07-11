@@ -1,3 +1,26 @@
+## [v5.11.0] — 2026-07-11 — fix(skill6): route producer status writes through the lifecycle guard + map survey/form/quiz to web-development
+
+Reconciled from `feat/skill6-survey-visibility` (branch was **256 commits stale**). Two of its three changes landed; the third was **rejected because `main` already solves it more strictly**. Judge 9.2.
+
+### fix — the producer route can no longer drive a card along an ILLEGAL edge (`src/app/api/tasks/[id]/status/route.ts`)
+`POST /api/tasks/[id]/status` wrote **any schema-valid status straight to the DB with a raw `UPDATE`**. It therefore accepted transitions the `LEGAL_TRANSITIONS` map forbids and that the operator `PATCH` path has always rejected — e.g. `backlog → review`, skipping the whole middle of the lifecycle. **Proven, not asserted:** the new test drives exactly that edge against pre-fix `main` and the illegal status **is persisted**.
+- The write now routes through `transition()` (`src/lib/task-lifecycle.ts`), which enforces the legal-transition guard, writes the `task_events` + legacy `events` audit rows in one atomic transaction, and broadcasts SSE. An illegal edge is now refused with **409** and the card is **not mutated**. This closes the standing integrator TODO on this route ("canonical consolidation is the shared `transition()`").
+- The route no longer writes its own `events` row — `transition()` writes it — so the audit is **not double-counted**. Pinned by a test asserting exactly ONE status audit event per transition.
+- `operatorOverride: true` is passed **deliberately**, and it does not weaken the guard we came for: in `transition()` the legal-transition check runs BEFORE `checkPreconditions()`, so only the AGENT-ASSIGNMENT preconditions are skipped. Those encode a CC-internal, agent-driven workflow and are wrong for this path — the Skill-6 producer builds its own cards externally and has **no assigned CC agent**, so enforcing them would have returned **422 on every legitimate producer update and broken the funnel/website build flow outright**. (The branch as-written did exactly that: it 422'd 3 of the 9 existing route tests. Caught and fixed before merge.) The route earns the override the way an operator does: HMAC-signed, scoped to its own producer's cards, and unable to set `'done'`.
+- **INGEST-14 provenance preserved** — `task_history` still records `board:<source>`.
+
+### fix — Skill-6 survey job types now reach the right department (`src/app/api/tasks/ingest/route.ts`)
+`department_slug` of `'survey' | 'form' | 'quiz'` (posted by `cc_board.py` for a GoHighLevel web-builder task) resolved to nothing: there is no `survey` workspace, and the `survey` keyword in `departments.config.ts` maps to **Research** — the wrong semantic for a build task — so the card fell through to the CEO catch-all and was effectively invisible to the department that had to build it. These three job types now remap to `web-development`. Zero-migration.
+
+### REJECTED from the branch — its `'done'` coercion would have WEAKENED `main`
+The branch closed the "done-skip hole" by **coercing** an incoming `status='done'` to `'review'` and enqueueing `runQCOnReview` — returning **200 OK** to the producer. `main` already closes the same hole **more strictly**: `'done'` is in `FORBIDDEN_STATUSES` and is hard-**403**'d before the DB is touched ("a builder may never self-grade its own card"). Taking the branch's version would have turned a hard rejection into an accepted-and-silently-downgraded request. `main`'s 403 is kept; the coercion machinery is dropped (it is unreachable dead code anyway, since `'done'` never survives the 403). A security regression test now pins the 403 so the lifecycle refactor cannot quietly re-open the QC bypass.
+
+### test — `tests/unit/skill6-lifecycle-guard.test.ts` (new, 4 tests, all green)
+The branch shipped **zero** tests for a security-adjacent change. Added: illegal edge → 409 + no mutation (**fails on pre-fix `main`**, proving the bug is real); legal edge on an **agent-less** producer card → 200 (pins the `operatorOverride` contract that keeps the producer working); exactly ONE audit event per transition (no double-count); and `'done'` → 403 + no mutation (security guard).
+
+### regression status — zero
+`npm run test:unit`: 844 / 831 pass / **13 fail** — one FEWER than the 14-failure clean-`main` baseline, and a strict subset of it (the env-sensitive `studio-registry-seed` flake reordered back to passing). `tsc --noEmit` clean. The 9 pre-existing route tests go from 4 failing (branch as-written) to 8/9 passing — matching clean `main` exactly, with the same single known flake.
+
 ## [v5.10.0] — 2026-07-11 — fix(standup): count tasks with `count_task_ids()` at the two remaining call sites
 
 `scripts/standup-heartbeat.sh` counts four Kanban columns. INBOX (`:70`) and TESTING (`:76`) already used the correct `count_task_ids()` helper defined at `:60` — but IN_PROGRESS (`:91`) and ASSIGNED (`:97`) still used the raw pattern `COUNT=$(echo "$TASKS" | grep -c '"id"' || echo "0")`. The helper existed; it was simply never wired into half the call sites. Judge 9.3.
