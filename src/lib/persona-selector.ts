@@ -133,6 +133,24 @@ export interface SopSelectorContext {
 export interface SelectPersonaOptions {
   /** Spawn timeout in ms. Defaults to 30_000 (creation); dispatch rescore bounds it tighter. */
   timeoutMs?: number;
+  /**
+   * D1 (W7 persona-blend) — run `--blend` instead of the legacy single-persona
+   * select: voice-first audience+topic blend, up to 10 task_personas, the
+   * persona-bundle SUPERSET (see PersonaBundle). Content tasks pass this from
+   * createTaskCore INSTEAD of `--combined` (the bundle already decomposes
+   * task_personas internally — running both would double-decompose). Ignored
+   * (falls back to the legacy select) on a box whose selector predates W7 —
+   * see the unknown-argument retry in selectPersonaForTask.
+   */
+  blend?: boolean;
+  /**
+   * D3 (audience-confirm) — an operator-confirmed audience label, forwarded to
+   * the selector as ENV `OPENCLAW_AUDIENCE` (never argv — the script's strict
+   * argparse has no such flag; see persona-selector-v2.py's --blend comment).
+   * Re-scores the VOICE decision against the confirmed audience and clears
+   * `confirm_required` on the returned bundle. Only meaningful with `blend:true`.
+   */
+  audienceOverride?: string;
 }
 
 /** True when the SOP context carries at least one selector-consumable value. */
@@ -150,8 +168,10 @@ export function hasSopContext(ctx: SopSelectorContext | null | undefined): ctx i
  *
  * The base argv is unchanged from the pre-SOP behaviour. When `sopContext`
  * carries meaningful values the `--sop-slug` / `--sop-name` / `--sop-hints`
- * flags (DEP-1) are appended. Exported so a unit test can assert the forwarding
- * without spawning Python.
+ * flags (DEP-1) are appended. When `blend` is true, `--blend` is appended (D1 /
+ * W7 persona-blend) — the persona-bundle SUPERSET path (persona-selector-v2.py
+ * `if getattr(args, "blend", False):`). Exported so a unit test can assert the
+ * forwarding without spawning Python.
  */
 export function buildSelectorArgv(
   scriptPath: string,
@@ -159,6 +179,7 @@ export function buildSelectorArgv(
   dept: string,
   taskId: string,
   sopContext?: SopSelectorContext | null,
+  blend?: boolean,
 ): string[] {
   const argv = [
     scriptPath,
@@ -181,6 +202,9 @@ export function buildSelectorArgv(
       // Comma-joined list — the selector splits on ',' (mirrors its other list inputs).
       argv.push("--sop-hints", hints.join(","));
     }
+  }
+  if (blend) {
+    argv.push("--blend");
   }
   return argv;
 }
@@ -207,6 +231,53 @@ function isUnknownArgumentError(err: unknown): boolean {
   const e = err as { stderr?: string; message?: string };
   const text = `${e?.stderr ?? ""} ${e?.message ?? ""}`;
   return /unrecognized arguments?|no such option|unrecognized option/i.test(text);
+}
+
+/**
+ * Run the FIRST argv tier that succeeds, falling back through progressively
+ * FEWER flags ONLY on an unknown-argument rejection (PERS-03: never on a real
+ * error — a genuine crash/bad-value must surface, not be swallowed as a
+ * predates-this-flag signal). `tiers` must be ordered most-featured first
+ * (e.g. [sop+blend, sop-only, bare]) so each fallback drops exactly the flag(s)
+ * a stale box would reject.
+ *
+ * D1: generalizes the pre-existing single-level SOP retry (PERS-03) to also
+ * cover `--blend` (a box may support DEP-1 SOP flags but predate W7 --blend,
+ * or predate both) without a combinatorial explosion of nested try/catch.
+ *
+ * On total exhaustion, re-throws the FIRST (primary) tier's error — matching
+ * PERS-03's existing contract that the surfaced failure is always the
+ * highest-fidelity attempt's real cause, not a later fallback's incidental one.
+ */
+async function runSelectorWithFallback(
+  runSelector: (argv: string[]) => Promise<string>,
+  tiers: string[][],
+  taskId: string,
+): Promise<string> {
+  let primaryErr: unknown;
+  for (let i = 0; i < tiers.length; i++) {
+    try {
+      return await runSelector(tiers[i]);
+    } catch (err) {
+      if (i === 0) primaryErr = err;
+      const isLastTier = i === tiers.length - 1;
+      if (!isUnknownArgumentError(err) || isLastTier) {
+        if (isLastTier && i > 0) {
+          console.error(
+            `[persona-selector] all fallback tiers exhausted for task ${taskId} — ` +
+            `surfacing the primary (most-featured) attempt's error.`,
+          );
+        }
+        throw i === 0 ? err : primaryErr;
+      }
+      console.warn(
+        `[persona-selector] argv tier ${i} rejected (unrecognized argument) for task ${taskId} ` +
+        `— retrying with reduced flags (box predates that feature).`,
+      );
+    }
+  }
+  // Unreachable when tiers is non-empty (every branch above returns or throws).
+  throw primaryErr;
 }
 
 export interface PersonaSelectionResult {
@@ -284,6 +355,50 @@ function normalizeVoice(raw: unknown): BundleVoiceDecision {
   };
 }
 
+/**
+ * D2 — extract a display label from one raw `resolved_audience.candidates[]`
+ * entry. The real matcher (persona_blend.py `_candidate()`, persona_blend.py:
+ * 472-478) emits CANDIDATE OBJECTS: `{label, audience_persona_id, matched_tags,
+ * why?}` — never bare strings. The prior parser kept only
+ * `typeof c === "string"` entries, so every real `--blend` run filtered the
+ * whole array to `[]` (candidates always empty; buildAudiencePrompt then always
+ * rendered "no ICP audiences on file" and the single-candidate audienceLabel
+ * fallback in persistPersonaBundle was permanently dead). A bare string is also
+ * accepted so a legacy/future selector emitting the pre-blend shape still
+ * parses unchanged (back-compat / non-breaking).
+ */
+function candidateLabel(c: unknown): string | null {
+  if (typeof c === "string") return c.trim() || null;
+  if (c && typeof c === "object") {
+    const label = (c as Record<string, unknown>).label;
+    if (typeof label === "string" && label.trim()) return label.trim();
+  }
+  return null;
+}
+
+/**
+ * D4 — map the matcher's string confidence enum to the numeric scale the CC's
+ * audience-confirm gate compares against AUDIENCE_HIGH_CONFIDENCE (tasks.ts).
+ * persona_blend.py's resolve_audience() (persona_blend.py:441-469) emits
+ * confidence as one of the strings 'high' | 'medium' | 'none' — never a number
+ * — so the prior `typeof a.confidence === "number"` check coerced every real
+ * `--blend` result to 0, making the "single high-confidence ICP → CONFIRM
+ * prompt" branch (buildAudiencePrompt, tasks.ts) unreachable in production.
+ * Numeric passthrough is kept for the fixture/test shape and any future
+ * selector that emits a number directly.
+ */
+function normalizeAudienceConfidence(raw: unknown): number {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string") {
+    switch (raw.trim().toLowerCase()) {
+      case "high": return 0.9;
+      case "medium": return 0.6;
+      case "none": return 0;
+    }
+  }
+  return 0;
+}
+
 function normalizeResolvedAudience(raw: unknown): ResolvedAudience | null {
   if (!raw || typeof raw !== "object") return null;
   const a = raw as Record<string, unknown>;
@@ -292,9 +407,9 @@ function normalizeResolvedAudience(raw: unknown): ResolvedAudience | null {
     ? a.source
     : "asked") as AudienceConfirmSource;
   const candidates = Array.isArray(a.candidates)
-    ? (a.candidates.filter((c) => typeof c === "string" && c.trim()) as string[]).map((c) => c.trim())
+    ? (a.candidates.map(candidateLabel).filter((c): c is string => c !== null))
     : [];
-  const confidence = typeof a.confidence === "number" ? a.confidence : 0;
+  const confidence = normalizeAudienceConfidence(a.confidence);
   return { source, candidates, confidence, label: asString(a.label), id: asString(a.id) };
 }
 
@@ -535,11 +650,18 @@ export async function selectPersonaForTask(
     //    would crash on it.
     const companyConfigHint = resolveCompanyConfigHint();
     const timeoutMs = opts?.timeoutMs ?? PERSONA_SELECT_TIMEOUT_MS;
+    // D3: an operator-confirmed audience is forwarded via ENV ONLY — the script's
+    // strict argparse has no --audience flag (mirrors the OPENCLAW_COMPANY_CONFIG
+    // rationale above). persona_blend.py's resolve_audience() reads it as
+    // `audience_override`, which short-circuits to source='operator_confirmed',
+    // confirm_required=False.
+    const audienceOverride = opts?.audienceOverride?.trim();
     const spawnEnv = {
       ...process.env,
       DASHBOARD_DB_PATH: DB_PATH,
       OPENCLAW_TASK_ID: taskId,
       ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
+      ...(audienceOverride ? { OPENCLAW_AUDIENCE: audienceOverride } : {}),
     };
 
     const runSelector = async (argv: string[]): Promise<string> => {
@@ -551,43 +673,31 @@ export async function selectPersonaForTask(
       return stdout;
     };
 
-    // F3.4: fold SOP context into the match when present. DEP-1 teaches the
-    // selector the --sop-* flags; on a box whose selector predates DEP-1 the
-    // strict argparse rejects them, so we retry ONCE without the SOP flags
-    // rather than let the whole SOP-carrying task fail selection (fail-closed:
-    // degrade to a non-SOP-aware match, never to a naked/fallback persona).
+    // F3.4 / D1: fold SOP context and/or --blend into the match when requested.
+    // DEP-1 taught the selector --sop-*; W7 taught it --blend. A box predating
+    // either rejects the unknown flag with a strict-argparse SystemExit, so we
+    // fall back tier-by-tier (most-featured first) rather than let the whole
+    // task fail selection — fail-closed: degrade toward a plainer match, NEVER
+    // to a naked/unselected persona. See runSelectorWithFallback / PERS-03.
     const wantsSop = hasSopContext(sopContext);
+    const wantsBlend = Boolean(opts?.blend);
     const baseArgv = buildSelectorArgv(scriptPath, taskDescription, dept, taskId);
-    let output: string;
-    if (wantsSop) {
-      const sopArgv = buildSelectorArgv(scriptPath, taskDescription, dept, taskId, sopContext);
-      try {
-        output = await runSelector(sopArgv);
-      } catch (sopErr) {
-        if (isUnknownArgumentError(sopErr)) {
-          console.warn(
-            `[persona-selector] SOP-aware flags rejected by selector for task ${taskId} ` +
-            `(selector predates DEP-1 --sop-* inputs) — retrying without SOP context.`,
-          );
-          try {
-            output = await runSelector(baseArgv);
-          } catch (retryErr) {
-            // PERS-03: the non-SOP retry ALSO failed. Surface the ORIGINAL error
-            // (the primary SOP-run failure) — masking it behind the retry error
-            // would hide the real cause. Log the retry error for context.
-            console.error(
-              `[persona-selector] non-SOP retry also failed for task ${taskId}:`,
-              (retryErr as Error)?.message ?? retryErr,
-            );
-            throw sopErr;
-          }
-        } else {
-          throw sopErr;
-        }
-      }
-    } else {
-      output = await runSelector(baseArgv);
-    }
+    const sopArgv = wantsSop
+      ? buildSelectorArgv(scriptPath, taskDescription, dept, taskId, sopContext)
+      : baseArgv;
+    const fullArgv = wantsBlend
+      ? buildSelectorArgv(scriptPath, taskDescription, dept, taskId, wantsSop ? sopContext : null, true)
+      : sopArgv;
+
+    // Tiers ordered most-featured → least, de-duplicated: [sop+blend, sop-only,
+    // bare]. When neither sop nor blend is requested this collapses to a single
+    // [baseArgv] tier, preserving the exact pre-D1 behavior (one spawn, errors
+    // propagate unchanged to the outer catch below).
+    const tiers: string[][] = [fullArgv];
+    if (wantsBlend && wantsSop) tiers.push(sopArgv);
+    if (wantsBlend || wantsSop) tiers.push(baseArgv);
+
+    const output = await runSelectorWithFallback(runSelector, tiers, taskId);
 
     const result = JSON.parse(output) as Partial<PersonaSelectionResult>;
 
