@@ -1,3 +1,24 @@
+## [v5.6.0] — 2026-07-11 — fix(cc-sop-ghost): C2 — de-ghost the CC SOP library (canonical seed + re-key/purge migration 091)
+
+The CC SOP library read as a "ghost": 54 rows on disk presented as an EMPTY library that silently blocked the Triad Rule, because the pre-C2 starter seed keyed rows to LEGACY alias slugs (webdev/support/comms/billing/appdev/openclaw/social/paid-ads) and DEPRECATED departments (ceo/security/hr-people/finance-accounting/operations/data-analytics/executive-assistant), plus ~30 `test-dept` residue rows left by harnesses that wrote to the live DB — so a canonical-slug SOP query matched none of them. Judge 9.0. QC re-confirmed from RAW gate output: `tests/unit/cc-sop-ghost-refix.test.ts` 9/9 + `npm run test:vitest` 137/137 green + `tsc --noEmit` clean; every `npm run test:unit` red is a pre-existing order-dependent flake (verified against the pristine v5.5.0 baseline; the one merged-only name — `ad-campaigns` `createAdCampaign` — passes 7/7 in isolation on the merged tree, proving it is ordering, not a regression). Zero regressions.
+
+### fix — canonical starter seed, deprecated SOPs dropped (`src/lib/sops-seed.ts`)
+- Every starter SOP re-keyed to a CANONICAL ZHC department slug; the 7 deprecated-department starter SOPs removed (16 canonical SOPs remain).
+
+### fix — migration 091 `rekeyAndPurgeGhostSops` (`src/lib/db/migrations.ts`)
+- Re-keys existing legacy-alias rows to canonical slugs PRESERVING each `sop` id (the `dispatch_rules.sop_id` FK + Triad matching key both hang off the id), soft-deletes the deprecated-dept rows (`deleted_at`), and hard-purges the exact `test-dept` residue (FK-safe: nulls any stray `sop_proposals` reference first). Idempotent; deferred out of the additive request-time self-heal (it is destructive) so it runs on a controlled boot.
+
+### fix — canonical-slug alias coverage (`src/lib/routing/canonical-slug.ts`)
+- Adds the missing `comms` / `communication` → `communications` alias so `canonicalDeptSlug()` covers all 8 legacy seed slugs the re-key relies on.
+
+### fix — converge scope=sops fail-loud (`src/app/api/system/converge/route.ts`)
+- `scope=sops` now ASSERTS the SOP library is non-empty after ingest (fail-loud 500 on 0 active rows) instead of silently returning `ok:true` on a ghost library; the response carries `active_total`.
+
+### test (`tests/unit/cc-sop-ghost-refix.test.ts`, +9 cases)
+- Proves the canonical seed (16, no deprecated/alias), id-preserving re-key, deprecated soft-delete, `test-dept` purge, idempotency, and a fully-canonical residue-free end state.
+
+**Deferred operator-live (NOT executed in this release — flagged):** deploy the CC build (`atomic-deploy.sh`) so migration 091 runs at a controlled boot to fix the LIVE ghost rows; run `converge scope=sops` after the SOP ingest; the skill-32 `run-full-install.sh` Phase-6c installer wiring rides the SEPARATE onboarding train.
+
 ## [v5.5.0] — 2026-07-11 — fix(cc-duality-tail): persona-blend duality TAIL — deadline voice-fallback gate, full-blend credit, config validation, rescore invalidation (D5/D7/D8/D9)
 
 Closes the remaining P2/P3 "duality tail" findings on top of the D1–D4 persona-blend core (v5.3.0), so the never-naked house-voice guarantees actually hold at the deadline, credit, config, and rescore seams. Judge 9.0. QC re-confirmed from RAW gate output: `npm run test:vitest` 137/137 green + `tsc --noEmit` clean; `npm run test:unit` 814 pass / 14 fail, with the failing set independently reproduced byte-for-byte in a pristine v5.4.0 worktree (parent baseline 793 pass / 14 fail — merged adds exactly this branch's new assertions, zero new failures).
