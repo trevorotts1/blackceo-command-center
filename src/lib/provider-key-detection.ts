@@ -32,16 +32,49 @@
  *        b. Each `.env` file returned by `candidateEnvFiles()` (OpenClaw secret
  *           files on the box: host project .env, ~/.openclaw/.env, etc.)
  *        c. `openclaw.json` `env` / `env.vars` + `models.providers[slug].apiKey`
+ *        d. OpenClaw's SQLite AUTH-PROFILE STORE (see below) — the authoritative
+ *           store the gateway itself resolves keys from at runtime.
  *      First hit wins; the matched env-var name and source are returned for
  *      observability / error messages.
  *   4. If no candidate is found in any store → returns a structured "not found"
  *      result so the caller can log the right error message.
  *
- * This module is SERVER-ONLY (it imports `fs` and the `candidateEnvFiles`
- * helper). Do NOT import from client components.
+ * SOURCE (d) — THE OPENCLAW AUTH-PROFILE STORE (v5.16.2)
+ * ------------------------------------------------------
+ * OpenClaw does NOT necessarily keep a provider key in any env file or in
+ * `openclaw.json` — for Ollama Cloud it keeps it in its SQLite auth store:
+ *
+ *   <openclaw-dir>/agents/<agent>/agent/openclaw-agent.sqlite
+ *     table  auth_profile_store
+ *     row    store_key = 'primary'
+ *     json   store_json.profiles["ollama:default"]
+ *              = { type: "api_key", provider: "ollama", key: "<secret>" }
+ *
+ * The gateway resolves the key from THAT store at runtime (the `openclaw.json`
+ * profile block carries only mode/provider — no inline key) and sends it as
+ * `Authorization: Bearer`. Command Center previously scanned only env stores and
+ * `openclaw.json`, so it reported `configured=false` for a provider whose key
+ * demonstrably exists and works — every box with a sovereign Ollama Cloud key
+ * registered ZERO models. Reading this store is what makes CC agree with the
+ * gateway. Combined with the corrected `https://ollama.com` base URL, it is what
+ * actually heals Ollama Cloud on those boxes.
+ *
+ * INVARIANTS for this source (non-negotiable):
+ *   • READ-ONLY. The store is opened `readonly` and is NEVER written or mutated —
+ *     Command Center consumes OpenClaw's key, it does not own it.
+ *   • The key VALUE is NEVER printed, logged, or embedded in any message. Only
+ *     the provider name / source label is ever emitted.
+ *   • The agent directory is NOT hardcoded to `main` — every `agents/<agent>/`
+ *     is scanned, and the `primary` store_key is preferred.
+ *   • Never throws: a missing file / missing table / bad JSON simply yields no key.
+ *
+ * This module is SERVER-ONLY (it imports `fs`, `better-sqlite3` and the
+ * `candidateEnvFiles` helper). Do NOT import from client components.
  */
 
 import fs from 'fs';
+import path from 'path';
+import Database from 'better-sqlite3';
 import {
   candidateEnvFiles,
   parseDotEnv,
@@ -57,8 +90,8 @@ export type KeyDetectionResult =
       found: true;
       /** The env-var name the key was found under. */
       envVar: string;
-      /** Which store the key was found in (for logging). */
-      source: 'process.env' | 'env_file' | 'openclaw_json';
+      /** Which store the key was found in (for logging). NEVER log `value`. */
+      source: 'process.env' | 'env_file' | 'openclaw_json' | 'openclaw_auth_store';
       /** The resolved key value. */
       value: string;
     }
@@ -115,13 +148,149 @@ export function envCandidatesForProvider(provider: ModelProvider): string[] {
 }
 
 /**
- * Resolve the API key for a provider by scanning ALL available env stores.
+ * The OpenClaw provider name(s) an auth-profile row may carry for a Command
+ * Center provider slug. CC calls it `ollama-cloud`; OpenClaw stores it under
+ * provider `ollama` (profile key `ollama:default`). Stripping a trailing
+ * `-cloud` covers that generically without a hardcoded per-provider table.
+ */
+export function openclawProviderNamesFor(slug: string): string[] {
+  const names: string[] = [];
+  const add = (v: string) => {
+    const t = v.trim().toLowerCase();
+    if (t && !names.includes(t)) names.push(t);
+  };
+  add(slug);
+  add(slug.replace(/-cloud$/, ''));
+  return names;
+}
+
+/**
+ * Every OpenClaw agent auth store on this box:
+ *   <openclaw-dir>/agents/<agent>/agent/openclaw-agent.sqlite
+ * The agent dir is NOT hardcoded to `main` — a box may name its agent anything.
+ * Derived from openclawConfigPath() so it is correct on BOTH the Mac layout
+ * (~/.openclaw) and the VPS Docker layout (/data/.openclaw). Sorted for
+ * determinism. Never throws.
+ */
+export function openclawAuthStorePaths(): string[] {
+  try {
+    const openclawDir = path.dirname(openclawConfigPath());
+    const agentsDir = path.join(openclawDir, 'agents');
+    if (!fs.existsSync(agentsDir) || !fs.statSync(agentsDir).isDirectory()) return [];
+    return fs
+      .readdirSync(agentsDir)
+      .sort()
+      .map((agent) => path.join(agentsDir, agent, 'agent', 'openclaw-agent.sqlite'))
+      .filter((p) => {
+        try {
+          return fs.existsSync(p) && fs.statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+/** One `profiles` entry in an OpenClaw auth-profile store. */
+interface OpenClawAuthProfile {
+  type?: string;
+  provider?: string;
+  key?: string;
+}
+
+/**
+ * Pull a provider's API key out of ONE OpenClaw auth store (read-only).
+ *
+ * Shape: table `auth_profile_store`, row `store_key='primary'`, column
+ * `store_json` = `{ profiles: { "<provider>:<name>": { type, provider, key } } }`.
+ * `profiles` is matched by its `provider` field AND by the `<provider>:` prefix
+ * of its key, so a renamed profile still resolves. Tolerates an array-shaped
+ * `profiles`. Falls back to scanning every row when there is no `primary`.
+ *
+ * NEVER logs the key. NEVER writes. Returns null on any error.
+ */
+function readKeyFromAuthStore(storePath: string, providerNames: string[]): string | null {
+  let db: Database.Database | null = null;
+  try {
+    // READ-ONLY: Command Center consumes OpenClaw's key; it must never mutate it.
+    db = new Database(storePath, { readonly: true, fileMustExist: true });
+
+    let rows: { store_json: string }[] = [];
+    try {
+      rows = db
+        .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = 'primary'")
+        .all() as { store_json: string }[];
+      if (rows.length === 0) {
+        rows = db.prepare('SELECT store_json FROM auth_profile_store').all() as { store_json: string }[];
+      }
+    } catch {
+      return null; // no such table/column on this box — not an error, just no key here
+    }
+
+    for (const row of rows) {
+      if (!row?.store_json) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.store_json);
+      } catch {
+        continue;
+      }
+      const profiles = (parsed as { profiles?: unknown } | null)?.profiles;
+      if (!profiles || typeof profiles !== 'object') continue;
+
+      const entries: [string, OpenClawAuthProfile][] = Array.isArray(profiles)
+        ? (profiles as OpenClawAuthProfile[]).map((p, i) => [String(i), p])
+        : Object.entries(profiles as Record<string, OpenClawAuthProfile>);
+
+      for (const [profileKey, profile] of entries) {
+        if (!profile || typeof profile !== 'object') continue;
+        const key = typeof profile.key === 'string' ? profile.key.trim() : '';
+        if (!key) continue;
+        // An api_key profile (tolerate a missing/other type that still carries a key).
+        if (profile.type && profile.type !== 'api_key') continue;
+
+        const declared = (profile.provider ?? '').trim().toLowerCase();
+        const prefix = profileKey.split(':')[0].trim().toLowerCase();
+        if (providerNames.includes(declared) || providerNames.includes(prefix)) {
+          return key; // value returned to the caller — never logged here
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
+/**
+ * Scan every OpenClaw auth store on the box for this provider's key.
+ * Read-only, never logs the value, never throws.
+ */
+export function lookupKeyInOpenClawAuthStore(slug: string): string | null {
+  const providerNames = openclawProviderNamesFor(slug);
+  for (const storePath of openclawAuthStorePaths()) {
+    const key = readKeyFromAuthStore(storePath, providerNames);
+    if (key) return key;
+  }
+  return null;
+}
+
+/**
+ * Resolve the API key for a provider by scanning ALL available key stores.
  *
  * Returns `{ localEndpoint: true }` for local_endpoint providers (no key
  * check needed). Returns `KeyDetectionResult` for all API-key providers.
  *
  * Never throws. File reads fail silently; only present and non-empty values
- * are returned.
+ * are returned. The resolved value is NEVER logged by this module.
  */
 export function resolveProviderApiKey(
   provider: ModelProvider
@@ -179,6 +348,22 @@ export function resolveProviderApiKey(
         }
       }
     }
+  }
+
+  // 4. Check OpenClaw's SQLite auth-profile store — the store the GATEWAY itself
+  //    resolves keys from at runtime. For Ollama Cloud the key lives ONLY here
+  //    (never in an env file or openclaw.json), which is why CC previously
+  //    reported configured=false for a key that demonstrably exists and works.
+  //    Deliberately LAST so every env source still wins (no regression for boxes
+  //    that do carry the key in env). Read-only; the value is never logged.
+  const storeKey = lookupKeyInOpenClawAuthStore(provider.slug);
+  if (storeKey) {
+    // Hydrate the conventional env var so later readers in this process resolve
+    // it without re-opening the store — mirrors the env_file / openclaw_json
+    // branches above. (Value assigned, never printed.)
+    const envVar = candidates[0] ?? defaultEnvVarForSlug(provider.slug);
+    process.env[envVar] = storeKey;
+    return { found: true, envVar, source: 'openclaw_auth_store', value: storeKey };
   }
 
   return { found: false, checked: candidates };

@@ -63,6 +63,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { TRIO_ROLE_ALIASES } from '@/lib/db/migrations';
 import { getMissionControlUrl } from '@/lib/config';
+import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
@@ -3455,9 +3456,13 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             suggested_department: task.department ?? null,
             returned_by_agent_id: null,
           };
+          // AUTH (SWEEP-401): server-side loopback to our own /api — no same-origin
+          // Origin, so middleware Gate B 401s a POST without the bearer. Present it,
+          // else this ALWAYS fell through to writeStructuredHandbackFallback() (below)
+          // on a 401 rather than a genuine failure. Same class as stale-task-sweep.
           const returnResp = await fetch(`${baseUrl}/api/tasks/${taskId}/return-to-orchestrator`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...missionControlAuthHeaders() },
             body: JSON.stringify(handbackBody),
           });
           if (!returnResp.ok) {

@@ -28,6 +28,7 @@
 import { queryAll, queryOne, run, sqlTime, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
+import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifySystem } from '@/lib/notify';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
@@ -125,14 +126,31 @@ async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
     // triggers Telegram if wired). Best-effort -- no throw on failure.
     const ccUrl = getMissionControlUrl();
     try {
-      await fetch(`${ccUrl}/api/events`, {
+      // AUTH (SWEEP-401): this is a SERVER-SIDE loopback to our own /api/events —
+      // it carries NO same-origin Origin/Referer, so middleware Gate B treats it
+      // as EXTERNAL and (with MC_API_TOKEN set) hard-401s a POST without a bearer.
+      // Before this fix every owner re-ping 401'd and was swallowed by the catch
+      // below (one box logged ~1,301 rejections at ~600/hr), silently dropping
+      // stale-blocked owner notifications fleet-wide. Present the canonical bearer.
+      const resp = await fetch(`${ccUrl}/api/events`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...missionControlAuthHeaders() },
         body: JSON.stringify({
           type: 'stale_blocked_repinged',
           payload: { task_id: task.id, message },
         }),
       });
+      if (!resp.ok) {
+        // Do not swallow silently — a rejected re-ping means the owner was NOT
+        // notified; surface it loudly (this is exactly the failure that stayed
+        // invisible for a month behind a bare console.warn on the catch alone).
+        console.error(
+          `[stale-task-sweep] Owner re-ping POST /api/events returned ${resp.status} — owner was NOT notified` +
+            (resp.status === 401 || resp.status === 403
+              ? ' (AUTH: verify MC_API_TOKEN is set in this process and matches the Command Center)'
+              : ''),
+        );
+      }
     } catch (err) {
       console.warn('[stale-task-sweep] Owner re-ping notification failed:', (err as Error).message);
     }
