@@ -134,6 +134,11 @@ jobs:
         env:
           NODE_ENV: test
 
+      - name: F3.2 standup task-counting regression test (count_task_ids at every call site)
+        run: bash tests/unit/standup-count-task-ids.test.sh
+        env:
+          NODE_ENV: test
+
   # ── B.1 thin-probe fixture run ─────────────────────────────────────────────
   # Exercises cc-health-check.sh against a real Next.js build + pm2-less fixture
   # to confirm the script exits 0 (green) on a known-good state and exits 1 on
