@@ -49,6 +49,7 @@ let rescorePersonaWithSOP: TasksModule['rescorePersonaWithSOP'];
 type SelectorModule = typeof import('../../src/lib/persona-selector');
 let buildSelectorArgv: SelectorModule['buildSelectorArgv'];
 let hasSopContext: SelectorModule['hasSopContext'];
+let persistPersonaBundle: SelectorModule['persistPersonaBundle'];
 
 let counter = 0;
 const nextId = (p: string) => `${p}-${++counter}`;
@@ -98,6 +99,7 @@ test.before(async () => {
   const sel = await import('../../src/lib/persona-selector');
   buildSelectorArgv = sel.buildSelectorArgv;
   hasSopContext = sel.hasSopContext;
+  persistPersonaBundle = sel.persistPersonaBundle;
 });
 
 test.after(() => {
@@ -272,4 +274,120 @@ test('[DEP2] rescorePersonaWithSOP: a concrete new persona re-pins + writes pers
   );
   assert.ok(evt, 'persona_rescored_at_dispatch event persisted');
   assert.ok(/generic-leader/.test(evt!.message) && /bly-copywriters-handbook/.test(evt!.message), 'audit records old → new');
+});
+
+// ── D9 — a changed rescore must not let a stale blend directive ride the NEW persona ─
+
+function testBundle(): import('../../src/lib/types').PersonaBundle {
+  return {
+    topic: 'Cold outreach',
+    confirm_required: false,
+    resolved_audience: { source: 'onboarding_icp', candidates: [], confidence: 0.9, label: 'Founders', id: null },
+    voice: {
+      audience_persona: { id: 'generic-leader' },
+      topic_persona: { id: 'voss-never-split-difference' },
+      collapsed: false,
+    },
+    blend_directive: 'Write in generic-leader\'s VOICE; carry voss-never-split-difference\'s expertise.',
+    task_personas: [{ seq: 1, part: 'body', persona_id: 'voss-never-split-difference', why: 'negotiation craft' }],
+    catalog_version: '1.3',
+  };
+}
+
+test('[D9] rescorePersonaWithSOP: a CHANGED rescore w/ an existing bundle row invalidates the stale blend directive', async () => {
+  const id = nextId('task');
+  insertTaskWithPersona(id, { persona_id: 'generic-leader', persona_name: 'Generic Leader', persona_mode: 'leadership' });
+  persistPersonaBundle(id, testBundle());
+
+  const before = queryOne<{ blend_directive: string | null; voice_persona_id: string | null }>(
+    'SELECT blend_directive, voice_persona_id FROM tasks WHERE id = ?', [id],
+  );
+  assert.ok(before?.blend_directive, 'sanity: blend directive present pre-rescore');
+  assert.equal(before?.voice_persona_id, 'generic-leader');
+
+  process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    persona_id: 'bly-copywriters-handbook',
+    persona_name: 'Robert Bly',
+    interaction_mode: 'leadership',
+    score: 0.82,
+  });
+  const res = await rescorePersonaWithSOP(
+    id, 'Write a cold outreach email', 'marketing',
+    { slug: 'cold-email', name: 'Cold Email Outreach', hints: ['bly-copywriters-handbook'] },
+  );
+  delete process.env.PERSONA_FIXTURE_JSON;
+
+  assert.equal(res.changed, true);
+  assert.equal(res.persona_id, 'bly-copywriters-handbook');
+  assert.equal(res.blend_directive, null, 'D9: RescoreResult carries the neutralized (null) blend_directive for the caller to patch in-memory');
+
+  const after = queryOne<{
+    blend_directive: string | null; voice_persona_id: string | null; topic_persona_id: string | null; voice_collapsed: number | null;
+  }>('SELECT blend_directive, voice_persona_id, topic_persona_id, voice_collapsed FROM tasks WHERE id = ?', [id]);
+  assert.equal(after?.blend_directive, null, 'D9: stale blend_directive mirror is NULLed, never rides the new persona');
+  assert.equal(after?.voice_persona_id, null, 'D9: voice mirror NULLed');
+  assert.equal(after?.topic_persona_id, null, 'D9: topic mirror NULLed');
+  assert.equal(after?.voice_collapsed, 0);
+
+  const bundleRow = queryOne<{ confirm_state: string }>(
+    'SELECT confirm_state FROM task_persona_bundle WHERE task_id = ?', [id],
+  );
+  assert.equal(bundleRow?.confirm_state, 'not_required', 'D9: bundle confirm_state neutralized alongside the mirror columns');
+
+  const invalidateEvt = queryOne<{ message: string }>(
+    "SELECT message FROM events WHERE task_id = ? AND type = 'persona_blend_invalidated_by_rescore' ORDER BY created_at DESC LIMIT 1",
+    [id],
+  );
+  assert.ok(invalidateEvt, 'D9: persona_blend_invalidated_by_rescore audit event written');
+  assert.ok(/generic-leader/.test(invalidateEvt!.message) && /bly-copywriters-handbook/.test(invalidateEvt!.message));
+});
+
+test('[D9] rescorePersonaWithSOP: a CHANGED rescore w/ NO bundle row leaves blend_directive undefined (no regression for non-blend tasks)', async () => {
+  const id = nextId('task');
+  insertTaskWithPersona(id, { persona_id: 'generic-leader', persona_name: 'Generic Leader', persona_mode: 'leadership' });
+  // No persistPersonaBundle call — this task never blended.
+
+  process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    persona_id: 'bly-copywriters-handbook',
+    persona_name: 'Robert Bly',
+    interaction_mode: 'leadership',
+    score: 0.82,
+  });
+  const res = await rescorePersonaWithSOP(
+    id, 'Write a cold outreach email', 'marketing',
+    { slug: 'cold-email', name: 'Cold Email Outreach', hints: [] },
+  );
+  delete process.env.PERSONA_FIXTURE_JSON;
+
+  assert.equal(res.changed, true);
+  assert.equal(res.blend_directive, undefined, 'no bundle → nothing to invalidate → undefined (caller leaves task.blend_directive untouched)');
+
+  const evt = queryOne<{ n: number }>(
+    "SELECT COUNT(*) as n FROM events WHERE task_id = ? AND type = 'persona_blend_invalidated_by_rescore'", [id],
+  );
+  assert.equal(evt!.n, 0, 'no invalidation event for a task that never blended');
+});
+
+test('[D9] rescorePersonaWithSOP: UNCHANGED rescore (same persona) never invalidates an existing blend', async () => {
+  const id = nextId('task');
+  insertTaskWithPersona(id, { persona_id: 'generic-leader', persona_name: 'Generic Leader', persona_mode: 'leadership' });
+  persistPersonaBundle(id, testBundle());
+
+  process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    persona_id: 'generic-leader', // SAME persona — not a change
+    persona_name: 'Generic Leader',
+    interaction_mode: 'leadership',
+    score: 0.5,
+  });
+  const res = await rescorePersonaWithSOP(
+    id, 'Write a cold outreach email', 'marketing',
+    { slug: 'cold-email', name: 'Cold Email Outreach', hints: [] },
+  );
+  delete process.env.PERSONA_FIXTURE_JSON;
+
+  assert.equal(res.changed, false);
+  assert.equal(res.blend_directive, undefined, 'unchanged rescore never touches the blend mirror');
+
+  const after = queryOne<{ blend_directive: string | null }>('SELECT blend_directive FROM tasks WHERE id = ?', [id]);
+  assert.ok(after?.blend_directive, 'the ORIGINAL blend_directive survives an unchanged rescore');
 });

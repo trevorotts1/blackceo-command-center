@@ -62,7 +62,6 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { getMissionControlUrl } from '@/lib/config';
-import { spawnRecordCompletion } from '@/lib/persona-selector';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
@@ -3872,8 +3871,22 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
         // Pass task title + description as --task-output so the Python
         // record_completion() function can write the persona_performance row.
+        // D7: credit EVERY blended persona (voice + topic + any subtask-decomposition
+        // personas), not just the primary voice mirror — see recordPersonaCompletions.
+        // Dynamic import: qc-scorer.ts is statically imported by task-dispatcher.ts,
+        // which is statically imported by tasks.ts — a static import here would close
+        // a tasks.ts <-> qc-scorer.ts cycle (same reasoning as the dynamic imports
+        // already used elsewhere in tasks.ts/task-dispatcher.ts for this same pair).
         const taskOutput = [task.title, task.description].filter(Boolean).join(' — ');
-        spawnRecordCompletion(taskId, task.persona_id, deptSlug, taskOutput);
+        try {
+          const { recordPersonaCompletions } = await import('@/lib/tasks');
+          recordPersonaCompletions(taskId, task.persona_id, deptSlug, taskOutput);
+        } catch (creditErr) {
+          console.warn(
+            `[QCScorer] recordPersonaCompletions failed for task ${taskId} (non-fatal):`,
+            (creditErr as Error).message,
+          );
+        }
       }
     } else {
       // FAIL path

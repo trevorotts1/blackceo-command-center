@@ -42,11 +42,13 @@ import {
   loadSubtaskPersonas,
   broadcastPersonaPlan,
   persistPersonaBundle,
+  spawnRecordCompletion,
   DEFAULT_PERSONA_FALLBACK,
   GOVERNANCE_PERSONA_FALLBACK,
   type SubtaskPersona,
   type SopSelectorContext,
 } from '@/lib/persona-selector';
+import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -932,6 +934,82 @@ export interface RescoreResult {
   persona_id: string | null;
   persona_name: string | null;
   persona_mode: string | null;
+  /**
+   * D9 — when a CHANGED rescore invalidated a stale persona-blend directive (a
+   * `task_persona_bundle` row existed), the NEW (neutralized, i.e. `null`) mirror
+   * value the caller should ALSO patch onto its in-memory task row — mirrors the
+   * `persona_id`/`persona_name`/`persona_mode` patch the dispatcher already applies
+   * (task-dispatcher.ts), so `buildPersonaBlock` never renders the stale directive
+   * over the newly-rescored persona. `undefined` when there was no bundle to
+   * invalidate (task never blended) — the caller leaves task.blend_directive
+   * untouched (no regression for non-blend tasks).
+   */
+  blend_directive?: string | null;
+}
+
+/**
+ * D9 — a dispatch-time SOP rescore that lands a DIFFERENT persona than the one the
+ * blend was originally computed against makes any stored `blend_directive` STALE:
+ * it still reads "write in <old persona>'s voice / carry <old topic>'s expertise"
+ * even though the doer is now handed a DIFFERENT persona_id. rescorePersonaWithSOP
+ * patched persona_* but never touched the bundle mirror, so the stale directive rode
+ * the new persona silently.
+ *
+ * Chosen default (see D9 in the fix ledger — "operator picks a/b"): NULL the VOICE
+ * mirror columns + `confirm_state` → 'not_required' + an audit event, rather than
+ * re-running full blend selection here (which would double an already-bounded
+ * dispatch-time selector spawn on every SOP-driven rescore). `audience_*` mirrors
+ * are left untouched — the CONFIRMED audience the content is FOR did not change,
+ * only the VOICE decision built on top of it is now stale.
+ *
+ * No-ops (returns undefined) when the task never carried a bundle — a rescore on a
+ * non-blend task is unaffected, exactly as before D9.
+ */
+function invalidateStaleBlendOnRescore(
+  taskId: string,
+  oldPersonaId: string | null,
+  newPersonaId: string | null,
+): string | null | undefined {
+  try {
+    const row = queryOne<{ id: string }>(
+      'SELECT id FROM task_persona_bundle WHERE task_id = ?',
+      [taskId],
+    );
+    if (!row) return undefined; // never blended — nothing to invalidate
+
+    run(
+      `UPDATE tasks
+          SET voice_persona_id = NULL,
+              topic_persona_id = NULL,
+              voice_collapsed = 0,
+              blend_directive = NULL
+        WHERE id = ?`,
+      [taskId],
+    );
+    run(
+      `UPDATE task_persona_bundle SET confirm_state = 'not_required' WHERE task_id = ?`,
+      [taskId],
+    );
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        'persona_blend_invalidated_by_rescore',
+        taskId,
+        `[PERSONA-BLEND] dispatch-time SOP rescore changed persona ${oldPersonaId ?? '(none)'} → ` +
+          `${newPersonaId ?? '(none)'} — the stale voice-blend directive was neutralized (voice/topic ` +
+          `mirror columns cleared, bundle confirm_state → not_required) so it never rides the new persona.`,
+        new Date().toISOString(),
+      ],
+    );
+    return null;
+  } catch (err) {
+    console.warn(
+      `[rescorePersonaWithSOP] blend invalidation non-fatal for task ${taskId}:`,
+      (err as Error).message,
+    );
+    return undefined;
+  }
 }
 
 /**
@@ -1022,6 +1100,12 @@ export async function rescorePersonaWithSOP(
       ],
     );
 
+    // D9: a CHANGED persona invalidates any stale blend directive riding the OLD
+    // persona's voice/topic decision — see invalidateStaleBlendOnRescore above.
+    const blendDirective = changed
+      ? invalidateStaleBlendOnRescore(taskId, prev?.persona_id ?? null, persona.persona_id)
+      : undefined;
+
     const updatedTask = queryOne<Task>(
       `SELECT t.*,
           aa.name as assigned_agent_name,
@@ -1046,6 +1130,7 @@ export async function rescorePersonaWithSOP(
       persona_id: persona.persona_id,
       persona_name: persona.persona_name,
       persona_mode: persona.interaction_mode,
+      blend_directive: blendDirective,
     };
   } catch (err) {
     console.warn(
@@ -1289,10 +1374,103 @@ export function holdForAudienceConfirm(
 }
 
 /**
+ * D5 — the neutral directive shipped once an unconfirmed audience VOICE is
+ * neutralized on deadline release. Never impersonates the (unconfirmed)
+ * audience persona; a still-assigned topic persona's EXPERTISE only.
+ */
+const NEUTRAL_HOUSE_VOICE_DIRECTIVE =
+  'Audience unconfirmed past the escalation deadline — do NOT write in any ' +
+  'audience-specific persona VOICE. Use a NEUTRAL, professional house voice for ' +
+  'tone and phrasing. If a topic/expertise persona is still assigned below, apply ' +
+  'ONLY its methodology/expertise — never adopt its voice or first-person style.';
+
+/**
+ * D5 — on the pending → deadline_fallback transition, strip the UNCONFIRMED
+ * audience voice out of what actually gets dispatched. Without this, the stored
+ * `blend_directive` (persisted at selection time, before the deadline lapsed)
+ * still reads "Write in <audience persona>'s VOICE" verbatim, and buildPersonaBlock
+ * (persona-dispatch.ts) delivers task.persona_id + that directive UNCHANGED — so
+ * the never-naked house-voice release was fictional; the blend always mirrors the
+ * voice persona onto tasks.persona_id (D1), so the "neutralize only when
+ * persona_id is NULL" assumption never actually fires.
+ *
+ * Mirrors persistPersonaBundle's own voice→id derivation so "the unconfirmed
+ * audience voice persona" means the SAME id it originally mirrored onto
+ * voice_persona_id / tasks.persona_id.
+ *
+ *   - blend_directive  → rewritten to the neutral house-voice directive
+ *                         (+ ensureBlendGuardrail, defense in depth).
+ *   - voice_persona_id → NULL (the unconfirmed voice no longer governs).
+ *   - persona_id/name  → repointed to the bundle's TOPIC persona ONLY when the
+ *                         task is currently pinned to the unconfirmed AUDIENCE
+ *                         voice persona AND a distinct topic persona exists —
+ *                         never invents a persona the bundle didn't carry, never
+ *                         downgrades an already-different pin.
+ *
+ * Best-effort: any failure here must never block the deadline-fallback bookkeeping
+ * (the confirm_state flip + visible event) or dispatch itself.
+ */
+function neutralizeUnconfirmedVoiceOnDeadline(taskId: string): void {
+  try {
+    const row = queryOne<TaskPersonaBundleRow>(
+      'SELECT * FROM task_persona_bundle WHERE task_id = ?',
+      [taskId],
+    );
+    if (!row) return; // no bundle — nothing to neutralize
+
+    let bundle: PersonaBundle | null = null;
+    try { bundle = JSON.parse(row.bundle_json) as PersonaBundle; } catch { bundle = null; }
+    const voice = bundle?.voice;
+    const unconfirmedVoicePersonaId =
+      (voice?.collapsed ? voice.collapsed_persona_id : voice?.audience_persona?.id) ||
+      voice?.audience_persona?.id ||
+      null;
+    const topicPersonaId = voice?.topic_persona?.id ?? null;
+    const neutralDirective = ensureBlendGuardrail(NEUTRAL_HOUSE_VOICE_DIRECTIVE);
+
+    const current = queryOne<{ persona_id: string | null }>(
+      'SELECT persona_id FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    const shouldRepoint =
+      !!unconfirmedVoicePersonaId &&
+      current?.persona_id === unconfirmedVoicePersonaId &&
+      !!topicPersonaId &&
+      topicPersonaId !== unconfirmedVoicePersonaId;
+
+    if (shouldRepoint) {
+      run(
+        `UPDATE tasks
+            SET voice_persona_id = NULL,
+                blend_directive = ?,
+                persona_id = ?,
+                persona_name = ?
+          WHERE id = ?`,
+        [neutralDirective, topicPersonaId, humanizeSlug(topicPersonaId as string), taskId],
+      );
+    } else {
+      run(
+        `UPDATE tasks SET voice_persona_id = NULL, blend_directive = ? WHERE id = ?`,
+        [neutralDirective, taskId],
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[audience-confirm] neutralizeUnconfirmedVoiceOnDeadline non-fatal for task ${taskId}:`,
+      (err as Error).message,
+    );
+  }
+}
+
+/**
  * NEVER-NAKED deadline release: an unconfirmed task past the deadline is dispatched
  * under house-voice GOVERNANCE only. We flip the bundle to 'deadline_fallback' (once)
  * and record a visible event; `confirm_required` is left visible so the operator can
  * still confirm afterwards. No audience is fabricated.
+ *
+ * D5: the transition ALSO neutralizes the unconfirmed audience VOICE out of the
+ * dispatched directive (see neutralizeUnconfirmedVoiceOnDeadline) — a fallback must
+ * never ship an unconfirmed-audience persona blend.
  */
 export function markAudienceDeadlineFallback(taskId: string): void {
   const now = new Date().toISOString();
@@ -1303,10 +1481,11 @@ export function markAudienceDeadlineFallback(taskId: string): void {
     );
     // Only emit the event on the transition (res.changes === 1), never every sweep.
     if (res.changes === 1) {
+      neutralizeUnconfirmedVoiceOnDeadline(taskId);
       run(
         `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
         [uuidv4(), 'audience_confirm_deadline_fallback', taskId,
-          `[AUDIENCE-CONFIRM] unconfirmed past deadline — dispatching under house-voice governance ONLY; audience still unconfirmed (no audience fabricated).`, now],
+          `[AUDIENCE-CONFIRM] unconfirmed past deadline — dispatching under house-voice governance ONLY; audience still unconfirmed (no audience fabricated). Blend directive neutralized so no unconfirmed-audience voice ships.`, now],
       );
     }
   } catch { /* best-effort — never block dispatch on the fallback bookkeeping */ }
@@ -1421,6 +1600,96 @@ export async function rescoreAudienceBlend(
   }
 }
 
+// ─── D7 — LEARNING LOOP: CREDIT EVERY BLENDED PERSONA, NOT JUST THE VOICE ───
+
+/** One persona the done-transition completion signal should credit. */
+export interface CreditablePersona {
+  personaId: string;
+  /** Which slot earned this persona the credit — analytics-only tag. */
+  role: 'primary' | 'voice' | 'topic' | 'subtask';
+}
+
+/**
+ * D7 — spawnRecordCompletion's callers (route.ts PATCH status=done, qc-scorer.ts
+ * auto-approve) fired it ONCE with `tasks.persona_id` — which in blend mode IS the
+ * voice mirror (persona_blend.py:888), never the topic persona, never any of the
+ * up-to-10 `task_personas` bundle entries, never a `task_subtask_persona` row
+ * (DEP-5 `--combined` decomposition). Every persona that actually did craft/
+ * expertise work except the voice went uncredited — the adaptive weights only
+ * ever adapted from the ONE mirror id.
+ *
+ * PURE (DB reads only, no spawn) so the dedup/cap contract is unit-testable
+ * without touching child_process — same split as evaluateAudienceConfirmGate /
+ * holdForAudienceConfirm. Sources, in credit order (first wins on a dup id):
+ *   1. `primaryPersonaId` (tasks.persona_id at done-transition) → role 'primary'.
+ *   2. The bundle's VOICE decision (task_persona_bundle.bundle_json) → 'voice'
+ *      (collapsed ? collapsed_persona_id : audience_persona.id) then 'topic'
+ *      (topic_persona.id). Absent when the task never blended (no bundle row) —
+ *      tolerated, primary credit still stands.
+ *   3. `task_subtask_persona` rows (loadSubtaskPersonas, DEP-5 decomposition) →
+ *      'subtask', one credit per distinct persona_id.
+ * Sentinel ids (SENTINEL_IDS) are dropped. Capped at 10 — mirrors the bundle's own
+ * up-to-10 `task_personas` contract.
+ */
+export function collectCreditablePersonaIds(
+  taskId: string,
+  primaryPersonaId: string | null | undefined,
+): CreditablePersona[] {
+  const credited: CreditablePersona[] = [];
+  const seen = new Set<string>();
+  const addCredit = (id: string | null | undefined, role: CreditablePersona['role']) => {
+    if (!id || SENTINEL_IDS.has(id) || seen.has(id)) return;
+    seen.add(id);
+    credited.push({ personaId: id, role });
+  };
+
+  addCredit(primaryPersonaId, 'primary');
+
+  try {
+    const bundleRow = queryOne<{ bundle_json: string }>(
+      'SELECT bundle_json FROM task_persona_bundle WHERE task_id = ?',
+      [taskId],
+    );
+    if (bundleRow) {
+      const bundle = JSON.parse(bundleRow.bundle_json) as PersonaBundle;
+      const voice = bundle?.voice;
+      addCredit(voice?.collapsed ? voice.collapsed_persona_id : voice?.audience_persona?.id, 'voice');
+      addCredit(voice?.topic_persona?.id, 'topic');
+    }
+  } catch {
+    /* pre-090 DB or malformed bundle_json — tolerated, primary credit still stands */
+  }
+
+  try {
+    for (const sub of loadSubtaskPersonas(taskId)) {
+      addCredit(sub.persona_id, 'subtask');
+    }
+  } catch {
+    /* loadSubtaskPersonas is already tolerant; belt-and-suspenders */
+  }
+
+  return credited.slice(0, 10); // mirror the bundle's own up-to-10 task_personas cap
+}
+
+/**
+ * D7 — fire-and-forget: spawn one `record-completion` per distinct blended
+ * persona (capped at 10) instead of the single voice-mirror call. Drop-in
+ * replacement for the direct `spawnRecordCompletion(taskId, task.persona_id, ...)`
+ * call at both done-transition sites (route.ts PATCH status=done, qc-scorer.ts
+ * auto-approve) — same signature plus the extra completions, same non-blocking /
+ * error-logged contract (spawnRecordCompletion itself never throws).
+ */
+export function recordPersonaCompletions(
+  taskId: string,
+  primaryPersonaId: string | null | undefined,
+  deptSlug: string | null | undefined,
+  taskOutput?: string | null,
+): void {
+  const credits = collectCreditablePersonaIds(taskId, primaryPersonaId);
+  for (const { personaId, role } of credits) {
+    spawnRecordCompletion(taskId, personaId, deptSlug, taskOutput, role);
+  }
+}
 
 // ─── DEDUPLICATION HELPERS ──────────────────────────────────────────────────
 

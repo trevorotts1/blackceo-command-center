@@ -309,3 +309,66 @@ test('[confirm] confirmTaskAudience flips to confirmed + mirrors source=operator
   const evt = queryOne<{ message: string }>("SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirmed'", [id]);
   assert.ok(evt && /operator confirmed audience "Founders"/.test(evt.message));
 });
+
+// ── E. D5 — deadline fallback never ships the unconfirmed audience voice ────
+
+test('[D5] markAudienceDeadlineFallback neutralizes the stale audience-voice directive + repoints persona to topic', () => {
+  const id = nextId('d5-repoint');
+  insertTask(id);
+  // Simulate the REAL post-selection state (D1): tasks.persona_id mirrors the
+  // blend's VOICE (audience) persona — never the topic persona.
+  run(`UPDATE tasks SET persona_id = ?, persona_name = ? WHERE id = ?`, ['audience-voice-persona', 'Audience Voice Persona', id]);
+  persistPersonaBundle(id, bundle({ confirm_required: true })); // → pending; voice_persona_id = 'audience-voice-persona'
+
+  const beforeMirror = queryOne<{ voice_persona_id: string | null; blend_directive: string | null }>(
+    'SELECT voice_persona_id, blend_directive FROM tasks WHERE id = ?', [id],
+  );
+  assert.equal(beforeMirror?.voice_persona_id, 'audience-voice-persona', 'sanity: voice mirror set pre-fallback');
+  assert.ok(beforeMirror?.blend_directive && /audience voice/i.test(beforeMirror.blend_directive), 'sanity: original directive names the audience voice');
+
+  markAudienceDeadlineFallback(id);
+
+  const row = queryOne<{ confirm_state: string }>('SELECT confirm_state FROM task_persona_bundle WHERE task_id = ?', [id]);
+  assert.equal(row?.confirm_state, 'deadline_fallback');
+
+  const after = queryOne<{
+    voice_persona_id: string | null; blend_directive: string | null;
+    persona_id: string | null; persona_name: string | null;
+  }>('SELECT voice_persona_id, blend_directive, persona_id, persona_name FROM tasks WHERE id = ?', [id]);
+  assert.equal(after?.voice_persona_id, null, 'D5: unconfirmed voice mirror is NULLed');
+  assert.ok(after?.blend_directive, 'a neutral directive is still present (never naked)');
+  assert.ok(!/write in the audience voice/i.test(after!.blend_directive!), 'D5: the unconfirmed audience-voice instruction is GONE');
+  assert.ok(/neutral/i.test(after!.blend_directive!), 'D5: replaced with an explicit neutral house-voice directive');
+  assert.ok(/style-inspired/i.test(after!.blend_directive!) && /impersonation/i.test(after!.blend_directive!), 'guardrail still present');
+  assert.equal(after?.persona_id, 'ogilvy-on-advertising', 'D5: repointed to the bundle TOPIC persona (was pinned to the audience/voice persona)');
+  assert.equal(after?.persona_name, 'Ogilvy On Advertising');
+
+  const evt = queryOne<{ message: string }>(
+    "SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirm_deadline_fallback'", [id],
+  );
+  assert.ok(evt && /neutralized/i.test(evt.message));
+});
+
+test('[D5] markAudienceDeadlineFallback: persona_id NOT pinned to the audience persona → neutralizes voice only, no repoint', () => {
+  const id = nextId('d5-norepoint');
+  insertTask(id);
+  // persona_id already points somewhere ELSE (not the bundle's audience persona) —
+  // never invent/repoint away from an existing, unrelated pin.
+  run(`UPDATE tasks SET persona_id = ?, persona_name = ? WHERE id = ?`, ['some-other-persona', 'Some Other Persona', id]);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+
+  markAudienceDeadlineFallback(id);
+
+  const after = queryOne<{ voice_persona_id: string | null; persona_id: string | null; blend_directive: string | null }>(
+    'SELECT voice_persona_id, persona_id, blend_directive FROM tasks WHERE id = ?', [id],
+  );
+  assert.equal(after?.voice_persona_id, null, 'voice mirror still NULLed regardless of the repoint decision');
+  assert.equal(after?.persona_id, 'some-other-persona', 'no repoint — the existing unrelated pin is left untouched');
+  assert.ok(after?.blend_directive && /neutral/i.test(after.blend_directive), 'directive still neutralized');
+});
+
+test('[D5] markAudienceDeadlineFallback: no bundle row → no-op (pre-existing tolerance, no crash)', () => {
+  const id = nextId('d5-nobundle');
+  insertTask(id);
+  assert.doesNotThrow(() => markAudienceDeadlineFallback(id));
+});
