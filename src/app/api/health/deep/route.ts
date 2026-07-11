@@ -20,7 +20,8 @@
  *     "company_branding": { "pass": bool, "detail": string, "indeterminate"?: bool },
  *     "database_path":    { "pass": bool, "detail": string },
  *     "migrations":       { "pass": bool, "detail": string },
- *     "disk_headroom":    { "pass": bool, "detail": string }
+ *     "disk_headroom":    { "pass": bool, "detail": string },
+ *     "anthology_board_projection": { "pass": bool, "detail": string }
  *   }
  * }
  *
@@ -40,6 +41,7 @@ import {
   checkMigrations,
   checkDiskHeadroom,
   checkNextPublicAppUrl,
+  checkAnthologyBoardProjection,
 } from '@/lib/health/deep-checks';
 
 export const dynamic = 'force-dynamic';
@@ -47,7 +49,7 @@ export const revalidate = 0;
 
 export async function GET() {
   try {
-    const [assetManifest, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl] =
+    const [assetManifest, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl, anthologyBoardProjection] =
       await Promise.all([
         Promise.resolve(checkAssetManifest()),
         Promise.resolve(checkCompanyBranding()),
@@ -56,6 +58,7 @@ export async function GET() {
         Promise.resolve(checkMigrations()),
         checkDiskHeadroom(),
         Promise.resolve(checkNextPublicAppUrl()),
+        Promise.resolve(checkAnthologyBoardProjection()),
       ]);
 
     const checks = {
@@ -66,6 +69,7 @@ export async function GET() {
       migrations: migrations,
       disk_headroom: diskHeadroom,
       next_public_app_url: appUrl,
+      anthology_board_projection: anthologyBoardProjection,
     };
 
     const allChecks = Object.values(checks);

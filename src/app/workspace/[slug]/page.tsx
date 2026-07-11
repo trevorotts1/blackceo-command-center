@@ -16,6 +16,7 @@ import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import { resolveDepartment } from '@/lib/routing/resolve-department';
+import { AnthologyBoardDriftBanner } from '@/components/anthology/BoardDriftBanner';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -323,6 +324,10 @@ export default function WorkspacePage() {
           ]}
         />
       </div>
+
+      {/* A7 — board projection drift banner (Anthology board only). Read-only,
+          fail-soft; renders nothing unless the ledger shows confirmed drift. */}
+      {workspace.slug === 'anthology' && <AnthologyBoardDriftBanner />}
 
       {/* Department head banner — migration 028. Surfaces the agent designated
           as the head of this workspace so visitors immediately know who owns it. */}
