@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { Task } from '@/lib/types';
+import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -351,35 +352,75 @@ export async function POST(
       nextDescription = existing.description ? `${existing.description}\n\n${noteLine}` : noteLine;
     }
 
-    // ── Persist the transition ──
+    // ── Persist the transition via the shared lifecycle state machine ─────────
+    // CANONICAL CONSOLIDATION (was the standing integrator TODO on this route):
+    // the write now routes through transition() (src/lib/task-lifecycle.ts) instead
+    // of a raw UPDATE. That closes a real hole — this route previously wrote ANY
+    // schema-valid status straight to the DB, so it could drive a card along an
+    // ILLEGAL edge (e.g. backlog → review) that the LEGAL_TRANSITIONS map forbids
+    // and that the operator PATCH path has always rejected. transition() enforces
+    // that guard, writes the task_events + legacy `events` audit rows, broadcasts
+    // SSE, and fires the done owner-notification.
+    //
+    // NOT a QC bypass: 'done' is still hard-rejected with 403 by FORBIDDEN_STATUSES
+    // above, BEFORE the DB is touched, so it can never reach this call. QC (>= 8.5)
+    // via the independent auto-scorer remains the only path to 'done'. The internal
+    // QC promoter writes 'done' straight to the DB and does not call this endpoint,
+    // so its review → done promotion is unaffected.
+    //
+    // operatorOverride: TRUE — deliberate, and it does NOT weaken the guard we came
+    // here for. In transition(), the LEGAL_TRANSITIONS check runs BEFORE
+    // checkPreconditions(), and operatorOverride only short-circuits the latter. So
+    // the illegal-edge guard is fully enforced; what we skip are the AGENT-ASSIGNMENT
+    // preconditions (e.g. "in_progress requires assigned_agent_id"). Those encode a
+    // CC-INTERNAL, agent-driven workflow and are wrong for this path: the Skill-6
+    // producer builds its own cards externally and legitimately has no assigned CC
+    // agent, so enforcing them would 422 every legitimate producer update and break
+    // the funnel/website build flow outright. This route earns the override the same
+    // way an operator does — it is HMAC-signed, scoped to its own producer's cards,
+    // and cannot set 'done'.
     const statusChanged = status !== existing.status;
-    const updates: string[] = ['status = ?', 'updated_at = ?', 'last_progress_at = ?'];
-    const values: unknown[] = [status, now, now];
-    if (trimmedNote) {
-      updates.push('description = ?');
-      values.push(nextDescription);
+    try {
+      await transition(id, status as LifecycleState, {
+        actor: `board:${boardSource}`,
+        reason: trimmedNote ?? undefined,
+        operatorOverride: true,
+      });
+    } catch (err) {
+      if (err instanceof TransitionError) {
+        if (err.code === 'NOT_FOUND') {
+          return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+        }
+        if (err.code === 'ILLEGAL_TRANSITION') {
+          return NextResponse.json({ error: err.message, code: err.code }, { status: 409 });
+        }
+        return NextResponse.json({ error: err.message, code: err.code }, { status: 422 });
+      }
+      throw err; // unknown error → outer catch → 500
     }
-    values.push(id);
-    run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
 
-    // ── Audit trail: status-change event + task_history (parity with PATCH) ──
+    // ── Supplementary UPDATE: fields transition() does not own ────────────────
+    // transition() updates `status` + `updated_at` only. Preserve this route's
+    // last_progress_at (activity-timestamp surface) and the note-appended
+    // description so the board card still shows the producer's timestamped line.
+    const supUpdates: string[] = ['last_progress_at = ?'];
+    const supValues: unknown[] = [now];
+    if (trimmedNote) {
+      supUpdates.push('description = ?');
+      supValues.push(nextDescription);
+    }
+    supValues.push(id);
+    run(`UPDATE tasks SET ${supUpdates.join(', ')} WHERE id = ?`, supValues);
+
+    // ── Audit trail: task_history (parity with PATCH) ──────────────────────────
+    // transition() writes the task_events + legacy `events` rows, so this route no
+    // longer inserts its own `events` row (doing both would double-count the audit).
+    // task_history is NOT written by transition(), so it stays here.
     if (statusChanged) {
-      const eventType = status === 'done' ? 'task_completed' : 'task_status_changed';
-      const eventMessage = trimmedNote
-        ? `Task "${existing.title}" moved to ${status}: ${trimmedNote}`
-        : `Task "${existing.title}" moved to ${status}`;
-      run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), eventType, id, eventMessage, now],
-      );
-
       // task_history feeds /api/performance duration + attribution. Best-effort:
       // older DBs without the table (pre-migration 027) simply skip this row.
       // INGEST-14: record the board-producer provenance (was null) so the
-      // audit attributes the transition to the signed producer that drove it,
-      // not to nothing. Canonical consolidation is the shared transition()
-      // (task-lifecycle.ts, owned by L3) — see integrator note.
+      // audit attributes the transition to the signed producer that drove it.
       try {
         run(
           `INSERT INTO task_history (id, task_id, status_from, status_to, changed_at, changed_by_agent_id, agent_name)

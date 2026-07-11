@@ -447,6 +447,29 @@ export async function POST(request: NextRequest) {
     const sourceRef = typeof body.source_ref === 'string' ? body.source_ref.trim() : undefined;
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
+
+    // ── Skill-6 survey job-type mapping (zero-migration) ──────────────────────
+    // cc_board.py (and callers like it) may post department_slug='survey', 'form',
+    // or 'quiz' to describe a GoHighLevel web-builder task. There is no 'survey'
+    // workspace in the standard CC schema, and the 'survey' keyword that DOES exist
+    // in departments.config.ts maps to the Research department — the wrong semantic
+    // for a build task. Without this remap the card falls through to the CEO
+    // catch-all and is effectively invisible to the department that must build it.
+    //
+    // Zero-migration fix: remap these job types to 'web-development', the one
+    // department that reliably resolves today, so the card lands in the right
+    // workspace.
+    //
+    // NOTE (operator): a dedicated 'surveys' department is a fast-follow once survey
+    // volume justifies its own Kanban column. When that department is added, its SOP
+    // MUST carry `success_criteria` so runQCOnReview auto-scores the build instead of
+    // parking at 7.5 for human sign-off.
+    const SKILL6_SURVEY_SLUGS = new Set(['survey', 'form', 'quiz']);
+    const resolvedDeptSlug =
+      departmentSlug && SKILL6_SURVEY_SLUGS.has(departmentSlug.toLowerCase())
+        ? 'web-development'
+        : departmentSlug;
+
     const persona = typeof body.persona === 'string' ? body.persona.trim() : undefined;
     // W3.2 — owner-direct specialist pin. `target_agent` wins; `specialist` is
     // an accepted alias. Empty strings collapse to undefined.
@@ -488,8 +511,8 @@ export async function POST(request: NextRequest) {
         .digest('hex');
     const dedupeKey = idempotencyKey || sourceRef || syntheticDedupeKey;
 
-    let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(departmentSlug, persona);
-    let resolvedDepartment: string | undefined = departmentSlug;
+    let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(resolvedDeptSlug, persona);
+    let resolvedDepartment: string | undefined = resolvedDeptSlug;
     // INGEST-06 — the explicit slug was unrecognized and got redirected to the
     // general-task catch-all (or left unrouted). Report the department we ACTUALLY
     // landed in so the W5.2 owner-assignment notice never announces a department
