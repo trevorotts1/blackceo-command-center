@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import BetterSqlite3 from 'better-sqlite3';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -85,12 +86,55 @@ let tmpDir: string;
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deep-health-test-'));
   vi.spyOn(process, 'cwd').mockReturnValue(tmpDir);
+  // A7: pin the Anthology ledger resolution to an isolated, non-existent-by-
+  // default path for EVERY test in this file (not just the new describe block
+  // below) so no test — old or new — ever reads a real box's live
+  // ~/.anthology-engine ledger. Without this, checkAnthologyBoardProjection()
+  // falls back to $HOME, which is non-deterministic across machines.
+  process.env.ANTHOLOGY_STATE_DIR = path.join(tmpDir, 'anthology-state');
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  delete process.env.ANTHOLOGY_STATE_DIR;
+  delete process.env.ANTHOLOGY_MC_BOARD_SCRIPT;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
+
+/** Build a throwaway Anthology ledger mirror with N participants/anthologies. */
+function makeAnthologyLedger(
+  dir: string,
+  rows: { participants?: number; anthologies?: number } = {}
+): string {
+  const { participants = 0, anthologies = 0 } = rows;
+  fs.mkdirSync(dir, { recursive: true });
+  const dbPath = path.join(dir, 'anthology_state.db');
+  const db = new BetterSqlite3(dbPath);
+  db.exec(`
+    CREATE TABLE participants(participant_key TEXT PRIMARY KEY, anthology_id TEXT);
+    CREATE TABLE anthologies(anthology_id TEXT PRIMARY KEY, name TEXT);
+  `);
+  const insertP = db.prepare('INSERT INTO participants (participant_key, anthology_id) VALUES (?, ?)');
+  for (let i = 0; i < participants; i++) insertP.run(`p${i}::k`, `a${i}`);
+  const insertA = db.prepare('INSERT INTO anthologies (anthology_id, name) VALUES (?, ?)');
+  for (let i = 0; i < anthologies; i++) insertA.run(`a${i}`, `Anthology ${i}`);
+  db.close();
+  return dbPath;
+}
+
+/** A getDb() mock returning a fixed anthology-card count from `tasks`. */
+function mockDbWithAnthologyCardCount(n: number) {
+  return {
+    getDb: () => ({
+      prepare: (_sql: string) => ({
+        get: () => ({ n }),
+        all: () => [],
+      }),
+    }),
+    getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+    DB_PATH: path.join(tmpDir, 'test.db'),
+  };
+}
 
 async function loadChecks() {
   vi.resetModules();
@@ -1464,5 +1508,339 @@ describe('GET /api/health/deep — response shape', () => {
     const body = await response.json() as Record<string, unknown>;
     expect(body.indeterminate).toBe(true);
     expect(body.pass).toBe(false);
+  });
+
+  // ── A7 REGRESSION GUARD (the disqualifying defect this refix closes) ────────
+  //
+  // Prior attempt wired checkAnthologyBoardProjection() into the GATING
+  // aggregation (allChecks), so a confirmed board-projection drift flipped the
+  // top-level `pass` to false. cc-health-check.sh reads ONLY that top-level
+  // `pass`/`indeterminate` (scripts/cc-health-check.sh:77-80) → exit 1 → RED →
+  // atomic-deploy.sh auto-rollback + standup-heartbeat halting all task work,
+  // every cron tick. A7's whole purpose is to DETECT that drift — it must never
+  // be the thing that disables the box.
+  //
+  // This test builds a scenario where all 7 GATING checks are green AND a
+  // confirmed drift exists, then asserts the drift is reported as a NON-GATING
+  // advisory while the top-level verdict stays green.
+  function greenGatingDbMock() {
+    return {
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Summit Retail Enterprises' };
+            // anthology card count query → 0 cards (drift when ledger has rows)
+            if (sql.includes('FROM tasks')) return { n: 0 };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    };
+  }
+
+  /** Write a branded pre-rendered index.html so checkHtmlTitle() passes. */
+  function writeBrandedServerHtml(dir: string) {
+    const serverDir = path.join(dir, '.next', 'server', 'pages');
+    fs.mkdirSync(serverDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(serverDir, 'index.html'),
+      '<!DOCTYPE html><html><head><title>Summit Retail Enterprises</title></head><body></body></html>'
+    );
+  }
+
+  it('A7 regression: a CONFIRMED board drift is ADVISORY only — top-level pass stays GREEN, never trips rollback/heartbeat', async () => {
+    makeNextBuild(tmpDir);
+    writeBrandedServerHtml(tmpDir);
+    // Ledger has rows but the board shows 0 anthology cards → confirmed DRIFT.
+    makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 5, anthologies: 2 });
+
+    // Keep the URL/db-path gating checks green + deterministic.
+    const savedAppUrl = process.env.NEXT_PUBLIC_APP_URL;
+    const savedPubUrl = process.env.CC_PUBLIC_URL;
+    const savedDbPath = process.env.DATABASE_PATH;
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.CC_PUBLIC_URL;
+    delete process.env.DATABASE_PATH;
+
+    vi.doMock('@/lib/db', () => greenGatingDbMock());
+    vi.doMock('../../src/lib/health/deep-checks.js', async () => {
+      const actual = await vi.importActual('../../src/lib/health/deep-checks.js') as typeof import('../../src/lib/health/deep-checks');
+      return { ...actual, diskReader: { readFreeBytes: () => 20 * 1024 ** 3 } };
+    });
+
+    vi.resetModules();
+    const mod = await import('../../src/app/api/health/deep/route.js') as {
+      GET?: () => Promise<Response>;
+    };
+
+    try {
+      if (!mod.GET) return;
+      const response = await mod.GET();
+      const body = await response.json() as {
+        pass: boolean;
+        indeterminate: boolean;
+        checks: Record<string, unknown>;
+        advisory?: { anthology_board_projection?: { pass: boolean; detail: string } };
+      };
+
+      // The drift is real and surfaced under `advisory`.
+      expect(body.advisory).toBeDefined();
+      expect(body.advisory?.anthology_board_projection?.pass).toBe(false);
+      expect(body.advisory?.anthology_board_projection?.detail).toMatch(/DRIFT/);
+
+      // ...but it is EXCLUDED from the gating verdict: top-level stays GREEN.
+      expect(body.pass).toBe(true);
+      expect(body.indeterminate).toBe(false);
+
+      // ...and it is NOT inside the gating `checks` object (so cc-health-check.sh,
+      // atomic-deploy.sh, and standup-heartbeat.sh never see it as a red check).
+      expect(body.checks).not.toHaveProperty('anthology_board_projection');
+    } finally {
+      if (savedAppUrl !== undefined) process.env.NEXT_PUBLIC_APP_URL = savedAppUrl;
+      if (savedPubUrl !== undefined) process.env.CC_PUBLIC_URL = savedPubUrl;
+      if (savedDbPath !== undefined) process.env.DATABASE_PATH = savedDbPath;
+    }
+  });
+
+  it('A7 regression: advisory field present + non-gating on a not-provisioned box (green stays green)', async () => {
+    makeNextBuild(tmpDir);
+    writeBrandedServerHtml(tmpDir);
+    // No ledger created → Anthology Engine not provisioned → advisory pass:true.
+
+    const savedAppUrl = process.env.NEXT_PUBLIC_APP_URL;
+    const savedPubUrl = process.env.CC_PUBLIC_URL;
+    const savedDbPath = process.env.DATABASE_PATH;
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.CC_PUBLIC_URL;
+    delete process.env.DATABASE_PATH;
+
+    vi.doMock('@/lib/db', () => greenGatingDbMock());
+    vi.doMock('../../src/lib/health/deep-checks.js', async () => {
+      const actual = await vi.importActual('../../src/lib/health/deep-checks.js') as typeof import('../../src/lib/health/deep-checks');
+      return { ...actual, diskReader: { readFreeBytes: () => 20 * 1024 ** 3 } };
+    });
+
+    vi.resetModules();
+    const mod = await import('../../src/app/api/health/deep/route.js') as {
+      GET?: () => Promise<Response>;
+    };
+
+    try {
+      if (!mod.GET) return;
+      const response = await mod.GET();
+      const body = await response.json() as {
+        pass: boolean;
+        indeterminate: boolean;
+        checks: Record<string, unknown>;
+        advisory?: { anthology_board_projection?: { pass: boolean } };
+      };
+
+      expect(body).toHaveProperty('advisory');
+      expect(body.advisory?.anthology_board_projection?.pass).toBe(true);
+      expect(body.checks).not.toHaveProperty('anthology_board_projection');
+      expect(body.pass).toBe(true);
+      expect(body.indeterminate).toBe(false);
+    } finally {
+      if (savedAppUrl !== undefined) process.env.NEXT_PUBLIC_APP_URL = savedAppUrl;
+      if (savedPubUrl !== undefined) process.env.CC_PUBLIC_URL = savedPubUrl;
+      if (savedDbPath !== undefined) process.env.DATABASE_PATH = savedDbPath;
+    }
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// ANTHOLOGY BOARD PROJECTION DRIFT (A7 — new check, no truth-table row)
+//
+// Problem: an empty Kanban board (0 anthology cards) is visually identical
+// whether nothing is queued (healthy-idle) or the S0→mc_board mirror silently
+// dropped every card while the engine's ledger kept accumulating participants
+// (the confirmed failure: 5 ledger participants invisible for 3 days against
+// 0 cards, no alert). checkAnthologyBoardProjection() makes the two cases
+// distinguishable by comparing the engine's own ledger counts against this
+// box's tasks.source='anthology' card count.
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('anthology_board_projection', () => {
+  // GUARD: the 'GET /api/health/deep — response shape' suite above registers
+  // `vi.doMock('../../src/lib/health/deep-checks.js', factory)` (wrapping
+  // vi.importActual + a diskReader override) and never un-registers it — that
+  // mock factory registration is NOT cleared by vi.resetModules() (which only
+  // clears the module CACHE, not the mock REGISTRY), so every loadChecks()
+  // call after that suite would otherwise resolve through a stale factory
+  // whose captured `actual` module was evaluated against a THROWING @/lib/db
+  // mock from that suite's own last test. Explicitly un-mock both specifier
+  // forms before each test here so this describe block always exercises the
+  // real, unpolluted module.
+  beforeEach(() => {
+    vi.doUnmock('../../src/lib/health/deep-checks.js');
+    vi.doUnmock('@/lib/health/deep-checks');
+  });
+
+  it('no ledger mirror on disk at all → pass=true, NOT indeterminate (feature not provisioned, not UNKNOWN)', async () => {
+    // ANTHOLOGY_STATE_DIR (set in beforeEach) points at a directory that was
+    // never created — mirrors a box that never ran anthology provisioning.
+    vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(0));
+    const { checkAnthologyBoardProjection } = await loadChecks();
+    const result = checkAnthologyBoardProjection();
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/not provisioned/i);
+    // LEAK POSTURE (A7 refix): the not-provisioned detail must NOT echo the
+    // resolved absolute ledger path (which sits under $HOME / the data dir) —
+    // this detail is exposed through the unauthenticated endpoint bypass.
+    const ledgerPath = path.join(tmpDir, 'anthology-state', 'anthology_state.db');
+    expect(result.detail).not.toContain(ledgerPath);
+    expect(result.detail).not.toContain(tmpDir);
+  });
+
+  it('ledger present but EMPTY (0 participants, 0 anthologies) → pass=true, healthy-idle', async () => {
+    makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 0, anthologies: 0 });
+    vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(0));
+    const { checkAnthologyBoardProjection } = await loadChecks();
+    const result = checkAnthologyBoardProjection();
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/healthy-idle/i);
+    expect(result.ledger_participants).toBe(0);
+    expect(result.ledger_anthologies).toBe(0);
+  });
+
+  it('CONFIRMED DRIFT: ledger has participants but board shows 0 anthology cards → pass=false, indeterminate=false', async () => {
+    makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 5, anthologies: 2 });
+    vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(0));
+    const { checkAnthologyBoardProjection } = await loadChecks();
+    const result = checkAnthologyBoardProjection();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(false);
+    expect(result.detail).toMatch(/DRIFT/);
+    expect(result.detail).toMatch(/Run:/);
+    expect(result.ledger_participants).toBe(5);
+    expect(result.ledger_anthologies).toBe(2);
+    expect(result.board_cards).toBe(0);
+  });
+
+  // LEAK POSTURE (A7 refix): the drift detail is exposed through the
+  // unauthenticated /api/health/deep bypass, so it MUST use a generic, path-free
+  // reconcile command — even when a real mc_board.py path resolves. The old
+  // behaviour (embedding the resolved absolute path) leaked $HOME + the skill
+  // install layout through an unauthenticated endpoint.
+  it('DRIFT detail uses a generic, path-free reconcile command and does NOT leak the resolved mc_board.py absolute path', async () => {
+    makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 1 });
+    const scriptPath = path.join(tmpDir, 'mc_board.py');
+    fs.writeFileSync(scriptPath, '# fixture stub\n');
+    // Even with an explicit resolvable script path set...
+    process.env.ANTHOLOGY_MC_BOARD_SCRIPT = scriptPath;
+    vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(0));
+    const { checkAnthologyBoardProjection } = await loadChecks();
+    const result = checkAnthologyBoardProjection();
+    expect(result.pass).toBe(false);
+    // ...the endpoint-facing detail must NOT contain that absolute path.
+    expect(result.detail).not.toContain(scriptPath);
+    // Generic, copy-pasteable guidance is still present for the operator banner.
+    expect(result.detail).toMatch(/Run:\s*mc_board\.py reconcile --json/);
+  });
+
+  it('ledger has rows AND the board is projecting cards → pass=true, no drift', async () => {
+    makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 5, anthologies: 2 });
+    vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(6));
+    const { checkAnthologyBoardProjection } = await loadChecks();
+    const result = checkAnthologyBoardProjection();
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/projecting/i);
+    expect(result.board_cards).toBe(6);
+  });
+
+  it('ledger mirror present but unreadable (corrupt file) → pass=false, indeterminate=true (UNKNOWN, not a confirmed drift)', async () => {
+    const dir = path.join(tmpDir, 'anthology-state');
+    fs.mkdirSync(dir, { recursive: true });
+    // Not a valid SQLite file — better-sqlite3 will throw on open.
+    fs.writeFileSync(path.join(dir, 'anthology_state.db'), 'not a sqlite database');
+    vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(0));
+    const { checkAnthologyBoardProjection } = await loadChecks();
+    const result = checkAnthologyBoardProjection();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(true);
+  });
+
+  it("this box's own task DB is unreadable → pass=false, indeterminate=true", async () => {
+    makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 3 });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: () => ({
+          get: () => { throw new Error('SQLITE_BUSY: database is locked'); },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: [], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    }));
+    const { checkAnthologyBoardProjection } = await loadChecks();
+    const result = checkAnthologyBoardProjection();
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(true);
+    // Ledger counts already read successfully — still surfaced even though
+    // the comparison itself couldn't complete.
+    expect(result.ledger_participants).toBe(3);
+  });
+
+  describe('resolveAnthologyStateDbPath — mirrors mc_board.py resolve_state_dir() precedence', () => {
+    it('ANTHOLOGY_STATE_DIR wins when set', async () => {
+      process.env.ANTHOLOGY_STATE_DIR = '/custom/state/dir';
+      process.env.OPENCLAW_DATA_DIR = '/should/not/be/used';
+      const { resolveAnthologyStateDbPath } = await loadChecks();
+      expect(resolveAnthologyStateDbPath()).toBe(path.join('/custom/state/dir', 'anthology_state.db'));
+      delete process.env.OPENCLAW_DATA_DIR;
+    });
+
+    it('falls back to OPENCLAW_DATA_DIR/anthology-engine/state when ANTHOLOGY_STATE_DIR is unset', async () => {
+      delete process.env.ANTHOLOGY_STATE_DIR;
+      process.env.OPENCLAW_DATA_DIR = '/data';
+      const { resolveAnthologyStateDbPath } = await loadChecks();
+      expect(resolveAnthologyStateDbPath()).toBe(
+        path.join('/data', 'anthology-engine', 'state', 'anthology_state.db')
+      );
+      delete process.env.OPENCLAW_DATA_DIR;
+    });
+
+    it('falls back to ~/.anthology-engine/state when neither env var is set', async () => {
+      delete process.env.ANTHOLOGY_STATE_DIR;
+      delete process.env.OPENCLAW_DATA_DIR;
+      const { resolveAnthologyStateDbPath } = await loadChecks();
+      const home = process.env.HOME || os.homedir();
+      expect(resolveAnthologyStateDbPath()).toBe(
+        path.join(home, '.anthology-engine', 'state', 'anthology_state.db')
+      );
+    });
+  });
+
+  describe('findMcBoardScript', () => {
+    it('returns null (fail-soft) when no candidate path exists', async () => {
+      delete process.env.ANTHOLOGY_MC_BOARD_SCRIPT;
+      // Pin HOME to the isolated tmpDir (which has no .openclaw/skills tree) so
+      // this assertion is deterministic even when run ON a real provisioned box
+      // that genuinely has ~/.openclaw/skills/59-anthology-engine/scripts/mc_board.py
+      // — without this, the fallback candidate would resolve to that REAL file.
+      const realHome = process.env.HOME;
+      process.env.HOME = tmpDir;
+      try {
+        const { findMcBoardScript } = await loadChecks();
+        expect(findMcBoardScript()).toBeNull();
+      } finally {
+        process.env.HOME = realHome;
+      }
+    });
+
+    it('returns the explicit ANTHOLOGY_MC_BOARD_SCRIPT override when it exists', async () => {
+      const scriptPath = path.join(tmpDir, 'mc_board.py');
+      fs.writeFileSync(scriptPath, '# fixture stub\n');
+      process.env.ANTHOLOGY_MC_BOARD_SCRIPT = scriptPath;
+      const { findMcBoardScript } = await loadChecks();
+      expect(findMcBoardScript()).toBe(scriptPath);
+    });
   });
 });
