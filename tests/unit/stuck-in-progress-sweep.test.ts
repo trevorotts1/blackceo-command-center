@@ -57,7 +57,7 @@ function seedTask(opts: {
   run(
     `INSERT INTO tasks (id, title, status, workspace_id, assigned_agent_id, updated_at, last_progress_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [id, 'Send Corey the summary', opts.status, opts.workspaceId, opts.agentId, opts.updatedAt, opts.lastProgressAt ?? null],
+    [id, 'Send the client the summary', opts.status, opts.workspaceId, opts.agentId, opts.updatedAt, opts.lastProgressAt ?? null],
   );
   return id;
 }

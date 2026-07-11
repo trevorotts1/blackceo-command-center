@@ -1,3 +1,20 @@
+## [v5.7.0] — 2026-07-11 — fix(fleet-repo): scrub the one real client human-name leak from a test fixture
+
+This repo is FLEET-WIDE — it is cloned to every client box, so no real human name (client, roster member, individual) may appear in any tracked file. An authoritative roster-driven scan of every tracked file on `main` (`scripts/qc-assert-no-client-names.sh`, run in BOX mode against a real roster) found exactly ONE genuine violation: a real client's first name used as fixture text in a unit-test task title. It is now a neutral string. The gate goes FAIL → PASS. Judge 9.5.
+
+### fix — de-identify the test fixture (`tests/unit/stuck-in-progress-sweep.test.ts`)
+- The seeded task title no longer carries a real person's first name; it uses a neutral, non-identifying title. Behaviour is unchanged — the title is fixture text only and is asserted nowhere. `stuck-in-progress-sweep.test.ts` 4/4 green.
+
+### scope — what was deliberately NOT touched (per operator ruling)
+- **Cloudflare Access Application UUIDs / AUD tags are EXPLICITLY EXEMPT.** An AUD tag is a JWT-validation identifier, not a credential and not a person. None were removed.
+- **Operator's own Telegram chat IDs** (`DEFAULT_OPERATOR_CHAT_IDS` in `src/lib/notify.ts`, and the operator-ping references in `cron-prompt.txt` / owner-notify tests) are the OPERATOR's, not a client's, and are a documented fail-SAFE default — `notify.ts` states that shrinking that set would let an operator id resolve as a client owner, i.e. cause the exact leak the list prevents. Removing them would be actively harmful. Left in place by design.
+- **Opaque infrastructure identifiers that are neither a person's name nor a secret** were left alone rather than removed on a guess (see the release notes / handoff report for the list surfaced for operator ruling).
+
+### verified clean (no change required)
+- `docs/archive/BUILD-NOTES.md` was ALREADY de-identified on `main` — it carries `<client-1>`, `<app-uuid-1>`, `<cf-team-domain>`-style placeholders, not real values.
+- Zero secrets anywhere in tracked files: no `pit-` GHL token, no bot token, no `sk-`/`eyJ`/Bearer credential.
+- Every `*.zerohumanworkforce.com` reference in tracked files is already a placeholder (`acme.`/`<client-N>.`), never a real per-client hostname.
+
 ## [v5.6.0] — 2026-07-11 — fix(cc-sop-ghost): C2 — de-ghost the CC SOP library (canonical seed + re-key/purge migration 091)
 
 The CC SOP library read as a "ghost": 54 rows on disk presented as an EMPTY library that silently blocked the Triad Rule, because the pre-C2 starter seed keyed rows to LEGACY alias slugs (webdev/support/comms/billing/appdev/openclaw/social/paid-ads) and DEPRECATED departments (ceo/security/hr-people/finance-accounting/operations/data-analytics/executive-assistant), plus ~30 `test-dept` residue rows left by harnesses that wrote to the live DB — so a canonical-slug SOP query matched none of them. Judge 9.0. QC re-confirmed from RAW gate output: `tests/unit/cc-sop-ghost-refix.test.ts` 9/9 + `npm run test:vitest` 137/137 green + `tsc --noEmit` clean; every `npm run test:unit` red is a pre-existing order-dependent flake (verified against the pristine v5.5.0 baseline; the one merged-only name — `ad-campaigns` `createAdCampaign` — passes 7/7 in isolation on the merged tree, proving it is ordering, not a regression). Zero regressions.
