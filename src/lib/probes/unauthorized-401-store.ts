@@ -95,6 +95,11 @@ export function recordUnauthorized401(event: Unauthorized401Event): number {
   s.byReason[event.reason] = (s.byReason[event.reason] ?? 0) + 1;
   s.lastEvent = event;
 
+  // Prune on WRITE, never on read (below). Two bounds, both applied here:
+  // drop anything already outside the window, then hard-cap the array. Memory
+  // stays bounded under a 401 flood without the reader ever mutating state.
+  const cutoff = at - UNAUTHORIZED_401_WINDOW_MS;
+  s.recentTimestamps = s.recentTimestamps.filter((t) => t >= cutoff);
   s.recentTimestamps.push(at);
   if (s.recentTimestamps.length > MAX_RECENT) {
     s.recentTimestamps.splice(0, s.recentTimestamps.length - MAX_RECENT);
@@ -103,16 +108,22 @@ export function recordUnauthorized401(event: Unauthorized401Event): number {
   return s.total;
 }
 
-/** Snapshot for the probe. Prunes the recent window as a side effect. */
+/**
+ * Snapshot for the probe. PURE — reading never mutates the store.
+ *
+ * `now` is injectable so a caller (or a test) can ask "what would this look like
+ * at time T" without that question destroying the window it is asking about. An
+ * earlier cut pruned here, which meant a single read at a future timestamp
+ * silently wiped the recent-failure window for every subsequent reader.
+ */
 export function readUnauthorized401Counters(now = Date.now()): Unauthorized401Counters {
   const s = state();
   const cutoff = now - UNAUTHORIZED_401_WINDOW_MS;
-  s.recentTimestamps = s.recentTimestamps.filter((t) => t >= cutoff);
 
   return {
     total: s.total,
     byReason: { ...s.byReason },
-    recentCount: s.recentTimestamps.length,
+    recentCount: s.recentTimestamps.filter((t) => t >= cutoff).length,
     lastEvent: s.lastEvent,
   };
 }
