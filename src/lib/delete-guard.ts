@@ -172,9 +172,13 @@ export function hardDeleteRefusedResponseBody(err: HardDeleteWithoutArchiveError
     message: err.message,
     table: err.table,
     id: err.rowId,
+    // The remedy MUST name an endpoint that actually works. PATCH /api/tasks/<id>
+    // does NOT accept archived_at (that is the whole reason hard DELETE got reached
+    // for, and why this branch adds the archive routes) — pointing callers at it
+    // would refuse the delete and then prescribe a fix that provably fails.
     remedy:
       err.table === 'tasks'
-        ? 'PATCH /api/tasks/<id> with { "archived_at": "<ISO timestamp>" } to soft-archive, then DELETE.'
+        ? 'POST /api/tasks/<id>/archive to soft-archive, then DELETE.'
         : 'POST /api/workspaces/<id>/archive to soft-archive, then DELETE.',
   };
 }
