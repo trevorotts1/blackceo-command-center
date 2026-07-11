@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { seedStarterSOPs } from '../sops-seed';
+import { canonicalDeptSlug } from '../routing/canonical-slug';
 import { seedCompanyGuarded } from './branding-seed';
 import {
   dedupeCanonicalWorkspaces,
@@ -3538,6 +3539,42 @@ const migrations: Migration[] = [
       console.log('[Migration 090] persona-blend columns + task_persona_bundle ready');
     },
   },
+  {
+    id: '091',
+    name: 'rekey_and_purge_ghost_sops',
+    // DESTRUCTIVE data cleanup (re-key + soft-delete + hard-delete). Defer during
+    // request-time additive self-heal so it never races live ingest; it runs on
+    // the next controlled boot instead.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // C2 — the CC SOP library was a "ghost": the pre-C2 starter seed keyed rows
+      // to LEGACY alias slugs (webdev, support, comms, billing, appdev, openclaw,
+      // social, paid-ads) and to DEPRECATED departments (ceo, security, hr-people,
+      // finance-accounting, operations, data-analytics, executive-assistant), and
+      // test harnesses that wrote to the LIVE DB left ~30 `test-dept` residue rows.
+      // A `/api/sops?department=<canonical>` query could never match the alias-keyed
+      // rows, so the library read as empty even with 54 rows on disk.
+      //
+      // This migration, on an existing DB, brings those rows into line with the
+      // rewritten canonical sops-seed.ts:
+      //   1. PURGE the test-dept residue (exact slug — never pattern-match).
+      //   2. SOFT-DELETE the deprecated-department rows (deleted_at set) by their
+      //      ORIGINAL department value, BEFORE re-key, so 'ceo' is retired rather
+      //      than silently rescued to master-orchestrator.
+      //   3. RE-KEY every remaining active row to its canonical slug via
+      //      canonicalDeptSlug(), PRESERVING each sop id — dispatch_rules.sop_id
+      //      and Triad matching key off the id, so the id must never change.
+      // Idempotent + safe on a fresh DB (sops empty → all three steps no-op, then
+      // autoSeedStarterSOPs seeds the 16 canonical starter SOPs).
+      console.log('[Migration 091] Re-keying legacy SOP rows + purging ghost residue (C2)...');
+      const r = rekeyAndPurgeGhostSops(db);
+      console.log(
+        `[Migration 091] re-keyed ${r.rekeyed} row(s) to canonical slugs, ` +
+          `retired ${r.deprecatedRetired} deprecated-dept row(s), ` +
+          `purged ${r.testPurged} test-dept row(s)`,
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -3743,6 +3780,115 @@ export function autoSeedTrioAgents(db: Database.Database): void {
     // Non-fatal: log and continue.
     console.log('[Auto-seed Trio] Skipped:', (err as Error).message);
   }
+}
+
+// ── C2: ghost SOP-library cleanup ────────────────────────────────────────────
+// Deprecated department slugs whose starter SOP rows are retired (dropped from
+// sops-seed.ts; soft-deleted here on DBs that already seeded them). Matched
+// against each row's ORIGINAL department value BEFORE canonicalization so 'ceo'
+// is retired rather than rescued to master-orchestrator.
+const DEPRECATED_SOP_DEPARTMENTS: readonly string[] = [
+  'ceo',
+  'security',
+  'hr-people',
+  'finance-accounting',
+  'operations',
+  'data-analytics',
+  'executive-assistant',
+];
+
+// Exact test-residue department slug. EXACT match only — never a LIKE/pattern
+// match (a 'testing-lab' or 'contest-dept' client dept must never be purged).
+const TEST_RESIDUE_SOP_DEPARTMENTS: readonly string[] = ['test-dept'];
+
+export interface SopGhostCleanupResult {
+  rekeyed: number;
+  deprecatedRetired: number;
+  testPurged: number;
+}
+
+/**
+ * C2 — retire the ghost SOP-library residue and re-key legacy alias rows to the
+ * canonical ZHC department slug set.
+ *
+ * PRESERVES every surviving row's sop id: dispatch_rules.sop_id (an FK by
+ * convention) and Triad SOP matching key off the id, so re-keying only ever
+ * UPDATEs the `department` column, never re-inserts.
+ *
+ * Order matters:
+ *   1. PURGE test-dept residue (hard DELETE, exact slug). FK-safe: sop_proposals
+ *      may reference sops(id) and foreign_keys is ON at connection, so any stray
+ *      reference to a test-dept row is nulled out first (test rows are never real
+ *      proposals, but this makes the DELETE impossible to trip an FK).
+ *   2. SOFT-DELETE deprecated-dept rows (set deleted_at) by ORIGINAL department.
+ *   3. RE-KEY remaining active rows: department := canonicalDeptSlug(department).
+ *
+ * Idempotent: a second run purges/retires nothing and re-keys nothing (all
+ * active rows already canonical).
+ */
+export function rekeyAndPurgeGhostSops(db: Database.Database): SopGhostCleanupResult {
+  const empty: SopGhostCleanupResult = { rekeyed: 0, deprecatedRetired: 0, testPurged: 0 };
+
+  const hasTable = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sops'")
+    .get();
+  if (!hasTable) return empty;
+
+  const cols = db.prepare('PRAGMA table_info(sops)').all() as { name: string }[];
+  const hasDeletedAt = cols.some((c) => c.name === 'deleted_at');
+  const now = new Date().toISOString();
+
+  // ── 1. PURGE test-dept residue ─────────────────────────────────────────────
+  const testPlaceholders = TEST_RESIDUE_SOP_DEPARTMENTS.map(() => '?').join(',');
+  const testRows = db
+    .prepare(`SELECT id FROM sops WHERE department IN (${testPlaceholders})`)
+    .all(...TEST_RESIDUE_SOP_DEPARTMENTS) as { id: string }[];
+  let testPurged = 0;
+  if (testRows.length > 0) {
+    const hasProposals = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sop_proposals'")
+      .get();
+    if (hasProposals) {
+      const clearApproved = db.prepare('UPDATE sop_proposals SET approved_sop_id = NULL WHERE approved_sop_id = ?');
+      const clearReplaces = db.prepare('UPDATE sop_proposals SET replaces_sop_id = NULL WHERE replaces_sop_id = ?');
+      for (const { id } of testRows) {
+        clearApproved.run(id);
+        clearReplaces.run(id);
+      }
+    }
+    testPurged = db
+      .prepare(`DELETE FROM sops WHERE department IN (${testPlaceholders})`)
+      .run(...TEST_RESIDUE_SOP_DEPARTMENTS).changes;
+  }
+
+  // ── 2. SOFT-DELETE deprecated-department rows (by original department) ──────
+  let deprecatedRetired = 0;
+  if (hasDeletedAt) {
+    const depPlaceholders = DEPRECATED_SOP_DEPARTMENTS.map(() => '?').join(',');
+    deprecatedRetired = db
+      .prepare(
+        `UPDATE sops SET deleted_at = ?, updated_at = ?
+         WHERE department IN (${depPlaceholders}) AND deleted_at IS NULL`,
+      )
+      .run(now, now, ...DEPRECATED_SOP_DEPARTMENTS).changes;
+  }
+
+  // ── 3. RE-KEY remaining active rows to canonical slugs (id preserved) ──────
+  const activeClause = hasDeletedAt ? 'WHERE deleted_at IS NULL' : '';
+  const activeRows = db
+    .prepare(`SELECT id, department FROM sops ${activeClause}`)
+    .all() as { id: string; department: string | null }[];
+  const rekeyStmt = db.prepare('UPDATE sops SET department = ?, updated_at = ? WHERE id = ?');
+  let rekeyed = 0;
+  for (const row of activeRows) {
+    const canon = canonicalDeptSlug(row.department);
+    if (canon && canon !== (row.department ?? '')) {
+      rekeyStmt.run(canon, now, row.id);
+      rekeyed++;
+    }
+  }
+
+  return { rekeyed, deprecatedRetired, testPurged };
 }
 
 // Auto-seed starter SOPs on boot (B6). Non-fatal: a missing `sops` table or any

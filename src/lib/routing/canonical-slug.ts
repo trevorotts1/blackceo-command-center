@@ -105,6 +105,10 @@ const ALIAS_MAP: Record<string, string> = {
   'support':           'customer-support',
   'customer-service':  'customer-support',
 
+  // communications variants
+  'comms':             'communications',
+  'communication':     'communications',
+
   // social-media variants
   'social':            'social-media',
 
