@@ -32,7 +32,7 @@
  * Structure mirrors weekly-done-clear.ts / general-task-recurrence.ts.
  */
 
-import { queryAll, run } from '@/lib/db';
+import { queryAll, sqlTime, timeNow } from '@/lib/db';
 import { runQCOnReview } from '@/lib/qc-scorer';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ export interface QCReviewSweepResult {
  * is caught internally by `runQCOnReview` and leaves the task in review.
  */
 export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
-  const ranAt = new Date().toISOString();
+  const ranAt = timeNow();
 
   if (
     process.env.DISABLE_QC_REVIEW_SWEEP === '1' ||
@@ -98,14 +98,14 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
          WHERE e.task_id = t.id
            AND e.type = 'qc_review'
            AND e.message NOT LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%'
-           AND e.created_at >= datetime('now', '-10 minutes')
+           AND ${sqlTime('e.created_at')} >= datetime('now', '-10 minutes')
        )
        AND NOT EXISTS (
          SELECT 1 FROM events e
          WHERE e.task_id = t.id
            AND e.type = 'qc_review'
            AND e.message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%'
-           AND e.created_at >= datetime('now', ?)
+           AND ${sqlTime('e.created_at')} >= datetime('now', ?)
        )
      ORDER BY t.updated_at ASC`,
     [`-${deferredRetryMin} minutes`],
@@ -123,9 +123,18 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
       const result = await runQCOnReview(row.id);
       if (result !== null) {
         scored++;
+        // B9: the previous string logged 'FAIL→backlog' for EVERY non-pass, but a
+        // heuristic (no-key / provider-down) score does NOT move the task — it
+        // STAYS in review for human promotion. Only an `llm` fail reroutes. Report
+        // the outcome the task actually took so the operator log is truthful.
+        const outcome = result.pass
+          ? 'PASS→done'
+          : result.scoringPath === 'heuristic'
+            ? 'HELD in review (heuristic — human review required)'
+            : 'FAIL→reroute';
         console.log(
           `[qc-review-sweep] Task "${row.title}" (${row.id}): ` +
-            `score ${result.score.toFixed(1)}/10 — ${result.pass ? 'PASS→done' : 'FAIL→backlog'}`,
+            `score ${result.score.toFixed(1)}/10 — ${outcome}`,
         );
       }
     } catch (err) {

@@ -118,5 +118,59 @@ export function transaction<T>(fn: () => T): T {
   return db.transaction(fn)();
 }
 
+// ---------------------------------------------------------------------------
+// B2 — canonical timestamp helpers (timestamp-dialect fix)
+// ---------------------------------------------------------------------------
+//
+// mission-control.db stores timestamps in TWO dialects inside the SAME TEXT
+// columns:
+//   • ISO-8601 with a 'T' separator and 'Z' suffix — `new Date().toISOString()`
+//     (every Node writer), e.g. `2026-07-10T18:40:29.584Z`.
+//   • SQLite space-separated — `datetime('now')`, e.g. `2026-07-10 18:40:29`.
+//
+// A naive TEXT comparison `col >= datetime('now','-10 minutes')` is WRONG: 'T'
+// (0x54) sorts AFTER ' ' (0x20) at index 10, so an ISO-'T' value ALWAYS compares
+// "greater" than a space-format bound regardless of the real instant. Every time
+// window (QC re-score, stale, dispatch backoff) silently degenerates — a proven
+// 10-minute QC window became "the rest of the UTC day". These helpers give every
+// writer one canonical format and every window predicate a dialect-safe compare.
+
+/** Canonical write format for every new timestamp (ISO-8601, UTC). ALL writers
+ *  should use this so new rows land in a single dialect. */
+export function timeNow(): string {
+  return new Date().toISOString();
+}
+
+/**
+ * Wrap a SQL time expression (a column reference OR a bound `?` placeholder) so
+ * BOTH dialects compare correctly. `replace(replace(expr,'T',' '),'Z','')` folds
+ * the ISO-'T'/'Z' form to the SQLite space form and the outer `datetime(...)`
+ * parses it to a single canonical instant. Apply to EVERY side of a time-window
+ * predicate, e.g.
+ *   `${sqlTime('e.created_at')} >= datetime('now','-10 minutes')`
+ *   `${sqlTime('t.updated_at')} <= ${sqlTime('?')}`
+ */
+export function sqlTime(expr: string): string {
+  return `datetime(replace(replace(${expr}, 'T', ' '), 'Z', ''))`;
+}
+
+/**
+ * Parse a DB timestamp string to epoch millis, correcting the space-dialect
+ * misparse. `new Date('2026-07-10 18:40:29')` is read as LOCAL time by V8 (age
+ * shifts by the box's UTC offset), whereas the ISO-'T'-'Z' form parses as UTC.
+ * Both dialects store UTC, so normalize the space form to ISO-UTC before parsing.
+ * Returns NaN for empty / unparseable input.
+ */
+export function parseDbTime(ts: string | null | undefined): number {
+  if (!ts) return NaN;
+  let s = String(ts).trim();
+  if (!s) return NaN;
+  // SQLite space form 'YYYY-MM-DD HH:MM:SS' → ISO 'YYYY-MM-DDTHH:MM:SS'.
+  if (!s.includes('T') && s.includes(' ')) s = s.replace(' ', 'T');
+  // No timezone marker → the value is UTC → append 'Z' so V8 parses it as UTC.
+  if (!/(Z|[+-]\d{2}:?\d{2})$/.test(s)) s = `${s}Z`;
+  return Date.parse(s);
+}
+
 // Export migration utilities for CLI use
 export { runMigrations, getMigrationStatus, reseedWorkspacesFromConfig, autoSeedTrioAgents, getLastFailedMigrationId } from './migrations';

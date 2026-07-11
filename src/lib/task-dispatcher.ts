@@ -207,6 +207,18 @@ function recordDispatchSuccess(taskId: string): void {
  * The dept-presentations builder runtime is one concrete example:
  *   ~/.openclaw/agents/dept-presentations/ → key agent:dept-presentations:<session>
  */
+/**
+ * B5: the deterministic `openclaw_session_id` for an agent — a PURE function of
+ * the agent name (`mission-control-<name-slug>`). The openclaw_sessions row is
+ * purgeable (a hard-delete wiped 64 rows on the live box), but the id is not: the
+ * dispatcher, the completion webhook, and the execution-watcher can all re-derive
+ * it from the agent name so a completion reconciles even with NO session row.
+ * This MUST match the string the dispatcher stores below exactly.
+ */
+export function deterministicOpenclawSessionId(agentName: string): string {
+  return `mission-control-${agentName.toLowerCase().replace(/\s+/g, '-')}`;
+}
+
 export function resolveSpecialistSessionKey(
   agent: Agent,
   openclawSessionId: string,
@@ -461,15 +473,30 @@ export async function autoDispatchTask(
       }
     }
 
-    // ── Session: active or create ───────────────────────────────────────────
+    // ── Session: UPSERT keyed (agent_id, status='active') ───────────────────
+    // B5: the openclaw_sessions row is the fragile link in the completion chain.
+    // UPSERT it — reuse the agent's active session when present (refreshing its id
+    // to the deterministic form + binding the CURRENT task for attribution), else
+    // create it. Storing the deterministic id (identical to
+    // deterministicOpenclawSessionId) lets the webhook / watcher re-derive it if
+    // the row is ever purged.
+    const openclawSessionId = deterministicOpenclawSessionId(agent.name);
     let session = queryOne<OpenClawSession>(
       'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
       [agent.id, 'active'],
     );
 
-    if (!session) {
+    if (session) {
+      // Refresh the active session: pin the deterministic id (self-heals a drifted
+      // row) and bind task_id so completion webhook / execution-reconcile attribute
+      // this turn to the right task.
+      run(
+        `UPDATE openclaw_sessions SET openclaw_session_id = ?, task_id = ?, updated_at = ? WHERE id = ?`,
+        [openclawSessionId, task.id, now, session.id],
+      );
+      session = queryOne<OpenClawSession>('SELECT * FROM openclaw_sessions WHERE id = ?', [session.id]);
+    } else {
       const sessionId = uuidv4();
-      const openclawSessionId = `mission-control-${agent.name.toLowerCase().replace(/\s+/g, '-')}`;
 
       // FIX 2: bind task_id so completion webhook / execution-reconcile can attribute the turn.
       // The task_id column + idx_openclaw_sessions_task index already exist in schema.ts:213/360.

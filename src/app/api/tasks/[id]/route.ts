@@ -334,6 +334,13 @@ export async function PATCH(
       // Clear blocked fields when the card moves out of Blocked.
       updates.push('blocked_reason = ?', 'blocked_on_human = ?', 'ask = ?');
       values.push(null, null, null);
+      // B3: also clear the SYSTEM block-metadata columns the stuck-in-progress
+      // sweep / recordDispatchFailure write (block_reason / block_needs /
+      // block_audience). Leaving them populated made an unblocked card still read
+      // as SYSTEM-blocked on the board and in audience routing. Cleared in the
+      // SAME UPDATE so the unblock is atomic.
+      updates.push('block_reason = ?', 'block_needs = ?', 'block_audience = ?');
+      values.push(null, null, null);
     }
 
     // Track if we need to dispatch task

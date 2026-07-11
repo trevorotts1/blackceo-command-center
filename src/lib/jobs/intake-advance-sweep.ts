@@ -34,8 +34,9 @@
  * Disable with INTAKE_ADVANCE_SWEEP_ENABLED=0.
  */
 
-import { queryAll, run, queryOne } from '@/lib/db';
+import { queryAll, run, queryOne, sqlTime, timeNow } from '@/lib/db';
 import { broadcast } from '@/lib/events';
+import { notifySystem } from '@/lib/notify';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { routeTask } from '@/lib/routing/department-router';
 import { ensureCampaignForTask } from '@/lib/campaigns';
@@ -56,6 +57,9 @@ export interface IntakeAdvanceResult {
   scanned: number;
   routed: number;
   dispatched: number;
+  /** B6: tasks surfaced to the operator this tick for hitting the QC-reroute cap
+   *  (fires exactly once per task via the `task_capped` event dedup). */
+  capped?: number;
   skippedReason?: string;
 }
 
@@ -83,7 +87,7 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
   const dispatchCap = Math.max(1, parseInt(process.env.MAX_DISPATCH_ATTEMPTS || '5', 10));
   const batch = parseInt(process.env.INTAKE_ADVANCE_BATCH || '25', 10);
   const graceSeconds = parseInt(process.env.INTAKE_ADVANCE_GRACE_SECONDS || '120', 10);
-  const now = new Date().toISOString();
+  const now = timeNow();
   const graceCutoff = new Date(Date.now() - graceSeconds * 1000).toISOString();
   const placeholders = ADVANCEABLE_STATUSES.map(() => '?').join(',');
 
@@ -98,10 +102,10 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
           AND t.archived_at IS NULL
           AND (t.qc_reroute_attempts IS NULL OR t.qc_reroute_attempts < ?)
           AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
-          AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
+          AND (t.next_dispatch_eligible_at IS NULL OR ${sqlTime('t.next_dispatch_eligible_at')} <= ${sqlTime('?')})
           AND (t.assigned_agent_id IS NULL OR a.is_master IS NULL OR a.is_master = 0)
           AND (t.sop_authoring_for_task_id IS NULL)
-          AND t.updated_at <= ?
+          AND ${sqlTime('t.updated_at')} <= ${sqlTime('?')}
         ORDER BY t.updated_at ASC
         LIMIT ?`,
       [...ADVANCEABLE_STATUSES, cap, dispatchCap, now, graceCutoff, batch],
@@ -111,10 +115,9 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
     return { scanned: 0, routed: 0, dispatched: 0, skippedReason: `query failed: ${(err as Error).message}` };
   }
 
-  if (rows.length === 0) {
-    return { scanned: 0, routed: 0, dispatched: 0 };
-  }
-
+  // NOTE: do NOT early-return on an empty advanceable set — the B6 cap-out
+  // surfacing below must still run (capped tasks are, by construction, excluded
+  // from `rows`). The loop is a no-op on an empty set.
   let routed = 0;
   let dispatched = 0;
 
@@ -182,5 +185,57 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
     }
   }
 
-  return { scanned: rows.length, routed, dispatched };
+  // ── B6: cap-out surfacing (silent-rot fix) ──────────────────────────────────
+  // A task that hit the QC-reroute cap (qc_reroute_attempts >= cap) is silently
+  // filtered out of the advanceable selection above and then rots invisibly in
+  // backlog forever — the "silent cap-out rot" half of the review-churn defect.
+  // Surface each capped task to the OPERATOR exactly once: write a `task_capped`
+  // event (whose presence is the dedup key, so the NOT EXISTS guard fires the
+  // alert a single time per task) and one SYSTEM-audience alert. NEVER a client
+  // Telegram (MOVE-IN-SILENCE) — a capped task is an operator triage concern.
+  let capped = 0;
+  try {
+    const cappedRows = queryAll<{ id: string; title: string; qc_reroute_attempts: number | null }>(
+      `SELECT t.id, t.title, t.qc_reroute_attempts
+         FROM tasks t
+        WHERE t.status IN (${placeholders})
+          AND t.archived_at IS NULL
+          AND t.qc_reroute_attempts IS NOT NULL
+          AND t.qc_reroute_attempts >= ?
+          AND (t.sop_authoring_for_task_id IS NULL)
+          AND NOT EXISTS (
+            SELECT 1 FROM events e WHERE e.task_id = t.id AND e.type = 'task_capped'
+          )
+        LIMIT 50`,
+      [...ADVANCEABLE_STATUSES, cap],
+    );
+    for (const t of cappedRows) {
+      try {
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'task_capped', ?, ?, ?)`,
+          [
+            uuidv4(),
+            t.id,
+            `[CAP] Task "${t.title}" reached the QC-reroute cap (${t.qc_reroute_attempts ?? cap}/${cap}) — ` +
+              `held for operator review; auto-advancement stopped.`,
+            now,
+          ],
+        );
+        notifySystem(
+          `[qc-cap] Task "${t.title}" (id ${t.id}) hit the QC-reroute cap ` +
+            `(${t.qc_reroute_attempts ?? cap}/${cap}) and can no longer auto-advance. ` +
+            `It is held for operator triage (promote, re-scope, or close).`,
+          { agent: 'intake-advance-sweep', action: 'escalate' },
+        );
+        capped++;
+      } catch (err) {
+        console.warn(`[intake-advance] cap surfacing failed for ${t.id}:`, (err as Error).message);
+      }
+    }
+  } catch (err) {
+    // Pre-migration DB (no qc_reroute_attempts / events table) — non-fatal.
+    console.warn('[intake-advance] cap-out query failed (non-fatal):', (err as Error).message);
+  }
+
+  return { scanned: rows.length, routed, dispatched, capped };
 }

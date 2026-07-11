@@ -5,7 +5,31 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
+
+/**
+ * B5: resolve the agent behind a completion `session_id` when the
+ * openclaw_sessions row is missing/purged. The id is deterministic
+ * (`mission-control-<agent-name-slug>`), so match it back to an agent by name.
+ * A direct SQL match covers the common single-spaced case; a JS scan (using the
+ * SAME derivation the dispatcher uses) covers irregular whitespace.
+ */
+function resolveAgentFromSessionId(sessionId: string): { id: string; name: string } | null {
+  if (!sessionId || !sessionId.startsWith('mission-control-')) return null;
+  const direct = queryOne<{ id: string; name: string }>(
+    `SELECT id, name FROM agents
+      WHERE ('mission-control-' || lower(replace(name, ' ', '-'))) = ?
+      LIMIT 1`,
+    [sessionId],
+  );
+  if (direct) return direct;
+  const all = queryAll<{ id: string; name: string }>('SELECT id, name FROM agents', []);
+  for (const a of all) {
+    if (deterministicOpenclawSessionId(a.name) === sessionId) return a;
+  }
+  return null;
+}
 
 /**
  * Re-fetch a task with joined agent fields and broadcast a `task_updated` SSE
@@ -177,7 +201,27 @@ export async function POST(request: NextRequest) {
         [body.session_id, 'active']
       );
 
-      if (!session) {
+      // B5: the openclaw_sessions row can be purged/missing while a real turn is
+      // live. The id is deterministic, so resolve the agent directly from it and
+      // recreate the active row instead of 404-ing a genuine completion.
+      let agentId: string | null = session?.agent_id ?? null;
+      if (!agentId) {
+        const agent = resolveAgentFromSessionId(body.session_id);
+        if (agent) {
+          agentId = agent.id;
+          try {
+            run(
+              `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, created_at, updated_at)
+               VALUES (?, ?, ?, 'mission-control', 'active', ?, ?)`,
+              [uuidv4(), agent.id, body.session_id, now, now]
+            );
+          } catch {
+            /* best-effort session recreate — attribution below still proceeds */
+          }
+        }
+      }
+
+      if (!agentId) {
         return NextResponse.json(
           { error: 'Session not found or inactive' },
           { status: 404 }
@@ -193,7 +237,7 @@ export async function POST(request: NextRequest) {
            AND t.status = 'in_progress'
          ORDER BY t.updated_at DESC
          LIMIT 1`,
-        [session.agent_id]
+        [agentId]
       );
 
       if (!task) {
@@ -213,7 +257,7 @@ export async function POST(request: NextRequest) {
         );
         // DISP-10: complete the task_events audit sink for this advance.
         recordStatusEvent(task.id, task.status, 'review', {
-          actor: session.agent_id ?? 'agent-completion',
+          actor: agentId ?? 'agent-completion',
           reason: 'agent reported TASK_COMPLETE (webhook, session path)',
         });
       }
@@ -225,7 +269,7 @@ export async function POST(request: NextRequest) {
         [
           uuidv4(),
           'task_completed',
-          session.agent_id,
+          agentId,
           task.id,
           `${task.assigned_agent_name} completed: ${summary}`,
           now
@@ -235,7 +279,7 @@ export async function POST(request: NextRequest) {
       // Set agent back to standby
       run(
         'UPDATE agents SET status = ?, updated_at = ? WHERE id = ?',
-        ['standby', now, session.agent_id]
+        ['standby', now, agentId]
       );
 
       // Advance the card on the board instantly (B2).
@@ -249,7 +293,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: true,
         task_id: task.id,
-        agent_id: session.agent_id,
+        agent_id: agentId,
         summary,
         new_status: 'review',
         message: 'Task moved to review for verification'
