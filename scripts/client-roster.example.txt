@@ -7,11 +7,42 @@
 # (~/.openclaw/client-roster.txt) and the repo-local .openclaw-client-roster.txt
 # are gitignored.
 #
+# ─── THIS IS A HUMAN-NAME ROSTER. NOTHING ELSE. ──────────────────────────────
 # FORMAT: one entry per line. Blank lines and lines beginning with '#' ignored.
 #   - full name / brand ......... Jane Doe   /   Acme Consulting
 #   - first-name ERE pattern .... \bJane\b   (matched case-insensitively)
-#   - GHL location ID ........... an opaque alphanumeric token
-#   - Telegram chat ID .......... a pure-numeric line (matched \b-anchored, MASKED in logs)
+#
+# ⚠️ DO NOT PUT OPAQUE IDENTIFIERS IN THIS FILE. Telegram chat IDs, GHL location
+#    IDs, Cloudflare Access UUIDs / AUD tags, hashes — these are EXPLICITLY EXEMPT
+#    and are FILTERED OUT on load (client-roster-lib.sh) even if you add them.
+#    Listing them here does nothing except mislead the next reader.
+#
+# ─── THE RULE THIS ROSTER SERVES (operator, 2026-07-11 — AUTHORITATIVE) ──────
+# This repo is FLEET-WIDE (cloned to every client box). Only THREE things are
+# enforceable:
+#   1. No CLIENT / ROSTER MEMBER real HUMAN NAMES (an actual customer or team
+#      member — NOT book characters, NOT personas, NOT authors of referenced works)
+#   2. No genuine SECRETS (live tokens, API keys, `pit-` GHL tokens, bot tokens,
+#      private keys) — ABSOLUTE
+#   3. Nothing built for ONE client — content stays generic and fleet-reusable
+#
+# ─── EXPLICITLY EXEMPT — never flag, block, or scrub ─────────────────────────
+#   • Cloudflare Access Application UUIDs / AUD tags
+#   • Telegram chat IDs
+#   • GHL location IDs
+#   • any opaque identifier (UUID, numeric ID, hash)
+#   • book titles
+#   • persona names derived from books
+#   • authors of referenced works
+#   • product proper nouns
+#   GOVERNING PRINCIPLE: opaque infrastructure identifiers and product content are
+#   NOT the target.
+#
+# ⛔ This roster is a CHEAP always-on scan, NOT the authoritative name check. Never
+#    try to enforce the name rule with a wider regex or a longer roster — a pattern
+#    match cannot tell a client's real name from a book-persona name. The
+#    authoritative check is the LLM reviewer (scripts/qc-llm-diff-review.py),
+#    which runs on every PR. See QC.md → "FLEET-REPO CONTENT RULE".
 #
 # The three placeholder NAMES below are also used by the gates' roster-absent
 # STRUCTURAL check: none of them may appear anywhere in tracked content, so they
@@ -24,9 +55,3 @@ PlaceholderCo
 # Example of a first-name pattern entry (kept commented so it is not treated as
 # an active placeholder sentinel):
 # \bExamplefirst\b
-
-# Example of a client GHL location ID entry (fake, commented):
-# EXAMPLEghlLOCATIONid00
-
-# Example of a client Telegram chat ID entry (fake, commented):
-# 1000000001

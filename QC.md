@@ -9,6 +9,42 @@ yourself honestly.
 
 ---
 
+## 🔴🔴🔴 FLEET-REPO CONTENT RULE — what may NOT go in this repo (AUTHORITATIVE, 2026-07-11) 🔴🔴🔴
+
+**READ THIS BEFORE AUTHORING ANY REPO CONTENT.** The command-center repo is FLEET-WIDE — it is cloned to every client box. Exactly **THREE** things are enforceable here, and **nothing else**:
+
+1. **No CLIENT / ROSTER MEMBER real human names.** An actual customer or an actual team member. **NOT** book characters. **NOT** personas. **NOT** authors of referenced works.
+2. **No genuine secrets** — live tokens, API keys, `pit-` GHL tokens, bot tokens, private keys. **ABSOLUTE. This one never relaxes.**
+3. **Nothing built for ONE client.** Repo content stays generic and fleet-reusable.
+
+### ✅ EXPLICITLY EXEMPT — never flag, block, or scrub these
+
+- Cloudflare Access Application UUIDs / AUD tags
+- **Telegram chat IDs**
+- **GHL location IDs**
+- Any **opaque identifier** — UUID, numeric ID, hash
+- **Book titles**
+- **Persona names derived from books**
+- **Authors of referenced works**
+- **Product proper nouns**
+
+> **GOVERNING PRINCIPLE: opaque infrastructure identifiers and product content are NOT the target.**
+> A UUID is not a person. A book author is not a customer. A chat ID is not a secret.
+
+### ⛔ NEVER ENFORCE THE NAME RULE WITH A GREP / REGEX / NAME-ROSTER
+
+A pattern match **cannot** tell a client's real name from a book-persona name. It will either miss real leaks or block legitimate product PRs forever — and it has already done both. Do not "fix" a missed name by widening a regex, and do not add an identifier scan pass to any guard.
+
+- **Names → LLM review.** The authoritative name check is `scripts/qc-llm-diff-review.py`, run on every PR by `.github/workflows/qc-llm-diff-review.yml`. It reads the diff's added lines and blocks on the three rules above. It **fails closed**: reviewer error, malformed response, API error, or timeout is a **BLOCK**.
+- **Secrets → regex is correct.** A secret has a literal shape; a human name does not. The reviewer runs a `pit-`/token secret regex pre-filter in addition to the model.
+- The legacy shell gates (`qc-assert-no-client-names.sh`, `qc-blocked-gate.sh` Assertion 5) survive only as a cheap always-on scan for the operator machine path and `.example` placeholder leaks. Their roster is **human names only** — `client-roster-lib.sh` filters opaque identifiers out at load time.
+
+### History — why this section exists
+
+The guard scripts once encoded an over-broad rule: a chat-ID denylist, an identifier scan pass, and a roster accessor that swept GHL location IDs in as scan terms. The **correct** rule lived only in the operator's head while the **wrong** rule lived in the code, so every fresh agent re-derived the wrong rule from the guards' own comments and repeated the mistake. That is why the rule is written **here**, where an agent authoring repo content actually reads it.
+
+---
+
 ## Rubric (out of 10)
 
 | Section | Points | Item |

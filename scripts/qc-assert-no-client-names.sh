@@ -1,38 +1,58 @@
 #!/usr/bin/env bash
-# qc-assert-no-client-names.sh — v2.0.0 (command-center)
+# qc-assert-no-client-names.sh — v3.0.0 (command-center)
 #
-# STATIC QC INVARIANT: enforces the fleet-wide rule that NO real client name,
-# client-identifying token, or operator machine path may appear in ANY TRACKED
-# file of this repo. The command-center repo is cloned to every client box, so
-# any client-identifying string is a privacy / co-mingling violation (PRD P0-3).
+# ─── THE RULE (operator, 2026-07-11 — AUTHORITATIVE; supersedes v2.x) ─────────
+# The command-center repo is FLEET-WIDE — it is cloned to every client box.
+# Exactly THREE things are enforceable, and NOTHING else:
 #
-# WHY THIS EXISTS (PRD P2-5):
-#   The pre-existing qc-blocked-gate.sh Assertion 5 only scans the *git diff*,
-#   so client names that were ALREADY committed to tracked files never trip it.
-#   This gate is the AUTHORITATIVE scan: it walks EVERY tracked file on disk
-#   (not just the diff) so historical/committed leaks are caught too.
+#   1. No CLIENT / ROSTER MEMBER real HUMAN NAMES — an actual customer or team
+#      member. NOT book characters. NOT personas. NOT authors of referenced works.
+#   2. No genuine SECRETS — live tokens, API keys, `pit-` GHL tokens, bot tokens,
+#      private keys. ABSOLUTE. DO NOT WEAKEN THIS.
+#   3. Nothing built for ONE client — content stays generic and fleet-reusable.
 #
-# v2.0.0 — ROSTER EXTERNALIZATION:
-#   The real client roster (names, Telegram chat IDs, GHL location IDs) NO LONGER
-#   lives inline in this file — it lives in NO tracked file and NOWHERE on
-#   GitHub. It is loaded at runtime from an operator-local, gitignored roster
-#   (see scripts/client-roster-lib.sh):
-#       $OPENCLAW_CLIENT_ROSTER  ->  else  ${HOME}/.openclaw/client-roster.txt
+# ─── ⚠️ EXPLICITLY EXEMPT — NEVER flag, block, or scrub ⚠️ ────────────────────
+#   • Cloudflare Access Application UUIDs / AUD tags
+#   • Telegram chat IDs
+#   • GHL location IDs
+#   • ANY opaque identifier (UUID, numeric ID, hash)
+#   • Book titles
+#   • Persona names derived from books
+#   • Authors of referenced works
+#   • Product proper nouns
+#
+# GOVERNING PRINCIPLE: opaque infrastructure identifiers and product content are
+# NOT the target.
+#
+# WHAT v3.0.0 REMOVED (and why): v2.x carried a chat-ID denylist (CHATID_PATTERN),
+# a separate chat-ID scan pass, and a masked-token formatter, and its roster
+# accessor swept GHL location IDs in as scan terms. All of that enforced an
+# OVER-BROAD rule — it hard-blocked PRs over EXEMPT opaque identifiers. It is
+# deleted. ⛔ Do NOT re-add an identifier pass here.
+#
+# ─── ⛔ WHY THIS GATE IS DELIBERATELY NARROW ──────────────────────────────────
+# NEVER enforce the NAME rule with a grep / regex / name-roster ALONE. A pattern
+# match cannot tell a client's real name from a book-persona name — it either
+# misses real leaks or blocks legitimate product PRs forever. The AUTHORITATIVE
+# name check is the LLM reviewer (scripts/qc-llm-diff-review.py, run on every PR).
+# This script survives only as a cheap always-on scan for the two things that DO
+# have a literal shape: the operator machine path, and .example placeholder leaks.
+# (Regex IS still correct for SECRETS — a secret has a literal shape; a human
+# name does not.)
+#
+# WHY A WHOLE-TREE SCAN EXISTS (PRD P2-5):
+#   qc-blocked-gate.sh Assertion 5 only scans the *git diff*, so names that were
+#   ALREADY committed never trip it. This gate walks EVERY tracked file on disk.
 #
 #   TWO MODES:
 #     * BOX MODE (roster present): scan every tracked file for every real client
-#       name / chat ID / GHL ID in the roster. Any hit FAILS (exit 1). This is
-#       the authoritative check; it runs on operator boxes and pre-commit.
+#       HUMAN NAME in the roster. Any hit FAILS (exit 1).
 #     * STRUCTURAL MODE (roster absent/empty, e.g. CI without the secret): the
 #       gate MUST NOT silently pass. It runs a STRUCTURAL check instead — it
 #       still scans for the operator machine path AND for the obviously-fake
 #       placeholder names from scripts/client-roster.example.txt (a placeholder
 #       leak must still fail — never fail-open) — and emits a clear WARNING that
-#       the full roster-specific name check was skipped. The authoritative
-#       roster check runs where the roster exists.
-#
-#   Numeric client chat-ID hits are still MASKED in output (only the last 4
-#   digits survive) — see the "MASKED-OUTPUT CONVENTION" block below.
+#       the full roster-specific name check was skipped.
 #
 # SCANNING STRATEGY:
 #   Uses a filesystem walk (`find`) — NOT `git` — so it runs in environments
@@ -47,7 +67,7 @@
 #   Nothing else is excluded — real source, docs, tests, configs are all scanned.
 #
 # Exit codes:
-#   0  — no client names / chat IDs / operator paths / placeholder leaks found (PASS)
+#   0  — no client/roster human names / operator paths / placeholder leaks (PASS)
 #   1  — one or more found (FAIL — block commit / QC / CI)
 #
 # Usage:
@@ -66,7 +86,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo-root) REPO_ROOT="$2"; shift 2 ;;
-    -h|--help) sed -n '1,55p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,75p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -82,15 +102,13 @@ OPERATOR_PATHS=(
 # ─── MODE SELECTION: box (roster present) vs structural (roster absent) ────────
 if roster_available; then
   MODE="box"
-  mapfile -t CLIENT_NAMES    < <(roster_names)
-  mapfile -t CLIENT_CHAT_IDS < <(roster_chat_ids)
+  mapfile -t CLIENT_NAMES < <(roster_names)
 else
   MODE="structural"
   # NEVER fail-open: in structural mode we scan for the obviously-fake .example
   # placeholder names (a placeholder leak must still exit non-zero) plus the
-  # operator path — but we DO skip the real-roster-specific name/chat-ID scan.
+  # operator path — but we DO skip the real-roster-specific human-name scan.
   mapfile -t CLIENT_NAMES < <(roster_example_names)
-  CLIENT_CHAT_IDS=()
   {
     echo "WARNING: client roster not found (looked at \$OPENCLAW_CLIENT_ROSTER"
     echo "         and $(roster_resolve_path))."
@@ -101,17 +119,14 @@ else
   } >&2
 fi
 
-# ─── Build the name/token ERE alternation (client names + operator paths) ─────
+# ─── Build the name/token ERE alternation (client HUMAN NAMES + operator paths) ─
+# NOTE: there is NO identifier pass here. The chat-ID denylist (CHATID_PATTERN),
+# its scan pass, and the masked-token formatter have been REMOVED: Telegram chat
+# IDs and GHL location IDs are EXPLICITLY EXEMPT. Do not re-add them.
 SCAN_TERMS=()
 SCAN_TERMS+=( ${CLIENT_NAMES[@]+"${CLIENT_NAMES[@]}"} )
 SCAN_TERMS+=( "${OPERATOR_PATHS[@]}" )
 PATTERN=$(printf '%s\n' "${SCAN_TERMS[@]}" | paste -sd'|' -)
-
-# Whole-number, \b-anchored alternation for the chat-ID denylist (box mode only).
-CHATID_PATTERN=""
-if [ "${#CLIENT_CHAT_IDS[@]}" -gt 0 ]; then
-  CHATID_PATTERN=$(printf '\\b%s\\b\n' "${CLIENT_CHAT_IDS[@]}" | paste -sd'|' -)
-fi
 
 # ─── File enumeration (filesystem walk — no git) ─────────────────────────────
 # Prune the .git, node_modules, and __pycache__ trees, then take every regular
@@ -151,21 +166,6 @@ _is_excluded() {
   return 1
 }
 
-# ─── MASKED-OUTPUT CONVENTION ─────────────────────────────────────────────────
-# Chat-ID hits are reported as "  <path>:<line>: ******<last4>" — the file and
-# line number are shown (so the leak is locatable and fixable) but the token
-# itself is NEVER printed in full, only its last 4 digits behind a mask.
-_masked_token_for_line() {
-  local content="$1"
-  local id
-  for id in ${CLIENT_CHAT_IDS[@]+"${CLIENT_CHAT_IDS[@]}"}; do
-    case "$content" in
-      *"$id"*) printf '******%s' "${id: -4}"; return 0 ;;
-    esac
-  done
-  printf '******????'
-}
-
 HITS=0
 OFFENDERS=()
 
@@ -190,45 +190,23 @@ if [ "${#FILES[@]}" -gt 0 ]; then
              | xargs -0 grep -E -Hin "$PATTERN" 2>/dev/null)
 fi
 
-# ─── Chat-ID scan pass (masked output — box mode only) ───────────────────────
-CHATID_HITS=0
-CHATID_OFFENDERS=()
-declare -A _PER_FILE_CHATID_HITS=()
-if [ -n "$CHATID_PATTERN" ] && [ "${#FILES[@]}" -gt 0 ]; then
-  while IFS= read -r hit_line; do
-    [ -z "$hit_line" ] && continue
-    path="${hit_line%%:*}"
-    rest="${hit_line#*:}"
-    lineno="${rest%%:*}"
-    content="${rest#*:}"
-    n=$(( ${_PER_FILE_CHATID_HITS["$path"]:-0} + 1 ))
-    _PER_FILE_CHATID_HITS["$path"]=$n
-    [ "$n" -gt 20 ] && continue   # per-file cap so one noisy file can't flood
-    masked="$(_masked_token_for_line "$content")"
-    CHATID_OFFENDERS+=("  $path:$lineno: $masked")
-    CHATID_HITS=$((CHATID_HITS + 1))
-  done < <(printf '%s\0' "${FILES[@]}" \
-             | xargs -0 grep -E -Hin "$CHATID_PATTERN" 2>/dev/null)
-fi
+# NOTE: the chat-ID scan pass that used to live here is DELETED. Telegram chat IDs
+# are EXPLICITLY EXEMPT — they are opaque infrastructure identifiers, not client
+# identity, and scanning for them hard-blocked legitimate PRs. Do not re-add it.
 
-TOTAL_HITS=$((HITS + CHATID_HITS))
-
-if [ "$TOTAL_HITS" -eq 0 ]; then
+if [ "$HITS" -eq 0 ]; then
   if [ "$MODE" = "structural" ]; then
     echo "[qc-assert-no-client-names] STRUCTURAL PASS — no operator paths and no .example"
     echo "  placeholder leaks in tracked files. (Full roster-specific name scan was SKIPPED;"
     echo "  roster absent. Run on an operator box / with OPENCLAW_CLIENT_ROSTER for the"
     echo "  authoritative check.)"
   else
-    echo "[qc-assert-no-client-names] PASS — no client names / chat IDs / operator paths in tracked files."
+    echo "[qc-assert-no-client-names] PASS — no client/roster human names or operator paths in tracked files."
   fi
   exit 0
 else
-  echo "[qc-assert-no-client-names] INVARIANT VIOLATED — $TOTAL_HITS client-identifying hit(s) in tracked files:"
+  echo "[qc-assert-no-client-names] INVARIANT VIOLATED — $HITS client/roster human-name hit(s) in tracked files:"
   for line in "${OFFENDERS[@]}"; do
-    echo "$line"
-  done
-  for line in ${CHATID_OFFENDERS[@]+"${CHATID_OFFENDERS[@]}"}; do
     echo "$line"
   done
   echo
@@ -237,11 +215,18 @@ else
     echo "  operator-path leak and/or a committed .example PLACEHOLDER name. Placeholder"
     echo "  names must never appear in tracked content; remove them (the gate is fail-closed)."
   fi
-  echo "REMEDY: replace each real client name / chat ID / operator path with a neutral placeholder."
+  echo "REMEDY: replace each real client/roster HUMAN NAME / operator path with a neutral placeholder."
   echo "  Prose:  'a client box', 'a client VPS', '<client-1>'"
   echo "  Config: env/config lookup with a safe default (e.g. \$HOME, <CLIENT_SLUG>)"
   echo "  URLs:   'acme.zerohumanworkforce.com' or 'client.example.com'"
-  echo "  Chat IDs: use an obviously-synthetic literal in tests (e.g. 1000000001)."
-  echo "  See repo memory [repo-is-fleet-wide-no-client-names]."
+  echo
+  echo "NOT A VIOLATION (EXEMPT — if the gate flagged one of these, the gate is wrong):"
+  echo "  Cloudflare Access Application UUIDs / AUD tags · Telegram chat IDs ·"
+  echo "  GHL location IDs · any opaque identifier (UUID, numeric ID, hash) ·"
+  echo "  book titles · persona names derived from books · authors of referenced"
+  echo "  works · product proper nouns."
+  echo "  Opaque infrastructure identifiers and product content are NOT the target."
+  echo
+  echo "  See QC.md → 'FLEET-REPO CONTENT RULE' for the full rule."
   exit 1
 fi

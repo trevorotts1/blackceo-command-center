@@ -94,7 +94,25 @@ if [[ "${SKIP_SCHEDULER:-0}" != "1" ]]; then
   fi
 fi
 
-# ── Assertion 5: No client names in changed files (fleet-wide guard) ──────────
+# ── Assertion 5: No client HUMAN NAMES in changed files (fleet-wide guard) ────
+#
+# ⚠️ EXPLICITLY EXEMPT — NEVER flagged here (operator, 2026-07-11 — AUTHORITATIVE):
+#   Cloudflare Access Application UUIDs / AUD tags · Telegram chat IDs · GHL
+#   location IDs · any opaque identifier (UUID, numeric ID, hash) · book titles ·
+#   persona names derived from books · authors of referenced works · product
+#   proper nouns.
+#   GOVERNING PRINCIPLE: opaque infrastructure identifiers and product content are
+#   NOT the target.
+#   This assertion draws its denylist ONLY from roster_names() / roster_example_names(),
+#   both of which now return HUMAN NAMES ONLY — client-roster-lib.sh filters opaque
+#   identifiers out at load time, so a chat ID or GHL location ID left in an old
+#   operator roster can never become a scan term here. It never called
+#   roster_chat_ids() (now deleted). ⛔ Do NOT add an identifier pass to this gate.
+#
+# ⛔ This is a CHEAP diff-scope signal, NOT the authoritative name check. A regex
+#   cannot tell a client's real name from a book-persona name. The authoritative
+#   check is the LLM reviewer (scripts/qc-llm-diff-review.py), run on every PR.
+#
 # SCOPE: DIFF-ONLY fast-path. This assertion greps only the uncommitted git diff
 # (added `+` lines), so it catches a client name being introduced in the CURRENT
 # change set but CANNOT catch names that were ALREADY committed to tracked files.
