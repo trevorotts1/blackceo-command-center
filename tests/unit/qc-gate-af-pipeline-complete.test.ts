@@ -26,6 +26,16 @@
  * Run: npm run test:vitest  (or: node --import tsx --test)
  */
 
+// C8 — DB isolation. A statically-imported project module here transitively
+// pulls in '@/lib/db', whose module-level
+// `DB_PATH = process.env.DATABASE_PATH || <cwd>/mission-control.db` is frozen at
+// eval time. This suite does not open the DB today, but nothing stopped it from
+// starting to — and then it would have written to the LIVE production board.
+// './_isolated-db' points DATABASE_PATH at a temp file and MUST stay the first
+// import (it is a no-op for a suite that never opens the DB).
+// Enforced by tests/unit/c8-db-isolation-guard.test.ts.
+import './_isolated-db';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';

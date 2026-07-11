@@ -18,7 +18,13 @@
  *
  * Response:
  *   { ok: true, ran_at, workspaces: { created, updated }, sops: { imported, updated },
- *     untagged_personas: [...], deploy: { rebuild_required_after_code_change, command, note } }
+ *     untagged_personas: [...], warnings?: [...],
+ *     deploy: { rebuild_required_after_code_change, command, note } }
+ *
+ *   `warnings` (C8) is present only when a NON-fatal residue finding exists — today
+ *   that is a test/fixture `companies` row, which is not a client-facing surface.
+ *   Client-facing residue (workspaces / active SOP departments) is FATAL (500), not
+ *   a warning. See Step 2.5 for the full severity rationale.
  *
  * FAIL LOUD: returns 500 on any sub-step error — never silently reports ok:true
  * with a partial result.
@@ -50,7 +56,7 @@ import { getDb, reseedWorkspacesFromConfig } from '@/lib/db';
 // Direct module import (not re-exported via @/lib/db): resolve the departments/
 // tree that pairs with the seeded departments.json so SOP import reads the SAME
 // company the workspaces came from (Gap C ↔ Gap D lockstep, G12-FLOOR-CC-SEED).
-import { resolveDepartmentsTreePath } from '@/lib/db/migrations';
+import { resolveDepartmentsTreePath, detectTestResidue } from '@/lib/db/migrations';
 import { importRoleLibrary } from '@/lib/role-library-import';
 
 export const dynamic = 'force-dynamic';
@@ -151,6 +157,8 @@ export async function POST(req: NextRequest): Promise<Response> {
     workspaces?: { created: number; updated: number };
     sops?: { imported: number; updated: number; active_total?: number };
     untagged_personas?: string[];
+    /** C8 — non-fatal residue findings (currently: test/fixture company rows). */
+    warnings?: string[];
     deploy?: {
       rebuild_required_after_code_change: boolean;
       command: string;
@@ -237,6 +245,80 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
   }
 
+  // ── Step 2.5: C8 test/fixture residue assertion ──────────────────────────
+  // FAIL LOUD (mirrors the C2 empty-SOP-library assertion above) when a
+  // WORKSPACE or an active SOP DEPARTMENT still looks test/fixture-shaped after
+  // reseed/ingest — the un-isolated QC-harness leak this guards against must
+  // never quietly ride onto a client's board/API. Detection is pattern OR
+  // exact-allowlist (see lib/test-residue.ts) so a NEW leak shape is caught even
+  // before anyone allowlists it, AND a known-but-token-less slug like
+  // `no-script-dept` can't slip through a pattern-only check.
+  //
+  // SEVERITY SPLIT — companies are a WARNING, not a 500. Deliberate:
+  //
+  //   • A `workspaces` row IS a client-facing surface (it renders as a Kanban
+  //     lane) and an active `sops.department` IS one (it renders in the SOP
+  //     library). Residue there is a real client-visible leak → FATAL. Both are
+  //     remediable: migrations 091/093 hard-delete them by exact slug, and the
+  //     C8 ingest guards stop converge from re-creating them from a stale
+  //     departments.json / a leftover departments/<slug>/ directory. So a 500
+  //     here is a condition the operator can actually clear.
+  //
+  //   • A `companies` row is an ingest-ROOT record — no client page or API
+  //     response renders companies.slug. And it is NOT always removable:
+  //     purgeTestResidueCompanies (migration 094) correctly REFUSES to delete a
+  //     company any workspace still references (workspaces.company_id is a real
+  //     FK), so an operator can be left holding a flagged row with no supported
+  //     way to clear it. Hard-failing converge — the mechanism the box's own
+  //     exit test depends on — on non-client-facing state with no guaranteed
+  //     remediation is a brick, not a gate. It surfaces loudly in `warnings`
+  //     (and in the server log) on an otherwise-successful 200 instead.
+  //
+  // This is the exact defect that made the previous revision unmergeable:
+  // companies were converge-FATAL while nothing anywhere deleted the `testco`
+  // row, and the 500's own remediation text pointed at migrations 091/093 —
+  // neither of which touches `companies`. Merging that would have permanently
+  // 500'd POST /api/system/converge on the default scope=all path.
+  const warnings: string[] = [];
+  if (scope === 'all' || scope === 'workspaces' || scope === 'sops') {
+    const db = getDb();
+    const residue = detectTestResidue(db);
+
+    const fatalHits = residue.workspaces.length + residue.sopDepartments.length;
+    if (fatalHits > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          ran_at,
+          scope,
+          error:
+            'converge detected test/fixture-shaped residue on a CLIENT-FACING surface, which must ' +
+            `never ride onto a client board/API — workspaces=[${residue.workspaces.join(', ')}] ` +
+            `sopDepartments=[${residue.sopDepartments.join(', ')}]. ` +
+            'Remediation: reboot the box so the deferred C8 cleanup migrations run ' +
+            '(091 rekeyAndPurgeGhostSops, 093 purgeTestResidueWorkspaces — both are ' +
+            'deferInAdditiveSelfHeal, so they land on a controlled boot, NOT on a request-time ' +
+            'self-heal). If a workspace is reported as SKIPPED by 093, it holds a task whose title ' +
+            'is not test-shaped: review that task by hand (it is never auto-deleted — a hard-delete ' +
+            'path errs toward keeping data). If a hit is a legitimate client department that merely ' +
+            'matches the detection pattern, confirm it manually; it is never auto-deleted.',
+        },
+        { status: 500 }
+      );
+    }
+
+    if (residue.companies.length > 0) {
+      const warning =
+        `test/fixture-shaped company row(s) present: [${residue.companies.join(', ')}]. ` +
+        'Not client-facing (no page or API renders companies.slug), so this does NOT fail the converge. ' +
+        'Reboot to run migration 094 (purgeTestResidueCompanies), which deletes them by exact slug — ' +
+        'unless a workspace still references the row, in which case 094 refuses (FK safety) and the ' +
+        'row needs manual review.';
+      console.warn(`[/api/system/converge] ${warning}`);
+      warnings.push(warning);
+    }
+  }
+
   // ── Step 3: Read needs-tags.json ─────────────────────────────────────────
   if (scope === 'all' || scope === 'personas') {
     result.untagged_personas = loadNeedsTags();
@@ -255,6 +337,13 @@ export async function POST(req: NextRequest): Promise<Response> {
       'sync (e.g. new department pages/components), run atomic-deploy.sh to build + swap + ' +
       'restart, or the new code serves stale (dead Kanban).',
   };
+
+  // C8 — surface non-fatal residue findings on the successful response rather
+  // than swallowing them. Omitted entirely when clean, so a green converge stays
+  // noise-free.
+  if (warnings.length > 0) {
+    result.warnings = warnings;
+  }
 
   result.ok = true;
   return NextResponse.json(result);

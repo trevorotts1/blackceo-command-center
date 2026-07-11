@@ -19,6 +19,13 @@ import {
   reapDuplicateOpenAuthoringTasks,
   findCanonicalWorkspaceId,
 } from './task-dedup';
+import {
+  TEST_RESIDUE_SOP_DEPARTMENTS,
+  TEST_RESIDUE_WORKSPACE_SLUGS,
+  TEST_RESIDUE_COMPANY_SLUGS,
+  isTestResidueSlug,
+  isTestResidueIngestSlug,
+} from '../test-residue';
 
 interface Migration {
   id: string;
@@ -3589,6 +3596,59 @@ const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '093',
+    name: 'purge_test_residue_workspaces',
+    // DESTRUCTIVE data cleanup (hard delete of exact-slug fixture workspaces +
+    // their fixture agents/tasks). Same rationale as migration 091: defer during
+    // request-time additive self-heal so it never races live ingest, and run on
+    // the next controlled boot instead.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // C8 — the same un-isolated QC/smoke-test harness that left ~30 test-dept
+      // SOP rows (migration 091 / C2) also left fixture WORKSPACES behind:
+      // smoke-test-dept and no-script-dept, 7 synthetic agents each. Purge them
+      // by EXACT slug — never a pattern match (see ../test-residue.ts) — and
+      // ONLY when every task referencing the workspace is itself test-shaped,
+      // so this can never delete real client work. Idempotent: a fresh DB or a
+      // box that never had the residue is a total no-op.
+      console.log('[Migration 093] Purging test/fixture-residue workspaces (C8)...');
+      const r = purgeTestResidueWorkspaces(db);
+      console.log(
+        `[Migration 093] purged ${r.workspacesPurged.length} test workspace(s)` +
+          `${r.workspacesPurged.length ? ` (${r.workspacesPurged.join(', ')})` : ''}, ` +
+          `skipped ${r.workspacesSkipped.length} (non-test task refs or FK conflict — left for manual review)`,
+      );
+    },
+  },
+  {
+    id: '094',
+    name: 'purge_test_residue_companies',
+    // DESTRUCTIVE data cleanup (hard delete of the exact-slug `testco` fixture
+    // company). Deferred out of request-time additive self-heal for the same
+    // reason as 091/093 — run on the next controlled boot, never racing live
+    // ingest.
+    //
+    // MUST run AFTER 093: the fixture workspaces 092 purges may still carry
+    // company_id = testco, and purgeTestResidueCompanies refuses (correctly) to
+    // delete a company any workspace still references. Array order IS run order.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // C8 — the un-isolated QC harness that left test-dept SOPs (091) and
+      // fixture workspaces (093) also left a `testco` COMPANY row, and until now
+      // NOTHING deleted it: converge detected it, returned 500, and told the
+      // operator to run 091/092 — neither of which touches `companies`. The
+      // remediation the error text prescribed provably did not work, so converge
+      // stayed bricked. This migration makes that advice true.
+      console.log('[Migration 094] Purging test/fixture-residue companies (C8)...');
+      const r = purgeTestResidueCompanies(db);
+      console.log(
+        `[Migration 094] purged ${r.companiesPurged.length} test company row(s)` +
+          `${r.companiesPurged.length ? ` (${r.companiesPurged.join(', ')})` : ''}, ` +
+          `skipped ${r.companiesSkipped.length} (still referenced by a workspace — left for manual review)`,
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -4242,9 +4302,11 @@ const DEPRECATED_SOP_DEPARTMENTS: readonly string[] = [
   'executive-assistant',
 ];
 
-// Exact test-residue department slug. EXACT match only — never a LIKE/pattern
-// match (a 'testing-lab' or 'contest-dept' client dept must never be purged).
-const TEST_RESIDUE_SOP_DEPARTMENTS: readonly string[] = ['test-dept'];
+// C8 — TEST_RESIDUE_SOP_DEPARTMENTS now lives in ../test-residue (imported
+// above) so the API-layer gate (api/sops/route.ts) and the converge assertion
+// (detectTestResidue below) share the SAME exact allowlist as this migration —
+// never a LIKE/pattern match here (a 'testing-lab' or 'contest-dept' client
+// dept must never be purged).
 
 export interface SopGhostCleanupResult {
   rekeyed: number;
@@ -4334,6 +4396,245 @@ export function rekeyAndPurgeGhostSops(db: Database.Database): SopGhostCleanupRe
   }
 
   return { rekeyed, deprecatedRetired, testPurged };
+}
+
+// ── C8 — test/fixture residue: workspaces + companies ───────────────────────
+// rekeyAndPurgeGhostSops (above) only ever touched the `sops` table. The same
+// live QC-harness leak also left fixture WORKSPACES (smoke-test-dept,
+// no-script-dept — 7 fixture agents each) and a `testco` COMPANY row behind.
+// This section extends the C2 cleanup pattern to those two tables, reusing the
+// SAME exact-allowlist discipline (see ../test-residue.ts).
+
+/**
+ * A single test-shaped title token. Kept separate from TEST_RESIDUE_DETECT_PATTERN
+ * (slug-shaped) because task TITLES are free text, not hyphenated slugs.
+ *
+ * This pattern is the ONLY thing standing between a task and a HARD DELETE
+ * (purgeTestResidueWorkspaces drops the row outright), so it is deliberately
+ * NARROW — on a destructive path, err toward KEEPING data:
+ *
+ *   - 'routing' and 'probe' were removed. Both are ordinary business words: a
+ *     real task titled "Fix routing for the campaign" or "Probe the vendor's
+ *     API limits" would have been classified test-shaped and DESTROYED. A
+ *     false negative here is a skipped purge an operator reviews by hand; a
+ *     false positive is unrecoverable client work loss. Not a close call.
+ *
+ * Every token that remains is one no real client task title would carry as a
+ * standalone word (`test`, `e2e`, `smoke`, `dims`, `fixture`). If a workspace
+ * on the exact allowlist holds a task this does NOT match, the workspace is
+ * SKIPPED (never force-purged) and reported for manual review.
+ */
+const TASK_TEST_TITLE_PATTERN = /\b(test|e2e|smoke|dims|fixture)\b/i;
+
+export interface TestResidueReport {
+  /** workspaces.slug values that look test/fixture-shaped (detection only). */
+  workspaces: string[];
+  /** active sops.department values that look test/fixture-shaped (detection only). */
+  sopDepartments: string[];
+  /** companies.slug values that look test/fixture-shaped (detection only). */
+  companies: string[];
+}
+
+/**
+ * C8 — DETECTION ONLY (never deletes, never mutates). Scans workspaces / active
+ * SOPs / companies for test-or-fixture-shaped slugs so a converge run (or a
+ * standalone QC check) can FAIL LOUD when residue is live in a prod DB — see
+ * TEST_RESIDUE_DETECT_PATTERN's docstring for why this is intentionally
+ * BROADER than (and must stay decoupled from) the exact-slug delete allowlists.
+ */
+export function detectTestResidue(db: Database.Database): TestResidueReport {
+  const report: TestResidueReport = { workspaces: [], sopDepartments: [], companies: [] };
+
+  const tableExists = (name: string) =>
+    !!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
+
+  // All three branches use isTestResidueSlug (pattern OR exact allowlist).
+  // Pattern-ONLY would be BLIND to `no-script-dept`: it is on
+  // TEST_RESIDUE_WORKSPACE_SLUGS and IS hard-deleted by migration 092, yet it
+  // carries no test-shaped token, so a pattern-only gate would never fail loud
+  // on it — letting known residue ride onto a client board whenever 092 is
+  // deferred (it is `deferInAdditiveSelfHeal`) or skipped.
+  if (tableExists('workspaces')) {
+    const rows = db.prepare('SELECT slug FROM workspaces').all() as { slug: string | null }[];
+    for (const { slug } of rows) {
+      if (isTestResidueSlug(slug, TEST_RESIDUE_WORKSPACE_SLUGS)) report.workspaces.push(slug!);
+    }
+  }
+
+  if (tableExists('sops')) {
+    const cols = db.prepare('PRAGMA table_info(sops)').all() as { name: string }[];
+    const activeClause = cols.some((c) => c.name === 'deleted_at') ? 'WHERE deleted_at IS NULL' : '';
+    const rows = db
+      .prepare(`SELECT DISTINCT department FROM sops ${activeClause}`)
+      .all() as { department: string | null }[];
+    for (const { department } of rows) {
+      if (isTestResidueSlug(department, TEST_RESIDUE_SOP_DEPARTMENTS)) report.sopDepartments.push(department!);
+    }
+  }
+
+  if (tableExists('companies')) {
+    const rows = db.prepare('SELECT slug FROM companies').all() as { slug: string | null }[];
+    for (const { slug } of rows) {
+      if (isTestResidueSlug(slug, TEST_RESIDUE_COMPANY_SLUGS)) report.companies.push(slug!);
+    }
+  }
+
+  return report;
+}
+
+export interface TestResidueWorkspaceCleanupResult {
+  /** Workspace slugs that were dropped (fixture agents + tasks with them). */
+  workspacesPurged: string[];
+  /** Workspace slugs on the allowlist that were found but left untouched, with why. */
+  workspacesSkipped: { slug: string; reason: string }[];
+}
+
+/**
+ * C8 — EXACT-slug cleanup of fixture workspaces (`smoke-test-dept`,
+ * `no-script-dept`) that leaked into the live DB from an un-isolated test
+ * harness. NEVER pattern-deletes — see ../test-residue.ts. Idempotent: a slug
+ * absent from `workspaces` (already cleaned, or never present on this box) is
+ * silently skipped-as-absent (not reported as skipped/purged).
+ *
+ * Safety: a matched workspace is dropped ONLY when EVERY task referencing it
+ * is itself test-shaped (TASK_TEST_TITLE_PATTERN) or it has zero tasks. A
+ * workspace carrying any real-looking task, or any FK the deletion can't
+ * satisfy, is left completely untouched and reported in `workspacesSkipped`
+ * for manual review — this cleanup must never destroy real client work.
+ */
+export function purgeTestResidueWorkspaces(db: Database.Database): TestResidueWorkspaceCleanupResult {
+  const result: TestResidueWorkspaceCleanupResult = { workspacesPurged: [], workspacesSkipped: [] };
+
+  const hasWorkspaces = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workspaces'")
+    .get();
+  if (!hasWorkspaces) return result;
+
+  for (const slug of TEST_RESIDUE_WORKSPACE_SLUGS) {
+    const ws = db.prepare('SELECT id FROM workspaces WHERE slug = ?').get(slug) as { id: string } | undefined;
+    if (!ws) continue; // not present on this box — nothing to do, not a "skip"
+
+    const tasks = db.prepare('SELECT id, title FROM tasks WHERE workspace_id = ?').all(ws.id) as {
+      id: string;
+      title: string;
+    }[];
+    const nonTest = tasks.filter((t) => !TASK_TEST_TITLE_PATTERN.test(t.title || ''));
+    if (nonTest.length > 0) {
+      result.workspacesSkipped.push({
+        slug,
+        reason: `${nonTest.length} non-test-looking task(s) reference this workspace — left untouched`,
+      });
+      continue;
+    }
+
+    try {
+      const purge = db.transaction(() => {
+        const agentIds = (
+          db.prepare('SELECT id FROM agents WHERE workspace_id = ?').all(ws.id) as { id: string }[]
+        ).map((a) => a.id);
+        // Delete the (already-confirmed-test-shaped) tasks FIRST so no FK from
+        // tasks.assigned_agent_id/created_by_agent_id blocks the agent deletes
+        // below (those columns carry no ON DELETE clause).
+        for (const t of tasks) {
+          db.prepare('DELETE FROM tasks WHERE id = ?').run(t.id);
+        }
+        for (const agentId of agentIds) {
+          db.prepare('DELETE FROM agents WHERE id = ?').run(agentId);
+        }
+        // workspaces.head_agent_id is ON DELETE SET NULL, so it self-clears
+        // above when its agent is deleted — safe to delete the workspace now.
+        db.prepare('DELETE FROM workspaces WHERE id = ?').run(ws.id);
+      });
+      purge();
+      result.workspacesPurged.push(slug);
+    } catch (err) {
+      // FK conflict from a table this function doesn't know about (e.g. a
+      // deliverable or message row referencing a fixture agent) — never half-
+      // delete; the transaction already rolled back. Leave it for manual
+      // review rather than crashing the whole migration/converge run.
+      result.workspacesSkipped.push({
+        slug,
+        reason: `cleanup failed (${(err as Error).message}) — left untouched for manual review`,
+      });
+    }
+  }
+
+  return result;
+}
+
+export interface TestResidueCompanyCleanupResult {
+  /** Company slugs that were deleted. */
+  companiesPurged: string[];
+  /** Company slugs found but left untouched, with why. */
+  companiesSkipped: { slug: string; reason: string }[];
+}
+
+/**
+ * C8 — EXACT-slug cleanup of the fixture `testco` COMPANY row left behind by
+ * the same un-isolated QC harness (it is a role-library-import ingest ROOT
+ * candidate, so a stray one can mis-attribute an ingest).
+ *
+ * This closes a real hole: BEFORE this function existed, `detectTestResidue`
+ * flagged `testco`, converge returned 500 on the hit, and the 500's own
+ * remediation text told the operator to run migrations 091/092 — but NOTHING
+ * anywhere deleted a company row (the only other `DELETE FROM companies` is
+ * migration 030, scoped to slugs 'default'/'command-center'). The advice
+ * provably did not work, so converge stayed 500 forever on any box carrying a
+ * testco row. Now the advice is true.
+ *
+ * Safety: NEVER pattern-deletes (see ../test-residue.ts), and a company is
+ * dropped ONLY when nothing references it — `workspaces.company_id` is a real
+ * FK (schema.ts:35). A referenced company is left completely untouched and
+ * reported in `companiesSkipped` for manual review; deleting it would orphan or
+ * cascade into live workspaces. Idempotent: an absent slug is a silent no-op.
+ */
+export function purgeTestResidueCompanies(db: Database.Database): TestResidueCompanyCleanupResult {
+  const result: TestResidueCompanyCleanupResult = { companiesPurged: [], companiesSkipped: [] };
+
+  const hasCompanies = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='companies'")
+    .get();
+  if (!hasCompanies) return result;
+
+  const hasWorkspaces = !!db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workspaces'")
+    .get();
+
+  for (const slug of TEST_RESIDUE_COMPANY_SLUGS) {
+    const company = db.prepare('SELECT id FROM companies WHERE slug = ?').get(slug) as
+      | { id: string }
+      | undefined;
+    if (!company) continue; // not on this box — nothing to do
+
+    // FK guard: refuse to delete a company any workspace still points at.
+    if (hasWorkspaces) {
+      const refs = db
+        .prepare('SELECT COUNT(*) AS c FROM workspaces WHERE company_id = ?')
+        .get(company.id) as { c: number };
+      if (refs.c > 0) {
+        result.companiesSkipped.push({
+          slug,
+          reason:
+            `${refs.c} workspace(s) still reference this company — left untouched. ` +
+            `Purge/re-home those workspaces first (migration 092 handles the fixture ones).`,
+        });
+        continue;
+      }
+    }
+
+    try {
+      db.prepare('DELETE FROM companies WHERE id = ?').run(company.id);
+      result.companiesPurged.push(slug);
+    } catch (err) {
+      // A FK from a table this function doesn't know about — never half-delete.
+      result.companiesSkipped.push({
+        slug,
+        reason: `cleanup failed (${(err as Error).message}) — left untouched for manual review`,
+      });
+    }
+  }
+
+  return result;
 }
 
 // Auto-seed starter SOPs on boot (B6). Non-fatal: a missing `sops` table or any
@@ -4632,6 +4933,22 @@ export function reseedWorkspacesFromConfig(
       // Floor invariant: an EXPLICITLY opted-out department never gets a lane.
       if (isDepartmentOptedOut(dept)) {
         console.log(`[reseed] Skipping "${dept.id || dept.slug}" — explicitly opted out (honored decline)`);
+        continue;
+      }
+
+      // C8 INGEST GUARD — never (re-)create a known test/fixture workspace from a
+      // stale departments.json. EXACT slug match only (see ../test-residue.ts);
+      // a client dept named "testing-lab" is untouched.
+      //
+      // Without this, the C8 loop is unbreakable: migration 092 hard-deletes
+      // `smoke-test-dept` on boot, then the very next converge re-seeds it right
+      // back from the manifest, and converge's own residue assertion 500s on the
+      // row converge itself just created — a permanent brick no migration can
+      // clear. Refusing to create it is the only fix that terminates.
+      if (isTestResidueIngestSlug(dept.slug || dept.id)) {
+        console.log(
+          `[reseed] Skipping "${dept.id || dept.slug}" — test/fixture residue slug (C8); never seeded onto a client board`,
+        );
         continue;
       }
 

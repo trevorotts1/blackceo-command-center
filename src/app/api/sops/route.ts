@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { parseAndValidateSteps, type SOP } from '@/lib/sops';
 import { storeEmbeddingForSOP } from '@/lib/sop-embeddings';
+import { expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
+import { TEST_RESIDUE_SOP_DEPARTMENTS } from '@/lib/test-residue';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -11,9 +13,16 @@ export const revalidate = 0;
  * GET /api/sops
  *
  * Query params:
- *   ?department=<slug>   — filter to SOPs bound to this department
+ *   ?department=<slug>   — filter to SOPs bound to this department (alias-aware,
+ *                          see C10 note below)
  *   ?keywords=<comma>    — at least one keyword must appear in task_keywords
  *   ?include_deleted=1   — include soft-deleted rows (off by default)
+ *
+ * C8 — test/fixture-residue gate: rows keyed to an exact TEST_RESIDUE_SOP_
+ * DEPARTMENTS value are EXCLUDED unconditionally (even with include_deleted=1)
+ * so a client-facing caller can never see them, regardless of whether the C8
+ * cleanup migration has run on this box yet. This is belt-and-suspenders with
+ * that migration, not a replacement for it.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -28,10 +37,43 @@ export async function GET(request: NextRequest) {
     if (!includeDeleted) {
       sql += ` AND deleted_at IS NULL`;
     }
+
+    // C8 — never surface test-harness residue on a client-facing surface.
+    const residuePlaceholders = TEST_RESIDUE_SOP_DEPARTMENTS.map(() => '?').join(',');
+    sql += ` AND department NOT IN (${residuePlaceholders})`;
+    params.push(...TEST_RESIDUE_SOP_DEPARTMENTS);
+
+    // C10 — alias-aware department filter, IN SQL.
+    //
+    // A row may still be keyed to a LEGACY alias slug (webdev, billing,
+    // support, ...) if C2's re-key migration hasn't reached this box's DB yet,
+    // while the caller (a workspace page, dispatch-time SOP lookup, etc.) always
+    // queries by the CANONICAL slug — and vice versa if a caller passes an
+    // alias. A bare `department = ?` silently drops those rows and the library
+    // reads as EMPTY for that department even though rows exist.
+    //
+    // Fix: canonicalize the caller's input, expand it to the full set of raw
+    // spellings that mean the same department (expandDeptSlugAliases — the
+    // inverse of canonicalDeptSlug), and match with `IN (...)`. Because C2 /
+    // migration 091 re-keys at write time, that alias set is knowable up front.
+    //
+    // Kept in SQL on purpose: filtering in JS after the fact would SELECT the
+    // WHOLE sops table (~2.5k rows on a live box) and materialize every row into
+    // a JS object on EVERY ?department= request, just to throw almost all of them
+    // away. LOWER(TRIM(...)) mirrors canonicalDeptSlug's own normalization so the
+    // SQL predicate is exactly equivalent to the canonicalize-both-sides compare.
     if (department) {
-      sql += ` AND department = ?`;
-      params.push(department);
+      const aliases = expandDeptSlugAliases(department);
+      if (aliases.length === 0) {
+        // Caller passed a blank/whitespace-only department — match nothing rather
+        // than silently returning the entire library.
+        return NextResponse.json([]);
+      }
+      const deptPlaceholders = aliases.map(() => '?').join(',');
+      sql += ` AND LOWER(TRIM(COALESCE(department, ''))) IN (${deptPlaceholders})`;
+      params.push(...aliases);
     }
+
     if (keywords) {
       const list = keywords.split(',').map((k) => k.trim().toLowerCase()).filter(Boolean);
       if (list.length > 0) {

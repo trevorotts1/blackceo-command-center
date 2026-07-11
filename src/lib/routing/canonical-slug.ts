@@ -188,3 +188,48 @@ export function canonicalDeptSlug(slug: string | null | undefined): string {
 export function isMasterOrchestratorSlug(slug: string | null | undefined): boolean {
   return canonicalDeptSlug(slug) === 'master-orchestrator';
 }
+
+/**
+ * Every RAW department slug that canonicalizes to the same department as `slug`.
+ *
+ * This is the INVERSE of canonicalDeptSlug: given any variant, return the full
+ * set of stored spellings that mean the same department — the canonical slug,
+ * every ALIAS_MAP key pointing at it, and the "dept-" prefixed form of each.
+ *
+ * Exists so a DB query can do the alias-aware match IN SQL instead of pulling
+ * the whole table into JS and filtering there (C10). A `sops` row may still be
+ * keyed to a LEGACY alias ('webdev', 'billing') if C2's re-key migration hasn't
+ * reached that box yet, while the caller always queries the CANONICAL slug — so
+ * an exact `department = ?` silently drops those rows. Expanding to
+ * `LOWER(TRIM(department)) IN (...)` keeps the filter in SQLite while still
+ * matching every alias.
+ *
+ * Returns lowercase, de-duplicated values. An unknown slug returns just itself
+ * (+ its dept- form), matching canonicalDeptSlug's graceful Step-5 fallback, so
+ * a caller never gets an empty IN-list and never accidentally matches everything.
+ *
+ * @example
+ *   expandDeptSlugAliases('web-development')
+ *     → ['web-development','dept-web-development','webdev','dept-webdev',
+ *        'web-dev','dept-web-dev','web','dept-web']
+ *   expandDeptSlugAliases('dept-webdev')   // same set — input is canonicalized first
+ *   expandDeptSlugAliases('unknown-dept')  → ['unknown-dept','dept-unknown-dept']
+ */
+export function expandDeptSlugAliases(slug: string | null | undefined): string[] {
+  const canon = canonicalDeptSlug(slug);
+  if (!canon) return [];
+
+  const bare = new Set<string>([canon]);
+  for (const [alias, target] of Object.entries(ALIAS_MAP)) {
+    if (target === canon) bare.add(alias);
+  }
+
+  // Include the workspace auto-seed "dept-" spelling of every variant, since
+  // canonicalDeptSlug strips that prefix and rows may carry it.
+  const out: string[] = [];
+  bare.forEach((s) => {
+    out.push(s);
+    out.push(`dept-${s}`);
+  });
+  return out;
+}
