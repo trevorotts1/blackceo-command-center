@@ -2289,9 +2289,13 @@ const migrations: Migration[] = [
       // by name). It is deliberately absent from any persona/agent picker
       // that shows up in the client board view.
       //
-      // Idempotent: INSERT OR IGNORE on deterministic ids
-      //   research agent id:        'research-agent-<workspace.id>'
-      //   devils-advocate agent id: 'da-agent-<workspace.id>'
+      // Idempotent on the ROLE, not on the id (C3). This originally used
+      // `INSERT OR IGNORE` keyed on its own deterministic ids
+      // ('research-agent-<ws.id>' / 'da-agent-<ws.id>'), which only suppresses a
+      // PRIMARY-KEY collision. Skill 23 had already seeded the same roles under hex
+      // ids, so the insert did not collide — it DUPLICATED. seedTrioForWorkspaces()
+      // now skips any role slot already filled by any agent, under any id and any
+      // alias spelling ('deep-research' == 'research').
       //
       // Deferred: if no workspaces exist yet, this migration records a log
       // message and returns cleanly. The autoSeedFromDepartmentsJson path
@@ -2313,43 +2317,11 @@ const migrations: Migration[] = [
         return;
       }
 
-      const insertResearch = db.prepare(`
-        INSERT OR IGNORE INTO agents
-          (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
-           specialist_type, role_type, created_at, updated_at)
-        VALUES (?, ?, 'Research Specialist', ?, '🔬', 'standby', 0, ?, 'permanent', 'research', datetime('now'), datetime('now'))
-      `);
-
-      const insertDA = db.prepare(`
-        INSERT OR IGNORE INTO agents
-          (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
-           specialist_type, role_type, created_at, updated_at)
-        VALUES (?, ?, 'Devil''s Advocate', ?, '😈', 'standby', 0, ?, 'permanent', 'devils-advocate', datetime('now'), datetime('now'))
-      `);
-
-      let researchSeeded = 0;
-      let daSeeded = 0;
-
-      for (const ws of workspaces) {
-        const researchId = `research-agent-${ws.id}`;
-        const daId = `da-agent-${ws.id}`;
-
-        const researchName = `${ws.name} Research Specialist`;
-        const researchDesc = `Deep-research specialist for the ${ws.name} department. Applies the Tier-1 research mandate (McKinsey, Harvard Business Review, IBISWorld, Statista citations required) to discover, synthesise, and validate information needed by the department's specialists and SOP library.`;
-        insertResearch.run(researchId, researchName, researchDesc, ws.id);
-        researchSeeded++;
-
-        const daName = `${ws.name} Devil's Advocate`;
-        // DA is internal: description is intentionally operator-facing only —
-        // it never appears in client-facing UI.
-        const daDesc = `[INTERNAL — not surfaced to client] Devil's Advocate for the ${ws.name} department. Stress-tests plans, decisions, and deliverables by surfacing assumptions, edge cases, and counter-arguments BEFORE they become problems. Reports findings only to the department's QC Specialist and the master orchestrator.`;
-        insertDA.run(daId, daName, daDesc, ws.id);
-        daSeeded++;
-      }
-
+      const seeded = seedTrioForWorkspaces(db, workspaces);
       console.log(
-        `[Migration 065] Seeded/verified ${researchSeeded} Research + ${daSeeded} Devil's Advocate agent(s)` +
-        ` across ${workspaces.length} workspace(s)`,
+        `[Migration 065] Seeded ${seeded.research} Research + ${seeded.devilsAdvocate} Devil's Advocate ` +
+        `(+${seeded.qc} QC) agent(s) across ${workspaces.length} workspace(s); ` +
+        `${seeded.skipped} role slot(s) already filled`,
       );
     },
   },
@@ -3575,6 +3547,48 @@ const migrations: Migration[] = [
       );
     },
   },
+
+  // ── Migration 092 — C3: de-duplicate trio agents + reap headless workspaces ──
+  {
+    id: '092',
+    name: 'dedupe_trio_agents_and_materialize_heads',
+    // DESTRUCTIVE data cleanup (deletes duplicate agent rows and repoints foreign
+    // keys). Defer during request-time additive self-heal so it never races a live
+    // dispatch; it runs on the next controlled boot instead. Same posture as 091.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // C3 — provisioning multiplied agents and left workspaces headless.
+      //
+      // Duplicates: migration 065 / autoSeedTrioAgents seeded the trio with
+      // INSERT OR IGNORE on their OWN ids, so the Skill-23 rows (hex ids, and the
+      // 'deep-research' alias) never collided and every re-provision added another
+      // copy. This collapses each workspace/role slot to ONE agent, repointing all
+      // foreign keys onto the survivor first. Non-trio roles are untouched —
+      // 'specialist' departments legitimately hold many agents.
+      //
+      // Headless: migration 028 backfilled head_agent_id ONCE, so every workspace
+      // created afterwards was born headless and stayed that way. This materialises
+      // a head for each, and ensureWorkspaceHeadAgents() now runs on every boot so
+      // the condition cannot re-accumulate.
+      console.log('[Migration 092] De-duplicating trio agents + materialising department heads (C3)...');
+
+      const d = dedupeTrioAgents(db);
+      console.log(
+        `[Migration 092] normalised ${d.aliasesNormalized} role_type alias(es); ` +
+          `found ${d.groupsFound} duplicated role slot(s); ` +
+          `repointed ${d.referencesRepointed} reference(s); ` +
+          `removed ${d.agentsRemoved} duplicate agent(s); ` +
+          `kept ${d.groupsSkipped} duplicate(s) whose references could not be repointed`,
+      );
+
+      const h = ensureWorkspaceHeadAgents(db);
+      console.log(
+        `[Migration 092] promoted ${h.promoted} existing agent(s) to head, ` +
+          `materialised ${h.created} new head agent(s), ` +
+          `${h.stillHeadless} workspace(s) still headless`,
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -3703,8 +3717,26 @@ export function runMigrations(db: Database.Database): void {
 
   // PRD 2.11: Ensure the trio (QC + research + DA) exists for every workspace.
   // This covers the case where migration 065 ran before any workspaces existed
-  // (autoSeedFromDepartmentsJson may have just created them above). Idempotent.
+  // (autoSeedFromDepartmentsJson may have just created them above). Idempotent —
+  // and, since C3, idempotent on the ROLE rather than on the agent id, so this
+  // boot-time call tops up missing trio members without ever duplicating one.
   autoSeedTrioAgents(db);
+
+  // C3: no workspace may be headless. Migration 028's head backfill ran ONCE, so
+  // every workspace created after it (including by autoSeedFromDepartmentsJson
+  // directly above) was born with head_agent_id = NULL and nothing refilled it —
+  // 13 accumulated. Running the reaper on every boot means a headless workspace
+  // cannot survive a restart. Idempotent; non-fatal.
+  try {
+    const heads = ensureWorkspaceHeadAgents(db);
+    if (heads.promoted + heads.created > 0) {
+      console.log(
+        `[Auto-seed Heads] Promoted ${heads.promoted} + materialised ${heads.created} department head(s)`,
+      );
+    }
+  } catch (err) {
+    console.log('[Auto-seed Heads] Skipped:', (err as Error).message);
+  }
 
   // Auto-seed the starter SOP library (B6). Chained here — the same first-boot /
   // DB-init path where the Skill-23 workspace auto-seed runs — so the role
@@ -3746,40 +3778,453 @@ export function autoSeedTrioAgents(db: Database.Database): void {
     const workspaces = db.prepare('SELECT id, name FROM workspaces').all() as { id: string; name: string }[];
     if (workspaces.length === 0) return;
 
-    const insertResearch = db.prepare(`
-      INSERT OR IGNORE INTO agents
-        (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
-         specialist_type, role_type, created_at, updated_at)
-      VALUES (?, ?, 'Research Specialist', ?, '🔬', 'standby', 0, ?, 'permanent', 'research', datetime('now'), datetime('now'))
-    `);
-
-    const insertDA = db.prepare(`
-      INSERT OR IGNORE INTO agents
-        (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
-         specialist_type, role_type, created_at, updated_at)
-      VALUES (?, ?, 'Devil''s Advocate', ?, '😈', 'standby', 0, ?, 'permanent', 'devils-advocate', datetime('now'), datetime('now'))
-    `);
-
-    let count = 0;
-    for (const ws of workspaces) {
-      const researchName = `${ws.name} Research Specialist`;
-      const researchDesc = `Deep-research specialist for the ${ws.name} department. Applies the Tier-1 research mandate (McKinsey, Harvard Business Review, IBISWorld, Statista citations required) to discover, synthesise, and validate information needed by the department's specialists and SOP library.`;
-      insertResearch.run(`research-agent-${ws.id}`, researchName, researchDesc, ws.id);
-
-      const daName = `${ws.name} Devil's Advocate`;
-      // DA description is intentionally operator-facing only — never shown in client UI.
-      const daDesc = `[INTERNAL — not surfaced to client] Devil's Advocate for the ${ws.name} department. Stress-tests plans, decisions, and deliverables by surfacing assumptions, edge cases, and counter-arguments BEFORE they become problems. Reports findings only to the department's QC Specialist and the master orchestrator.`;
-      insertDA.run(`da-agent-${ws.id}`, daName, daDesc, ws.id);
-      count++;
-    }
-
-    if (count > 0) {
-      console.log(`[Auto-seed Trio] Seeded/verified Research + Devil's Advocate for ${count} workspace(s)`);
+    const seeded = seedTrioForWorkspaces(db, workspaces);
+    const total = seeded.qc + seeded.research + seeded.devilsAdvocate;
+    if (total > 0) {
+      console.log(
+        `[Auto-seed Trio] Seeded ${seeded.qc} QC + ${seeded.research} Research + ` +
+          `${seeded.devilsAdvocate} Devil's Advocate agent(s) across ${workspaces.length} workspace(s); ` +
+          `${seeded.skipped} role slot(s) already filled (role_type-aware skip)`,
+      );
     }
   } catch (err) {
     // Non-fatal: log and continue.
     console.log('[Auto-seed Trio] Skipped:', (err as Error).message);
   }
+}
+
+// ── C3: duplicate trio agents + headless workspaces ──────────────────────────
+//
+// ROOT CAUSE (create side). Migration 065 and autoSeedTrioAgents both seeded the
+// trio with `INSERT OR IGNORE` keyed on their OWN deterministic ids
+// (`research-agent-<ws.id>`, `da-agent-<ws.id>`). Skill 23 had ALREADY seeded the
+// same *roles* under different (hex) ids — e.g. marketing carried BOTH
+// 'Deep Research Specialist — Marketing' (hex, role_type='deep-research') AND
+// 'Marketing Research Specialist' (research-agent-marketing, role_type='research').
+// `INSERT OR IGNORE` only suppresses a PRIMARY-KEY collision, so a different id
+// carrying the SAME role never collided: it duplicated. Every re-provision
+// (converge → reseedWorkspacesFromConfig → autoSeedTrioAgents) re-ran that seed,
+// so the trio multiplied instead of converging. The fix is to make the seed
+// idempotent on the ROLE, not on the id.
+//
+// ROOT CAUSE (head side). Migration 028 backfilled workspaces.head_agent_id ONCE.
+// Migrations run once, so every workspace created AFTERWARDS (autoSeedFromDepartments-
+// Json, reseedWorkspacesFromConfig) was born with head_agent_id = NULL and nothing
+// ever filled it — 13 workspaces accumulated with no head, including mandatory
+// floor departments. ensureWorkspaceHeadAgents() below is the reaper/guard: it runs
+// on EVERY boot, so a headless workspace cannot survive a restart.
+//
+// role_type vocabulary. Skill 23 writes 'deep-research'; CC writes 'research'. They
+// are the SAME role. resolveTrioAgents() matched `role_type = 'research'` exactly,
+// so the 58 live 'deep-research' rows were invisible to it — which is precisely why
+// the CC seed thought the slot was empty and inserted a duplicate. We canonicalise
+// the alias in the DB (migration 092) AND teach the resolver both spellings.
+
+/** The three trio role slots, in canonical spelling. */
+export const TRIO_ROLE_TYPES = ['qc', 'research', 'devils-advocate'] as const;
+export type TrioRoleType = (typeof TRIO_ROLE_TYPES)[number];
+
+/**
+ * Every role_type spelling that means a trio role, mapped to its canonical form.
+ * Skill 23 and CC evolved separate vocabularies; this is the reconciliation table.
+ */
+export const TRIO_ROLE_ALIASES: Readonly<Record<string, TrioRoleType>> = {
+  qc: 'qc',
+  research: 'research',
+  'deep-research': 'research', // Skill-23 spelling for the same role
+  'devils-advocate': 'devils-advocate',
+};
+
+/** The role_type that marks a department head. All 54 live heads use this. */
+export const HEAD_ROLE_TYPE = 'leadership';
+
+/**
+ * Canonicalise a role_type to its trio slot, or null when it is NOT a trio role.
+ *
+ * Returning null for non-trio roles is the load-bearing safety property of the
+ * de-dup: 'specialist', 'leadership', 'healer' and 'orchestrator' agents are
+ * legitimately many-per-workspace (the live `presentations` department has 17
+ * DISTINCT role_type='specialist' agents). De-duping those would delete 16 real
+ * agents. Only the trio is one-per-workspace-per-role.
+ */
+export function canonicalTrioRole(roleType: string | null | undefined): TrioRoleType | null {
+  if (!roleType) return null;
+  return TRIO_ROLE_ALIASES[roleType.trim().toLowerCase()] ?? null;
+}
+
+/** Every alias spelling for a canonical trio slot (for SQL IN (...) matching). */
+function aliasesFor(role: TrioRoleType): string[] {
+  return Object.keys(TRIO_ROLE_ALIASES).filter((a) => TRIO_ROLE_ALIASES[a] === role);
+}
+
+/** Ids this codebase generates for trio agents — used to tell CC rows from Skill-23 rows. */
+function isCcGeneratedTrioId(id: string): boolean {
+  return /^(qc|research|da)-agent-/.test(id);
+}
+
+/**
+ * Seed the trio (QC + Research + Devil's Advocate) for the given workspaces,
+ * skipping any ROLE SLOT that is already filled by ANY agent — whatever its id or
+ * alias spelling. This is the C3 create-side guard: it makes re-provisioning
+ * converge instead of multiply.
+ */
+export function seedTrioForWorkspaces(
+  db: Database.Database,
+  workspaces: { id: string; name: string }[],
+): { qc: number; research: number; devilsAdvocate: number; skipped: number } {
+  const result = { qc: 0, research: 0, devilsAdvocate: 0, skipped: 0 };
+
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO agents
+      (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+       specialist_type, role_type, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'standby', 0, ?, 'permanent', ?, datetime('now'), datetime('now'))
+  `);
+
+  const spec = (ws: { id: string; name: string }): Record<TrioRoleType, {
+    id: string; name: string; role: string; emoji: string; desc: string;
+  }> => ({
+    qc: {
+      id: `qc-agent-${ws.id}`,
+      name: `${ws.name} QC Specialist`,
+      role: 'QC Specialist',
+      emoji: '🔍',
+      desc: `Quality control specialist for the ${ws.name} department. Reviews completed tasks against SOP success criteria and decides whether work moves to Done or back to In Progress.`,
+    },
+    research: {
+      id: `research-agent-${ws.id}`,
+      name: `${ws.name} Research Specialist`,
+      role: 'Research Specialist',
+      emoji: '🔬',
+      desc: `Deep-research specialist for the ${ws.name} department. Applies the Tier-1 research mandate (McKinsey, Harvard Business Review, IBISWorld, Statista citations required) to discover, synthesise, and validate information needed by the department's specialists and SOP library.`,
+    },
+    'devils-advocate': {
+      id: `da-agent-${ws.id}`,
+      name: `${ws.name} Devil's Advocate`,
+      role: "Devil's Advocate",
+      emoji: '😈',
+      // DA description is intentionally operator-facing only — never shown in client UI.
+      desc: `[INTERNAL — not surfaced to client] Devil's Advocate for the ${ws.name} department. Stress-tests plans, decisions, and deliverables by surfacing assumptions, edge cases, and counter-arguments BEFORE they become problems. Reports findings only to the department's QC Specialist and the master orchestrator.`,
+    },
+  });
+
+  for (const ws of workspaces) {
+    const specs = spec(ws);
+    for (const role of TRIO_ROLE_TYPES) {
+      const aliases = aliasesFor(role);
+      const placeholders = aliases.map(() => '?').join(',');
+      // The guard: does ANY agent already fill this role slot for this workspace,
+      // regardless of id or alias spelling? (INSERT OR IGNORE could not see this.)
+      const existing = db
+        .prepare(
+          `SELECT id FROM agents WHERE workspace_id = ? AND lower(role_type) IN (${placeholders}) LIMIT 1`,
+        )
+        .get(ws.id, ...aliases) as { id: string } | undefined;
+
+      if (existing) {
+        result.skipped++;
+        continue;
+      }
+
+      const s = specs[role];
+      const info = insert.run(s.id, s.name, s.role, s.desc, s.emoji, ws.id, role);
+      if (info.changes > 0) {
+        if (role === 'devils-advocate') result.devilsAdvocate++;
+        else result[role]++;
+      }
+    }
+  }
+
+  return result;
+}
+
+/** A workspace/role slot filled by more than one agent. */
+export interface DuplicateTrioGroup {
+  workspaceId: string;
+  role: TrioRoleType;
+  agentIds: string[];
+}
+
+/**
+ * Find every workspace/role slot occupied by more than one trio agent.
+ * Alias-aware ('deep-research' and 'research' collapse into one slot) and
+ * strictly limited to trio roles, so multi-specialist departments are never
+ * reported. Used by the de-dup migration and as a standing invariant in tests.
+ */
+export function findDuplicateTrioAgents(db: Database.Database): DuplicateTrioGroup[] {
+  const cols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes('role_type')) return [];
+
+  const rows = db
+    .prepare(
+      `SELECT id, workspace_id, role_type FROM agents
+        WHERE workspace_id IS NOT NULL AND role_type IS NOT NULL
+        ORDER BY created_at ASC, rowid ASC`,
+    )
+    .all() as { id: string; workspace_id: string; role_type: string }[];
+
+  const groups = new Map<string, DuplicateTrioGroup>();
+  for (const r of rows) {
+    const role = canonicalTrioRole(r.role_type);
+    if (!role) continue; // non-trio roles are legitimately many-per-workspace
+    const key = `${r.workspace_id}::${role}`;
+    const g = groups.get(key) ?? { workspaceId: r.workspace_id, role, agentIds: [] };
+    g.agentIds.push(r.id);
+    groups.set(key, g);
+  }
+
+  return Array.from(groups.values()).filter((g) => g.agentIds.length > 1);
+}
+
+/** Workspaces with no head agent — the thing that must always be zero. */
+export function findHeadlessWorkspaces(db: Database.Database): { id: string; slug: string }[] {
+  const cols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes('head_agent_id')) return [];
+  return db
+    .prepare(
+      `SELECT w.id, w.slug FROM workspaces w
+        WHERE w.head_agent_id IS NULL OR w.head_agent_id = ''
+           OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = w.head_agent_id)
+        ORDER BY w.slug ASC`,
+    )
+    .all() as { id: string; slug: string }[];
+}
+
+/** Every column in the schema that is a FOREIGN KEY onto agents(id). */
+function agentFkColumns(db: Database.Database): { table: string; column: string }[] {
+  const tables = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    .all() as { name: string }[];
+
+  const out: { table: string; column: string }[] = [];
+  for (const t of tables) {
+    // Introspect rather than hardcode: the live schema has 12 FK columns onto
+    // agents across 12 tables with mixed ON DELETE actions (SET NULL / CASCADE /
+    // NO ACTION). A hardcoded list silently rots as tables are added.
+    const fks = db.prepare(`PRAGMA foreign_key_list("${t.name}")`).all() as {
+      table: string; from: string;
+    }[];
+    for (const fk of fks) {
+      if (fk.table === 'agents') out.push({ table: t.name, column: fk.from });
+    }
+  }
+  return out;
+}
+
+export interface TrioDedupeResult {
+  aliasesNormalized: number;
+  groupsFound: number;
+  agentsRemoved: number;
+  referencesRepointed: number;
+  groupsSkipped: number;
+}
+
+/**
+ * Collapse duplicate trio agents to ONE agent per workspace/role, preserving all
+ * references.
+ *
+ * Survivor selection (deterministic, highest wins):
+ *   1. most inbound FK references   — never orphan real work
+ *   2. NOT a CC-generated id        — keep the older/richer Skill-23 row (per spec)
+ *   3. name matches the workspace   — disambiguates merged departments, e.g. the
+ *                                     'engineering' workspace carries 4 DAs, two of
+ *                                     them named '— App Development' from a merged
+ *                                     tree; this keeps 'Devil's Advocate — Engineering'
+ *   4. oldest created_at, then lowest rowid
+ *
+ * Losers' references are repointed onto the survivor BEFORE deletion. If any
+ * reference cannot be repointed (a UNIQUE collision), the loser is KEPT rather than
+ * deleted — a duplicate row is recoverable, a destroyed foreign key is not.
+ *
+ * Idempotent: running it twice is a no-op (the second pass finds no groups).
+ */
+export function dedupeTrioAgents(db: Database.Database): TrioDedupeResult {
+  const result: TrioDedupeResult = {
+    aliasesNormalized: 0, groupsFound: 0, agentsRemoved: 0,
+    referencesRepointed: 0, groupsSkipped: 0,
+  };
+
+  const cols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes('role_type')) return result;
+
+  // 1. Canonicalise the alias vocabulary FIRST, so 'deep-research' and 'research'
+  //    group into one slot here AND become visible to resolveTrioAgents().
+  for (const alias of Object.keys(TRIO_ROLE_ALIASES)) {
+    const canonical = TRIO_ROLE_ALIASES[alias];
+    if (alias === canonical) continue;
+    const info = db
+      .prepare('UPDATE agents SET role_type = ?, updated_at = datetime(\'now\') WHERE lower(role_type) = ?')
+      .run(canonical, alias);
+    result.aliasesNormalized += info.changes;
+  }
+
+  const groups = findDuplicateTrioAgents(db);
+  result.groupsFound = groups.length;
+  if (groups.length === 0) return result;
+
+  const fkCols = agentFkColumns(db);
+
+  const countRefs = (agentId: string): number => {
+    let n = 0;
+    for (const fk of fkCols) {
+      const row = db
+        .prepare(`SELECT count(*) AS c FROM "${fk.table}" WHERE "${fk.column}" = ?`)
+        .get(agentId) as { c: number };
+      n += row.c;
+    }
+    return n;
+  };
+
+  for (const g of groups) {
+    const ws = db.prepare('SELECT name FROM workspaces WHERE id = ?').get(g.workspaceId) as
+      | { name: string }
+      | undefined;
+    const wsName = (ws?.name ?? '').toLowerCase();
+
+    const candidates = g.agentIds.map((id) => {
+      const row = db
+        .prepare('SELECT id, name, created_at, rowid AS rid FROM agents WHERE id = ?')
+        .get(id) as { id: string; name: string; created_at: string; rid: number };
+      return {
+        ...row,
+        refs: countRefs(id),
+        ccGenerated: isCcGeneratedTrioId(id),
+        nameAffinity: wsName.length > 0 && row.name.toLowerCase().includes(wsName),
+      };
+    });
+
+    candidates.sort((a, b) => {
+      // Identity first, references LAST. Reference count deliberately does NOT
+      // outrank identity: every loser's references are repointed onto the survivor
+      // below, so keeping the most-referenced row buys no safety the repoint does
+      // not already provide — while letting a stray reference on a CC-generated row
+      // hijack the survivor slot. It really happened: the live 'engineering' DA
+      // duplicate had ONE events row pinned to 'da-agent-app-development', which was
+      // enough to beat "Devil's Advocate — Engineering" and leave the department
+      // holding a wrongly-named internal agent.
+      if (a.ccGenerated !== b.ccGenerated) return a.ccGenerated ? 1 : -1;   // prefer the Skill-23 row
+      if (a.nameAffinity !== b.nameAffinity) return a.nameAffinity ? -1 : 1; // prefer own-dept name
+      const t = String(a.created_at).localeCompare(String(b.created_at));
+      if (t !== 0) return t;                                                 // oldest / richer
+      if (a.refs !== b.refs) return b.refs - a.refs;                        // fewest repoints
+      return a.rid - b.rid;                                                  // stable
+    });
+
+    const survivor = candidates[0];
+    const losers = candidates.slice(1);
+
+    for (const loser of losers) {
+      // Repoint every inbound reference onto the survivor. OR IGNORE absorbs a
+      // UNIQUE collision (e.g. the survivor is already a participant in the same
+      // conversation) instead of aborting the migration.
+      for (const fk of fkCols) {
+        const info = db
+          .prepare(`UPDATE OR IGNORE "${fk.table}" SET "${fk.column}" = ? WHERE "${fk.column}" = ?`)
+          .run(survivor.id, loser.id);
+        result.referencesRepointed += info.changes;
+      }
+
+      // Any reference that survived the repoint hit a UNIQUE collision. Deleting the
+      // loser now would CASCADE (conversation_participants, agent_memory_logs) or
+      // dangle a NO ACTION FK (tasks, messages, events). Keep the row instead.
+      const residual = countRefs(loser.id);
+      if (residual > 0) {
+        result.groupsSkipped++;
+        console.warn(
+          `[C3 dedupe] Kept duplicate ${loser.id} (workspace=${g.workspaceId} role=${g.role}): ` +
+            `${residual} reference(s) could not be repointed onto ${survivor.id}`,
+        );
+        continue;
+      }
+
+      db.prepare('DELETE FROM agents WHERE id = ?').run(loser.id);
+      result.agentsRemoved++;
+    }
+  }
+
+  return result;
+}
+
+export interface HeadAgentResult {
+  promoted: number;
+  created: number;
+  stillHeadless: number;
+}
+
+/**
+ * Guarantee every workspace has a head agent.
+ *
+ * Prefers promoting an existing non-trio agent (a 'leadership' row first — that is
+ * what all 54 live heads are). Only when a workspace has NOTHING but trio
+ * specialists — which is exactly the state the 13 headless departments were in, each
+ * holding just a Research + Devil's Advocate row — does it materialise a head.
+ *
+ * A trio agent is NEVER promoted to head: the Devil's Advocate is an INTERNAL role
+ * that must never surface in client-facing UI, and the department head does.
+ *
+ * Runs on every boot, so a headless workspace cannot survive a restart. Idempotent.
+ */
+export function ensureWorkspaceHeadAgents(db: Database.Database): HeadAgentResult {
+  const result: HeadAgentResult = { promoted: 0, created: 0, stillHeadless: 0 };
+
+  const wsCols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map((c) => c.name);
+  const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name);
+  if (!wsCols.includes('head_agent_id') || !agentCols.includes('role_type')) return result;
+
+  const headless = findHeadlessWorkspaces(db);
+  if (headless.length === 0) return result;
+
+  const setHead = db.prepare('UPDATE workspaces SET head_agent_id = ? WHERE id = ?');
+  const insertHead = db.prepare(`
+    INSERT OR IGNORE INTO agents
+      (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+       specialist_type, role_type, created_at, updated_at)
+    VALUES (?, ?, 'Department Head', ?, '🧭', 'standby', 0, ?, 'permanent', ?, datetime('now'), datetime('now'))
+  `);
+
+  const trioAliases = Object.keys(TRIO_ROLE_ALIASES);
+  const trioPlaceholders = trioAliases.map(() => '?').join(',');
+
+  for (const ws of headless) {
+    // Promote the best existing non-trio agent: a 'leadership' row wins, then the
+    // oldest remaining non-trio agent.
+    const candidate = db
+      .prepare(
+        `SELECT id FROM agents
+          WHERE workspace_id = ?
+            AND (role_type IS NULL OR lower(role_type) NOT IN (${trioPlaceholders}))
+          ORDER BY CASE WHEN lower(role_type) = ? THEN 0 ELSE 1 END, created_at ASC, rowid ASC
+          LIMIT 1`,
+      )
+      .get(ws.id, ...trioAliases, HEAD_ROLE_TYPE) as { id: string } | undefined;
+
+    if (candidate) {
+      setHead.run(candidate.id, ws.id);
+      result.promoted++;
+      continue;
+    }
+
+    // Nothing but trio specialists — materialise the department head.
+    const wsRow = db.prepare('SELECT name FROM workspaces WHERE id = ?').get(ws.id) as
+      | { name: string }
+      | undefined;
+    const wsName = wsRow?.name ?? ws.slug;
+    const headId = `head-agent-${ws.id}`;
+    const desc = `Department head for the ${wsName} department. Owns the department's queue: triages incoming work, assigns tasks to specialists, and is accountable for the department's deliverables.`;
+
+    insertHead.run(headId, `${wsName} Department Head`, desc, ws.id, HEAD_ROLE_TYPE);
+
+    const exists = db.prepare('SELECT id FROM agents WHERE id = ?').get(headId) as { id: string } | undefined;
+    if (!exists) {
+      result.stillHeadless++;
+      console.warn(`[C3 heads] Could not materialise a head agent for workspace ${ws.slug}`);
+      continue;
+    }
+    setHead.run(headId, ws.id);
+    result.created++;
+  }
+
+  return result;
 }
 
 // ── C2: ghost SOP-library cleanup ────────────────────────────────────────────
@@ -4225,8 +4670,13 @@ export function reseedWorkspacesFromConfig(
       }
     }
 
-    // Re-seed trio agents and starter SOPs (both idempotent)
+    // Re-seed trio agents and starter SOPs (both idempotent).
+    // C3: this converge path is the RE-PROVISIONING loop that used to multiply the
+    // trio on every run — autoSeedTrioAgents is now role-idempotent, so re-running
+    // converge converges instead of duplicating. Newly created workspaces also get
+    // a head here, so converge can never mint a headless department.
     autoSeedTrioAgents(db);
+    ensureWorkspaceHeadAgents(db);
     autoSeedStarterSOPs(db);
 
     console.log(`[reseed] workspaces: created=${created} updated=${updated} company=${companyId}`);
