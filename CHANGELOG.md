@@ -1,3 +1,28 @@
+## [v5.10.0] — 2026-07-11 — fix(standup): count tasks with `count_task_ids()` at the two remaining call sites
+
+`scripts/standup-heartbeat.sh` counts four Kanban columns. INBOX (`:70`) and TESTING (`:76`) already used the correct `count_task_ids()` helper defined at `:60` — but IN_PROGRESS (`:91`) and ASSIGNED (`:97`) still used the raw pattern `COUNT=$(echo "$TASKS" | grep -c '"id"' || echo "0")`. The helper existed; it was simply never wired into half the call sites. Judge 9.3.
+
+Salvaged from `fix/standup-counting-bug`, which was NOT merged — see below.
+
+### fix — two call sites (`scripts/standup-heartbeat.sh`)
+The raw pattern carried **two** distinct bugs:
+- **Miscount.** `grep -c` counts matching *LINES*, not occurrences. The API returns single-line JSON, so any non-empty response counted as exactly `1` — ten in-progress tasks reported as "1".
+- **`"0\n0"` corruption.** On zero matches `grep -c` prints `0` **and** exits 1, so the `|| echo "0"` *also* fired. `COUNT` became the two-line string `"0\n0"`, and the alert test at `:105` (`[ "$ASSIGNED_COUNT" -gt 0 ]`) then died with `integer expression expected` — so the rework alert broke precisely when the queue was empty.
+
+Both sites now call `count_task_ids()` (`grep -o '"id"' | wc -l`), which counts occurrences and yields a clean single `0`. All 4 columns now go through it.
+
+### test — `tests/unit/standup-count-task-ids.test.sh` (new, 8 assertions, all green)
+- Extracts the SHIPPING `count_task_ids()` out of the real script (so the test cannot drift from a copy), and pins both bugs: 3 tasks in single-line JSON → `3` not `1`; empty response → a clean single `0` that survives `[ -gt ]` without raising `integer expression expected`.
+- Also asserts **no raw `grep -c '"id"'` call site remains** and that all 4 columns route through the helper.
+- **Proven failable:** reverting either call site turns it RED.
+- Wired into CI as a **new** step (`F3.2` in `.github/workflows/qc-cc.yml`). Purely additive — no existing gating check was modified.
+
+### not merged — `fix/standup-counting-bug`
+The branch this bug came from was **abandoned, not merged**. It forked on 2026-04-01 (main was 551 commits ahead) and its `+467/-19` diffstat was an artifact of a three-dot diff against that stale base. Merging it would have: re-introduced a hand-hacked `ecosystem.config.cjs` that fails main's own port-pin/BUILD-ID guards (the pattern main's `tests/fixtures/port-guard/bleeding-ecosystem.cjs` documents as having caused the CC crash-loop on 13+ client boxes), collided on migration IDs 016/017, and regressed `ad-campaigns` to a draft that predates main's `ILLEGAL_TRANSITION` guards. Its entire mergeable value was the 2-line change above, which is landed here directly on current main with the test it never had.
+
+### regression status — zero
+`npm run test:unit`: 840 / 826 pass / 14 fail — an IDENTICAL failure set to the pre-change tree (the same 14 known order-dependent flakes). A shell-script change has no TypeScript surface.
+
 ## [v5.9.0] — 2026-07-11 — fix(demo): C8 — close the destructive-seed FAIL-OPEN that could wipe a real client's Command Center
 
 `scripts/demo/seed-demo.ts` is a DESTRUCTIVE seeder: it `DELETE`s from 14 tables (`tasks`, `agents`, `workspaces`, `companies`, `messages`, `conversations`, `kpi_snapshots`, `campaigns`, `dept_memory`, …) and then re-brands the `clients` `'self'` row to the fictional demo company. It resolved its target database as `arg('db') || process.env.DATABASE_PATH` — and that fallback was **FAIL-OPEN**.
