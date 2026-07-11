@@ -82,6 +82,24 @@ export const GOVERNANCE_PERSONA_FALLBACK = "covey-7-habits";
 export const PERSONA_SELECT_TIMEOUT_MS = 60_000;
 
 /**
+ * D8 — true only when `filePath` exists, is readable, AND parses as valid JSON.
+ * Guards resolveCompanyConfigHint so the CC never hands the Python selector a
+ * path to a file that EXISTS but is empty/corrupt/mid-write — the prior
+ * `fs.existsSync`-only check would forward that path anyway, and a downstream
+ * consumer taught to actually read OPENCLAW_COMPANY_CONFIG (the ONB-side
+ * detect_platform.py companion fix) would then crash or silently no-op on a
+ * malformed file instead of falling back to its own path resolution.
+ */
+export function isValidJsonFile(filePath: string): boolean {
+  try {
+    JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve the company-config.json path to hand the python selector as a grounding
  * hint (G10-TRIAD-PERSONA-RESOLVE / Gap A/B). Without company-config the selector's
  * grounding layers neutralize to a flat 0.6 score. We forward the path via the
@@ -94,16 +112,28 @@ export const PERSONA_SELECT_TIMEOUT_MS = 60_000;
  * through get_openclaw_paths()/OPENCLAW_COMPANY_SLUG today; OPENCLAW_COMPANY_CONFIG is
  * forward-compatible for when the script is taught to honour an explicit path.
  *
+ * D8: the CC side of this hint was already "forward-compatible" (this function) —
+ * the finding's live defect is entirely on the Python/ONB side (skill 23
+ * `detect_platform.py` never reads this env var; `verify-v2.1-installation.sh`
+ * never asserts `ideal_customer` presence in the fleet fan-out). That companion
+ * fix lives in the onboarding skills repo and is OUT OF SCOPE for this CC-repo
+ * dispatch. What IS a genuine CC-side gap: the prior check only asked
+ * `fs.existsSync` — a path can exist and still be empty/corrupt/mid-write. Now
+ * VALIDATED (exists + parses as JSON — isValidJsonFile) before being forwarded,
+ * so the CC never hands a downstream consumer (today: nothing reads it; tomorrow:
+ * the ONB-side fix) a hint pointing at unusable JSON.
+ *
  * Resolution order: explicit env override → command-center's config/company-config.json.
- * Returns undefined when no readable file is found (selector falls back to its own
- * path resolution — no behaviour change).
+ * Returns undefined when no VALIDATED file is found (selector falls back to its own
+ * path resolution — no behaviour change for the existing "no file" case; a corrupt
+ * file now ALSO falls back rather than forwarding a bad path).
  */
-function resolveCompanyConfigHint(): string | undefined {
+export function resolveCompanyConfigHint(): string | undefined {
   const explicit = process.env.OPENCLAW_COMPANY_CONFIG;
-  if (explicit && fs.existsSync(explicit)) return explicit;
+  if (explicit && isValidJsonFile(explicit)) return explicit;
   try {
     const appConfig = path.join(process.cwd(), "config", "company-config.json");
-    if (fs.existsSync(appConfig)) return appConfig;
+    if (isValidJsonFile(appConfig)) return appConfig;
   } catch {
     /* non-fatal — fall through to undefined */
   }
@@ -964,29 +994,62 @@ export function broadcastPersonaPlan(taskId: string, plan?: SubtaskPersona[]): v
  * @param taskOutput  Task title + description concatenated (used by the Python script's
  *                    record_completion() to categorise the outcome). Defaults to the
  *                    taskId when not supplied so the argument is always present.
+ * @param role        D7 — optional analytics tag ('primary' | 'voice' | 'topic' |
+ *                    'subtask') identifying WHICH slot in a persona-blend this
+ *                    completion credits, forwarded as `--persona-role`. A box
+ *                    whose selector predates the flag rejects it (strict argparse
+ *                    SystemExit) — detected the same way as the SOP/--blend argv
+ *                    tiers (isUnknownArgumentError) and retried ONCE without the
+ *                    flag, so a stale box still records the completion, just
+ *                    without the role tag.
  */
 export function spawnRecordCompletion(
   taskId: string,
   personaId: string,
   deptSlug: string | null | undefined,
-  taskOutput?: string | null
+  taskOutput?: string | null,
+  role?: string | null,
 ): void {
   const scriptPath = resolveScriptPath();
   const dept = deptSlug || "general";
   // Python requires --task-output (or --task-output-file); always supply it.
   // Fall back to the task id so the argument is never omitted.
   const outputText = (taskOutput && taskOutput.trim()) ? taskOutput.trim() : taskId;
+  const roleTag = role && role.trim() ? role.trim() : undefined;
 
+  const baseArgv = [
+    scriptPath,
+    "--mode", "record-completion",
+    "--task-id", taskId,
+    "--persona-id", personaId,
+    "--department", dept,
+    "--task-output", outputText,
+  ];
+  const argv = roleTag ? [...baseArgv, "--persona-role", roleTag] : baseArgv;
+
+  runRecordCompletionSpawn(taskId, personaId, dept, argv, roleTag ? baseArgv : null);
+}
+
+/**
+ * D7: one `record-completion` child spawn, with a single graceful downgrade.
+ *
+ * `fallbackArgv`, when non-null, is the SAME call WITHOUT `--persona-role` —
+ * retried exactly once if THIS spawn dies on an unrecognized-argument SystemExit
+ * (a box whose selector predates the analytics flag). Any OTHER non-zero exit is
+ * logged + audited exactly as before (persona_completion_failed), never retried —
+ * PERS-03's "don't swallow a real crash as a predates-this-feature signal"
+ * discipline applies here too.
+ */
+function runRecordCompletionSpawn(
+  taskId: string,
+  personaId: string,
+  dept: string,
+  argv: string[],
+  fallbackArgv: string[] | null,
+): void {
   const child = spawn(
     "python3",
-    [
-      scriptPath,
-      "--mode", "record-completion",
-      "--task-id", taskId,
-      "--persona-id", personaId,
-      "--department", dept,
-      "--task-output", outputText,
-    ],
+    argv,
     {
       detached: true,
       stdio: "pipe",
@@ -1004,6 +1067,14 @@ export function spawnRecordCompletion(
 
   child.on("close", (code) => {
     if (code !== 0) {
+      if (fallbackArgv && isUnknownArgumentError({ stderr })) {
+        console.warn(
+          `[persona-selector] record-completion rejected --persona-role for task ${taskId} ` +
+          `(box predates the flag) — retrying without it.`
+        );
+        runRecordCompletionSpawn(taskId, personaId, dept, fallbackArgv, null);
+        return;
+      }
       console.warn(
         `[persona-selector] record-completion exited ${code} for task ${taskId} ` +
         `(persona ${personaId}, dept ${dept})` +

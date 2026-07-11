@@ -167,6 +167,110 @@ test('spawnRecordCompletion: OPENCLAW_PLATFORM=vps resolves to /data/.openclaw',
   process.env.OPENCLAW_ROOT = '/nonexistent/openclaw-root-for-tests';
 });
 
+// ── D7: spawnRecordCompletion's optional `role` param ──────────────────────
+test('spawnRecordCompletion: optional `role` param does not throw synchronously', async () => {
+  const mod = await import('../../src/lib/persona-selector') as SelectorModule;
+  let threw = false;
+  try {
+    mod.spawnRecordCompletion('rc-role-task', 'some-persona', 'general', 'output text', 'topic');
+  } catch {
+    threw = true;
+  }
+  assert.ok(!threw, 'spawnRecordCompletion with a role tag must not throw synchronously');
+});
+
+// ── D7: collectCreditablePersonaIds — pure dedup/cap/credit logic ──────────
+type TasksModule = typeof import('../../src/lib/tasks');
+let collectCreditablePersonaIds: TasksModule['collectCreditablePersonaIds'];
+let recordPersonaCompletions: TasksModule['recordPersonaCompletions'];
+
+test('[D7] collectCreditablePersonaIds: primary only when there is no bundle and no subtask plan', async () => {
+  const tasks = await import('../../src/lib/tasks') as TasksModule;
+  collectCreditablePersonaIds = tasks.collectCreditablePersonaIds;
+  recordPersonaCompletions = tasks.recordPersonaCompletions;
+
+  const id = nextId('d7-primary-only');
+  insertTask(id, 'primary-persona');
+  const credits = collectCreditablePersonaIds(id, 'primary-persona');
+  assert.deepEqual(credits, [{ personaId: 'primary-persona', role: 'primary' }]);
+});
+
+test('[D7] collectCreditablePersonaIds: credits primary + bundle voice + bundle topic (distinct ids)', async () => {
+  const { persistPersonaBundle } = await import('../../src/lib/persona-selector') as SelectorModule;
+  const id = nextId('d7-bundle');
+  insertTask(id, 'audience-voice-persona');
+  persistPersonaBundle(id, {
+    topic: 'x',
+    confirm_required: false,
+    voice: {
+      audience_persona: { id: 'audience-voice-persona' },
+      topic_persona: { id: 'ogilvy-on-advertising' },
+      collapsed: false,
+    },
+    blend_directive: 'blend',
+    task_personas: [],
+  });
+
+  const credits = collectCreditablePersonaIds(id, 'audience-voice-persona');
+  assert.deepEqual(credits, [
+    { personaId: 'audience-voice-persona', role: 'primary' },
+    { personaId: 'ogilvy-on-advertising', role: 'topic' },
+  ], 'voice persona == primary → deduped (first credit wins); topic persona credited separately');
+});
+
+test('[D7] collectCreditablePersonaIds: credits per-sub-task decomposition personas (task_subtask_persona)', async () => {
+  const id = nextId('d7-subtasks');
+  insertTask(id, 'primary-persona');
+  run(
+    `INSERT INTO task_subtask_persona (task_id, seq, persona_id) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)`,
+    [id, 1, 'primary-persona', id, 2, 'subtask-persona-a', id, 3, 'subtask-persona-b'],
+  );
+  const credits = collectCreditablePersonaIds(id, 'primary-persona');
+  assert.deepEqual(credits, [
+    { personaId: 'primary-persona', role: 'primary' },
+    { personaId: 'subtask-persona-a', role: 'subtask' },
+    { personaId: 'subtask-persona-b', role: 'subtask' },
+  ]);
+});
+
+test('[D7] collectCreditablePersonaIds: capped at 10 distinct personas', async () => {
+  const id = nextId('d7-cap');
+  insertTask(id, 'primary-persona');
+  const rows: unknown[] = [];
+  const placeholders: string[] = [];
+  for (let i = 1; i <= 12; i++) {
+    placeholders.push('(?, ?, ?)');
+    rows.push(id, i, `subtask-persona-${i}`);
+  }
+  run(`INSERT INTO task_subtask_persona (task_id, seq, persona_id) VALUES ${placeholders.join(', ')}`, rows);
+  const credits = collectCreditablePersonaIds(id, 'primary-persona');
+  assert.equal(credits.length, 10, 'capped at 10 (1 primary + 9 of the 12 subtasks)');
+});
+
+test('[D7] collectCreditablePersonaIds: sentinel ids are dropped', async () => {
+  const id = nextId('d7-sentinel');
+  insertTask(id, 'primary-persona');
+  run(`INSERT INTO task_subtask_persona (task_id, seq, persona_id) VALUES (?, ?, ?)`, [id, 1, 'personas']);
+  const credits = collectCreditablePersonaIds(id, 'primary-persona');
+  assert.ok(!credits.some((c) => c.personaId === 'personas'), 'the "personas" sentinel id must never be credited');
+});
+
+test('[D7] recordPersonaCompletions: does not throw synchronously with a full bundle + subtask plan', async () => {
+  const { persistPersonaBundle } = await import('../../src/lib/persona-selector') as SelectorModule;
+  const id = nextId('d7-wrapper');
+  insertTask(id, 'primary-persona');
+  persistPersonaBundle(id, {
+    topic: 'x',
+    confirm_required: false,
+    voice: { audience_persona: { id: 'primary-persona' }, topic_persona: { id: 'topic-persona' }, collapsed: false },
+    blend_directive: 'blend',
+    task_personas: [],
+  });
+  run(`INSERT INTO task_subtask_persona (task_id, seq, persona_id) VALUES (?, ?, ?)`, [id, 1, 'subtask-persona']);
+
+  assert.doesNotThrow(() => recordPersonaCompletions(id, 'primary-persona', 'general', 'output'));
+});
+
 test.after(() => {
   try {
     if (typeof closeDb === 'function') closeDb();
