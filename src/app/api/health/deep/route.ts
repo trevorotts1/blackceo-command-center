@@ -12,18 +12,32 @@
  *
  * Response shape:
  * {
- *   "pass": boolean,          // true only when ALL checks pass
- *   "indeterminate": boolean, // true when any check is UNKNOWN (transient)
+ *   "pass": boolean,          // true only when ALL GATING checks pass
+ *   "indeterminate": boolean, // true when any GATING check is UNKNOWN (transient)
  *   "timestamp": "ISO-8601",
- *   "checks": {
+ *   "checks": {               // GATING — these determine the green/red verdict
  *     "asset_manifest":   { "pass": bool, "detail": string },
  *     "company_branding": { "pass": bool, "detail": string, "indeterminate"?: bool },
  *     "database_path":    { "pass": bool, "detail": string },
  *     "migrations":       { "pass": bool, "detail": string },
- *     "disk_headroom":    { "pass": bool, "detail": string },
- *     "anthology_board_projection": { "pass": bool, "detail": string }
+ *     "disk_headroom":    { "pass": bool, "detail": string }
+ *   },
+ *   "advisory": {             // NON-GATING — reported side-by-side, never gates
+ *     "anthology_board_projection": { "pass": bool, "detail": string, ... }
  *   }
  * }
+ *
+ * GATING vs ADVISORY (A7):
+ *   `checks`  feed the top-level pass/indeterminate verdict that
+ *   cc-health-check.sh reads (it consumes ONLY d.pass / d.indeterminate) and
+ *   that atomic-deploy.sh (auto-rollback) and standup-heartbeat.sh (task-work
+ *   gate) act on. `advisory` entries are EXCLUDED from that aggregation — they
+ *   mirror the dual-store embedding_health field in cc-health-check.sh, which
+ *   "NEVER changes the green/red verdict or EXIT_CODE". A board-projection
+ *   drift is an operational signal (the S0→board mirror needs reconciling), not
+ *   a Command Center correctness fault, so it must NEVER trip auto-rollback or
+ *   halt the heartbeat — the very thing A7 exists to detect cannot be allowed
+ *   to disable the box that detects it.
  *
  * Exit / HTTP semantics:
  *   200 + pass=true              → green
@@ -49,7 +63,7 @@ export const revalidate = 0;
 
 export async function GET() {
   try {
-    const [assetManifest, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl, anthologyBoardProjection] =
+    const [assetManifest, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl] =
       await Promise.all([
         Promise.resolve(checkAssetManifest()),
         Promise.resolve(checkCompanyBranding()),
@@ -58,9 +72,10 @@ export async function GET() {
         Promise.resolve(checkMigrations()),
         checkDiskHeadroom(),
         Promise.resolve(checkNextPublicAppUrl()),
-        Promise.resolve(checkAnthologyBoardProjection()),
       ]);
 
+    // GATING checks — these, and only these, feed the pass/indeterminate
+    // verdict that the deploy + heartbeat automation acts on.
     const checks = {
       asset_manifest: assetManifest,
       company_branding: companyBranding,
@@ -69,22 +84,43 @@ export async function GET() {
       migrations: migrations,
       disk_headroom: diskHeadroom,
       next_public_app_url: appUrl,
-      anthology_board_projection: anthologyBoardProjection,
     };
 
-    const allChecks = Object.values(checks);
+    const gatingChecks = Object.values(checks);
 
-    // Any indeterminate check → overall indeterminate (UNKNOWN)
-    const anyIndeterminate = allChecks.some((c) => c.indeterminate === true);
+    // Any indeterminate GATING check → overall indeterminate (UNKNOWN)
+    const anyIndeterminate = gatingChecks.some((c) => c.indeterminate === true);
 
-    // pass = ALL checks pass (indeterminate checks are treated as non-passing)
-    const pass = allChecks.every((c) => c.pass === true);
+    // pass = ALL GATING checks pass (indeterminate checks are treated as non-passing)
+    const pass = gatingChecks.every((c) => c.pass === true);
+
+    // NON-GATING ADVISORY (A7) — board-projection drift. Kept OUT of the
+    // gatingChecks aggregation above so it can never flip pass/indeterminate,
+    // and wrapped in its own try/catch so an unexpected throw here can NEVER
+    // reach the outer catch (which would return 500 + pass:false and trip
+    // auto-rollback). Any failure degrades the advisory to a self-describing
+    // UNKNOWN with pass:true — the verdict stays whatever the gating checks say.
+    let advisory: Record<string, unknown>;
+    try {
+      advisory = { anthology_board_projection: checkAnthologyBoardProjection() };
+    } catch (advErr) {
+      advisory = {
+        anthology_board_projection: {
+          pass: true,
+          indeterminate: true,
+          detail: `anthology_board_projection: advisory probe unavailable — ${
+            advErr instanceof Error ? advErr.message : String(advErr)
+          } (UNKNOWN; non-gating)`,
+        },
+      };
+    }
 
     return NextResponse.json({
       pass,
       indeterminate: anyIndeterminate,
       timestamp: new Date().toISOString(),
       checks,
+      advisory,
     });
   } catch (err) {
     return NextResponse.json(

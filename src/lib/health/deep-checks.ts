@@ -905,12 +905,18 @@ export function resolveAnthologyStateDbPath(): string {
 }
 
 /**
- * Locate mc_board.py so a detected drift can render a copy-pasteable
- * reconcile command instead of a vague pointer. Mirrors the candidate-list
- * convention in src/app/participant/_lib/gate-engine.ts
- * (findGateEngineScript) — same skill, same house pattern, own script name.
- * Returns null (fail-soft) when not found; the caller falls back to naming
- * the command without an absolute path.
+ * Locate mc_board.py so an AUTHENTICATED caller (a CLI/diagnostic surface, not
+ * the unauthenticated /api/health/deep endpoint) can render a copy-pasteable
+ * reconcile command with the resolved absolute path. Mirrors the candidate-list
+ * convention in src/app/participant/_lib/gate-engine.ts (findGateEngineScript)
+ * — same skill, same house pattern, own script name. Returns null (fail-soft)
+ * when not found.
+ *
+ * NOTE: checkAnthologyBoardProjection() intentionally does NOT call this for its
+ * `detail` string — that detail is exposed through the unauthenticated endpoint
+ * bypass, so it uses a generic, path-free command form instead (see the drift
+ * branch). This function is retained and unit-tested for the authenticated
+ * callers that legitimately want the real path.
  */
 export function findMcBoardScript(): string | null {
   const candidates = [
@@ -929,13 +935,21 @@ export function findMcBoardScript(): string | null {
 }
 
 export function checkAnthologyBoardProjection(): BoardProjectionResult {
+  // resolveAnthologyStateDbPath() returns an absolute path under $HOME (or a
+  // configured data dir). This result is surfaced through /api/health/deep,
+  // which middleware.ts bypasses (unauthenticated subtree). Keep that absolute
+  // path — and the resolved mc_board.py script path — OUT of the `detail`
+  // string (see the drift branch below): the endpoint must not leak filesystem
+  // layout beyond the posture the other checks already set. Small integer row
+  // counts are surfaced (as migrations/asset_manifest already surface counts)
+  // because the operator banner needs them to distinguish drift from idle.
   const ledgerDbPath = resolveAnthologyStateDbPath();
 
   if (!fs.existsSync(ledgerDbPath)) {
     // Not provisioned on this box at all — legitimate PASS, not UNKNOWN.
     return {
       pass: true,
-      detail: `anthology_board_projection: OK — Anthology Engine not provisioned on this box (no ledger mirror at ${ledgerDbPath}); not applicable`,
+      detail: 'anthology_board_projection: OK — Anthology Engine not provisioned on this box; not applicable',
     };
   }
 
@@ -960,11 +974,14 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
     } finally {
       ledgerDb.close();
     }
-  } catch (err) {
+  } catch {
+    // Do NOT echo the raw driver error or ledgerDbPath: on a corrupt/locked
+    // file better-sqlite3 embeds the absolute path in its message, which would
+    // leak through the unauthenticated endpoint.
     return {
       pass: false,
       indeterminate: true,
-      detail: `anthology_board_projection: ledger mirror exists at ${ledgerDbPath} but could not be read — ${err instanceof Error ? err.message : String(err)} (UNKNOWN)`,
+      detail: 'anthology_board_projection: ledger mirror present but could not be read (locked, mid-write, or corrupt) — UNKNOWN',
     };
   }
 
@@ -985,13 +1002,14 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
       )
       .get() as { n: number } | undefined;
     boardCards = row?.n ?? 0;
-  } catch (err) {
+  } catch {
+    // Generic message — the raw driver error can embed the DB file path.
     return {
       pass: false,
       indeterminate: true,
       ledger_participants: ledgerParticipants,
       ledger_anthologies: ledgerAnthologies,
-      detail: `anthology_board_projection: could not read this box's task board — ${err instanceof Error ? err.message : String(err)} (UNKNOWN)`,
+      detail: "anthology_board_projection: could not read this box's task board (locked or unavailable) — UNKNOWN",
     };
   }
 
@@ -1008,15 +1026,20 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
   }
 
   if (boardCards === 0) {
-    const script = findMcBoardScript();
-    const cmd = script ? `python3 ${script} reconcile --json` : 'python3 <59-anthology-engine>/scripts/mc_board.py reconcile --json';
+    // Generic, path-free reconcile command. We deliberately do NOT embed the
+    // resolved absolute mc_board.py path (findMcBoardScript()) here — that path
+    // reveals the skill install layout and $HOME, and this detail is exposed
+    // through the unauthenticated /api/health/deep bypass. The operator viewing
+    // the board banner runs mc_board.py from their own known install location;
+    // findMcBoardScript() is retained (exported, unit-tested) for authenticated
+    // CLI/diagnostic callers that are not this endpoint.
     return {
       pass: false,
       indeterminate: false,
       ledger_participants: ledgerParticipants,
       ledger_anthologies: ledgerAnthologies,
       board_cards: 0,
-      detail: `anthology_board_projection: DRIFT — ledger holds ${ledgerParticipants} participant(s) + ${ledgerAnthologies} anthology row(s) but the board shows 0 anthology card(s) (dead board, not idle). Run: ${cmd}`,
+      detail: `anthology_board_projection: DRIFT — ledger holds ${ledgerParticipants} participant(s) + ${ledgerAnthologies} anthology row(s) but the board shows 0 anthology card(s) (dead board, not idle). Run: mc_board.py reconcile --json`,
     };
   }
 

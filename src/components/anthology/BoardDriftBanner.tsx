@@ -10,11 +10,13 @@
  * invisible for 3 days against 0 cards, with no distinguishing signal).
  *
  * This banner makes the two cases distinguishable for the operator viewing
- * the board: it reads the `anthology_board_projection` check off the existing
- * `/api/health/deep` endpoint (src/lib/health/deep-checks.ts) and renders
- * ONLY when that check reports a confirmed drift (ledger has rows, board has
- * none) — a healthy-idle board (ledger empty) or a healthy-projecting board
- * renders nothing here.
+ * the board: it reads the `anthology_board_projection` entry off the existing
+ * `/api/health/deep` endpoint (src/lib/health/deep-checks.ts). That entry is a
+ * NON-GATING advisory — it lives under the response's `advisory` object, not
+ * the gating `checks` object, so a drift never flips the box red or trips
+ * auto-rollback (A7 refix). The banner renders ONLY when the advisory reports a
+ * confirmed drift (ledger has rows, board has none) — a healthy-idle board
+ * (ledger empty) or a healthy-projecting board renders nothing here.
  *
  * Read-only, fail-soft: this is a diagnostic aid, never a page dependency —
  * any fetch/parse failure renders nothing rather than breaking the board.
@@ -41,8 +43,10 @@ interface DriftState {
   detail: string;
 }
 
-/** Extracts the `python3 ... reconcile --json` command from the check's
- *  detail string so the banner never has to re-derive the script path. */
+/** Extracts the generic, path-free `mc_board.py reconcile --json` command from
+ *  the advisory detail string (the endpoint deliberately omits the resolved
+ *  absolute script path — see deep-checks.ts drift branch). Returns null if the
+ *  detail carries no `Run:` marker. */
 function extractCommand(detail: string): string | null {
   const m = detail.match(/Run:\s*(.+)$/);
   return m ? m[1].trim() : null;
@@ -59,7 +63,9 @@ export function AnthologyBoardDriftBanner() {
         const res = await fetch('/api/health/deep', { cache: 'no-store' });
         if (!res.ok) return;
         const data = await res.json();
-        const c: AnthologyBoardProjectionCheck | undefined = data?.checks?.anthology_board_projection;
+        // Non-gating advisory field (A7 refix) — read from `advisory`, not the
+        // gating `checks` object.
+        const c: AnthologyBoardProjectionCheck | undefined = data?.advisory?.anthology_board_projection;
         if (!c || cancelled) return;
 
         // Only a CONFIRMED drift (not indeterminate — engine unreadable is a

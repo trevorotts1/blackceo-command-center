@@ -1509,6 +1509,147 @@ describe('GET /api/health/deep — response shape', () => {
     expect(body.indeterminate).toBe(true);
     expect(body.pass).toBe(false);
   });
+
+  // ── A7 REGRESSION GUARD (the disqualifying defect this refix closes) ────────
+  //
+  // Prior attempt wired checkAnthologyBoardProjection() into the GATING
+  // aggregation (allChecks), so a confirmed board-projection drift flipped the
+  // top-level `pass` to false. cc-health-check.sh reads ONLY that top-level
+  // `pass`/`indeterminate` (scripts/cc-health-check.sh:77-80) → exit 1 → RED →
+  // atomic-deploy.sh auto-rollback + standup-heartbeat halting all task work,
+  // every cron tick. A7's whole purpose is to DETECT that drift — it must never
+  // be the thing that disables the box.
+  //
+  // This test builds a scenario where all 7 GATING checks are green AND a
+  // confirmed drift exists, then asserts the drift is reported as a NON-GATING
+  // advisory while the top-level verdict stays green.
+  function greenGatingDbMock() {
+    return {
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: 'Summit Retail Enterprises' };
+            // anthology card count query → 0 cards (drift when ledger has rows)
+            if (sql.includes('FROM tasks')) return { n: 0 };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      DB_PATH: path.join(tmpDir, 'test.db'),
+    };
+  }
+
+  /** Write a branded pre-rendered index.html so checkHtmlTitle() passes. */
+  function writeBrandedServerHtml(dir: string) {
+    const serverDir = path.join(dir, '.next', 'server', 'pages');
+    fs.mkdirSync(serverDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(serverDir, 'index.html'),
+      '<!DOCTYPE html><html><head><title>Summit Retail Enterprises</title></head><body></body></html>'
+    );
+  }
+
+  it('A7 regression: a CONFIRMED board drift is ADVISORY only — top-level pass stays GREEN, never trips rollback/heartbeat', async () => {
+    makeNextBuild(tmpDir);
+    writeBrandedServerHtml(tmpDir);
+    // Ledger has rows but the board shows 0 anthology cards → confirmed DRIFT.
+    makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 5, anthologies: 2 });
+
+    // Keep the URL/db-path gating checks green + deterministic.
+    const savedAppUrl = process.env.NEXT_PUBLIC_APP_URL;
+    const savedPubUrl = process.env.CC_PUBLIC_URL;
+    const savedDbPath = process.env.DATABASE_PATH;
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.CC_PUBLIC_URL;
+    delete process.env.DATABASE_PATH;
+
+    vi.doMock('@/lib/db', () => greenGatingDbMock());
+    vi.doMock('../../src/lib/health/deep-checks.js', async () => {
+      const actual = await vi.importActual('../../src/lib/health/deep-checks.js') as typeof import('../../src/lib/health/deep-checks');
+      return { ...actual, diskReader: { readFreeBytes: () => 20 * 1024 ** 3 } };
+    });
+
+    vi.resetModules();
+    const mod = await import('../../src/app/api/health/deep/route.js') as {
+      GET?: () => Promise<Response>;
+    };
+
+    try {
+      if (!mod.GET) return;
+      const response = await mod.GET();
+      const body = await response.json() as {
+        pass: boolean;
+        indeterminate: boolean;
+        checks: Record<string, unknown>;
+        advisory?: { anthology_board_projection?: { pass: boolean; detail: string } };
+      };
+
+      // The drift is real and surfaced under `advisory`.
+      expect(body.advisory).toBeDefined();
+      expect(body.advisory?.anthology_board_projection?.pass).toBe(false);
+      expect(body.advisory?.anthology_board_projection?.detail).toMatch(/DRIFT/);
+
+      // ...but it is EXCLUDED from the gating verdict: top-level stays GREEN.
+      expect(body.pass).toBe(true);
+      expect(body.indeterminate).toBe(false);
+
+      // ...and it is NOT inside the gating `checks` object (so cc-health-check.sh,
+      // atomic-deploy.sh, and standup-heartbeat.sh never see it as a red check).
+      expect(body.checks).not.toHaveProperty('anthology_board_projection');
+    } finally {
+      if (savedAppUrl !== undefined) process.env.NEXT_PUBLIC_APP_URL = savedAppUrl;
+      if (savedPubUrl !== undefined) process.env.CC_PUBLIC_URL = savedPubUrl;
+      if (savedDbPath !== undefined) process.env.DATABASE_PATH = savedDbPath;
+    }
+  });
+
+  it('A7 regression: advisory field present + non-gating on a not-provisioned box (green stays green)', async () => {
+    makeNextBuild(tmpDir);
+    writeBrandedServerHtml(tmpDir);
+    // No ledger created → Anthology Engine not provisioned → advisory pass:true.
+
+    const savedAppUrl = process.env.NEXT_PUBLIC_APP_URL;
+    const savedPubUrl = process.env.CC_PUBLIC_URL;
+    const savedDbPath = process.env.DATABASE_PATH;
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.CC_PUBLIC_URL;
+    delete process.env.DATABASE_PATH;
+
+    vi.doMock('@/lib/db', () => greenGatingDbMock());
+    vi.doMock('../../src/lib/health/deep-checks.js', async () => {
+      const actual = await vi.importActual('../../src/lib/health/deep-checks.js') as typeof import('../../src/lib/health/deep-checks');
+      return { ...actual, diskReader: { readFreeBytes: () => 20 * 1024 ** 3 } };
+    });
+
+    vi.resetModules();
+    const mod = await import('../../src/app/api/health/deep/route.js') as {
+      GET?: () => Promise<Response>;
+    };
+
+    try {
+      if (!mod.GET) return;
+      const response = await mod.GET();
+      const body = await response.json() as {
+        pass: boolean;
+        indeterminate: boolean;
+        checks: Record<string, unknown>;
+        advisory?: { anthology_board_projection?: { pass: boolean } };
+      };
+
+      expect(body).toHaveProperty('advisory');
+      expect(body.advisory?.anthology_board_projection?.pass).toBe(true);
+      expect(body.checks).not.toHaveProperty('anthology_board_projection');
+      expect(body.pass).toBe(true);
+      expect(body.indeterminate).toBe(false);
+    } finally {
+      if (savedAppUrl !== undefined) process.env.NEXT_PUBLIC_APP_URL = savedAppUrl;
+      if (savedPubUrl !== undefined) process.env.CC_PUBLIC_URL = savedPubUrl;
+      if (savedDbPath !== undefined) process.env.DATABASE_PATH = savedDbPath;
+    }
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1548,6 +1689,12 @@ describe('anthology_board_projection', () => {
     expect(result.pass).toBe(true);
     expect(result.indeterminate).not.toBe(true);
     expect(result.detail).toMatch(/not provisioned/i);
+    // LEAK POSTURE (A7 refix): the not-provisioned detail must NOT echo the
+    // resolved absolute ledger path (which sits under $HOME / the data dir) —
+    // this detail is exposed through the unauthenticated endpoint bypass.
+    const ledgerPath = path.join(tmpDir, 'anthology-state', 'anthology_state.db');
+    expect(result.detail).not.toContain(ledgerPath);
+    expect(result.detail).not.toContain(tmpDir);
   });
 
   it('ledger present but EMPTY (0 participants, 0 anthologies) → pass=true, healthy-idle', async () => {
@@ -1576,16 +1723,25 @@ describe('anthology_board_projection', () => {
     expect(result.board_cards).toBe(0);
   });
 
-  it('DRIFT detail names the real mc_board.py path when ANTHOLOGY_MC_BOARD_SCRIPT resolves', async () => {
+  // LEAK POSTURE (A7 refix): the drift detail is exposed through the
+  // unauthenticated /api/health/deep bypass, so it MUST use a generic, path-free
+  // reconcile command — even when a real mc_board.py path resolves. The old
+  // behaviour (embedding the resolved absolute path) leaked $HOME + the skill
+  // install layout through an unauthenticated endpoint.
+  it('DRIFT detail uses a generic, path-free reconcile command and does NOT leak the resolved mc_board.py absolute path', async () => {
     makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 1 });
     const scriptPath = path.join(tmpDir, 'mc_board.py');
     fs.writeFileSync(scriptPath, '# fixture stub\n');
+    // Even with an explicit resolvable script path set...
     process.env.ANTHOLOGY_MC_BOARD_SCRIPT = scriptPath;
     vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(0));
     const { checkAnthologyBoardProjection } = await loadChecks();
     const result = checkAnthologyBoardProjection();
     expect(result.pass).toBe(false);
-    expect(result.detail).toContain(`python3 ${scriptPath} reconcile --json`);
+    // ...the endpoint-facing detail must NOT contain that absolute path.
+    expect(result.detail).not.toContain(scriptPath);
+    // Generic, copy-pasteable guidance is still present for the operator banner.
+    expect(result.detail).toMatch(/Run:\s*mc_board\.py reconcile --json/);
   });
 
   it('ledger has rows AND the board is projecting cards → pass=true, no drift', async () => {
