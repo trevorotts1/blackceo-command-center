@@ -1,65 +1,108 @@
 /**
- * Middleware 401 observability (FLEET-FIX 2.3 / AUD-71).
+ * Unauthorized-401 probe — the CONSUMER that puts the counter on the health
+ * surface (FLEET-FIX 2.3 / AUD-71, spec clause "increment a counter exposed via
+ * the existing health endpoint").
  *
- * The CC write-back auth train (`23c9ef2` -> v5.1.0/v5.1.1) rebuilt
- * `src/middleware.ts` around a canonical `unauthorized(request, message,
- * status)` helper (DATA-09/10/11, G15-AUTH-HARDEN) but never wired
- * observability for it: a 401 on this deployment produced no structured log
- * line and incremented no counter, so an operator watching a box's stdout or
- * a dashboard had no signal that clients were being rejected — only the
- * client's own error page told them.
+ * Registered in `runAllProbes()` (`src/lib/system-status.ts`) next to
+ * `probeCloudflareAccess`, so the number appears as a component on
+ * `GET /api/system/status` and is persisted to `system_status_snapshots` by that
+ * orchestrator's `persistSnapshot()` on every run.
  *
- * This module is the counter + structured-log sink `unauthorized()` calls on
- * every ACTUAL 401 (not the 503 misconfiguration responses the same helper
- * also emits — those are a config-error signal, not an auth-rejection
- * signal, and mixing them would make the 401 counter lie about how many
- * callers were actually turned away for bad/missing credentials).
+ * Data path, end to end:
  *
- * Module-level counter, exactly like the sibling `cloudflare-access-probe.ts`
- * (`recordCfAccessSeen` / its module-level `lastSeen` Map) — this file runs in
- * the same Edge runtime as `src/middleware.ts` and follows the same pattern:
- * no filesystem, no node:crypto, plain in-memory module state.
+ *   Edge middleware rejects a caller for bad/missing credentials
+ *     -> NextResponse.rewrite() to /api/internal/auth-rejected  (Node runtime)
+ *       -> recordUnauthorized401()  -> unauthorized-401-store.ts (globalThis)
+ *         -> THIS probe reads it    -> /api/system/status
+ *
+ * The middleware's own (Edge) module scope holds NO counter — it cannot, and a
+ * counter there would be unreadable from here. `unauthorized-401-contract.ts`
+ * documents that boundary in full.
+ *
+ * Status semantics (deliberate):
+ *   - credential failures inside the 5-minute window -> `degraded` + `error`.
+ *     Something is being turned away RIGHT NOW; on this fleet that is the
+ *     signature of the dept-agent write-back trap (a bearer-less or wrong-token
+ *     caller), which is the whole reason AUD-71 exists. Windowed, so it clears
+ *     itself once the failures stop rather than pinning the pill forever.
+ *   - otherwise -> `live`. A lifetime total > 0 with nothing recent is history,
+ *     not a current fault, and must not hold the overall pill down.
  */
 
-export interface Unauthorized401Event {
-  /** The request path that was rejected, e.g. `/api/tasks`. */
-  pathname: string;
-  /** HTTP method of the rejected request. */
-  method: string;
-  /** The human-readable reason `unauthorized()` was called with. */
-  reason: string;
-}
+import {
+  PROBE_TIMEOUT_MS,
+  ProbeResult,
+  withTimeout,
+} from './types';
+import {
+  UNAUTHORIZED_401_WINDOW_MS,
+  readUnauthorized401Counters,
+} from './unauthorized-401-store';
 
-/** Module-level counter. Edge runtime keeps this alive for the isolate's lifetime. */
-let unauthorized401Count = 0;
+export const UNAUTHORIZED_401_COMPONENT = 'unauthorized_401';
+export const UNAUTHORIZED_401_LABEL = 'Unauthorized 401s';
 
-/**
- * Called by `unauthorized()` in `src/middleware.ts` for every response it
- * returns with `status === 401`. Increments the counter and emits ONE
- * single-line structured JSON log record via `console.warn` so it is
- * greppable from raw stdout/log aggregation without a JSON log pipeline.
- */
-export function recordUnauthorized401(event: Unauthorized401Event): void {
-  unauthorized401Count += 1;
-  console.warn(
-    JSON.stringify({
-      event: 'middleware_401',
-      status: 401,
-      pathname: event.pathname,
-      method: event.method,
-      reason: event.reason,
-      count: unauthorized401Count,
-      ts: new Date().toISOString(),
+export async function probeUnauthorized401(): Promise<ProbeResult> {
+  const start = Date.now();
+
+  return withTimeout<ProbeResult>(
+    async () => {
+      const now = Date.now();
+      const counters = readUnauthorized401Counters(now);
+      const windowMinutes = Math.round(UNAUTHORIZED_401_WINDOW_MS / 60_000);
+      const degraded = counters.recentCount > 0;
+
+      const detail: Record<string, unknown> = {
+        // The number the spec asks to expose.
+        count: counters.total,
+        // The discrimination AUD-71 is FOR: an operator can tell a caller that
+        // sent no Authorization header from one that sent the wrong bearer.
+        byReason: counters.byReason,
+        recentCount: counters.recentCount,
+        windowMs: UNAUTHORIZED_401_WINDOW_MS,
+        lastReason: counters.lastEvent?.reason ?? null,
+        lastPathname: counters.lastEvent?.pathname ?? null,
+        lastMethod: counters.lastEvent?.method ?? null,
+        lastUa: counters.lastEvent?.ua ?? null,
+        lastSeenAt: counters.lastEvent?.ts ?? null,
+        summary: degraded
+          ? `${counters.recentCount} credential-failure 401(s) in the last ${windowMinutes}m ` +
+            `(missing-header: ${counters.byReason['missing-header']}, ` +
+            `token-mismatch: ${counters.byReason['token-mismatch']} lifetime)`
+          : counters.total > 0
+            ? `no credential-failure 401s in the last ${windowMinutes}m (${counters.total} lifetime)`
+            : 'no credential-failure 401s observed',
+      };
+
+      return {
+        component: UNAUTHORIZED_401_COMPONENT,
+        label: UNAUTHORIZED_401_LABEL,
+        status: degraded ? 'degraded' : 'live',
+        latencyMs: Date.now() - start,
+        error: degraded
+          ? `${counters.recentCount} caller(s) rejected for bad/missing credentials in the last ${windowMinutes}m`
+          : undefined,
+        detail,
+        probedAt: new Date().toISOString(),
+      };
+    },
+    PROBE_TIMEOUT_MS,
+    () => ({
+      component: UNAUTHORIZED_401_COMPONENT,
+      label: UNAUTHORIZED_401_LABEL,
+      status: 'offline',
+      latencyMs: Date.now() - start,
+      error: 'probe timed out',
+      probedAt: new Date().toISOString(),
     })
   );
 }
 
-/** Current lifetime count of 401 responses `unauthorized()` has emitted. */
-export function getUnauthorized401Count(): number {
-  return unauthorized401Count;
-}
-
-/** Test-only: resets the in-memory counter between test cases. */
-export function __resetUnauthorized401Counter(): void {
-  unauthorized401Count = 0;
-}
+/** Re-exported so callers have one import site for the whole unit. */
+export {
+  readUnauthorized401Counters,
+  recordUnauthorized401,
+  __resetUnauthorized401Store,
+  UNAUTHORIZED_401_WINDOW_MS,
+} from './unauthorized-401-store';
+export type { Unauthorized401Counters } from './unauthorized-401-store';
