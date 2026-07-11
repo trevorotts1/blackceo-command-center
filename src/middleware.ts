@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
+import { recordUnauthorized401 } from '@/lib/probes/unauthorized-401-probe';
 import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gate-cookie';
 
 /**
@@ -252,7 +253,25 @@ function isSameOriginRequest(request: NextRequest): boolean {
   return false;
 }
 
-function unauthorized(message: string, status = 401): NextResponse {
+/**
+ * FLEET-FIX 2.3 / AUD-71: every ACTUAL 401 this helper returns emits one
+ * structured log line and increments a counter (`unauthorized-401-probe.ts`).
+ * This was a numbered unit the otherwise-complete write-back auth train
+ * (`23c9ef2`) left this file untouched by — see that module's header comment
+ * for the full rationale, including why 503 misconfiguration responses
+ * (also routed through this same helper) are deliberately excluded: they are
+ * a config-error signal, not an auth-rejection signal, and folding them into
+ * the 401 counter would make it lie about how many callers were actually
+ * turned away for bad/missing credentials.
+ */
+function unauthorized(request: NextRequest, message: string, status = 401): NextResponse {
+  if (status === 401) {
+    recordUnauthorized401({
+      pathname: request.nextUrl.pathname,
+      method: request.method,
+      reason: message,
+    });
+  }
   return NextResponse.json({ error: message }, { status });
 }
 
@@ -329,6 +348,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   if (REQUIRE_CF_ACCESS) {
     if (!cfJwt || !cfEmail) {
       return unauthorized(
+        request,
         'This deployment is misconfigured. Cloudflare Access is not active on this subdomain. Contact the operator.'
       );
     }
@@ -345,6 +365,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       isWebhookSecretRoute(pathname)
     ) {
       return unauthorized(
+        request,
         'This deployment is misconfigured: WEBHOOK_SECRET is not set, so webhook authentication is disabled. Set WEBHOOK_SECRET (or ALLOW_INSECURE_OPEN_API=true to override). Contact the operator.',
         503
       );
@@ -393,6 +414,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         return passthrough;
       }
       return unauthorized(
+        request,
         'This deployment is misconfigured: MC_API_TOKEN is not set, so external API authentication is disabled. Set MC_API_TOKEN (or ALLOW_INSECURE_OPEN_API=true to override). Contact the operator.',
         503
       );
@@ -416,11 +438,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
     const authHeader = request.headers.get('authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return unauthorized('Unauthorized');
+      return unauthorized(request, 'Unauthorized');
     }
     const token = authHeader.substring(7);
     if (!timingSafeEqualStr(token, MC_API_TOKEN)) {
-      return unauthorized('Unauthorized');
+      return unauthorized(request, 'Unauthorized');
     }
 
     const passthrough = NextResponse.next();
