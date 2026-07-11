@@ -63,9 +63,25 @@ export async function POST(req: NextRequest) {
 }
 
 /**
- * GET handler so the route is also reachable from a browser or external cron
- * that only supports GET. Behaves identically to POST.
+ * GET /api/cron/refresh-models — READ-ONLY. Never mutates.
+ *
+ * MODEL-07: this used to be `return POST(req)` — a plain browser visit to this
+ * URL ran a full destructive catalog refresh. Combined with the self-destruct
+ * deprecation bug, merely opening the URL could tombstone the entire model
+ * registry. A GET must be safe: HTTP semantics require it, and nothing in the
+ * codebase ever called this handler (the "Refresh now" button in
+ * IntelligenceProviderList.tsx correctly uses POST, and the weekly refresh runs
+ * in-process via the scheduler — not through this route).
+ *
+ * It now returns 405 and tells the caller how to actually trigger a refresh.
  */
-export async function GET(req: NextRequest) {
-  return POST(req);
+export async function GET() {
+  return NextResponse.json(
+    {
+      error: 'method_not_allowed',
+      message:
+        'GET does not refresh the model catalog — a refresh is destructive and must not run on a read. Use POST /api/cron/refresh-models.',
+    },
+    { status: 405, headers: { Allow: 'POST' } },
+  );
 }

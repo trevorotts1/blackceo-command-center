@@ -79,20 +79,62 @@ function inferFamily(modelId: string): string | undefined {
   return undefined;
 }
 
+/**
+ * ── MODEL-07: KIND-FIRST CLASSIFICATION (fixed) ──────────────────────────────
+ * `vision` means IMAGE UNDERSTANDING (image as INPUT). It is NOT a synonym for
+ * "this model has something to do with images".
+ *
+ * The previous version pushed `vision` onto ANY model whose name contained
+ * 'gemini' and not 'embedding'. Google names its image GENERATOR
+ * `gemini-2.5-flash-image` and its speech models `gemini-*-tts`, so both were
+ * written into the registry as active, vision-capable models. An image
+ * generator cannot READ an image; a TTS endpoint cannot see one. Together with
+ * the OpenAI `gpt-4o-mini-tts` bug, these were the only two "vision" models on
+ * the operator's box — both fake.
+ *
+ * The fix classifies the model KIND first, and prefers the STRUCTURAL evidence
+ * Google actually gives us (`supportedGenerationMethods`) over name substrings.
+ */
 function inferCapabilities(row: GeminiModelRow): ModelCapability[] {
   const lower = row.name.toLowerCase();
   const methods = row.supportedGenerationMethods || [];
+
+  // ── 1. SINGLE-PURPOSE ENDPOINTS — kind first, early return. ────────────────
+  // Structural evidence (the API's own method list) wins over name matching.
+  if (methods.includes('embedContent') || lower.includes('embedding')) {
+    return ['embeddings'];
+  }
+  // Image GENERATION (output) — e.g. gemini-2.5-flash-image, imagen-*.
+  // `predict` / `predictLongRunning` are the generation-model methods.
+  if (lower.includes('imagen') || /(^|[-_.])image($|[-_.:])/.test(lower)) {
+    return ['image_generation'];
+  }
+  // Video generation — e.g. veo-*.
+  if (lower.includes('veo')) {
+    return ['video_generation'];
+  }
+  // Text-to-speech — e.g. gemini-2.5-flash-preview-tts.
+  if (lower.includes('tts')) {
+    return ['audio_generation'];
+  }
+
+  // ── 2. CHAT / MULTIMODAL. Only reached by genuine generateContent models. ──
   const caps: ModelCapability[] = [];
-  if (methods.includes('generateContent') || methods.includes('streamGenerateContent')) {
+  const isChat =
+    methods.includes('generateContent') || methods.includes('streamGenerateContent');
+  if (isChat) {
     caps.push('text', 'streaming');
   }
-  if (methods.includes('embedContent') || lower.includes('embedding')) {
-    caps.push('embeddings');
-  }
-  if (lower.includes('gemini') && !lower.includes('embedding')) {
+  // Image UNDERSTANDING: the Gemini chat models are natively multimodal. The
+  // media endpoints above already returned, so a surviving 'gemini' chat id is
+  // the real multimodal model. Require the chat method — never infer vision for
+  // a model that cannot even take a generateContent call.
+  if (isChat && lower.includes('gemini')) {
     caps.push('vision', 'tool_use', 'long_context');
   }
-  if (lower.includes('thinking') || lower.includes('pro')) {
+  // Reasoning: only the genuinely reasoning-tier models. Matching bare 'pro'
+  // also caught unrelated ids; require a word-boundary 'pro' or 'thinking'.
+  if (isChat && (lower.includes('thinking') || /(^|[-_.])pro($|[-_.:])/.test(lower))) {
     caps.push('reasoning');
   }
   return caps.length > 0 ? caps : ['text'];

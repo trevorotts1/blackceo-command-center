@@ -155,6 +155,29 @@ export function sqlTime(expr: string): string {
 }
 
 /**
+ * Sub-second-precise sibling of `sqlTime()` (MODEL-07).
+ *
+ * `sqlTime()` wraps `datetime(...)`, which TRUNCATES to whole seconds. That is
+ * fine for minute/day-scale windows, but it is NOT safe when the two sides of a
+ * comparison can land inside the SAME SECOND — the truncation collapses them to
+ * equal and a strict `<` / `>` silently becomes false.
+ *
+ * `julianday(...)` parses the same normalized value to a REAL (a true numeric
+ * instant) and PRESERVES fractional seconds, so the comparison stays correct at
+ * millisecond resolution. Use this for any predicate where the bound is "now"
+ * and the column may have been written moments earlier in the same run — e.g.
+ * the model-registry deprecation cutoff, where a same-second collapse would let
+ * a model that genuinely vanished from the provider catalog escape tombstoning.
+ *
+ * Like `sqlTime()`, it folds the ISO 'T'/'Z' dialect to the SQLite space form
+ * first, so it is correct for BOTH dialects. This is a real datetime comparison,
+ * never a lexicographic byte-sort.
+ */
+export function sqlTimePrecise(expr: string): string {
+  return `julianday(replace(replace(${expr}, 'T', ' '), 'Z', ''))`;
+}
+
+/**
  * Parse a DB timestamp string to epoch millis, correcting the space-dialect
  * misparse. `new Date('2026-07-10 18:40:29')` is read as LOCAL time by V8 (age
  * shifts by the box's UTC offset), whereas the ISO-'T'-'Z' form parses as UTC.

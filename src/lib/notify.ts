@@ -102,15 +102,55 @@ function resolveConfigPath(): string {
   return path.join(path.dirname(resolveWorkspaceBase()), 'openclaw.json');
 }
 
-/** Normalise + validate a candidate chat id; '' when invalid or an operator id. */
-function validOwnerChatId(v: unknown): string {
+/** Normalise a candidate chat id to its bare digits; '' when malformed. */
+function normalizeChatId(v: unknown): string {
   if (typeof v !== 'string' && typeof v !== 'number') return '';
   const s = String(v).trim().replace(/^telegram:/, '').replace(/^tg:/, '');
   if (!s) return '';
   const digits = s.replace(/^-/, '');
   if (!/^\d{6,20}$/.test(digits)) return '';
-  if (OPERATOR_CHAT_IDS.has(s)) return '';
   return s;
+}
+
+/** Normalise + validate a candidate chat id; '' when invalid or an operator id. */
+function validOwnerChatId(v: unknown): string {
+  const s = normalizeChatId(v);
+  if (!s) return '';
+  if (OPERATOR_CHAT_IDS.has(s)) return ''; // client-protection guardrail — UNCHANGED
+  return s;
+}
+
+/**
+ * The INVERSE guard (MSG-07) — the seam that makes the OPERATOR loud without
+ * making CLIENTS loud.
+ *
+ * `validOwnerChatId` rejects OPERATOR ids so an agent can never DM an operator
+ * as if they were the client owner. This is its mirror image: a SYSTEM/operator
+ * alert target is valid ONLY IF the id IS a known operator id. A client id can
+ * therefore NEVER be returned here, which makes it *structurally impossible* for
+ * a SYSTEM alert (dispatch failure, block, undeliverable notification) to land in
+ * a client's Telegram — MOVE-IN-SILENCE holds by construction, not by convention.
+ *
+ * Together the two guards partition the chat-id space:
+ *   validOwnerChatId    → clients only   (operator ids rejected)
+ *   validOperatorChatId → operators only (client ids rejected)
+ * Neither can ever leak into the other's channel.
+ */
+function validOperatorChatId(v: unknown): string {
+  const s = normalizeChatId(v);
+  if (!s) return '';
+  if (!OPERATOR_CHAT_IDS.has(s)) return ''; // a client id is NEVER a system target
+  return s;
+}
+
+/** First OPERATOR id from an allowFrom-style list (string | array). */
+function firstOperatorFromList(list: unknown): string {
+  const entries = Array.isArray(list) ? list : list != null ? [list] : [];
+  for (const entry of entries) {
+    const id = validOperatorChatId(entry as string | number);
+    if (id) return id;
+  }
+  return '';
 }
 
 /** First non-operator id from an allowFrom-style list (string | array). */
@@ -184,6 +224,82 @@ export function resolveOwnerChatId(): string | null {
 }
 
 /**
+ * Resolve the OPERATOR Telegram chat ID for SYSTEM-audience alerts (MSG-07).
+ *
+ * ── WHY THIS EXISTS: the operator's own board was structurally MUTE ──────────
+ * `resolveOwnerChatId()` rejects operator ids at EVERY source — correctly, so a
+ * client box can never DM an operator as if they were the client. But on the
+ * OPERATOR's own box, `channels.telegram.allowFrom` contains ONLY operator ids
+ * (there is no client on that box). So every source rejected every candidate and
+ * `resolveOwnerChatId()` returned null — forever. `notifyOwner()` then hit its
+ * `console.warn` and dropped the message on the floor. The live error log carried
+ * 501 of those drops, including the operator's own blocked-task notification.
+ *
+ * The rail built to stop operators spamming clients had made the operator's own
+ * board silent. This resolver is the seam: it targets the OPERATOR deliberately,
+ * through the `validOperatorChatId` INVERSE guard, so it can only ever return an
+ * operator id — never a client's. The client-spam guardrail is untouched.
+ *
+ * Sources (each passes through the inverse guard):
+ *   S0  CC_OPERATOR_CHAT_ID / OPENCLAW_OPERATOR_CHAT_ID env (explicit pin)
+ *   S1  openclaw.json → channels.telegram.allowFrom  (first OPERATOR entry)
+ *   S1b openclaw.json → commands.ownerAllowFrom      (first OPERATOR entry)
+ *
+ * Returns null when no operator id is resolvable (e.g. a client box that lists no
+ * operator in allowFrom) — in which case SYSTEM alerts fall through to the
+ * durable record instead, and still never reach the client.
+ */
+export function resolveOperatorChatId(): string | null {
+  const pinned =
+    validOperatorChatId(process.env.CC_OPERATOR_CHAT_ID ?? '') ||
+    validOperatorChatId(process.env.OPENCLAW_OPERATOR_CHAT_ID ?? '');
+  if (pinned) return pinned;
+
+  try {
+    const raw = fs.readFileSync(resolveConfigPath(), 'utf8');
+    const cfg = JSON.parse(raw) as Record<string, any>;
+    const fromChannel = firstOperatorFromList(cfg?.channels?.telegram?.allowFrom);
+    if (fromChannel) return fromChannel;
+    const fromCommands = firstOperatorFromList(cfg?.commands?.ownerAllowFrom);
+    if (fromCommands) return fromCommands;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The durable, always-on record of a notification that could NOT be delivered
+ * (MSG-07). This is the last rung of the escalation ladder: even with no webhook
+ * and no reachable operator chat, a dropped alert must leave a trace a human can
+ * find. Failing to notify is itself an alarm — never a `console.warn`.
+ *
+ * Written as append-only JSONL beside the workspace, and mirrored to
+ * console.ERROR (not warn) with a greppable tag. Never throws.
+ */
+export function recordUndeliverable(kind: string, message: string): void {
+  const line = {
+    ts: new Date().toISOString(),
+    kind,
+    message,
+    // Deliberately NO chat ids — this file is diagnostic, not a contact list.
+  };
+  // LOUD: error-level, distinctive tag. This is the string to alert on.
+  console.error('[notify][UNDELIVERABLE] %s — %s', kind, message);
+  try {
+    const dir = resolveWorkspaceBase();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(
+      path.join(dir, 'notification-failures.jsonl'),
+      `${JSON.stringify(line)}\n`,
+      'utf8',
+    );
+  } catch {
+    /* durable record is best-effort — the console.error above already fired */
+  }
+}
+
+/**
  * Send a Telegram message to a specific chat via `openclaw message send`.
  *
  * MSG-01: this is FIRE-AND-FORGET. The send is dispatched with async
@@ -243,14 +359,41 @@ export function notifyTelegram(opts: {
  * @returns true if sent, false if chat ID missing or send failed.
  */
 export function notifyOwner(message: string): boolean {
+  // An explicit mute (CI, unit tests) is a DELIBERATE suppression, not a failed
+  // delivery — it must not raise an alarm or write an undeliverable record.
+  // Only a genuine inability to deliver escalates.
+  if (process.env.OWNER_NOTIFY_TELEGRAM_DISABLED === '1') return false;
+
   const chatId = resolveOwnerChatId();
   if (!chatId) {
-    console.warn(
-      '[notify] notifyOwner: no owner chat ID found in sessions — skipping Telegram',
-    );
+    // ── MSG-07: NEVER SILENTLY DROP ─────────────────────────────────────────
+    // This was a `console.warn` + `return false`. Every automated caller
+    // (task-dispatcher, qc-scorer ×2, all 5 owner-reports helpers) throws that
+    // boolean away, so an undeliverable alert simply ceased to exist — 501 of
+    // them in the live error log, including a blocked-task notification the
+    // operator never saw.
+    //
+    // Failing to notify is itself an alarm. Escalate to the SYSTEM channel,
+    // which is operator-only by construction (validOperatorChatId) and so can
+    // never turn this into client spam. Fixing it HERE — at the source — repairs
+    // every automated caller at once, rather than at eight call sites.
+    notifySystem(`UNDELIVERABLE owner notification (no owner chat resolvable): ${message}`, {
+      agent: 'notify',
+      action: 'escalate',
+    });
+    // Still `false`: callers that DO check (e.g. interview/send-link) must keep
+    // reporting "owner not reachable" to the user. The escalation is additive.
     return false;
   }
-  return notifyTelegram({ chatId, message });
+  const dispatched = notifyTelegram({ chatId, message });
+  if (!dispatched) {
+    // Suppressed (test/CI gate) or not dispatched — record it rather than lose it.
+    notifySystem(`UNDELIVERABLE owner notification (gateway send not dispatched): ${message}`, {
+      agent: 'notify',
+      action: 'escalate',
+    });
+  }
+  return dispatched;
 }
 
 /** Notification audience. SYSTEM alerts are operator concerns and must NEVER
@@ -282,30 +425,47 @@ export function notifySystem(
   message: string,
   meta?: { agent?: string; action?: string },
 ): boolean {
+  let dispatched = false;
+
+  // ── RUNG 1: Rescue Rangers escalation webhook (when configured). ───────────
   const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
-  if (!webhookUrl) {
-    console.warn(
-      '[notify] notifySystem: no RESCUE_RANGERS_WEBHOOK_URL — SYSTEM alert logged, NOT sent to client: %s',
-      message,
-    );
-    return false;
+  if (webhookUrl) {
+    // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
+    void fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: meta?.action ?? 'escalate',
+        agent: meta?.agent ?? 'command-center',
+        message,
+      }),
+    }).catch((err) => {
+      console.warn(
+        '[notify] notifySystem: Rescue Rangers POST failed: %s',
+        (err as Error).message,
+      );
+    });
+    dispatched = true;
   }
-  // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
-  void fetch(webhookUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      action: meta?.action ?? 'escalate',
-      agent: meta?.agent ?? 'command-center',
-      message,
-    }),
-  }).catch((err) => {
-    console.warn(
-      '[notify] notifySystem: Rescue Rangers POST failed: %s',
-      (err as Error).message,
-    );
-  });
-  return true;
+
+  // ── RUNG 2: the OPERATOR's Telegram (MSG-07). ─────────────────────────────
+  // This is what un-mutes the operator's own box. `resolveOperatorChatId()` runs
+  // every candidate through the INVERSE guard, so the target here is ALWAYS a
+  // known operator id and NEVER a client's — a SYSTEM alert cannot become client
+  // spam even in principle. Gateway-only (`openclaw message send`), never a
+  // direct call to api.telegram.org.
+  const operatorChatId = resolveOperatorChatId();
+  if (operatorChatId) {
+    if (notifyTelegram({ chatId: operatorChatId, message })) dispatched = true;
+  }
+
+  // ── RUNG 3: the durable record. ALWAYS, when nothing above got through. ────
+  // A SYSTEM alert must never evaporate. The old code hit a `console.warn` and
+  // dropped it; that is how 501 notifications disappeared without a trace.
+  if (!dispatched) {
+    recordUndeliverable('system_alert', message);
+  }
+  return dispatched;
 }
 
 /**
