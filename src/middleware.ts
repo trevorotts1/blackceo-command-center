@@ -1,5 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
+import {
+  AUTH_REJECTED_PATH,
+  AUTH_REJECT_HEADERS,
+  AuthRejectionSignal,
+  REWRITABLE_METHODS,
+  Unauthorized401Event,
+  isCredentialFailure,
+  logUnauthorized401,
+  sanitizeHeaderValue,
+} from '@/lib/probes/unauthorized-401-contract';
 import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gate-cookie';
 
 /**
@@ -252,7 +262,71 @@ function isSameOriginRequest(request: NextRequest): boolean {
   return false;
 }
 
-function unauthorized(message: string, status = 401): NextResponse {
+/**
+ * Every rejection this middleware emits, telemetry included (FLEET-FIX 2.3 /
+ * AUD-71).
+ *
+ * `signal` — NOT the status code — decides whether a rejection counts as a
+ * credential failure. That distinction is load-bearing: the Cloudflare-Access-
+ * not-active response below is a MISCONFIGURATION that happens to carry the
+ * default 401 status, so a guard written as `if (status === 401)` folds an
+ * operator's config fault into the "callers rejected for bad credentials"
+ * counter and makes the number lie. Only `missing-header` and `token-mismatch`
+ * are credential failures (`isCredentialFailure()`).
+ *
+ * Delivery: this file runs in the EDGE runtime. It cannot hold a counter the
+ * Node health route can read — module state does not cross that boundary. So a
+ * credential failure is REWRITTEN to the Node-runtime sink route
+ * (`AUTH_REJECTED_PATH`), which increments the authoritative counter, emits the
+ * structured log line, and returns the identical `401 {"error":"Unauthorized"}`.
+ * A middleware-initiated rewrite is dispatched in-process and does not re-enter
+ * middleware. `unauthorized-401-contract.ts` documents the whole boundary.
+ *
+ * Fallback: Next dispatches a rewrite only for methods the sink route exports
+ * (REWRITABLE_METHODS). An exotic verb is answered here directly — same 401,
+ * same body, still logged — but with `count: null`, because no counter is
+ * reachable from this runtime. Uncounted, never mis-counted.
+ */
+function unauthorized(
+  request: NextRequest,
+  message: string,
+  signal: AuthRejectionSignal,
+  status = 401
+): NextResponse {
+  if (!isCredentialFailure(signal)) {
+    // Misconfiguration (cf-access-misconfigured / mc-api-token-unset /
+    // webhook-secret-unset). Never counted, never rewritten.
+    return NextResponse.json({ error: message }, { status });
+  }
+
+  const event: Unauthorized401Event = {
+    pathname: request.nextUrl.pathname,
+    method: request.method,
+    reason: signal,
+    ua: sanitizeHeaderValue(request.headers.get('user-agent')),
+    ts: new Date().toISOString(),
+  };
+
+  if (REWRITABLE_METHODS.includes(request.method.toUpperCase())) {
+    const url = request.nextUrl.clone();
+    url.pathname = AUTH_REJECTED_PATH;
+    url.search = '';
+
+    // Build the destination's request headers from the caller's, then OVERWRITE
+    // every internal field — a client cannot smuggle its own x-cc-auth-reject-*
+    // values through (it also cannot reach the route directly; see the 404 guard
+    // in middleware()).
+    const headers = new Headers(request.headers);
+    headers.set(AUTH_REJECT_HEADERS.reason, event.reason);
+    headers.set(AUTH_REJECT_HEADERS.pathname, event.pathname);
+    headers.set(AUTH_REJECT_HEADERS.method, event.method);
+    if (event.ua) headers.set(AUTH_REJECT_HEADERS.ua, event.ua);
+    else headers.delete(AUTH_REJECT_HEADERS.ua);
+
+    return NextResponse.rewrite(url, { request: { headers } });
+  }
+
+  logUnauthorized401(event, null, 'middleware-direct');
   return NextResponse.json({ error: message }, { status });
 }
 
@@ -289,6 +363,18 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // `/api/health/deep`, which must stay reachable with no MC_API_TOKEN set.
   if (matchesRoute(pathname, '/api/health')) {
     return NextResponse.next();
+  }
+
+  // AUD-71: /api/internal/auth-rejected is this middleware's OWN rewrite target
+  // — the Node-runtime sink that owns the 401 counter. It is INTERNAL-ONLY. A
+  // direct inbound request must never reach the handler, or an outside caller
+  // could inflate the counter and forge the per-reason breakdown by hand-setting
+  // the x-cc-auth-reject-* headers. Next does NOT re-run middleware on a
+  // middleware-initiated rewrite, so this 404 cannot swallow the internal
+  // dispatch (proved end-to-end by tests/e2e/prove-401-telemetry.e2e.mjs, which
+  // asserts a rejected caller still receives 401 — not 404 — from a real build).
+  if (pathname === AUTH_REJECTED_PATH) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
 
   // Anthology participant token page (SPEC 11.3) — the ONE public,
@@ -328,8 +414,14 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   if (REQUIRE_CF_ACCESS) {
     if (!cfJwt || !cfEmail) {
+      // MISCONFIGURATION, not a credential failure — and it carries the DEFAULT
+      // 401 status, which is exactly why the telemetry guard discriminates on
+      // the signal rather than on the status code. This response must never
+      // touch the credential-failure counter.
       return unauthorized(
-        'This deployment is misconfigured. Cloudflare Access is not active on this subdomain. Contact the operator.'
+        request,
+        'This deployment is misconfigured. Cloudflare Access is not active on this subdomain. Contact the operator.',
+        'cf-access-misconfigured'
       );
     }
   }
@@ -345,7 +437,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       isWebhookSecretRoute(pathname)
     ) {
       return unauthorized(
+        request,
         'This deployment is misconfigured: WEBHOOK_SECRET is not set, so webhook authentication is disabled. Set WEBHOOK_SECRET (or ALLOW_INSECURE_OPEN_API=true to override). Contact the operator.',
+        'webhook-secret-unset',
         503
       );
     }
@@ -393,7 +487,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         return passthrough;
       }
       return unauthorized(
+        request,
         'This deployment is misconfigured: MC_API_TOKEN is not set, so external API authentication is disabled. Set MC_API_TOKEN (or ALLOW_INSECURE_OPEN_API=true to override). Contact the operator.',
+        'mc-api-token-unset',
         503
       );
     }
@@ -414,13 +510,22 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       }
     }
 
+    // AUD-71: the two branches below are the CREDENTIAL FAILURES, and they are
+    // reported as DISTINCT reasons. Both used to emit the bare literal
+    // 'Unauthorized', so an operator staring at a rejected dept-agent write-back
+    // could not tell "the caller sent no Authorization header at all" (the agent
+    // was never given the token) from "the caller sent the WRONG bearer" (the box
+    // has a stale/mismatched MC_API_TOKEN) — two different faults with two
+    // different fixes. The discriminated reason rides the telemetry event and the
+    // structured log line; the RESPONSE BODY stays the bare 'Unauthorized' on
+    // purpose, so the reject reason is never disclosed to the caller.
     const authHeader = request.headers.get('authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return unauthorized('Unauthorized');
+      return unauthorized(request, 'Unauthorized', 'missing-header');
     }
     const token = authHeader.substring(7);
     if (!timingSafeEqualStr(token, MC_API_TOKEN)) {
-      return unauthorized('Unauthorized');
+      return unauthorized(request, 'Unauthorized', 'token-mismatch');
     }
 
     const passthrough = NextResponse.next();

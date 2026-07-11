@@ -23,6 +23,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
+import { AUTH_REJECTED_PATH } from '@/lib/probes/unauthorized-401-contract';
 
 const BOARD_HOST = 'board.example.com';
 const BOARD_ORIGIN = `https://${BOARD_HOST}`;
@@ -114,6 +115,39 @@ function isPassthrough(res: NextResponse): boolean {
   return res.status === 200 && res.headers.get('x-middleware-next') === '1';
 }
 
+/**
+ * Post-AUD-71 (FLEET-FIX 2.3) spelling of "the middleware rejected this caller
+ * for bad/missing credentials."
+ *
+ * A CREDENTIAL-FAILURE 401 (missing Authorization header / wrong bearer) is no
+ * longer a direct `NextResponse.json({error},{status:401})` from the middleware.
+ * The middleware runs in the EDGE runtime and the 401 counter must be readable
+ * from a NODE health route, so the middleware `NextResponse.rewrite()`s the
+ * rejected request to the internal Node sink (`AUTH_REJECTED_PATH`), which
+ * returns the real `401 {"error":"Unauthorized"}` body AND records the
+ * telemetry. The middleware's OWN return is therefore a rewrite (HTTP 200 +
+ * `x-middleware-rewrite` -> the sink), not a raw 401 — but it is still a
+ * REFUSAL: the caller never reaches the protected route.
+ *
+ * The end-to-end 401 the caller actually receives is proven separately
+ * (tests/e2e/prove-401-telemetry.e2e.mjs, against a real next build). Here we
+ * assert the middleware's ROUTING DECISION, which is this suite's concern:
+ * refused, and specifically routed to the 401 sink (never smuggled through to
+ * the real route). MISCONFIGURATION refusals (503, and the CF-Access-not-active
+ * 401) are still DIRECT responses and keep their raw-status assertions below —
+ * they are not credential failures and are not rewritten.
+ */
+function isCredentialRejection(res: NextResponse): boolean {
+  if (isPassthrough(res)) return false;
+  const rewrite = res.headers.get('x-middleware-rewrite');
+  if (!rewrite) return false;
+  try {
+    return new URL(rewrite, BOARD_ORIGIN).pathname === AUTH_REJECTED_PATH;
+  } catch {
+    return rewrite.includes(AUTH_REJECTED_PATH);
+  }
+}
+
 // Real deploy: `next start` forces production. Prove the fix in production mode.
 const TOKEN = 'mc-token-value';
 const SECRET = 'webhook-secret-value';
@@ -153,7 +187,9 @@ describe('plain Cloudflare Tunnel box (no CF Access), secrets provisioned, produ
   it('external cross-origin read WITHOUT bearer is rejected (401)', async () => {
     const mw = await loadMiddleware(ENV);
     const res = await mw(makeReq('/api/tasks', { origin: 'https://evil.example.com' }));
-    expect(res.status).toBe(401);
+    // AUD-71: credential-failure 401 is now delivered via a rewrite to the 401
+    // sink (see isCredentialRejection). Still a refusal; never a passthrough.
+    expect(isCredentialRejection(res)).toBe(true);
     expect(isPassthrough(res)).toBe(false);
   });
 
@@ -166,7 +202,8 @@ describe('plain Cloudflare Tunnel box (no CF Access), secrets provisioned, produ
   it('external read with a WRONG bearer is rejected (401)', async () => {
     const mw = await loadMiddleware(ENV);
     const res = await mw(makeReq('/api/tasks', { bearer: 'not-the-token' }));
-    expect(res.status).toBe(401);
+    // AUD-71: token-mismatch is a credential failure -> rewrite to the 401 sink.
+    expect(isCredentialRejection(res)).toBe(true);
   });
 
   it.each(INGEST_WEBHOOK_APIS)(
@@ -175,7 +212,12 @@ describe('plain Cloudflare Tunnel box (no CF Access), secrets provisioned, produ
       const mw = await loadMiddleware(ENV);
       // Forge a same-origin Referer to try to skip the bearer gate — must fail.
       const res = await mw(makeReq(path, { method: 'POST', sameOrigin: true }));
-      expect(res.status).toBe(401);
+      // The security property this guards is UNCHANGED: a webhook/ingest route is
+      // never reachable via the same-origin passthrough, so a bearer-less forged
+      // caller is refused. AUD-71 only changes HOW the refusal is delivered
+      // (rewrite to the 401 sink), not WHETHER it happens — isPassthrough stays
+      // false, proving no smuggling to the real route.
+      expect(isCredentialRejection(res)).toBe(true);
       expect(isPassthrough(res)).toBe(false);
     },
   );
@@ -241,6 +283,8 @@ describe('CF-Access-fronted box (opt-in REQUIRE_CF_ACCESS=true still enforces)',
   it('ingest WITH a CF assertion but NO bearer is still rejected (401) — bearer required behind CF', async () => {
     const mw = await loadMiddleware(ENV);
     const res = await mw(makeReq('/api/tasks/ingest', { method: 'POST', sameOrigin: true, cf: true }));
-    expect(res.status).toBe(401);
+    // Passes CF Layer 1 but has no bearer -> credential failure -> rewrite to the
+    // 401 sink (AUD-71). The bearer-required-behind-CF property is intact.
+    expect(isCredentialRejection(res)).toBe(true);
   });
 });
