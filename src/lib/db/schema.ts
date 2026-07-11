@@ -47,10 +47,22 @@ CREATE TABLE IF NOT EXISTS workspaces (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- Index for workspaces by company
-CREATE INDEX IF NOT EXISTS idx_workspaces_company ON workspaces(company_id);
--- Board query filters on archived_at IS NULL on every render.
-CREATE INDEX IF NOT EXISTS idx_workspaces_archived_at ON workspaces(archived_at);
+-- NOTE (v5.16.1 — the migration-deadlock class): NO CREATE INDEX for
+-- company_id / archived_at / archived_reason lives here, and none ever may.
+-- schema.ts is exec'd BEFORE runMigrations() (src/lib/db/index.ts), so on an
+-- EXISTING database the CREATE TABLE IF NOT EXISTS above is a no-op and the
+-- table still has its OLD column set. An index here on a column that a migration
+-- ALTERs in later throws "no such column" *before* that migration can ever run —
+-- and because db.exec() aborts the whole script at the first failing statement,
+-- the DB layer never comes up, boot fail-closes, and the migration that would fix
+-- it is unreachable. A permanent deadlock: the box cannot upgrade its way out.
+-- That is exactly what idx_workspaces_archived_at did in v5.14.0–v5.16.0 (it
+-- bricked every in-place upgrade from below v5.14.0).
+-- These indexes are owned by the migrations that add their columns, and each one
+-- creates its index UNCONDITIONALLY so fresh installs get it too:
+--   idx_workspaces_company      -> migration 012 (company_id)
+--   idx_workspaces_archived_at  -> migration 095 (archived_at)
+-- Enforced by src/lib/db/__tests__/schema-migration-ordering.test.ts.
 
 -- Agents table
 -- NOTE: agents.role_type TEXT column is added by migration 060.
@@ -420,8 +432,10 @@ CREATE INDEX IF NOT EXISTS idx_dept_memory_importance ON dept_memory(importance 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
+-- idx_tasks_workspace / idx_agents_workspace are NOT declared here: workspace_id
+-- is ALTER-added by migration 002, so an index on it in this pre-migration script
+-- would deadlock any database predating 002 (same class as idx_workspaces_archived_at).
+-- Migration 002 owns both indexes and creates them unconditionally.
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
