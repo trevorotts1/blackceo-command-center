@@ -425,7 +425,7 @@ cd "$APP_DIR"
 # this by writing npm's exit code to a temp file inside the subshell and
 # reading it back after the pipe drains. This is the only portable approach
 # that also preserves streaming build output.
-BUILD_EXIT_FILE=$(mktemp /tmp/atomic-build-exit-$$.txt)
+BUILD_EXIT_FILE=$(mktemp "${TMPDIR:-/tmp}/atomic-build-exit-XXXXXX")
 echo "2" > "$BUILD_EXIT_FILE"   # Pre-set to failure; overwritten only on clean exit
 
 export BUILD_EXIT_FILE
