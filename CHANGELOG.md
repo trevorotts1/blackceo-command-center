@@ -1,3 +1,22 @@
+## [v5.18.1] — 2026-07-12 — fix(jobs): P1-06 board hygiene — "nothing stuck on the board"
+
+Merges `fix/v5.18-board-hygiene` (P1-06). Codifies the lane SLAs so tasks never rot silently in Blocked, Review/QC, Done, or a stale Backlog/Inbox column.
+
+### The job — `src/lib/jobs/board-hygiene.ts`, hourly sweep (`BOARD_HYGIENE_CRON`, disable with `DISABLE_BOARD_HYGIENE=1`)
+- **Rule 1** — blocked > 48h with `block_audience='OWNER'` → re-ping the requester, max once/48h.
+- **Rule 2** — blocked > 7d (any audience) → escalate to the operator lane via `notifySystem()` with the block reason. A blocked task with a human dependency is NEVER auto-archived at any age — this rule only ever notifies + logs; the archive paths (rules 4/5) query `status = 'done'` and `status IN ('backlog','inbox')` respectively, structurally excluding `blocked`.
+- **Rule 3** — review with no `qc_review` event in 24h → force one judge scoring attempt (`runQCOnReview`); an unprovisioned judge (heuristic fallback, `no-key`) surfaces `qc_starved` to the operator lane instead of staying silent (P1-05).
+- **Rule 4** — done > 30d → auto-archive (soft — `archived_at` stamp; NEVER DELETE).
+- **Rule 5** — stale backlog/inbox > 21d with no activity → message the requester "still want this?"; no reply in 7d → archive with an `auto_archived_stale` event. Tasks with no requester id go to a batched operator digest (one message per run, never a per-task drip — MOVE-IN-SILENCE / 2.5 batching doctrine).
+- **Trust-engine integration seam (P1-04 sequencing).** The spec calls for rule 1's re-ping and rule 5's nudge to go out via the trust engine's message path; P1-04 had not yet merged into this repo when this job was built (repos are merged serially, Section 2.6). Decision (recorded in-code, 2.5 decide-autonomously): route both through the existing `notify.ts` owner/system channels behind a single `sendOwnerMessage()` seam for now — now that P1-04 has merged (this release), swapping that one function to the dedicated trust-engine sender is the follow-up, not a re-design.
+
+### Remediation — `scripts/remediate/purge-board-residue.ts` (P1-06 step 2, per-box, one-time)
+Archives (never hard-deletes) task-level demo/test residue the SOP-table purge (migration 091) never covered: `[DEMO]`/`[TEST]` exact bracket-prefix titles (high confidence, auto-archived), `smoke-test`-prefixed titles (token-boundary matched), and the known synthetic anthology drill cards. Dry-run by default; idempotent; never prints a secret.
+
+### Tests
+- `tests/unit/board-hygiene.test.ts` — all 5 rules against a real DB: the 48h re-ping cadence cap, the 7d escalation (and blocked tasks never archived at any age), the 24h judge-forcing + `qc_starved` surfacing, the 30d soft-archive, and the 21d stale-nudge → 7d-archive path with the operator-digest batching for requester-less tasks.
+- `tests/unit/purge-board-residue.test.ts` — the three residue categories classify and archive correctly, real synthetic rows are caught, a genuine client task with a coincidentally similar title is never touched, dry-run makes no writes.
+
 ## [v5.18.0] — 2026-07-11 — feat(jobs,db): THE TRUST ENGINE / report-back loop (P1-04, #1 client complaint)
 
 A client asks their AI CEO for something, it is routed to a department, and then **silence** — no "it was assigned," no progress/ETA, no completion notice. Clients stopped trusting the system because it never reported back. This ships the three-message report-back contract from the directive: **(1) acknowledge → (2) in-progress + ETA → (3) done + result/where-to-find-it.** Two mechanical layers of this (write-back 401s, notify drops) were already fixed at origin/main; the report-back UX itself was **never designed or built** — this is that net-new feature. (Branch `feat/v5.18-trust-engine`.)
