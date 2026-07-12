@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { RefreshCcw, Loader2, CheckCircle2, AlertCircle, Clock, KeyRound, X, Server, Puzzle } from 'lucide-react';
+import { RefreshCcw, Loader2, CheckCircle2, AlertCircle, AlertTriangle, Clock, KeyRound, X, Server, Puzzle, ShieldCheck, Sparkles, Check, Ban } from 'lucide-react';
 
 /**
  * IntelligenceProviderList - provider freshness + key status panel for the
@@ -19,13 +19,25 @@ import { RefreshCcw, Loader2, CheckCircle2, AlertCircle, Clock, KeyRound, X, Ser
  * Per PRD Section 5.4 the page must surface a "last refreshed" timestamp
  * and a manual refresh trigger. This component owns both.
  *
- * HONESTY NOTE (BUG 5): the badge here reads "Key present", not "Configured"
- * or "Verified". /api/models/provider-status's detectKey() only checks
- * whether a non-empty string exists under a candidate env-var name in
- * process.env / a .env file / openclaw.json — it never calls the provider.
- * A present-but-revoked, present-but-typo'd, or present-but-wrong key still
- * reads "Key present". Do not add live probing here (cost/latency) — the
- * fix is an honest label, not more machinery.
+ * HONESTY NOTE (BUG 5, superseded in part by P2-04): the badge here reads
+ * "Key present", not "Configured" or "Verified" — detectKey() only checks
+ * whether a non-empty string exists under a candidate env-var name; it never
+ * calls the provider on its own. That rule still stands for THIS component's
+ * passive data fetch: it never triggers a live provider call on page load.
+ *
+ * P2-04 (c) step 3 adds a THIRD, narrow exception: an explicit "Prove"
+ * action (or the weekly cron) may run ONE real authenticated call and cache
+ * the result 24h (`/api/models/provider-status/prove` ->
+ * provider-auth-proof.ts). The tile therefore has three honestly-distinct
+ * states, never conflated:
+ *   1. "Key present" (amber)              — a key exists, nothing proven yet.
+ *   2. "Listed, auth UNPROVEN" (amber)     — the weekly refresh's fetchModels()
+ *      succeeded (so the catalog listed), but that is NOT proof of auth (the
+ *      "/v1/models unauthenticated mirage" — some providers 200 a model list
+ *      for a garbage key). This state is NEVER rendered with a green check.
+ *   3. "Call PROVEN" (emerald)             — a real authenticated call
+ *      (a 5-token chat completion, or verifyKey() as a fallback) actually
+ *      succeeded within the last 24h.
  */
 
 export interface ProviderRefreshEntry {
@@ -38,6 +50,14 @@ export interface ProviderRefreshEntry {
   error_message: string | null;
 }
 
+/** Cache-only auth-proof summary — see the HONESTY NOTE above. */
+interface AuthProofSummary {
+  proven: boolean;
+  stale: boolean;
+  method: string | null;
+  provenAt: string | null;
+}
+
 interface ProviderStatusEntry {
   slug: string;
   displayName: string;
@@ -47,6 +67,18 @@ interface ProviderStatusEntry {
   foundInStore: 'process.env' | 'env_file' | 'openclaw_json' | null;
   localEndpointUrl?: string;
   envCandidates: string[];
+  authProof: AuthProofSummary | null;
+}
+
+/** P2-04 — a pending Deep Scan suggestion (never carries the secret value). */
+interface EnvAuditSuggestion {
+  id: number;
+  run_at: string;
+  env_var: string;
+  source_label: string;
+  suggested_provider: string;
+  confidence: 'high' | 'medium' | 'low';
+  reason: string | null;
 }
 
 interface IntegrationStatusEntry {
@@ -139,6 +171,110 @@ export function IntelligenceProviderList({
       /* ignore — status panel degrades gracefully */
     }
   };
+
+  // P2-04 — "Prove" action: runs (or reuses a cached) real authenticated call
+  // for one provider. Never fires automatically; only on this explicit click.
+  const [proving, setProving] = useState<string | null>(null);
+  const handleProve = async (slug: string) => {
+    setProving(slug);
+    try {
+      await fetch('/api/models/provider-status/prove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug }),
+      });
+      await fetchProviderStatus();
+    } catch {
+      /* the tile just stays in its current honest state */
+    } finally {
+      setProving(null);
+    }
+  };
+
+  // P2-04 — the LLM env-auditor ("Deep Scan"): gathers candidate env-var names
+  // (values redacted before any LLM sees them), classifies with the box's own
+  // cheap model, and surfaces suggestions here. Auto-wiring only on Confirm.
+  const [auditSuggestions, setAuditSuggestions] = useState<EnvAuditSuggestion[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [scanNotice, setScanNotice] = useState<string | null>(null);
+  const [actingOnSuggestion, setActingOnSuggestion] = useState<number | null>(null);
+
+  const fetchAuditSuggestions = async () => {
+    try {
+      const res = await fetch('/api/models/env-audit', { cache: 'no-store' });
+      if (!res.ok) return;
+      const json = (await res.json()) as { suggestions: EnvAuditSuggestion[] };
+      setAuditSuggestions(json.suggestions ?? []);
+    } catch {
+      /* ignore — Deep Scan panel simply starts empty */
+    }
+  };
+
+  const handleDeepScan = async () => {
+    setScanning(true);
+    setScanNotice(null);
+    try {
+      const res = await fetch('/api/models/env-audit', { method: 'POST' });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(json.message || json.error || `Deep Scan failed (${res.status})`);
+      }
+      setAuditSuggestions(json.suggestions ?? []);
+      if (json.skipped_reason) {
+        setScanNotice(`Scanned ${json.candidates_found ?? 0} candidate key(s) but could not classify: ${json.skipped_reason}`);
+      } else if ((json.suggestions ?? []).length === 0) {
+        setScanNotice(`Scanned ${json.candidates_found ?? 0} candidate key(s) — nothing new to suggest.`);
+      } else {
+        setScanNotice(`Scanned ${json.candidates_found ?? 0} candidate key(s) — ${json.suggestions.length} suggestion(s) found.`);
+      }
+    } catch (err) {
+      setScanNotice(err instanceof Error ? err.message : 'Deep Scan failed');
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const handleConfirmSuggestion = async (id: number) => {
+    setActingOnSuggestion(id);
+    try {
+      const res = await fetch('/api/models/env-audit/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.message || json.error || 'Confirm failed');
+      setAuditSuggestions((prev) => prev.filter((s) => s.id !== id));
+      setKeyNotice(`Wired ${json.env_var ?? 'the key'} — catalog ${json.refreshed ? 'refreshed' : 'save confirmed'}.`);
+      setKeyNoticeOk(true);
+      await fetchProviderStatus();
+    } catch (err) {
+      setScanNotice(err instanceof Error ? err.message : 'Confirm failed');
+    } finally {
+      setActingOnSuggestion(null);
+    }
+  };
+
+  const handleDismissSuggestion = async (id: number) => {
+    setActingOnSuggestion(id);
+    try {
+      await fetch('/api/models/env-audit/dismiss', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      setAuditSuggestions((prev) => prev.filter((s) => s.id !== id));
+    } catch {
+      /* leave the row; operator can retry */
+    } finally {
+      setActingOnSuggestion(null);
+    }
+  };
+
+  useEffect(() => {
+    fetchAuditSuggestions();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -304,9 +440,19 @@ export function IntelligenceProviderList({
         </div>
         <button
           type="button"
+          onClick={handleDeepScan}
+          disabled={scanning}
+          className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Read this box's own env with its own low-cost model to find provider keys stored under unconventional names. Values are redacted before the model ever sees them; nothing is wired without your confirmation."
+        >
+          {scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+          {scanning ? 'Scanning...' : 'Deep Scan'}
+        </button>
+        <button
+          type="button"
           onClick={handleRefresh}
           disabled={refreshing}
-          className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {refreshing ? (
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -325,6 +471,58 @@ export function IntelligenceProviderList({
       {keyNotice && (
         <div className={`px-5 py-2 border-b text-xs ${keyNoticeOk ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-amber-50 border-amber-100 text-amber-700'}`}>
           {keyNotice}
+        </div>
+      )}
+      {scanNotice && (
+        <div className="px-5 py-2 border-b border-violet-100 bg-violet-50/60 text-xs text-violet-700">
+          {scanNotice}
+        </div>
+      )}
+
+      {/* ── P2-04: Deep Scan suggestions — nothing here is wired until Confirm. ── */}
+      {auditSuggestions.length > 0 && (
+        <div className="border-b border-gray-100 bg-violet-50/40">
+          <div className="px-5 py-2.5 flex items-center gap-2">
+            <Sparkles className="w-3.5 h-3.5 text-violet-500" />
+            <span className="text-xs font-bold text-violet-700 uppercase tracking-wider">
+              Deep Scan suggestions
+            </span>
+          </div>
+          <ul className="divide-y divide-violet-100/70">
+            {auditSuggestions.map((s) => (
+              <li key={s.id} className="px-5 py-3 flex items-center gap-3 flex-wrap">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-gray-800">
+                    Found <code className="font-mono text-[12px] bg-gray-100 px-1 rounded">{s.env_var}</code>{' '}
+                    in <span className="italic">{s.source_label}</span> — treat as{' '}
+                    <span className="font-semibold">{s.suggested_provider}</span>?
+                  </div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">
+                    Confidence: {s.confidence}
+                    {s.reason && <> · {s.reason}</>}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleConfirmSuggestion(s.id)}
+                  disabled={actingOnSuggestion === s.id}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition-colors disabled:opacity-50"
+                >
+                  {actingOnSuggestion === s.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDismissSuggestion(s.id)}
+                  disabled={actingOnSuggestion === s.id}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 transition-colors disabled:opacity-50"
+                >
+                  <Ban className="w-3 h-3" />
+                  Dismiss
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -388,29 +586,45 @@ export function IntelligenceProviderList({
                         {entry.error_message}
                       </div>
                     )}
-                    {/* C2 — Live key detection status (multi-store). When a
-                        candidate env var is found, show "Key present (key:
-                        ENVVAR)" and suppress the re-entry prompt.
-                        BUG 5 FIX: this was labeled "Configured", which reads
-                        as "verified working" — detectKey() only scans env
-                        stores for a non-empty string; it never calls the
-                        provider. Renamed to "Key present" + a tooltip
-                        spelling out that distinction, so operators don't
-                        mistake presence for a live, working credential. */}
+                    {/* P2-04 — three honestly-distinct states, never conflated
+                        (see the HONESTY NOTE at the top of this file):
+                          1. no key -> "No key detected" (amber)
+                          2. key found, not proven -> "Key present" (amber),
+                             plus an explicit "models listed, auth UNPROVEN"
+                             callout when the refresh log shows a listed
+                             catalog — that listing is NEVER read as proof.
+                          3. key found + a fresh cached authenticated call
+                             succeeded -> "Call PROVEN" (emerald). */}
                     {status && !isLocalEndpoint && (
                       <div className="text-xs text-gray-400 mt-0.5">
                         {status.configured ? (
-                          <span
-                            className="text-emerald-600"
-                            title="A key was found under this name in an env store. This does NOT mean it has been verified against the provider — presence, not proof."
-                          >
-                            Key present (key:{' '}
-                            <code className="font-mono">{status.foundEnvVar}</code>
-                            {status.foundInStore && status.foundInStore !== 'process.env' && (
-                              <> · found in <span className="italic">{sourceLabel(status.foundInStore)}</span></>
-                            )}
-                            )
-                          </span>
+                          status.authProof?.proven ? (
+                            <span
+                              className="text-emerald-600"
+                              title={`An authenticated ${status.authProof.method === 'chat_completion' ? '5-token completion' : 'key-verification'} call succeeded${status.authProof.provenAt ? ` at ${status.authProof.provenAt}` : ''}. Cached 24h.`}
+                            >
+                              <ShieldCheck className="w-3 h-3 inline -mt-0.5 mr-0.5" />
+                              Key present · call PROVEN (key:{' '}
+                              <code className="font-mono">{status.foundEnvVar}</code>)
+                            </span>
+                          ) : (
+                            <span
+                              className="text-amber-600"
+                              title="A key was found under this name in an env store. This does NOT mean it has been verified against the provider — presence, not proof. Click Prove to run one real authenticated call."
+                            >
+                              Key present · auth UNPROVEN (key:{' '}
+                              <code className="font-mono">{status.foundEnvVar}</code>
+                              {status.foundInStore && status.foundInStore !== 'process.env' && (
+                                <> · found in <span className="italic">{sourceLabel(status.foundInStore)}</span></>
+                              )}
+                              )
+                              {entry?.success && (
+                                <span className="block text-[10px] text-amber-500 mt-0.5">
+                                  Models listed on the last refresh — that is NOT proof of auth.
+                                </span>
+                              )}
+                            </span>
+                          )
                         ) : (
                           <span className="text-amber-600">
                             No key detected
@@ -445,7 +659,25 @@ export function IntelligenceProviderList({
                     </button>
                   )}
 
-                  {/* Status badge */}
+                  {/* P2-04 — "Prove" action: only offered when a key is present
+                      and not already freshly proven. One real authenticated
+                      call, cached 24h. */}
+                  {!isLocalEndpoint && status?.configured && !status.authProof?.proven && (
+                    <button
+                      type="button"
+                      onClick={() => handleProve(p)}
+                      disabled={proving === p}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 transition-colors disabled:opacity-50"
+                      title="Run one real authenticated call to prove this key actually works (cached 24h)"
+                    >
+                      {proving === p ? <Loader2 className="w-3 h-3 animate-spin" /> : <ShieldCheck className="w-3 h-3" />}
+                      Prove
+                    </button>
+                  )}
+
+                  {/* Status badge. NEVER a green check off fetchModels() alone —
+                      "OK" requires a cached PROVEN authProof, not just a listed
+                      catalog (the mirage this exists to kill). */}
                   {isLocalEndpoint ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
                       <Server className="w-3 h-3" />
@@ -459,10 +691,18 @@ export function IntelligenceProviderList({
                       <AlertCircle className="w-3 h-3" />
                       Failed
                     </span>
-                  ) : entry ? (
+                  ) : entry && status?.authProof?.proven ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
                       <CheckCircle2 className="w-3 h-3" />
-                      OK
+                      OK · proven
+                    </span>
+                  ) : entry ? (
+                    <span
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200"
+                      title="Models were listed, but that is not proof of auth. Click Prove."
+                    >
+                      <AlertTriangle className="w-3 h-3" />
+                      Listed · unproven
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-gray-50 text-gray-500 border border-gray-200">

@@ -4077,6 +4077,61 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '100',
+    name: 'add_env_auditor_and_auth_proof_tables',
+    // P2-04 — MODEL SETTINGS: LLM env-auditor + mirage-proof tiles.
+    //
+    // Two new, purely-additive tables (same CREATE-TABLE-IF-NOT-EXISTS pattern
+    // Migration 031 used for model_registry — never touches an existing row):
+    //
+    //   provider_key_audit_suggestions — one row per candidate env-var name the
+    //   Deep Scan surfaced, classified by the box's OWN cheap/quick-tier model
+    //   (never Anthropic, never the operator's model — see env-auditor.ts). The
+    //   raw secret VALUE is never stored here — only the env-var NAME, its
+    //   source file, and the suggested provider. Auto-wiring happens ONLY when
+    //   the operator confirms a row (status -> 'confirmed'); until then the
+    //   suggestion is inert.
+    //
+    //   provider_auth_proof_cache — one row per provider slug recording whether
+    //   an actual AUTHENTICATED call (a real chat completion, or a connector's
+    //   verifyKey()) succeeded, and when. This is what kills the "/v1/models
+    //   unauthenticated mirage": a provider whose catalog listed successfully
+    //   is NOT rendered with a proven green check unless a row here says so,
+    //   and that row is at most 24h old (see provider-auth-proof.ts).
+    up: (db) => {
+      console.log('[Migration 100] Adding env-auditor + auth-proof-cache tables...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_key_audit_suggestions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_at TEXT DEFAULT (datetime('now')),
+          env_var TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          source_label TEXT NOT NULL,
+          suggested_provider TEXT NOT NULL,
+          confidence TEXT NOT NULL DEFAULT 'low' CHECK (confidence IN ('high', 'medium', 'low')),
+          reason TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'dismissed')),
+          confirmed_at TEXT,
+          confirmed_env_var TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_provider_key_audit_status ON provider_key_audit_suggestions(status)`);
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_auth_proof_cache (
+          provider_slug TEXT PRIMARY KEY,
+          proven_at TEXT NOT NULL,
+          ok INTEGER NOT NULL,
+          method TEXT NOT NULL,
+          model_id TEXT,
+          detail TEXT
+        );
+      `);
+
+      console.log('[Migration 100] provider_key_audit_suggestions + provider_auth_proof_cache ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

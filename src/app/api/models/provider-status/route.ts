@@ -27,9 +27,29 @@ import {
   extractOpenclawProviderKeys,
 } from '@/lib/studio/provider-discovery';
 import { openclawConfigPath } from '@/lib/platform';
+import { getCachedAuthProof, isProofFresh } from '@/lib/provider-auth-proof';
 import fs from 'fs';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * P2-04 (c) step 3 — the honest, three-state auth-proof summary for a tile.
+ * This is a READ-ONLY reflection of `provider_auth_proof_cache` — it NEVER
+ * makes a live network call (that only happens from POST
+ * /api/models/provider-status/prove or the weekly cron). `proven` is true
+ * ONLY when a cached authenticated call succeeded within the last 24h; it is
+ * deliberately never derived from `configured` or from the refresh log's
+ * fetchModels() success — see provider-auth-proof.ts for why a listed catalog
+ * is not proof of auth (the mirage).
+ */
+export interface AuthProofSummary {
+  /** True only when a cached authenticated call succeeded within the TTL. */
+  proven: boolean;
+  /** True when a proof attempt (success or failure) exists but is stale. */
+  stale: boolean;
+  method: string | null;
+  provenAt: string | null;
+}
 
 export interface ProviderStatusEntry {
   slug: string;
@@ -46,6 +66,8 @@ export interface ProviderStatusEntry {
   localEndpointUrl?: string;
   /** All candidate env-var names checked (for tooltip). */
   envCandidates: string[];
+  /** Cache-only auth-proof summary. null for local_endpoint (no key to prove). */
+  authProof: AuthProofSummary | null;
 }
 
 export interface IntegrationStatusEntry {
@@ -153,12 +175,24 @@ export async function GET() {
           foundInStore: null,
           localEndpointUrl: localUrl,
           envCandidates: [],
+          authProof: null, // local_endpoint has no key to prove
         };
       }
 
       const candidates = envCandidatesForProvider(p);
       // Pass the slug so source (4) — OpenClaw's SQLite auth store — is consulted.
       const found = detectKey(candidates, p.slug);
+
+      // Cache-only read (no network call) — see AuthProofSummary docstring.
+      const cachedProof = getCachedAuthProof(p.slug);
+      const fresh = isProofFresh(cachedProof);
+      const authProof: AuthProofSummary = {
+        proven: fresh && cachedProof!.ok === 1,
+        stale: cachedProof !== null && !fresh,
+        method: cachedProof?.method ?? null,
+        provenAt: cachedProof?.proven_at ?? null,
+      };
+
       return {
         slug: p.slug,
         displayName: p.displayName,
@@ -167,6 +201,7 @@ export async function GET() {
         foundEnvVar: found?.envVar ?? null,
         foundInStore: found?.source ?? null,
         envCandidates: candidates,
+        authProof,
       };
     });
 
