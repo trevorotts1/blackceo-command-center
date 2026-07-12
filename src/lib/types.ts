@@ -222,6 +222,17 @@ export interface Task {
   audience_source?: string | null;
   voice_collapsed?: number | null;
   blend_directive?: string | null;
+  // P4-02 step 5 — the audience-confirm state of this task's persona bundle,
+  // surfaced onto the board row (LEFT JOIN task_persona_bundle in the tasks GET
+  // route) so the Kanban card can show an "awaiting audience confirm" chip when
+  // it is 'pending'. Not a tasks column — a joined mirror of
+  // task_persona_bundle.confirm_state. Absent on a non-blend / pre-090 task.
+  //   'pending'           — audience unconfirmed; the write is GATED, the card
+  //                         must signal it (the silent-hold-then-house-voice bug).
+  //   'confirmed'         — operator confirmed the audience.
+  //   'not_required'      — non-content / no audience voice needed.
+  //   'deadline_fallback' — released under the neutral house voice past deadline.
+  blend_confirm_state?: string | null;
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;

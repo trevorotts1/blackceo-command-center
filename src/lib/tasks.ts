@@ -436,6 +436,37 @@ export function loadSopSelectorContextById(
  *          deterministic department-default flagged persona_fallback=true), or null
  *          ONLY when the selector explicitly returned no_persona_required.
  */
+/**
+ * P4-02 step 6 — the queryable audit event emitted when a task that WANTED a
+ * voice blend (isContentTask → `--blend`) got a persona pinned but NO bundle
+ * SUPERSET back. This is the in-DB signal that lets a D1 regression ("--blend
+ * dead in prod") be DETECTED instead of silently looking like "no content task
+ * was created". Mirrors the shape/robustness of the existing
+ * `persona_completion_failed` / `persona_governance` audit writes (best-effort,
+ * never throws to the caller). Exported for the board-hygiene regression check
+ * and the fail-first test.
+ */
+export const EVT_PERSONA_BLEND_MISSING = 'persona_blend_missing';
+
+export function emitPersonaBlendMissing(taskId: string, personaId: string | null): void {
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        EVT_PERSONA_BLEND_MISSING,
+        taskId,
+        `[PERSONA-BLEND-MISSING] content task requested --blend but the selector returned NO bundle ` +
+          `(persona_id=${personaId ?? '(none)'} pinned without a voice/audience/topic superset). ` +
+          `Duality dead for this task — investigate the selector install / --blend wiring (D1 regression signal).`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch {
+    /* audit-only — never block the pin path on the observability write */
+  }
+}
+
 export async function resolvePersonaAndPin(
   taskId: string,
   taskDescription: string,
@@ -540,6 +571,15 @@ export async function resolvePersonaAndPin(
           } catch (bundleErr) {
             console.warn(`[resolvePersonaAndPin] bundle persist non-fatal for task ${taskId}:`, (bundleErr as Error).message);
           }
+        } else if (opts?.blend) {
+          // P4-02 step 6 — THE SILENT-REGRESSION LOCK. The blend was REQUESTED
+          // (`--blend`, i.e. isContentTask() was true at the call site) but the
+          // selector returned NO bundle SUPERSET. That is precisely the D1
+          // failure mode ("--blend never passed / duality dead in prod"): a
+          // recurrence would again be indistinguishable from "nobody made a
+          // content task". Emit a queryable audit event (mirroring
+          // `persona_completion_failed`) so a regression is loud, not silent.
+          emitPersonaBlendMissing(taskId, persona.persona_id);
         }
 
         if (updatedTask) {
@@ -1507,6 +1547,21 @@ export function markAudienceDeadlineFallback(taskId: string): void {
         [uuidv4(), 'audience_confirm_deadline_fallback', taskId,
           `[AUDIENCE-CONFIRM] unconfirmed past deadline — dispatching under house-voice governance ONLY; audience still unconfirmed (no audience fabricated). Blend directive neutralized so no unconfirmed-audience voice ships.`, now],
       );
+      // P4-02 step 5 — THE SILENT NEUTRAL-VOICE RELEASE MUST NEVER BE SILENT
+      // AGAIN. Beyond the card event above, actively notify the operator lane
+      // (trust-engine seam): the audience-matched voice this feature exists to
+      // deliver was just quietly dropped for a house voice. Best-effort — never
+      // block the fallback bookkeeping on the notification.
+      try {
+        const t = queryOne<{ title: string | null }>('SELECT title FROM tasks WHERE id = ?', [taskId]);
+        const title = t?.title ?? taskId;
+        notifySystem(
+          `[AUDIENCE-CONFIRM] "${title}" (id: ${taskId}) released under the NEUTRAL HOUSE VOICE — ` +
+            `its audience was never confirmed within the ${Math.round(AUDIENCE_CONFIRM_DEADLINE_MS / 60000)}-minute window. ` +
+            `The audience-matched voice was dropped (no audience fabricated). Confirm the audience to re-voice future work.`,
+          { agent: 'audience-confirm', action: 'deadline_fallback' },
+        );
+      } catch { /* notify best-effort */ }
     }
   } catch { /* best-effort — never block dispatch on the fallback bookkeeping */ }
 }
