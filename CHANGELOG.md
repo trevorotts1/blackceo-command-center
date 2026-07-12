@@ -1,3 +1,11 @@
+## [v5.17.1] — 2026-07-11 — fix(cloudflare): P1-08 — Google IdP attached alongside One-Time PIN on Cloudflare Access apps
+
+**P1-08** (SUPER-SPEC-2026-07-11): `scripts/cloudflare/setup-access-app.sh` provisioned One-Time PIN only and had no Google-IdP wiring, while some client boxes' Access apps were hand-configured with Google directly in the dashboard, outside this script — a real gap between the operator's described "Google login" flow and what the automation actually did.
+
+- The script now detects an account-level Google identity provider (never creates one — that remains a one-time, account-level OAuth setup only the operator can authorize, spec Section 9 D-3) and, when present, attaches it to the Access App's `allowed_idps` alongside One-Time PIN. Idempotent: a brand-new app gets both from the start; an already-existing app gets Google attached (PUT) the first time it becomes available, and is left alone once it already has it.
+- **QC follow-up fix**: on the existing-app path, when Google is being attached and the "Allowed users" policy already existed, the prior logic skipped the policy entirely, leaving a stale `require:[{login_method:{id:onetimepin}}]` clause in place — an AND condition a Google login could never simultaneously satisfy, so Google sign-in kept failing at policy eval even with Google present in `allowed_idps`. Fixed with a GET-check-then-update-only-if-needed pass that drops the stale `login_method` require clause while preserving name/decision/include, matching the script's existing idempotence pattern.
+- New probe script `scripts/cloudflare/probe-access-login.sh` and unit coverage in `tests/unit/p1-08-cf-access-google-pin.test.ts` and `tests/unit/p1-08-access-login-probe.test.ts`.
+
 ## [v5.17.0] — 2026-07-11 — fix(dashboard): P1-03 — producer-card fail-LOUD-but-graceful, version stamp, interview-lock copy
 
 Merges `fix/v5.17-dashboard-determinism` (P1-03). Executes P1-03 (c) steps 1, 3, 4, 5-confirm, 6-verify from SUPER-SPEC-2026-07-11-MASTER.md.
