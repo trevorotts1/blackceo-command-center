@@ -1,3 +1,15 @@
+## [v5.18.2] — 2026-07-12 — feat(board): P2-01 — client-facing Backlog/To-Do labels + triad-missing pill
+
+Merges `fix/v5.18-backlog-todo-labels` (P2-01). Executes SUPER-SPEC-2026-07-11 P2-01(c): both waiting columns stay (they encode the real server-enforced Triad Rule gate, not duplicates) — only the client-facing LABELS change.
+
+- Backlog → "Being Prepared" (hover subtitle: the operator's verbatim "We're gathering what this task needs — a description, a playbook, and the right persona"); To-Do → "Ready to Start". New `src/lib/board-labels.ts` is the single source of this vocabulary. Only display strings changed — zero `TaskStatus` enum changes, zero API shape changes, `taskToColumnId()` / `columnIdToStatus()` untouched.
+- Backlog cards now show a "why is this here?" pill naming WHICH triad leg (description / SOP / persona) is still missing, via a client-safe (DB-free) presence mirror of `sops.ts`'s `checkTriad` — the same local-mirror pattern already used by `sop-learning.ts`'s `isValidTriadPersona`, since the real DB-backed `checkTriad` can't be imported into a `'use client'` component.
+- The trust engine's backlog-parked ACK (P1-04) now reuses the identical `BACKLOG_COLUMN_SUBTITLE` copy, so the client hears the same honest explanation on the board and in the report-back message.
+
+### Tests
+- `tests/unit/board-labels.test.ts` — 10 new cases: renamed labels, subtitle text, triad presence checks incl. sentinel-persona-id and whitespace-only-description edge cases, pill text rendering.
+- `tests/unit/trust-engine.test.ts` — 1 new case asserting the ACK includes the shared subtitle verbatim.
+
 ## [v5.18.1] — 2026-07-12 — fix(jobs): P1-06 board hygiene — "nothing stuck on the board"
 
 Merges `fix/v5.18-board-hygiene` (P1-06). Codifies the lane SLAs so tasks never rot silently in Blocked, Review/QC, Done, or a stale Backlog/Inbox column.
