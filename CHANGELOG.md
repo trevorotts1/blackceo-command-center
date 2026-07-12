@@ -1,3 +1,15 @@
+## [v5.17.0] — 2026-07-11 — fix(dashboard): P1-03 — producer-card fail-LOUD-but-graceful, version stamp, interview-lock copy
+
+Merges `fix/v5.17-dashboard-determinism` (P1-03). Executes P1-03 (c) steps 1, 3, 4, 5-confirm, 6-verify from SUPER-SPEC-2026-07-11-MASTER.md.
+
+- **Fail-LOUD-but-graceful producer cards** (root cause class 3): a failed `GET /api/workspaces` used to be caught-and-swallowed, leaving the Anthology/Podcast card slot silently empty — indistinguishable from "this box has no producer engines." `src/app/page.tsx` now tracks a `workspacesStatus` state; on failure it renders one visible degraded slot ("Board data unavailable — retrying"), logs a `dashboard_workspaces_fetch_failed` event via the existing `POST /api/events`, and retries every 15s. The branching logic is extracted to `src/lib/dashboard-workspaces.ts` (pure, no React/DOM) so it is unit-testable in a repo with no jsdom/testing-library harness.
+- **Version stamp**: new `GET /api/version` (`src/app/api/version/route.ts`) reads the repo-root `version` file (the same file `scripts/bump-version.sh` treats as canonical) and the dashboard footer renders it, so build-generation drift is diagnosable at a glance.
+- **Interview-lock clarity**: `ConsentScreen` (`src/app/interview/InterviewClient.tsx`, the `/interview` landing the middleware's shell-lock 302s to) now states "Your Command Center unlocks when the AI Workforce Interview is complete."
+- **Deploy discipline** (confirmed, no change needed): `update.sh` already routes the CC's own rebuild through `scripts/atomic-deploy.sh`.
+
+### Tests
+- `tests/unit/p1-03-dashboard-workspaces.test.ts`, `tests/unit/p1-03-version-route.test.ts`.
+
 ## [v5.16.2] — 2026-07-11 — fix(db,models,jobs): the migration LEDGER-LIE (dispatch silently dead) + Ollama Cloud made to actually work (404 base URL + the key CC never read) + the swallowed stale-sweep 401
 
 Four repo-level fixes, one release. All were invisible because the failures were swallowed. **FIX 2 and FIX 4 are the same feature** — the URL fix makes the endpoint correct, the auth-store fix makes Command Center able to authenticate to it; a box needs BOTH before Ollama Cloud registers a single model.
