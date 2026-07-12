@@ -47,6 +47,8 @@ import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import { notifyTelegram, notifySystem, resolveOperatorChatId, resolveOwnerChatId } from '@/lib/notify';
 import { v4 as uuidv4 } from 'uuid';
 import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
+import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
+import { appendTrustMessage } from '@/lib/ceo-chat/store';
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 /** After ingest, wait up to this long for the triad to advance a task past
@@ -368,11 +370,44 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
 
 export interface ExecuteContext {
   now: Date;
-  /** Injected gateway sender (defaults to notify.ts notifyTelegram). Returns
-   *  true when a send was DISPATCHED. */
-  send?: (chatId: string, message: string) => boolean;
+  /**
+   * Injected sender. When omitted, the DEFAULT dispatcher routes BY CHANNEL
+   * (P5-01 step 2 — one trust engine, two channels): a `ceo-chat` plan is written
+   * into the "My AI CEO" chat transcript so the report-back renders as a chat
+   * event in that UI; every other channel goes to Telegram via notify.ts. Tests
+   * may override to capture sends. Returns true when a send was DISPATCHED.
+   */
+  send?: (chatId: string, message: string, channel?: string) => boolean;
   /** Injected operator-lane escalation for the done-without-deliverable QC smell. */
   escalate?: (message: string) => void;
+}
+
+/** Map a plan's stamps to the ceo-chat trust `kind` used for UI styling. */
+function trustKindFor(plan: PlannedSend): 'trust_ack' | 'trust_progress' | 'trust_done' {
+  const t = plan.stamps[0]?.eventType;
+  if (t === 'trust_ack') return 'trust_ack';
+  if (t === 'trust_done') return 'trust_done';
+  return 'trust_progress';
+}
+
+/**
+ * The channel-aware DEFAULT sender (P5-01 step 2). `ceo-chat` report-backs are
+ * written into `ceo_chat_messages` (the My AI CEO transcript) instead of
+ * Telegram; every other channel uses notifyTelegram. Never throws — a write
+ * failure returns false so the durable stamp is preserved and the row simply
+ * isn't counted as sent (no duplicate risk).
+ */
+function defaultTrustSend(plan: PlannedSend): boolean {
+  if (plan.channel === CEO_CHAT_CHANNEL) {
+    try {
+      appendTrustMessage(plan.chatId, plan.message, trustKindFor(plan));
+      return true;
+    } catch (err) {
+      console.warn('[trust-engine] ceo-chat report-back write failed:', (err as Error).message);
+      return false;
+    }
+  }
+  return notifyTelegram({ chatId: plan.chatId, message: plan.message });
 }
 
 export interface ExecuteResult {
@@ -390,7 +425,10 @@ export interface ExecuteResult {
  * idempotency guard (P1-04 step 7).
  */
 export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): ExecuteResult {
-  const send = ctx.send ?? ((chatId: string, message: string) => notifyTelegram({ chatId, message }));
+  // Channel-aware dispatch: an injected ctx.send wins (tests / custom routers);
+  // otherwise the DEFAULT routes ceo-chat → chat transcript, else → Telegram.
+  const dispatch = (plan: PlannedSend): boolean =>
+    ctx.send ? ctx.send(plan.chatId, plan.message, plan.channel) : defaultTrustSend(plan);
   const escalate =
     ctx.escalate ??
     ((message: string) => notifySystem(message, { agent: 'trust-engine', action: 'escalate' }));
@@ -453,7 +491,7 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     // never aborts the rest of the batch.
     let dispatched = false;
     try {
-      dispatched = send(plan.chatId, plan.message);
+      dispatched = dispatch(plan);
     } catch (err) {
       console.warn('[trust-engine] send failed (claim already durable, no duplicate):', (err as Error).message);
       dispatched = false;
