@@ -1,3 +1,18 @@
+## [v5.18.3] — 2026-07-12 — fix(tasks): P2-03 — create-task wiring: null-field schema reject + phantom workspace_id crash + silent save failures
+
+Merges `fix/v5.18-create-task` (P2-03). Live reproduction on a fresh checkout (per P2-03 part (c) step 1) traced the "create task doesn't really work" report to THREE compounding bugs, all in the create path `TaskModal` → `POST /api/tasks` → `createTaskCore`:
+
+1. `CreateTaskSchema` (`src/lib/validation.ts`) declared `assigned_agent_id`/`due_date` as `z.string().uuid().optional()` / `z.string().optional()` — missing `.nullable()`. `TaskModal` always sends an explicit `null` for both when left at their default (unassigned agent, no due date) — the normal state of a freshly opened "New Task" form. Every such create 400'd with "Validation failed". Added `.nullable()` to both, matching `UpdateTaskSchema`.
+2. `createTaskCore`'s `workspace_id` resolution (`src/lib/tasks.ts`) looked up a caller-supplied `workspace_id`, and on a lookup MISS left the variable holding the phantom id instead of nulling it (despite a comment at the top of the function already claiming it did). `TaskModal` hardcodes `workspace_id:'default'` when it has no real workspace context (the cross-department `/tasks/all` board) — no box seeds a `workspaces` row with id `'default'` outside the standalone `npm run db:seed` script — so this phantom id reached `INSERT INTO tasks`, which threw an uncaught `SQLITE_CONSTRAINT_FOREIGNKEY` that bypassed `route.ts`'s try/catch and 500'd with a raw framework error page. Now nulls `workspaceId` on a lookup miss (or lookup failure), matching the documented intent. `TaskModal` also no longer manufactures the `'default'` string at all — it omits `workspace_id` when it has no real context, letting the server default it.
+3. `TaskModal.handleSubmit` swallowed every non-Triad, non-ok save response silently: the modal just sat there with `isSubmitting` reset, no indication anything failed. Added a generic save-error banner (`data-testid="task-save-error"`) for every non-ok response, and a network-failure fallback in the catch block.
+
+### Tests
+- `tests/unit/create-task-null-fields.test.ts` — drives the real `POST /api/tasks` route handler with the exact `TaskModal` null-field payload shape; 5 cases including a guard that a genuinely malformed `assigned_agent_id` still 400s.
+- `tests/unit/create-task-phantom-workspace.test.ts` — drives the real route with `workspace_id:'default'` (and other unresolvable ids) against a DB with no such row; proves 201 + NULL persistence instead of a 500/throw; guards that a REAL `workspace_id` still resolves correctly.
+- `tests/integration/create-task.spec.ts` (+ `.fixture`/`.global-setup` + `playwright.create-task.config.ts`, `npm run test:e2e:create-task`) — Playwright regression lock: stands up a real Next dev server + isolated DB, clicks New Task on the real `/tasks/all` board, fills only the title, saves, and asserts the card appears in the Backlog column with no error banner.
+
+Full existing unit suite (1038 tests) re-run clean against the fix: only the same 13 pre-existing environment-dependent failures remain, none touching the changed files. `tsc --noEmit`, `eslint` on all changed files, and `next build` all pass clean.
+
 ## [v5.18.2] — 2026-07-12 — feat(board): P2-01 — client-facing Backlog/To-Do labels + triad-missing pill
 
 Merges `fix/v5.18-backlog-todo-labels` (P2-01). Executes SUPER-SPEC-2026-07-11 P2-01(c): both waiting columns stay (they encode the real server-enforced Triad Rule gate, not duplicates) — only the client-facing LABELS change.
