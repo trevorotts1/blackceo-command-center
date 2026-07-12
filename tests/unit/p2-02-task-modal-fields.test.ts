@@ -19,6 +19,10 @@
  *     done trail in the task's Activity tab.
  */
 
+// C8 isolation — FIRST import: points DATABASE_PATH at a throwaway temp DB before
+// any project module (persona-selector → @/lib/db) is evaluated, so this suite can
+// never open the live mission-control.db (c8-db-isolation-guard enforces this).
+import './_isolated-db';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -27,6 +31,7 @@ import {
   TRUST_EVENT_TYPES,
   isTrustEventType,
   trustEventToActivity,
+  extractClientMessage,
 } from '../../src/lib/trust-activity';
 
 function baseResult(over: Partial<PersonaSelectionResult>): PersonaSelectionResult {
@@ -108,4 +113,33 @@ test('trustEventToActivity is resilient to a message with no prefix (uses it ver
   });
   assert.equal(activity.activity_type, 'trust_done');
   assert.equal(activity.message, 'Done — the deck is in Drive.');
+});
+
+// ── FAIL-FIRST: prefix-only / empty-body telemetry rows must not leak the chat id ──
+// A trust event whose client body is EMPTY ("trust_ack -> <id>:" — a bare ack the
+// engine still records) previously failed the `([\s\S]+)$` match and the whole raw
+// string, chat id and all, was returned verbatim into the Activity UI. The body is
+// now `[\s\S]*` so the prefix still strips and the empty body extracts to ''.
+
+test('extractClientMessage strips a prefix-only telemetry row (empty body → no chat id leak)', () => {
+  assert.equal(extractClientMessage('trust_ack -> 55512345:'), '');
+});
+
+test('extractClientMessage strips a prefix-only telemetry row with a trailing space', () => {
+  assert.equal(extractClientMessage('trust_ack -> 55512345: '), '');
+});
+
+test('trustEventToActivity never leaks the chat id for a prefix-only (empty-body) event', () => {
+  for (const message of ['trust_progress -> 987654321:', 'trust_done -> 987654321: ']) {
+    const activity = trustEventToActivity({
+      id: 'evt-empty',
+      type: message.slice(0, message.indexOf(' ')),
+      task_id: 'task-9',
+      message,
+      created_at: '2026-07-12T12:00:00.000Z',
+    });
+    assert.equal(activity.message, '', 'an empty-body telemetry row must render as an empty message');
+    assert.ok(!activity.message.includes('987654321'), 'the raw chat id must never leak into the feed');
+    assert.ok(!activity.message.includes('->'), 'the raw telemetry prefix must never leak into the feed');
+  }
 });

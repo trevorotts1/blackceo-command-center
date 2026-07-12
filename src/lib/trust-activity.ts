@@ -45,7 +45,13 @@ export function extractClientMessage(raw: string): string {
   // Only strip when the line genuinely begins with a trust telemetry prefix of the
   // form "<trust_type> -> <token>: <rest>" — anchored so an unrelated ": " inside a
   // real message is never used as the split point.
-  const m = msg.match(/^trust_(?:ack|progress|done)(?:\([^)]*\))?\s*->\s*[^:]*:\s*([\s\S]+)$/);
+  //
+  // The body is `[\s\S]*` (zero-or-more), NOT `+`: a prefix-ONLY telemetry row such
+  // as "trust_ack -> 55512345:" (or "…: " once trimmed) carries an EMPTY client body.
+  // With `+` that empty-body case failed the whole match and the raw string — prefix
+  // AND chat id — was returned verbatim and leaked into the Activity UI. With `*` the
+  // prefix still matches and the empty body correctly extracts to '' (no id leak).
+  const m = msg.match(/^trust_(?:ack|progress|done)(?:\([^)]*\))?\s*->\s*[^:]*:\s*([\s\S]*)$/);
   return m ? m[1].trim() : msg;
 }
 
