@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic, Sparkles } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -64,6 +64,9 @@ export default function HomePage() {
   // Null until resolved; the footer renders nothing extra until then so a slow
   // read never shows a wrong/blank version string.
   const [ccVersion, setCcVersion] = useState<string | null>(null);
+  // P5-01: the "My AI CEO" BETA surface only appears when the feature flag is on
+  // for this box. Null until resolved so the card never flashes then vanishes.
+  const [ceoBetaEnabled, setCeoBetaEnabled] = useState<boolean | null>(null);
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
   const cardBackground = hasBrand
@@ -179,6 +182,25 @@ export default function HomePage() {
       } catch {}
     }
     loadVersion();
+  }, []);
+
+  useEffect(() => {
+    // P5-01: is the My AI CEO BETA surface enabled on this box? Best-effort — a
+    // failed read just leaves the card hidden (fail-safe: never a dead BETA link).
+    async function loadCeoBeta() {
+      try {
+        const res = await fetch('/api/ceo-chat/status', { cache: 'no-store' });
+        if (!res.ok) {
+          setCeoBetaEnabled(false);
+          return;
+        }
+        const data = await res.json();
+        setCeoBetaEnabled(data?.enabled === true);
+      } catch {
+        setCeoBetaEnabled(false);
+      }
+    }
+    loadCeoBeta();
   }, []);
 
   // PRD 3.8 + v4.0.1 P0-1: landing layout. Operator Console is the 5th card.
@@ -308,9 +330,22 @@ export default function HomePage() {
   // the core seven-card order. Falls back to appending if that card ever moves.
   const conversationalIdx = cards.findIndex((c) => c.route === '/conversational-ai');
   const insertAt = conversationalIdx >= 0 ? conversationalIdx + 1 : cards.length;
-  const visibleCards: EntryCard[] = producerCards.length
+  const coreCards: EntryCard[] = producerCards.length
     ? [...cards.slice(0, insertAt), ...producerCards, ...cards.slice(insertAt)]
     : cards;
+
+  // P5-01: the "My AI CEO" BETA card leads the grid (a prominent, deliberate
+  // competitor to Telegram) — but ONLY when the flag is enabled on this box.
+  const ceoCard: EntryCard = {
+    title: 'My AI CEO',
+    description: 'Talk directly to your agent · BETA',
+    detail: 'Chat with your main AI agent in a clean UI — send requests, upload documents, images, and videos, and watch what happens live. A direct line, right here.',
+    icon: <Sparkles className="w-7 h-7 text-white" />,
+    gradient: 'from-indigo-500 via-purple-500 to-fuchsia-500',
+    route: '/my-ai-ceo',
+    cta: 'Open My AI CEO',
+  };
+  const visibleCards: EntryCard[] = ceoBetaEnabled ? [ceoCard, ...coreCards] : coreCards;
 
   return (
     <div className="min-h-screen bg-bcc-bg flex flex-col">

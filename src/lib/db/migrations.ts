@@ -4132,6 +4132,55 @@ const migrations: Migration[] = [
       console.log('[Migration 100] provider_key_audit_suggestions + provider_auth_proof_cache ready');
     },
   },
+  {
+    id: '101',
+    name: 'add_ceo_chat_messages_table',
+    // P5-01 — THE BETA "MY AI CEO" DASHBOARD FEATURE.
+    //
+    // A new, purely-additive table (same CREATE-TABLE-IF-NOT-EXISTS pattern
+    // Migration 100 used for the env-auditor tables — never touches an existing
+    // row and is a NO-OP on a box that already has it). Stores the transcript of
+    // the "My AI CEO" chat surface: the client's messages, the agent's streamed
+    // replies, upload receipts, and the trust-engine report-back events that the
+    // 2-minute sweep writes back INTO this channel (requester_channel='ceo-chat').
+    //
+    // One trust engine, two channels (P5-01 step 2): a task the agent routes from
+    // a ceo-chat request carries requester_channel='ceo-chat' + requester_chat_id
+    // = the chat session id, so the trust engine's ack/progress/done land here as
+    // `trust`-role rows instead of going to Telegram.
+    //
+    //   session_id        the chat session id (also used as requester_chat_id)
+    //   role              'user' | 'assistant' | 'system' | 'trust'
+    //   content           the message text
+    //   kind              'message' | 'upload' | 'trust_ack' | 'trust_progress' |
+    //                     'trust_done' | 'error' (free-form provenance)
+    //   task_id           optional link to a task this event pertains to
+    //   attachment_*      upload provenance (path the agent was told about, name,
+    //                     mime type, byte size). The raw file lives on disk under
+    //                     <workspace>/inbox/ceo-chat/<date>/; only its PATH is here.
+    up: (db) => {
+      console.log('[Migration 101] Adding ceo_chat_messages table...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ceo_chat_messages (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'trust')),
+          content TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'message',
+          task_id TEXT,
+          attachment_path TEXT,
+          attachment_name TEXT,
+          attachment_type TEXT,
+          attachment_size INTEGER,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_ceo_chat_session ON ceo_chat_messages(session_id, created_at)`,
+      );
+      console.log('[Migration 101] ceo_chat_messages ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

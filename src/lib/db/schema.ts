@@ -210,6 +210,27 @@ CREATE TABLE IF NOT EXISTS task_persona_bundle (
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_confirm ON task_persona_bundle(confirm_state);
 
+-- "My AI CEO" chat transcript (P5-01). Migration 101 also creates this for
+-- existing DBs; CREATE TABLE IF NOT EXISTS is idempotent. One row per chat event:
+-- the client's messages, the agent's streamed replies, upload receipts, and the
+-- trust-engine report-back events (requester_channel='ceo-chat') that the sweep
+-- writes back into this channel. Only an upload's PATH is stored here — the file
+-- itself lands under <workspace>/inbox/ceo-chat/<date>/.
+CREATE TABLE IF NOT EXISTS ceo_chat_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'trust')),
+  content TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'message',
+  task_id TEXT,
+  attachment_path TEXT,
+  attachment_name TEXT,
+  attachment_type TEXT,
+  attachment_size INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ceo_chat_session ON ceo_chat_messages(session_id, created_at);
+
 -- Task history table — every status transition is recorded here for
 -- performance analytics (avg completion time, throughput, agent attribution).
 CREATE TABLE IF NOT EXISTS task_history (

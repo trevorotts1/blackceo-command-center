@@ -60,6 +60,13 @@ interface MissionQueueProps {
 
 type ColumnDef = { id: string; label: string; gradient: string; tooltip?: string };
 
+// Pixel width of the `gap-6` (1.5rem @ a 16px root) Tailwind class on the
+// column-strip flex container below. Columns are now fixed-width at every
+// breakpoint (mobile swipes/snaps between them instead of stacking them
+// vertically — see the P5-01 QC finding on board mobile responsiveness), so
+// the scroll-position → "which column is this" math needs the real gap size.
+const COLUMN_STRIP_GAP_PX = 24;
+
 // ── Column tooltips (v4.44.0) ─────────────────────────────────────────────
 // Each column carries a tooltip string (rendered via the `title` attribute on
 // the column-header pill) that explains what the column means, what gate
@@ -188,6 +195,36 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // Blocked but not yet confirmed with the required human-only fields).
   const [blockingTask, setBlockingTask] = useState<Task | null>(null);
 
+  // Select the active column set from BOARD_PRESETS; default is 'task' (6
+  // columns, unchanged). Computed early (used by the scroll-tracking effects
+  // below, not just the render loop).
+  const COLUMNS = BOARD_PRESETS[boardKind];
+
+  // ── Mobile column picker (board mobile-responsiveness finding) ───────────
+  // Below `lg`, columns no longer stack vertically full-width — they render
+  // as a horizontally-scrollable, snap-aligned strip (see the column
+  // container className in the render loop). The picker is a row of
+  // label+count pills that let a touch user jump straight to a column
+  // instead of swiping through all of them; it tracks which column is
+  // currently in view and highlights it.
+  const [activeColumnIndex, setActiveColumnIndex] = useState(0);
+  const columnRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const scrollToColumn = useCallback((columnId: string, index: number) => {
+    setActiveColumnIndex(index); // optimistic — the scroll listener will confirm it
+    columnRefs.current[columnId]?.scrollIntoView({
+      behavior: 'smooth',
+      inline: 'start',
+      block: 'nearest',
+    });
+  }, []);
+
+  useEffect(() => {
+    // Reset to the first column when the board preset changes (task <-> bug)
+    // so the picker never highlights a column id that no longer exists.
+    setActiveColumnIndex(0);
+  }, [boardKind]);
+
   const pushToast = useCallback((toast: Omit<BoardToastMessage, 'id'>) => {
     setToasts((prev) => [...prev, { id: crypto.randomUUID(), ...toast }]);
   }, []);
@@ -222,7 +259,18 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     if (!el) return;
     setCanScrollLeft(el.scrollLeft > 8);
     setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
-  }, []);
+
+    // Derive the mobile column-picker's "active" pill from scroll position.
+    // Columns are equal-width + a fixed gap, so integer division gives a
+    // stable index without a second (IntersectionObserver) listener.
+    const firstColumnEl = columnRefs.current[COLUMNS[0]?.id];
+    const colWidth = firstColumnEl?.offsetWidth ?? 0;
+    if (colWidth > 0) {
+      const idx = Math.round(el.scrollLeft / (colWidth + COLUMN_STRIP_GAP_PX));
+      const clamped = Math.min(Math.max(idx, 0), COLUMNS.length - 1);
+      setActiveColumnIndex((prev) => (prev === clamped ? prev : clamped));
+    }
+  }, [COLUMNS]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -451,9 +499,6 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // chip count matches what the columns actually render.
   const filteredTasks = tasks.filter(matchesScope);
 
-  // Select the active column set from BOARD_PRESETS; default is 'task' (6 columns, unchanged).
-  const COLUMNS = BOARD_PRESETS[boardKind];
-
   const filters = [
     {
       id: 'total',
@@ -563,6 +608,48 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         )}
       </div>
 
+      {/* Mobile column picker — board mobile-responsiveness finding. Below
+          `lg` the columns render as a horizontally-scrollable, snap-aligned
+          strip (see the column container className below) instead of the
+          old full-width vertical stack, so this row of label+count pills
+          lets a touch user jump straight to a column instead of swiping
+          through all of them. Hidden at `lg`+, where every column is already
+          visible side-by-side. */}
+      <div
+        data-testid="kanban-column-picker"
+        role="tablist"
+        aria-label="Jump to board column"
+        className="lg:hidden bg-white px-4 py-2 border-b border-gray-100 flex items-center gap-2 overflow-x-auto shrink-0"
+      >
+        {COLUMNS.map((column, index) => {
+          const count =
+            boardKind === 'bug' ? getBugsByStatus(column.id).length : getTasksByStatus(column.id).length;
+          const isActive = index === activeColumnIndex;
+          return (
+            <button
+              key={column.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              data-testid={`column-picker-${column.id}`}
+              onClick={() => scrollToColumn(column.id, index)}
+              className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
+                isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              <span>{column.label}</span>
+              <span
+                className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                  isActive ? 'bg-white/20' : 'bg-gray-200 text-gray-500'
+                }`}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
       {/* Kanban Columns — scroll wrapper with always-visible scrollbar + affordances */}
       {/*
         Layout:
@@ -606,12 +693,12 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         {/* Actual scrollable column strip */}
         <div
           ref={scrollRef}
-          className="kanban-scroll overflow-x-auto overflow-y-auto lg:overflow-y-hidden overscroll-contain h-full p-4 lg:p-6"
+          className="kanban-scroll overflow-x-auto overflow-y-hidden overscroll-contain h-full p-4 lg:p-6 snap-x snap-mandatory lg:snap-none"
           role="region"
           aria-label="Task board columns — scroll left or right to see more"
           tabIndex={0}
         >
-          <div className="flex flex-col lg:flex-row gap-6 h-full min-w-0 lg:min-w-max pb-4">
+          <div className="flex flex-row gap-6 h-full pb-4">
             {boardKind === 'bug' ? (
               /* Bug Board -- 7 lifecycle lanes, read from /api/bugs */
               bugLoading ? (
@@ -622,8 +709,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                   return (
                     <div
                       key={column.id}
+                      ref={(el) => { columnRefs.current[column.id] = el; }}
                       data-walkthrough={`bug-column-${column.id}`}
-                      className="w-full lg:w-80 flex flex-col gap-4 lg:min-h-0"
+                      data-testid={`bug-column-${column.id}`}
+                      className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0"
                     >
                       {/* Column Header */}
                       <div className="flex items-center justify-between shrink-0">
@@ -635,10 +724,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                         </div>
                       </div>
 
-                      {/* Bug Cards — lg:min-h-0 keeps the list constrained so
-                          it scrolls internally instead of clipping; lg:pb-6
-                          gives the last card breathing room at the shell edge. */}
-                      <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto lg:min-h-0 lg:pb-6 overscroll-contain pr-0 lg:pr-2">
+                      {/* Bug Cards — min-h-0 keeps the list constrained so it
+                          scrolls internally instead of clipping; pb-6 gives
+                          the last card breathing room at the shell edge. */}
+                      <div className="flex flex-col gap-3 lg:gap-4 overflow-y-auto min-h-0 pb-6 overscroll-contain pr-0 lg:pr-2">
                         {columnBugs.map((bug) => (
                           <BugCard key={bug.id} bug={bug} />
                         ))}
@@ -654,8 +743,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                 return (
                   <div
                     key={column.id}
+                    ref={(el) => { columnRefs.current[column.id] = el; }}
                     data-walkthrough={`column-${column.id}`}
-                    className="w-full lg:w-80 flex flex-col gap-4 lg:min-h-0"
+                    data-testid={`column-${column.id}`}
+                    className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0"
                     onDragOver={handleDragOver}
                     onDrop={(e) => handleDrop(e, column.id as TaskStatus | 'todo')}
                   >
@@ -693,10 +784,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                       )}
                     </div>
 
-                    {/* Tasks — lg:min-h-0 keeps the list constrained so it
-                        scrolls internally instead of clipping; lg:pb-6 gives
+                    {/* Tasks — min-h-0 keeps the list constrained so it
+                        scrolls internally instead of clipping; pb-6 gives
                         the last card breathing room at the shell edge. */}
-                    <div className="flex flex-col gap-3 lg:gap-4 overflow-visible lg:overflow-y-auto lg:min-h-0 lg:pb-6 overscroll-contain pr-0 lg:pr-2">
+                    <div className="flex flex-col gap-3 lg:gap-4 overflow-y-auto min-h-0 pb-6 overscroll-contain pr-0 lg:pr-2">
                       {columnTasks.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-10 text-gray-300 select-none">
                           <InboxIcon className="w-7 h-7 mb-2" aria-hidden="true" />

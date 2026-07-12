@@ -47,6 +47,30 @@ export default defineConfig({
       // Uses vi.doMock + dynamic import of an '@/...'-aliased dep tree, so it only
       // runs here via `npm run test:vitest`, never the tsx --test glob.
       'tests/unit/provider-key-auth-store.test.ts',
+      // P5-01 — My AI CEO BETA. Upload validation (5GB/executable break-it),
+      // the feature flag, the DB-backed chat transcript store (proves migration
+      // 101), the ONE-trust-engine-TWO-channels routing (ceo-chat → transcript,
+      // telegram → Telegram), and the gateway forwarder graceful-down path. All
+      // use vitest globals / vi.mock / the '@' alias, so they run here only —
+      // the tsx --test glob (npm run test:unit) skips them (see package.json).
+      'tests/unit/ceo-chat-upload-validation.test.ts',
+      'tests/unit/ceo-chat-config.test.ts',
+      'tests/unit/ceo-chat-store.test.ts',
+      'tests/unit/trust-engine-ceo-chat-channel.test.ts',
+      'tests/unit/ceo-chat-gateway-forward.test.ts',
+      // P5-01 FIX: gatewayTransport.forward() must session-filter the shared
+      // gateway 'notification' relay (getOpenClawClient() caches ONE client
+      // per target, so concurrent chats share its single notification
+      // stream). Drives the REAL gatewayTransport against a mocked
+      // '@/lib/openclaw/client', so — like provider-key-auth-store.test.ts —
+      // it only runs here via `npm run test:vitest`, never the tsx --test glob.
+      'tests/unit/ceo-chat-gateway-session-isolation.test.ts',
+      // Same P5-01 area, but drives the REAL gatewayTransport.forward() (queue
+      // bridge, extractText() key precedence, completion-method regex,
+      // REPLY_TIMEOUT_MS fallback, createSession id extraction, connect-failure
+      // gateway_down path) against a fake OpenClawClient EventEmitter, mocked
+      // via vi.doMock('@/lib/openclaw/client', ...) — vitest-only, same reason.
+      'tests/unit/ceo-chat-gateway-transport.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
