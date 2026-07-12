@@ -19,6 +19,16 @@
  * NOT throw into the route — it yields a single `gateway_down` chunk so the UI can
  * render "Your AI CEO is restarting — Telegram still works" and the message is
  * never lost silently (it was already persisted by the route before forwarding).
+ *
+ * Session-scoped relay: `getOpenClawClient()` caches ONE client instance per
+ * target (client.ts), so every concurrent ceo-chat request against the same
+ * box (two tabs, two chats) shares the '__self__' singleton and its single
+ * 'notification' event stream. `forward()` therefore filters every incoming
+ * notification against ITS OWN gatewaySessionId (see `extractSessionId()`)
+ * before relaying a token or closing the stream — an unmatched/unattributable
+ * frame is dropped, never relayed. Without this, two concurrent chats would
+ * interleave each other's tokens and a foreign completion event could close
+ * the wrong stream.
  */
 import type { OpenClawClientTarget } from '@/lib/openclaw/client';
 
@@ -73,6 +83,27 @@ function extractText(payload: unknown): string | null {
   if (typeof payload !== 'object') return null;
   const p = payload as Record<string, unknown>;
   for (const key of ['delta', 'text', 'content', 'chunk', 'token', 'message']) {
+    const v = p[key];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
+}
+
+/**
+ * Best-effort gateway-session-id extraction from an arbitrary notification
+ * payload, so `forward()` can tell whether a 'notification' frame belongs to
+ * ITS OWN gateway session before relaying it. `getOpenClawClient()` caches
+ * ONE client instance per target — every concurrent ceo-chat request against
+ * the same box shares the '__self__' singleton (client.ts) and therefore
+ * shares its single 'notification' event stream. Mirrors the RPC param name
+ * (`session_id`) the client itself already uses for `sessions.send` /
+ * `sessions.history`; the extra keys are defensive about payload-shape drift,
+ * same as `extractText()` above.
+ */
+function extractSessionId(payload: unknown): string | null {
+  if (payload == null || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  for (const key of ['session_id', 'sessionId', 'session', 'id']) {
     const v = p[key];
     if (typeof v === 'string' && v.length > 0) return v;
   }
@@ -135,18 +166,11 @@ export const gatewayTransport: ChatTransport = {
       resolveNext = null;
     };
 
-    // The gateway emits 'notification' frames; we relay the ones that carry text
-    // and end on a completion/idle signal. Defensive about the exact shape.
-    const onNotification = (msg: { method?: string; params?: unknown }) => {
-      const method = String(msg.method || '');
-      const text = extractText(msg.params);
-      if (text) push({ type: 'token', text });
-      if (/complete|done|idle|finished|end/i.test(method)) {
-        push({ type: 'done' });
-        close();
-      }
-    };
-    client.on('notification', onNotification);
+    // The 'notification' listener is registered further down, once the
+    // gateway session id for THIS forward() call is known, so it can be
+    // declared here and detached in `finally` regardless of where the try
+    // block exits.
+    let onNotification: ((msg: { method?: string; params?: unknown }) => void) | null = null;
 
     const timer = setTimeout(() => {
       push({ type: 'done' });
@@ -164,6 +188,27 @@ export const gatewayTransport: ChatTransport = {
         (session as { id?: string; session_id?: string })?.id ||
         (session as { session_id?: string })?.session_id ||
         req.sessionId;
+
+      // The gateway emits 'notification' frames on the SHARED client for every
+      // session in flight (concurrent chats/tabs interleave on the same
+      // '__self__' singleton — client.ts:832), so relay only frames that carry
+      // THIS forward() call's own gatewaySessionId, and only end the stream on
+      // a completion/idle signal for THIS session. A frame we cannot attribute
+      // to a session is, by definition, not provably ours — drop it rather
+      // than risk relaying (or closing on) a foreign chat's event.
+      onNotification = (msg: { method?: string; params?: unknown }) => {
+        const notifSessionId = extractSessionId(msg.params);
+        if (notifSessionId !== gatewaySessionId) return;
+        const method = String(msg.method || '');
+        const text = extractText(msg.params);
+        if (text) push({ type: 'token', text });
+        if (/complete|done|idle|finished|end/i.test(method)) {
+          push({ type: 'done' });
+          close();
+        }
+      };
+      client.on('notification', onNotification);
+
       await client.sendMessage(gatewaySessionId, req.content);
 
       // Drain the bridge until closed or timed out.
@@ -180,7 +225,7 @@ export const gatewayTransport: ChatTransport = {
       yield { type: 'error', message: err instanceof Error ? err.message : 'Failed to reach the agent.' };
     } finally {
       clearTimeout(timer);
-      client.off('notification', onNotification);
+      if (onNotification) client.off('notification', onNotification);
     }
   },
 };

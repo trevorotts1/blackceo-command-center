@@ -58,6 +58,19 @@ export default defineConfig({
       'tests/unit/ceo-chat-store.test.ts',
       'tests/unit/trust-engine-ceo-chat-channel.test.ts',
       'tests/unit/ceo-chat-gateway-forward.test.ts',
+      // P5-01 FIX: gatewayTransport.forward() must session-filter the shared
+      // gateway 'notification' relay (getOpenClawClient() caches ONE client
+      // per target, so concurrent chats share its single notification
+      // stream). Drives the REAL gatewayTransport against a mocked
+      // '@/lib/openclaw/client', so — like provider-key-auth-store.test.ts —
+      // it only runs here via `npm run test:vitest`, never the tsx --test glob.
+      'tests/unit/ceo-chat-gateway-session-isolation.test.ts',
+      // Same P5-01 area, but drives the REAL gatewayTransport.forward() (queue
+      // bridge, extractText() key precedence, completion-method regex,
+      // REPLY_TIMEOUT_MS fallback, createSession id extraction, connect-failure
+      // gateway_down path) against a fake OpenClawClient EventEmitter, mocked
+      // via vi.doMock('@/lib/openclaw/client', ...) — vitest-only, same reason.
+      'tests/unit/ceo-chat-gateway-transport.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

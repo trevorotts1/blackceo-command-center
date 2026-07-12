@@ -23,7 +23,11 @@ export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024; // 200 MB
  * a non-empty MIME type) that MIME type is in the extension's set. A missing /
  * empty MIME type falls back to the extension alone (some mobile pickers send
  * `application/octet-stream` or nothing) — the extension gate still blocks an
- * executable renamed with a disallowed extension.
+ * executable renamed with a disallowed extension. For binary media types
+ * (images/video/audio — see MAGIC_SNIFFERS below) that extension-only fallback
+ * is further tightened: an executable renamed `malware.png` and sent with an
+ * empty/octet-stream MIME is refused unless its actual bytes match the format's
+ * magic-byte signature.
  */
 export const ALLOWED_UPLOAD_TYPES: Record<string, string[]> = {
   // Documents
@@ -58,7 +62,69 @@ export interface UploadCandidate {
   mimeType?: string | null;
   /** The byte size of the upload. */
   size: number;
+  /**
+   * A small prefix of the ACTUAL file bytes (the first ~32 bytes are enough
+   * for every signature below), used to close the MIME-gate bypass: a
+   * renamed executable sent with an empty/`application/octet-stream` MIME
+   * type. Only required when the extension is a binary media type (see
+   * MAGIC_SNIFFERS) and no trustworthy MIME was declared — see
+   * `needsContentSniff` on the result when this is missing.
+   */
+  bytesPrefix?: Uint8Array | ArrayBuffer | number[];
 }
+
+/** Normalize any of the accepted byte-prefix shapes to a Uint8Array. */
+function toUint8Array(input: Uint8Array | ArrayBuffer | number[]): Uint8Array {
+  if (input instanceof Uint8Array) return input;
+  if (Array.isArray(input)) return Uint8Array.from(input);
+  return new Uint8Array(input);
+}
+
+/** True when `bytes` starts with the given byte sequence at `offset`. */
+function bytesStartWith(bytes: Uint8Array, sig: number[], offset = 0): boolean {
+  if (bytes.length < offset + sig.length) return false;
+  for (let i = 0; i < sig.length; i++) {
+    if (bytes[offset + i] !== sig[i]) return false;
+  }
+  return true;
+}
+
+/** True when `bytes` has the ASCII string `text` at `offset`. */
+function asciiAt(bytes: Uint8Array, offset: number, text: string): boolean {
+  if (bytes.length < offset + text.length) return false;
+  for (let i = 0; i < text.length; i++) {
+    if (bytes[offset + i] !== text.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+/** ISO-BMFF (MP4/QuickTime family) box types that legitimately open a file. */
+const ISO_BMFF_BOX_TYPES = ['ftyp', 'moov', 'mdat', 'free', 'skip', 'wide'];
+
+/**
+ * Magic-byte signature checkers, keyed by lower-cased extension, for every
+ * binary media type in ALLOWED_UPLOAD_TYPES (images, video, audio). An
+ * extension with no entry here has no cheap, reliable signature (e.g. text
+ * formats) and is left on the extension-only fallback. Extensions listed
+ * here are exactly the ones an attacker would rename an executable to
+ * ("malware.png") to ride the octet-stream/empty-MIME fallback — see
+ * validateUpload().
+ */
+export const MAGIC_SNIFFERS: Record<string, (bytes: Uint8Array) => boolean> = {
+  png: (b) => bytesStartWith(b, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  jpg: (b) => bytesStartWith(b, [0xff, 0xd8, 0xff]),
+  jpeg: (b) => bytesStartWith(b, [0xff, 0xd8, 0xff]),
+  gif: (b) => asciiAt(b, 0, 'GIF8'),
+  webp: (b) => asciiAt(b, 0, 'RIFF') && asciiAt(b, 8, 'WEBP'),
+  heic: (b) => asciiAt(b, 4, 'ftyp'),
+  mp4: (b) => asciiAt(b, 4, 'ftyp'),
+  m4v: (b) => asciiAt(b, 4, 'ftyp'),
+  mov: (b) => ISO_BMFF_BOX_TYPES.some((box) => asciiAt(b, 4, box)),
+  webm: (b) => bytesStartWith(b, [0x1a, 0x45, 0xdf, 0xa3]),
+  mp3: (b) => asciiAt(b, 0, 'ID3') || (b.length >= 2 && b[0] === 0xff && (b[1] & 0xe0) === 0xe0),
+  m4a: (b) => asciiAt(b, 4, 'ftyp'),
+  wav: (b) => asciiAt(b, 0, 'RIFF') && asciiAt(b, 8, 'WAVE'),
+};
 
 export type UploadRejectReason =
   | 'empty'
@@ -74,6 +140,14 @@ export interface UploadValidation {
   safeName?: string;
   /** The lower-cased extension WITHOUT the dot. */
   ext?: string;
+  /**
+   * Set (with `ok: false`) when this is a binary media extension with no
+   * trustworthy declared MIME type and no `bytesPrefix` was supplied — the
+   * caller should read a small prefix of the real bytes (see MAGIC_SNIFFERS)
+   * and re-validate with `bytesPrefix` set before treating this as a final
+   * rejection.
+   */
+  needsContentSniff?: boolean;
 }
 
 /** Extract a lower-cased, dotless extension from a filename, or '' if none. */
@@ -141,15 +215,41 @@ export function validateUpload(candidate: UploadCandidate): UploadValidation {
 
   // When the browser supplied a real MIME type, it must also match the
   // extension's allow-set — so a `.png` carrying `application/x-msdownload`
-  // (an executable masquerading as an image) is refused. An empty / generic
-  // octet-stream MIME falls back to the extension gate above (already passed).
+  // (an executable masquerading as an image) is refused.
   const declared = (mimeType || '').toLowerCase().split(';')[0].trim();
-  if (declared && declared !== 'application/octet-stream' && !allowedMimes.includes(declared)) {
+  const isGenericMime = !declared || declared === 'application/octet-stream';
+  if (!isGenericMime && !allowedMimes.includes(declared)) {
     return {
       ok: false,
       reason: 'type-not-allowed',
       message: `The file's content type "${declared}" doesn't match a "${ext}" file.`,
     };
+  }
+
+  // An empty / generic octet-stream MIME (some mobile pickers send this)
+  // falls back to the extension gate above — EXCEPT for binary media types,
+  // where extension alone is exactly what lets an executable renamed
+  // `malware.png` through. For those, require the real bytes to match the
+  // format's magic-byte signature before accepting.
+  const sniffer = MAGIC_SNIFFERS[ext];
+  if (isGenericMime && sniffer) {
+    if (candidate.bytesPrefix === undefined) {
+      return {
+        ok: false,
+        reason: 'type-not-allowed',
+        needsContentSniff: true,
+        message: `Can't verify this "${ext}" file without a content type — its actual bytes need to be checked.`,
+        safeName,
+        ext,
+      };
+    }
+    if (!sniffer(toUint8Array(candidate.bytesPrefix))) {
+      return {
+        ok: false,
+        reason: 'type-not-allowed',
+        message: `The file's contents don't match a "${ext}" file.`,
+      };
+    }
   }
 
   return { ok: true, safeName, ext };

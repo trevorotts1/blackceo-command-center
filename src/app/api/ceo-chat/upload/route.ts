@@ -58,8 +58,19 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'file is required' }, { status: 400 });
   }
 
-  // Validate from the descriptor (name/type/size) BEFORE reading any bytes.
-  const verdict = validateUpload({ filename: file.name, mimeType: file.type, size: file.size });
+  // Validate from the descriptor (name/type/size) BEFORE reading any bytes —
+  // a 5GB (or otherwise oversized/empty) file is refused on this pass alone.
+  let verdict = validateUpload({ filename: file.name, mimeType: file.type, size: file.size });
+
+  // Only when the descriptor alone can't be trusted (a binary media
+  // extension with no real MIME type — the executable-renamed-as-.png
+  // bypass) do we touch bytes at all, and even then only a small magic-byte
+  // prefix, not the whole file.
+  if (!verdict.ok && verdict.needsContentSniff) {
+    const prefix = Buffer.from(await file.slice(0, 32).arrayBuffer());
+    verdict = validateUpload({ filename: file.name, mimeType: file.type, size: file.size, bytesPrefix: prefix });
+  }
+
   if (!verdict.ok || !verdict.safeName) {
     return NextResponse.json(
       { error: verdict.message || 'Upload rejected', reason: verdict.reason },

@@ -1,6 +1,6 @@
-## [unreleased] — branch `feat/my-ai-ceo-beta` — feat(ui,api,db): P5-01 — the BETA "My AI CEO" dashboard surface
+## [v5.23.0] — 2026-07-12 — feat(ui,api,db): P5-01 — the BETA "My AI CEO" dashboard surface + CC responsiveness
 
-Net-new build (zero prior coverage in the spec cluster): a BETA surface on the CC home — **My AI CEO** — where the client talks DIRECTLY to their on-box main agent in a clean UI: send requests, upload documents/images/videos, and watch what's happening. A deliberate competitor to Telegram and the OpenClaw UI. Feature-flagged, clearly labeled, and it degrades to "use Telegram meanwhile" — never a broken-looking core dashboard. Built on top of Phases 1–3 (CC v5.19.1). Version is assigned by the CC merge train at merge time (Section 2.6) — this branch does not bump it.
+Net-new build (zero prior coverage in the spec cluster): a BETA surface on the CC home — **My AI CEO** — where the client talks DIRECTLY to their on-box main agent in a clean UI: send requests, upload documents/images/videos, and watch what's happening. A deliberate competitor to Telegram and the OpenClaw UI. Feature-flagged, clearly labeled, and it degrades to "use Telegram meanwhile" — never a broken-looking core dashboard. Built on top of Phases 1–3, rebased onto v5.22.0 (the branch was cut before P4-01/P4-02/P4-03 landed on `main`; the rebase was clean — only this CHANGELOG heading conflicted, no source-file conflicts).
 
 ### Backend (P5-01 (c) step 1)
 - **`POST /api/ceo-chat/message`** — persists the client's message to a new `ceo_chat_messages` table, forwards it to the on-box OpenClaw gateway (`ws://127.0.0.1:18789` — the ONLY sanctioned door; never bypassed), and streams the reply as SSE. The user's message is persisted BEFORE forwarding, so it is never lost — even when the gateway is down (a `gateway_down` SSE event drives the degrade banner).
@@ -34,6 +34,16 @@ New `ceo_chat_messages` table (session_id, role, content, kind, task_id, attachm
 - 32/32 new tests pass; full existing vitest suite 196/196 green (no regression); `tsc --noEmit` clean; `next build` compiles all four routes + the page. Fail-first: every suite imports modules (`src/lib/ceo-chat/*`) that do not exist pre-P5-01, so all are red against the prior tree.
 
 Live-box proof (a full request→ack→progress→done loop inside the new UI on the operator box, prompt-injection handling at the gateway boundary, and the Playwright screenshots on a running server) is the QC judge's live pass and the P6-01 per-box probe — this build ran in an isolated scratch checkout with no live gateway.
+
+### P5-01 fix round 1 (this integration)
+- **Gateway session isolation** (`src/lib/ceo-chat/gateway.ts`): `getOpenClawClient()` caches ONE client per target, so concurrent ceo-chat requests shared the `__self__` singleton's single 'notification' stream and interleaved tokens / closed the wrong stream. `forward()` now filters every notification against ITS OWN resolved gateway session id (new `extractSessionId()`), dropping unattributable frames. Covered by `ceo-chat-gateway-session-isolation.test.ts` (fail-first) + `ceo-chat-gateway-transport.test.ts` (queue bridge / extractText precedence / completion regex / REPLY_TIMEOUT fallback / connect-down path).
+- **Board mobile responsiveness** (`src/components/MissionQueue.tsx`): columns now render as a horizontally-scrollable, snap-aligned strip at every breakpoint (was a full-width vertical stack below `lg`), plus a `lg:hidden` column picker to jump straight to a column. Body never scrolls horizontally.
+- **Upload MIME-gate bypass closed** (`src/lib/ceo-chat/upload.ts` + `upload/route.ts`): an executable renamed `malware.png` with empty/`octet-stream` MIME no longer rides the extension-only fallback — binary-media extensions now require a magic-byte signature match (route reads only a 32-byte prefix, never the whole file), surfaced via a new `needsContentSniff` flag.
+- **Responsive-proof E2E self-boots its server** (`playwright.my-ai-ceo.config.ts` + new `my-ai-ceo-responsive.fixture.ts` / `.global-setup.ts`): the suite stands up its own `next dev` against a throwaway workspace (dedicated port 4125) and FAILS if the server never comes up (was `test.skip` when nothing listened on :4000), and adds TaskModal coverage (chat + board + modal × 360/768/1280).
+
+No client names, no secret values, no roster human names in the diff, no canary, no model added/removed/substituted, no client box touched.
+
+- **Version roll** — repo rolled v5.22.0 → **v5.23.0** via `scripts/bump-version.sh` (all 5 locations in lockstep). Annotated tag `v5.23.0` to be cut on the release merge commit.
 
 ## [v5.22.0] — 2026-07-12 — test(persona): P4-01 — cover the untested blend-rationale tier of buildPersonaReason
 
