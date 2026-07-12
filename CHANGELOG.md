@@ -1,3 +1,16 @@
+## [v5.22.0] — 2026-07-12 — test(persona): P4-01 — cover the untested blend-rationale tier of buildPersonaReason
+
+Merges `feat/p4-01-persona-reason-blend-rationale` into `main`, `--no-ff`. Clean merge, no conflicts — the branch adds one new test file only; `main`'s changes since branch-cut (P4-02, P4-03) touch none of the same path. Version re-bumped fresh to v5.22.0 on top of P4-03's v5.21.0 (concurrent merge-train landed first).
+
+`buildPersonaReason` (`src/lib/persona-selector.ts`) has a documented three-tier precedence: (1) the scorer's own `message`; (2) else the blend voice decision's `why` (`result.bundle?.voice?.audience_persona?.why || result.bundle?.voice?.topic_persona?.why`); (3) else a synthesized sentence. Every prior test (`p2-02-task-modal-fields.test.ts`, `p2-02-persona-reason-persistence.test.ts`) exercised tier 1 and tier 3 only — tier 2, the entire reason the persona-blend feature (P4-01/P4-02) exists, was untested. A regression that broke the bundle-rationale reuse (e.g. a rename of `voice` → `voice_decision`, or reading `.rationale` instead of `.why`) would ship silently: `buildPersonaReason` would just fall through to the tier-3 synthesized sentence with no test noticing the fallback fired for the wrong reason.
+
+### Tests
+- `tests/unit/p4-01-persona-reason-blend-rationale.test.ts` (fail-first, targets the exact precedence contract in the `buildPersonaReason` docstring) — proves the audience-persona `why` is preferred when present, the topic-persona `why` is used as fallback when the audience one is absent, and the tier-3 synthesized sentence only fires when neither bundle rationale exists.
+
+No client names, no secret values, no roster human names in the diff, no canary, no model added/removed/substituted, no client box touched.
+
+- **Version roll** — repo rolled v5.21.0 → **v5.22.0** via `scripts/bump-version.sh` (all 5 locations in lockstep). Annotated tag `v5.22.0` cut on the release merge commit.
+
 ## [v5.21.0] — 2026-07-12 — fix(routing,embeddings): P4-03 — department-embedding cache + shipped-asset refusal guard
 
 Merges `fix/dept-router-embed-cache` into `main`, `--no-ff`. Companion to the onboarding repo's `feat/sop-embed-once` branch — Part of P4-03 (SECTION 6 of the 2026-07-11 spec). Clean merge, no conflicts — the branch's changes are scoped to `src/lib/routing/department-router.ts`, `scripts/backfill-sop-embeddings.ts`, and two new test files; `main`'s changes since branch-cut (P4-02, persona/board) touch none of the same paths. Version re-bumped fresh to v5.21.0 on top of P4-02's v5.20.0 (concurrent merge-train landed first).
