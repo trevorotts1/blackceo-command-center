@@ -484,6 +484,123 @@ test('P1-08 step 2b (d): existing app already has Google attached → no redunda
   }
 });
 
+// ─── Scenario E: existing app, existing 'Allowed users' policy carries a stale
+// login_method:onetimepin require clause, Google now available → the script must
+// reconcile (PUT) the policy so the stale clause is gone. This is the exact
+// discrepancy the P1-08 code comments describe: an app the OLD script
+// provisioned kept the restrictive clause and Google login was rejected at
+// policy eval even though Google is in allowed_idps.
+//
+// FAIL-FIRST: before this fix, the "policy already exists" branch always
+// skipped entirely (POLICY_PRESENT=yes -> no PUT is ever issued to the
+// policy). This test asserts a PUT to the policy IS issued and that its body
+// no longer contains "login_method" -- it fails against the pre-reconciliation
+// branch (no such PUT call exists in the log) and passes once the fix lands ──
+
+test('P1-08 policy reconciliation: existing app + stale login_method:onetimepin policy + Google available → PUT removes the clause', () => {
+  const routes: RouteFixture[] = [
+    {
+      method: 'GET',
+      urlContains: '/identity_providers',
+      body: {
+        success: true,
+        result: [
+          { id: 'otp-111', type: 'onetimepin', name: 'One-time PIN login' },
+          { id: 'goog-222', type: 'google', name: 'Google Workspace' },
+        ],
+      },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps?per_page=1000',
+      body: { success: true, result: [{ id: 'app-stale', domain: 'stale.zerohumanworkforce.com' }] },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps/app-stale',
+      body: {
+        success: true,
+        result: {
+          id: 'app-stale',
+          aud: 'aud-stale',
+          domain: 'stale.zerohumanworkforce.com',
+          // Already carries both IdPs (e.g. reconciled by a prior run of
+          // Step 2b) so this scenario isolates the POLICY reconciliation
+          // path specifically -- no Step 2b app PUT should fire here.
+          allowed_idps: ['otp-111', 'goog-222'],
+        },
+      },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps/app-stale/policies',
+      body: {
+        success: true,
+        result: [
+          {
+            id: 'pol-stale',
+            name: 'Allowed users',
+            decision: 'allow',
+            include: [{ email: { email: 'owner@stale.com' } }],
+            // The stale, over-restrictive clause the OLD (pre-P1-08) script
+            // always attached -- this is what makes Google logins fail at
+            // policy eval on apps that script provisioned.
+            require: [{ login_method: { id: 'onetimepin' } }],
+          },
+        ],
+      },
+    },
+    {
+      method: 'PUT',
+      urlContains: '/apps/app-stale/policies/pol-stale',
+      body: { success: true, result: { id: 'pol-stale' } },
+    },
+  ];
+
+  const fixture = buildFixture(routes) as any;
+  try {
+    const { exitCode, stderr } = runSetupScript(fixture, ['stale.zerohumanworkforce.com', 'owner@stale.com']);
+    assert.strictEqual(exitCode, 0, `Expected exit 0 but got ${exitCode}.\nstderr:\n${stderr}`);
+
+    const log = fixture.readCallLog();
+
+    // No Step 2b app PUT expected -- allowed_idps already had both ids.
+    const appAttachCall = log.find(
+      (c) => c.method === 'PUT' && (c.url ?? '').includes('/apps/app-stale') && !(c.url ?? '').includes('policies'),
+    );
+    assert.strictEqual(appAttachCall, undefined, 'app already has both IdPs — Step 2b must not issue a redundant app PUT');
+
+    // The policy reconciliation PUT must exist and must NOT carry login_method.
+    // Pre-fix: this call does not exist at all (the branch skipped entirely on
+    // POLICY_PRESENT=yes) — this assertion fails against the pre-fix/pre-
+    // reconciliation script.
+    const policyUpdateCall = log.find(
+      (c) => c.method === 'PUT' && (c.url ?? '').includes('/apps/app-stale/policies/pol-stale'),
+    );
+    assert.ok(policyUpdateCall, 'must PUT /apps/app-stale/policies/pol-stale to reconcile the stale policy');
+    const policyUpdateBody = parseData(policyUpdateCall);
+    assert.ok(policyUpdateBody, 'policy update call must carry a JSON body');
+    assert.strictEqual(
+      JSON.stringify(policyUpdateBody).includes('login_method'),
+      false,
+      'reconciled policy body must not contain login_method — the stale require clause must be dropped',
+    );
+    // The email allow-list itself must survive the reconciliation.
+    assert.deepStrictEqual(
+      policyUpdateBody.include,
+      [{ email: { email: 'owner@stale.com' } }],
+      'reconciled policy must retain the existing include list',
+    );
+
+    assert.ok(
+      stderr.includes('stale login_method:onetimepin require clause'),
+      'must log that it detected and is removing the stale clause',
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 // ─── Structural: the script file exists (behavioral proof lives in Scenario A/B/C/D above —
 // per spec 2.4, correctness of the emitted request bodies is judged by executing the
 // script and reading its ACTUAL runtime call log, never by grepping the script source) ──

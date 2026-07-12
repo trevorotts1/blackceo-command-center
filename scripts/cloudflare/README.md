@@ -56,26 +56,49 @@ Multiple operator emails are supported by listing them after the subdomain.
    subdomain with a 336-hour (14-day) session duration and `allowed_idps`
    set to whichever of One-Time PIN / Google are available. If an app for
    that exact domain already exists and Google has newly become available
-   since it was created, the script attaches Google to it.
+   since it was created, the script attaches Google to it. **Ownership
+   note:** that attach call is a Cloudflare `PUT /apps/{id}`, which REPLACES
+   the app record with exactly the fields the script sends (name, domain,
+   type, session_duration, allowed_idps) -- any option set by hand in the
+   dashboard on that app (app launcher visibility, a custom deny page, CORS,
+   etc.) is reset to Cloudflare's default by this call. This script owns and
+   re-asserts only those 5 fields on every app it touches; re-apply any
+   hand-set option after running the script if one is needed.
 4. **Attaches an Allow policy** named "Allowed users" that includes the
    supplied operator email(s). The policy does not restrict login method --
    that is enforced once, at the app level, via `allowed_idps` above. If a
-   policy with that name already exists on the app, it is left in place.
+   policy with that name already exists on the app, the script GETs it and,
+   **only if it still carries the old `require: login_method=onetimepin`
+   clause** (the restriction the pre-P1-08 version of this script always
+   attached), PUTs it back with that clause removed -- name, decision, and
+   the existing email `include` list are preserved. A policy that is
+   already clean is left untouched; no other field is ever modified.
 
 ## Idempotency
 
 Safe to re-run. The script checks for the existing IdP, Application,
 Application `allowed_idps`, and Policy before any create/update call. On a
 second run for the same subdomain you will see "already exists" /
-"already has Google attached" lines on stderr and the same Application
-UUID + AUD on stdout. The only mutation on an already-existing app is
-attaching Google to `allowed_idps` the first time it becomes available at
-the account level.
+"already has Google attached" / "no login_method restriction to remove"
+lines on stderr and the same Application UUID + AUD on stdout. The only
+mutations on an already-existing app are: attaching Google to
+`allowed_idps` the first time it becomes available at the account level,
+and removing a stale `login_method` require clause from the "Allowed
+users" policy if one is found and Google is available to attach.
 
-To change the allow-list after the fact, edit the policy via the Cloudflare
-dashboard (Zero Trust -> Access -> Applications -> [your app] -> Policies)
-or PUT it via the API directly. This script intentionally does not mutate
-an existing policy.
+**Residue on apps provisioned before this fix:** pulling this fix into the
+repo does not change anything on a box until the script is actually run
+again against it -- the stale policy clause lives in Cloudflare's API, not
+in this repo. Blast radius is every app created by a pre-P1-08 checkout
+(unmeasured until the P6-01 per-box probe runs); remediation is re-running
+this script against the affected subdomain, which is safe (idempotent) and
+touches only the `require` field of an already-existing policy.
+
+To change the allow-list (the email `include` set) after the fact, edit
+the policy via the Cloudflare dashboard (Zero Trust -> Access ->
+Applications -> [your app] -> Policies) or PUT it via the API directly --
+this script does not add or remove emails from an existing policy, only
+reconciles the login-method restriction described above.
 
 ## Output env vars
 

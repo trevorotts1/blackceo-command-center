@@ -249,6 +249,22 @@ APP_AUD=$(echo "$APP_DETAIL" | json_extract aud)
 # available and isn't wired yet. GET-check-then-create-only-missing, applied
 # to the app's allowed_idps rather than to the app record itself: never
 # touches an app that already lists every currently-known IdP.
+#
+# KNOWN RESIDUE (documented per spec Section 2.7, not GET-merged here): a
+# Cloudflare PUT /apps/{id} REPLACES the app record with exactly the fields
+# in the body. This script sends only name/domain/type/session_duration/
+# allowed_idps, so if an app had any hand-set options in the Cloudflare
+# dashboard (app_launcher_visible, custom deny/block-page messages, CORS
+# headers, custom_non_identity_deny_url, etc.) BEFORE this PUT ran, those
+# options are reset to Cloudflare defaults by this call -- the script owns
+# and re-asserts only the 5 fields listed above on every app it touches.
+# Remediation if a box needs a hand-set option preserved: re-apply that
+# option in the dashboard AFTER this script runs (it is idempotent and will
+# not touch the app again once allowed_idps already matches), or extend this
+# PUT to GET-merge the full app record (`cf_call GET "/apps/${APP_ID}"`,
+# override only `allowed_idps` on the returned object, PUT the merged
+# object back) if per-app hand-set options become common enough to need
+# in-script preservation.
 # ---------------------------------------------------------------------------
 
 if [ -n "$GOOGLE_IDP_ID" ]; then
@@ -280,24 +296,72 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3: Create (or detect) the Allow policy
+# Step 3: Create (or reconcile) the Allow policy
 # ---------------------------------------------------------------------------
 
 echo "==> Checking existing policies on App ${APP_ID}..." >&2
 POLICIES=$(cf_call GET "/apps/${APP_ID}/policies")
 
-POLICY_PRESENT=$(echo "$POLICIES" | python3 -c "
+EXISTING_POLICY_JSON=$(echo "$POLICIES" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for p in data.get('result', []) or []:
     if p.get('name') == 'Allowed users':
-        print('yes')
+        print(json.dumps(p))
         break
 " || true)
 
-if [ "$POLICY_PRESENT" = "yes" ]; then
-  echo "    Policy 'Allowed users' already exists on this app. Skipping create." >&2
-  echo "    To change the allow-list, edit the policy via dashboard or PUT it directly." >&2
+if [ -n "$EXISTING_POLICY_JSON" ]; then
+  echo "    Policy 'Allowed users' already exists on this app." >&2
+
+  # P1-08 FIX (re-derived after a failed QC pass): an app the OLD
+  # (pre-P1-08) script provisioned carries a policy with
+  # "require":[{"login_method":{"id":"onetimepin"}}] -- an AND clause that
+  # rejects any login NOT performed via One-Time PIN, even after Step 2/2b
+  # above just attached Google to the app's allowed_idps. Skipping this
+  # policy outright (the old behavior) left that clause in place forever, so
+  # Google logins on an old-script-provisioned app kept failing at policy
+  # eval despite Google being an allowed IdP -- exactly the incompatibility
+  # this unit's code comments describe elsewhere in this file. Detect the
+  # stale clause and, only when Google is available to attach, reconcile the
+  # policy: GET-check-then-update-only-if-needed, the same idempotence
+  # pattern the rest of this script already uses -- a policy that is already
+  # clean (no login_method require, or Google not yet available) is left
+  # untouched.
+  POLICY_ID=$(echo "$EXISTING_POLICY_JSON" | json_extract id)
+  HAS_LOGIN_METHOD=$(echo "$EXISTING_POLICY_JSON" | python3 -c "
+import json, sys
+p = json.load(sys.stdin)
+require = p.get('require') or []
+found = any(isinstance(r, dict) and 'login_method' in r for r in require)
+print('yes' if found else 'no')
+")
+
+  if [ -n "$GOOGLE_IDP_ID" ] && [ "$HAS_LOGIN_METHOD" = "yes" ]; then
+    echo "==> Policy 'Allowed users' on App ${APP_ID} carries a stale login_method:onetimepin require clause from the pre-P1-08 script -- Google is available but would be rejected at policy eval. Removing the clause..." >&2
+
+    # Preserve the policy's own name/decision/include; drop only the
+    # restrictive require clause. Built from the policy record already
+    # fetched above (no extra GET needed) rather than hand-assembled from
+    # shell variables, so unexpected characters in email addresses/names
+    # can never corrupt the JSON we send back.
+    RECONCILED_POLICY_BODY=$(echo "$EXISTING_POLICY_JSON" | python3 -c "
+import json, sys
+p = json.load(sys.stdin)
+body = {
+    'name': p.get('name'),
+    'decision': p.get('decision'),
+    'include': p.get('include') or [],
+}
+print(json.dumps(body))
+")
+
+    cf_call PUT "/apps/${APP_ID}/policies/${POLICY_ID}" "$RECONCILED_POLICY_BODY" >/dev/null
+    echo "    Policy 'Allowed users' updated -- login_method restriction removed. Login method is now enforced once, at the app level, via allowed_idps (Step 2/2b); this policy only restricts WHO (by email) is allowed in." >&2
+  else
+    echo "    Policy 'Allowed users' has no login_method restriction to remove (or Google is not yet available). Skipping update." >&2
+    echo "    To change the allow-list, edit the policy via dashboard or PUT it directly." >&2
+  fi
 else
   echo "==> Creating Allow policy with ${#EMAILS[@]} email(s)..." >&2
 
