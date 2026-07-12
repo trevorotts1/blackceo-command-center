@@ -23,7 +23,6 @@
  *   Semantic embeddings classify by MEANING against those real names.
  */
 
-import { createHash } from 'node:crypto';
 import { queryAll } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
@@ -329,8 +328,26 @@ interface DeptVectorCacheEntry {
 
 const _deptVectorCache = new Map<string, DeptVectorCacheEntry>();
 
-function _deptTextHash(text: string): string {
-  return createHash('sha1').update(text).digest('hex');
+async function _deptTextHash(text: string): Promise<string> {
+  // Web Crypto SHA-1 (globalThis.crypto.subtle) rather than node:crypto's
+  // createHash. This module is pulled into the EDGE/instrumentation webpack
+  // bundle via the static chain instrumentation -> jobs/scheduler ->
+  // jobs/ceo-delegation-sweep -> here, so a top-level `import { createHash }
+  // from 'node:crypto'` makes `next build` fail with
+  //   UnhandledSchemeError: Reading from "node:crypto" is not handled by plugins
+  // even though this code only ever executes in the nodejs runtime. Web Crypto
+  // is a global in BOTH the nodejs (Node >=20) and edge runtimes and needs no
+  // module import, so it compiles cleanly for edge and yields the identical
+  // 40-char SHA-1 hex digest at runtime. This value is purely a
+  // cache-invalidation fingerprint (process-local, never persisted, never
+  // security-sensitive), so the algorithm and its behaviour are unchanged.
+  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(text));
+  const bytes = new Uint8Array(digest);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
 }
 
 /** Test-only: reset the cache between test cases so assertions don't leak
@@ -358,7 +375,7 @@ async function getCachedDepartmentVectors(
 
   for (const dept of departments) {
     const text = deptEmbedText(dept);
-    const hash = _deptTextHash(text);
+    const hash = await _deptTextHash(text);
     const cached = _deptVectorCache.get(dept.id);
     if (cached && cached.hash === hash) {
       resolved.set(dept.id, cached.vector);
