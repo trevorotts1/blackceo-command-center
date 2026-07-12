@@ -1,3 +1,21 @@
+## [v5.21.0] — 2026-07-12 — fix(routing,embeddings): P4-03 — department-embedding cache + shipped-asset refusal guard
+
+Merges `fix/dept-router-embed-cache` into `main`, `--no-ff`. Companion to the onboarding repo's `feat/sop-embed-once` branch — Part of P4-03 (SECTION 6 of the 2026-07-11 spec). Clean merge, no conflicts — the branch's changes are scoped to `src/lib/routing/department-router.ts`, `scripts/backfill-sop-embeddings.ts`, and two new test files; `main`'s changes since branch-cut (P4-02, persona/board) touch none of the same paths. Version re-bumped fresh to v5.21.0 on top of P4-02's v5.20.0 (concurrent merge-train landed first).
+
+Fixes two client-key-embedding waste patterns the 2026-07-11 investigation found in the CC SOP/routing embedding system (System 2):
+
+- **Department-vector cache** (`src/lib/routing/department-router.ts`): `semanticRankDepartments()` embedded the task text AND every department's (name+purpose+keywords) text on EVERY `comDispatch()` call. Adds a module-level department-vector cache keyed on a content hash of that same text — a department's vector is now embedded ONCE and reused until an operator edit changes the hash. Embed-call accounting: N+1 → 1 on a warm cache (task text only). Exports `_resetDeptVectorCacheForTests` / `_deptVectorCacheSizeForTests` for test isolation only.
+- **Shipped-asset refusal guard** (`scripts/backfill-sop-embeddings.ts`): the docstring previously prescribed "run this once per client... with the client's own key" — i.e. re-embedding the ENTIRE shared library from scratch on every client box. Adds `refuseFullRebuildIfShipped()`: `--force` (full re-embed of every SOP, including shared-library rows the operator already shipped with zero client-key spend) is REFUSED when the `sop_embeddings_shipped_asset` marker table is present (written by the onboarding repo's `provision_sop_embeddings.py` on import) — mirrors `embedding_engine.py::_refuse_full_rebuild_if_prebuilt`. New `--force-full-rebuild-shipped` is the operator-only override for a genuine embedding-model migration. The default (non-`--force`) run was ALREADY delta-only by construction (skips any `sop_id` with a same-model row) — the docstring is corrected to describe that accurately instead of prescribing a per-client full re-embed.
+
+### Tests (fail-first, verified against the pre-fix tree via git stash)
+- `tests/unit/dept-router-embed-cache.test.ts` (3 tests) — proves 4 texts on a cold-cache dispatch, 1 text on a warm-cache dispatch (N+1 → 1), and that editing one department invalidates only that department's cache entry.
+- `tests/unit/backfill-sop-embeddings-shipped-guard.test.ts` (4 tests, spawns the real script as a child process against a fixture DB built via the app's own migration chain) — proves the refusal, the operator override, and that a fresh/no-marker box is never blocked.
+- Existing suites re-verified green: `intelligent-routing.test.ts` (14), `route-task-bare-full-universe.test.ts` (8), `embedding-health.test.ts` (5), `sop-embedding-provider.test.ts` (25), `sop-semantic-search.test.ts` (11). Full `tsc --noEmit` clean.
+
+No client names, no secret values, no roster human names in the diff, no canary, no model added/removed/substituted, no client box touched.
+
+- **Version roll** — repo rolled v5.20.0 → **v5.21.0** via `scripts/bump-version.sh` (all 5 locations in lockstep). Annotated tag `v5.21.0` cut on the release merge commit.
+
 ## [v5.20.0] — 2026-07-12 — feat(persona,board): P4-02 — dual-persona blend live visibility, backfill + silent-regression lock
 
 Builds on the D1–D9 blend fixes (v5.3.0/v5.5.0). Those fixes made `--blend` fire, but P4-02's investigation found the feature was still effectively invisible and un-observable in prod: the blend had never left a live footprint, blend-less content tasks stayed blend-less forever, the confirm gate silently released under a neutral house voice after 30 min, and a D1 recurrence would again be indistinguishable from "nobody made a content task". This ships the REPO-buildable legs of P4-02 part (c) — steps 3, 5, and 6 — each with fail-first tests. (Steps 1/2/8 are live-box proof and step 4's operator-ICP fill are operator-box actions carried by the P6-01 rollout, not a repo change; step 4's repo side is P2-05 scope, not duplicated here.)
