@@ -21,6 +21,11 @@ Eight nullable columns on `tasks`, following the migration-097 pattern exactly (
 - `tests/unit/trust-engine-migration.test.ts` — migration 098 adds all eight columns + the index; the columns round-trip; `createTaskCore` threads `requester_channel`/`requester_chat_id` and leaves them NULL for internal tasks.
 - `tests/unit/db-upgrade-migration-ordering.test.ts` + `tests/unit/dispatch-ledger-reconcile.test.ts` — HEAD advanced 097 → 098 in lockstep (the migration-097 ledger-lie behaviour under test is unchanged).
 
+### QC fix iteration (P1-04 re-review)
+- **`executeSends` now wraps each plan's stamp-claims + `events` inserts in ONE explicit `transaction(...)`** so the "within a single transaction" contract is now accurate — a crash mid-claim can no longer leave a plan half-claimed (some stamps taken, others not); the claim is all-or-nothing, then the gateway send fires AFTER the durable commit (crash-safety ordering unchanged).
+- **Removed the unused `timeNow` import** from `trust-engine.ts` (the engine times off `ctx.now.toISOString()`).
+- **`tests/unit/ingest-requester-stamp.test.ts` (new)** — end-to-end coverage of the `POST /api/tasks/ingest` HTTP route parsing: a signed request with `requester_chat_id` + `requester_channel` persists both verbatim; a chat id with NO channel defaults the channel to `telegram`; no chat id leaves both NULL; a whitespace-only chat id trims to NULL (never report on a phantom chat). Fail-first against the pre-P1-04 route.
+
 ---
 
 ## [v5.16.2] — 2026-07-11 — fix(db,models,jobs): the migration LEDGER-LIE (dispatch silently dead) + Ollama Cloud made to actually work (404 base URL + the key CC never read) + the swallowed stale-sweep 401

@@ -43,7 +43,7 @@
  * thing that goes to the OPERATOR lane (notifySystem) — never to the client.
  */
 
-import { queryAll, queryOne, run, timeNow } from '@/lib/db';
+import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import { notifyTelegram, notifySystem, resolveOperatorChatId, resolveOwnerChatId } from '@/lib/notify';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -398,33 +398,42 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
 
   for (const plan of plans) {
     // ── Claim: durable stamp BEFORE dispatch (transactional outbox). ──
-    let anyClaimed = false;
-    for (const stamp of plan.stamps) {
-      const sets: string[] = [`${stamp.guardColumn} = ?`, 'updated_at = ?'];
-      const params: (string | null)[] = [nowIso, nowIso];
-      for (const [col, val] of Object.entries(stamp.extraSets)) {
-        sets.push(`${col} = ?`);
-        params.push(val);
-      }
-      params.push(stamp.taskId);
-      const res = run(
-        `UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND ${stamp.guardColumn} IS NULL`,
-        params,
-      );
-      if (res.changes > 0) {
-        anyClaimed = true;
-        // Operator-visibility events row so the board Activity tab shows the
-        // client-communication trail (P1-04 step 8, feeds P2-02).
-        try {
-          run(
-            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-            [uuidv4(), stamp.eventType, stamp.taskId, stamp.eventMessage, nowIso],
-          );
-        } catch {
-          // events row is best-effort telemetry — never block the send on it.
+    // A plan's stamp-claims AND their events rows commit together inside ONE
+    // explicit transaction, so a crash mid-claim can never leave a half-applied
+    // plan (some stamps taken, others not) — the whole claim is all-or-nothing,
+    // exactly as the executeSends contract above promises.
+    const anyClaimed = transaction(() => {
+      let claimedInTx = false;
+      for (const stamp of plan.stamps) {
+        const sets: string[] = [`${stamp.guardColumn} = ?`, 'updated_at = ?'];
+        const params: (string | null)[] = [nowIso, nowIso];
+        for (const [col, val] of Object.entries(stamp.extraSets)) {
+          sets.push(`${col} = ?`);
+          params.push(val);
+        }
+        params.push(stamp.taskId);
+        const res = run(
+          `UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND ${stamp.guardColumn} IS NULL`,
+          params,
+        );
+        if (res.changes > 0) {
+          claimedInTx = true;
+          // Operator-visibility events row so the board Activity tab shows the
+          // client-communication trail (P1-04 step 8, feeds P2-02). Best-effort:
+          // a missing events table on a very old box must never roll back the
+          // durable stamp, so the insert is swallowed but stays inside the tx.
+          try {
+            run(
+              `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+              [uuidv4(), stamp.eventType, stamp.taskId, stamp.eventMessage, nowIso],
+            );
+          } catch {
+            // events row is best-effort telemetry — never block the send on it.
+          }
         }
       }
-    }
+      return claimedInTx;
+    });
 
     if (!anyClaimed) {
       // Every stamp was already claimed by a prior sweep/worker => no duplicate.
