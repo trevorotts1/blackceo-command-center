@@ -1,3 +1,14 @@
+## [v5.17.3] — 2026-07-11 — feat(qc): P1-05 — fleet judge-proof probe + un-terminal false [QC-HEURISTIC-FINAL] finals
+
+Merges `fix/v5.17-judge-provisioning` (P1-05).
+
+- `src/lib/probes/qc-judge-probe.ts` and `src/app/api/system/qc-judge-probe/route.ts`: a fleet-wide probe that verifies a real LLM judge is actually provisioned and reachable for QC scoring, rather than trusting config alone.
+- `scripts/clear-qc-heuristic-final.ts`: reopens tasks that were wrongly marked terminal by the heuristic-only `[QC-HEURISTIC-FINAL]` fallback (i.e. finalized without a real judge pass), so they re-enter the judge-backed QC gate instead of staying falsely closed.
+- `src/lib/qc-scorer.ts`: wiring to route scoring through the verified judge path.
+
+### Tests
+- `tests/unit/p1-05-qc-judge-probe.test.ts`, `tests/unit/p1-05-clear-qc-heuristic-final.test.ts`.
+
 ## [v5.17.2] — 2026-07-11 — fix(port): P1-02 Unit B — belt-and-suspenders port-4000 guard
 
 Merges `fix/v5.17-ingress-port-guard` (P1-02 Unit B). Repo-side half of P1-02 (CC client-link stability + port 4000 standardized permanently) — Unit A (the live Cloudflare ingress repair sweep) is a separate, out-of-scope live-fleet operation.
