@@ -899,6 +899,29 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns
           </span>
         )}
 
+        {/* Awaiting-audience-confirm chip (P4-02 step 5) — the audience/topic
+            duality was previously invisible on the card: a content task's voice
+            blend silently held for confirmation and, unconfirmed, released under
+            a neutral house voice after 30 min. This chip surfaces the pending
+            confirm gate on the card face so the operator sees it without opening
+            the modal. */}
+        {task.blend_confirm_state === 'pending' && (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300"
+            title="This content task's audience voice is awaiting your confirmation. Open the task to confirm the audience — unconfirmed, it releases under a neutral house voice after the deadline."
+          >
+            ⏳ Awaiting audience confirm
+          </span>
+        )}
+        {task.blend_confirm_state === 'deadline_fallback' && (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 border border-orange-300"
+            title="The audience was never confirmed in time — this task released under the neutral house voice. Confirm the audience to re-voice future work."
+          >
+            ⚠️ Released on house voice
+          </span>
+        )}
+
         {/* Model Pill (v4.0.1 P0-7) — shows the model resolved at dispatch.
             If model_id is null, renders a dimmed "no model" placeholder. */}
         <ModelPill task={task} />

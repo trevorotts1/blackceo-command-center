@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryAll } from '@/lib/db';
+import { queryAll, queryOne } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
@@ -7,6 +7,24 @@ import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+// P4-02 step 5 — does this box carry the persona-blend bundle table (migration
+// 090)? Cached: schema presence is stable per process, and a pre-090 box must
+// not have its board fetch break on a JOIN to a missing table.
+let _bundleTablePresent: boolean | null = null;
+function bundleTableExists(): boolean {
+  if (_bundleTablePresent !== null) return _bundleTablePresent;
+  try {
+    const row = queryOne<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='task_persona_bundle'",
+      [],
+    );
+    _bundleTablePresent = !!row;
+  } catch {
+    _bundleTablePresent = false;
+  }
+  return _bundleTablePresent;
+}
 
 // GET /api/tasks - List all tasks with optional filters
 export async function GET(request: NextRequest) {
@@ -28,6 +46,17 @@ export async function GET(request: NextRequest) {
     // tasks stay fully retrievable (audit, restore) — they are hidden, not gone.
     const includeArchived = searchParams.get('includeArchived') === 'true';
 
+    // P4-02 step 5 — surface the persona-blend audience-confirm state onto each
+    // board row so the card can flag 'pending' (awaiting audience confirm). Only
+    // joined when the table exists (pre-090 boxes get a NULL literal instead).
+    const hasBundle = bundleTableExists();
+    const blendConfirmSelect = hasBundle
+      ? 'tpb.confirm_state as blend_confirm_state'
+      : 'NULL as blend_confirm_state';
+    const blendConfirmJoin = hasBundle
+      ? 'LEFT JOIN task_persona_bundle tpb ON tpb.task_id = t.id'
+      : '';
+
     let sql = `
       SELECT
         t.*,
@@ -38,11 +67,13 @@ export async function GET(request: NextRequest) {
         mr.label as model_label,
         mr.provider as model_provider,
         mr.input_cost_per_million as model_input_cost_per_million,
-        mr.output_cost_per_million as model_output_cost_per_million
+        mr.output_cost_per_million as model_output_cost_per_million,
+        ${blendConfirmSelect}
       FROM tasks t
       LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
       LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
       LEFT JOIN model_registry mr ON t.model_id = mr.model_id
+      ${blendConfirmJoin}
       WHERE 1=1
     `;
     const params: unknown[] = [];

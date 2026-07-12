@@ -55,6 +55,7 @@
 import { queryAll, queryOne, run, sqlTime, parseDbTime, timeNow } from '@/lib/db';
 import { notifyOwner, notifySystem, notifyTelegram } from '@/lib/notify';
 import { runQCOnReview } from '@/lib/qc-scorer';
+import { isContentTask } from '@/lib/tasks';
 import { v4 as uuidv4 } from 'uuid';
 
 export const BOARD_HYGIENE_CRON = '0 * * * *'; // hourly, on the hour
@@ -90,6 +91,14 @@ const EVT_QC_STARVED = 'qc_starved';
 const EVT_DONE_ARCHIVED = 'board_hygiene_auto_archived_done';
 const EVT_STALE_NUDGED = 'board_hygiene_stale_nudged';
 const EVT_STALE_ARCHIVED = 'auto_archived_stale';
+// P4-02 step 6 — the board-level silent-blend-regression lock.
+const EVT_BLEND_REGRESSION = 'persona_blend_regression';
+
+// The trailing window the blend-regression check evaluates (spec: "any 7-day
+// window with content tasks created but zero bundles written") + its re-alert
+// cooldown (reuse the 48h cadence the other operator-lane alerts use).
+const BLEND_REGRESSION_WINDOW_DAYS = numEnv('BOARD_HYGIENE_BLEND_REGRESSION_WINDOW_DAYS', 7);
+const BLEND_REGRESSION_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_BLEND_REGRESSION_COOLDOWN_HOURS', 48);
 
 // ── Result shape ─────────────────────────────────────────────────────────────
 
@@ -111,6 +120,13 @@ export interface BoardHygieneResult {
   staleArchived: number;
   staleArchivedIds: string[];
   operatorDigestSent: boolean;
+  /** P4-02 step 6 — true when the trailing window had content tasks created but
+   *  ZERO persona bundles written (the D1 silent-regression signal fired). */
+  blendRegressionFlagged: boolean;
+  /** Content tasks created in the regression window (diagnostic). */
+  blendWindowContentTasks: number;
+  /** Persona bundles written in the regression window (diagnostic). */
+  blendWindowBundles: number;
 }
 
 function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult {
@@ -132,6 +148,9 @@ function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult 
     staleArchived: 0,
     staleArchivedIds: [],
     operatorDigestSent: false,
+    blendRegressionFlagged: false,
+    blendWindowContentTasks: 0,
+    blendWindowBundles: 0,
   };
 }
 
@@ -491,6 +510,90 @@ function processStaleBacklogLane(result: BoardHygieneResult): void {
   }
 }
 
+// ── Rule 6: Persona-blend silent-regression check (P4-02 step 6) ────────────
+//
+// The D1 bug ("--blend never passed → duality dead in prod") was invisible: a
+// board with zero persona bundles looked identical to a board where nobody made
+// a content task. This check makes a recurrence LOUD. Over the trailing window,
+// if content tasks were created (isContentTask over title+description — a
+// semantic classifier, never grep-as-content-judge, meta-rule 2.4) but ZERO
+// persona bundles were written, the blend has silently died again — surface it
+// to the operator lane, cooldown-guarded. `persona_blend_missing` (emitted by
+// resolvePersonaAndPin) catches the PER-TASK failure; this catches the BOARD-WIDE
+// "the whole pipeline is dead" pattern that a single missing task can't reveal.
+function processBlendRegressionCheck(result: BoardHygieneResult): void {
+  const windowExpr = `-${BLEND_REGRESSION_WINDOW_DAYS} days`;
+
+  // Count persona bundles written in the window. If the table is absent
+  // (pre-090 box) there is no blend pipeline to regress — skip silently.
+  let bundlesInWindow: number;
+  try {
+    const b = queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM task_persona_bundle
+        WHERE ${sqlTime('created_at')} >= datetime('now', ?)`,
+      [windowExpr],
+    );
+    bundlesInWindow = b?.n ?? 0;
+  } catch {
+    return; // no bundle table → feature not present on this box
+  }
+
+  // Content tasks created in the window (semantic filter in TS, not SQL LIKE).
+  let created: Array<{ id: string; title: string; description: string | null }>;
+  try {
+    created = queryAll<{ id: string; title: string; description: string | null }>(
+      `SELECT id, title, description FROM tasks
+        WHERE archived_at IS NULL
+          AND ${sqlTime('created_at')} >= datetime('now', ?)`,
+      [windowExpr],
+    );
+  } catch (err) {
+    console.warn('[board-hygiene] blend-regression query failed:', (err as Error).message);
+    return;
+  }
+
+  const contentTasks = created.filter((t) =>
+    isContentTask(`${t.title}${t.description ? ` ${t.description}` : ''}`),
+  );
+
+  result.blendWindowContentTasks = contentTasks.length;
+  result.blendWindowBundles = bundlesInWindow;
+
+  // The regression signal: content demand existed, zero blends were produced.
+  if (contentTasks.length > 0 && bundlesInWindow === 0) {
+    result.blendRegressionFlagged = true;
+
+    // Cooldown: at most one operator alert per COOLDOWN window (global, not
+    // task-scoped — this is a board-wide condition). task_id is nullable on
+    // events, so the marker rides with a NULL task_id.
+    let recentAlert = 0;
+    try {
+      recentAlert =
+        queryOne<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM events
+            WHERE type = ? AND ${sqlTime('created_at')} >= datetime('now', ?)`,
+          [EVT_BLEND_REGRESSION, `-${BLEND_REGRESSION_COOLDOWN_HOURS} hours`],
+        )?.n ?? 0;
+    } catch {
+      recentAlert = 0;
+    }
+    if (recentAlert > 0) return; // already alerted within the cooldown
+
+    const message =
+      `[BOARD-HYGIENE] PERSONA-BLEND REGRESSION: ${contentTasks.length} content task(s) were created in ` +
+      `the last ${BLEND_REGRESSION_WINDOW_DAYS}d but ZERO persona bundles were written — the audience/topic ` +
+      `voice blend appears DEAD again (the D1 "duality dead in prod" pattern). Check --blend wiring / the ` +
+      `selector install. Sample: ${contentTasks.slice(0, 3).map((t) => `"${t.title}"`).join(', ')}.`;
+    notifySystem(message, { agent: 'board-hygiene', action: 'blend_regression' });
+    try {
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, NULL, ?, ?)`,
+        [uuidv4(), EVT_BLEND_REGRESSION, message, timeNow()],
+      );
+    } catch { /* audit best-effort */ }
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function runBoardHygiene(): Promise<BoardHygieneResult> {
@@ -513,6 +616,9 @@ export async function runBoardHygiene(): Promise<BoardHygieneResult> {
   }
   if (!(process.env.DISABLE_BOARD_HYGIENE_STALE === '1')) {
     processStaleBacklogLane(result);
+  }
+  if (!(process.env.DISABLE_BOARD_HYGIENE_BLEND_REGRESSION === '1')) {
+    processBlendRegressionCheck(result);
   }
 
   return result;
