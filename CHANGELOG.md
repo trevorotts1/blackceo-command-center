@@ -1,3 +1,18 @@
+## [v6.0.0] — 2026-07-12 — CAPSTONE: SUPER SPEC close-out (My AI CEO dashboard) + build-green
+
+**MAJOR capstone release.** Command Center rolls to v6.0.0 — the operator-ordered major line — closing out the SUPER SPEC cluster whose centerpiece is the **My AI CEO** dashboard surface (a client talks directly to their on-box main agent: send requests, upload documents/images/videos, watch what's happening). Merges `fix/cc-green-v6` into `main`, `--no-ff`.
+
+### Build-green (the one substantive change in this roll)
+- **`src/lib/routing/department-router.ts`** — dropped `import { createHash } from 'node:crypto'` in favour of a dependency-free pure-JS content hash (cyrb53). department-router.ts is pulled into Next.js's EDGE instrumentation bundle (`instrumentation → scheduler.ts → ceo-delegation-sweep.ts → department-router.ts`); the `node:crypto` import made `next build` fail with `UnhandledSchemeError: Reading from "node:crypto" is not handled` because the edge runtime has no `node:` builtins. The hash is only a content fingerprint for the P4-03 department-vector embed-cache invalidation (same text → same hash; any edit → new hash), never a cryptographic digest, so the swap keeps that feature byte-for-byte identical while compiling cleanly for edge, node, and browser alike. No async ripple.
+- Verified red→green: `next build` failed on the pre-merge tree with the `node:crypto` `UnhandledSchemeError` and compiles successfully after the fix.
+
+### Capstone
+This is the version-line rollover to the v6 major. The full My AI CEO feature set (BETA chat surface, `/api/ceo-chat/*` routes, one-trust-engine-two-channels report-back, migration 101, responsive proofs) landed across the v5.18–v5.23 spec cluster and remains as shipped; v6.0.0 seals that cluster with the build compiling green end-to-end.
+
+- **Version roll** — repo rolled v5.23.0 → **v6.0.0** via `scripts/bump-version.sh` (all 5 locations in lockstep). Annotated tag `v6.0.0` cut on the release commit.
+
+No client names, no secret values, no roster human names, no box IDs in the diff. No model added/removed/substituted. No client box touched.
+
 ## [v5.23.0] — 2026-07-12 — feat(ui,api,db): P5-01 — the BETA "My AI CEO" dashboard surface + CC responsiveness
 
 Net-new build (zero prior coverage in the spec cluster): a BETA surface on the CC home — **My AI CEO** — where the client talks DIRECTLY to their on-box main agent in a clean UI: send requests, upload documents/images/videos, and watch what's happening. A deliberate competitor to Telegram and the OpenClaw UI. Feature-flagged, clearly labeled, and it degrades to "use Telegram meanwhile" — never a broken-looking core dashboard. Built on top of Phases 1–3, rebased onto v5.22.0 (the branch was cut before P4-01/P4-02/P4-03 landed on `main`; the rebase was clean — only this CHANGELOG heading conflicted, no source-file conflicts).
