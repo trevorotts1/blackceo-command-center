@@ -8,6 +8,12 @@ import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
 import { Breadcrumb } from '@/components/Breadcrumb';
+import {
+  WORKSPACES_RETRY_MS,
+  parseWorkspaceSlugs,
+  buildWorkspacesFetchFailedEvent,
+  selectProducerCardSlugs,
+} from '@/lib/dashboard-workspaces';
 
 const cardVariants = {
   hidden: { opacity: 0, y: 30, scale: 0.95 },
@@ -30,6 +36,10 @@ interface EntryCard {
   gradient: string;
   route: string;
   cta: string;
+  /** P1-03 step 1: when true, this slot renders as a non-navigable degraded
+   *  placeholder (not a real card) instead of a Link. Used ONLY for the
+   *  producer-board "fetch failed" state — see loadWorkspaceSlugs below. */
+  degraded?: boolean;
 }
 
 export default function HomePage() {
@@ -44,6 +54,16 @@ export default function HomePage() {
   // producer-board cards (below) so a CC without a given engine never renders a
   // dead-link card. Empty until /api/workspaces resolves.
   const [presentSlugs, setPresentSlugs] = useState<Set<string>>(new Set());
+  // P1-03 c.1: 'loading' until the first attempt settles; 'error' means the
+  // most recent /api/workspaces attempt failed (network error or non-2xx) and
+  // a retry is scheduled — the producer-card slot renders a visible degraded
+  // state instead of silently showing nothing. 'ok' means the last attempt
+  // succeeded (presentSlugs reflects real data, possibly empty).
+  const [workspacesStatus, setWorkspacesStatus] = useState<'loading' | 'ok' | 'error'>('loading');
+  // P1-03 c.3: build-generation version stamp, read from GET /api/version.
+  // Null until resolved; the footer renders nothing extra until then so a slow
+  // read never shows a wrong/blank version string.
+  const [ccVersion, setCcVersion] = useState<string | null>(null);
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
   const cardBackground = hasBrand
@@ -95,24 +115,70 @@ export default function HomePage() {
   useEffect(() => {
     // Discover which workspaces this deployment has so producer-board cards only
     // render when their engine is actually present. /api/workspaces is a
-    // same-origin board-read API (no bearer needed from the browser); on any
-    // failure we leave presentSlugs empty and simply show no producer cards.
+    // same-origin board-read API (no bearer needed from the browser).
+    //
+    // P1-03 root-cause class 3: a fetch failure used to leave presentSlugs
+    // empty and silently show NO producer cards — indistinguishable from "this
+    // box just doesn't have that engine." Now: on failure we set
+    // workspacesStatus='error' (the render below shows a visible degraded slot
+    // with retry copy, never silent omission), log a
+    // `dashboard_workspaces_fetch_failed` event so the failure has a durable
+    // record, and retry automatically after WORKSPACES_RETRY_MS.
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
+    function logFetchFailedEvent(reason: string) {
+      // Fire-and-forget; a failure to log must never block the retry loop or
+      // throw into the render path.
+      fetch('/api/events', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(buildWorkspacesFetchFailedEvent(attempt, reason)),
+      }).catch(() => {});
+    }
+
     async function loadWorkspaceSlugs() {
+      attempt += 1;
       try {
         const res = await fetch('/api/workspaces', { cache: 'no-store' });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        setPresentSlugs(parseWorkspaceSlugs(data));
+        setWorkspacesStatus('ok');
+      } catch (err) {
+        if (cancelled) return;
+        setWorkspacesStatus('error');
+        logFetchFailedEvent(err instanceof Error ? err.message : 'unknown error');
+        retryTimer = setTimeout(loadWorkspaceSlugs, WORKSPACES_RETRY_MS);
+      }
+    }
+
+    loadWorkspaceSlugs();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    // P1-03 step 3: version stamp so build-generation drift ("you're on
+    // v5.14.0, current is v5.17.0") is diagnosable at a glance. Best-effort —
+    // a failed read just leaves the footer without a version chip.
+    async function loadVersion() {
+      try {
+        const res = await fetch('/api/version', { cache: 'no-store' });
         if (!res.ok) return;
         const data = await res.json();
-        const list: Array<{ slug?: string }> = Array.isArray(data) ? data : [];
-        setPresentSlugs(
-          new Set(
-            list
-              .map((w) => String(w?.slug ?? '').toLowerCase())
-              .filter(Boolean),
-          ),
-        );
+        if (typeof data?.version === 'string' && data.version) {
+          setCcVersion(data.version);
+        }
       } catch {}
     }
-    loadWorkspaceSlugs();
+    loadVersion();
   }, []);
 
   // PRD 3.8 + v4.0.1 P0-1: landing layout. Operator Console is the 5th card.
@@ -212,9 +278,31 @@ export default function HomePage() {
     },
   ];
 
-  const producerCards: EntryCard[] = producerBoardCandidates
-    .filter((c) => presentSlugs.has(c.slug))
-    .map(({ slug: _slug, ...card }) => card);
+  // P1-03 c.1: when the workspaces fetch has FAILED, we don't know whether
+  // Anthology/Podcast engines are present — render one visible degraded slot
+  // instead of silently showing zero producer cards (the old fail-EMPTY
+  // behavior). While loading (first attempt, not yet settled) or once it
+  // succeeds, behave as before: gate strictly on presentSlugs. The selection
+  // decision itself lives in the pure, unit-tested selectProducerCardSlugs()
+  // (src/lib/dashboard-workspaces.ts) — this just maps its answer onto the
+  // EntryCard shape this component renders.
+  const selection = selectProducerCardSlugs(workspacesStatus, presentSlugs, producerBoardCandidates);
+  const producerCards: EntryCard[] = selection.degraded
+    ? [
+        {
+          title: 'Producer Boards',
+          description: 'Board data unavailable — retrying',
+          detail: `We couldn't confirm which producer boards this deployment has. Retrying automatically every ${WORKSPACES_RETRY_MS / 1000} seconds.`,
+          icon: <Activity className="w-7 h-7 text-white" />,
+          gradient: 'from-slate-500 via-gray-500 to-zinc-600',
+          route: '',
+          cta: 'Retrying…',
+          degraded: true,
+        },
+      ]
+    : producerBoardCandidates
+        .filter((c) => selection.slugs.includes(c.slug))
+        .map(({ slug: _slug, ...card }) => card);
 
   // Slot any present producer cards in right after Conversational AI, preserving
   // the core seven-card order. Falls back to appending if that card ever moves.
@@ -300,46 +388,80 @@ export default function HomePage() {
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-stretch"
             variants={containerVariants}
           >
-            {visibleCards.map((card) => (
-              <motion.div
-                key={card.route}
-                className="group relative w-full h-full"
-                variants={cardVariants}
-                whileHover={{ scale: 1.03, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } }}
-                whileTap={{ scale: 0.98 }}
-              >
-                <Link href={card.route} className="block text-left h-full">
-                  <div
-                    className={`relative overflow-hidden rounded-2xl ${cardBackground ? '' : `bg-gradient-to-br ${card.gradient}`} p-8 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
-                    style={cardBackground || undefined}
+            {visibleCards.map((card) => {
+              // P1-03 c.1: degraded slot is NOT a navigable card — render the
+              // same visual footprint (so the grid doesn't jump) with retry
+              // copy and no Link, so a fetch failure is loud but not a
+              // dead-link trap.
+              if (card.degraded) {
+                return (
+                  <motion.div
+                    key="producer-boards-degraded"
+                    className="relative w-full h-full"
+                    variants={cardVariants}
+                    data-testid="producer-boards-degraded"
                   >
-                    {/* Decorative */}
-                    <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
-                    <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
-
-                    <div className="relative z-10 flex flex-col h-full">
-                      {/* Icon */}
-                      <div className="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-5">
-                        {card.icon}
-                      </div>
-
-                      {/* Title + subtitle */}
-                      <h3 className="text-white font-bold text-xl mb-1 leading-tight">{card.title}</h3>
-                      <p className="text-white/70 text-sm font-semibold uppercase tracking-wider mb-4">{card.description}</p>
-
-                      {/* Detail */}
-                      <p className="text-white/75 text-sm leading-relaxed flex-1">{card.detail}</p>
-
-                      {/* CTA */}
-                      <div className="mt-6 flex items-center gap-2 text-white font-semibold text-sm">
-                        <span>{card.cta}</span>
-                        <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
+                    <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-500 via-gray-500 to-zinc-600 p-8 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50">
+                      <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
+                      <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
+                      <div className="relative z-10 flex flex-col h-full">
+                        <div className="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-5">
+                          {card.icon}
+                        </div>
+                        <h3 className="text-white font-bold text-xl mb-1 leading-tight">{card.title}</h3>
+                        <p className="text-white/70 text-sm font-semibold uppercase tracking-wider mb-4">{card.description}</p>
+                        <p className="text-white/75 text-sm leading-relaxed flex-1">{card.detail}</p>
+                        <div className="mt-6 flex items-center gap-2 text-white font-semibold text-sm">
+                          <span className="w-2 h-2 rounded-full bg-white/70 animate-pulse" />
+                          <span>{card.cta}</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </Link>
-              </motion.div>
-            ))}
+                  </motion.div>
+                );
+              }
+
+              return (
+                <motion.div
+                  key={card.route}
+                  className="group relative w-full h-full"
+                  variants={cardVariants}
+                  whileHover={{ scale: 1.03, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <Link href={card.route} className="block text-left h-full">
+                    <div
+                      className={`relative overflow-hidden rounded-2xl ${cardBackground ? '' : `bg-gradient-to-br ${card.gradient}`} p-8 h-full min-h-[320px] flex flex-col shadow-xl shadow-gray-200/50 group-hover:shadow-2xl group-hover:shadow-gray-300/50 transition-shadow duration-300`}
+                      style={cardBackground || undefined}
+                    >
+                      {/* Decorative */}
+                      <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
+                      <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/5 rounded-full blur-xl" />
+
+                      <div className="relative z-10 flex flex-col h-full">
+                        {/* Icon */}
+                        <div className="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-5">
+                          {card.icon}
+                        </div>
+
+                        {/* Title + subtitle */}
+                        <h3 className="text-white font-bold text-xl mb-1 leading-tight">{card.title}</h3>
+                        <p className="text-white/70 text-sm font-semibold uppercase tracking-wider mb-4">{card.description}</p>
+
+                        {/* Detail */}
+                        <p className="text-white/75 text-sm leading-relaxed flex-1">{card.detail}</p>
+
+                        {/* CTA */}
+                        <div className="mt-6 flex items-center gap-2 text-white font-semibold text-sm">
+                          <span>{card.cta}</span>
+                          <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-200" />
+                        </div>
+                      </div>
+                    </div>
+                  </Link>
+                </motion.div>
+              );
+            })}
           </motion.div>
 
           {/* Footer */}
@@ -347,6 +469,17 @@ export default function HomePage() {
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
               <Activity className="w-4 h-4 text-indigo-500" />
               <span>{isOnline ? 'All systems operational' : 'System check failed'}</span>
+              {/* P1-03 step 3: version stamp — makes build-generation drift
+                  diagnosable at a glance ("you're on v5.14.0, current is
+                  v5.17.0"). Omitted entirely if /api/version hasn't resolved. */}
+              {ccVersion ? (
+                <>
+                  <span className="text-gray-300" aria-hidden="true">·</span>
+                  <span data-testid="cc-version-stamp" className="font-mono text-xs text-gray-400">
+                    {ccVersion}
+                  </span>
+                </>
+              ) : null}
             </div>
           </motion.div>
         </motion.div>
