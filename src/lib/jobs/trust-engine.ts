@@ -46,6 +46,7 @@
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import { notifyTelegram, notifySystem, resolveOperatorChatId, resolveOwnerChatId } from '@/lib/notify';
 import { v4 as uuidv4 } from 'uuid';
+import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 /** After ingest, wait up to this long for the triad to advance a task past
@@ -159,9 +160,12 @@ export interface PlanContext {
 
 function ackMessage(task: TrustTaskRow, queuedForGrooming: boolean): string {
   if (queuedForGrooming) {
+    // P2-01 step 3: same honest language the board uses for a backlog-parked
+    // (now "Being Prepared") card — BACKLOG_COLUMN_SUBTITLE — so the client
+    // hears the identical explanation here and on the board.
     return (
-      `✅ Got it — "${task.title}" is captured and queued for grooming. ` +
-      `I'll assign it to the right department shortly and keep you posted.`
+      `✅ Got it — "${task.title}" is captured and queued for grooming (being prepared). ` +
+      `${BACKLOG_COLUMN_SUBTITLE}. I'll assign it to the right department shortly and keep you posted.`
     );
   }
   const dept = task.department ? `the ${task.department} department` : 'the right department';
