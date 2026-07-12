@@ -22,6 +22,15 @@ import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
 // a task that actually went through the blend (task.blend_directive present)
 // so a plain non-content task never fires the extra gate-status fetch.
 import { AudienceConfirmPanel } from './AudienceConfirmPanel';
+// P2-02 — the task-detail panels that fill in and actually USE the modal's
+// fields: who's working on this + why, the SOP link, the QC block transparency,
+// and the planning metadata.
+import {
+  WhoIsWorkingPanel,
+  TaskSopPanel,
+  BlockedReasonPanel,
+  PlanningMetaPanel,
+} from './TaskOverviewPanels';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -505,6 +514,18 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {task && task.blend_directive && (
             <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
           )}
+          {/* P2-02 — task-detail panels for an existing task (skipped on the
+              anthology Assembly card, whose overview is the cockpit only). They
+              sit OUTSIDE the form so their buttons/links never submit the edit
+              form. Each panel renders a designed empty-state when its data is
+              absent — never a dead control, never a raw NULL. */}
+          {task && !anthologyAssembly && (
+            <div className="mb-4 space-y-3">
+              <WhoIsWorkingPanel task={task} />
+              <TaskSopPanel task={task} onChangeSop={handleAttachSop} changing={suggestingSop} />
+              <BlockedReasonPanel task={task} />
+            </div>
+          )}
             <form onSubmit={handleSubmit} className="space-y-4">
           {/* U13 — B12 Assembly cockpit: readiness → arm (typed name) → order →
               sign-off. Only for the anthology's Assembly card; its own component. */}
@@ -851,10 +872,16 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
           {/* Planning Tab */}
           {activeTab === 'planning' && task && (
-            <PlanningTab
-              taskId={task.id}
-              onSpecLocked={handleSpecLocked}
-            />
+            <div className="space-y-4">
+              {/* P2-02 step 3 — structured planning metadata (dependencies,
+                  parallel candidates, sprint, source) with honest empty-states,
+                  above the AI planning-session flow. */}
+              <PlanningMetaPanel task={task} />
+              <PlanningTab
+                taskId={task.id}
+                onSpecLocked={handleSpecLocked}
+              />
+            </div>
           )}
 
           {/* Activity Tab */}

@@ -4036,6 +4036,47 @@ const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '099',
+    name: 'add_persona_reason_column',
+    // Purely ADDITIVE: a single PRAGMA-guarded `ALTER TABLE tasks ADD COLUMN`.
+    // No row is read, written, moved or destroyed, so it is safe under the
+    // additive self-heal path and a NO-OP on healthy boxes. Follows the
+    // migration-097/098 pattern exactly: inspect the LIVE schema (PRAGMA
+    // table_info), never the ledger, and add the column only when genuinely
+    // missing. Never throws on an unforeseen shape (096/097/098 philosophy:
+    // skipping costs one column; throwing costs the whole box).
+    //
+    // WHY THIS EXISTS (P2-02 — TASK-DETAIL WINDOW: FILL IN AND USE ITS FIELDS)
+    // The operator wants the task modal to show which persona is working on a
+    // task AND WHY. `persona_reason` stores that one-sentence WHY, generated at
+    // persona-selection time (buildPersonaReason in persona-selector.ts, which
+    // REUSES the scorer's own message when it wrote one) and persisted alongside
+    // persona_id/name/mode/score. Nullable + additive; the base schema.ts CREATE
+    // carries it for fresh installs and this migration back-fills every existing
+    // box. A pre-099 row simply carries NULL and the panel renders its honest
+    // empty-state.
+    up: (db) => {
+      console.log('[Migration 099] Adding persona_reason column to tasks...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 099] tasks table absent — nothing to add');
+        return;
+      }
+
+      const presentCols = () =>
+        new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+
+      if (!presentCols().has('persona_reason')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN persona_reason TEXT');
+        console.log('[Migration 099] Added persona_reason column');
+      } else {
+        console.log('[Migration 099] persona_reason already present — nothing to add');
+      }
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

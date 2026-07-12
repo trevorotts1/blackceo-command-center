@@ -188,6 +188,13 @@ export interface Task {
   persona_score?: number | null;
   persona_selected_at?: string | null;
   persona_version?: number | null;
+  // P2-02 (migration 099) — the stored one-sentence WHY for the persona pick,
+  // generated at persona-selection time (buildPersonaReason, reusing the scorer's
+  // own message when it wrote one). Surfaced in the TaskModal "Who's Working On
+  // This" panel. Nullable + additive: absent on a pre-099 row or a task whose
+  // persona was pinned before this column existed → the panel shows a designed
+  // empty-state, never a fabricated reason.
+  persona_reason?: string | null;
   // Multi-persona plan rows (DEP-5 / F3.7 + F3.9 — migration 088). Present only on
   // decomposed tasks; populated by the tasks GET route + the persona-plan SSE
   // broadcast so the kanban card can render per-sub-task slot chips. Empty/absent
@@ -376,7 +383,20 @@ export interface OpenClawSession {
   updated_at: string;
 }
 
-export type ActivityType = 'spawned' | 'updated' | 'completed' | 'file_created' | 'status_changed' | 'owner_message' | 'agent_message';
+export type ActivityType =
+  | 'spawned'
+  | 'updated'
+  | 'completed'
+  | 'file_created'
+  | 'status_changed'
+  | 'owner_message'
+  | 'agent_message'
+  // P2-02 — the trust engine's report-back trail (P1-04), folded into the
+  // Activity feed from the `events` table by src/lib/trust-activity.ts so the
+  // client sees the ack → in-progress → done communication trail on the task.
+  | 'trust_ack'
+  | 'trust_progress'
+  | 'trust_done';
 
 export interface TaskActivity {
   id: string;

@@ -8,6 +8,7 @@ import { getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { CreateActivitySchema } from '@/lib/validation';
 import type { TaskActivity } from '@/lib/types';
+import { TRUST_EVENT_TYPES, trustEventToActivity, type TrustEventRow } from '@/lib/trust-activity';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -59,6 +60,37 @@ export async function GET(
         updated_at: '',
       } : undefined,
     }));
+
+    // P2-02 step 4 — fold in the trust engine's report-back trail so the client
+    // sees the ack → in-progress → done communication history in the Activity
+    // tab. The trust engine (P1-04) records each send as an `events` row typed
+    // trust_ack / trust_progress / trust_done (a DIFFERENT table from
+    // task_activities), so without this merge the trail is written but never
+    // shown. Best-effort: a very old box with no `events` table must never 500
+    // the activity feed — the whole block is wrapped so a query failure just
+    // omits the trust rows.
+    try {
+      const hasEvents = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'")
+        .get();
+      if (hasEvents) {
+        const placeholders = TRUST_EVENT_TYPES.map(() => '?').join(', ');
+        const trustRows = db
+          .prepare(
+            `SELECT id, type, task_id, message, created_at
+               FROM events
+              WHERE task_id = ? AND type IN (${placeholders})`,
+          )
+          .all(taskId, ...TRUST_EVENT_TYPES) as TrustEventRow[];
+        for (const r of trustRows) result.push(trustEventToActivity(r));
+      }
+    } catch (err) {
+      console.warn('[activities] trust-event merge skipped (non-fatal):', (err as Error).message);
+    }
+
+    // Newest-first, matching the task_activities ORDER BY above, now that the two
+    // sources are interleaved.
+    result.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
 
     return NextResponse.json(result);
   } catch (error) {

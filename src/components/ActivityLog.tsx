@@ -84,8 +84,31 @@ export function ActivityLog({ taskId }: ActivityLogProps) {
         return '📄';
       case 'status_changed':
         return '🔄';
+      // P2-02 — the trust engine's client report-back trail.
+      case 'trust_ack':
+        return '📨';
+      case 'trust_progress':
+        return '⏳';
+      case 'trust_done':
+        return '🎉';
       default:
         return '📝';
+    }
+  };
+
+  // P2-02 — a short label for the trust report-back rows so the client trail
+  // reads as "Client notified · Acknowledged / In progress / Delivered", not a
+  // raw event line indistinguishable from an internal activity.
+  const getTrustLabel = (type: string): string | null => {
+    switch (type) {
+      case 'trust_ack':
+        return 'Client notified · Acknowledged';
+      case 'trust_progress':
+        return 'Client notified · In progress';
+      case 'trust_done':
+        return 'Client notified · Delivered';
+      default:
+        return null;
     }
   };
 
@@ -126,6 +149,15 @@ export function ActivityLog({ taskId }: ActivityLogProps) {
                 <span className="text-sm">{activity.agent.avatar_emoji}</span>
                 <span className="text-sm font-medium text-gray-900">
                   {activity.agent.name}
+                </span>
+              </div>
+            )}
+
+            {/* Trust report-back label (P2-02) */}
+            {getTrustLabel(activity.activity_type) && (
+              <div className="mb-1">
+                <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 border border-emerald-200">
+                  {getTrustLabel(activity.activity_type)}
                 </span>
               </div>
             )}

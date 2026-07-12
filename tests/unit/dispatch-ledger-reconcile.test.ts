@@ -37,6 +37,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { HEAD_MIGRATION } from './_head-migration';
 
 const REPO = path.resolve(__dirname, '../..');
 const MIGRATE_ENTRY = path.join(REPO, 'src/lib/db/migrate.ts');
@@ -126,12 +127,15 @@ function corruptToFalselyHealed(dbPath: string): void {
 test('DATA-01 ledger-lie: 097 reconciles a box whose ledger claims 077/078 applied while their columns are absent', () => {
   const dbPath = tmpDbPath('lifecycle');
 
-  // A fresh install is fully healthy and reaches head 098 (P1-04 added migration
-  // 098; the ledger-lie behaviour under test is still owned by migration 097).
+  // A fresh install is fully healthy and reaches the head migration (P1-04 added
+  // 098, P2-02 added 099; the ledger-lie behaviour under test is still owned by
+  // migration 097). HEAD_MIGRATION is derived from the migrations array itself
+  // (shared with db-upgrade-migration-ordering.test.ts) so a future bump can't
+  // leave this assertion stale.
   assert.doesNotThrow(() => boot(dbPath), 'fresh install must boot clean');
   {
     const db = new Database(dbPath);
-    assert.equal(headMigration(db), '098', 'fresh install must reach the head migration');
+    assert.equal(headMigration(db), HEAD_MIGRATION, 'fresh install must reach the head migration');
     const cols = tasksColumns(db);
     for (const c of DISPATCH_COLUMNS) assert.ok(cols.has(c), `fresh install must have tasks.${c}`);
     assert.ok(indexExists(db, DISPATCH_INDEX), `fresh install must have ${DISPATCH_INDEX}`);
@@ -147,11 +151,12 @@ test('DATA-01 ledger-lie: 097 reconciles a box whose ledger claims 077/078 appli
     assert.ok(ledgerHas(db, '077'), 'precondition: _migrations must still record 077 applied');
     assert.ok(ledgerHas(db, '078'), 'precondition: _migrations must still record 078 applied');
     assert.ok(!ledgerHas(db, '097'), 'precondition: 097 must be pending again');
-    // The ledger still records everything up to head (096 + the later additive 098)
-    // while 097's dispatch columns are gone — the box "looks healthy" by ledger id
-    // yet dispatch is dead. (P1-04 added 098; corruptToFalselyHealed removes only
-    // 097, so the reported head is now the additive 098, an even stronger lie.)
-    assert.equal(headMigration(db), '098', 'precondition: the box reports a high head (looks healthy)');
+    // The ledger still records everything up to head (096 + the later additive
+    // 098/099) while 097's dispatch columns are gone — the box "looks healthy" by
+    // ledger id yet dispatch is dead. (P1-04 added 098, P2-02 added 099;
+    // corruptToFalselyHealed removes only 097, so the reported head is still the
+    // head migration, an even stronger lie.)
+    assert.equal(headMigration(db), HEAD_MIGRATION, 'precondition: the box reports a high head (looks healthy)');
 
     const cols = tasksColumns(db);
     for (const c of DISPATCH_COLUMNS) {
@@ -207,7 +212,7 @@ test('DATA-01 ledger-lie: 097 reconciles a box whose ledger claims 077/078 appli
   assert.doesNotThrow(() => boot(dbPath), 'a second boot on a healthy box must be a clean no-op');
   {
     const db = new Database(dbPath);
-    assert.equal(headMigration(db), '098', 'head stays at the head migration (no duplicate row / no error)');
+    assert.equal(headMigration(db), HEAD_MIGRATION, 'head stays at the head migration (no duplicate row / no error)');
     const n097 = (db.prepare("SELECT COUNT(*) n FROM _migrations WHERE id='097'").get() as { n: number }).n;
     assert.equal(n097, 1, '097 must be recorded exactly once (idempotent)');
     db.close();

@@ -51,6 +51,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { HEAD_MIGRATION } from './_head-migration';
 
 const REPO = path.resolve(__dirname, '../..');
 const SCHEMA_TS = path.join(REPO, 'src/lib/db/schema.ts');
@@ -59,8 +60,11 @@ const MIGRATE_ENTRY = path.join(REPO, 'src/lib/db/migrate.ts');
 const OLD_DB_FIXTURE = path.join(REPO, 'tests/fixtures/db-v4.72.0-era.sql');
 
 /** The migration id every database must land on once fully upgraded.
- *  Advanced to 098 by P1-04 (trust engine: additive tasks report-back columns). */
-const HEAD_MIGRATION = '098';
+ *  Derived once, from the migrations array itself, in `_head-migration.ts` and
+ *  shared with dispatch-ledger-reconcile.test.ts so a future migration bump
+ *  (098 -> 099 by P2-02: additive tasks.persona_reason; 097 -> 098 by P1-04:
+ *  trust-engine report-back columns) can never leave one suite's assertion
+ *  stale. See that file for why it scans the source instead of importing it. */
 
 /**
  * Every index the app creates anywhere (schema.ts + migrations.ts).
@@ -239,7 +243,7 @@ test('upgrade: a v4.72.0-era database (migrations stopped at 090) boots clean an
   // Migrations 091-096 actually ran.
   const lastAfter = db.prepare('SELECT id FROM _migrations ORDER BY id DESC LIMIT 1').get() as { id: string };
   assert.equal(lastAfter.id, HEAD_MIGRATION, `expected the upgraded database to reach migration ${HEAD_MIGRATION}`);
-  for (const id of ['091', '092', '093', '094', '095', '096', '097', '098']) {
+  for (const id of ['091', '092', '093', '094', '095', '096', '097', '098', '099']) {
     const row = db.prepare('SELECT id FROM _migrations WHERE id = ?').get(id);
     assert.ok(row, `migration ${id} must have been applied by the upgrade`);
   }
