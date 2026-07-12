@@ -1,3 +1,18 @@
+## [v5.17.2] — 2026-07-11 — fix(port): P1-02 Unit B — belt-and-suspenders port-4000 guard
+
+Merges `fix/v5.17-ingress-port-guard` (P1-02 Unit B). Repo-side half of P1-02 (CC client-link stability + port 4000 standardized permanently) — Unit A (the live Cloudflare ingress repair sweep) is a separate, out-of-scope live-fleet operation.
+
+- **`scripts/cc-start.sh`** — after `CC_PORT` is resolved (CLI flag > `CC_PORT` env > default 4000), refuses to start on a non-4000 port unless `CC_PORT_OVERRIDE_ACK=1` is explicitly set. Prints a LOUD warning naming the exact drift source (`--port` flag vs `CC_PORT` env var, with the value) before refusing. Runs BEFORE the orphan-port killer and the build-freshness check, so a refused start has zero side effects. The operator can still deliberately run elsewhere; nobody drifts there silently.
+- **`src/lib/jobs/port-integrity.ts`** (new) + `scheduler.ts` wiring — a daily port-integrity job that (a) empirically confirms the process is actually listening on `:4000` via a live self-probe of `/api/health` (never trusts the env var alone), and (b) when Cloudflare tunnel API credentials + this box's hostname are configured, confirms the tunnel ingress for that hostname targets `:4000` too. Deliberately silent (`checked:false`) when tunnel credentials are unprovisioned — never guesses/fabricates a result. Any mismatch fires `notifySystem()` only — SYSTEM/operator audience, MOVE-IN-SILENCE, never the client.
+- **`scripts/qc-cc.sh`** — checks 11.14-11.17 assert the ACK guard exists in `cc-start.sh`, `port-integrity.ts` exists, the job is registered in `scheduler.ts`, and it routes through `notifySystem`.
+- **`.github/workflows/qc-cc.yml`** — wires the new `cc-start.sh` guard test into the port-pin-env-bleed-guard CI job.
+
+### Tests
+- `tests/unit/cc-start-port-ack-guard.test.sh` — drives the real `cc-start.sh` through 4 scenarios (env-var drift, CLI-flag drift, ACK'd override, canonical default), fail-first verified against pre-fix HEAD.
+- `tests/unit/port-integrity-job.test.ts` — 4 `node:test` cases against the real `runPortIntegrityCheck()` with fetch + notify test doubles (no real network/Telegram) covering healthy/drifted listen port, tunnel mismatch, and unprovisioned-tunnel silence.
+
+Full suite: `npm run test:unit` 925/938 pass (13 pre-existing failures unrelated to this change). `bash scripts/qc-cc.sh`: 137 checks green. `tsc --noEmit`: 0 errors.
+
 ## [v5.17.1] — 2026-07-11 — fix(cloudflare): P1-08 — Google IdP attached alongside One-Time PIN on Cloudflare Access apps
 
 **P1-08** (SUPER-SPEC-2026-07-11): `scripts/cloudflare/setup-access-app.sh` provisioned One-Time PIN only and had no Google-IdP wiring, while some client boxes' Access apps were hand-configured with Google directly in the dashboard, outside this script — a real gap between the operator's described "Google login" flow and what the automation actually did.
