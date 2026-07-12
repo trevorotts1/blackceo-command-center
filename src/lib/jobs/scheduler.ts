@@ -41,6 +41,7 @@ import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
 import { runPersonaBackfillSweep } from './persona-backfill-sweep';
 import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { runPortIntegrityCheck } from './port-integrity';
+import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -557,6 +558,28 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else {
         console.log(
           `[cron] port-integrity: ok — listenPort=${result.listenPort}, tunnelChecked=${result.tunnelChecked}`,
+        );
+      }
+    },
+  },
+
+  // board-hygiene: hourly — P1-06 "nothing stuck on the board". Codifies the
+  // five lane SLAs (blocked owner re-ping/escalate, review force-score +
+  // qc_starved, done > 30d soft-archive, stale backlog/inbox > 21d nudge +
+  // 7d-no-reply soft-archive). NEVER auto-archives a blocked task at any age
+  // — see board-hygiene.ts rule 2. Disable with DISABLE_BOARD_HYGIENE=1.
+  {
+    name: 'board-hygiene',
+    expr: BOARD_HYGIENE_CRON,
+    fn: async () => {
+      const result = await runBoardHygiene();
+      if (result.skippedReason) {
+        console.log(`[cron] board-hygiene: skipped — ${result.skippedReason}`);
+      } else {
+        console.log(
+          `[cron] board-hygiene: owner-repinged=${result.ownerRepinged}, operator-escalated=${result.operatorEscalated}, ` +
+            `review-force-scored=${result.reviewForceScored}, qc-starved=${result.qcStarved}, ` +
+            `done-archived=${result.doneArchived}, stale-nudged=${result.staleNudged}, stale-archived=${result.staleArchived}`,
         );
       }
     },
