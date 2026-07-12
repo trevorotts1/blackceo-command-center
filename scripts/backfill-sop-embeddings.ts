@@ -58,14 +58,33 @@
  *   treated as unembedded for the active provider. Re-running after a partial failure
  *   or interruption will only embed the remaining rows.
  *
- * DEPLOY NOTE
- *   Run this once per client at Wave-5 deploy (operator-gated, with the client's
- *   own key). For gemini-embedding-001 → gemini-embedding-2 migration:
+ * DEPLOY NOTE (P4-03 — DELTA-ONLY, not a per-client full re-embed)
+ *   The shared SOP library (~2,578 rows, identical content across clients) is
+ *   now embedded ONCE by the operator and shipped to every client box via
+ *   shared-utils/sop-embed-once/ (onboarding repo) +
+ *   32-command-center-setup/scripts/ingest-sop-library.sh, which calls
+ *   provision_sop_embeddings.py automatically at install AND every Sunday
+ *   update — ZERO client-key embed calls for that content. This script's job
+ *   is now GENUINELY DELTA-ONLY: it only ever touches rows NOT already
+ *   covered by the shipped asset (client-specific SOPs from `sop_proposals`,
+ *   or a genuine model migration). It already skips any sop_id with an
+ *   up-to-date row for the active model (see "discover work" below), so a
+ *   normal (non---force) run against a box that already has the shipped
+ *   asset imported does ZERO API calls for the shared library by construction.
+ *   `--force` (full re-embed of EVERY sop, including shipped-covered rows) is
+ *   REFUSED when the `sop_embeddings_shipped_asset` marker table is present
+ *   (written by provision_sop_embeddings.py) — mirrors
+ *   embedding_engine.py::_refuse_full_rebuild_if_prebuilt in the onboarding
+ *   repo. Use --force-full-rebuild-shipped (operator-only; never surface to a
+ *   client) for a genuine embedding-model migration that must re-embed
+ *   shipped rows too — that is an operator decision, not a per-client default.
+ *
+ *   For gemini-embedding-001 → gemini-embedding-2 migration on CLIENT-DELTA
+ *   rows only:
  *     SOP_EMBEDDING_PROVIDER=google GOOGLE_API_KEY=<client-key> tsx scripts/backfill-sop-embeddings.ts
- *   This re-embeds every stale gemini-embedding-001 row with gemini-embedding-2.
- *   Typical Google 2,578-row run: ~30–45 minutes (sequential + quota pacing).
- *   Google free-tier limit: ~1,500 embeds/min in normal conditions; slowdown expected.
- *   Typical OpenAI 2,578-row run:  ~3 minutes (batch 10, 1s pause)  ~$0.003 total.
+ *   Typical Google run (delta only, N rows): sequential + quota pacing, ~N/2
+ *   seconds. Google free-tier limit: ~1,500 embeds/min in normal conditions.
+ *   Typical OpenAI run: batch 10, 1s pause, ~$0.003 total for a small delta.
  */
 
 import process from 'node:process';
@@ -75,13 +94,56 @@ import type { SOP } from '../src/lib/sops';
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const forceReEmbed = args.includes('--force');
+const forceFullRebuildShipped = args.includes('--force-full-rebuild-shipped');
 const checkStale = args.includes('--check-stale');
 const batchSizeArg = args.find((a) => a.startsWith('--batch-size='));
+
+/**
+ * P4-03 step 3 — mirrors embedding_engine.py::_refuse_full_rebuild_if_prebuilt
+ * in the onboarding repo. Refuses a `--force` full re-embed (which would
+ * re-embed EVERY sop, including the shared-library rows the operator already
+ * shipped with zero client-key spend) when the `sop_embeddings_shipped_asset`
+ * marker table is present — written by
+ * shared-utils/sop-embed-once/provision_sop_embeddings.py on import.
+ * `--force-full-rebuild-shipped` is the operator-only override for a genuine
+ * embedding-model migration; never surface it in any client-facing doc/reflex.
+ */
+function refuseFullRebuildIfShipped(
+  queryOne: (sql: string, params: unknown[]) => unknown,
+): void {
+  if (forceFullRebuildShipped) return;
+  let marker: { release_tag: string; sop_count: number } | undefined;
+  try {
+    marker = queryOne(
+      'SELECT release_tag, sop_count FROM sop_embeddings_shipped_asset WHERE id = 1',
+      []
+    ) as { release_tag: string; sop_count: number } | undefined;
+  } catch {
+    // Table absent (no shipped asset ever imported on this box) — nothing to refuse.
+    return;
+  }
+  if (!marker) return;
+  console.error(
+    '[backfill-sop-embeddings] REFUSED: --force requested but this box carries the ' +
+      `operator-shipped SOP-embeddings asset (release=${marker.release_tag}, ` +
+      `${marker.sop_count} rows, zero client-key embed calls). A full re-embed would ` +
+      'discard it and re-pay the full per-client embed cost this pipeline exists to avoid. ' +
+      'A normal (non---force) run already embeds ONLY genuinely uncovered rows. If you are ' +
+      'an OPERATOR performing a real embedding-model migration, pass ' +
+      '--force-full-rebuild-shipped alongside --force to override (operator-only — never ' +
+      'surface this to a client).'
+  );
+  process.exit(3);
+}
 
 async function main(): Promise<void> {
   // ----- db + embedding imports (dynamic so DATABASE_PATH is set first) -----
   const db = await import('../src/lib/db');
   const { queryAll, queryOne, run } = db;
+
+  if (forceReEmbed) {
+    refuseFullRebuildIfShipped(queryOne as (sql: string, params: unknown[]) => unknown);
+  }
 
   const emb = await import('../src/lib/sop-embeddings');
   const {
