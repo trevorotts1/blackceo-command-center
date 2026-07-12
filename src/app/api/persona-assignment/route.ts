@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
-import { selectPersonaForTask } from '@/lib/persona-selector';
+import { selectPersonaForTask, buildPersonaReason } from '@/lib/persona-selector';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -59,6 +59,18 @@ export async function POST(request: Request) {
         result.score,
         task.id
       );
+
+      // P2-02 — persist the one-sentence WHY (buildPersonaReason reuses the
+      // scorer's own message when it wrote one). Best-effort + column-guarded so
+      // a pre-099 box (persona_reason column absent) never fails the assignment.
+      try {
+        const reason = buildPersonaReason(result);
+        if (reason) {
+          db.prepare(`UPDATE tasks SET persona_reason = ? WHERE id = ?`).run(reason, task.id);
+        }
+      } catch {
+        // persona_reason is additive telemetry — never block the pin on it.
+      }
     }
 
     return NextResponse.json({

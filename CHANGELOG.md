@@ -1,3 +1,27 @@
+## [v5.19.0] — 2026-07-12 — feat(ui,db): P2-02 task-detail window — fill in and ACTUALLY use its fields
+
+Merges `feat/v5.19-task-modal-fields` (P2-02). Opening a task showed tabs/fields that were defined but never populated or shown — the operator specifically wanted "which personas are used AND WHY, the task, the description — all genuinely functional." `TaskModal` sat on a `Task` interface far richer than the form ever surfaced (persona governance, the voice/topic/audience blend, `sop_id`, block-transparency, `dependencies`/`parallel_candidates`/`sprint`/`source`). This wires those fields into the modal and stores the missing WHY. (Annotated release tag applied by the merge-writer at merge, per the one-merge-writer-per-repo discipline.)
+
+### Migration 099 (`add_persona_reason_column`) — additive, PRAGMA-guarded, no-op on healthy boxes
+One nullable `persona_reason TEXT` column on `tasks`, following the migration-097/098 pattern exactly (inspect the LIVE schema via `PRAGMA table_info`, never the ledger; never throw on an unforeseen shape). `schema.ts` carries the column in the base CREATE for fresh installs.
+
+### The stored WHY — `buildPersonaReason()` (`src/lib/persona-selector.ts`)
+A pure helper that turns a `PersonaSelectionResult` into a single clean sentence, with the spec's reuse-first precedence: (1) the scorer's own `message` when it wrote one; (2) else the blend voice decision's `why`; (3) else an honest synthesized sentence naming the persona, mode, and match strength — never a stub, never a fabricated specific claim. Returns `null` for a no-match result so the panel shows its empty-state rather than a fabricated reason. It is persisted at every scored-selection site (the modal's `/api/persona-assignment` auto-assign CTA, the Triad late-resolve in `PATCH /api/tasks/[id]`, and the dispatch-time SOP rescore + create-time pin in `tasks.ts`) — each write best-effort + column-guarded so a pre-099 box never fails a pin.
+
+### The modal — `src/components/TaskOverviewPanels.tsx` + `TaskModal.tsx`
+- **Overview "Who's Working On This" panel** — task persona (name + mode + match score) with the stored WHY line, plus VOICE / TOPIC / AUDIENCE chips when the duality mirror columns are non-null (`blend_directive` on expand). Honest empty-states when a task has no persona or no recorded reason.
+- **Overview SOP** — `sop_id` rendered as a named link (SOP title fetched from `/api/sops/[id]`) with a "change" affordance that REUSES the existing Add-an-SOP flow (`handleAttachSop`), never a second one. Empty-state "No SOP attached" + "Add an SOP".
+- **Blocked transparency panel** — always renders `block_reason` / `block_needs` / `block_audience` (migration-073 QC-scorer fields) when `status='blocked'`, headed "NEEDS YOUR DECISION" for an `OWNER`-audience block (closing the phantom-spec generic-card finding). Read-only; distinct from the editable Blocked-gate form.
+- **Planning tab** — a structured metadata panel renders `dependencies`, `parallel_candidates`, `sprint`, `source` with honest empty-states ("No dependencies recorded"), never a blank pane, above the AI planning-session flow.
+- Every panel renders a designed empty-state when its data is absent — no dead controls, no raw-NULL renders (P2-02 step 6).
+
+### Activity tab — the trust-engine report-back trail (`src/lib/trust-activity.ts`)
+The trust engine (P1-04) records each client send as an `events` row typed `trust_ack` / `trust_progress` / `trust_done` — a DIFFERENT table from `task_activities`, so the ack → in-progress → done trail was written but never SHOWN. `GET /api/tasks/[id]/activities` now folds those events into the feed via a pure mapping seam that extracts the client-facing message (dropping the `trust_x -> <chatId>:` telemetry prefix so a chat id never leaks into the UI). `ActivityLog` renders them with distinct icons and a "Client notified · …" label.
+
+### Tests
+- `tests/unit/p2-02-task-modal-fields.test.ts` — `buildPersonaReason` reuses the scorer message, synthesizes an honest sentence when absent, always yields ONE clean sentence, and returns `null` for a no-match result; the trust-event mapping strips the telemetry prefix (no chat-id leak), maps each of the three types, and is resilient to a prefix-less message.
+- `tests/unit/db-upgrade-migration-ordering.test.ts` — HEAD advanced 098 → 099; fresh install and the v4.72.0-era upgrade both reach 099.
+
 ## [v5.18.1] — 2026-07-12 — fix(jobs): P1-06 board hygiene — "nothing stuck on the board"
 
 Merges `fix/v5.18-board-hygiene` (P1-06). Codifies the lane SLAs so tasks never rot silently in Blocked, Review/QC, Done, or a stale Backlog/Inbox column.

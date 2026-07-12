@@ -152,6 +152,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   block_reason TEXT,                          -- migration 078
   redispatch_count INTEGER DEFAULT 0,         -- migration 084
   persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
+  -- P2-02 (migration 099 owns this for existing DBs; this base CREATE covers
+  -- fresh installs). The stored one-sentence WHY for the persona pick, written
+  -- at persona-selection time (buildPersonaReason) and surfaced in the TaskModal
+  -- "Who's Working On This" panel. Nullable + additive.
+  persona_reason TEXT,
   -- Immutable board-producer provenance (migration 089 / INGEST-10). Stamped
   -- ONLY at creation from the validated ingest 'source' field; never exposed
   -- on UpdateTaskSchema / the PATCH surface. /api/tasks/[id]/status uses this

@@ -352,6 +352,63 @@ export interface PersonaSelectionResult {
   bundle?: PersonaBundle | null;
 }
 
+/**
+ * P2-02 — the stored one-sentence WHY for a persona pick, surfaced in the
+ * TaskModal "Who's Working On This" panel.
+ *
+ * Doctrine (spec step 1): "reuse the selection event's message if the scorer
+ * already writes one — READ persona selection code first and reuse before
+ * adding." So the precedence is:
+ *   1. the scorer's own `message` (its human explanation), when it wrote one;
+ *   2. else the blend voice decision's `why` (audience / topic persona rationale);
+ *   3. else an honest SYNTHESIZED sentence naming the persona, the mode, and the
+ *      match strength — never a stub, never a fabricated specific claim.
+ *
+ * Returns a single clean sentence (collapsed whitespace, no newlines, terminating
+ * period) so the panel renders one tidy line. Returns `null` for a no-match
+ * result (`persona_id` absent) so the caller writes nothing and the panel shows
+ * its honest empty-state rather than a fabricated reason.
+ */
+export function buildPersonaReason(result: PersonaSelectionResult | null | undefined): string | null {
+  if (!result || !result.persona_id) return null;
+
+  const toSentence = (raw: string): string => {
+    // Collapse any newlines / runs of whitespace into single spaces so a
+    // multi-line scorer message never renders as a raw dump, then ensure a
+    // terminating period.
+    const clean = raw.replace(/\s+/g, ' ').trim();
+    if (!clean) return '';
+    return /[.!?]$/.test(clean) ? clean : `${clean}.`;
+  };
+
+  // 1. Reuse the scorer's own explanation verbatim (as a single tidy sentence).
+  const scorerMsg = typeof result.message === 'string' ? toSentence(result.message) : '';
+  if (scorerMsg) return scorerMsg;
+
+  // 2. Reuse the blend voice decision's rationale when present.
+  const voiceWhy =
+    result.bundle?.voice?.audience_persona?.why ||
+    result.bundle?.voice?.topic_persona?.why ||
+    null;
+  if (voiceWhy) {
+    const whySentence = toSentence(voiceWhy);
+    if (whySentence) return whySentence;
+  }
+
+  // 3. Synthesize an honest sentence from what the scorer DID return.
+  const name = result.persona_name && result.persona_name !== 'N/A'
+    ? result.persona_name
+    : result.persona_id;
+  const mode = result.interaction_mode || 'leadership';
+  const category = result.task_category ? ` for ${result.task_category} work` : '';
+  const score = typeof result.score === 'number' && result.score > 0
+    ? ` (match ${Math.round(result.score * 100)}%)`
+    : '';
+  return toSentence(
+    `${name} was matched to this task${category} in ${mode} mode${score}`,
+  );
+}
+
 // ─── PERSONA-BLEND BUNDLE PARSE + PERSIST ────────────────────────────────────
 
 /** True when a raw selector result carries any persona-bundle SUPERSET field. */

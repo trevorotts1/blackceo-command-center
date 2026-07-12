@@ -13,7 +13,7 @@ import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/type
 import { checkTriad, getBestSOPForTask } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { selectPersonaForTask } from '@/lib/persona-selector';
+import { selectPersonaForTask, buildPersonaReason } from '@/lib/persona-selector';
 import { recordPersonaCompletions } from '@/lib/tasks';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
@@ -418,6 +418,14 @@ export async function PATCH(
                   ],
                 );
                 merged.persona_id = persona.persona_id;
+                // P2-02 — store the one-sentence WHY alongside the pin (best-effort,
+                // column-guarded so a pre-099 box never fails the Triad resolve).
+                try {
+                  const reason = buildPersonaReason(persona);
+                  if (reason) run(`UPDATE tasks SET persona_reason = ? WHERE id = ?`, [reason, id]);
+                } catch {
+                  // persona_reason is additive telemetry — never block the pin.
+                }
               }
             } catch (err) {
               console.warn('[tasks PATCH] Triad persona auto-resolve failed (non-fatal):', (err as Error).message);

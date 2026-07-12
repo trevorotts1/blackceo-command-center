@@ -38,6 +38,7 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import {
   selectPersonaForTask,
+  buildPersonaReason,
   selectPersonaPlanForTask,
   loadSubtaskPersonas,
   broadcastPersonaPlan,
@@ -506,6 +507,16 @@ export async function resolvePersonaAndPin(
             taskId,
           ],
         );
+
+        // P2-02 — persist the one-sentence WHY at persona-selection time so the
+        // TaskModal "Who's Working On This" panel has it for a newly-created task
+        // end-to-end. Best-effort + column-guarded (pre-099 boxes have no column).
+        try {
+          const reason = buildPersonaReason(persona);
+          if (reason) run(`UPDATE tasks SET persona_reason = ? WHERE id = ?`, [reason, taskId]);
+        } catch {
+          // persona_reason is additive telemetry — never block the pin on it.
+        }
 
         const updatedTask = queryOne<Task>(
           `SELECT t.*,
@@ -1085,6 +1096,15 @@ export async function rescorePersonaWithSOP(
         taskId,
       ],
     );
+
+    // P2-02 — persist the one-sentence WHY alongside the rescored pin (best-effort,
+    // column-guarded so a pre-099 box never fails the dispatch rescore).
+    try {
+      const reason = buildPersonaReason(persona);
+      if (reason) run(`UPDATE tasks SET persona_reason = ? WHERE id = ?`, [reason, taskId]);
+    } catch {
+      // persona_reason is additive telemetry — never block the rescore on it.
+    }
 
     const sopLabel = sopContext.slug || sopContext.name || 'sop';
     run(
