@@ -14,10 +14,16 @@
 #                           71,551 restarts. Works on Mac (lsof) and Linux (lsof/fuser).
 #   3. CLEAN EXEC         — uses exec so PM2's PID tracking stays correct (the
 #                           bash wrapper never hides the real node child).
+#   4. NON-4000 DRIFT ACK GUARD (P1-02) — if the resolved port is anything
+#                          other than the canonical 4000, print a LOUD warning
+#                          naming the drift's source and refuse to start
+#                          unless CC_PORT_OVERRIDE_ACK=1 is set. Nobody drifts
+#                          off :4000 silently again.
 #
 # Usage:
 #   bash scripts/cc-start.sh [--port PORT]
 #   CC_PORT=4000 bash scripts/cc-start.sh
+#   CC_PORT=3000 CC_PORT_OVERRIDE_ACK=1 bash scripts/cc-start.sh   # deliberate override
 #
 # The script is meant to run as the PM2 `script` + `args` target (see
 # ecosystem.config.cjs).  Under PM2: PM2 passes CC_PORT via the env block.
@@ -47,6 +53,9 @@ done
 # Resolve the canonical CC port: CLI flag → CC_PORT env var → default 4000.
 # Then strip the inherited PORT entirely and re-export only our own port so no
 # ambient OpenClaw gateway PORT or Hostinger injected PORT can reach next start.
+# Capture the RAW inbound env CC_PORT (before we overwrite it below) so the
+# 1b. NON-4000 DRIFT ACK GUARD can name the exact source of a drift.
+_CC_PORT_ENV_ORIG="${CC_PORT:-}"
 CC_PORT="${ARG_PORT:-${CC_PORT:-4000}}"
 
 # Unset ambient PORT before setting ours; also clear HOSTNAME stray if present.
@@ -57,6 +66,36 @@ export CC_PORT="$CC_PORT"
 export NODE_ENV="${NODE_ENV:-production}"
 
 printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "$NODE_ENV" >&2
+
+# ── 1b. NON-4000 DRIFT ACK GUARD (P1-02 Unit B, item 4) ───────────────────────
+# Port 4000 is the ONE canonical CC port fleet-wide — the Cloudflare tunnel
+# ingress → cloudflared → localhost:PORT → pm2 → Next.js chain only holds
+# together when every hop agrees on :4000 (P1-02). This is belt-and-suspenders
+# alongside the ingress-side repair (Unit A): nothing here stops a human or
+# agent from exporting CC_PORT=3000 or passing --port 3000 — the operator can
+# still deliberately run elsewhere — but nobody drifts there SILENTLY. Runs
+# BEFORE the orphan-port killer and BEFORE the build check so a refused start
+# has zero side effects on whatever the requested port happens to be running.
+if [[ "$CC_PORT" != "4000" ]]; then
+  _cc_port_source="unknown source"
+  if [[ -n "$ARG_PORT" ]]; then
+    _cc_port_source="--port CLI flag (value: $ARG_PORT)"
+  elif [[ -n "$_CC_PORT_ENV_ORIG" ]]; then
+    _cc_port_source="CC_PORT environment variable (value: $_CC_PORT_ENV_ORIG)"
+  fi
+  printf '[cc-start] ==================================================================\n' >&2
+  printf '[cc-start] LOUD WARNING: CC_PORT resolved to %s, NOT the canonical port 4000.\n' "$CC_PORT" >&2
+  printf '[cc-start] Source of the drift: %s\n' "$_cc_port_source" >&2
+  printf '[cc-start] Port 4000 is the universal fleet decision (P1-02). Starting elsewhere\n' >&2
+  printf "[cc-start] breaks this box's Cloudflare tunnel -> localhost link for the client.\n" >&2
+  printf '[cc-start] ==================================================================\n' >&2
+  if [[ "${CC_PORT_OVERRIDE_ACK:-0}" != "1" ]]; then
+    printf '[cc-start] FATAL: refusing to start on a non-canonical port without an explicit ACK.\n' >&2
+    printf '[cc-start] If this is truly deliberate, re-run with CC_PORT_OVERRIDE_ACK=1.\n' >&2
+    exit 1
+  fi
+  printf '[cc-start] CC_PORT_OVERRIDE_ACK=1 set — proceeding on port %s deliberately.\n' "$CC_PORT" >&2
+fi
 
 # ── 2. ORPHAN-PORT KILLER ─────────────────────────────────────────────────────
 # Find any process currently LISTENing on the CC port and kill it before next

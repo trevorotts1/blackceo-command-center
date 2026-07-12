@@ -40,6 +40,7 @@ import { runInterviewNudgeSweep, INTERVIEW_NUDGE_SWEEP_CRON } from './interview-
 import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
 import { runPersonaBackfillSweep } from './persona-backfill-sweep';
 import { runIntakeAdvanceSweep } from './intake-advance-sweep';
+import { runPortIntegrityCheck } from './port-integrity';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -523,6 +524,41 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
           `${result.recommendations_upserted} recommendation(s) upserted ` +
           `(${result.recommendations_created} new)`,
       );
+    },
+  },
+
+  // port-integrity: daily at 05:15 server local — P1-02 Unit B, item 5.
+  // Belt-and-suspenders alongside the launch-time ACK guard in cc-start.sh:
+  // that guard stops a NEW drift from ever booting; this catches an ALREADY
+  // running process that drifted after boot (e.g. a manually-launched
+  // `next start -p 3000` that bypassed cc-start.sh entirely — the residual
+  // bypass risk P1-02(b).3 names explicitly). Asserts the actual listen port
+  // is the canonical 4000 (live self-probe, not just the env var) and, when
+  // the Cloudflare tunnel ingress is readable on this box, that it targets
+  // :4000 too. Any mismatch alerts the OPERATOR lane only (MOVE-IN-SILENCE —
+  // never the client). Disable with DISABLE_PORT_INTEGRITY_CHECK=1.
+  {
+    name: 'port-integrity',
+    expr: '15 5 * * *',
+    fn: async () => {
+      if (
+        process.env.DISABLE_PORT_INTEGRITY_CHECK === '1' ||
+        process.env.DISABLE_PORT_INTEGRITY_CHECK === 'true'
+      ) {
+        console.log('[cron] port-integrity: DISABLE_PORT_INTEGRITY_CHECK set, skipping');
+        return;
+      }
+      const result = await runPortIntegrityCheck();
+      if (result.alerted) {
+        console.warn(
+          `[cron] port-integrity: DRIFT — listenPort=${result.listenPort} listenPortOk=${result.listenPortOk} ` +
+            `tunnelChecked=${result.tunnelChecked} tunnelOk=${result.tunnelOk} (${result.tunnelDetail ?? 'n/a'})`,
+        );
+      } else {
+        console.log(
+          `[cron] port-integrity: ok — listenPort=${result.listenPort}, tunnelChecked=${result.tunnelChecked}`,
+        );
+      }
     },
   },
 ];
