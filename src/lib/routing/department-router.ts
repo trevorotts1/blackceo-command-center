@@ -23,6 +23,7 @@
  *   Semantic embeddings classify by MEANING against those real names.
  */
 
+import { createHash } from 'node:crypto';
 import { queryAll } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
@@ -299,11 +300,95 @@ interface SemanticScore {
   similarity: number;
 }
 
+// ---------------------------------------------------------------------------
+// Department-embedding cache (P4-03 step 6)
+//
+// PRE-FIX: semanticRankDepartments() embedded the task text AND every
+// department's deptEmbedText() on EVERY comDispatch() call — N+1 client-key
+// embedding calls per task dispatch, zero caching of the semi-static
+// department vectors (department name/purpose/keywords rarely change between
+// dispatches). This module-level cache computes each department's vector
+// ONCE per department-config version and reuses it until the department's
+// embed text actually changes, so semanticRankDepartments() embeds only the
+// live task text per call: N+1 -> 1.
+//
+// Cache key = department.id; invalidation = a content hash of the SAME text
+// deptEmbedText() produces (name + purpose + first-12-keywords) — no
+// separate version field needed. An operator editing a department's name,
+// purpose, or keywords changes the hash and the next dispatch re-embeds ONLY
+// that department, never the whole roster.
+//
+// Process-local (not persisted) — cheap to rebuild on restart, and per the
+// standing guard (P4-03 step 8) never shipped as a cross-client asset:
+// department configs are per-client, not a shared library.
+// ---------------------------------------------------------------------------
+interface DeptVectorCacheEntry {
+  hash: string;
+  vector: EmbeddingVector;
+}
+
+const _deptVectorCache = new Map<string, DeptVectorCacheEntry>();
+
+function _deptTextHash(text: string): string {
+  return createHash('sha1').update(text).digest('hex');
+}
+
+/** Test-only: reset the cache between test cases so assertions don't leak
+ * state across departments-config fixtures in the same test process. */
+export function _resetDeptVectorCacheForTests(): void {
+  _deptVectorCache.clear();
+}
+
+/** Test-only: current cache size, for asserting cache population/eviction. */
+export function _deptVectorCacheSizeForTests(): number {
+  return _deptVectorCache.size;
+}
+
+/**
+ * Resolve every department's semantic vector, embedding ONLY the
+ * departments whose cache entry is missing or stale (content-hash mismatch).
+ * Returns null when the embed call for the uncached delta fails, so the
+ * caller falls back to keyword scoring exactly as before.
+ */
+async function getCachedDepartmentVectors(
+  departments: DepartmentConfig[],
+): Promise<Map<string, EmbeddingVector> | null> {
+  const resolved = new Map<string, EmbeddingVector>();
+  const toEmbed: { dept: DepartmentConfig; text: string; hash: string }[] = [];
+
+  for (const dept of departments) {
+    const text = deptEmbedText(dept);
+    const hash = _deptTextHash(text);
+    const cached = _deptVectorCache.get(dept.id);
+    if (cached && cached.hash === hash) {
+      resolved.set(dept.id, cached.vector);
+    } else {
+      toEmbed.push({ dept, text, hash });
+    }
+  }
+
+  if (toEmbed.length > 0) {
+    const results = await fetchEmbeddings(toEmbed.map((t) => t.text));
+    if (!results || results.length !== toEmbed.length) return null;
+    toEmbed.forEach((t, i) => {
+      const vector = results[i].embedding;
+      _deptVectorCache.set(t.dept.id, { hash: t.hash, vector });
+      resolved.set(t.dept.id, vector);
+    });
+  }
+
+  return resolved;
+}
+
 /**
  * Rank departments by semantic (cosine) similarity to the task text.
  *
  * Returns null when embeddings are unavailable (no key / API error) so
  * callers can fall back to keyword scoring.
+ *
+ * Embed-call accounting (P4-03): 1 call for the live task text, PLUS one call
+ * per uncached/stale department (0 on a fully warm cache) — never N+1 for a
+ * roster whose department configs have not changed since the last dispatch.
  */
 async function semanticRankDepartments(
   taskText: string,
@@ -312,19 +397,21 @@ async function semanticRankDepartments(
   if (!getEmbeddingApiKey()) return null;
   if (departments.length === 0) return null;
 
-  const deptTexts = departments.map(deptEmbedText);
-  const allTexts = [taskText, ...deptTexts];
+  const deptVectors = await getCachedDepartmentVectors(departments);
+  if (!deptVectors) return null;
 
-  const results = await fetchEmbeddings(allTexts);
-  if (!results || results.length < 2) return null;
-
-  const taskVec: EmbeddingVector = results[0].embedding;
+  const taskResults = await fetchEmbeddings([taskText]);
+  if (!taskResults || taskResults.length < 1) return null;
+  const taskVec: EmbeddingVector = taskResults[0].embedding;
 
   return departments
-    .map((dept, i) => ({
-      department: dept,
-      similarity: cosineSimilarity(taskVec, results[i + 1].embedding),
-    }))
+    .map((dept) => {
+      const deptVec = deptVectors.get(dept.id);
+      return {
+        department: dept,
+        similarity: deptVec ? cosineSimilarity(taskVec, deptVec) : 0,
+      };
+    })
     .sort((a, b) => b.similarity - a.similarity);
 }
 
