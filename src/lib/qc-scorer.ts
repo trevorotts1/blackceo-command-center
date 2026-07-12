@@ -852,8 +852,12 @@ If score <8.5, "gaps" must list specific, actionable rework items.`;
  * sanctioned QC-judge provider. Matches the registry shape `ollama-cloud/<m>`,
  * the legacy `ollama/<m>:cloud` shape, and a bare `<m>:cloud` tag (the ':cloud'
  * suffix is authoritative). Mirrors model-selector.tierOf()'s tier-1 detection.
+ *
+ * Exported (P1-05) so the fleet judge-proof probe (src/lib/probes/qc-judge-
+ * probe.ts) shares this exact classification instead of re-deriving it —
+ * single source of truth for "what counts as a client Ollama Cloud judge id".
  */
-function isOllamaCloudModel(modelId: string | null | undefined): boolean {
+export function isOllamaCloudModel(modelId: string | null | undefined): boolean {
   if (!modelId) return false;
   const id = modelId.trim().toLowerCase();
   return id.startsWith('ollama-cloud/') || id.includes(':cloud');
