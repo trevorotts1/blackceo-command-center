@@ -41,6 +41,7 @@ import { runBacklogRedispatchSweep } from './backlog-redispatch-sweep';
 import { runPersonaBackfillSweep } from './persona-backfill-sweep';
 import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { runPortIntegrityCheck } from './port-integrity';
+import { runTrustEngineSweep } from './trust-engine';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -338,6 +339,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else if (result.scanned > 0) {
         console.log(
           `[cron] intake-advance: scanned ${result.scanned}, routed ${result.routed}, dispatched ${result.dispatched}`,
+        );
+      }
+    },
+  },
+
+  // trust-engine: every 2 minutes — THE report-back loop (P1-04, the #1 client
+  // complaint). Reports acknowledge -> in-progress -> done back to the client's
+  // originating channel for every task that carries a requester_chat_id. Crash-
+  // safe by construction (CLAIM-then-dispatch; the durable *_sent_at stamp is the
+  // sole idempotency guard, so a re-run never double-sends) and furnace-proof (it
+  // only selects tasks with a client chat id AND a pending, unstamped message).
+  // Disable with DISABLE_TRUST_ENGINE=1.
+  {
+    name: 'trust-engine',
+    expr: '*/2 * * * *',
+    fn: async () => {
+      const result = runTrustEngineSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] trust-engine: skipped — ${result.skippedReason}`);
+      } else if (result.scanned > 0) {
+        console.log(
+          `[cron] trust-engine: scanned ${result.scanned}, claimed ${result.claimed}, ` +
+            `sent ${result.sent}, skipped ${result.skipped}`,
         );
       }
     },

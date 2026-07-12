@@ -1819,6 +1819,16 @@ export interface CreateTaskCoreInput {
    * with the same title (e.g. recurring tasks). Default: false.
    */
   skipWindowDedup?: boolean;
+  /**
+   * P1-04 (trust engine) — the ORIGINATING client channel + chat id, captured at
+   * ingest when the task came from a client message (e.g. a Telegram request the
+   * CEO routed). The trust-engine sweep uses these to report acknowledge ->
+   * in-progress -> done back INTO the same channel. Both nullable: a task with no
+   * requester_chat_id is simply never reported on (operator-created / internal
+   * tasks never trigger a client-facing message).
+   */
+  requester_channel?: string | null;
+  requester_chat_id?: string | null;
 }
 
 export interface CreateTaskCoreResult {
@@ -2007,8 +2017,8 @@ export async function createTaskCore(
       : null;
 
   run(
-    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.title,
@@ -2023,6 +2033,10 @@ export async function createTaskCore(
       input.due_date || null,
       sopId,
       input.source || null,   // INGEST-10: immutable board-producer provenance, creation-only
+      // P1-04: capture the originating client channel so the trust engine can
+      // report back into it. Both NULL for operator/internal tasks (never reported on).
+      input.requester_channel || null,
+      input.requester_chat_id || null,
       now,
       now,
     ]

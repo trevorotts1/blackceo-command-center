@@ -3952,6 +3952,90 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '098',
+    name: 'add_trust_engine_columns',
+    // Purely ADDITIVE: PRAGMA-guarded `ALTER TABLE tasks ADD COLUMN` only. No row
+    // is read, written, moved or destroyed, so it is safe under the additive
+    // self-heal path and a NO-OP on healthy boxes. Follows the migration-097
+    // pattern exactly: inspect the LIVE schema (PRAGMA table_info), never the
+    // ledger, and add whatever is genuinely missing. Never throws on an
+    // unforeseen shape (096/097 philosophy: skipping costs one column; throwing
+    // costs the whole box).
+    //
+    // WHY THIS EXISTS (P1-04 — THE TRUST ENGINE / REPORT-BACK LOOP)
+    // The #1 client complaint: a client asks the AI CEO for something, it is
+    // routed to a department, and then silence — no ack, no progress, no done.
+    // The report-back engine (src/lib/jobs/trust-engine.ts) needs eight new
+    // columns on `tasks` to (a) remember the ORIGINATING client channel so it can
+    // report back into it, and (b) crash-safely stamp each of the three messages
+    // exactly once. All eight are nullable + additive; the base schema.ts CREATE
+    // TABLE carries them for fresh installs, and this migration back-fills every
+    // existing box.
+    //
+    //   requester_channel      e.g. 'telegram' — the channel the request came in on
+    //   requester_chat_id      the client's chat id to report back to
+    //   ack_sent_at            stamp: message 1 (acknowledge) sent
+    //   progress_last_sent_at  stamp: message 2 (in-progress / blocked-needs-you) sent
+    //   eta_estimate           the coarse honest ETA surfaced with the progress msg
+    //   completion_sent_at     stamp: message 3 (done + result) sent
+    //   result_summary         honest one-line result surfaced on done
+    //   result_location        where the deliverable can be found (file/GHL/Drive)
+    up: (db) => {
+      console.log('[Migration 098] Adding trust-engine report-back columns to tasks...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 098] tasks table absent — nothing to add');
+        return;
+      }
+
+      const presentCols = () =>
+        new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+
+      // Every column is nullable TEXT and additive — no DEFAULT, no CHECK, so an
+      // ALTER can never fail on existing data.
+      const wanted: { name: string; ddl: string }[] = [
+        { name: 'requester_channel', ddl: 'ALTER TABLE tasks ADD COLUMN requester_channel TEXT' },
+        { name: 'requester_chat_id', ddl: 'ALTER TABLE tasks ADD COLUMN requester_chat_id TEXT' },
+        { name: 'ack_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN ack_sent_at TEXT' },
+        { name: 'progress_last_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN progress_last_sent_at TEXT' },
+        { name: 'eta_estimate', ddl: 'ALTER TABLE tasks ADD COLUMN eta_estimate TEXT' },
+        { name: 'completion_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN completion_sent_at TEXT' },
+        { name: 'result_summary', ddl: 'ALTER TABLE tasks ADD COLUMN result_summary TEXT' },
+        { name: 'result_location', ddl: 'ALTER TABLE tasks ADD COLUMN result_location TEXT' },
+      ];
+
+      const added: string[] = [];
+      for (const { name, ddl } of wanted) {
+        if (!presentCols().has(name)) {
+          db.exec(ddl);
+          added.push(name);
+        }
+      }
+
+      // Partial index so the 2-minute trust-engine sweep can cheaply find the
+      // tasks it must report on (those that carry an originating client chat id)
+      // without scanning the whole board. IF NOT EXISTS + a column-presence guard
+      // so it can never deadlock a box.
+      if (presentCols().has('requester_chat_id')) {
+        const existed = db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_tasks_requester_chat'")
+          .get();
+        db.exec(
+          'CREATE INDEX IF NOT EXISTS idx_tasks_requester_chat ON tasks(requester_chat_id) WHERE requester_chat_id IS NOT NULL',
+        );
+        if (!existed) console.log('[Migration 098] Created idx_tasks_requester_chat');
+      }
+
+      console.log(
+        added.length > 0
+          ? `[Migration 098] Added ${added.length} trust-engine column(s): ${added.join(', ')}`
+          : '[Migration 098] All trust-engine columns already present — nothing to add',
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

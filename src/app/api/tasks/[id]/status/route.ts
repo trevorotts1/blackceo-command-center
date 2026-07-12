@@ -450,6 +450,19 @@ export async function POST(
       broadcast({ type: 'task_updated', payload: task });
     }
 
+    // P1-04 — trust engine: on a status change, report back to the client
+    // IMMEDIATELY (in-progress/blocked/done) rather than waiting up to 2 min for
+    // the sweep. Best-effort; shares the sweep's exact claim-then-send path so it
+    // can never double-send. Never blocks or fails the response.
+    if (task && statusChanged) {
+      try {
+        const { runTrustEngineForTask } = await import('@/lib/jobs/trust-engine');
+        runTrustEngineForTask(id);
+      } catch (err) {
+        console.warn('[tasks status] trust-engine trigger skipped:', (err as Error).message);
+      }
+    }
+
     return NextResponse.json(task, { status: 200 });
   } catch (error) {
     console.error('[tasks status] Failed to update task status:', error);

@@ -126,11 +126,12 @@ function corruptToFalselyHealed(dbPath: string): void {
 test('DATA-01 ledger-lie: 097 reconciles a box whose ledger claims 077/078 applied while their columns are absent', () => {
   const dbPath = tmpDbPath('lifecycle');
 
-  // A fresh install is fully healthy and reaches head 097.
+  // A fresh install is fully healthy and reaches head 098 (P1-04 added migration
+  // 098; the ledger-lie behaviour under test is still owned by migration 097).
   assert.doesNotThrow(() => boot(dbPath), 'fresh install must boot clean');
   {
     const db = new Database(dbPath);
-    assert.equal(headMigration(db), '097', 'fresh install must reach migration 097');
+    assert.equal(headMigration(db), '098', 'fresh install must reach the head migration');
     const cols = tasksColumns(db);
     for (const c of DISPATCH_COLUMNS) assert.ok(cols.has(c), `fresh install must have tasks.${c}`);
     assert.ok(indexExists(db, DISPATCH_INDEX), `fresh install must have ${DISPATCH_INDEX}`);
@@ -146,7 +147,11 @@ test('DATA-01 ledger-lie: 097 reconciles a box whose ledger claims 077/078 appli
     assert.ok(ledgerHas(db, '077'), 'precondition: _migrations must still record 077 applied');
     assert.ok(ledgerHas(db, '078'), 'precondition: _migrations must still record 078 applied');
     assert.ok(!ledgerHas(db, '097'), 'precondition: 097 must be pending again');
-    assert.equal(headMigration(db), '096', 'precondition: the box reports head 096 (looks healthy)');
+    // The ledger still records everything up to head (096 + the later additive 098)
+    // while 097's dispatch columns are gone — the box "looks healthy" by ledger id
+    // yet dispatch is dead. (P1-04 added 098; corruptToFalselyHealed removes only
+    // 097, so the reported head is now the additive 098, an even stronger lie.)
+    assert.equal(headMigration(db), '098', 'precondition: the box reports a high head (looks healthy)');
 
     const cols = tasksColumns(db);
     for (const c of DISPATCH_COLUMNS) {
@@ -202,7 +207,7 @@ test('DATA-01 ledger-lie: 097 reconciles a box whose ledger claims 077/078 appli
   assert.doesNotThrow(() => boot(dbPath), 'a second boot on a healthy box must be a clean no-op');
   {
     const db = new Database(dbPath);
-    assert.equal(headMigration(db), '097', 'head stays 097 (no duplicate 097 row / no error)');
+    assert.equal(headMigration(db), '098', 'head stays at the head migration (no duplicate row / no error)');
     const n097 = (db.prepare("SELECT COUNT(*) n FROM _migrations WHERE id='097'").get() as { n: number }).n;
     assert.equal(n097, 1, '097 must be recorded exactly once (idempotent)');
     db.close();
