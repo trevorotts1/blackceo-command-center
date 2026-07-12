@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BACKLOG_COLUMN_SUBTITLE } from '../../src/lib/board-labels';
 
 const TMP_DB = path.join(
   fs.mkdtempSync(path.join(os.tmpdir(), 'bc-trust-engine-')),
@@ -97,6 +98,23 @@ test('ACK: a task stalled in backlog past the grace window gets the HONEST queue
   assert.match(plans[0].message, /queued for grooming/i);
   assert.equal(plans[0].stamps[0].guardColumn, 'ack_sent_at');
   assert.equal(plans[0].stamps[0].eventType, 'trust_ack');
+});
+
+test('P2-01 step 3: the backlog-parked ACK uses the SAME honest "being prepared" language as the board', () => {
+  const old = new Date(DAYTIME.getTime() - 11 * 60 * 1000).toISOString();
+  const plans = engine.planSends([mkTask({ id: 't1b', status: 'backlog', created_at: old })], {
+    now: DAYTIME,
+    deliverableFor: noDeliverable,
+  });
+  assert.equal(plans.length, 1);
+  // The exact operator-specified explainer (src/lib/board-labels.ts) must be
+  // reused verbatim here, not paraphrased — a single source of truth so the
+  // board's hover subtitle and the trust-engine message can never drift.
+  assert.ok(
+    plans[0].message.includes(BACKLOG_COLUMN_SUBTITLE),
+    `expected the ACK to include the shared BACKLOG_COLUMN_SUBTITLE copy, got: ${plans[0].message}`,
+  );
+  assert.match(plans[0].message, /queued for grooming/i, 'still the pre-existing honest phrase');
 });
 
 test('ACK: a fresh backlog task inside the grace window is NOT acked yet (avoids premature noise)', () => {

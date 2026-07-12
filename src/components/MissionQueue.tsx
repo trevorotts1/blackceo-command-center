@@ -15,6 +15,13 @@ import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
 import { BlockTaskModal, type BlockTaskDetails } from './kanban/BlockTaskModal';
 import { MoveTaskMenu } from './kanban/MoveTaskMenu';
 import { formatDistanceToNow } from 'date-fns';
+import {
+  BACKLOG_COLUMN_LABEL,
+  TODO_COLUMN_LABEL,
+  BACKLOG_COLUMN_SUBTITLE,
+  triadMissingFields,
+  triadMissingPillText,
+} from '@/lib/board-labels';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
 // 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
@@ -57,9 +64,12 @@ type ColumnDef = { id: string; label: string; gradient: string; tooltip?: string
 // Each column carries a tooltip string (rendered via the `title` attribute on
 // the column-header pill) that explains what the column means, what gate
 // controls entry, and what the owner should do when work piles up there.
+// P2-01 — labels renamed (client confusion was the naming, not the
+// mechanism — both columns stay, each still encodes the real server-enforced
+// Triad Rule gate). BACKLOG_COLUMN_SUBTITLE is the operator's verbatim
+// hover copy for "Being Prepared"; see src/lib/board-labels.ts.
 const COLUMN_TOOLTIPS: Record<string, string> = {
-  backlog:
-    'Just landed — not ready. Missing a description, SOP, or persona; can\'t start until it has all three (the Triad).',
+  backlog: BACKLOG_COLUMN_SUBTITLE,
   todo:
     'Groomed & ready — has description + SOP + persona and is assigned to an agent; queued but not started.',
   in_progress: 'An agent is actively working this.',
@@ -71,8 +81,8 @@ const COLUMN_TOOLTIPS: Record<string, string> = {
 
 const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
   task: [
-    { id: 'backlog',     label: 'Backlog',     gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.backlog },
-    { id: 'todo',        label: 'To-Do',       gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.todo },
+    { id: 'backlog',     label: BACKLOG_COLUMN_LABEL, gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.backlog },
+    { id: 'todo',        label: TODO_COLUMN_LABEL,    gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.todo },
     { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress', tooltip: COLUMN_TOOLTIPS.in_progress },
     { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review',   tooltip: COLUMN_TOOLTIPS.review },
     { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked',  tooltip: COLUMN_TOOLTIPS.blocked },
@@ -776,7 +786,9 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns
   };
 
   const statusLabels: Record<string, string> = {
-    backlog: 'Backlog',
+    // P2-01: matches the renamed "Being Prepared" column so a card's own
+    // status pill never contradicts the column it's sitting in.
+    backlog: BACKLOG_COLUMN_LABEL,
     inbox: 'New',
     planning: 'Planning',
     assigned: 'Queued',
@@ -854,6 +866,25 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns
         }`}>
           {statusLabels[task.status] || task.status}
         </span>
+
+        {/* P2-01 step 2 — "why is this here?" affordance: on a Being-Prepared
+            (backlog) card, shows WHICH triad element(s) are still missing.
+            Client-safe presence mirror of the server's Triad Rule gate — see
+            src/lib/board-labels.ts for why this can't just import checkTriad
+            directly (that module reads the DB and this is a 'use client'
+            component). */}
+        {task.status === 'backlog' && (() => {
+          const missingTriad = triadMissingFields(task);
+          if (missingTriad.length === 0) return null;
+          return (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200"
+              title={`Why is this here? "${BACKLOG_COLUMN_LABEL}" means it's still missing part of the Triad (description + SOP + persona) it needs before it can start.`}
+            >
+              🧩 {triadMissingPillText(missingTriad)}
+            </span>
+          );
+        })()}
 
         {/* Persona Pill — typed fields from Task interface (Hop 10) */}
         {task.persona_name && (
