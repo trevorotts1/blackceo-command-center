@@ -1,3 +1,34 @@
+## [v5.17.0] — 2026-07-11 — fix(dispatch,models): the phantom-worker TRIGGER — a substring "vision" classifier that a single noun ("screenshot") could flip, then a silent 5×-retry refusal (P1-01)
+
+There was never a phantom worker. The 2026-07-11 ~11:31 incident — a routine "check the Convert and Flow balance… screenshot…" task reported as routed to an agent that "did not exist" — was a three-defect chain, and its agent-side explanation (a phantom worker + a claimed morning fix) was **confabulated**. Defects #2 (the MODEL-07 catalog self-destruct) and #3 (the silent-refusal notify path) were fixed in v5.16.0–v5.16.2. This release fixes the **proximate trigger**, defect #1: a dumb substring modality classifier. No model was added, removed, or substituted; no credential was touched; sovereignty is unchanged.
+
+### FIX 1 — the substring "vision" classifier a single innocent noun could flip (the keyword landmine)
+
+`detectModality()` (`src/lib/model-selector.ts`) classified a task's required modality by testing the task text against `VISION_SIGNALS = ['image','screenshot','photo','visual','look at','ocr','slide','diagram','chart','graphic','picture','thumbnail','mockup','inspect',…]` with a bare `text.includes(s)`. The word **"screenshot"** inside "check the balance and take a screenshot" therefore classified the task as `vision`, demanding a vision-capable model. On a box whose vision models had been deprecated (defect #2) the AF-MODEL-SOVEREIGNTY gate (`task-dispatcher.ts`) then **correctly** refused to dispatch — and the task stalled. This is the in-code embodiment of the "grep to judge content" failure mode (Section 2.4): a substring standing in for meaning.
+
+The classifier is now **conservative and fail-to-text**. `detectModality()` returns a non-`text` modality ONLY when one of:
+- **(i)** the task carries an actual attachment/file of that kind (`context.attachments` — image/PDF → `vision`, audio → `audio_transcription`, video → `vision`),
+- **(ii)** the text matches an explicit GENERATION VERB PHRASE (multi-word: "generate image", "create video", "text to speech" — the `IMAGE_GEN_SIGNALS`/`*_GEN_SIGNALS` lists), or
+- **(iii)** the task explicitly declares a modality field (`context.declaredModality`).
+
+Every bare passive noun ("screenshot", "image", "chart", "slide", "inspect", "photo", "video", "clip", "motion", …) is **deleted** from the signal lists — none can flip modality on its own. `vision` (image understanding) has no natural generation verb, so it is reachable ONLY via a real attachment (i) or an explicit declaration (iii), never from wording alone. When none of (i)/(ii)/(iii) hold the task is `text` — the modality every ordinary language model can attempt — so a keyword can never again make a task undispatchable.
+
+### FIX 1b — the vision→text SAFETY NET (a keyword must never block dispatch)
+
+Even a legitimately-classified `vision` task must not become undispatchable on a box that simply has no vision model. `applyModalityDowngrade()` (new, `model-selector.ts`) degrades a `vision` classification to `text` when the active inventory has no vision-capable model, and `selectTaskModel()` threads a `modality_downgraded` flag through the resolver (`intelligence-resolver.ts` `ResolvedSettings`) to the dispatcher, which logs a `modality_downgraded` event. A text model then attempts the task instead of it stalling. Pure GENERATION modalities (image/video/audio generation) and transcription are **never** downgraded — a text model cannot fake them, so they correctly ask the owner for a model.
+
+### FIX 2 — a model-sovereignty refusal now BLOCKS + reports on attempt 1, not after a silent 5×-retry ladder
+
+`recordDispatchFailure()` (`task-dispatcher.ts`) treated every failure as transient: it backed off and only blocked + notified the owner at `MAX_DISPATCH_ATTEMPTS` (5), i.e. after ~33 minutes of silence — the residue of defect #3. A model-sovereignty refusal (no sovereign/modality-fit model resolved) is **non-transient**: no retry can cure a missing model. It now carries a `hardBlock` class that blocks the task and notifies the OWNER on the **first** attempt (block note marked "non-transient"), never looping. The ordinary transient ladder (gateway down, SOP-authoring holds, etc.) is unchanged — proven by the control test.
+
+### FIX 3 — per-box residue remediation (a code update alone does not heal an already-damaged box)
+
+`scripts/remediate/unfreeze-sovereignty-blocks.ts` (new, ships in the P6-01 rollout) performs the two steps new code cannot do for a box already damaged by the incident: (1) return every task blocked on `block_reason LIKE 'model_sovereignty%'` (archived excluded) to `backlog` with its dispatch attempt-accounting reset, so the intake sweep re-dispatches it correctly; (2) force one model refresh so a self-destructed catalog reactivates its re-seen models; then assert ≥1 active model exists. Dry-run by default; `--apply` executes; idempotent; never prints a secret.
+
+### Tests
+- `tests/unit/modality-classifier.test.ts` — (a) the exact incident title/description ("…screenshot…" balance check) classifies `text`; (b) "generate image of a red car" classifies `image_generation` while a bare "image" noun stays `text`; (c) an attached-image task classifies `vision` (and the same text with no attachment stays `text`); (d) a `vision` task on a box with zero active vision models downgrades to `text` and dispatch proceeds (a text model is selected), while a vision model present keeps it `vision`; a generation modality with no capable model is NOT downgraded (owner input); plus a 20-noun break-it sweep (solo, upper-case, in-URL, in-sentence — all `text`). **Fail-first:** against the pre-fix `VISION_SIGNALS` the incident text matched "screenshot" → `vision`, so case (a) fails on the pre-fix tree.
+- `tests/unit/dispatch-hardblock-sovereignty.test.ts` — a `hardBlock` (model_sovereignty) failure blocks + reports on attempt 1 (`status='blocked'`, `dispatch_attempts=1`, OWNER audience, non-transient block note), while a transient failure still defers with a backoff window on attempt 1. Against the pre-fix ladder the sovereignty failure only deferred on attempt 1, so the first assertion fails pre-fix.
+
 ## [v5.16.2] — 2026-07-11 — fix(db,models,jobs): the migration LEDGER-LIE (dispatch silently dead) + Ollama Cloud made to actually work (404 base URL + the key CC never read) + the swallowed stale-sweep 401
 
 Four repo-level fixes, one release. All were invisible because the failures were swallowed. **FIX 2 and FIX 4 are the same feature** — the URL fix makes the endpoint correct, the auth-store fix makes Command Center able to authenticate to it; a box needs BOTH before Ollama Cloud registers a single model.

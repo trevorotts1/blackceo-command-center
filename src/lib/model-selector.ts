@@ -164,39 +164,171 @@ export type TaskModality =
   | 'audio_generation'
   | 'audio_transcription';
 
-const VISION_SIGNALS = [
-  'image', 'screenshot', 'photo', 'visual', 'look at', 'ocr', 'slide',
-  'diagram', 'chart', 'graphic', 'picture', 'thumbnail', 'mockup',
-  'inspect', 'review the image', 'visual qc', 'branding review',
-];
+/**
+ * P1-01 — CONSERVATIVE, FAIL-TO-TEXT modality classifier.
+ *
+ * The old classifier flipped a task off `text` on a bare substring match against
+ * a noun list (`VISION_SIGNALS = ['image','screenshot','photo',…,'inspect']`).
+ * A single innocent noun in the task text — the word "screenshot" in
+ * "check the balance and take a screenshot" — classified the task as `vision`,
+ * demanding a vision-capable model. On a box with no active vision model the
+ * sovereignty gate then (correctly) refused to dispatch, and the task stalled.
+ * That substring classifier was the proximate trigger of the 2026-07-11
+ * phantom-worker incident (Section 2.4 / P1-01). It is the in-code embodiment of
+ * the "grep to judge content" failure mode and is removed here.
+ *
+ * NEW RULE: `detectModality()` may return a NON-`text` modality ONLY when one of:
+ *   (i)   the task carries an actual attachment/file of that kind
+ *         (`context.attachments`), OR
+ *   (ii)  the text matches an explicit GENERATION VERB PHRASE (multi-word
+ *         phrases like "generate image", "create video", "text to speech"), OR
+ *   (iii) the task explicitly declares a modality field
+ *         (`context.declaredModality`).
+ *
+ * A single noun ("screenshot", "image", "chart", "slide", "inspect", "photo",
+ * "video", "clip", "motion", …) NEVER by itself flips modality — those nouns are
+ * deleted from the signal lists. When none of (i)/(ii)/(iii) hold, the task is
+ * `text`. This fails to the modality every ordinary language model can attempt,
+ * so a keyword can never make a task undispatchable.
+ *
+ * `vision` (understanding/looking at an image) has no natural generation verb
+ * phrase — it is reached ONLY via an actual image attachment (i) or an explicit
+ * declaration (iii), never from task wording alone.
+ */
+
+/** A file/attachment carried by a task. `kind`/`mime` are best-effort hints. */
+export interface TaskAttachmentHint {
+  kind?: string | null;
+  mime?: string | null;
+}
+
+/** Optional evidence that lets `detectModality` return a non-text modality. */
+export interface ModalityContext {
+  /** Real files attached to the task (condition (i)). */
+  attachments?: TaskAttachmentHint[] | null;
+  /** An explicitly declared modality field on the task (condition (iii)). */
+  declaredModality?: TaskModality | null;
+}
+
+const VALID_MODALITIES: ReadonlySet<TaskModality> = new Set<TaskModality>([
+  'text', 'vision', 'image_generation', 'video_generation',
+  'audio_generation', 'audio_transcription',
+]);
+
+// (ii) GENERATION verb phrases only — multi-word action phrases that state an
+// intent to PRODUCE media. No bare passive nouns.
 const IMAGE_GEN_SIGNALS = [
   'generate image', 'create image', 'produce image', 'make image',
   'generate graphic', 'design graphic', 'create graphic', 'produce graphic',
   'generate photo', 'image generation',
 ];
-const VIDEO_SIGNALS = [
-  'video', 'storyboard', 'reel', 'clip', 'animation', 'motion',
+const VIDEO_GEN_SIGNALS = [
+  'generate video', 'create video', 'produce video', 'make video',
+  'render video', 'video generation', 'generate animation',
+  'create animation', 'produce animation',
 ];
 const AUDIO_GEN_SIGNALS = [
-  'generate audio', 'text to speech', 'tts', 'voiceover', 'narrate',
-  'produce audio', 'synthesize voice',
+  'generate audio', 'text to speech', 'text-to-speech', 'produce audio',
+  'synthesize voice', 'generate voiceover', 'generate a voiceover',
 ];
+// Transcription (audio INPUT → text) — action verbs, not passive nouns.
 const AUDIO_TRANSCRIBE_SIGNALS = [
-  'transcribe', 'transcription', 'speech to text', 'stt', 'caption audio',
+  'transcribe', 'transcription', 'speech to text', 'speech-to-text',
+  'caption audio', 'caption the audio',
 ];
+
+/** (i) Infer a modality from an attached file's kind/mime hint. */
+function modalityFromAttachments(
+  attachments?: TaskAttachmentHint[] | null,
+): TaskModality | null {
+  if (!attachments || attachments.length === 0) return null;
+  for (const a of attachments) {
+    const hint = `${a.kind ?? ''} ${a.mime ?? ''}`.toLowerCase();
+    if (!hint.trim()) continue;
+    // An attached image/PDF/screenshot means the task must LOOK AT it → vision.
+    if (/(^|[^a-z])(image|png|jpe?g|gif|webp|bmp|tiff?|heic|pdf|screenshot|photo)([^a-z]|$)/.test(hint)) {
+      return 'vision';
+    }
+    // Attached audio means the task consumes audio → transcription.
+    if (/(^|[^a-z])(audio|mp3|wav|m4a|flac|ogg|voice)([^a-z]|$)/.test(hint)) {
+      return 'audio_transcription';
+    }
+    // Attached video is understood (analysed) as visual input → vision.
+    if (/(^|[^a-z])(video|mp4|mov|webm|mkv|avi)([^a-z]|$)/.test(hint)) {
+      return 'vision';
+    }
+  }
+  return null;
+}
 
 export function detectModality(
   title: string,
   description?: string | null,
+  context?: ModalityContext,
 ): TaskModality {
+  // (iii) Explicit declaration wins outright.
+  if (context?.declaredModality && VALID_MODALITIES.has(context.declaredModality)) {
+    return context.declaredModality;
+  }
+
   const text = `${title} ${description ?? ''}`.toLowerCase();
-  // Image generation is more specific than vision, check first
+
+  // (ii) Explicit GENERATION verb phrases. Most specific first.
   if (IMAGE_GEN_SIGNALS.some((s) => text.includes(s))) return 'image_generation';
-  if (VIDEO_SIGNALS.some((s) => text.includes(s))) return 'video_generation';
+  if (VIDEO_GEN_SIGNALS.some((s) => text.includes(s))) return 'video_generation';
   if (AUDIO_GEN_SIGNALS.some((s) => text.includes(s))) return 'audio_generation';
   if (AUDIO_TRANSCRIBE_SIGNALS.some((s) => text.includes(s))) return 'audio_transcription';
-  if (VISION_SIGNALS.some((s) => text.includes(s))) return 'vision';
+
+  // (i) An actual attachment of a given kind.
+  const fromAttachment = modalityFromAttachments(context?.attachments);
+  if (fromAttachment) return fromAttachment;
+
+  // Fail to text: a bare noun in the task wording NEVER flips modality.
   return 'text';
+}
+
+/**
+ * P1-01 SAFETY NET — modalities a text model can still ATTEMPT if the box has no
+ * capable model. `vision` ("look at / understand an image") degrades to a text
+ * attempt rather than blocking dispatch. Pure GENERATION modalities
+ * (image/video/audio generation) and transcription cannot be faked by a text
+ * model, so they never downgrade — they correctly ask the owner for a model.
+ */
+const DOWNGRADABLE_MODALITIES: ReadonlySet<TaskModality> = new Set<TaskModality>([
+  'vision',
+]);
+
+/** True when the active inventory contains at least one model that can serve `modality`. */
+export function inventoryServesModality(
+  modality: TaskModality,
+  inventory: ModelRegistryEntry[],
+): boolean {
+  if (modality === 'text') {
+    return inventory.some((m) => !isForbidden(m.model_id) && canServeTextTask(m));
+  }
+  return inventory.some(
+    (m) => !isForbidden(m.model_id) && m.capabilities.includes(modality as ModelCapability),
+  );
+}
+
+/**
+ * Apply the P1-01 safety net: a would-be downgradable modality (vision) with NO
+ * active capable model on the box degrades to `text` (a text model attempts it)
+ * instead of leaving the task undispatchable. Returns the effective modality plus
+ * whether a downgrade occurred (the caller logs a `modality_downgraded` event).
+ */
+export function applyModalityDowngrade(
+  modality: TaskModality,
+  inventory: ModelRegistryEntry[],
+): { modality: TaskModality; downgraded: boolean } {
+  if (
+    modality !== 'text' &&
+    DOWNGRADABLE_MODALITIES.has(modality) &&
+    !inventoryServesModality(modality, inventory)
+  ) {
+    return { modality: 'text', downgraded: true };
+  }
+  return { modality, downgraded: false };
 }
 
 // ─── Version tie-break ───────────────────────────────────────────────────────
@@ -301,6 +433,12 @@ export interface TaskModelSelection {
   difficulty: PurposeTier;
   candidates_considered: number;
   needs_owner_input: boolean;
+  /**
+   * P1-01: true when the requested modality was a downgradable one (vision) with
+   * no active capable model on the box and was degraded to `text` so the task
+   * could still dispatch. `required_modality` already reflects the degraded value.
+   */
+  modality_downgraded: boolean;
 }
 
 export interface SelectTaskModelInput {
@@ -315,7 +453,15 @@ export interface SelectTaskModelInput {
 
 export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection {
   const difficulty = classifyDifficulty(input.title, input.description);
-  const required_modality = input.required_modality ?? detectModality(input.title, input.description);
+  const detected = input.required_modality ?? detectModality(input.title, input.description);
+
+  // P1-01 SAFETY NET: a would-be vision task on a box with no active vision model
+  // degrades to a text attempt rather than becoming undispatchable. required_modality
+  // below reflects the effective (possibly degraded) modality; modality_downgraded is
+  // threaded to the caller so it can log a `modality_downgraded` event.
+  const downgrade = applyModalityDowngrade(detected, input.inventory);
+  const required_modality = downgrade.modality;
+  const modality_downgraded = downgrade.downgraded;
 
   // Step B: hard-filter by modality. text tasks accept any model.
   const modalityCapability = required_modality as ModelCapability;
@@ -339,6 +485,7 @@ export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection
       difficulty,
       candidates_considered: input.inventory.length,
       needs_owner_input: true,
+      modality_downgraded,
     };
   }
 
@@ -354,12 +501,12 @@ export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection
       if (freeOnly.length === 0) continue;
       const best = pickBest(freeOnly, difficulty, required_modality, input.department);
       if (best) {
-        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false };
+        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false, modality_downgraded };
       }
     } else {
       const best = pickBest(inTier, difficulty, required_modality, input.department);
       if (best) {
-        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false };
+        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false, modality_downgraded };
       }
     }
   }
@@ -372,6 +519,7 @@ export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection
     difficulty,
     candidates_considered,
     needs_owner_input: true,
+    modality_downgraded,
   };
 }
 

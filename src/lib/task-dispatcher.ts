@@ -105,7 +105,20 @@ type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
 export function recordDispatchFailure(
   taskId: string,
   agentId: string | null,
-  opts: { reason: string; audience: DispatchBlockAudience; needs: string; context: string },
+  opts: {
+    reason: string;
+    audience: DispatchBlockAudience;
+    needs: string;
+    context: string;
+    /**
+     * P1-01: NON-TRANSIENT failure — block + notify on THIS attempt (no retry
+     * ladder). A model-sovereignty refusal (no sovereign/modality-fit model
+     * resolved) is not something a retry can cure: retrying it 5× over ~33 min
+     * only delayed the owner alert. When set, the task is blocked and reported
+     * immediately regardless of the attempt count.
+     */
+    hardBlock?: boolean;
+  },
 ): void {
   try {
     const row = queryOne<{ dispatch_attempts: number | null; title: string }>(
@@ -120,11 +133,14 @@ export function recordDispatchFailure(
     );
     const nextEligible = new Date(Date.now() + backoffSeconds * 1000).toISOString();
 
-    if (attempts >= MAX_DISPATCH_ATTEMPTS) {
-      // Cap reached → BLOCK (visible on the board + reported). No re-loop.
-      const blockNote =
-        `[dispatch-blocked] ${opts.reason} after ${attempts} failed advance attempt(s) ` +
-        `(cap ${MAX_DISPATCH_ATTEMPTS}). ${opts.needs}`;
+    if (opts.hardBlock || attempts >= MAX_DISPATCH_ATTEMPTS) {
+      // Cap reached OR a non-transient hard-block class → BLOCK (visible on the
+      // board + reported) immediately. No re-loop, no silent retry ladder.
+      const blockNote = opts.hardBlock
+        ? `[dispatch-blocked] ${opts.reason} — non-transient failure, blocked + reported on ` +
+          `attempt ${attempts} (not retried). ${opts.needs}`
+        : `[dispatch-blocked] ${opts.reason} after ${attempts} failed advance attempt(s) ` +
+          `(cap ${MAX_DISPATCH_ATTEMPTS}). ${opts.needs}`;
       run(
         `UPDATE tasks SET status = 'blocked', dispatch_attempts = ?, last_dispatch_attempt_at = ?,
            next_dispatch_eligible_at = NULL, block_reason = ?, block_needs = ?, block_audience = ?, updated_at = ?
@@ -600,6 +616,22 @@ export async function autoDispatchTask(
     const inventory = listModels();
     const required_modality = settings.required_modality ??
       detectModality(task.title, task.description);
+    // P1-01: when the resolver degraded a would-be vision task to text (no active
+    // vision model on the box), record the downgrade so the safety net is auditable
+    // — dispatch then proceeds as a text attempt rather than blocking on a keyword.
+    if (settings.modality_downgraded) {
+      const dnNow = new Date().toISOString();
+      const dnMsg =
+        `[modality_downgraded] Task "${task.title}" (${task.id}) had no active vision model; ` +
+        `degraded to a text attempt rather than blocking dispatch (P1-01 safety net).`;
+      try {
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, 'modality_downgraded', ?, ?, ?, ?)`,
+          [uuidv4(), agent.id, task.id, dnMsg, dnNow],
+        );
+      } catch { /* pre-migration events table tolerant */ }
+      console.warn(`[${context}] ${dnMsg}`);
+    }
     const sovereigntyViolation: ModelSovereigntyViolation | null = checkModelSovereignty(
       settings.model,
       inventory,
@@ -626,10 +658,13 @@ export async function autoDispatchTask(
          VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), 'af_model_sovereignty_block', agent.id, task.id, blockMsg, now2],
       );
-      // W8.2/W8.5: account for the failed advance + back off so the sweeps don't
-      // re-fire a model-less task every tick; block+report once the cap is hit.
-      // With the sovereign-default (W8.5) this gate should now only trip on a
-      // genuine modality gap (e.g. a vision task with no vision model).
+      // P1-01: a model-sovereignty refusal is NON-TRANSIENT — no retry can cure a
+      // missing sovereign/modality-fit model. The old ladder retried it 5× over
+      // ~33 min and only alerted the owner at the cap (the silent-refusal defect).
+      // It now BLOCKS + notifies the OWNER on attempt 1 (hardBlock). With the
+      // sovereign-default (W8.5) + the P1-01 vision→text downgrade, this gate now
+      // only trips on a genuine, un-downgradable modality gap (e.g. an
+      // image/video/audio-generation task with no matching model).
       recordDispatchFailure(task.id, agent.id, {
         reason: `model_sovereignty_${sovereigntyViolation.reason}`,
         audience: 'OWNER',
@@ -637,6 +672,7 @@ export async function autoDispatchTask(
           'No sovereign model resolved for this task. Assign/approve a model ' +
           '(Settings → Models) to release it.',
         context,
+        hardBlock: true,
       });
       return;
     }
