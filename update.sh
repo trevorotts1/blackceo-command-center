@@ -19,22 +19,45 @@ fatal() { echo "  ✗ ERROR: $1"; exit 1; }
 # ----------------------------------------------------------
 # Detect install location
 # ----------------------------------------------------------
-CANDIDATES=(
-  "$HOME/clawd/projects/blackceo-command-center"
-  "/data/clawd/projects/blackceo-command-center"
-  "$HOME/blackceo-command-center"
-  "/data/blackceo-command-center"
-)
+# P1-07: an explicit caller (e.g. the onboarding repo's Sunday --update-only
+# path, which already knows exactly which checkout it just pulled) can pin
+# the install dir directly instead of relying on autodetection — same
+# CC_APP_DIR convention scripts/atomic-deploy.sh and scripts/deploy.sh
+# already use, so this script honors it too rather than inventing a new name.
 INSTALL_DIR=""
-for c in "${CANDIDATES[@]}"; do
-  if [ -d "$c" ] && [ -f "$c/package.json" ]; then
-    INSTALL_DIR="$c"
-    break
-  fi
-done
+if [ -n "${CC_APP_DIR:-}" ] && [ -d "$CC_APP_DIR" ] && [ -f "$CC_APP_DIR/package.json" ]; then
+  INSTALL_DIR="$CC_APP_DIR"
+fi
+
+# Fallback autodetection. The canonical layout used fleet-wide by every other
+# install/runtime script in this repo (scripts/atomic-deploy.sh's DB-resolve
+# list, scripts/watchdog-cc.sh, scripts/seed-workspaces.py,
+# scripts/install/mac-mini-bootstrap.sh, scripts/install/vps-docker-bootstrap.sh,
+# and the onboarding repo's INSTALL.md clone target) is `~/projects/command-center`
+# on Mac and `/data/projects/command-center` on VPS Docker boxes — list those
+# FIRST. The older paths below never matched any documented install layout in
+# this repo; they are kept only as a last-resort fallback for a box that was
+# hand-installed off the documented path, so this autodetect can never regress
+# a box that happened to depend on the old list.
+if [ -z "$INSTALL_DIR" ]; then
+  CANDIDATES=(
+    "$HOME/projects/command-center"
+    "/data/projects/command-center"
+    "$HOME/clawd/projects/blackceo-command-center"
+    "/data/clawd/projects/blackceo-command-center"
+    "$HOME/blackceo-command-center"
+    "/data/blackceo-command-center"
+  )
+  for c in "${CANDIDATES[@]}"; do
+    if [ -d "$c" ] && [ -f "$c/package.json" ]; then
+      INSTALL_DIR="$c"
+      break
+    fi
+  done
+fi
 
 if [ -z "$INSTALL_DIR" ]; then
-  fatal "Command Center not found at any expected install path. Cannot update."
+  fatal "Command Center not found at any expected install path (checked \$CC_APP_DIR and the known candidate layouts). Cannot update."
 fi
 success "Found install at: $INSTALL_DIR"
 

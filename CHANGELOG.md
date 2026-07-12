@@ -1,3 +1,48 @@
+## [Unreleased] — branch `fix/sunday-cc-rebuild` — fix(update.sh): the Sunday-updater install-dir autodetect never matched this repo's actual canonical layout (P1-07)
+
+**Grounded while wiring P1-07 (the Sunday ~2–3AM version-update protocol):**
+`update.sh`'s own install-dir autodetection (`CANDIDATES`) listed
+`$HOME/clawd/projects/blackceo-command-center`,
+`/data/clawd/projects/blackceo-command-center`, `$HOME/blackceo-command-center`,
+`/data/blackceo-command-center` — none of which match the canonical layout
+every OTHER script in this repo agrees on: `~/projects/command-center` (Mac) /
+`/data/projects/command-center` (VPS Docker) — see
+`scripts/atomic-deploy.sh`'s DB-resolve list, `scripts/watchdog-cc.sh`,
+`scripts/seed-workspaces.py`, `scripts/install/mac-mini-bootstrap.sh`,
+`scripts/install/vps-docker-bootstrap.sh`, and the onboarding repo's
+`INSTALL.md` clone target. A standalone (autodetect-only) invocation of
+`update.sh` on a real box would fail "Command Center not found at any
+expected install path" — making it unusable as the single canonical CC
+update path the onboarding repo's D5 block now routes through.
+
+- **Fixed:** `update.sh` now accepts a `CC_APP_DIR` env override (the same
+  convention `scripts/atomic-deploy.sh` / `scripts/deploy.sh` already use, so
+  a caller that already knows its checkout path — like the onboarding repo's
+  update-only flow — can pin it directly, skipping autodetection). Fallback
+  autodetection now tries the canonical `~/projects/command-center` /
+  `/data/projects/command-center` paths FIRST, keeping the old (never
+  matched by any documented layout) candidates as a last-resort fallback so
+  this change can never regress a box that happened to depend on them.
+- **Tests:** `tests/unit/p1-07-update-sh-install-dir.test.ts` — proves the
+  `CC_APP_DIR` override is honored, the canonical layout is now found by
+  fallback autodetection, a no-match still fails loudly (fatal, non-zero
+  exit — never a silent false-success), and — the fail-first proof — the
+  EXACT original `CANDIDATES` list, reconstructed verbatim, does NOT find the
+  canonical layout (reproduces the grounded bug before this fix).
+- **`DEPLOYMENT.md`** rewritten to point at `update.sh` / `scripts/atomic-deploy.sh`
+  as canonical (the doc previously described the DEPRECATED, non-atomic
+  `scripts/deploy.sh` as the "golden rule" path) and gained a new "Automated
+  Sunday Update Path (P1-07)" section documenting what runs, what proves
+  success, and how to roll back — see also the onboarding repo's
+  `UPDATE-PLAYBOOK.md` for the other half of the same chain.
+- Coordinates with the onboarding-repo half of P1-07 (branch
+  `fix/sunday-cc-rebuild` there too): `run-full-install.sh`'s
+  `cc_route_update_through_canonical_path()` now routes the Sunday
+  `--update-only` build+restart through THIS script (falling back to
+  `scripts/atomic-deploy.sh` directly, then a snapshot/revert legacy path)
+  instead of a hand-rolled `npm run build` + bare `pm2 restart` with no
+  health check and no rollback wired to it.
+
 ## [v5.16.2] — 2026-07-11 — fix(db,models,jobs): the migration LEDGER-LIE (dispatch silently dead) + Ollama Cloud made to actually work (404 base URL + the key CC never read) + the swallowed stale-sweep 401
 
 Four repo-level fixes, one release. All were invisible because the failures were swallowed. **FIX 2 and FIX 4 are the same feature** — the URL fix makes the endpoint correct, the auth-store fix makes Command Center able to authenticate to it; a box needs BOTH before Ollama Cloud registers a single model.
