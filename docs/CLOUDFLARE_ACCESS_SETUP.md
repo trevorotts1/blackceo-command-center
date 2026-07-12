@@ -50,12 +50,29 @@ The setup script is at [`../scripts/cloudflare/setup-access-app.sh`](../scripts/
      ```
   4. The script creates (in order):
      - A One-Time PIN identity provider on the account if one does not exist.
-     - An Access Application that protects `acme.zerohumanworkforce.com/*`.
-     - A policy named `allow-owner` that includes only `owner@acme.com` via the One-Time PIN IdP.
+     - Detects whether a **Google** identity provider is already configured at the account level (see "Google login" below). It never creates one.
+     - An Access Application that protects `acme.zerohumanworkforce.com/*`, with `allowed_idps` set to One-Time PIN plus Google when Google is available.
+     - A policy named `Allowed users` that includes only the supplied email(s). It does not restrict which of the app's allowed identity providers the user authenticates through -- that is governed by `allowed_idps` above, not by the policy.
      - Session duration is set to `336h` (14 days). This means the client logs in once every two weeks at most.
-  5. The script prints the new App UUID and Policy UUID. Save both into the client's row in the operator's client registry. You will need them to add more emails or revoke access later.
+  5. The script prints the new App UUID, AUD, and which login methods were attached. Save the UUID into the client's row in the operator's client registry. You will need it to add more emails or revoke access later.
 
-If any step returns non-200 from the Cloudflare API, the script aborts before creating downstream resources. Re-run after fixing the failing call. The script is idempotent on the IdP and App but creates a new Policy on every run, so always check for and delete duplicate policies if you re-run.
+If any step returns non-200 from the Cloudflare API, the script aborts before creating downstream resources. Re-run after fixing the failing call. The script is idempotent on the IdP, the App, its `allowed_idps`, and the Policy -- re-running it against the same subdomain never creates a duplicate resource, and re-running it after Google becomes newly available at the account level attaches Google to an already-existing app.
+
+## Google login
+
+The script does **not** create a Google identity provider -- that requires an OAuth client ID/secret configured once, account-wide, in the Cloudflare dashboard (Zero Trust > Settings > Authentication > Login methods > Google), which only the operator can authorize. What the script DOES do:
+
+  - If a Google IdP is already configured on the account, the script attaches it to the client's Access Application alongside One-Time PIN, so the client can sign in with either. This applies both to newly-created apps and to already-existing apps the first time Google becomes available -- **provided the script is actually RE-RUN against that app** (see "Residue on already-provisioned apps" below; the fix does not retroactively repair a box on its own).
+  - If no Google IdP is configured on the account, the script prints a loud `WARNING` naming the gap and falls back to One-Time PIN only. PIN remains a fully working login in the meantime -- nothing is broken by the absence of Google.
+  - The script previously always attached a `require: login_method=onetimepin` clause to every policy it created. That clause is an AND condition: a login performed via Google could never simultaneously satisfy `login_method == onetimepin`, so even after Google was attached to an app's `allowed_idps`, a Google sign-in would still be rejected at policy evaluation. The clause is removed from what the script writes going forward, **and the script now also reconciles a pre-existing "Allowed users" policy that still carries the stale clause** -- it GETs the policy, and if `require` contains a `login_method` entry, PUTs it back with that entry stripped (name/decision/include preserved). Login-method selection is enforced once, at the app level, via `allowed_idps`; the policy only restricts WHO (by email) is allowed in.
+
+### Residue on already-provisioned apps -- what a code update alone does NOT fix
+
+Pulling this fix into the repo does not, by itself, change anything on a box whose Access app was already provisioned. The stale `login_method:onetimepin` policy clause (and a missing Google `allowed_idps` entry) are state that lives in Cloudflare's API, not in this repo -- a `git pull` changes the script, not the Cloudflare account.
+
+  - **Blast radius:** every client Access app created by a pre-P1-08 checkout of this script carries the stale policy clause. Unmeasured until the P6-01 per-box probe runs; treat as "suspected on every box provisioned before this fix landed" until measured.
+  - **Remediation:** re-run `./scripts/cloudflare/setup-access-app.sh <subdomain> <operator-email...>` against the affected subdomain from an updated checkout. The script is idempotent -- it detects the stale clause via a GET and issues exactly one PUT to remove it; it does not touch an app/policy that is already clean, and it does not create duplicate resources.
+  - **Reversibility:** the policy PUT only removes the `require` entry; it does not touch `include` (the email allow-list) or `decision`. To revert, re-add `"require":[{"login_method":{"id":"onetimepin"}}]` to the policy via the dashboard or a direct API PUT.
 
 ## Manual setup fallback
 
