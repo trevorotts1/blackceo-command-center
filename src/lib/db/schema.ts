@@ -170,6 +170,22 @@ CREATE TABLE IF NOT EXISTS tasks (
   audience_source TEXT,
   voice_collapsed INTEGER,
   blend_directive TEXT,
+  -- Trust engine / report-back loop (migration 098 owns these for existing DBs;
+  -- this base CREATE covers fresh installs). Nullable + additive. requester_channel
+  -- / requester_chat_id capture the ORIGINATING client channel so the trust engine
+  -- (src/lib/jobs/trust-engine.ts) can report acknowledge -> in-progress -> done
+  -- back to the client. The *_sent_at columns are the crash-safe idempotency
+  -- stamps (a stamped row never re-sends; an unstamped row is re-attempted by the
+  -- 2-minute sweep). eta_estimate / result_summary / result_location carry the
+  -- honest status detail surfaced to the client. See P1-04.
+  requester_channel TEXT,
+  requester_chat_id TEXT,
+  ack_sent_at TEXT,
+  progress_last_sent_at TEXT,
+  eta_estimate TEXT,
+  completion_sent_at TEXT,
+  result_summary TEXT,
+  result_location TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

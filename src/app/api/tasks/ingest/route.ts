@@ -123,6 +123,15 @@ interface IngestPayload {
    */
   target_agent?: unknown;
   specialist?: unknown;
+  /**
+   * P1-04 (trust engine) — the ORIGINATING client channel + chat id. When the CEO
+   * routes a task that came from a client message it passes these so the trust
+   * engine can report acknowledge -> in-progress -> done back INTO that channel.
+   * `requester_chat_id` is the client's chat id; `requester_channel` defaults to
+   * 'telegram' when a chat id is present but no channel is named.
+   */
+  requester_channel?: unknown;
+  requester_chat_id?: unknown;
 }
 
 const VALID_PRIORITIES = new Set<TaskPriority>(['low', 'medium', 'high', 'critical']);
@@ -482,6 +491,19 @@ export async function POST(request: NextRequest) {
     const idempotencyKey =
       typeof body.idempotency_key === 'string' ? body.idempotency_key.trim() : undefined;
 
+    // P1-04 (trust engine) — capture the originating client chat so the report-back
+    // engine can acknowledge/progress/done into it. A chat id with no explicit
+    // channel defaults to 'telegram' (the only client-facing channel today).
+    const requesterChatId =
+      typeof body.requester_chat_id === 'string' && body.requester_chat_id.trim()
+        ? body.requester_chat_id.trim()
+        : undefined;
+    const requesterChannel = requesterChatId
+      ? (typeof body.requester_channel === 'string' && body.requester_channel.trim()
+          ? body.requester_channel.trim()
+          : 'telegram')
+      : undefined;
+
     const priorityRaw = typeof body.priority === 'string' ? body.priority.trim() : undefined;
     const priority: TaskPriority | undefined =
       priorityRaw && VALID_PRIORITIES.has(priorityRaw as TaskPriority)
@@ -702,6 +724,9 @@ export async function POST(request: NextRequest) {
         // now reads first, before falling back to the legacy (forgeable)
         // description marker for pre-migration rows.
         source: source ?? null,
+        // P1-04: the originating client channel so the trust engine reports back.
+        requester_channel: requesterChannel ?? null,
+        requester_chat_id: requesterChatId ?? null,
       },
       { origin: request.headers.get('origin') }
     );
@@ -842,6 +867,8 @@ export async function GET() {
       target_agent: 'string (optional; owner-direct specialist pin — routes straight to the named AI, alias: specialist)',
       external_session_id: 'string (optional provenance)',
       idempotency_key: 'string (optional; primary dedupe key)',
+      requester_channel: 'string (optional; P1-04 trust engine — originating client channel, default telegram when requester_chat_id is present)',
+      requester_chat_id: 'string (optional; P1-04 trust engine — client chat id the report-back loop acks/progress/done into)',
     },
   });
 }
