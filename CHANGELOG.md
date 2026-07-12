@@ -1,3 +1,50 @@
+## [v5.23.0] — 2026-07-12 — feat(ui,api,db): P5-01 — the BETA "My AI CEO" dashboard surface + CC responsiveness
+
+Net-new build (zero prior coverage in the spec cluster): a BETA surface on the CC home — **My AI CEO** — where the client talks DIRECTLY to their on-box main agent in a clean UI: send requests, upload documents/images/videos, and watch what's happening. A deliberate competitor to Telegram and the OpenClaw UI. Feature-flagged, clearly labeled, and it degrades to "use Telegram meanwhile" — never a broken-looking core dashboard. Built on top of Phases 1–3, rebased onto v5.22.0 (the branch was cut before P4-01/P4-02/P4-03 landed on `main`; the rebase was clean — only this CHANGELOG heading conflicted, no source-file conflicts).
+
+### Backend (P5-01 (c) step 1)
+- **`POST /api/ceo-chat/message`** — persists the client's message to a new `ceo_chat_messages` table, forwards it to the on-box OpenClaw gateway (`ws://127.0.0.1:18789` — the ONLY sanctioned door; never bypassed), and streams the reply as SSE. The user's message is persisted BEFORE forwarding, so it is never lost — even when the gateway is down (a `gateway_down` SSE event drives the degrade banner).
+- **`POST /api/ceo-chat/upload`** — multipart, allow-list types (pdf/docx/txt/md/png/jpg/mp4/mov…), hard 200MB cap checked from the File descriptor BEFORE any bytes are buffered (a 5GB upload is refused without reading it), stores under `<workspace>/inbox/ceo-chat/<date>/` (path-traversal-safe), returns the path the agent was told about, and records an upload receipt in the transcript.
+- **`GET /api/ceo-chat/history`** — a session's transcript plus the tasks it spawned (the "What's happening" side rail).
+- **`GET /api/ceo-chat/status`** — BETA-flag + gateway-up probe (drives the card + degrade banner).
+- All routes are same-origin + session-gated by the existing middleware contract (non-webhook `/api/*`: the board's own same-origin fetch passes; an external caller still needs the `MC_API_TOKEN` bearer). No new middleware exceptions.
+
+### One trust engine, TWO channels (P5-01 step 2)
+`executeSends()` (trust-engine.ts) now routes the report-back BY CHANNEL: a task carrying `requester_channel:'ceo-chat'` has its ack/progress/done written INTO the chat transcript (role `trust`) so it renders as chat events in THIS UI; every other channel still goes to Telegram via `notifyTelegram`. The `requester_channel`/`requester_chat_id` metadata is handed to the agent on forward so any task it routes reports back here. An injected `ctx.send` (tests / custom routers) still wins for every channel — the seam is intact.
+
+### UI (P5-01 step 3)
+- **`/my-ai-ceo`** — a streaming chat pane, drag-drop + file-picker (mobile camera/file) upload affordance, a "What's happening" side rail with live status chips off the board, and a graceful gateway-down state ("Your AI CEO is restarting — Telegram still works"). Responsive at 360 / 768 / 1280 (side rail stacks under the chat on mobile; body never scrolls horizontally).
+- **A prominent dashboard card** joins the home grid (leads it when the flag is on), clearly labeled BETA — hidden entirely when the flag is off (never a dead BETA link).
+
+### Responsiveness pass (P5-01 step 4)
+The board (MissionQueue) already stacks columns vertically on mobile with a contained `overflow-x-auto` on ≥lg (prior phases), so the body never scrolls horizontally. This build makes the **TaskModal a full-screen sheet on mobile** (`rounded-none`/full-height on <sm, centered dialog ≥sm) and ships a Playwright responsive-proof harness (`playwright.my-ai-ceo.config.ts` + `tests/integration/my-ai-ceo-responsive.spec.ts`, `npm run test:e2e:my-ai-ceo`) that screenshots the chat + board at all three breakpoints and asserts zero horizontal body scroll — the cataloging harness step 4 calls for and the QC (e) "responsive proof."
+
+### Feature flag (P5-01 step 5)
+`MY_AI_CEO_BETA` (default ON; set `false` to hide on a box). Read at call time so a route always sees the current env. Documented in `.env.example`.
+
+### Migration 101 (`add_ceo_chat_messages_table`) — additive, same CREATE-TABLE-IF-NOT-EXISTS pattern as Migration 100
+New `ceo_chat_messages` table (session_id, role, content, kind, task_id, attachment_* provenance — only an upload's PATH is stored, never its bytes) + `idx_ceo_chat_session`. Base `schema.ts` carries it for fresh installs. No existing row touched.
+
+### Tests (fail-first; wired into `vitest.config.ts` include, excluded from the `test:unit` tsx glob)
+- `ceo-chat-upload-validation.test.ts` — the QC break-it probes as a unit: a 5GB file → `too-large`, an `.exe`/`.sh`/octet-`.png` → `type-not-allowed`, allowed types accepted, filename traversal stripped, inbox path lands under `inbox/ceo-chat/<date>`.
+- `ceo-chat-config.test.ts` — flag default ON / OFF on the literal `false`.
+- `ceo-chat-store.test.ts` — proves migration 101 creates the table; insert/read a session transcript in chronological order, session scoping, upload-receipt provenance.
+- `trust-engine-ceo-chat-channel.test.ts` — the ONE-engine-TWO-channels proof: a ceo-chat plan lands in the transcript and NOT Telegram; a telegram plan still hits Telegram and never leaks into the transcript; an injected `ctx.send` still wins.
+- `ceo-chat-gateway-forward.test.ts` — the forwarder relays a streamed reply and degrades gracefully (yields `gateway_down`, never throws) when the gateway is down.
+- 32/32 new tests pass; full existing vitest suite 196/196 green (no regression); `tsc --noEmit` clean; `next build` compiles all four routes + the page. Fail-first: every suite imports modules (`src/lib/ceo-chat/*`) that do not exist pre-P5-01, so all are red against the prior tree.
+
+Live-box proof (a full request→ack→progress→done loop inside the new UI on the operator box, prompt-injection handling at the gateway boundary, and the Playwright screenshots on a running server) is the QC judge's live pass and the P6-01 per-box probe — this build ran in an isolated scratch checkout with no live gateway.
+
+### P5-01 fix round 1 (this integration)
+- **Gateway session isolation** (`src/lib/ceo-chat/gateway.ts`): `getOpenClawClient()` caches ONE client per target, so concurrent ceo-chat requests shared the `__self__` singleton's single 'notification' stream and interleaved tokens / closed the wrong stream. `forward()` now filters every notification against ITS OWN resolved gateway session id (new `extractSessionId()`), dropping unattributable frames. Covered by `ceo-chat-gateway-session-isolation.test.ts` (fail-first) + `ceo-chat-gateway-transport.test.ts` (queue bridge / extractText precedence / completion regex / REPLY_TIMEOUT fallback / connect-down path).
+- **Board mobile responsiveness** (`src/components/MissionQueue.tsx`): columns now render as a horizontally-scrollable, snap-aligned strip at every breakpoint (was a full-width vertical stack below `lg`), plus a `lg:hidden` column picker to jump straight to a column. Body never scrolls horizontally.
+- **Upload MIME-gate bypass closed** (`src/lib/ceo-chat/upload.ts` + `upload/route.ts`): an executable renamed `malware.png` with empty/`octet-stream` MIME no longer rides the extension-only fallback — binary-media extensions now require a magic-byte signature match (route reads only a 32-byte prefix, never the whole file), surfaced via a new `needsContentSniff` flag.
+- **Responsive-proof E2E self-boots its server** (`playwright.my-ai-ceo.config.ts` + new `my-ai-ceo-responsive.fixture.ts` / `.global-setup.ts`): the suite stands up its own `next dev` against a throwaway workspace (dedicated port 4125) and FAILS if the server never comes up (was `test.skip` when nothing listened on :4000), and adds TaskModal coverage (chat + board + modal × 360/768/1280).
+
+No client names, no secret values, no roster human names in the diff, no canary, no model added/removed/substituted, no client box touched.
+
+- **Version roll** — repo rolled v5.22.0 → **v5.23.0** via `scripts/bump-version.sh` (all 5 locations in lockstep). Annotated tag `v5.23.0` cut on the release commit.
+
 ## [v5.22.0] — 2026-07-12 — test(persona): P4-01 — cover the untested blend-rationale tier of buildPersonaReason
 
 Merges `feat/p4-01-persona-reason-blend-rationale` into `main`, `--no-ff`. Clean merge, no conflicts — the branch adds one new test file only; `main`'s changes since branch-cut (P4-02, P4-03) touch none of the same path. Version re-bumped fresh to v5.22.0 on top of P4-03's v5.21.0 (concurrent merge-train landed first).
