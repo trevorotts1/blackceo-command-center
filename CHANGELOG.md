@@ -1,3 +1,13 @@
+## [v6.0.1] — 2026-07-12 — fix(deploy): portable `mktemp` template in atomic-deploy.sh (Linux/VPS fleet)
+
+**One-line portability fix.** `scripts/atomic-deploy.sh` line 428 called `mktemp /tmp/atomic-build-exit-$$.txt` — a fixed filename with no `XXXXXX` template. GNU coreutils `mktemp` (Ubuntu/Linux, i.e. every VPS fleet box) REQUIRES the last path component to contain a template of at least 3 consecutive `X`s and fails closed (`too few X's in template`) without one, so Phase 2 of the atomic deploy died before `npm run build` ever ran. macOS's BSD `mktemp` is lenient about a missing template (falls back to the literal path), which is why this never surfaced on the operator Mac and only broke on Linux/VPS boxes.
+
+- **Fix**: `BUILD_EXIT_FILE=$(mktemp /tmp/atomic-build-exit-$$.txt)` → `BUILD_EXIT_FILE=$(mktemp "${TMPDIR:-/tmp}/atomic-build-exit-XXXXXX")`. Verified empirically (this repo's CI + local macOS testing) that BSD/macOS `mktemp` only substitutes `XXXXXX` when it is the trailing characters of the template — a suffix like `.txt` after the X's silently fails to substitute on BSD, so the fix intentionally drops the `.txt` suffix (the variable is used as an opaque path elsewhere in the script; no code depends on the extension) to stay portable across GNU and BSD `mktemp` alike.
+- Scope: this fix touches only the identified line (428). A second, textually-identical pattern exists at line 193 (`json_tmp=$(mktemp /tmp/cc-health-$$.json)` in `_run_health_check`) and was NOT touched — flagged here for a separate follow-up, out of scope for this one-line fix.
+- **Version roll** — repo rolled v6.0.0 → **v6.0.1** via `scripts/bump-version.sh` (all 5 locations in lockstep). Annotated tag `v6.0.1` cut on the release commit.
+
+No client names, no secret values, no box IDs in the diff. No model added/removed/substituted. No client box touched.
+
 ## [v6.0.0] — 2026-07-12 — CAPSTONE: SUPER SPEC close-out (My AI CEO dashboard) + build-green
 
 **MAJOR capstone release.** Command Center rolls to v6.0.0 — the operator-ordered major line — closing out the SUPER SPEC cluster whose centerpiece is the **My AI CEO** dashboard surface (a client talks directly to their on-box main agent: send requests, upload documents/images/videos, watch what's happening). Merges `fix/cc-green-v6` into `main`, `--no-ff`.
