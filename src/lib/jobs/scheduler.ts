@@ -43,6 +43,7 @@ import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { runPortIntegrityCheck } from './port-integrity';
 import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
+import { runEnvAudit } from '@/lib/env-auditor';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -113,6 +114,38 @@ async function runModelRefresh(): Promise<void> {
     return;
   }
   await refreshModels(ALL_PROVIDERS);
+}
+
+/**
+ * P2-04 — Job: weekly LLM env-auditor ("Deep Scan"). Sundays at 04:00 server
+ * local time (offset an hour past model-refresh so it runs after the catalog
+ * is current, which the auditor's model-resolution step depends on). Reads
+ * this box's OWN env surfaces, redacts every value before any LLM sees it,
+ * and classifies with the box's own cheap/quick-tier model — never
+ * Anthropic, never the operator's model (see env-auditor.ts). Only writes
+ * SUGGESTION rows; never auto-wires a key. Disable with
+ * DISABLE_ENV_AUDIT_CRON=1.
+ */
+async function runEnvAuditWeekly(): Promise<void> {
+  if (
+    process.env.DISABLE_ENV_AUDIT_CRON === '1' ||
+    process.env.DISABLE_ENV_AUDIT_CRON === 'true'
+  ) {
+    console.log('[cron] env-audit: DISABLE_ENV_AUDIT_CRON set, skipping');
+    return;
+  }
+  const result = await runEnvAudit();
+  if (!result.ok) {
+    console.log(`[cron] env-audit: skipped — ${result.skipped_reason}`);
+    return;
+  }
+  console.log(
+    `[cron] env-audit: ${result.candidates_found} candidate key(s) scanned, ` +
+      `${result.suggestions_saved} suggestion(s) saved` +
+      (result.unreadable_providers.length > 0
+        ? `, unreadable providers flagged: ${result.unreadable_providers.join(', ')}`
+        : ''),
+  );
 }
 
 /**
@@ -278,6 +311,10 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // model-refresh: Sundays 03:00 server local. DESTRUCTIVE — it can deprecate
   // catalog rows. Kill switch: DISABLE_MODEL_REFRESH_CRON=1 (see runModelRefresh).
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
+  // env-audit: Sundays 04:00 server local — the P2-04 LLM env-auditor "Deep
+  // Scan". NON-destructive (only ever writes suggestion rows, never a key).
+  // Kill switch: DISABLE_ENV_AUDIT_CRON=1.
+  { name: 'env-audit', expr: '0 4 * * 0', fn: runEnvAuditWeekly },
   { name: 'usage-refresh', expr: '0 */6 * * *', fn: runUsageRefresh },
   { name: 'memory-index', expr: '0 * * * *', fn: runMemoryIndexRebuild },
   // sop-learning: nightly at 02:00 server local time — the auto-SOP-writer.
