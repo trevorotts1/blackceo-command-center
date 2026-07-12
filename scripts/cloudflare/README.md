@@ -45,19 +45,32 @@ Multiple operator emails are supported by listing them after the subdomain.
 
 1. **Ensures a One-Time PIN identity provider exists** on the account. If
    one is already configured (any prior client setup), it is reused.
-2. **Creates a self-hosted Access Application** bound to the subdomain with
-   a 336-hour (14-day) session duration. If an app for that exact domain
-   already exists, the script reuses it.
-3. **Attaches an Allow policy** named "Allowed users" that includes the
-   supplied operator email(s) and requires One-Time PIN login. If a policy
-   with that name already exists on the app, it is left in place.
+2. **Detects an account-level Google identity provider.** The script never
+   creates one -- that is a one-time, account-level OAuth setup only the
+   operator can authorize (dashboard: Zero Trust -> Settings ->
+   Authentication -> Login methods -> Google). If Google is found, its id is
+   attached to the app's `allowed_idps` alongside One-Time PIN. If not, the
+   script prints a loud `WARNING` and falls back to PIN-only -- PIN keeps
+   working either way.
+3. **Creates (or updates) a self-hosted Access Application** bound to the
+   subdomain with a 336-hour (14-day) session duration and `allowed_idps`
+   set to whichever of One-Time PIN / Google are available. If an app for
+   that exact domain already exists and Google has newly become available
+   since it was created, the script attaches Google to it.
+4. **Attaches an Allow policy** named "Allowed users" that includes the
+   supplied operator email(s). The policy does not restrict login method --
+   that is enforced once, at the app level, via `allowed_idps` above. If a
+   policy with that name already exists on the app, it is left in place.
 
 ## Idempotency
 
-Safe to re-run. The script checks for the existing IdP, Application, and
-policy before any create call. On a second run for the same subdomain you
-will see "already exists" lines on stderr and the same Application UUID +
-AUD on stdout.
+Safe to re-run. The script checks for the existing IdP, Application,
+Application `allowed_idps`, and Policy before any create/update call. On a
+second run for the same subdomain you will see "already exists" /
+"already has Google attached" lines on stderr and the same Application
+UUID + AUD on stdout. The only mutation on an already-existing app is
+attaching Google to `allowed_idps` the first time it becomes available at
+the account level.
 
 To change the allow-list after the fact, edit the policy via the Cloudflare
 dashboard (Zero Trust -> Access -> Applications -> [your app] -> Policies)
@@ -77,6 +90,25 @@ CF_ACCESS_AUD=<Application AUD tag printed by the script>
 `CF_ACCESS_TEAM_DOMAIN` is the team subdomain you chose when enabling Zero
 Trust. `CF_ACCESS_AUD` is the per-application audience tag printed at the
 end of the script run.
+
+## Verifying the login posture (`probe-access-login.sh`)
+
+`probe-access-login.sh` is a separate, read-only probe that answers "is
+Cloudflare Access actually gating this hostname" from the outside, by
+issuing one unauthenticated request:
+
+```bash
+./scripts/cloudflare/probe-access-login.sh <cc-hostname> [service-token-id] [service-token-secret]
+```
+
+It exits `0` (protected: the hostname redirected off-origin to an Access
+login page), `1` (`cc_unprotected`: the hostname answered 200 with no gate
+at all -- this is the condition that should be flagged to the operator
+lane), or `3` (unknown/ambiguous -- network error, or a same-origin redirect
+that isn't confirmed to be an Access login page). This script is built and
+QC'd as part of P1-08 but is wired into the fleet's per-box validation only
+in the final P6-01 roll -- it is not invoked against any live client box by
+this repo's build/deploy scripts on its own.
 
 ## Troubleshooting
 

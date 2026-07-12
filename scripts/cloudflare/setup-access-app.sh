@@ -6,13 +6,23 @@
 # subdomain. Implements PRD Section 7.2 (P1-10).
 #
 # Given a subdomain and one or more operator emails, this script will:
-#   1. Ensure a One-Time PIN identity provider exists for the account
-#   2. Create a self-hosted Access Application for the subdomain
-#      (336h / 14-day session)
-#   3. Attach an "Allow" policy for the supplied emails, gated on OTP login
+#   1. Ensure a One-Time PIN identity provider exists for the account, and
+#      detect whether a Google identity provider is ALSO configured at the
+#      account level (P1-08, 2026-07-11 spec, decision D-3). Google is never
+#      created by this script -- only PIN's presence is guaranteed; Google is
+#      attached when it already exists.
+#   2. Create (or update) a self-hosted Access Application for the subdomain
+#      (336h / 14-day session) whose allowed_idps lists One-Time PIN plus
+#      Google when available -- attaching Google to an already-existing app
+#      the first time it becomes available at the account level.
+#   3. Attach an "Allow" policy for the supplied emails. The policy no longer
+#      hardcodes a login-method requirement -- which of the app's allowed_idps
+#      a user authenticates through is enforced at the app level (step 2), not
+#      re-restricted here to One-Time PIN only.
 #
 # The script is idempotent: re-running it against the same subdomain will
-# detect the existing IdP / App and report rather than create duplicates.
+# detect the existing IdP / App / allowed_idps and report rather than create
+# duplicates or issue redundant updates.
 #
 # Required env:
 #   CLOUDFLARE_API_TOKEN   Token with Access: Edit + Access: Read scopes
@@ -112,28 +122,72 @@ if isinstance(data, dict):
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: Ensure One-Time PIN identity provider exists
+# Step 1: Ensure One-Time PIN identity provider exists; detect Google (P1-08)
 # ---------------------------------------------------------------------------
+#
+# P1-08 (2026-07-11 spec): the automation provisions One-Time PIN as the
+# always-available default. It does NOT create a Google IdP -- that requires
+# an OAuth client ID/secret configured once at the Cloudflare account level,
+# which is an operator decision (spec Section 9, decision D-3), not something
+# a script should provision unattended. This step only DETECTS whether a
+# Google IdP is already configured on the account and, if so, captures its id
+# so Step 2 can attach it to the app alongside One-Time PIN (D-3's
+# recommendation: "let the updated script attach both"). If Google is not
+# configured, we say so loudly and fall back to PIN-only -- PIN remains a
+# fully working login in the meantime.
 
-echo "==> Checking for existing One-Time PIN identity provider..." >&2
+echo "==> Checking existing identity providers..." >&2
 IDP_LIST=$(cf_call GET "/identity_providers")
 
-IDP_PRESENT=$(echo "$IDP_LIST" | python3 -c "
+OTP_IDP_ID=$(echo "$IDP_LIST" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for idp in data.get('result', []) or []:
     if idp.get('type') == 'onetimepin':
-        print('yes')
+        print(idp.get('id', ''))
         break
 " || true)
 
-if [ "$IDP_PRESENT" = "yes" ]; then
-  echo "    One-Time PIN IdP already exists for this account. Skipping create." >&2
+if [ -n "$OTP_IDP_ID" ]; then
+  echo "    One-Time PIN IdP already exists (id=${OTP_IDP_ID}). Skipping create." >&2
 else
   echo "    No One-Time PIN IdP found. Creating one..." >&2
-  cf_call POST "/identity_providers" \
-    '{"name":"One-time PIN login","type":"onetimepin","config":{}}' >/dev/null
-  echo "    One-Time PIN IdP created." >&2
+  OTP_CREATE_RESPONSE=$(cf_call POST "/identity_providers" \
+    '{"name":"One-time PIN login","type":"onetimepin","config":{}}')
+  OTP_IDP_ID=$(echo "$OTP_CREATE_RESPONSE" | json_extract id)
+  if [ -z "$OTP_IDP_ID" ]; then
+    echo "ERROR: Failed to parse One-Time PIN IdP id from creation response:" >&2
+    echo "$OTP_CREATE_RESPONSE" >&2
+    exit 1
+  fi
+  echo "    One-Time PIN IdP created (id=${OTP_IDP_ID})." >&2
+fi
+
+echo "==> Checking for an account-level Google identity provider..." >&2
+GOOGLE_IDP_ID=$(echo "$IDP_LIST" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for idp in data.get('result', []) or []:
+    if idp.get('type') == 'google':
+        print(idp.get('id', ''))
+        break
+" || true)
+
+if [ -n "$GOOGLE_IDP_ID" ]; then
+  echo "    Google IdP found (id=${GOOGLE_IDP_ID}). Will attach it alongside One-Time PIN." >&2
+else
+  echo "WARNING: No Google identity provider is configured on this Cloudflare account." >&2
+  echo "         Falling back to One-Time PIN only for ${SUBDOMAIN}." >&2
+  echo "         Configuring Google is a one-time, ACCOUNT-LEVEL OAuth setup" >&2
+  echo "         (Zero Trust > Settings > Authentication > Login methods > Google)" >&2
+  echo "         that only the operator can authorize -- see spec Section 9, decision D-3." >&2
+  echo "         PIN remains a fully working login in the meantime." >&2
+fi
+
+if [ -n "$GOOGLE_IDP_ID" ]; then
+  ALLOWED_IDPS_JSON="[\"${OTP_IDP_ID}\",\"${GOOGLE_IDP_ID}\"]"
+else
+  ALLOWED_IDPS_JSON="[\"${OTP_IDP_ID}\"]"
 fi
 
 # ---------------------------------------------------------------------------
@@ -171,7 +225,8 @@ if [ -z "$APP_ID" ]; then
   "name": "${SUBDOMAIN} Command Center",
   "domain": "${SUBDOMAIN}",
   "type": "self_hosted",
-  "session_duration": "336h"
+  "session_duration": "336h",
+  "allowed_idps": ${ALLOWED_IDPS_JSON}
 }
 EOF
 )")
@@ -182,12 +237,47 @@ EOF
     echo "$APP_RESPONSE" >&2
     exit 1
   fi
-  echo "    Access App created (id=${APP_ID})." >&2
+  echo "    Access App created (id=${APP_ID}) with allowed_idps=${ALLOWED_IDPS_JSON}." >&2
 fi
 
 # Re-fetch the app to grab the AUD tag (stable, used by middleware verification)
 APP_DETAIL=$(cf_call GET "/apps/${APP_ID}")
 APP_AUD=$(echo "$APP_DETAIL" | json_extract aud)
+
+# ---------------------------------------------------------------------------
+# Step 2b (P1-08): attach Google to an EXISTING app if it just became
+# available and isn't wired yet. GET-check-then-create-only-missing, applied
+# to the app's allowed_idps rather than to the app record itself: never
+# touches an app that already lists every currently-known IdP.
+# ---------------------------------------------------------------------------
+
+if [ -n "$GOOGLE_IDP_ID" ]; then
+  APP_HAS_GOOGLE=$(echo "$APP_DETAIL" | GOOGLE_IDP_ID="$GOOGLE_IDP_ID" python3 -c "
+import json, os, sys
+target = os.environ.get('GOOGLE_IDP_ID', '')
+data = json.load(sys.stdin)
+result = data.get('result', data) if isinstance(data, dict) else data
+ids = (result.get('allowed_idps') or []) if isinstance(result, dict) else []
+print('yes' if target in ids else 'no')
+" || echo "no")
+
+  if [ "$APP_HAS_GOOGLE" = "no" ]; then
+    echo "==> Attaching Google IdP to Access App ${APP_ID} (already existed, Google newly available)..." >&2
+    cf_call PUT "/apps/${APP_ID}" "$(cat <<EOF
+{
+  "name": "${SUBDOMAIN} Command Center",
+  "domain": "${SUBDOMAIN}",
+  "type": "self_hosted",
+  "session_duration": "336h",
+  "allowed_idps": ${ALLOWED_IDPS_JSON}
+}
+EOF
+)" >/dev/null
+    echo "    Google IdP attached to ${APP_ID} alongside One-Time PIN." >&2
+  else
+    echo "    Access App ${APP_ID} already has Google attached. Skipping update." >&2
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Step 3: Create (or detect) the Allow policy
@@ -217,21 +307,38 @@ else
   done
   EMAIL_JSON="[${EMAIL_JSON:1}]"
 
+  # P1-08 FIX: no "require": [{"login_method":{"id":"onetimepin"}}] clause.
+  # That clause forced EVERY allowed user through One-Time PIN specifically,
+  # even on an app whose allowed_idps also lists Google -- a user who tried
+  # to authenticate via Google would pass the app-level IdP gate and then be
+  # rejected here anyway (require is an AND: a login actually performed via
+  # Google can never simultaneously satisfy "login_method == onetimepin").
+  # This is the discrepancy the P1-08 spec named: hand-configured Google
+  # logins worked because they were set up OUTSIDE this script, which never
+  # had this restrictive clause. Login-METHOD selection is enforced once, at
+  # the app level, via allowed_idps (Step 2/2b); this policy only restricts
+  # WHO (by email) is allowed in, regardless of which of the app's allowed
+  # IdPs they used to prove who they are.
   cf_call POST "/apps/${APP_ID}/policies" "$(cat <<EOF
 {
   "name": "Allowed users",
   "decision": "allow",
-  "include": ${EMAIL_JSON},
-  "require": [{"login_method":{"id":"onetimepin"}}]
+  "include": ${EMAIL_JSON}
 }
 EOF
 )" >/dev/null
-  echo "    Allow policy created." >&2
+  echo "    Allow policy created (no login-method restriction; governed by the app's allowed_idps)." >&2
 fi
 
 # ---------------------------------------------------------------------------
 # Done. Print the operator-facing summary on stdout.
 # ---------------------------------------------------------------------------
+
+if [ -n "$GOOGLE_IDP_ID" ]; then
+  LOGIN_METHODS_SUMMARY="Google + One-Time PIN"
+else
+  LOGIN_METHODS_SUMMARY="One-Time PIN only (no Google IdP configured on this account -- see Section 9 D-3)"
+fi
 
 cat <<EOF
 
@@ -240,6 +347,7 @@ Cloudflare Access provisioned for ${SUBDOMAIN}
   Application UUID : ${APP_ID}
   Application AUD  : ${APP_AUD}
   Session length   : 336h (14 days)
+  Login methods    : ${LOGIN_METHODS_SUMMARY}
   Allowed emails   : ${EMAILS[*]}
 
 Copy these into the deployment .env so the Next.js middleware can verify
