@@ -1011,6 +1011,13 @@ function ConsentScreen({
             A short conversation about your business. We turn your answers into a full AI
             workforce — no jargon, just your own words.
           </p>
+          {/* P1-03 c.4 (interview-lock clarity): a client redirected here by the
+              middleware's interview shell-lock (src/middleware.ts) was landing
+              with no explanation of WHY, which got reported as an outage rather
+              than a locked-until-complete state. One line of copy closes that. */}
+          <p className={ivcx(iv.lede, 'mt-2')} style={{ fontSize: '0.82rem' }}>
+            Your Command Center unlocks when the AI Workforce Interview is complete.
+          </p>
           {booting && (
             <p className={iv.lede} style={{ fontSize: '0.78rem', marginTop: '0.5rem' }} aria-live="polite">
               Checking for saved progress…
