@@ -1942,11 +1942,31 @@ export async function createTaskCore(
     // workspaceId was supplied by the caller (UI path: a UUID for UI-created
     // workspaces, or already a slug for seed-created ones).  Resolve the slug
     // so the persona selector gets the canonical department name.
+    //
+    // P2-03: the row lookup was previously write-only for `workspaceSlug` —
+    // when `ws` came back undefined (the exact TaskModal-on-/tasks/all case:
+    // it hardcodes `workspace_id: 'default'`, and no box seeds a workspace row
+    // with id 'default' outside the standalone `npm run db:seed` script),
+    // `workspaceId` itself was left holding the caller's PHANTOM id. It then
+    // flowed straight into the `INSERT INTO tasks` below, which throws an
+    // UNCAUGHT SQLITE_CONSTRAINT_FOREIGNKEY (workspace_id has no matching row)
+    // — an unhandled exception that bypasses route.ts's try/catch entirely and
+    // 500s with a framework error page instead of a JSON body. This directly
+    // reproduced the operator's "create task doesn't really work" report.
+    // Nulling workspaceId here on a miss is what the comment at this
+    // function's top ("we leave workspace_id NULL rather than inserting a
+    // nonexistent 'default' row") already claimed happened — now it does.
     try {
       const ws = _db.prepare('SELECT id, slug FROM workspaces WHERE id = ?').get(workspaceId) as { id: string; slug: string } | undefined;
-      if (ws) workspaceSlug = ws.slug;
+      if (ws) {
+        workspaceSlug = ws.slug;
+      } else {
+        workspaceId = null;
+      }
     } catch {
-      // non-fatal — workspaceSlug stays null; selector falls back to 'general'
+      // Lookup itself failed (e.g. no workspaces table yet) — fail safe to
+      // NULL rather than risk an FK crash on an unverified id.
+      workspaceId = null;
     }
   }
 

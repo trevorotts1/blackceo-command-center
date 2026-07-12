@@ -55,12 +55,22 @@ export const CreateTaskSchema = z.object({
   description: z.string().max(10000, 'Description must be 10000 characters or less').optional(),
   status: TaskStatus.optional(),
   priority: TaskPriority.optional(),
-  assigned_agent_id: z.string().uuid().optional(),
+  // P2-03: BOTH of these must be `.nullable()`, matching UpdateTaskSchema below.
+  // TaskModal.handleSubmit() (src/components/TaskModal.tsx) ALWAYS sends
+  // `assigned_agent_id: form.assigned_agent_id || null` and
+  // `due_date: form.due_date || null` — including on the CREATE path, where
+  // leaving the agent unassigned / due date unset (the default, most-common
+  // "New Task" state) means the payload carries an EXPLICIT `null`, not a
+  // missing key. `.optional()` alone accepts a missing key but rejects an
+  // explicit `null`, so every create with these left at default 400'd with
+  // "Validation failed" — this was the actual cause of the operator's "create
+  // task doesn't really work" report (root-cause outcome (ii) in P2-03).
+  assigned_agent_id: z.string().uuid().optional().nullable(),
   created_by_agent_id: z.string().uuid().optional(),
   business_id: z.string().optional(),
   workspace_id: z.string().optional(),
   department: z.string().optional(),
-  due_date: z.string().optional(),
+  due_date: z.string().optional().nullable(),
   sop_id: z.string().uuid().optional().nullable(),
 });
 
