@@ -505,10 +505,12 @@ export interface CreateTaskRequest {
   title: string;
   description?: string;
   priority?: TaskPriority;
-  assigned_agent_id?: string;
+  // P2-03: nullable, in lockstep with CreateTaskSchema (src/lib/validation.ts)
+  // — TaskModal always sends an explicit `null` for these two, not a missing key.
+  assigned_agent_id?: string | null;
   created_by_agent_id?: string;
   business_id?: string;
-  due_date?: string;
+  due_date?: string | null;
   dependencies?: string[];
   parallel_candidates?: string[];
   block_reason?: string;

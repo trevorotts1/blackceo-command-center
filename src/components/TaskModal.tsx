@@ -102,6 +102,15 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
   const [touchedBlocked, setTouchedBlocked] = useState(false);
   const [suggestingPersona, setSuggestingPersona] = useState(false);
   const [suggestingSop, setSuggestingSop] = useState(false);
+  // P2-03 — generic non-201/200 save-failure banner. Before this, ANY save
+  // failure that wasn't the specific Triad-error shape (see triadError above)
+  // fell through handleSubmit's `if (res.ok)` block silently: isSubmitting
+  // reset to false in `finally`, the modal stayed open, and NOTHING told the
+  // operator the save failed — this is the "New Task doesn't really work"
+  // report (a 400 from a schema mismatch produced exactly this silent no-op).
+  // Populated for every non-ok response the other handled branches don't
+  // already cover; cleared on a fresh submit attempt and on close.
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,6 +128,7 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
     setIsSubmitting(true);
     setTriadError(null);
+    setSubmitError(null);
     setTouchedBlocked(false);
 
     try {
@@ -131,7 +141,16 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
         // New tasks always start in 'backlog'
         assigned_agent_id: form.assigned_agent_id || null,
         due_date: form.due_date || null,
-        workspace_id: workspaceId || task?.workspace_id || 'default',
+        // P2-03: never send the literal string 'default' — no box seeds a
+        // workspace row with id 'default' outside the standalone `npm run
+        // db:seed` script, so this modal (opened from the cross-department
+        // /tasks/all board, which passes no `workspaceId` prop, on a brand
+        // new task) was stamping a PHANTOM workspace id on every create.
+        // createTaskCore's lookup now nulls an unresolvable workspace_id
+        // server-side (see src/lib/tasks.ts), but the client should not
+        // manufacture an id it has no reason to believe exists in the first
+        // place — omit the key entirely and let the server default it.
+        workspace_id: workspaceId || task?.workspace_id || undefined,
       };
       // The blocked_reason/blocked_on_human/ask fields only mean anything on a
       // ->'blocked' transition (the API ignores them otherwise) — drop them
@@ -148,17 +167,44 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
         body: JSON.stringify(payload),
       });
 
-      if (!res.ok && res.status === 400) {
+      // P2-03 — every non-ok response is now surfaced to the operator. The
+      // Triad-incomplete shape gets its own dedicated banner (with
+      // remediation CTAs, handled below); everything else — validation
+      // failures, a 500, a 503 misconfiguration — falls through to the
+      // generic submitError banner instead of failing silently.
+      if (!res.ok) {
+        let errBody: unknown = null;
         try {
-          const errBody = await res.json();
-          if (errBody?.error === 'Triad incomplete' && Array.isArray(errBody.missing)) {
-            setTriadError({ missing: errBody.missing });
-            setIsSubmitting(false);
-            return;
-          }
+          errBody = await res.json();
         } catch {
-          // not a Triad error — fall through to generic handling
+          // Non-JSON error body — leave errBody null, fall through to the
+          // generic status-code message below.
         }
+        const errObj = (errBody ?? {}) as {
+          error?: string;
+          message?: string;
+          missing?: string[];
+          details?: Array<{ path?: string[]; message?: string }>;
+        };
+
+        if (errObj.error === 'Triad incomplete' && Array.isArray(errObj.missing)) {
+          setTriadError({ missing: errObj.missing });
+          setIsSubmitting(false);
+          return;
+        }
+
+        const detailText = Array.isArray(errObj.details)
+          ? errObj.details
+              .map((d) => `${(d.path ?? []).join('.')}: ${d.message ?? ''}`.trim())
+              .filter(Boolean)
+              .join('; ')
+          : '';
+        setSubmitError(
+          [errObj.message, errObj.error, detailText].filter(Boolean).join(' — ') ||
+            `Save failed (HTTP ${res.status}). Please try again or contact the operator.`,
+        );
+        setIsSubmitting(false);
+        return;
       }
 
       if (res.ok) {
@@ -216,6 +262,9 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
       }
     } catch (error) {
       console.error('Failed to save task:', error);
+      // P2-03 — a network-level failure (fetch threw: offline, DNS, CORS,
+      // server unreachable) must also be visible, not just the console.
+      setSubmitError('Could not reach the server. Check your connection and try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -464,6 +513,34 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
               anthologyId={anthologyAssembly.anthologyId}
               anthologyName={anthologyAssembly.anthologyName}
             />
+          )}
+          {/* P2-03 — generic save-failure banner. Covers every non-ok response
+              the Triad banner below doesn't already own: a Zod validation
+              400 (e.g. a schema/payload mismatch), a 500, a 503
+              misconfiguration, or a network failure. Previously these all
+              failed SILENTLY — the modal just sat there with no feedback,
+              which is the concrete shape of the operator's "create task
+              doesn't really work" report. */}
+          {submitError && (
+            <div
+              data-testid="task-save-error"
+              role="alert"
+              className="rounded-xl border border-red-300 bg-red-50 p-4"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-sm text-red-800">
+                  <strong className="font-semibold">Couldn&apos;t save this task.</strong>{' '}
+                  {submitError}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setSubmitError(null)}
+                  className="shrink-0 rounded-lg border border-red-200 bg-white px-2 py-1 text-xs font-medium text-red-700 transition-colors hover:bg-red-50"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
           )}
           {/* Triad Rule error banner — surfaces when /api/tasks PATCH refuses
               a backlog → start transition because the task is missing one or
