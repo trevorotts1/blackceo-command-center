@@ -92,6 +92,13 @@ export interface ResolvedSettings {
   difficulty?: 'heavy' | 'mid' | 'fast' | null;
   /** Selector tier that won (1=Ollama Cloud, 2=OpenRouter OSS, 3=Free). */
   model_tier?: 1 | 2 | 3 | null;
+  /**
+   * P1-01: the task's requested modality was a downgradable one (vision) with no
+   * active capable model and was degraded to `text` so it could still dispatch.
+   * `required_modality` already reflects the degraded value; the dispatcher logs a
+   * `modality_downgraded` event when this is true.
+   */
+  modality_downgraded?: boolean;
 }
 
 interface AgentSettingRow {
@@ -284,6 +291,7 @@ export function resolveSettings(
   let required_modality: TaskModality | null = null;
   let difficulty: 'heavy' | 'mid' | 'fast' | null = null;
   let model_tier: 1 | 2 | 3 | null = null;
+  let modality_downgraded = false;
 
   // Modality is computed once, up front (MODEL-02: moved ABOVE Layer 0) so it
   // can gate EVERY model source — the CEO pin (Layer 0) and SOP pin (Layer 1)
@@ -432,6 +440,8 @@ export function resolveSettings(
         required_modality = sel.required_modality;
         difficulty = sel.difficulty;
         model_tier = sel.tier;
+        // P1-01: carry the downgrade flag so the dispatcher logs the event.
+        modality_downgraded = sel.modality_downgraded;
       }
     }
   }
@@ -484,6 +494,7 @@ export function resolveSettings(
       required_modality: required_modality ?? null,
       difficulty: difficulty ?? null,
       model_tier: model_tier ?? null,
+      modality_downgraded,
     };
   }
 
@@ -556,6 +567,7 @@ export function resolveSettings(
       required_modality: required_modality ?? null,
       difficulty: difficulty ?? null,
       model_tier: model_tier ?? null,
+      modality_downgraded,
     };
   }
 
@@ -589,6 +601,7 @@ export function resolveSettings(
     required_modality: required_modality ?? null,
     difficulty: difficulty ?? null,
     model_tier: model_tier ?? null,
+    modality_downgraded,
   };
 }
 
