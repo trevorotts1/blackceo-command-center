@@ -356,6 +356,11 @@ jobs:
           # script must pass (no regressions in other sections).
           bash scripts/qc-cc.sh
 
+      # P1-02 Unit B, item 4: the non-4000 drift ACK guard in cc-start.sh.
+      # Fail-first contract test — see the file header for the four assertions.
+      - name: cc-start.sh non-4000 drift ACK guard test (P1-02 Unit B)
+        run: bash tests/unit/cc-start-port-ack-guard.test.sh
+
   build-smoke:
     name: Build smoke test
     runs-on: ubuntu-latest

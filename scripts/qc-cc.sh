@@ -538,6 +538,17 @@ check "11.12" "vps-docker-bootstrap.sh Step 8b uses cc-start.sh (not bare next s
 check "11.13" "planted fixture bleeding-ecosystem.cjs IS detectable by guard 11.1 (self-proof)" \
   'grep -E "process\.env\.PORT" tests/fixtures/port-guard/bleeding-ecosystem.cjs | grep -vE "^\s*(//|\*)" | grep -q .'
 
+# 11.14-11.16: P1-02 Unit B — non-4000 drift ACK guard (cc-start.sh) + the
+# daily port-integrity self-check job (registered in scheduler.ts).
+check "11.14" "scripts/cc-start.sh refuses a non-4000 CC_PORT without CC_PORT_OVERRIDE_ACK=1" \
+  'grep -q "CC_PORT_OVERRIDE_ACK" scripts/cc-start.sh'
+check "11.15" "src/lib/jobs/port-integrity.ts exists (daily port-integrity self-check, P1-02 Unit B)" \
+  '[ -f src/lib/jobs/port-integrity.ts ]'
+check "11.16" "scheduler.ts registers the port-integrity job" \
+  'grep -q "runPortIntegrityCheck" src/lib/jobs/scheduler.ts && grep -q "name: .port-integrity." src/lib/jobs/scheduler.ts'
+check "11.17" "port-integrity.ts routes any drift through notifySystem (SYSTEM audience, never the client)" \
+  'grep -q "notifySystem" src/lib/jobs/port-integrity.ts'
+
 blue ""
 blue "── 12. Cross-store embedding contract validate (SOP_EMBEDDING_PROVIDER=google / gemini-embedding-2 / 3072) ──"
 #
