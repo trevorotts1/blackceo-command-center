@@ -23,7 +23,6 @@
  *   Semantic embeddings classify by MEANING against those real names.
  */
 
-import { createHash } from 'node:crypto';
 import { queryAll } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
@@ -329,8 +328,44 @@ interface DeptVectorCacheEntry {
 
 const _deptVectorCache = new Map<string, DeptVectorCacheEntry>();
 
+/**
+ * Content fingerprint for department-vector cache invalidation.
+ *
+ * This is deliberately a small, dependency-free string hash (cyrb53) — NOT a
+ * cryptographic digest. Its ONLY job is to detect when a department's
+ * deptEmbedText() (name + purpose + first-12-keywords) changes so the cache
+ * re-embeds exactly that one department. Same text -> same hash; any edit ->
+ * a different hash. That is the entire contract the embed-cache relies on.
+ *
+ * WHY NOT node:crypto: department-router.ts is pulled into Next.js's EDGE
+ * instrumentation bundle via instrumentation -> scheduler.ts ->
+ * ceo-delegation-sweep.ts -> department-router.ts. Importing
+ * `createHash` from 'node:crypto' makes `next build` fail with
+ * UnhandledSchemeError ("Reading from node:crypto is not handled") because the
+ * edge runtime has no node: builtins. A lazy require would still be traced into
+ * the edge bundle; Web Crypto's subtle.digest is async and would force this
+ * synchronous cache path to become async. A pure-JS hash keeps the P4-03
+ * embed-cache feature byte-for-byte identical in behaviour while compiling
+ * cleanly for edge, node, and browser runtimes alike.
+ *
+ * cyrb53 is a well-distributed 53-bit hash — collision risk across a client's
+ * handful of department texts is negligible, which is all cache invalidation
+ * needs (a collision would at worst reuse a stale vector for one dept).
+ */
 function _deptTextHash(text: string): string {
-  return createHash('sha1').update(text).digest('hex');
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  const hashNum = 4294967296 * (2097151 & h2) + (h1 >>> 0);
+  return hashNum.toString(16);
 }
 
 /** Test-only: reset the cache between test cases so assertions don't leak
