@@ -37,7 +37,10 @@
 #   Rollback verified — the rollback itself is health-checked before the script exits
 #   Never rollback 3  — exit 3 (UNKNOWN/transient) triggers retry, never rollback
 #
-# REQUIRES: bash 4+, pm2, npm, python3, sqlite3, curl, df
+# REQUIRES: bash 4+, pm2, npm, python3, curl, df
+#           (no sqlite3 CLI: the pre-backup WAL checkpoint uses python3's stdlib
+#            sqlite3 module — the Linux/VPS container ships python3 but NOT the
+#            sqlite3 command-line binary.)
 
 set -uo pipefail
 
@@ -190,7 +193,13 @@ _health_check_args() {
 _run_health_check() {
   local outvar="$1"
   local json_tmp
-  json_tmp=$(mktemp /tmp/cc-health-$$.json)
+  # Portable mktemp: GNU coreutils mktemp REQUIRES an XXXXXX template in the
+  # trailing path component and fails closed without one ("too few X's in
+  # template") on every Linux/VPS box; BSD/macOS is lenient, which is why the
+  # old fixed-name form only broke on the container. The value is used purely as
+  # an opaque temp path below (redirect target, cat, rm) — nothing depends on a
+  # .json extension — so the suffix is dropped to stay portable across GNU/BSD.
+  json_tmp=$(mktemp "${TMPDIR:-/tmp}/atomic-cc-health-XXXXXX")
   local hc_exit=0
 
   # Build args array from helper
@@ -268,7 +277,7 @@ _preflight_abort_receipt() {
 ###############################################################################
 # Validate required tools
 ###############################################################################
-for _dep in pm2 npm python3 sqlite3 curl df; do
+for _dep in pm2 npm python3 curl df; do
   if ! command -v "$_dep" &>/dev/null; then
     _err "Required dependency missing: $_dep"
     exit 2
@@ -337,7 +346,21 @@ if [[ -z "$DB_FILE" || ! -f "$DB_FILE" ]]; then
   DB_BACKUP=""
 else
   DB_BACKUP="${DB_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
-  sqlite3 "$DB_FILE" '.timeout 5000' 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null || true
+  # Best-effort pre-backup WAL flush. The Linux/VPS container ships python3 but
+  # NOT the sqlite3 CLI, so use the stdlib sqlite3 module (behaviour-equivalent
+  # to `sqlite3 <db> '.timeout 5000' 'PRAGMA wal_checkpoint(TRUNCATE);'`).
+  # better-sqlite3 is deliberately NOT used here: this runs BEFORE `npm run
+  # build`, so its native binding may be unbuilt/ABI-mismatched at this point.
+  # The connection is always closed in a finally and the whole thing is fenced
+  # so a checkpoint failure can never fail the deploy — the cp below still runs.
+  python3 - "$DB_FILE" <<'PYWAL' 2>/dev/null || true
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1], timeout=5)
+try:
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+finally:
+    conn.close()
+PYWAL
   cp "$DB_FILE" "$DB_BACKUP"
   _ok "  DB backed up: ${DB_BACKUP}"
 fi
