@@ -26,7 +26,13 @@ apt-get install -y --no-install-recommends \
   python3 \
   python3-pip \
   git \
-  build-essential
+  build-essential \
+  lsof
+# lsof: cc-start.sh's orphan-port killer prefers lsof to free port 4000 before
+# `next start` binds it (breaks the EADDRINUSE crash-loop). The container image
+# does NOT ship lsof by default; cc-start.sh falls back to a pure-python3
+# /proc/net parser when it is absent, but installing lsof gives the killer its
+# primary, fastest path on every future container build.
 
 #
 # Step 2: Node.js 20 LTS via NodeSource

@@ -11,7 +11,10 @@
 #                          CC's listen port.
 #   2. ORPHAN-PORT KILLER — frees the CC port before next binds it, breaking the
 #                           EADDRINUSE crash-loop that caused a client box's
-#                           71,551 restarts. Works on Mac (lsof) and Linux (lsof/fuser).
+#                           71,551 restarts. Works on Mac (lsof), Linux (lsof or
+#                           fuser), AND the Hostinger VPS container which ships
+#                           neither — there it falls back to a pure-python3
+#                           /proc/net parser so the orphan is still found+killed.
 #   3. CLEAN EXEC         — uses exec so PM2's PID tracking stays correct (the
 #                           bash wrapper never hides the real node child).
 #   4. NON-4000 DRIFT ACK GUARD (P1-02) — if the resolved port is anything
@@ -99,9 +102,13 @@ fi
 
 # ── 2. ORPHAN-PORT KILLER ─────────────────────────────────────────────────────
 # Find any process currently LISTENing on the CC port and kill it before next
-# tries to bind.  Uses lsof (Mac + most Linux); falls back to fuser (Linux).
-# If neither tool is available, fails loudly so the PM2 circuit-breaker (not an
-# infinite EADDRINUSE loop) takes over.
+# tries to bind.  Enumerates the holder via lsof (Mac + most Linux), then fuser
+# (Linux), then a pure-python3 /proc/net/tcp parser (the Hostinger VPS container
+# ships python3 but NOT lsof/fuser — without this fallback the killer was a
+# FATAL exit on every VPS box, taking the CC down instead of freeing the port).
+# ONLY when none of those three methods is available (no lsof, no fuser, and no
+# readable /proc) does it degrade to a LOUD warning + skip — never a silent skip
+# and never a fatal exit — leaving PM2's circuit-breaker as the documented net.
 #
 # Safety: only LISTEN sockets on the exact port are targeted — never a kill-by-name.
 #
@@ -126,21 +133,96 @@ _cc_strip_protected() {
   printf '%s' "$out"
 }
 
+# _cc_port_probe_method — echo the best available way to enumerate the pid(s)
+# LISTENing on a TCP port: "lsof" | "fuser" | "python3" | "none". python3 is the
+# container fallback (the Hostinger image has python3 but no lsof/fuser) and needs
+# a readable /proc/net/tcp to parse.
+_cc_port_probe_method() {
+  if command -v lsof >/dev/null 2>&1; then
+    printf 'lsof'
+  elif command -v fuser >/dev/null 2>&1; then
+    printf 'fuser'
+  elif command -v python3 >/dev/null 2>&1 && [[ -r /proc/net/tcp ]]; then
+    printf 'python3'
+  else
+    printf 'none'
+  fi
+}
+
+# _cc_listeners_on_port <port> — echo the pid(s) LISTENing on the given TCP port,
+# one per line (empty if none / no probe method). Tries lsof, then fuser, then a
+# pure-python3 parser of /proc/net/tcp{,6} that maps the LISTEN socket's inode to
+# the owning pid via /proc/<pid>/fd — so the orphan is still found on a container
+# with no lsof/fuser. Always returns 0 (never trips `set -e`); callers gate the
+# no-method case on _cc_port_probe_method.
+_cc_listeners_on_port() {
+  local port="$1"
+  case "$(_cc_port_probe_method)" in
+    lsof)
+      lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true
+      ;;
+    fuser)
+      fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true
+      ;;
+    python3)
+      python3 - "$port" <<'PYPORT' 2>/dev/null || true
+import os, sys, glob
+port = int(sys.argv[1])
+port_hex = '%04X' % port          # /proc/net local port is 4-hex-digit uppercase
+LISTEN = '0A'                     # TCP_LISTEN state
+inodes = set()
+for path in ('/proc/net/tcp', '/proc/net/tcp6'):
+    try:
+        with open(path) as fh:
+            next(fh)              # skip header row
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 10 or parts[3] != LISTEN:
+                    continue
+                if parts[1].rsplit(':', 1)[-1].upper() == port_hex:
+                    inodes.add(parts[9])
+    except OSError:
+        continue
+if inodes:
+    pids = set()
+    for fd in glob.glob('/proc/[0-9]*/fd/*'):
+        try:
+            link = os.readlink(fd)
+        except OSError:
+            continue
+        if link.startswith('socket:[') and link[8:-1] in inodes:
+            pids.add(fd.split('/')[2])
+    for pid in sorted(pids, key=int):
+        print(pid)
+PYPORT
+      ;;
+    *)
+      : ;;  # no probe method available — caller emits the LOUD warning
+  esac
+}
+
 free_port() {
   local port="$1"
   local pids=""
   local self_pid=$$
   local parent_pid="${PPID:-0}"
 
-  if command -v lsof >/dev/null 2>&1; then
-    pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
-  elif command -v fuser >/dev/null 2>&1; then
-    pids="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
-  else
-    printf '[cc-start] FATAL: neither lsof nor fuser found — cannot check port %s for orphans\n' "$port" >&2
-    printf '[cc-start] Install lsof (apt install lsof / brew install lsof) and retry\n' >&2
-    exit 1
+  local probe_method
+  probe_method="$(_cc_port_probe_method)"
+  if [[ "$probe_method" == "none" ]]; then
+    # No lsof, no fuser, and /proc/net/tcp is unreadable: we genuinely cannot
+    # enumerate the port holder on this host. Do NOT fatal-exit (that would take
+    # the CC down on a missing-tool box) and do NOT silently skip. Warn LOUDLY
+    # and continue: if a real orphan holds the port, `next start` EADDRINUSEs and
+    # PM2's circuit-breaker (min_uptime + max_restarts) surfaces it — the
+    # documented fallback, not an infinite crash loop.
+    printf '[cc-start] LOUD WARNING: no lsof, no fuser, and /proc/net/tcp is unreadable —\n' >&2
+    printf '[cc-start] cannot enumerate the holder of port %s. SKIPPING the orphan-port kill.\n' "$port" >&2
+    printf '[cc-start] Install lsof (apt-get install -y lsof) so the orphan killer works here.\n' >&2
+    printf '[cc-start] If an orphan holds the port, PM2 max_restarts (not an infinite loop) will bite.\n' >&2
+    return 0
   fi
+  pids="$(_cc_listeners_on_port "$port")"
 
   # Never signal ourselves or our pm2/npm supervisor.
   pids="$(_cc_strip_protected "$self_pid" "$parent_pid" "$pids")"
@@ -165,11 +247,7 @@ free_port() {
     sleep 1
     waited=$((waited+1))
     local remaining=""
-    if command -v lsof >/dev/null 2>&1; then
-      remaining="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
-    else
-      remaining="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
-    fi
+    remaining="$(_cc_listeners_on_port "$port")"
     remaining="$(_cc_strip_protected "$self_pid" "$parent_pid" "$remaining")"
     if [[ -z "$remaining" ]]; then
       printf '[cc-start]   port %s freed after %ss\n' "$port" "$waited" >&2
@@ -186,11 +264,7 @@ free_port() {
 
   # Final re-probe — if still occupied, abort to let the PM2 circuit-breaker handle it.
   local final_check=""
-  if command -v lsof >/dev/null 2>&1; then
-    final_check="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
-  else
-    final_check="$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
-  fi
+  final_check="$(_cc_listeners_on_port "$port")"
   final_check="$(_cc_strip_protected "$self_pid" "$parent_pid" "$final_check")"
   if [[ -n "$final_check" ]]; then
     printf '[cc-start] FATAL: port %s still occupied after TERM+KILL — pid(s): %s\n' "$port" "$final_check" >&2
