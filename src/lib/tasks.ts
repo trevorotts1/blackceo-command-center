@@ -305,21 +305,27 @@ export function deriveDepartmentDefaultPersona(
 }
 
 /**
- * Pin a department-default persona onto a task and mark it persona_fallback=true.
- * Writes a queryable `persona_fallback` audit event (independent of the column so
- * the record exists even on a pre-migration DB) and re-broadcasts the row.
+ * Write the legacy `tasks.persona_id/name/mode/...` mirror columns — the
+ * pre-090 back-compat surface every existing consumer (TaskCard,
+ * PersonaGovernanceBoard, the persona-backfill sweep's `persona_id IS NULL`
+ * scan) still reads. Shared by every "pin a persona without a fresh selector
+ * match" path (department-default fallback, producer-pin) so the
+ * persona_fallback-column-presence branch is expressed exactly once.
  */
-function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPersona): void {
+function writeLegacyPersonaMirror(
+  taskId: string,
+  persona: { persona_id: string; persona_name: string; persona_mode: string },
+  { fallback }: { fallback: boolean },
+): void {
   const now = new Date().toISOString();
-
   if (tasksHasPersonaFallbackColumn()) {
     run(
       `UPDATE tasks
           SET persona_id = ?, persona_name = ?, persona_mode = ?,
               persona_score = NULL, persona_version = 1,
-              persona_selected_at = ?, persona_fallback = 1
+              persona_selected_at = ?, persona_fallback = ?
         WHERE id = ?`,
-      [fb.persona_id, fb.persona_name, fb.persona_mode, now, taskId],
+      [persona.persona_id, persona.persona_name, persona.persona_mode, now, fallback ? 1 : 0, taskId],
     );
   } else {
     run(
@@ -328,9 +334,20 @@ function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPerson
               persona_score = NULL, persona_version = 1,
               persona_selected_at = ?
         WHERE id = ?`,
-      [fb.persona_id, fb.persona_name, fb.persona_mode, now, taskId],
+      [persona.persona_id, persona.persona_name, persona.persona_mode, now, taskId],
     );
   }
+}
+
+/**
+ * Pin a department-default persona onto a task and mark it persona_fallback=true.
+ * Writes a queryable `persona_fallback` audit event (independent of the column so
+ * the record exists even on a pre-migration DB) and re-broadcasts the row.
+ */
+function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPersona): void {
+  const now = new Date().toISOString();
+
+  writeLegacyPersonaMirror(taskId, fb, { fallback: true });
 
   run(
     `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -407,29 +424,14 @@ export interface ProducerPersonaBundleInput {
  */
 export function pinProducerPersonaBundle(taskId: string, producer: ProducerPersonaBundleInput): string {
   const voicePersonaId = producer.voice_persona_id.trim();
-  const now = new Date().toISOString();
   const personaName = humanizeSlug(voicePersonaId);
 
   try {
-    if (tasksHasPersonaFallbackColumn()) {
-      run(
-        `UPDATE tasks
-            SET persona_id = ?, persona_name = ?, persona_mode = ?,
-                persona_score = NULL, persona_version = 1,
-                persona_selected_at = ?, persona_fallback = 0
-          WHERE id = ?`,
-        [voicePersonaId, personaName, 'leadership', now, taskId],
-      );
-    } else {
-      run(
-        `UPDATE tasks
-            SET persona_id = ?, persona_name = ?, persona_mode = ?,
-                persona_score = NULL, persona_version = 1,
-                persona_selected_at = ?
-          WHERE id = ?`,
-        [voicePersonaId, personaName, 'leadership', now, taskId],
-      );
-    }
+    writeLegacyPersonaMirror(
+      taskId,
+      { persona_id: voicePersonaId, persona_name: personaName, persona_mode: 'leadership' },
+      { fallback: false },
+    );
   } catch (err) {
     console.warn(`[createTaskCore] producer-pin legacy-column write failed for task ${taskId}:`, (err as Error).message);
   }
@@ -469,7 +471,7 @@ export function pinProducerPersonaBundle(taskId: string, producer: ProducerPerso
         taskId,
         `[PERSONA-PRODUCER-PIN] ingest carried a resolved bundle — pinned "${voicePersonaId}" ` +
           `directly (B-U7); no selector spawn.`,
-        now,
+        new Date().toISOString(),
       ],
     );
   } catch {
