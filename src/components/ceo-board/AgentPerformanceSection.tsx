@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Bot, Activity, CheckCircle, Clock } from 'lucide-react';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { Agent } from '@/lib/types';
 
 /** Map full model IDs to short display labels */
@@ -92,7 +93,7 @@ export function AgentPerformanceSection() {
       try {
         const res = await fetch('/api/agents');
         if (res.ok) {
-          const data: Agent[] = await res.json();
+          const data: Agent[] = unwrapAgents<Agent>(await res.json());
 
           const filtered = data
             // Remove QC and standup agents

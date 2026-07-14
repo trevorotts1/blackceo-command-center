@@ -90,10 +90,21 @@ def api_patch(path: str, body: dict, quiet: bool = False):
 _agent_cache: list | None = None
 
 def get_agents() -> list:
+    """Fetch the agent roster. U56: GET /api/agents now returns the
+    enveloped `{"agents": [...]}` shape (it used to be a bare array) so real
+    department-scoped agent lists could stop rendering empty on the CC
+    dashboard. Accept both shapes here — enveloped (current contract) or a
+    bare list (defensive backward-compat with an old server)."""
     global _agent_cache
     if _agent_cache is None:
         result = api_get("/api/agents")
-        _agent_cache = result if isinstance(result, list) else []
+        if isinstance(result, dict):
+            agents = result.get("agents")
+            _agent_cache = agents if isinstance(agents, list) else []
+        elif isinstance(result, list):
+            _agent_cache = result
+        else:
+            _agent_cache = []
     return _agent_cache
 
 

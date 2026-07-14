@@ -4209,6 +4209,45 @@ const migrations: Migration[] = [
       console.log('[Migration 102] job_liveness ready');
     },
   },
+  {
+    id: '103',
+    name: 'purge_demo_recommendations_seed',
+    // U56 (E.2 / JM-U52) — GET /api/recommendations used to auto-seed 5
+    // hardcoded demo rows (`DEMO_RECOMMENDATIONS`, now deleted from
+    // src/app/api/recommendations/route.ts) into the LIVE `recommendations`
+    // table on the first empty GET. Any box that ever hit that GET before
+    // this fix landed carries those 5 fake rows permanently. This migration
+    // deletes ONLY rows matching the five exact seeded (title, department_id)
+    // fingerprints below — an operator-authored recommendation that happens
+    // to share a department_id but NOT the exact seeded title text is never
+    // touched. Idempotent (a box with none of these rows is a no-op) and
+    // down-safe (it only ever deletes, never restores — re-running or
+    // reverting the migration itself cannot resurrect or re-delete operator
+    // data, because the fingerprint match is exact-title, not a LIKE/prefix).
+    //
+    // Destructive row-delete, so it defers during additive-only self-heal
+    // (INGEST-07 convention — see migrations 081/082/etc.).
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      console.log('[Migration 103] Purging DEMO_RECOMMENDATIONS seeded rows...');
+      const DEMO_RECOMMENDATIONS_FINGERPRINTS: Array<{ department_id: string; title: string }> = [
+        { department_id: 'marketing-dept', title: 'Double Down on Email Campaigns' },
+        { department_id: 'sales-dept', title: 'Pause Cold Calling Campaign' },
+        { department_id: 'operations-dept', title: 'Monitor Task Completion Times' },
+        { department_id: 'finance-dept', title: 'Automate Invoice Reminders' },
+        { department_id: 'product-dept', title: 'Expand User Testing Program' },
+      ];
+      const del = db.prepare(
+        `DELETE FROM recommendations WHERE department_id = ? AND title = ?`,
+      );
+      let deleted = 0;
+      for (const fp of DEMO_RECOMMENDATIONS_FINGERPRINTS) {
+        const result = del.run(fp.department_id, fp.title);
+        deleted += result.changes;
+      }
+      console.log(`[Migration 103] Deleted ${deleted} seeded demo recommendation row(s)`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

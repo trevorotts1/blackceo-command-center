@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { WorkspaceStats, Agent } from '@/lib/types';
 
 function AnimatedBar({
@@ -59,7 +60,7 @@ export function SystemPulseSection() {
             })
           );
         }
-        if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (agentsRes.ok) setAgents(unwrapAgents<Agent>(await agentsRes.json()));
       } catch {
         // handled
       } finally {

@@ -41,13 +41,17 @@ mc_patch() {
 }
 
 # Find agent ID by name (case-insensitive via jq)
+# U56: GET /api/agents now returns the enveloped `{"agents": [...]}` shape
+# (it used to be a bare array). Accept both — enveloped (current contract)
+# or a bare list (defensive backward-compat with an old server).
 find_agent_id() {
   local name="$1"
   local agents
   agents=$(mc_get "/api/agents") || { echo "⚠️  Mission Control unreachable" >&2; return 1; }
   echo "$agents" | python3 -c "
 import json, sys
-agents = json.load(sys.stdin)
+payload = json.load(sys.stdin)
+agents = payload.get('agents', []) if isinstance(payload, dict) else payload
 name = '${name}'.lower()
 for a in agents:
     if a['name'].lower() == name:
@@ -179,7 +183,8 @@ cmd_status() {
   echo "── Agents ──────────────────────────────────"
   echo "$agents" | python3 -c "
 import json, sys
-agents = json.load(sys.stdin)
+payload = json.load(sys.stdin)
+agents = payload.get('agents', []) if isinstance(payload, dict) else payload
 icons = {'working': '🟢', 'standby': '⚪', 'offline': '🔴'}
 for a in agents:
     s = a.get('status', '?')

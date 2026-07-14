@@ -814,7 +814,7 @@ export default function DepartmentSubBoardPage() {
 
       // Load recommendations from API, fall back to empty
       try {
-        const recRes = await fetch(`/api/recommendations?department=${deptId}`);
+        const recRes = await fetch(`/api/recommendations?department_id=${deptId}`);
         if (recRes.ok) {
           const recData = await recRes.json();
           if (recData.recommendations && recData.recommendations.length > 0) {

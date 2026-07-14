@@ -18,6 +18,7 @@ import { Breadcrumb } from '@/components/Breadcrumb';
 import { resolveDepartment } from '@/lib/routing/resolve-department';
 import { AnthologyBoardDriftBanner } from '@/components/anthology/BoardDriftBanner';
 import { Skill6BoardDriftBanner } from '@/components/skill6/BoardDriftBanner';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -115,7 +116,7 @@ export default function WorkspacePage() {
           fetch('/api/events'),
         ]);
 
-        if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (agentsRes.ok) setAgents(unwrapAgents(await agentsRes.json()));
         if (tasksRes.ok) {
           const tasksData = await tasksRes.json();
           debug.api('Loaded tasks', { count: tasksData.length });
