@@ -132,6 +132,19 @@ interface IngestPayload {
    */
   requester_channel?: unknown;
   requester_chat_id?: unknown;
+  /**
+   * B-U7 (ingest parity) — OPTIONAL producer-supplied persona-bundle identity,
+   * the SAME field vocabulary cc_board.py's report_persona_used posts back
+   * later (B-U6). The producer already resolved this bundle before creating
+   * the card (B-U1's threaded/cc/local rungs) — voice_persona_id GATES the
+   * whole group; when present, createTaskCore pins these directly instead of
+   * spawning its own selector match. Absent → today's async selector pin,
+   * unchanged.
+   */
+  voice_persona_id?: unknown;
+  topic_persona_id?: unknown;
+  task_persona_ids?: unknown;
+  bundle_sha?: unknown;
 }
 
 const VALID_PRIORITIES = new Set<TaskPriority>(['low', 'medium', 'high', 'critical']);
@@ -510,6 +523,29 @@ export async function POST(request: NextRequest) {
         ? (priorityRaw as TaskPriority)
         : undefined;
 
+    // B-U7 — ingest parity. voice_persona_id GATES the whole group (mirrors
+    // cc_board.py's own gate, and report_persona_used's voice-required rule):
+    // a caller sending topic/task/sha with no voice has nothing worth pinning,
+    // so the whole group is dropped rather than handed to createTaskCore as a
+    // half-formed bundle it could misread as authoritative.
+    const voicePersonaIdRaw =
+      typeof body.voice_persona_id === 'string' ? body.voice_persona_id.trim() : '';
+    const topicPersonaId =
+      voicePersonaIdRaw && typeof body.topic_persona_id === 'string' && body.topic_persona_id.trim()
+        ? body.topic_persona_id.trim()
+        : undefined;
+    const taskPersonaIds =
+      voicePersonaIdRaw && Array.isArray(body.task_persona_ids)
+        ? body.task_persona_ids
+            .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+            .map((p) => p.trim())
+        : undefined;
+    const bundleSha =
+      voicePersonaIdRaw && typeof body.bundle_sha === 'string' && body.bundle_sha.trim()
+        ? body.bundle_sha.trim()
+        : undefined;
+    const voicePersonaId = voicePersonaIdRaw || undefined;
+
     // Deterministic dedupe key: idempotency_key wins, else source_ref, else a
     // synthesized intrinsic key.
     // NOTE: The actual idempotency check lives in createTaskCore (Layer 1). We
@@ -727,6 +763,13 @@ export async function POST(request: NextRequest) {
         // P1-04: the originating client channel so the trust engine reports back.
         requester_channel: requesterChannel ?? null,
         requester_chat_id: requesterChatId ?? null,
+        // B-U7: producer-supplied persona-bundle identity (voice_persona_id
+        // gates the whole group — see parsing above). undefined/absent here
+        // is createTaskCore's byte-identical legacy path.
+        voice_persona_id: voicePersonaId ?? null,
+        topic_persona_id: topicPersonaId ?? null,
+        task_persona_ids: taskPersonaIds ?? null,
+        bundle_sha: bundleSha ?? null,
       },
       { origin: request.headers.get('origin') }
     );
@@ -869,6 +912,10 @@ export async function GET() {
       idempotency_key: 'string (optional; primary dedupe key)',
       requester_channel: 'string (optional; P1-04 trust engine — originating client channel, default telegram when requester_chat_id is present)',
       requester_chat_id: 'string (optional; P1-04 trust engine — client chat id the report-back loop acks/progress/done into)',
+      voice_persona_id: 'string (optional; B-U7 ingest parity — producer-resolved VOICE persona id. GATES the group below: pins directly instead of a fresh selector match; absent = async selector pin, unchanged)',
+      topic_persona_id: 'string (optional; B-U7 — producer-resolved topic/craft-hint persona id. Ignored unless voice_persona_id is also present)',
+      task_persona_ids: 'string[] (optional; B-U7 — producer-resolved task-slot persona ids. Ignored unless voice_persona_id is also present)',
+      bundle_sha: 'string (optional; B-U7 — sha of the bundle the producer used. Ignored unless voice_persona_id is also present)',
     },
   });
 }
