@@ -19,6 +19,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
+import { safeReadFileBuffer } from '@/lib/fs/safe-fs';
 import path from 'path';
 
 export const dynamic = 'force-dynamic';
@@ -132,22 +133,27 @@ export async function GET(
   }
 
   // ── Serve file ────────────────────────────────────────────────────────────
-  try {
-    const buf = fs.readFileSync(resolved);
-    const mime = mimeFor(filename);
-    const isImage = mime.startsWith('image/');
-
-    return new NextResponse(buf, {
-      status: 200,
-      headers: {
-        'Content-Type': mime,
-        'Content-Length': String(buf.length),
-        'Content-Disposition': isImage ? 'inline' : `attachment; filename="${filename}"`,
-        'Cache-Control': 'public, max-age=3600',
-      },
-    });
-  } catch (err) {
-    console.error(`[artifacts] Failed to read ${resolved}:`, err);
+  // safeReadFileBuffer never blocks the request thread on a TCC-gated artifact
+  // path (PROJECTS_PATH defaults to ~/Documents/Shared): a raw fs.readFileSync
+  // there could hang the whole Node process forever. Returns null instead.
+  const buf = safeReadFileBuffer(resolved);
+  if (!buf) {
+    console.error(`[artifacts] Failed to read ${resolved} (absent, unreadable, or TCC-blocked)`);
     return NextResponse.json({ error: 'Failed to read file' }, { status: 500 });
   }
+  const mime = mimeFor(filename);
+  const isImage = mime.startsWith('image/');
+
+  // Cast: a Node Buffer is a valid runtime BodyInit, but safe-fs types the
+  // return as the generic `Buffer` (ArrayBufferLike) rather than fs's
+  // NonSharedBuffer, which TS will not narrow to BufferSource. Runtime-safe.
+  return new NextResponse(buf as unknown as BodyInit, {
+    status: 200,
+    headers: {
+      'Content-Type': mime,
+      'Content-Length': String(buf.length),
+      'Content-Disposition': isImage ? 'inline' : `attachment; filename="${filename}"`,
+      'Cache-Control': 'public, max-age=3600',
+    },
+  });
 }

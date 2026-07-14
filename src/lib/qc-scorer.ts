@@ -58,6 +58,11 @@
 
 import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
+// TCC-safe accessors for the ARTIFACT tree (PROJECTS_PATH, default
+// ~/Documents/Shared — a macOS TCC-protected dir where a raw open()/opendir()
+// blocks the qc-review-sweep event loop forever). Session reads under
+// ~/.openclaw are NOT protected and keep the direct fs.* calls above.
+import { safeReadFileUtf8, safeReadFileBuffer, safeReaddirNames } from '@/lib/fs/safe-fs';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -1873,17 +1878,15 @@ export function collectPipelineRecords(deckArtifactPath: string): PipelineRecord
   let researchBriefComplete = false;
   try {
     const researchDir = path.join(working, 'research');
-    if (existsSync(researchDir)) {
-      for (const f of readdirSync(researchDir)) {
-        if (/^brief-.*\.md$/i.test(f)) {
-          try {
-            const body = readFileSync(path.join(researchDir, f), 'utf8');
-            // tolerate whitespace / quoting variants: research_complete: true
-            if (/research_complete["']?\s*[:=]\s*true/i.test(body)) {
-              researchBriefComplete = true;
-              break;
-            }
-          } catch { /* unreadable file — keep scanning */ }
+    // safeReaddirNames / safeReadFileUtf8 never block the sweep on a TCC-gated
+    // artifact tree (returns [] / null instead of hanging forever).
+    for (const f of safeReaddirNames(researchDir)) {
+      if (/^brief-.*\.md$/i.test(f)) {
+        const body = safeReadFileUtf8(path.join(researchDir, f));
+        // tolerate whitespace / quoting variants: research_complete: true
+        if (body && /research_complete["']?\s*[:=]\s*true/i.test(body)) {
+          researchBriefComplete = true;
+          break;
         }
       }
     }
@@ -2143,8 +2146,9 @@ export function collectCoverageInputs(
   for (const fname of ['intake.json', 'mission_prd.json']) {
     const candidate = path.join(runDir, fname);
     try {
-      if (!existsSync(candidate)) continue;
-      const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as Record<string, unknown>;
+      const rawIntake = safeReadFileUtf8(candidate);
+      if (rawIntake == null) continue;
+      const parsed = JSON.parse(rawIntake) as Record<string, unknown>;
       const t = readNumericKey(parsed, ['slide_count_target', 'slideCountTarget', 'target_slide_count']);
       if (t !== null) slideCountTarget = t;
       const cap = readNumericKey(parsed, [
@@ -2227,14 +2231,10 @@ function measureSourceLineCount(runDir: string): number | null {
   ];
   let maxLines: number | null = null;
   for (const candidate of candidates) {
-    try {
-      if (!existsSync(candidate)) continue;
-      const body = readFileSync(candidate, 'utf8');
-      const lines = body.split('\n').length;
-      if (maxLines === null || lines > maxLines) maxLines = lines;
-    } catch {
-      /* unreadable — skip */
-    }
+    const body = safeReadFileUtf8(candidate);
+    if (body == null) continue;
+    const lines = body.split('\n').length;
+    if (maxLines === null || lines > maxLines) maxLines = lines;
   }
   return maxLines;
 }
@@ -2617,17 +2617,16 @@ async function visionMatchCheck(
   const imageItem = manifest.find((m) => m.valid && m.type === 'image' && m.path);
   if (!imageItem?.path) return null; // no image to inspect — existence criterion covers this; neutral
 
-  // Read file as base64
-  let b64: string;
-  try {
-    const buf = readFileSync(imageItem.path);
-    b64 = buf.toString('base64');
-  } catch {
+  // Read file as base64. safeReadFileBuffer never blocks on a TCC-gated artifact
+  // path (returns null instead of hanging the sweep forever).
+  const buf = safeReadFileBuffer(imageItem.path);
+  if (!buf) {
     return {
       unverifiable: true,
       reason: `the artifact could not be read for subject verification (${imageItem.path})`,
     };
   }
+  const b64: string = buf.toString('base64');
 
   const prompt = `Look at this image. Does it depict: "${subject}"?
 Reply with ONLY this JSON (no other text):
@@ -2760,12 +2759,10 @@ Reply with ONLY this JSON (no other text):
 
   for (const imageItem of imageItems) {
     if (!imageItem.path) continue;
-    let b64: string;
-    try {
-      b64 = readFileSync(imageItem.path).toString('base64');
-    } catch {
-      continue;
-    }
+    // safeReadFileBuffer never blocks on a TCC-gated artifact path.
+    const _imgBuf = safeReadFileBuffer(imageItem.path);
+    if (!_imgBuf) continue;
+    const b64: string = _imgBuf.toString('base64');
     const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
 
@@ -2896,12 +2893,10 @@ Reply with ONLY this JSON (no other text):
 
   for (const imageItem of imageItems) {
     if (!imageItem.path) continue;
-    let b64: string;
-    try {
-      b64 = readFileSync(imageItem.path).toString('base64');
-    } catch {
-      continue;
-    }
+    // safeReadFileBuffer never blocks on a TCC-gated artifact path.
+    const _imgBuf = safeReadFileBuffer(imageItem.path);
+    if (!_imgBuf) continue;
+    const b64: string = _imgBuf.toString('base64');
     const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
 
@@ -3026,12 +3021,10 @@ Reply with ONLY this JSON (no other text):
 
   for (const imageItem of imageItems) {
     if (!imageItem.path) continue;
-    let b64: string;
-    try {
-      b64 = readFileSync(imageItem.path).toString('base64');
-    } catch {
-      continue;
-    }
+    // safeReadFileBuffer never blocks on a TCC-gated artifact path.
+    const _imgBuf = safeReadFileBuffer(imageItem.path);
+    if (!_imgBuf) continue;
+    const b64: string = _imgBuf.toString('base64');
     const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
 
@@ -3295,8 +3288,7 @@ function resolveProducerScorecard(taskId: string): ProducerScorecard | null {
 function verifyProducerScorecardFile(scorecardPath: string): boolean {
   try {
     const resolved = scorecardPath.replace(/^~/, process.env.HOME || '');
-    if (!existsSync(resolved)) return false;
-    const raw = readFileSync(resolved, 'utf8');
+    const raw = safeReadFileUtf8(resolved);
     if (!raw || raw.trim().length === 0) return false;
     // Best-effort re-parse: most scorecards are JSON (fab-qc.json / page-qc.json).
     // A parse failure does NOT fail the read — the contract only requires the
