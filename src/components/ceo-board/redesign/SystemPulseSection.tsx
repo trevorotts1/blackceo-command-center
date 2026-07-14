@@ -70,9 +70,10 @@ export function SystemPulseSection() {
   }, []);
 
   const metrics = useMemo(() => {
-    const activeAgents = agents.filter(
-      (a) => a.status === 'active' || a.status === 'working'
-    ).length;
+    // Agent status enum is standby/working/busy/degraded/offline — 'active'
+    // never matches a real row (same dead-code class as ActiveAgentsStrip.tsx,
+    // fixed U55e). Count 'working' only.
+    const activeAgents = agents.filter((a) => a.status === 'working').length;
     const totalAgents = agents.length;
     const totalTasks = departments.reduce(
       (s, d) => s + (d.taskCounts?.total || 0),

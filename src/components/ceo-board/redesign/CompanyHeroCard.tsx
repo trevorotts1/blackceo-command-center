@@ -1,28 +1,30 @@
 'use client';
 
 /**
- * CompanyHeroCard — PRD 2.10 rebuild
+ * CompanyHeroCard — PRD 2.10 rebuild, U55 single-source pass
  *
- * Drives grade + label from /api/company-health (the single grading source of
- * truth). score===null → explicit "Insufficient data" state, never 72 or 0.
- * Stat pills (total tasks, active agents, completion rate) read from real counts
- * via existing /api/workspaces and /api/agents endpoints.
+ * ONE data source: `GET /api/company-health`, via `loadCompanyHeroData`
+ * (`src/lib/ceo-board/company-health-client.ts` — a pure, framework-free
+ * module, NO React, imported by this component and by
+ * `NeedsAttentionSection.tsx`). Every headline number (grade, windowed
+ * completion, all-time completion, tasks created, active agents, the
+ * attention count, the four-input breakdown) comes from that single
+ * response — this component itself never calls `fetch` a second time for
+ * headline numbers (U55 acceptance (f) — see
+ * tests/unit/company-health-client.test.ts for the contract test).
+ *
+ * score===null → explicit "Insufficient data" state, never 72 or 0 (never-72
+ * doctrine). Same discipline applies to every windowed/breakdown figure.
  */
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { gradeToLabel, isRealDepartment } from '@/lib/grading';
-import type { Grade } from '@/lib/grading';
-import type { WorkspaceStats, Agent } from '@/lib/types';
-
-// Client-side shape from /api/company-health
-interface ClientCompanyHealth {
-  score: number | null;
-  grade: string | null;
-  departments: unknown[];
-  worstTrending: unknown[];
-  generatedAt: string;
-}
+import { gradeToLabel } from '@/lib/grading';
+import type { Grade, GradeInputKey } from '@/lib/grading';
+import {
+  loadCompanyHeroData,
+  type ClientCompanyHealth,
+} from '@/lib/ceo-board/company-health-client';
 
 const GRADE_COLORS: Record<string, string> = {
   A: '#10B981',
@@ -37,78 +39,62 @@ function gradeColor(grade: string | null): string {
   return GRADE_COLORS[grade] ?? '#9CA3AF';
 }
 
+const INPUT_ORDER: GradeInputKey[] = ['throughput', 'qcPassRate', 'sopCoverage', 'kpiAttainment'];
+
+/** Scrolls to the Needs Attention panel — same anchor pattern as the header's
+ *  "Agents" tab (ceo-board/page.tsx handleTabClick / #agents-section). */
+function scrollToNeedsAttention() {
+  document.getElementById('needs-attention-section')?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  });
+}
+
 export function CompanyHeroCard() {
   const [health, setHealth] = useState<ClientCompanyHealth | null>(null);
-  const [departments, setDepartments] = useState<WorkspaceStats[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     async function load() {
       try {
         setLoading(true);
-        const [healthRes, wsRes, agentsRes] = await Promise.all([
-          fetch('/api/company-health'),
-          fetch('/api/workspaces?stats=true'),
-          fetch('/api/agents'),
-        ]);
-        if (healthRes.ok) {
-          setHealth(await healthRes.json());
-        }
-        if (wsRes.ok) {
-          const data: WorkspaceStats[] = await wsRes.json();
-          setDepartments(data.filter((d) => isRealDepartment(d.slug || d.id)));
-        }
-        if (agentsRes.ok) {
-          setAgents(await agentsRes.json());
-        }
+        const data = await loadCompanyHeroData();
+        if (!cancelled) setHealth(data);
       } catch {
-        // handled by loading state
+        // handled by loading/null-health state
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
     load();
-  }, []);
-
-  const { totalTasks, activeAgents, completionRate } = useMemo(() => {
-    const total = departments.reduce((s, d) => s + (d.taskCounts?.total || 0), 0);
-    const done = departments.reduce((s, d) => s + (d.taskCounts?.done || 0), 0);
-    // Agent status enum is standby/working/offline (DB CHECK constraint) —
-    // 'active' never matches a real row, so counting it was dead code that
-    // silently overstated nothing but misled readers of this filter. Count
-    // 'working' only; the "Active Agents" label describes agents currently
-    // working, not a distinct 'active' status.
-    const active = agents.filter((a) => a.status === 'working').length;
-    return {
-      totalTasks: total,
-      activeAgents: active,
-      completionRate: total > 0 ? Math.round((done / total) * 100) : 0,
+    return () => {
+      cancelled = true;
     };
-  }, [departments, agents]);
+  }, []);
 
   const grade = health?.grade ?? null;
   const color = gradeColor(grade);
   const label = grade ? gradeToLabel(grade as Grade) : null;
   const sufficientData = health !== null && health.score !== null;
 
+  const attentionItems = health?.attentionItems ?? [];
+  const attentionCount = health?.attentionCount ?? attentionItems.length;
+
   const statusLine = useMemo(() => {
     if (!sufficientData) {
       return 'Your AI workforce is getting started. Check back after agents complete their first tasks to see your performance grade.';
     }
-    const needsAttention = departments.filter((d) => {
-      const total = d.taskCounts?.total || 0;
-      const done = d.taskCounts?.done || 0;
-      const blocked = d.taskCounts?.blocked || 0;
-      if (total === 0) return false;
-      const rate = Math.round(((done + (d.taskCounts?.in_progress || 0) * 0.5) / total) * 100);
-      return rate < 60 || blocked > 0;
-    }).length;
-    if (needsAttention > 0) {
-      return `Your company is performing ${(label ?? '').toLowerCase()}. ${needsAttention} item${needsAttention > 1 ? 's' : ''} need${needsAttention === 1 ? 's' : ''} attention.`;
+    if (attentionCount > 0) {
+      return `Your company is performing ${(label ?? '').toLowerCase()}.`;
     }
     return 'Your company is performing well. All departments are on track.';
-  }, [sufficientData, departments, label]);
+  }, [sufficientData, attentionCount, label]);
+
+  const handleAttentionClick = useCallback(() => {
+    scrollToNeedsAttention();
+  }, []);
 
   if (loading) {
     return (
@@ -128,6 +114,12 @@ export function CompanyHeroCard() {
     );
   }
 
+  const windowDays = health?.windowDays ?? 30;
+  const windowedCompletion = health?.windowedCompletionRate ?? null;
+  const allTimeCompletion = health?.allTime?.completionRate ?? null;
+  const windowedCreated = health?.windowedTaskCounts?.created ?? 0;
+  const activeAgents = health?.activeAgentCount ?? 0;
+
   return (
     <motion.div
       className="w-full rounded-[20px] px-6 py-8 sm:px-12 sm:py-10 shadow-lg"
@@ -146,6 +138,9 @@ export function CompanyHeroCard() {
             <span className="text-xl font-medium text-brand-300">
               {label}
             </span>
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-white/50 px-2 py-0.5 rounded-full bg-white/10">
+              Last {windowDays} days
+            </span>
           </>
         ) : (
           <>
@@ -157,24 +152,105 @@ export function CompanyHeroCard() {
           </>
         )}
 
-        {/* Status line */}
-        <p className="text-white/80 text-base text-center max-w-lg mt-1">{statusLine}</p>
+        {/* Status line + click-through attention count (U55: ONE shared
+            definition — see src/lib/ceo-board/attention.ts. The count here
+            and the Needs Attention panel's rendered list length are
+            guaranteed equal: both read health.attentionItems from this
+            same /api/company-health response.) */}
+        <p className="text-white/80 text-base text-center max-w-lg mt-1">
+          {statusLine}{' '}
+          {sufficientData && attentionCount > 0 && (
+            <button
+              type="button"
+              onClick={handleAttentionClick}
+              className="underline decoration-white/40 hover:decoration-white font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 rounded"
+              aria-label={`${attentionCount} item${attentionCount === 1 ? '' : 's'} need attention — jump to Needs Attention`}
+            >
+              {attentionCount} item{attentionCount === 1 ? '' : 's'} need{attentionCount === 1 ? 's' : ''} attention.
+            </button>
+          )}
+        </p>
 
-        {/* Bottom stat pills — always real counts, never fabricated */}
+        {/* Bottom stat pills — windowed headline numbers, each with a window
+            badge (U55c). All-time completion is a secondary stat only. */}
         <div className="flex flex-wrap justify-center gap-2 sm:gap-3 mt-6">
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
-            <span className="text-white text-base font-semibold">{totalTasks}</span>
-            <span className="text-white/70 text-sm">Total Tasks</span>
+            <span className="text-white text-base font-semibold">{windowedCreated}</span>
+            <span className="text-white/70 text-sm">Tasks Created</span>
+            <span className="text-white/50 text-[10px] font-semibold uppercase tracking-wide">
+              {windowDays}d
+            </span>
           </div>
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
             <span className="text-white text-base font-semibold">{activeAgents}</span>
             <span className="text-white/70 text-sm">Active Agents</span>
+            <span className="text-white/50 text-[10px] font-semibold uppercase tracking-wide">
+              Live
+            </span>
           </div>
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20">
-            <span className="text-white text-base font-semibold">{completionRate}%</span>
+            {windowedCompletion !== null ? (
+              <span className="text-white text-base font-semibold">{windowedCompletion}%</span>
+            ) : (
+              <span className="text-white/50 text-sm font-medium">Insufficient data</span>
+            )}
             <span className="text-white/70 text-sm">Completion Rate</span>
+            <span className="text-white/50 text-[10px] font-semibold uppercase tracking-wide">
+              {windowDays}d
+            </span>
           </div>
         </div>
+
+        {/* All-time completion — secondary stat only, sourced from the same
+            response (U55b). This is deliberately NOT a headline number: it
+            can differ sharply from the windowed rate above (e.g. a young
+            department with a bad backlog but a clean recent window). */}
+        {allTimeCompletion !== null && (
+          <p className="text-white/50 text-xs mt-2">
+            All time: {allTimeCompletion}% completion ({health?.allTime?.completedTasks ?? 0} of{' '}
+            {health?.allTime?.totalTasks ?? 0} tasks)
+          </p>
+        )}
+
+        {/* "What drives this grade" — expandable four-input breakdown (U55c) */}
+        {health && (
+          <div className="w-full max-w-lg mt-4">
+            <button
+              type="button"
+              onClick={() => setBreakdownOpen((v) => !v)}
+              className="w-full flex items-center justify-between px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 transition-colors text-white/80 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50"
+              aria-expanded={breakdownOpen}
+            >
+              <span>What drives this grade</span>
+              <span className="text-white/50">{breakdownOpen ? '−' : '+'}</span>
+            </button>
+            {breakdownOpen && (
+              <div className="mt-2 rounded-xl bg-white/10 p-4 space-y-3">
+                {INPUT_ORDER.map((key) => {
+                  const entry = health.companyInputBreakdown?.[key];
+                  if (!entry) return null;
+                  return (
+                    <div key={key} className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-white text-sm font-semibold">{entry.label}</p>
+                        <p className="text-white/50 text-xs">
+                          Weight {Math.round(entry.weight * 100)}%
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        {entry.score !== null ? (
+                          <p className="text-white text-sm font-semibold">{entry.score}%</p>
+                        ) : (
+                          <p className="text-white/50 text-xs max-w-[180px]">{entry.detail}</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </motion.div>
   );
