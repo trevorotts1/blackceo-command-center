@@ -792,6 +792,17 @@ export interface PersonaBundle {
   fallbacks?: Record<string, unknown>;
   /** Catalog schemaVersion the matcher reasoned over (persona-categories.json). */
   catalog_version?: string | null;
+  /** A-U4 (master-spec v2 §A.5) — the resolved conversion goal ("what must
+   *  this page make the reader DO"), additive/optional so older bundles
+   *  (persisted before A-U4) still parse. Empty string when unresolved. */
+  conversion_goal?: string | null;
+  /** A-U4 — how `conversion_goal` was resolved: 'operator_confirmed' |
+   *  'skill6_intake' | 'template_inferred' | 'asked' | 'n/a'. */
+  goal_source?: string | null;
+  /** A-U4 — a SEPARATE, additive gate signal (never folded into
+   *  `confirm_required`): true when a content task's conversion goal is not
+   *  yet resolved/confirmed. */
+  goal_confirm_required?: boolean;
 }
 
 /** Lifecycle of the audience confirmation for a task's persona bundle. */

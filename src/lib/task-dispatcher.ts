@@ -581,8 +581,10 @@ export async function autoDispatchTask(
     // skip this entirely (no regression). Dynamic import avoids the
     // tasks<->task-dispatcher static import cycle (same pattern as the heal gate).
     try {
-      const { evaluateAudienceConfirmGate, holdForAudienceConfirm, markAudienceDeadlineFallback } =
-        await import('@/lib/tasks');
+      const {
+        evaluateAudienceConfirmGate, holdForAudienceConfirm, markAudienceDeadlineFallback,
+        isHardHoldConfirmDepartment, blockForOwnerConfirm,
+      } = await import('@/lib/tasks');
       const gate = evaluateAudienceConfirmGate(task.id);
       if (gate.hold) {
         holdForAudienceConfirm(task.id, agent.id, gate);
@@ -592,6 +594,17 @@ export async function autoDispatchTask(
         return; // write step gated — task stays claimable until confirmed/deadline
       }
       if (gate.state === 'deadline_fallback') {
+        const dept = canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+        if (isHardHoldConfirmDepartment(dept)) {
+          // A-U4 / D23 — kill the silent timeout for build departments: HARD-HOLD
+          // to 'blocked' (block_audience='OWNER'), NEVER a house-voice release.
+          blockForOwnerConfirm(task.id, dept, gate);
+          console.warn(
+            `[${context}] autoDispatchTask: task ${taskId} audience unconfirmed past deadline in ` +
+              `hard-hold department "${dept}" — BLOCKED for owner (no house-voice release)`,
+          );
+          return; // write step gated — never dispatched under house voice
+        }
         // NEVER-NAKED: unconfirmed past the deadline → dispatch under house-voice
         // governance only (buildPersonaBlock's fallback governs; the blend
         // directive's guardrail still renders). Audience is NOT fabricated.
