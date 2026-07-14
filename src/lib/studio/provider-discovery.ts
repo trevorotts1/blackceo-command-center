@@ -48,7 +48,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { openclawConfigPath, resolveClientPath } from '@/lib/platform';
+import { detectPlatform, openclawConfigPath, resolveClientPath } from '@/lib/platform';
 import { getClientContext, type Client } from '@/lib/clients';
 import { runClientSsh } from '@/lib/operator/client-fs';
 import type { ModelCapability, ModelRegistryUpsertInput } from '@/lib/model-registry-types';
@@ -311,11 +311,27 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
  * Candidate OpenClaw secret-file locations to probe for keys NOT already in
  * `process.env`. Order = precedence (first hit wins per key). An explicit
  * `OPENCLAW_PROJECT_DIR` (the host `/docker/<proj>` dir) is honored first.
+ *
+ * Platform branch (U48/U60): on `vps-docker`, Hostinger mounts `/data` as the
+ * persistent volume and OpenClaw's secret files live under
+ * `/data/.openclaw/.env` and `/data/.openclaw/secrets/.env` — the container
+ * analogs of the Mac `~/.openclaw/...` paths below, exactly as
+ * `openclawConfigPath()` (`platform.ts`) already branches for
+ * `openclaw.json`. Before this fix `candidateEnvFiles()` had NO platform
+ * branch, so a key delivered ONLY via those persistent-volume files (not
+ * `process.env`) was invisible to key detection AND to Deep Scan (which
+ * reuses this same function) on every Docker box. Mac paths are always
+ * scanned regardless of detected platform — the Mac side is not a gap and
+ * must not regress.
  */
 export function candidateEnvFiles(): string[] {
   const files: string[] = [];
   const projectDir = process.env.OPENCLAW_PROJECT_DIR;
   if (projectDir) files.push(path.join(projectDir, '.env'));
+  if (detectPlatform() === 'vps-docker') {
+    files.push('/data/.openclaw/.env');
+    files.push('/data/.openclaw/secrets/.env');
+  }
   const home = os.homedir();
   files.push(path.join(home, '.openclaw', '.env'));
   files.push(path.join(home, '.openclaw', 'secrets', '.env'));

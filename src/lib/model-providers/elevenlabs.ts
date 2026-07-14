@@ -252,6 +252,11 @@ export async function speechToText(
 export const elevenlabsProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // ELEVENLABS_API_KEY is the only spelling verified in use across this repo
+  // (tts route, studio generators, docs) — declared explicitly so detection
+  // does not silently rely on the derived <SLUG>_API_KEY fallback and the
+  // Intelligence Settings tile's "checked:" hint names it (U48/U60).
+  envCandidates: ['ELEVENLABS_API_KEY'],
   fetchModels,
 };
 

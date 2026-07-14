@@ -194,6 +194,11 @@ export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
 export const fishAudioProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // FISH_AUDIO_API_KEY is the only spelling verified in use across this repo
+  // (tts route, studio generators, docs) — declared explicitly so detection
+  // does not silently rely on the derived <SLUG>_API_KEY fallback and the
+  // Intelligence Settings tile's "checked:" hint names it (U48/U60).
+  envCandidates: ['FISH_AUDIO_API_KEY'],
   fetchModels,
 };
 
