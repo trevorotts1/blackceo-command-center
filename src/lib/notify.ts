@@ -37,13 +37,34 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { resolveBoxIdentity } from '@/lib/box-identity';
 
 /**
- * Owner-send timeout (MSG-01). Kept short so a hung gateway can never pin a
- * send for the old 10s window; the send is fire-and-forget so this only bounds
- * the detached child, never the request/event loop.
+ * Owner-send timeout (MSG-01). Bounds the detached child so a truly hung
+ * gateway can never pin it forever; the send is fire-and-forget, so this
+ * never blocks the request/event loop regardless of its value.
+ *
+ * FLEET-WIDE BUG (fixed): this was previously 5_000ms. A real
+ * `openclaw message send` measured ~6.2s end to end (6.19s / 6.38s, both
+ * exit 0), so the old 5s ceiling SIGTERM-killed EVERY owner send about 1.2s
+ * before completion — every client Command Center silently failed to notify
+ * its owner. Failure signature: "Command failed: openclaw message send" with
+ * EMPTY stderr (a timeout kill, not ENOENT). Raised to 30s: comfortably
+ * clears the observed ~6.2s send while still bounding a genuinely hung CLI.
+ *
+ * Overridable via OWNER_SEND_TIMEOUT_MS (ms) for boxes with a slower gateway
+ * round-trip, consistent with the other env-tunable knobs in this module
+ * (OPENCLAW_OWNER_CHAT_ID, CC_OPERATOR_CHAT_ID, etc). Falls back to the 30s
+ * default on anything non-numeric or <= 0.
  */
-const OWNER_SEND_TIMEOUT_MS = 5_000;
+const DEFAULT_OWNER_SEND_TIMEOUT_MS = 30_000;
+function resolveOwnerSendTimeoutMs(): number {
+  const raw = process.env.OWNER_SEND_TIMEOUT_MS;
+  if (!raw) return DEFAULT_OWNER_SEND_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OWNER_SEND_TIMEOUT_MS;
+}
+const OWNER_SEND_TIMEOUT_MS = resolveOwnerSendTimeoutMs();
 
 /**
  * ── SAFETY-01: A TEST MUST NEVER REACH A HUMAN'S PHONE ───────────────────────
@@ -373,10 +394,17 @@ function appendNotificationLog(entry: Record<string, unknown>): void {
 }
 
 export function recordUndeliverable(kind: string, message: string): void {
+  // ATTRIBUTION: an undeliverable alert is the LAST rung — the one a human reads
+  // cold, days later, with no other context. It must say which box wrote it.
+  // Identity is metadata only and never gates the write (fail-OPEN).
+  const identity = resolveBoxIdentity();
   const line = {
     ts: new Date().toISOString(),
     kind,
     message,
+    clientName: identity.clientName,
+    boxName: identity.boxName,
+    boxId: identity.boxId,
     // Deliberately NO chat ids — this file is diagnostic, not a contact list.
   };
   // LOUD: error-level, distinctive tag. This is the string to alert on.
@@ -685,13 +713,40 @@ export function notifySystem(
   // rather than load-bearing — no test can page the on-call channel by omission.
   const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
   if (webhookUrl && !isTestEnvironment()) {
+    // ATTRIBUTION (FIX-5): the body used to carry ONLY {action, agent, message}.
+    // No client. No box. So every escalation from every box in the fleet arrived
+    // anonymous: the operator could not tell WHOSE box was screaming (during a
+    // live flood the source was found only by tracing the webhook's x-real-ip),
+    // and the receiver had no key to enforce the documented "25 exchanges per
+    // client per day" cap — so ALL boxes shared ONE counter and a single runaway
+    // box could eat the whole fleet's escalation budget.
+    //
+    // The identity fields below are the SAME ones every box's AGENTS.md
+    // escalation block already sends (clientName / agentName / boxName / boxType
+    // — see fleet-heartbeat/scripts/propagate-rescue-webhook.sh); the Command
+    // Center was simply the one caller omitting them. `boxId` is the derived
+    // stable `<client>:<box>` slug the receiver should key its per-client cap and
+    // dedup on. Every value is resolved from env / the box's own config at
+    // runtime — no client is named in this repo.
+    //
+    // FAIL-OPEN: resolveBoxIdentity() never throws and degrades to
+    // `unknown-client` / `unknown-box`. Identity is metadata on an ALARM and can
+    // never be a reason NOT to escalate.
+    const identity = resolveBoxIdentity();
     // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
     void fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action: meta?.action ?? 'escalate',
+        // `agent` is kept for backward compatibility with the existing receiver;
+        // `agentName` is the canonical field name in the fleet payload schema.
         agent: meta?.agent ?? 'command-center',
+        agentName: meta?.agent ?? 'command-center',
+        clientName: identity.clientName,
+        boxName: identity.boxName,
+        boxType: identity.boxType,
+        boxId: identity.boxId,
         message,
       }),
     }).catch((err) => {
