@@ -45,6 +45,11 @@ import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
 import { runSweepLivenessSweep } from './sweep-liveness';
 import { runEnvAudit } from '@/lib/env-auditor';
+import {
+  resolveStaleTaskSweepKillFlag,
+  killFlagSkipReason,
+  logKillFlagBanner,
+} from '@/lib/ops/operator-kill-flags';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
@@ -507,16 +512,18 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
   // stale-task-sweep: every 10 minutes, return stale tasks to the orchestrator
   // for re-routing (N36 / SOP-01-Blocked-vs-Return). Non-Blocked stale tasks
   // are returned to backlog; Blocked stale tasks are re-pinged then returned.
-  // Disable with DISABLE_STALE_TASK_SWEEP=1.
+  // Disable with DISABLE_STALE_TASK_SWEEP=1 — in the environment, or durably
+  // (deploy-proof) via `bash scripts/operator-flag.sh set DISABLE_STALE_TASK_SWEEP 1`.
+  // F6: resolved through the shared kill-flag resolver so the SOURCE of a
+  // disabled sweep is always named in the log, and so an operator's emergency
+  // stop cannot be silently undone by an env file a deploy regenerates.
   {
     name: 'stale-task-sweep',
     expr: STALE_TASK_SWEEP_CRON,
     fn: async () => {
-      if (
-        process.env.DISABLE_STALE_TASK_SWEEP === '1' ||
-        process.env.DISABLE_STALE_TASK_SWEEP === 'true'
-      ) {
-        console.log('[cron] stale-task-sweep: DISABLE_STALE_TASK_SWEEP set, skipping');
+      const killFlag = resolveStaleTaskSweepKillFlag();
+      if (killFlag.disabled) {
+        console.log(`[cron] stale-task-sweep: ${killFlagSkipReason(killFlag)} — skipping (stale tasks NOT escalated)`);
         return;
       }
       const result = await runStaleTaskSweep();
@@ -723,6 +730,15 @@ export function registerCronJobs(): RegisteredJob[] {
     '[cron] Cron jobs registered:',
     registered.map((j) => j.name).join(', ')
   );
+
+  // F6 OBSERVABILITY: announce the stale-task-sweep kill-flag state on EVERY
+  // boot — ENABLED or DISABLED, and by which source. Before this, a sweep that
+  // a deploy silently RE-ENABLED (operator's emergency stop dropped => the
+  // escalation flood returns) produced no log line at all, and a sweep left
+  // DISABLED indefinitely (stuck tasks rot un-escalated) only whispered once
+  // per tick. Never throws — observability must not be able to break boot.
+  logKillFlagBanner();
+
   return registered;
 }
 
