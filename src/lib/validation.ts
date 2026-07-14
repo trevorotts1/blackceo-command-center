@@ -102,7 +102,15 @@ export const CreateActivitySchema = z.object({
   activity_type: ActivityType,
   message: z.string().min(1, 'Message is required').max(5000, 'Message must be 5000 characters or less'),
   agent_id: z.string().uuid().optional(),
-  metadata: z.string().optional(),
+  // B-U6 / U20 fix: every real caller (cc_board.py post_activity/post_qc_score,
+  // src/lib/orchestration.ts logActivity) sends `metadata` as a nested JSON
+  // OBJECT inside the request body — `z.string()` rejected every one of them
+  // with a 400 "Validation failed" (empirically confirmed: safeParse({...,
+  // metadata: {...}}) -> success:false, "expected string, received object"),
+  // silently dropping metadata on EVERY real POST including the already-shipped
+  // B-U12/U26 producer-scorecard contract. A pre-stringified string is still
+  // accepted for back-compat with any caller that already serializes it itself.
+  metadata: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
 });
 
 // Deliverable validation schema

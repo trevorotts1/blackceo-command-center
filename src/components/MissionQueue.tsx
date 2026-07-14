@@ -8,7 +8,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
-import { PersonaSlotChips } from './kanban/TaskCard';
+import { PersonaSlotChips, humanize } from './kanban/TaskCard';
 import { AnthologyCardFace } from './anthology/AnthologyCardFace';
 import { isAnthologyTask } from './anthology/anthology-card';
 import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
@@ -1010,6 +1010,26 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns
             title="The audience was never confirmed in time — this task released under the neutral house voice. Confirm the audience to re-voice future work."
           >
             ⚠️ Released on house voice
+          </span>
+        )}
+
+        {/* Persona-mismatch chip (B-U6 / U20) — the declared-vs-used comparator.
+            A bundle-carrying build can never have its blend silently ignored: the
+            producer reports the voice it ACTUALLY wrote with (cc_board.py's
+            BuildPhaseDriver.persona_used), and when that diverges from the voice
+            this card DECLARED (voice_persona_id), the divergence is never silent.
+            Agreement renders nothing — this chip is absent on every matching card. */}
+        {task.persona_mismatch && (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 border border-red-300"
+            title={
+              `Declared voice "${humanize(task.persona_mismatch.declared_voice_persona_id || '')}" but the ` +
+              `producer wrote with "${humanize(task.persona_mismatch.used_voice_persona_id || '')}"` +
+              (task.persona_mismatch.page ? ` on page "${task.persona_mismatch.page}"` : '') +
+              ' — open the task to resolve.'
+            }
+          >
+            🚨 Persona mismatch
           </span>
         )}
 

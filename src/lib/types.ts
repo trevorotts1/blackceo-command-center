@@ -233,6 +233,18 @@ export interface Task {
   //   'not_required'      — non-content / no audience voice needed.
   //   'deadline_fallback' — released under the neutral house voice past deadline.
   blend_confirm_state?: string | null;
+  // B-U6 / U20 — declared-vs-used comparator (src/lib/persona-mismatch.ts).
+  // Present ONLY when the producer's reported USED voice persona diverges from
+  // this task's DECLARED voice_persona_id; null/absent on agreement or when the
+  // task never blended. NOT a tasks column — computed per-row in the tasks GET
+  // routes from the newest open `persona_mismatch` events row. Powers the
+  // kanban-card persona-mismatch chip. Agreement renders nothing (never a
+  // fabricated warning).
+  persona_mismatch?: {
+    declared_voice_persona_id: string | null;
+    used_voice_persona_id: string | null;
+    page: string | null;
+  } | null;
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;

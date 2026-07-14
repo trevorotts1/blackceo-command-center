@@ -19,8 +19,10 @@
 
 import type { Task, TaskSubtaskPersona } from '@/lib/types';
 
-/** Title-case a persona id / slug for display ("bly-copywriters" → "Bly Copywriters"). */
-function humanize(slug: string): string {
+/** Title-case a persona id / slug for display ("bly-copywriters" → "Bly Copywriters").
+ * Exported for reuse by the B-U6 / U20 persona-mismatch chip (MissionQueue.tsx),
+ * which needs the same slug->label formatting for declared/used persona ids. */
+export function humanize(slug: string): string {
   return slug
     .replace(/[-_]+/g, ' ')
     .replace(/\b\w/g, (c) => c.toUpperCase())
