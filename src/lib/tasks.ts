@@ -2174,8 +2174,32 @@ export async function createTaskCore(
       });
       if (routing) {
         resolvedAgentId = routing.agentId;
-        routedDepartment = routing.department || routedDepartment;
         routedReason = routing.reason;
+        // comDispatch() (department-router.ts) returns `department` as the
+        // DepartmentConfig's DISPLAY name (e.g. "Marketing"), not its `.id`
+        // slug — the interface comment on DepartmentConfig.id says exactly
+        // that field is "used in task.department field", but comDispatch's
+        // five return sites all send `.name` instead. Persisting the raw
+        // name here would silently clobber the canonical-slug department
+        // backfill computed above (`resolvedDepartment`) the moment routing
+        // succeeds — breaking the board's department filter chip, which
+        // compares `task.department` against a workspace-slug string
+        // (C-10/U41). Resolve back to the real workspace slug the same way
+        // `workspaceSlug` was resolved above; fall back to
+        // canonicalDeptSlug's graceful degradation for department values
+        // with no workspace row (e.g. the CEO/COM last-resort sentinel).
+        if (routing.department) {
+          try {
+            const routedWs = _db
+              .prepare('SELECT slug FROM workspaces WHERE lower(name) = lower(?) OR slug = ? OR id = ?')
+              .get(routing.department, routing.department, routing.department) as
+              | { slug: string }
+              | undefined;
+            routedDepartment = routedWs ? routedWs.slug : canonicalDeptSlug(routing.department) || routedDepartment;
+          } catch {
+            routedDepartment = canonicalDeptSlug(routing.department) || routedDepartment;
+          }
+        }
         run(
           `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
           [resolvedAgentId, routedDepartment, now, id]
