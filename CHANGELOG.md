@@ -1,3 +1,13 @@
+## [v6.0.5] — 2026-07-14 — test(kanban): Maria-pattern proof harness (U32/C-01)
+
+**Proves the shipped stuck-card safety net actually fires instead of trusting that it does.** New `tests/unit/maria-pattern-harness.test.ts` seeds one throwaway-DB fixture per documented stuck-card state and drives the real production jobs against them — not mocks, not a redescription of the code, the actual functions the sweep cron calls.
+
+- **Fixtures, one per stuck state.** S1 stuck-in-Backlog (22-day-old ungroomed card → stale-backlog nudge), S2a stuck-not-assigned/phantom-id (the silent skip produces zero events — intentionally encodes today's pre-C-03 behavior at `task-dispatcher.ts:431-436`, designed to flip the moment U34/C-03 ships), S2b stuck-not-assigned/no-runtime (`resolveSpecialistSessionKey` refuses the silent `agent:main` fallback — tested directly rather than against a live OpenClaw gateway, which a unit-test harness cannot depend on), S3 stuck-not-QC'd (25h-unscored review card gets force-scored, surfaces `qc_starved`), S4a/S4b stuck-not-Done (`POST /api/tasks/[id]/status status=done` → 403 no mutation; the only legal promote path is QC PASS, audited).
+- **Real jobs, not test doubles.** Drives `runIntakeAdvanceSweep`, `runStaleTaskSweep`, `runBoardHygiene`, `runQCOnReview`, `runStuckInProgressSweep` — the exact functions the production sweep cron calls — against the fixtures, asserting the documented remedy fires for each.
+- **Fixture-guard.** A dedicated final assertion confirms the entire suite ran end-to-end against ONLY the throwaway `DATABASE_PATH`, never touching a real board.
+- **Verification:** 9/9 passing standalone, `node --import tsx --test tests/unit/maria-pattern-harness.test.ts` — re-verified GREEN on the merged tree before this commit.
+- No client names, no secret values, no box identifiers, no model added/removed/substituted. Client skills/engines still run only on the client's own providers.
+
 ## [v6.0.4] — 2026-07-14 — feat: declared-vs-used persona comparator + `persona_mismatch` chip (U20/B-U6, both-train)
 
 **Producer reports the personas it ACTUALLY used at the copy step back onto the card; a comparator renders declared-vs-used, never silent.** Companion to the `openclaw-onboarding` producer-side commit on the same branch name (`skill6-v2/U20`) — that repo's `cc_board.py`/`copy_persona_blend_seam.py` post a `kind: 'persona_used'` activity metadata report; this repo compares it against the declared `task_persona_bundle` row.
