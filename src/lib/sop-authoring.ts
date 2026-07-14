@@ -439,29 +439,84 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       return { status: 'no-research-specialist', reason: msg };
     }
 
-    // ── FM-6b — IDEMPOTENCY GUARD (no duplicate open authoring sub-tasks) ──────
-    // The dispatch sweep re-enters authorSOPForTask every ~2 min for an
-    // un-authored backlog task. Without this guard each pass INSERTED a fresh
-    // "Author SOP: X" sub-task, flooding the board with stuck `in_progress`
-    // clones (300+ on the affected box). If an OPEN authoring sub-task already
-    // exists for this original task (or an identical title+department), reuse it
-    // instead of creating another. Migration 082 reaps any pre-existing clones.
+    // ── FM-6b / F2 — IDEMPOTENCY GUARD (exactly ONE authoring card per natural key) ──
+    //
+    // The dispatch sweep re-enters authorSOPForTask every ~2 min for an un-authored
+    // backlog task. Without a guard each pass INSERTED a fresh "Author SOP: X"
+    // sub-task, flooding the board with hundreds of identical clones.
+    //
+    // NATURAL KEY = (workspace_id, department, title), plus the explicit
+    // `sop_authoring_for_task_id` back-link to the original task. `title` alone is
+    // NOT the key: two workspaces legitimately hold a same-titled card, and the
+    // authoring card's whole identity is "the SOP-authoring run for THIS task in
+    // THIS workspace".
+    //
+    // F2 — the hole this closes: the FM-6b guard only looked at OPEN rows
+    // (`status != 'done'` AND not archived). The moment an authoring card
+    // COMPLETED — or was ARCHIVED by a board-cleanup / dedup pass — the guard went
+    // blind again. And because §6 below only attaches the authored sop_id
+    // `WHERE status = 'backlog'`, an original task that has since left backlog stays
+    // SOP-less forever, so the sweep re-enters on EVERY tick: mint a card, close it,
+    // go blind, mint another. That is the observed furnace (hundreds of identical
+    // `Author SOP: <title>` cards per workspace on a live board). Keying on the
+    // natural key REGARDLESS of status/archived_at makes the card mint exactly-once,
+    // and — critically — means ARCHIVING the historical clones can never restart it.
+    //
+    // Enforcement is a single atomic `INSERT … SELECT … WHERE NOT EXISTS`, so two
+    // concurrent sweeps (or two processes sharing the SQLite file) cannot both win a
+    // check-then-insert race. NO DB UNIQUE constraint is added: live boards already
+    // carry hundreds of duplicate rows that hold REAL deliverables and must be
+    // ARCHIVED, never deleted — a UNIQUE index could not be built over them (and an
+    // archived row still occupies an index). The atomic INSERT gives the same
+    // exactly-once property with no destructive migration.
+    //
+    // The guard NEVER silences authoring: an OPEN card means a run is already in
+    // flight (reuse + return `deduped`, unchanged FM-6b behaviour); a CLOSED/archived
+    // card means the card already exists but this task still needs a SOP, so the
+    // authoring run PROCEEDS against the existing card (still capped by the
+    // 3-attempt safety cap above, which escalates to a human).
     const authorTitle = `Author SOP: ${input.title}`;
-    const existingAuthoring = queryOne<{ id: string }>(
-      `SELECT id FROM tasks
-        WHERE status != 'done' AND (archived_at IS NULL OR archived_at = '')
-          AND (
-            sop_authoring_for_task_id = ?
-            OR (title = ? AND COALESCE(department, '') = COALESCE(?, ''))
-          )
-        ORDER BY created_at ASC, rowid ASC
-        LIMIT 1`,
-      [input.originalTaskId, authorTitle, deptSlug],
-    );
-    if (existingAuthoring) {
+    const wsKey = input.workspaceId ?? '';
+    const deptKey = deptSlug ?? '';
+    // Matches an authoring card for the same original task OR the same natural key.
+    const AUTHORING_KEY_MATCH = `(
+        sop_authoring_for_task_id = ?
+        OR (title = ?
+            AND COALESCE(department, '') = ?
+            AND COALESCE(workspace_id, '') = ?)
+      )`;
+    const AUTHORING_KEY_PARAMS = [input.originalTaskId, authorTitle, deptKey, wsKey];
+
+    // Prefer an OPEN card when one exists; otherwise surface the closed/archived one.
+    let existingAuthoring: { id: string; status: string; archived_at: string | null } | undefined;
+    try {
+      existingAuthoring = queryOne<{ id: string; status: string; archived_at: string | null }>(
+        `SELECT id, status, archived_at FROM tasks
+          WHERE ${AUTHORING_KEY_MATCH}
+          ORDER BY (CASE WHEN status != 'done' AND (archived_at IS NULL OR archived_at = '')
+                         THEN 0 ELSE 1 END) ASC,
+                   created_at ASC, rowid ASC
+          LIMIT 1`,
+        AUTHORING_KEY_PARAMS,
+      );
+    } catch (lookupErr) {
+      // FAIL-OPEN: a lookup failure must never stall authoring. The atomic INSERT
+      // below is itself idempotent, so correctness does not depend on this read.
+      console.warn(
+        '[sop-authoring] Idempotency lookup failed (non-fatal, falling through to the atomic insert):',
+        (lookupErr as Error).message,
+      );
+    }
+
+    const existingIsOpen =
+      !!existingAuthoring &&
+      existingAuthoring.status !== 'done' &&
+      (existingAuthoring.archived_at === null || existingAuthoring.archived_at === '');
+
+    if (existingAuthoring && existingIsOpen) {
       console.log(
         `[sop-authoring] Idempotency guard: open authoring sub-task ${existingAuthoring.id} already exists ` +
-          `for "${input.title}" (dept ${deptSlug}) — NOT creating a duplicate.`,
+          `for "${input.title}" (ws ${wsKey || '-'} / dept ${deptKey || '-'}) — NOT creating a duplicate.`,
       );
       return {
         status: 'deduped',
@@ -470,52 +525,85 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       };
     }
 
-    // §2: Create the linked authoring sub-task.
-    const subTaskId = uuidv4();
+    // §2: Create the linked authoring sub-task — exactly once per natural key.
+    let subTaskId = existingAuthoring?.id ?? uuidv4();
     const now = new Date().toISOString();
-    try {
-      run(
-        `INSERT INTO tasks
-           (id, title, department, workspace_id, assigned_agent_id, status,
-            sop_authoring_for_task_id, created_at, updated_at,
-            priority, created_by_agent_id)
-         VALUES (?, ?, ?, ?, ?, 'in_progress', ?, ?, ?, 'medium', NULL)`,
-        [
-          subTaskId,
-          `Author SOP: ${input.title}`,
-          deptSlug,
-          input.workspaceId,
-          trio.research.id,
-          input.originalTaskId,
-          now,
-          now,
-        ],
-      );
-      run(
-        `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          uuidv4(),
-          'task_created',
-          trio.research.id,
-          subTaskId,
-          `[sop-authoring] Sub-task created for SOP authoring of "${input.title}"`,
-          now,
-        ],
-      );
-      run(
-        `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          uuidv4(),
-          'task_dispatched',
-          trio.research.id,
-          subTaskId,
-          `[sop-authoring] Sub-task dispatched to research specialist ${trio.research.name}`,
-          now,
-        ],
-      );
-    } catch (subTaskErr) {
-      console.error('[sop-authoring] Failed to create sub-task:', (subTaskErr as Error).message);
-      // Continue — sub-task creation is best-effort; authoring can still proceed.
+
+    if (existingAuthoring) {
+      // A CLOSED (done) or ARCHIVED card already exists for this natural key. Do NOT
+      // mint another — that is the F2 furnace. Reuse it and let the authoring run
+      // continue, and say so LOUDLY (console + events row): a skip is never silent.
+      const skipMsg =
+        `[sop-authoring] Idempotency guard: authoring sub-task ${existingAuthoring.id} already exists for ` +
+        `"${authorTitle}" (ws ${wsKey || '-'} / dept ${deptKey || '-'}, status=${existingAuthoring.status}` +
+        `${existingAuthoring.archived_at ? ', archived' : ''}) — SKIPPING duplicate card creation, reusing it. ` +
+        `Authoring proceeds against the existing card.`;
+      console.log(skipMsg);
+      emitEvent('sop_authoring_subtask_deduped', skipMsg, input.originalTaskId);
+    } else {
+      try {
+        const res = run(
+          `INSERT INTO tasks
+             (id, title, department, workspace_id, assigned_agent_id, status,
+              sop_authoring_for_task_id, created_at, updated_at,
+              priority, created_by_agent_id)
+           SELECT ?, ?, ?, ?, ?, 'in_progress', ?, ?, ?, 'medium', NULL
+            WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE ${AUTHORING_KEY_MATCH})`,
+          [
+            subTaskId,
+            authorTitle,
+            deptSlug,
+            input.workspaceId,
+            trio.research.id,
+            input.originalTaskId,
+            now,
+            now,
+            ...AUTHORING_KEY_PARAMS,
+          ],
+        );
+
+        if (res.changes === 0) {
+          // Lost a concurrent race — another sweep inserted the card between our
+          // lookup and this statement. Adopt the winner; never insert a second card.
+          const winner = queryOne<{ id: string }>(
+            `SELECT id FROM tasks WHERE ${AUTHORING_KEY_MATCH} ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+            AUTHORING_KEY_PARAMS,
+          );
+          const raceMsg =
+            `[sop-authoring] Idempotency guard: concurrent sweep already created authoring sub-task ` +
+            `${winner?.id ?? '(unknown)'} for "${authorTitle}" (ws ${wsKey || '-'} / dept ${deptKey || '-'}) ` +
+            `— SKIPPING duplicate card creation.`;
+          console.log(raceMsg);
+          emitEvent('sop_authoring_subtask_deduped', raceMsg, input.originalTaskId);
+          if (winner) subTaskId = winner.id;
+        } else {
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'task_created',
+              trio.research.id,
+              subTaskId,
+              `[sop-authoring] Sub-task created for SOP authoring of "${input.title}"`,
+              now,
+            ],
+          );
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'task_dispatched',
+              trio.research.id,
+              subTaskId,
+              `[sop-authoring] Sub-task dispatched to research specialist ${trio.research.name}`,
+              now,
+            ],
+          );
+        }
+      } catch (subTaskErr) {
+        console.error('[sop-authoring] Failed to create sub-task:', (subTaskErr as Error).message);
+        // Continue — sub-task creation is best-effort; authoring can still proceed.
+      }
     }
 
     // §4: Research (Tavily, fixture-gated).
