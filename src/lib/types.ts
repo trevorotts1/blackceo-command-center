@@ -624,7 +624,12 @@ export type SSEEventType =
   | 'recommendation_outcome_recorded'
   | 'publish_queued'
   | 'bug_updated'
-  | 'bug_created';
+  | 'bug_created'
+  // U60/JM-U63c — My AI CEO Operations Rail: a trust-engine report-back
+  // (ack/progress/done) landed in a ceo-chat session's transcript. Additive
+  // event so the rail's own EventSource listener can react within ~2s
+  // without touching the board's useSSE hook / Zustand store at all.
+  | 'ceo_chat_task_status';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -642,6 +647,12 @@ export interface SSEEvent {
   } | {
     task_id: string;
     activity: TaskActivity;
+  } | {
+    // ceo_chat_task_status payload (U60/JM-U63c).
+    taskId: string;
+    sessionId: string;
+    kind: 'trust_ack' | 'trust_progress' | 'trust_done';
+    message: string;
   } | PublishQueueItem;
 }
 

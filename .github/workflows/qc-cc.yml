@@ -17,6 +17,34 @@ on:
     branches: [main]
 
 jobs:
+  # ── U60/JM-U63b — My AI CEO off-brand color gate ────────────────────────
+  # BINARY acceptance item 1: zero indigo/purple/fuchsia utility classes
+  # under src/app/my-ai-ceo/ + src/components/ceo-chat/, gate fails on
+  # introduction. The mutation self-test proves the scanner actually bites
+  # BEFORE trusting its clean verdict on the real tree.
+  ceo-chat-color-gate:
+    name: My AI CEO off-brand color gate (indigo/purple/fuchsia)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Mutation self-test — a planted violation MUST fail the gate
+        run: |
+          node --import tsx --test tests/unit/ceo-chat-color-lint.test.ts
+
+      - name: Run the real gate against the tree
+        run: npm run lint:ceo-chat-colors
+
   qc-cc:
     name: QC Command Center
     runs-on: ubuntu-latest

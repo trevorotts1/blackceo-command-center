@@ -27,6 +27,14 @@ vi.mock('@/lib/notify', () => ({
   resolveOwnerChatId: () => null,
 }));
 
+// U60/JM-U63c — the new Operations Rail broadcast emit point. Mocked so this
+// suite observes exactly what defaultTrustSend() publishes without needing a
+// live SSE client registered on the in-process events.ts Set.
+const broadcastSpy = vi.fn();
+vi.mock('@/lib/events', () => ({
+  broadcast: (event: unknown) => broadcastSpy(event),
+}));
+
 import { getDb, run } from '../../src/lib/db';
 import { executeSends, type PlannedSend } from '../../src/lib/jobs/trust-engine';
 import { getCeoChatHistory } from '../../src/lib/ceo-chat/store';
@@ -75,9 +83,44 @@ describe('executeSends default channel routing', () => {
     expect(history[0].role).toBe('trust');
     expect(history[0].kind).toBe('trust_ack');
     expect(history[0].content).toContain('Got it');
+    // ...J.0.7 threading fix (U60/JM-U63c): the stamp's taskId survives onto
+    // the written row, so the Operations Rail can join it back to its card.
+    expect(history[0].task_id).toBe(taskId);
 
     // ...and Telegram was NEVER called for this ceo-chat session.
     expect(telegramSpy).not.toHaveBeenCalled();
+  });
+
+  it('U60/JM-U63c: a ceo-chat send broadcasts ceo_chat_task_status on the SSE bus, joined by task_id', () => {
+    telegramSpy.mockClear();
+    broadcastSpy.mockClear();
+    const sid = `ceochat-rail-${Date.now()}`;
+    const taskId = `t-ceo-rail-${Date.now()}`;
+    seedTask(taskId);
+
+    const plan: PlannedSend = {
+      chatId: sid,
+      channel: 'ceo-chat',
+      message: '🔄 "task" is in progress with Sales. Estimated completion: today.',
+      stamps: [
+        {
+          taskId,
+          guardColumn: 'progress_last_sent_at',
+          extraSets: {},
+          eventType: 'trust_progress',
+          eventMessage: `trust_progress -> ${sid}`,
+        },
+      ],
+      doneWithoutDeliverable: [],
+    };
+
+    const res = executeSends([plan], { now: new Date() });
+    expect(res.sent).toBe(1);
+    expect(broadcastSpy).toHaveBeenCalledTimes(1);
+    expect(broadcastSpy).toHaveBeenCalledWith({
+      type: 'ceo_chat_task_status',
+      payload: { taskId, sessionId: sid, kind: 'trust_progress', message: plan.message },
+    });
   });
 
   it('still routes a telegram report-back to Telegram (no regression)', () => {

@@ -91,13 +91,20 @@ export function insertCeoChatMessage(input: InsertCeoChatMessage): CeoChatMessag
  * (via the default sender in trust-engine.ts) so an ack/progress/done for a
  * ceo-chat task renders as a chat event in THIS UI instead of going to Telegram.
  * `kind` distinguishes the three trust messages so the UI can style them.
+ *
+ * `taskId` (J.0.7 threading fix, U60/JM-U63c): the trust engine's stamp op
+ * already carries the task id in hand (`StampOp.taskId`) but previously
+ * dropped it here, so a report-back row could never be joined back to the
+ * Operations Rail card that spawned it. Additive + defaulted to `null` so
+ * every pre-existing call site (and every already-written row) is untouched.
  */
 export function appendTrustMessage(
   sessionId: string,
   message: string,
   kind: 'trust_ack' | 'trust_progress' | 'trust_done' = 'trust_progress',
+  taskId: string | null = null,
 ): CeoChatMessage {
-  return insertCeoChatMessage({ sessionId, role: 'trust', content: message, kind });
+  return insertCeoChatMessage({ sessionId, role: 'trust', content: message, kind, taskId });
 }
 
 /**
