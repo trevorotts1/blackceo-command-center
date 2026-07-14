@@ -4181,6 +4181,34 @@ const migrations: Migration[] = [
       console.log('[Migration 101] ceo_chat_messages ready');
     },
   },
+  {
+    id: '102',
+    name: 'add_job_liveness_table',
+    // C-09 / U40 — "watch the watchers": the advancer-liveness watchdog.
+    //
+    // A single, purely-additive table (same CREATE-TABLE-IF-NOT-EXISTS pattern
+    // Migration 100/101 used — never touches an existing row, no-op on a box
+    // that already has it). One row per registered cron job name, upserted by
+    // scheduler.ts's wrap() on EVERY tick (success or failure — a tick is a
+    // liveness signal, not a success signal). src/lib/jobs/sweep-liveness.ts
+    // reads this to detect an advancer (intake-advance) or qc-review-sweep
+    // that has gone silent for 3x its cadence — the "nothing watches the
+    // watchers" gap this unit closes (root-caused in the master spec: the
+    // single advancer re-selects a stuck card every 2 minutes forever with no
+    // liveness probe on the sweep loop itself).
+    up: (db) => {
+      console.log('[Migration 102] Adding job_liveness table...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS job_liveness (
+          job_name TEXT PRIMARY KEY,
+          last_ran_at TEXT NOT NULL,
+          last_status TEXT NOT NULL DEFAULT 'ok' CHECK (last_status IN ('ok', 'error')),
+          last_error TEXT
+        );
+      `);
+      console.log('[Migration 102] job_liveness ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

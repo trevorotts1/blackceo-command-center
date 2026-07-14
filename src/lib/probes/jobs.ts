@@ -1,10 +1,15 @@
 /**
  * Background jobs probe — reports the size of the execution queue and whether
- * any task is stuck in `working` state for an unreasonable length of time.
+ * any task is stuck in `in_progress` state for an unreasonable length of time.
  *
  * This is the closest current proxy for "cron scheduler running" since Track
  * A1 owns scheduler instrumentation. We surface the queue depth and the
  * oldest in-flight task so the operator can spot stalls.
+ *
+ * For actual PER-JOB cron-scheduler liveness (does the loop still tick at
+ * all), see src/lib/jobs/sweep-liveness.ts (C-09 / U40) — that is the real
+ * "watch the watchers" signal this file's own doc comment names as missing;
+ * this probe only ever inspects task rows, never the scheduler's own ticks.
  */
 
 import { getDb } from '@/lib/db';
@@ -42,15 +47,25 @@ export async function probeJobs(): Promise<ProbeResult> {
           };
         }
 
+        // C-09 / U40: 'working' is NOT one of the 10 canonical task statuses
+        // (types.ts TaskStatus — the real in-flight value is 'in_progress'), so
+        // every query below that filtered on status = 'working' matched zero
+        // rows on every box, always. The working-task count was structurally
+        // zero and the "oldest in-flight task" stuck-detection could never
+        // fire. Also add archived_at IS NULL to the pending-count filter so a
+        // soft-archived (but not done/review) task never inflates the queue
+        // depth used for the busy/degraded thresholds below.
         const pending = db
-          .prepare("SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN ('done', 'review')")
+          .prepare(
+            "SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN ('done', 'review') AND archived_at IS NULL"
+          )
           .get() as { n: number };
         const working = db
-          .prepare("SELECT COUNT(*) AS n FROM tasks WHERE status = 'working'")
+          .prepare("SELECT COUNT(*) AS n FROM tasks WHERE status = 'in_progress'")
           .get() as { n: number };
         const oldestWorkingRow = db
           .prepare(
-            "SELECT id, updated_at FROM tasks WHERE status = 'working' ORDER BY updated_at ASC LIMIT 1"
+            "SELECT id, updated_at FROM tasks WHERE status = 'in_progress' ORDER BY updated_at ASC LIMIT 1"
           )
           .get() as { id: string; updated_at: string } | undefined;
 

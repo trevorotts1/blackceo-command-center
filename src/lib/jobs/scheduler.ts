@@ -43,6 +43,7 @@ import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { runPortIntegrityCheck } from './port-integrity';
 import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
+import { runSweepLivenessSweep } from './sweep-liveness';
 import { runEnvAudit } from '@/lib/env-auditor';
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
@@ -79,6 +80,31 @@ function markRegistered(): void {
 }
 
 /**
+ * C-09 / U40 — "watch the watchers". Persist a liveness tick for `name` into
+ * `job_liveness` on EVERY invocation (success or failure — a tick is proof the
+ * scheduler loop itself is alive, not proof the job's own logic succeeded;
+ * failures are already logged separately below). Best-effort: a write failure
+ * here must never affect the job's own outcome, so it is caught and logged,
+ * never rethrown. src/lib/jobs/sweep-liveness.ts reads this table to detect an
+ * advancer (intake-advance) or qc-review-sweep gone silent.
+ */
+export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error', errorMessage?: string): void {
+  try {
+    run(
+      `INSERT INTO job_liveness (job_name, last_ran_at, last_status, last_error)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(job_name) DO UPDATE SET
+         last_ran_at = excluded.last_ran_at,
+         last_status = excluded.last_status,
+         last_error = excluded.last_error`,
+      [name, ranAt, status, errorMessage ?? null],
+    );
+  } catch (err) {
+    console.warn(`[cron] ${name}: failed to record liveness tick:`, (err as Error).message);
+  }
+}
+
+/**
  * Wrap a task body so thrown errors are caught and logged. node-cron 4 will
  * surface them via the `execution:failed` event, but we want a single log line
  * regardless of the consumer.
@@ -90,8 +116,10 @@ function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise
       console.log(`[cron] ${name} starting at ${startedAt}`);
       await fn();
       console.log(`[cron] ${name} finished`);
+      recordJobTick(name, startedAt, 'ok');
     } catch (error) {
       console.error(`[cron] ${name} failed:`, error);
+      recordJobTick(name, startedAt, 'error', error instanceof Error ? error.message : String(error));
     }
   };
 }
@@ -377,6 +405,30 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else if (result.scanned > 0) {
         console.log(
           `[cron] intake-advance: scanned ${result.scanned}, routed ${result.routed}, dispatched ${result.dispatched}`,
+        );
+      }
+    },
+  },
+
+  // sweep-liveness: every 2 minutes — C-09 / U40 "watch the watchers". Reads
+  // the job_liveness ticks wrap() persists for every job and, when the
+  // intake-advance or qc-review-sweep advancer has gone silent for 3x its own
+  // cadence, fires ONE cooldown-guarded notifySystem() alert (SYSTEM audience
+  // only). The same underlying computation is exposed read-only, non-gating,
+  // via /api/health/deep's advisory.sweep_liveness (checkSweepLiveness in
+  // sweep-liveness.ts) so the board stays green overall while this chip goes
+  // red — same posture as the anthology board-projection drift banner (A7).
+  // Disable with DISABLE_SWEEP_LIVENESS=1.
+  {
+    name: 'sweep-liveness',
+    expr: '*/2 * * * *',
+    fn: async () => {
+      const result = await runSweepLivenessSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] sweep-liveness: skipped — ${result.skippedReason}`);
+      } else if (result.staleJobs.length > 0) {
+        console.warn(
+          `[cron] sweep-liveness: STALE — ${result.staleJobs.join(', ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
         );
       }
     },
