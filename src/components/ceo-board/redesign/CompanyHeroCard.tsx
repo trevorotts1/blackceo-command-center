@@ -11,7 +11,9 @@
  * attention count, the four-input breakdown) comes from that single
  * response — this component itself never calls `fetch` a second time for
  * headline numbers (U55 acceptance (f) — see
- * tests/unit/company-health-client.test.ts for the contract test).
+ * tests/unit/u55-company-health-client.test.ts for the pure-function
+ * contract test and tests/unit/u55-company-health-render.test.tsx for the
+ * real render-level proof against this component).
  *
  * score===null → explicit "Insufficient data" state, never 72 or 0 (never-72
  * doctrine). Same discipline applies to every windowed/breakdown figure.

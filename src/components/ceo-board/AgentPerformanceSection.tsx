@@ -164,7 +164,11 @@ export function AgentPerformanceSection() {
             const modelLabel = getModelLabel(agent.model);
             const pillStyle = getModelPillStyle(agent.model);
             const dotColor = getModelDotColor(agent.model);
-            const isActive = (agent.status as string) === 'working' || (agent.status as string) === 'active';
+            // Agent status enum is standby/working/busy/degraded/offline (migrations.ts
+            // migration 034 CHECK constraint) — 'active' never matches a real row.
+            // Count 'working' only (matches ActiveAgentsStrip.tsx, SystemPulseSection.tsx,
+            // MonthlyActivityChart.tsx, KPIStatCards.tsx — same fix, same class of bug).
+            const isActive = (agent.status as string) === 'working';
 
             return (
               <motion.div

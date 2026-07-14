@@ -1,24 +1,27 @@
 /**
- * U55 — CEO hero single-data-source contract test (acceptance (f)).
+ * U55 — CEO hero single-data-source contract test (acceptance (f)), PURE
+ * FUNCTION half.
  *
  * `loadCompanyHeroData` (src/lib/ceo-board/company-health-client.ts) is the
  * ONLY fetch `CompanyHeroCard.tsx` and `NeedsAttentionSection.tsx` perform
- * for headline / attention data. This test proves:
+ * for headline / attention data. This file proves, at the pure-function
+ * level (no React, no DOM):
  *
  *   1. It calls fetch exactly ONCE.
  *   2. It calls fetch against exactly `/api/company-health` — nothing else.
  *   3. It returns the parsed JSON body unmodified.
  *   4. A non-ok response throws (no silent fabrication of a health object).
  *
- * "Fails when a second headline fetch is introduced, proven once by
- * mutation" (acceptance (f)/(4)): test 5 below simulates exactly that
- * mutation — a caller that (incorrectly) fetches a second endpoint after
- * the single-source one — using the SAME fake-fetch harness, and shows the
- * harness catches it (throws "unexpected fetch call"). This is the one-time
- * mutation proof: temporarily adding a second `fetchImpl(...)` call inside
- * `loadCompanyHeroData` itself (manually, during development of this unit)
- * reproduces exactly this failure and was confirmed, then reverted — see
- * the unit's summary for the manual proof transcript.
+ * The REAL "fails when a second headline fetch is introduced" mutation
+ * proof (acceptance (f)/(4)) lives in
+ * tests/unit/u55-company-health-render.test.tsx: it renders the ACTUAL
+ * `CompanyHeroCard` / `NeedsAttentionSection` components with a stubbed
+ * `global.fetch` and asserts each calls fetch exactly once — a prior
+ * version of this file carried a same-named "mutation proof" test here that
+ * only exercised its own private fetch-stub function, never the production
+ * components; that self-test was removed (QC finding: proves the harness
+ * rejects a bad URL, proves nothing about whether the components ever call
+ * a second endpoint) in favor of the render-level suite.
  *
  * Node built-in runner: node --import tsx --test tests/unit/u55-company-health-client.test.ts
  */
@@ -83,19 +86,4 @@ test('loadCompanyHeroData: returns the parsed JSON body unmodified', async () =>
 test('loadCompanyHeroData: non-ok response throws (never fabricates a health object)', async () => {
   const { impl } = singleSourceFetch(COMPANY_HEALTH_ENDPOINT, { error: 'boom' }, false);
   await assert.rejects(() => loadCompanyHeroData(impl));
-});
-
-test('mutation proof: a caller that fetches a SECOND endpoint after the single source is caught', async () => {
-  // This simulates the exact regression U55 acceptance (f) guards against:
-  // some future edit adds `fetchImpl('/api/workspaces?stats=true')` back in
-  // alongside the company-health call. The single-source fetch stub used by
-  // every test above rejects any URL it wasn't told to allow — so a second,
-  // different endpoint immediately throws instead of silently succeeding.
-  const { impl } = singleSourceFetch(COMPANY_HEALTH_ENDPOINT, FIXTURE_HEALTH);
-  await loadCompanyHeroData(impl); // the real, correct single call — passes
-  await assert.rejects(
-    () => impl('/api/workspaces?stats=true'),
-    /unexpected fetch call/,
-    'a second headline-data endpoint must be rejected by this harness',
-  );
 });
