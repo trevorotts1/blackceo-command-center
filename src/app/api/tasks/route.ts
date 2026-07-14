@@ -3,6 +3,7 @@ import { queryAll, queryOne } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
+import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -154,6 +155,11 @@ export async function GET(request: NextRequest) {
       // loadSubtaskPersonas is tolerant: [] on a single-persona task or a
       // pre-migration-088 box, so this never breaks the board.
       subtask_personas: loadSubtaskPersonas(task.id),
+      // B-U6 / U20 — declared-vs-used comparator. Only a task with a resolved
+      // voice_persona_id can ever mismatch (a bundle-less task never blended),
+      // so short-circuit the per-row events lookup for every other card.
+      // getOpenPersonaMismatch is fail-soft: never breaks the board.
+      persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
     }));
 
     return NextResponse.json(transformedTasks);

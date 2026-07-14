@@ -15,6 +15,7 @@ import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { selectPersonaForTask, buildPersonaReason } from '@/lib/persona-selector';
 import { recordPersonaCompletions } from '@/lib/tasks';
+import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
@@ -49,7 +50,15 @@ export async function GET(
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    return NextResponse.json(task);
+    // B-U6 / U20 — declared-vs-used comparator, same field the tasks-list GET
+    // attaches (src/app/api/tasks/route.ts). Fail-soft, short-circuited when
+    // this task never resolved a voice persona.
+    const withMismatch: Task = {
+      ...task,
+      persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
+    };
+
+    return NextResponse.json(withMismatch);
   } catch (error) {
     console.error('Failed to fetch task:', error);
     return NextResponse.json({ error: 'Failed to fetch task' }, { status: 500 });

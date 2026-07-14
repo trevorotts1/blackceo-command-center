@@ -9,6 +9,7 @@ import { broadcast } from '@/lib/events';
 import { CreateActivitySchema } from '@/lib/validation';
 import type { TaskActivity } from '@/lib/types';
 import { TRUST_EVENT_TYPES, trustEventToActivity, type TrustEventRow } from '@/lib/trust-activity';
+import { isPersonaUsedReport, recordPersonaUsedAndCompare } from '@/lib/persona-mismatch';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -128,6 +129,12 @@ export async function POST(
     const db = getDb();
     const id = crypto.randomUUID();
 
+    // Normalize metadata to ONE JSON string for storage regardless of which
+    // accepted shape arrived (object — the real-world shape every caller
+    // sends — or a pre-stringified string; never double-encode the latter).
+    const metadataStr =
+      metadata == null ? null : typeof metadata === 'string' ? metadata : JSON.stringify(metadata);
+
     // Insert activity
     db.prepare(`
       INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata)
@@ -138,8 +145,27 @@ export async function POST(
       agent_id || null,
       activity_type,
       message,
-      metadata ? JSON.stringify(metadata) : null
+      metadataStr
     );
+
+    // B-U6 / U20 — declared-vs-used comparator. Only a `kind: 'persona_used'`
+    // metadata payload (the onboarding producer's report of the personas it
+    // actually wrote copy with) triggers this; every other activity type/
+    // metadata shape is untouched. Best-effort: never fails the activity POST
+    // that carries it (recordPersonaUsedAndCompare itself never throws).
+    let parsedMetadataForCompare: unknown = null;
+    if (typeof metadata === 'object' && metadata !== null) {
+      parsedMetadataForCompare = metadata;
+    } else if (typeof metadataStr === 'string') {
+      try {
+        parsedMetadataForCompare = JSON.parse(metadataStr);
+      } catch {
+        parsedMetadataForCompare = null;
+      }
+    }
+    if (isPersonaUsedReport(parsedMetadataForCompare)) {
+      recordPersonaUsedAndCompare(taskId, parsedMetadataForCompare);
+    }
 
     // Get the created activity with agent info
     const activity = db.prepare(`
