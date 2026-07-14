@@ -23,6 +23,11 @@
  * pure-unit context that never builds (deploy verification must NOT skip it).
  */
 
+// SAFETY-05 — MUST BE FIRST. Section F drives the tasks/ingest route, which calls
+// notifyOwnerAssigned() -> notifyOwner() -> a REAL `openclaw message send`. A bare
+// `tsx` run sets no test-runner env, so notify.ts cannot self-detect here.
+import './lib/no-outbound-sends.js';
+
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';

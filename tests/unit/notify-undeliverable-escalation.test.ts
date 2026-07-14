@@ -70,10 +70,19 @@ async function freshNotify() {
 }
 
 /** Capture every `openclaw message send` the module dispatches. */
-function captureSends(): { sends: Array<{ chatId: string; message: string }>; restore: () => void } {
+function captureSends(notify: typeof import('../../src/lib/notify')): {
+  sends: Array<{ chatId: string; message: string }>;
+  restore: () => void;
+} {
   const sends: Array<{ chatId: string; message: string }> = [];
   const cp = require('child_process') as typeof import('child_process');
   const realExecFile = cp.execFile;
+  // SAFETY-03: reset the dedup / rate-limit / digest counters. They are module-level
+  // and long-lived by design (production loads this module once per process), but a
+  // re-import in a test file does NOT reliably yield a fresh instance — so without
+  // this, one test's throttles silently starve the next one's and a suppressed send
+  // is indistinguishable from a send that never happened.
+  notify.__resetNotifyThrottleForTests();
   // SAFETY-01: notify.ts now hard-refuses every send inside a test runner, so a
   // forgotten gate can never spam a real phone again. These MSG-07 tests are the
   // ONE legitimate exception: they must observe that a dispatch happens. We opt
@@ -97,6 +106,7 @@ function captureSends(): { sends: Array<{ chatId: string; message: string }>; re
       cp.execFile = realExecFile;
       // Withdraw the opt-in the instant the double is removed (SAFETY-01).
       delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
+      notify.__resetNotifyThrottleForTests();
     },
   };
 }
@@ -114,10 +124,10 @@ test('MSG-07: an undeliverable owner notification escalates and REACHES THE OPER
   cleanEnv();
   // The operator's box exactly as it is in production: allowFrom holds ONLY
   // operator ids. There is no client here, so resolveOwnerChatId() is null.
-  makeBox([OPERATOR_ID]);
-  const cap = captureSends();
+  const workspace = makeBox([OPERATOR_ID]);
+  const notify = await freshNotify();
+  const cap = captureSends(notify);
   try {
-    const notify = await freshNotify();
 
     assert.equal(
       notify.resolveOwnerChatId(),
@@ -125,7 +135,8 @@ test('MSG-07: an undeliverable owner notification escalates and REACHES THE OPER
       'precondition: on an operator-only box no OWNER chat resolves (this is the mute)',
     );
 
-    const delivered = notify.notifyOwner('Task blocked: no vision model available.');
+    const PAYLOAD = 'Task blocked: no vision model available.';
+    const delivered = notify.notifyOwner(PAYLOAD);
 
     // notifyOwner still reports false to callers that check (send-link relies on it)…
     assert.equal(delivered, false, 'notifyOwner still returns false for a real owner-send');
@@ -135,10 +146,28 @@ test('MSG-07: an undeliverable owner notification escalates and REACHES THE OPER
     assert.equal(cap.sends[0].chatId, OPERATOR_ID, 'the escalation goes to the OPERATOR');
     assert.match(
       cap.sends[0].message,
-      /UNDELIVERABLE/,
+      /undeliverable/i,
       'the escalation says plainly that a notification could not be delivered',
     );
-    assert.match(cap.sends[0].message, /no vision model available/, 'the original alert is carried through');
+
+    // ── SAFETY-04: BUT NOT VERBATIM. ─────────────────────────────────────────
+    // This assertion used to be the exact opposite — it REQUIRED the original alert
+    // to be "carried through". That 1:1 relay is what flooded the operator: his box
+    // can NEVER resolve an owner, so every owner notification became an operator DM
+    // carrying the whole task body, un-deduped and un-rate-limited. The escalation
+    // must now carry a COUNT and a POINTER; the payload lives only in the durable log.
+    assert.ok(
+      !cap.sends[0].message.includes(PAYLOAD),
+      'the escalation must NOT forward the task payload — the verbatim relay IS the bug',
+    );
+    assert.match(cap.sends[0].message, /notification-failures\.jsonl/, 'it points at the durable log');
+
+    const ledger = path.join(workspace, 'notification-failures.jsonl');
+    const recs = fs.readFileSync(ledger, 'utf8').trim().split('\n').filter(Boolean)
+      .map((l) => JSON.parse(l) as { kind: string; message: string });
+    const owner = recs.find((r) => r.kind === 'owner_undeliverable');
+    assert.ok(owner, 'the undeliverable alert is durably recorded');
+    assert.equal(owner.message, PAYLOAD, 'the original alert is preserved IN FULL on disk');
   } finally {
     cap.restore();
   }
@@ -149,9 +178,9 @@ test('MSG-07: a SYSTEM alert is NEVER sent to a client chat id', async () => {
   cleanEnv();
   // A CLIENT box: allowFrom holds the client. There is no operator listed.
   makeBox([CLIENT_ID]);
-  const cap = captureSends();
+  const notify = await freshNotify();
+  const cap = captureSends(notify);
   try {
-    const notify = await freshNotify();
 
     // The client IS resolvable as the owner — normal client notifications work.
     assert.equal(notify.resolveOwnerChatId(), CLIENT_ID, 'the client is the owner on a client box');
@@ -175,9 +204,9 @@ test('MSG-07: a client id forced into CC_OPERATOR_CHAT_ID is REJECTED', async ()
   cleanEnv();
   makeBox([CLIENT_ID]);
   process.env.CC_OPERATOR_CHAT_ID = CLIENT_ID; // misconfiguration / hostile input
-  const cap = captureSends();
+  const notify = await freshNotify();
+  const cap = captureSends(notify);
   try {
-    const notify = await freshNotify();
     assert.equal(
       notify.resolveOperatorChatId(),
       null,
@@ -227,22 +256,34 @@ test('MSG-07: with nothing reachable, an undeliverable alert still leaves a dura
   cleanEnv();
   // A box with NO operator and NO client, and no webhook: the worst case.
   const workspace = makeBox([]);
-  const cap = captureSends();
+  const notify = await freshNotify();
+  const cap = captureSends(notify);
   try {
-    const notify = await freshNotify();
     assert.equal(notify.resolveOwnerChatId(), null);
     assert.equal(notify.resolveOperatorChatId(), null);
 
     notify.notifyOwner('Task blocked: assignee has no runtime.');
 
+    assert.equal(cap.sends.length, 0, 'nothing is reachable, so nothing is sent');
+
     const ledger = path.join(workspace, 'notification-failures.jsonl');
     assert.ok(fs.existsSync(ledger), 'an undeliverable alert MUST leave a durable trace on disk');
-    const lines = fs.readFileSync(ledger, 'utf8').trim().split('\n').filter(Boolean);
-    assert.ok(lines.length >= 1, 'at least one failure recorded');
-    const rec = JSON.parse(lines[lines.length - 1]) as { kind: string; message: string };
-    assert.equal(rec.kind, 'system_alert');
-    assert.match(rec.message, /UNDELIVERABLE/);
-    assert.match(rec.message, /no runtime/, 'the original alert content is preserved in the record');
+    const recs = fs.readFileSync(ledger, 'utf8').trim().split('\n').filter(Boolean)
+      .map((l) => JSON.parse(l) as { kind: string; message: string });
+
+    // The owner alert itself — recorded IN FULL. THIS is the invariant that matters:
+    // with nothing reachable, the content is still never lost. (SAFETY-04 moved the
+    // payload OUT of the operator DM, so the durable log is now the only place it
+    // lives — which makes this assertion more load-bearing than it was before.)
+    const owner = recs.find((r) => r.kind === 'owner_undeliverable');
+    assert.ok(owner, 'the undeliverable owner alert is recorded');
+    assert.match(owner.message, /no runtime/, 'the original alert content is preserved in the record');
+
+    // The escalation digest had nowhere to go either — so it is recorded too.
+    const digest = recs.find((r) => r.kind === 'system_alert');
+    assert.ok(digest, 'the escalation digest is also recorded rather than dropped');
+    assert.match(digest.message, /undeliverable/i);
+    assert.ok(!digest.message.includes('no runtime'), 'even the digest carries no payload');
   } finally {
     cap.restore();
   }
