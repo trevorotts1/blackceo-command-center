@@ -23,7 +23,8 @@
  *     "disk_headroom":    { "pass": bool, "detail": string }
  *   },
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
- *     "anthology_board_projection": { "pass": bool, "detail": string, ... }
+ *     "anthology_board_projection": { "pass": bool, "detail": string, ... },
+ *     "sweep_liveness":           { "pass": bool, "detail": string, ... }
  *   }
  * }
  *
@@ -37,7 +38,11 @@
  *   drift is an operational signal (the S0→board mirror needs reconciling), not
  *   a Command Center correctness fault, so it must NEVER trip auto-rollback or
  *   halt the heartbeat — the very thing A7 exists to detect cannot be allowed
- *   to disable the box that detects it.
+ *   to disable the box that detects it. `sweep_liveness` (C-09 / U40 — "watch
+ *   the watchers") is the same posture: an advancer gone silent is an
+ *   operational alert (routed separately, cooldown-guarded, via
+ *   sweep-liveness.ts's own scheduler.ts cron entry), never a reason to
+ *   auto-rollback a healthy deploy or halt the heartbeat.
  *
  * Exit / HTTP semantics:
  *   200 + pass=true              → green
@@ -57,6 +62,7 @@ import {
   checkNextPublicAppUrl,
   checkAnthologyBoardProjection,
 } from '@/lib/health/deep-checks';
+import { checkSweepLiveness } from '@/lib/jobs/sweep-liveness';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -112,6 +118,22 @@ export async function GET() {
             advErr instanceof Error ? advErr.message : String(advErr)
           } (UNKNOWN; non-gating)`,
         },
+      };
+    }
+
+    // C-09 / U40 — sweep-liveness advisory. Own try/catch for the same reason
+    // as the block above: a throw here must NEVER reach the outer catch (which
+    // would return 500 + pass:false and could trip auto-rollback/heartbeat-gate
+    // consumers that only read d.pass / d.indeterminate).
+    try {
+      advisory.sweep_liveness = checkSweepLiveness();
+    } catch (advErr) {
+      advisory.sweep_liveness = {
+        pass: true,
+        indeterminate: true,
+        detail: `sweep_liveness: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
       };
     }
 
