@@ -1,3 +1,12 @@
+## [v6.0.11] — 2026-07-14 — feat(kanban): Skill-6 board reconcile advisory + drift banner (U27/B-U13, both-train)
+
+**Closes the SKILL.md:607-608 blindness from the Command Center side.** Companion to the `openclaw-onboarding` repo's `cc_board.py reconcile` — this leg is the read-only advisory probe that surfaces what that sweep finds, on the dashboard.
+
+- **`checkSkill6BoardProjection()`** (`src/lib/health/deep-checks.ts`) mirrors the Python `resolve_evidence_base()` evidence-root precedence EXACTLY (same env-override → `$HOME/clawd/skill6-fix` → not-applicable resolution order) so both sides of the reconcile agree on where the evidence lives. Wired into `/api/health/deep` as `advisory.skill6_board_projection` — non-gating, same posture as the already-shipped Anthology board-projection A7 pattern; wrapped so a probe failure never takes the box red, never leaks a filesystem path into the response.
+- **`BoardDriftBanner`** (`src/components/skill6/BoardDriftBanner.tsx`) renders the advisory on `src/app/workspace/[slug]/page.tsx` — visible only when the probe reports real drift; silent (no render) on `unwired`/clean/DB-down states.
+- **Tests.** `tests/unit/skill6-board-projection.test.ts` — 12/12 PASS, covering both binary acceptance criteria, an orphaned-card cross-check, the DB-down → `UNKNOWN` fallback, and a no-path-leak assertion. Full `npx vitest run`: 233/233 PASS (`deep-health.test.ts` 79/79 unchanged, zero regressions). `tsc --noEmit` clean. `next build` clean (BUILD_ID present).
+- No client names, no secret values, no box identifiers, no model added/removed/substituted. Client skills/engines still run only on the client's own providers — this is pure health/advisory application code, no provider or LLM wiring touched. `src/lib/db/migrations.ts` untouched — no migration-id collision risk.
+
 ## [v6.0.10] — 2026-07-14 — feat(kanban): My AI CEO Phase A — decompose + re-skin, Operations Rail fix, delegate endpoint, context meter, mobile system (U60/JM-U63)
 
 **The 437-line `/my-ai-ceo` monolith is now a proper component tree, on-brand, with a live-threaded Operations Rail and a real delegate endpoint.**

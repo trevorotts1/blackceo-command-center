@@ -1051,3 +1051,214 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
     detail: `anthology_board_projection: OK — ledger holds ${ledgerTotal} row(s), board shows ${boardCards} anthology card(s) (projecting)`,
   };
 }
+
+// ── check: Skill-6 board projection drift (U27 / B-U13) ────────────────────
+//
+// PROBLEM (SKILL.md:607-608, verbatim): "cc_board.py fail-softs (the card
+// just never lands / never moves) and the build continues unregistered."
+// Skill 6's producer (06-ghl-install-pages/tools/cc_board.py) posts a board
+// card on `ingest_task()`, but until U27, a build could run all the way
+// through intake with the board unconfigured/unreachable and leave ZERO trace
+// that the card never landed — the exact A7 shape (a producer's local
+// ledger accumulates evidence while the board mirror silently drops it),
+// applied to Skill 6 instead of the Anthology Engine.
+//
+// U27's ONB half instruments `ingest_task(evidence_root=...)` to ALWAYS write
+// `routing/board-ingest-receipt.json` under the run's evidence root — whatever
+// the outcome — recording whether MISSION_CONTROL_URL was even set and
+// whether the card landed. This check is the Command Center half: it reads
+// those SAME on-disk receipts (co-located with this box, same convention as
+// `checkAnthologyBoardProjection()` reading the Anthology ledger directly off
+// disk rather than over HTTP) and reports DRIFT for any run that completed
+// intake (`routing/intake-receipt.json` present — "the run-evidence ledger
+// roots" B-U13 names) but whose board-ingest receipt shows the card never
+// landed. A run with NO board-ingest receipt at all (pre-U27, or a caller
+// that has not threaded `evidence_root=` through yet) is EXCLUDED from the
+// drift count — informational only — so shipping this check never turns a
+// quiet pre-existing box red.
+//
+// Also cross-checks the OPPOSITE failure mode the local receipt alone cannot
+// see: a card that DID land at ingest time (`ok: true`, a `task_id` was
+// returned) but no longer exists in this box's own `tasks` table (deleted /
+// archived / never actually persisted server-side despite a 200/201). Same
+// same-box assumption as the Anthology check, same DB the gating checks
+// already read via `getDb()`.
+//
+// DESIGN NOTE — mirrors the Anthology check's posture exactly: Skill 6 is
+// OPTIONAL per-box tooling. "No evidence-root base directory on this box at
+// all" is a legitimate PASS (not applicable), never UNKNOWN/FAIL.
+
+export interface Skill6BoardProjectionResult extends CheckResult {
+  ledger_runs?: number;
+  board_landed?: number;
+  drift_count?: number;
+  unwired_count?: number;
+}
+
+interface Skill6BoardIngestReceipt {
+  mission_control_url_set?: boolean;
+  ok?: boolean;
+  task_id?: string | null;
+  reason?: string;
+}
+
+const SKILL6_EVIDENCE_RUN_PREFIX = 'v2-';
+const SKILL6_ROUTING_SUBDIR = 'routing';
+const SKILL6_INTAKE_RECEIPT_FILENAME = 'intake-receipt.json';
+const SKILL6_BOARD_INGEST_RECEIPT_FILENAME = 'board-ingest-receipt.json';
+
+/**
+ * Resolve the Skill-6 evidence-root base directory. Mirrors
+ * `resolve_evidence_base()` in `06-ghl-install-pages/tools/cc_board.py`
+ * EXACTLY (same precedence) so both sides of the reconcile agree on where
+ * the evidence lives:
+ *   1. `SKILL6_EVIDENCE_BASE_DIR` env override.
+ *   2. `$HOME/clawd/skill6-fix` (the operator-box convention documented in
+ *      `v2-autonomous-build-sop.md`).
+ *   3. `''` — not applicable (no HOME resolvable).
+ */
+export function resolveSkill6EvidenceBaseDir(): string {
+  const explicit = (process.env.SKILL6_EVIDENCE_BASE_DIR || '').trim();
+  if (explicit) return explicit;
+  const home = process.env.HOME || os.homedir();
+  if (home) return path.join(home, 'clawd', 'skill6-fix');
+  return '';
+}
+
+function readJsonFile<T>(p: string): T | null {
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8')) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Every immediate `v2-*` subdirectory of `baseDir` that carries an intake
+ *  receipt — mirrors `list_evidence_runs()` in `cc_board.py`. Read-only;
+ *  never throws (an unreadable baseDir yields an empty list). */
+function listSkill6EvidenceRuns(baseDir: string): string[] {
+  try {
+    if (!baseDir || !fs.existsSync(baseDir) || !fs.statSync(baseDir).isDirectory()) return [];
+    return fs
+      .readdirSync(baseDir)
+      .filter((name) => name.startsWith(SKILL6_EVIDENCE_RUN_PREFIX))
+      .map((name) => path.join(baseDir, name))
+      .filter((runDir) => {
+        try {
+          return fs.statSync(runDir).isDirectory() &&
+            fs.existsSync(path.join(runDir, SKILL6_ROUTING_SUBDIR, SKILL6_INTAKE_RECEIPT_FILENAME));
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+export function checkSkill6BoardProjection(): Skill6BoardProjectionResult {
+  const baseDir = resolveSkill6EvidenceBaseDir();
+
+  if (!baseDir || !fs.existsSync(baseDir)) {
+    // Not provisioned on this box at all — legitimate PASS, not UNKNOWN.
+    return {
+      pass: true,
+      detail: 'skill6_board_projection: OK — no Skill-6 evidence-root base directory on this box; not applicable',
+    };
+  }
+
+  let runDirs: string[];
+  try {
+    runDirs = listSkill6EvidenceRuns(baseDir);
+  } catch {
+    return {
+      pass: false,
+      indeterminate: true,
+      detail: 'skill6_board_projection: evidence-root base present but could not be listed (locked or unreadable) — UNKNOWN',
+    };
+  }
+
+  if (runDirs.length === 0) {
+    return {
+      pass: true,
+      ledger_runs: 0,
+      detail: 'skill6_board_projection: OK — evidence-root base exists but holds no completed-intake runs (healthy-idle, not drift)',
+    };
+  }
+
+  const driftRuns: string[] = [];
+  const landedTaskIds: string[] = [];
+  let unwiredCount = 0;
+
+  for (const runDir of runDirs) {
+    const receiptPath = path.join(runDir, SKILL6_ROUTING_SUBDIR, SKILL6_BOARD_INGEST_RECEIPT_FILENAME);
+    if (!fs.existsSync(receiptPath)) {
+      // No board-ingest receipt: pre-U27 run, or a caller that has not
+      // threaded evidence_root= through to ingest_task() yet. Informational
+      // only — never counted as drift (see module note above).
+      unwiredCount += 1;
+      continue;
+    }
+    const receipt = readJsonFile<Skill6BoardIngestReceipt>(receiptPath);
+    if (!receipt) {
+      unwiredCount += 1; // unreadable receipt — treat like unwired, not a confirmed drift
+      continue;
+    }
+    if (receipt.mission_control_url_set === false) {
+      driftRuns.push(path.basename(runDir));
+      continue;
+    }
+    if (!receipt.ok || !receipt.task_id) {
+      driftRuns.push(path.basename(runDir));
+      continue;
+    }
+    landedTaskIds.push(receipt.task_id);
+  }
+
+  // Cross-check: a card that landed at ingest time but no longer exists in
+  // this box's own tasks table (deleted / archived / never actually
+  // persisted despite a 200/201 response) — the opposite failure mode the
+  // local receipt alone cannot see. Best-effort: a DB read failure degrades
+  // to UNKNOWN, never fabricates a verdict.
+  let orphanedCount = 0;
+  if (landedTaskIds.length > 0) {
+    try {
+      const db = getDb();
+      for (const taskId of landedTaskIds) {
+        const row = db.prepare('SELECT id FROM tasks WHERE id = ?').get(taskId) as { id: string } | undefined;
+        if (!row) orphanedCount += 1;
+      }
+    } catch {
+      return {
+        pass: false,
+        indeterminate: true,
+        ledger_runs: runDirs.length,
+        unwired_count: unwiredCount,
+        detail: "skill6_board_projection: could not read this box's task board to confirm landed cards (locked or unavailable) — UNKNOWN",
+      };
+    }
+  }
+
+  const driftCount = driftRuns.length + orphanedCount;
+
+  if (driftCount > 0) {
+    return {
+      pass: false,
+      indeterminate: false,
+      ledger_runs: runDirs.length,
+      board_landed: landedTaskIds.length - orphanedCount,
+      drift_count: driftCount,
+      unwired_count: unwiredCount,
+      detail: `skill6_board_projection: DRIFT — ${runDirs.length} run(s) completed intake, ${driftCount} card(s) never landed or vanished from the board (${driftRuns.length} never-landed, ${orphanedCount} orphaned). Run: cc_board.py reconcile --json`,
+    };
+  }
+
+  return {
+    pass: true,
+    ledger_runs: runDirs.length,
+    board_landed: landedTaskIds.length,
+    drift_count: 0,
+    unwired_count: unwiredCount,
+    detail: `skill6_board_projection: OK — ${runDirs.length} run(s) completed intake, ${landedTaskIds.length} card(s) landed and confirmed on the board (projecting)`,
+  };
+}
