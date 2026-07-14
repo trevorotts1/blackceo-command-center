@@ -21,15 +21,17 @@ import { probeCloudflareTunnel } from './probes/cloudflare-tunnel-probe';
 import { probeCloudflareAccess } from './probes/cloudflare-access-probe';
 import { probeUnauthorized401 } from './probes/unauthorized-401-probe';
 import {
+  computeOverallTiered,
   ProbeResult,
   SystemStatus,
-  worstStatus,
+  TieredProbeResult,
+  tierFor,
 } from './probes/types';
 
 export interface SystemStatusPayload {
   overall: SystemStatus;
   probedAt: string;
-  components: ProbeResult[];
+  components: TieredProbeResult[];
   fromCache: boolean;
   cacheAgeMs: number | null;
 }
@@ -94,7 +96,7 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     probeUnauthorized401(),
   ]);
 
-  const components: ProbeResult[] = [
+  const raw: ProbeResult[] = [
     database,
     openclaw,
     ...providers,
@@ -109,14 +111,22 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
     unauthorized401,
   ];
 
-  for (const c of components) persistSnapshot(c);
+  for (const c of raw) persistSnapshot(c);
 
-  // Overall pill color reflects the worst non-provider status, with providers
-  // considered too. Unknown providers (no key) do not degrade the overall.
+  // U46 — every component row carries its criticality tier (database +
+  // openclaw_gateway are `critical`; everything else is `auxiliary`).
+  const components: TieredProbeResult[] = raw.map((c) => ({
+    ...c,
+    tier: tierFor(c.component),
+  }));
+
+  // Overall reflects criticality-tiered aggregation, not a flat worst-of-all
+  // reduction: a critical outage means `offline`; an auxiliary problem never
+  // does. Unknown providers (no key) do not degrade the overall.
   const considered = components.filter(
     (c) => !(c.component.startsWith('provider_') && c.status === 'unknown')
   );
-  const overall = worstStatus(considered.map((c) => c.status));
+  const overall = computeOverallTiered(considered);
 
   return {
     overall,
@@ -176,7 +186,9 @@ export function readCachedStatus(): SystemStatusPayload | null {
       return null;
     }
 
-    const components: ProbeResult[] = rows.map((r) => ({
+    // U46 — every component row carries its criticality tier here too, so
+    // the cached-read path tags rows identically to the fresh-probe path.
+    const components: TieredProbeResult[] = rows.map((r) => ({
       component: r.component,
       label: labelFor(r.component),
       status: normalizeStatus(r.status),
@@ -184,12 +196,15 @@ export function readCachedStatus(): SystemStatusPayload | null {
       error: r.error || undefined,
       detail: r.metadata ? safeParse(r.metadata) : undefined,
       probedAt: r.probed_at,
+      tier: tierFor(r.component),
     }));
 
     const considered = components.filter(
       (c) => !(c.component.startsWith('provider_') && c.status === 'unknown')
     );
-    const overall = worstStatus(considered.map((c) => c.status));
+    // Same shared function as the fresh path — identical inputs (same
+    // component/tier/status triples) always produce an identical `overall`.
+    const overall = computeOverallTiered(considered);
 
     return {
       overall,
