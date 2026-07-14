@@ -31,6 +31,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { isBlankAsk } from '@/lib/blocked-ask';
 import type { Task } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -286,7 +287,10 @@ export async function moveAdStage(jobId: string, input: MoveAdStageInput): Promi
         `status=blocked requires blocked_reason ∈ {decision,approval,credential,payment}`,
       );
     }
-    if (!input.ask || input.ask.trim().length === 0) {
+    // isBlankAsk also rejects a rendered placeholder ("(no ask specified)") — a
+    // stage card parked on a human with a placeholder ask is unanswerable-forever
+    // exactly like one with no ask. See src/lib/blocked-ask.ts.
+    if (isBlankAsk(input.ask)) {
       throw new AdCampaignError(400, 'ASK_REQUIRED', 'status=blocked requires a non-empty ask');
     }
     run(
