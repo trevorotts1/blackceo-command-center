@@ -16,6 +16,15 @@
  * Run: node --import tsx --test tests/unit/backfill-sop-embeddings-shipped-guard.test.ts
  */
 
+// C8 — DB isolation MUST happen in an IMPORTED module, and this MUST stay the
+// first import. This suite drives the app's own getDb() (in a child process, via
+// setup.mjs) to build its fixture DB; pointing DATABASE_PATH at a throwaway temp
+// file up front guarantees nothing in this file's process ever opens or migrates
+// the LIVE mission-control.db. The child processes are always handed an explicit
+// per-fixture DATABASE_PATH, which takes precedence over this default.
+// Enforced by tests/unit/c8-db-isolation-guard.test.ts.
+import './_isolated-db';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
