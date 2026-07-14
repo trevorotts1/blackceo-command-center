@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, ChevronRight, ChevronLeft, Zap, ZapOff, Loader2, ArrowLeft } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
+import { unwrapAgents } from '@/lib/api-envelope';
 
 type FilterTab = 'all' | 'active' | 'idle';
 /**
@@ -124,8 +125,8 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
                   { cache: 'no-store' }
                 );
                 if (ar.ok) {
-                  const agents = (await ar.json()) as Array<{ status?: string }>;
-                  if (Array.isArray(agents) && agents.length > 0) {
+                  const agents = unwrapAgents<{ status?: string }>(await ar.json());
+                  if (agents.length > 0) {
                     const statuses = agents
                       .map((a) => normalizeAgentStatus(a.status))
                       .filter((s): s is AgentStatus => !!s);

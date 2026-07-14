@@ -23,6 +23,7 @@ import { motion } from 'framer-motion';
 import { ArrowUpRight, ArrowUp, ArrowDown, Minus } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer } from 'recharts';
 import { isRealDepartment } from '@/lib/grading';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { WorkspaceStats, Agent } from '@/lib/types';
 
 interface CompanyKpiConfig {
@@ -139,7 +140,7 @@ export function KPIStatCards() {
           const data: WorkspaceStats[] = await wsRes.json();
           setDepartments(data.filter((d) => isRealDepartment(d.slug || d.id)));
         }
-        if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (agentsRes.ok) setAgents(unwrapAgents<Agent>(await agentsRes.json()));
         if (configRes.ok) {
           const config = await configRes.json();
           if (Array.isArray(config.companyKPIs) && config.companyKPIs.length > 0) {

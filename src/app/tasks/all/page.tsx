@@ -26,6 +26,7 @@ import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useSSE } from '@/hooks/useSSE';
 import { debug } from '@/lib/debug';
 import { Breadcrumb } from '@/components/Breadcrumb';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { Task } from '@/lib/types';
 
 export default function AllTasksPage() {
@@ -60,7 +61,7 @@ export default function AllTasksPage() {
 
         if (cancelled) return;
 
-        if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (agentsRes.ok) setAgents(unwrapAgents(await agentsRes.json()));
         if (tasksRes.ok) {
           const tasksData = await tasksRes.json();
           debug.api('Loaded all tasks', { count: tasksData.length });

@@ -10,6 +10,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { WorkspaceStats, Agent } from '@/lib/types';
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -42,7 +43,7 @@ export function MonthlyActivityChart() {
             })
           );
         }
-        if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (agentsRes.ok) setAgents(unwrapAgents<Agent>(await agentsRes.json()));
       } catch {
         // handled
       } finally {

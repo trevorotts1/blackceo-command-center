@@ -46,6 +46,7 @@ import {
 } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { format, formatDistanceToNow } from 'date-fns';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { Task, Agent } from '@/lib/types';
 
 /* ── types for the lightweight fetches ─────────────────────────────────── */
@@ -155,7 +156,7 @@ export default function HomePage() {
         ]);
         if (cancelled) return;
         if (tasksRes.ok) setTasks(await tasksRes.json());
-        if (agentsRes.ok) setAgents(await agentsRes.json());
+        if (agentsRes.ok) setAgents(unwrapAgents(await agentsRes.json()));
         if (wsRes.ok) {
           const ws = await wsRes.json();
           setWorkspaces(Array.isArray(ws) ? ws : ws?.workspaces ?? []);

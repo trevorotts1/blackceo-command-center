@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ArrowRight, Zap, TrendingUp, Shield, Eye } from 'lucide-react';
+import { unwrapRecommendations } from '@/lib/api-envelope';
 
 interface Recommendation {
   id: string;
@@ -49,7 +50,7 @@ export function RecommendationsRow() {
         const res = await fetch('/api/recommendations?status=pending&limit=3');
         if (res.ok) {
           const data = await res.json();
-          setRecommendations(Array.isArray(data) ? data : []);
+          setRecommendations(unwrapRecommendations<Recommendation>(data));
         }
       } catch {
         // empty state

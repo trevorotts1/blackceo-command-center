@@ -2,27 +2,48 @@ import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { createAgentFolder } from '@/lib/agent-files';
+import { resolveDepartment } from '@/lib/routing/resolve-department';
 import type { Agent, CreateAgentRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-// GET /api/agents - List all agents
+// GET /api/agents - List agents, optionally scoped to a workspace or department.
+//
+// U56 (E.2 / JM-U52) — the department detail page (`/ceo-board/[dept]`) calls
+// this with `?department=<slug>` and reads the response's `agents` key. Before
+// this fix the route only read `workspace_id` (an exact id match — the page's
+// `deptId` route param is frequently a SLUG, not the workspace id) and
+// returned a bare array, so `agentData.agents` was always `undefined` and the
+// "Department Agents" section could never render real rows. `department`
+// resolves through the SAME `resolveDepartment()` the page/`/workspace/[slug]`
+// already use (slug-or-id → real workspace id), so it works for both forms.
+// `workspace_id` keeps its original exact-id semantics for existing callers
+// (`/workspace/[slug]`, `AgentsSidebar`) that already resolve the id upstream.
 export async function GET(request: NextRequest) {
   try {
-    const workspaceId = request.nextUrl.searchParams.get('workspace_id');
-    
+    const departmentParam = request.nextUrl.searchParams.get('department');
+    const workspaceIdParam = request.nextUrl.searchParams.get('workspace_id');
+
     let agents: Agent[];
-    if (workspaceId) {
+    if (departmentParam) {
+      const resolved = await resolveDepartment(departmentParam);
+      agents = resolved
+        ? queryAll<Agent>(
+            `SELECT * FROM agents WHERE workspace_id = ? ORDER BY is_master DESC, name ASC`,
+            [resolved.id],
+          )
+        : [];
+    } else if (workspaceIdParam) {
       agents = queryAll<Agent>(`
         SELECT * FROM agents WHERE workspace_id = ? ORDER BY is_master DESC, name ASC
-      `, [workspaceId]);
+      `, [workspaceIdParam]);
     } else {
       agents = queryAll<Agent>(`
         SELECT * FROM agents ORDER BY is_master DESC, name ASC
       `);
     }
-    return NextResponse.json(agents);
+    return NextResponse.json({ agents });
   } catch (error) {
     console.error('Failed to fetch agents:', error);
     return NextResponse.json({ error: 'Failed to fetch agents' }, { status: 500 });

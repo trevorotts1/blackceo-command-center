@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Lightbulb } from 'lucide-react';
 import { RecommendationEngineCard } from './RecommendationEngineCard';
+import { unwrapRecommendations } from '@/lib/api-envelope';
 import type { Recommendation } from '@/lib/types';
 
 interface EffectivenessStats {
@@ -34,7 +35,7 @@ export function RecommendationsSection() {
       const res = await fetch('/api/recommendations?status=pending&limit=5');
       if (!res.ok) throw new Error('Failed to fetch recommendations');
       const data = await res.json();
-      setRecommendations(data);
+      setRecommendations(unwrapRecommendations<Recommendation>(data));
     } catch (error) {
       console.error('Error fetching recommendations:', error);
     } finally {

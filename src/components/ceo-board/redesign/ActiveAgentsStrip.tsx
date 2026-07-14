@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
+import { unwrapAgents } from '@/lib/api-envelope';
 import type { Agent, Task } from '@/lib/types';
 
 // Unique avatar colors per agent
@@ -78,7 +79,7 @@ export function ActiveAgentsStrip() {
         let agentsData: Agent[] = [];
         let tasksData: Task[] = [];
 
-        if (agentsRes.ok) agentsData = await agentsRes.json();
+        if (agentsRes.ok) agentsData = unwrapAgents<Agent>(await agentsRes.json());
         if (tasksRes.ok) tasksData = await tasksRes.json();
 
         // Map active agents to their current task.

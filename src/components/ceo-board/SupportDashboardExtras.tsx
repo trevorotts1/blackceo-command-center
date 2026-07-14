@@ -14,6 +14,7 @@ import {
   Shield,
   ArrowRight,
 } from 'lucide-react';
+import { unwrapAgents } from '@/lib/api-envelope';
 
 // --- Types ---
 
@@ -238,9 +239,7 @@ export default function SupportDashboardExtras({ workspaceId, kpiCount }: Suppor
         }
 
         if (agentRes.ok) {
-          const agentData = await agentRes.json();
-          const raw = agentData.agents || agentData || [];
-          setAgents(Array.isArray(raw) ? raw : []);
+          setAgents(unwrapAgents<AgentItem>(await agentRes.json()));
         }
       } catch (err) {
         console.error('Failed to load support extras:', err);
