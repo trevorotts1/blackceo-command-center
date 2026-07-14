@@ -10,7 +10,11 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    include: ['tests/unit/u55-company-health-render.test.tsx'],
+    include: [
+      'tests/unit/u55-company-health-render.test.tsx',
+      // A-U5 acceptance (b) — PersonaScopeChips real render proof.
+      'tests/unit/a-u5-persona-scope-chips-render.test.tsx',
+    ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
   },

@@ -13,7 +13,7 @@ import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/type
 import { checkTriad, getBestSOPForTask } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { selectPersonaForTask, buildPersonaReason } from '@/lib/persona-selector';
+import { selectPersonaForTask, buildPersonaReason, loadPersonaBundleScopes } from '@/lib/persona-selector';
 import { recordPersonaCompletions } from '@/lib/tasks';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -53,9 +53,13 @@ export async function GET(
     // B-U6 / U20 — declared-vs-used comparator, same field the tasks-list GET
     // attaches (src/app/api/tasks/route.ts). Fail-soft, short-circuited when
     // this task never resolved a voice persona.
+    // A-U5 — per-page/scoped persona-blend rows (migration 104). Fail-soft:
+    // loadPersonaBundleScopes tolerates a pre-104 box or a table-read error
+    // by returning [], never breaking this single-task fetch.
     const withMismatch: Task = {
       ...task,
       persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
+      persona_bundle_scopes: loadPersonaBundleScopes(task.id),
     };
 
     return NextResponse.json(withMismatch);

@@ -1,5 +1,5 @@
 /**
- * Kanban task-card persona UI (DEP-5 / F3.7 + F3.9).
+ * Kanban task-card persona UI (DEP-5 / F3.7 + F3.9; A-U5 adds the per-scope row).
  *
  * `PersonaSlotChips` renders one chip per sub-task on a DECOMPOSED (multi-persona)
  * task — the `task.subtask_personas` plan rows written by `decompose-task.py` and
@@ -11,13 +11,21 @@
  * inferred task category, plus the persona that filled it. A mechanical / empty
  * sub-task (no persona) renders a muted "—" chip so the plan stays legible.
  *
+ * `PersonaScopeChips` (A-U5, master spec v2 Section A.6) is the per-PAGE analog:
+ * one chip per `task.persona_bundle_scopes` row (a `task_persona_bundle_scope`
+ * table row, migration 104) — a multi-page funnel build's opt-in/sales/thank-you
+ * pages, each carrying its OWN governing blend. Reuses the exact chip visuals +
+ * gating pattern above verbatim (≥2 rows required, same colors, same overflow
+ * "+N" affordance) so a scoped funnel and a decomposed multi-persona task read
+ * as ONE consistent visual language on the board.
+ *
  * The card itself (drag handlers, status, etc.) lives in `MissionQueue.tsx`; this
- * module is the ONE place the per-sub-task slot chips are rendered, so the board
- * and any future card surface stay consistent.
+ * module is the ONE place the per-sub-task slot chips (and per-scope chips) are
+ * rendered, so the board and any future card surface stay consistent.
  */
 'use client';
 
-import type { Task, TaskSubtaskPersona } from '@/lib/types';
+import type { Task, TaskSubtaskPersona, TaskPersonaBundleScope } from '@/lib/types';
 
 /** Title-case a persona id / slug for display ("bly-copywriters" → "Bly Copywriters").
  * Exported for reuse by the B-U6 / U20 persona-mismatch chip (MissionQueue.tsx),
@@ -80,6 +88,72 @@ export function PersonaSlotChips({
       })}
       {overflow > 0 && (
         <span className="text-[10px] text-zinc-400" title={`${overflow} more sub-task${overflow === 1 ? '' : 's'}`}>
+          +{overflow}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** A-U5 chip label: the page's role/slug (whichever is present), falling back
+ * to the bare scope key so a chip never renders empty. */
+function scopeChipLabel(row: TaskPersonaBundleScope): string {
+  return (
+    (row.page_role && row.page_role.trim()) ||
+    (row.page_slug && row.page_slug.trim()) ||
+    row.scope
+  );
+}
+
+export function PersonaScopeChips({
+  task,
+  max = 4,
+}: {
+  task: Pick<Task, 'persona_bundle_scopes'>;
+  max?: number;
+}) {
+  const scopes = task.persona_bundle_scopes;
+  // Only a genuine multi-page/scope blend (>=2 scoped bundles) warrants a
+  // chip row — a single scoped bundle degrades to the card's existing single
+  // persona chip, same threshold PersonaSlotChips uses for sub-task plans.
+  if (!Array.isArray(scopes) || scopes.length < 2) return null;
+
+  const ordered = [...scopes].sort((a, b) => a.scope.localeCompare(b.scope));
+  const shown = ordered.slice(0, max);
+  const overflow = ordered.length - shown.length;
+
+  return (
+    <div
+      className="mt-1 flex flex-wrap items-center gap-1"
+      data-testid="persona-scope-chips"
+      aria-label="Per-page persona blend"
+    >
+      {shown.map((row) => {
+        const label = scopeChipLabel(row);
+        const persona = row.persona_id ? row.persona_name || humanize(row.persona_id) : null;
+        return (
+          <span
+            key={`${row.scope}-${row.persona_id ?? 'none'}`}
+            className={
+              'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ' +
+              (persona
+                ? 'bg-violet-500/15 text-violet-300 ring-1 ring-inset ring-violet-500/30'
+                : 'bg-zinc-500/10 text-zinc-400 ring-1 ring-inset ring-zinc-500/20')
+            }
+            title={
+              persona
+                ? `${label}: ${persona}${row.scope_reason ? ` — ${row.scope_reason}` : ''}`
+                : `${label}: no persona required`
+            }
+          >
+            <span className="uppercase tracking-wide opacity-70">{label}</span>
+            <span aria-hidden>→</span>
+            <span>{persona ?? '—'}</span>
+          </span>
+        );
+      })}
+      {overflow > 0 && (
+        <span className="text-[10px] text-zinc-400" title={`${overflow} more page${overflow === 1 ? '' : 's'}`}>
           +{overflow}
         </span>
       )}

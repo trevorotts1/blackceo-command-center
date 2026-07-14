@@ -137,6 +137,23 @@ export interface TaskSubtaskPersona {
   slot?: string | null;
 }
 
+/**
+ * A-U5 (master spec v2 Section A.6) — one PAGE's (or, per U115, one PART's)
+ * scoped persona blend — a `task_persona_bundle_scope` row (migration 104).
+ * Rendered as a per-scope chip on the kanban card, reusing the
+ * `PersonaSlotChips` pattern with scope rows (`PersonaScopeChips`).
+ */
+export interface TaskPersonaBundleScope {
+  scope: string;
+  page_role?: string | null;
+  page_slug?: string | null;
+  conversion_goal?: string | null;
+  persona_id: string | null;
+  persona_name?: string | null;
+  /** The different-blends-allowed invariant's WHY, for the chip tooltip. */
+  scope_reason?: string | null;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -200,6 +217,16 @@ export interface Task {
   // broadcast so the kanban card can render per-sub-task slot chips. Empty/absent
   // for a single-persona task.
   subtask_personas?: TaskSubtaskPersona[];
+  // A-U5 — per-page/scoped persona blends (migration 104, `task_persona_bundle_scope`,
+  // keyed (task_id, scope)). Present only on a task whose producer called
+  // build_bundle(scope_hint=...) per page (a multi-page funnel build, A-U7);
+  // empty/absent for a single-bundle task. Attached by the tasks GET routes
+  // behind the same table-existence guard pattern bundleTableExists() uses;
+  // rendered as a per-scope chip row (PersonaScopeChips, TaskCard.tsx) reusing
+  // the PersonaSlotChips pattern verbatim. NEVER touches task_persona_bundle
+  // (090) or its mirror columns above — the unscoped task-level default stays
+  // exactly what it was.
+  persona_bundle_scopes?: TaskPersonaBundleScope[];
   // Persona-blend + audience-confirm mirror columns (migration 090). Written by the
   // persona-bundle persist path (persistPersonaBundle in persona-selector.ts) so the
   // board + dispatcher read the resolved VOICE decision and the confirmed audience
@@ -775,6 +802,19 @@ export interface BundleTaskPersona {
 }
 
 /**
+ * A-U5 (master spec v2 Section A.6) — the per-page/scope hint the ONB matcher's
+ * `build_bundle(scope_hint=...)` accepts and echoes back verbatim on
+ * `PersonaBundle.scope_hint` when it resolved a scope key. All fields optional;
+ * `part_id` is U115's later per-part generalization of this same mechanism.
+ */
+export interface PersonaBundleScopeHint {
+  page_role?: string | null;
+  page_slug?: string | null;
+  conversion_goal?: string | null;
+  part_id?: string | null;
+}
+
+/**
  * The full persona-bundle (matcher SUPERSET output). `confirm_required` GATES the
  * dispatcher's write step; `blend_directive` is the mandatory doer-facing string
  * that ALWAYS carries the non-removable style-inspired-NOT-impersonation clause.
@@ -792,6 +832,13 @@ export interface PersonaBundle {
   fallbacks?: Record<string, unknown>;
   /** Catalog schemaVersion the matcher reasoned over (persona-categories.json). */
   catalog_version?: string | null;
+  // A-U5 — present ONLY when the matcher call supplied a resolvable scope_hint
+  // (page_slug/page_role/part_id); absent on every unscoped (pre-A-U5-shaped)
+  // bundle — mirrors persona_blend.py's own additive-only contract exactly.
+  /** The resolved, persistable scope key (`task_persona_bundle_scope.scope`). */
+  scope?: string | null;
+  /** Verbatim echo of the scope_hint the caller supplied, for the persist layer. */
+  scope_hint?: PersonaBundleScopeHint | null;
 }
 
 /** Lifecycle of the audience confirmation for a task's persona bundle. */
