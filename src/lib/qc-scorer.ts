@@ -550,6 +550,42 @@ const DISABLE_QC_SCORER =
   process.env.DISABLE_QC_AUTO_SCORER === '1' ||
   process.env.DISABLE_QC_AUTO_SCORER === 'true';
 
+/**
+ * B-U12 / U26 — QC-contract fix. When set, `runQCOnReview` reads a producer-
+ * posted scorecard (the `{qc_gate, qc_score, qc_passed, scorecard_path}`
+ * metadata contract `cc_board.py:post_qc_score()` already writes onto a
+ * `completed` task_activities row) instead of treating the Command Center
+ * judge as the sole source of truth. Additive + flag-gated per the unit's
+ * revert contract: unset → today's fully-independent scoring, bit-identical.
+ *
+ * Read LIVE (function, not a frozen module-load-time const) so the flag can
+ * be toggled per-request/per-test without a process restart.
+ */
+export function isQCProducerScorecardEnabled(): boolean {
+  return (
+    process.env.QC_PRODUCER_SCORECARD_ENABLED === '1' ||
+    process.env.QC_PRODUCER_SCORECARD_ENABLED === 'true'
+  );
+}
+
+/**
+ * Disagreement threshold (score points) between a producer-posted scorecard
+ * and the Command Center judge's own score above which a review card is HELD
+ * (never silently kicked back) and a single `qc_disagreement` operator event
+ * is written. Spec-fixed at 1.0 — not configurable, to keep the contract
+ * predictable across boxes.
+ */
+const QC_DISAGREEMENT_THRESHOLD = 1.0;
+
+/**
+ * Department slugs subject to the B-U12 "both-gates" rule: review→done for
+ * these source cards requires BOTH the producer's own gate (FAB-QC) AND, when
+ * present, Page-QC v2's verdict (`page_qc_passed` — B-U11, not yet shipped as
+ * of this unit) to PASS. Stays inert (no card ever carries `page_qc_passed`)
+ * until B-U11 lands; wiring it now means no follow-up CC change is needed.
+ */
+const QC_BOTH_GATES_DEPARTMENTS = new Set(['funnel', 'web-development']);
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -3192,6 +3228,91 @@ export function emitOwnerApprovalPending(
   // ── End OWNER NOTIFICATION (OWNER-APPROVAL PENDING) ──────────────────
 }
 
+// ---------------------------------------------------------------------------
+// B-U12 / U26 — producer-scorecard contract (QC-contract fix)
+// ---------------------------------------------------------------------------
+
+/** The producer-posted QC verdict, read off the newest `completed` activity. */
+interface ProducerScorecard {
+  activityId: string;
+  qcGate: string | null;
+  qcScore: number | null;
+  qcPassed: boolean | null;
+  scorecardPath: string | null;
+  /** B-U11 (Page-QC v2) extension fields — read now, populated later. */
+  pageQcScore: number | null;
+  pageQcPassed: boolean | null;
+}
+
+/**
+ * Read the newest `completed` task_activities row for a review card and, ONLY
+ * when it carries the producer-scorecard contract (`qc_gate` present in its
+ * metadata — the exact shape `cc_board.py:post_qc_score()` posts), return the
+ * parsed verdict. Returns null when the newest completed activity carries no
+ * such metadata (nothing posted, or the newest completed activity is
+ * unrelated to QC) — the caller falls back to today's fully-independent scoring.
+ */
+function resolveProducerScorecard(taskId: string): ProducerScorecard | null {
+  const row = queryOne<{ id: string; metadata: string | null }>(
+    `SELECT id, metadata FROM task_activities
+     WHERE task_id = ? AND activity_type = 'completed' AND metadata IS NOT NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [taskId],
+  );
+  if (!row || !row.metadata) return null;
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(row.metadata) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || !('qc_gate' in parsed)) return null;
+
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const bool = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
+  const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+  return {
+    activityId: row.id,
+    qcGate: str(parsed.qc_gate),
+    qcScore: num(parsed.qc_score),
+    qcPassed: bool(parsed.qc_passed),
+    scorecardPath: str(parsed.scorecard_path),
+    pageQcScore: num(parsed.page_qc_score),
+    pageQcPassed: bool(parsed.page_qc_passed),
+  };
+}
+
+/**
+ * Fail-closed verification for a producer-posted `scorecard_path`: the file
+ * must exist and be readable so the CC side can re-parse the verdict rather
+ * than trust an unreadable/vanished path. Returns false on ANY problem — the
+ * caller then falls back to today's independent-scoring behavior unchanged
+ * (regression-safe: an unreadable scorecard never blocks or misroutes a card).
+ */
+function verifyProducerScorecardFile(scorecardPath: string): boolean {
+  try {
+    const resolved = scorecardPath.replace(/^~/, process.env.HOME || '');
+    if (!existsSync(resolved)) return false;
+    const raw = readFileSync(resolved, 'utf8');
+    if (!raw || raw.trim().length === 0) return false;
+    // Best-effort re-parse: most scorecards are JSON (fab-qc.json / page-qc.json).
+    // A parse failure does NOT fail the read — the contract only requires the
+    // file exist + be readable; downstream comparison uses the metadata fields
+    // already posted alongside it, not the file's internal structure.
+    try {
+      JSON.parse(raw);
+    } catch {
+      /* non-JSON scorecard body is still an honest, readable file */
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Run QC scoring for a task that just entered `review` status.
  *
@@ -3595,6 +3716,28 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     let result: QCResult;
     const now = new Date().toISOString();
 
+    // ── B-U12 / U26: resolve a producer-posted scorecard up front ─────────────
+    // Fail-closed: a `scorecard_path` that exists in the metadata but is
+    // unreadable disables the branch entirely for this pass — todays fully
+    // independent scoring runs unchanged (regression-safe fallback).
+    const producerScorecard = isQCProducerScorecardEnabled() ? resolveProducerScorecard(taskId) : null;
+    let useProducerConfirmation = false;
+    if (producerScorecard) {
+      if (producerScorecard.scorecardPath) {
+        useProducerConfirmation = verifyProducerScorecardFile(producerScorecard.scorecardPath);
+        if (!useProducerConfirmation) {
+          console.warn(
+            `[QCScorer] Task "${task.title}" (${taskId}): producer scorecard_path unreadable ` +
+            `(${producerScorecard.scorecardPath}) — falling back to independent scoring for this pass.`,
+          );
+        }
+      } else {
+        // Score/gate posted with no attached scorecard file — still a valid
+        // producer verdict (post_qc_score allows a passed-only emission).
+        useProducerConfirmation = true;
+      }
+    }
+
     if (deliverableManifest && deliverableManifest.length > 0) {
       // Artifact mode: use the pre-computed criteria (derived above for invariant A).
       const criteria = artifactCriteriaForTitle;
@@ -3637,6 +3780,31 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         };
         result = await scoreTaskForQC(input);
       }
+    } else if (useProducerConfirmation && producerScorecard) {
+      // ── B-U12 / U26: producer-scorecard confirmation (no evidence tree) ──────
+      // A non-artifact / no-manifest task with a producer scorecard already
+      // posted: per the ratified contract fix, this does NOT run "a fresh
+      // description-based rubric" (Mode-B) — the description-only heuristic adds
+      // no signal beyond what the producer's own gate already scored. The
+      // producer's posted verdict IS the build-side evidence; it is taken as
+      // read (never independently re-derived from the task description here).
+      const producerVal = producerScorecard.qcScore;
+      const producerPass =
+        producerScorecard.qcPassed ?? (producerVal !== null ? producerVal >= QC_PASS_THRESHOLD : null);
+      result = {
+        score: producerVal ?? (producerPass ? QC_PASS_THRESHOLD : 0),
+        pass: producerPass ?? false,
+        reason:
+          `Producer scorecard read directly (gate=${producerScorecard.qcGate ?? 'unknown'}` +
+          `${producerVal !== null ? `, score=${producerVal.toFixed(1)}/10` : ''}) — ` +
+          `no independent evidence tree for this task; description-rubric re-score skipped per B-U12.`,
+        gaps: producerPass ? [] : [`producer gate "${producerScorecard.qcGate ?? 'unknown'}" reported FAIL`],
+        scoringPath: 'llm',
+      };
+      console.log(
+        `[QCScorer] Task "${task.title}" (${taskId}): producer-scorecard confirmation path (gate=` +
+        `${producerScorecard.qcGate ?? 'unknown'}) — score ${result.score.toFixed(1)}/10 (${result.pass ? 'PASS' : 'FAIL'})`,
+      );
     } else {
       // ── Mode B: document/work task (confirmed non-artifact) ───────────────────
       // Only reached when isArtifactTask=false (deriveAcceptanceCriteria returned
@@ -3658,6 +3826,91 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       };
       result = await scoreTaskForQC(input);
     }
+
+    // ── B-U12 / U26: producer/judge agreement check + both-gates rule ─────────
+    // Only meaningful when a producer scorecard was resolved AND the CC side
+    // produced a real evidence-grounded score ('llm' — Mode A's evaluateCriteria/
+    // scoreTaskForQC-with-manifest, or the producer-confirmation branch just
+    // above). Heuristic/no-criteria paths have no independent score to compare.
+    if (useProducerConfirmation && producerScorecard && result.scoringPath === 'llm') {
+      const producerVal = producerScorecard.qcScore;
+      const producerPass = producerScorecard.qcPassed;
+      let disagreement = false;
+      let diffNote = '';
+
+      if (producerVal !== null) {
+        const diff = Math.abs(result.score - producerVal);
+        diffNote = ` (producer=${producerVal.toFixed(1)}, judge=${result.score.toFixed(1)}, diff=${diff.toFixed(1)})`;
+        if (diff > QC_DISAGREEMENT_THRESHOLD) disagreement = true;
+      } else if (producerPass !== null && producerPass !== result.pass) {
+        diffNote = ` (producer=${producerPass ? 'PASS' : 'FAIL'}, judge=${result.pass ? 'PASS' : 'FAIL'})`;
+        disagreement = true;
+      }
+
+      if (disagreement) {
+        // HOLD, never a silent kickback: write exactly one qc_disagreement
+        // event and return WITHOUT touching task status — the card stays
+        // visibly in `review` for a human to resolve.
+        const disagreementMsg =
+          `[QC-DISAGREEMENT] Producer scorecard (gate=${producerScorecard.qcGate ?? 'unknown'}) and the ` +
+          `Command Center judge disagree${diffNote} — HELD in review for human resolution.`;
+        run(
+          `INSERT INTO events (id, type, task_id, message, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            'qc_disagreement',
+            taskId,
+            disagreementMsg,
+            JSON.stringify({
+              qc_gate: producerScorecard.qcGate,
+              producer_score: producerVal,
+              producer_passed: producerPass,
+              judge_score: result.score,
+              judge_passed: result.pass,
+            }),
+            now,
+          ],
+        );
+        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): qc_disagreement — HELD in review${diffNote}`);
+        return {
+          ...result,
+          pass: false,
+          reason: disagreementMsg,
+          gaps: [...result.gaps, `qc_disagreement: producer/judge verdict mismatch${diffNote}`],
+        };
+      }
+
+      // Agreement (or nothing to disagree on) — tag the confirmation path so
+      // the downstream [QC-AUTO] event carries proof this was NOT a fresh
+      // description-rubric re-score.
+      result = {
+        ...result,
+        reason: `[producer-confirmed gate=${producerScorecard.qcGate ?? 'unknown'}${diffNote}] ${result.reason}`,
+      };
+
+      // Comms both-gates rule: for a funnel/web-development source card, a
+      // Page-QC FAIL (once B-U11 ships and posts page_qc_passed) blocks
+      // promotion even when the producer's own gate (FAB-QC) PASSED. Inert
+      // today — no producer posts page_qc_passed yet — additive + ready.
+      const deptSlug = task.department ? (canonicalDeptSlug(task.department) || task.department) : null;
+      if (
+        result.pass &&
+        deptSlug &&
+        QC_BOTH_GATES_DEPARTMENTS.has(deptSlug) &&
+        producerScorecard.pageQcPassed === false
+      ) {
+        result = {
+          ...result,
+          pass: false,
+          reason:
+            `${result.reason} — both-gates rule: Page-QC FAILED ` +
+            `(page_qc_score=${producerScorecard.pageQcScore ?? 'n/a'}); FAB-QC PASS alone is insufficient ` +
+            `for a ${deptSlug} card.`,
+          gaps: [...result.gaps, 'page_qc_failed'],
+        };
+      }
+    }
+    // ── End producer/judge agreement check + both-gates rule ──────────────────
 
     // ── PRD 2.10: Persist QC result to task_qc_results for grading module ─────
     // Fire-and-forget: wrap in try/catch so any DB error never breaks the scorer.
