@@ -37,6 +37,11 @@ import path from 'node:path';
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-u26-producer-scorecard-'));
 const TMP_DB = path.join(TMP_DIR, 'mission-control.test.db');
 process.env.DATABASE_PATH = TMP_DB;
+// Suppress ALL real owner Telegram sends. runQCOnReview() promotes fixture
+// tasks to done/blocked, and qc-scorer calls notifyOwner()/notifyOwnerDone(),
+// which execFile()s the real `openclaw message send`. Without this gate every
+// run of this file delivered live Telegram messages to a human's phone.
+process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
 
 // No real API keys in unit tests — any path that would need one either short
 // circuits via QC_FIXTURE_JSON_PATH or is intentionally exercised as no-criteria.

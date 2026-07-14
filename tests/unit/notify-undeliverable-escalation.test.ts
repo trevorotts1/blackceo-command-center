@@ -74,6 +74,14 @@ function captureSends(): { sends: Array<{ chatId: string; message: string }>; re
   const sends: Array<{ chatId: string; message: string }> = [];
   const cp = require('child_process') as typeof import('child_process');
   const realExecFile = cp.execFile;
+  // SAFETY-01: notify.ts now hard-refuses every send inside a test runner, so a
+  // forgotten gate can never spam a real phone again. These MSG-07 tests are the
+  // ONE legitimate exception: they must observe that a dispatch happens. We opt
+  // in ONLY here — the same call that installs the execFile double — and opt out
+  // again in restore(). Coupling the opt-in to the stub means a send can never be
+  // permitted unless execFile is already a test double, so this can never reach
+  // the real `openclaw` binary.
+  process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST = '1';
   // @ts-expect-error — test double
   cp.execFile = (_file: string, args: string[], _opts: unknown, cb?: (e: unknown) => void) => {
     const t = args.indexOf('--target');
@@ -87,6 +95,8 @@ function captureSends(): { sends: Array<{ chatId: string; message: string }>; re
     restore: () => {
       // @ts-expect-error — restore
       cp.execFile = realExecFile;
+      // Withdraw the opt-in the instant the double is removed (SAFETY-01).
+      delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
     },
   };
 }
