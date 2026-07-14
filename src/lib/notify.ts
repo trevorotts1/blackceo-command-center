@@ -33,6 +33,7 @@
  */
 
 import { execFile } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -108,7 +109,11 @@ export function isTestEnvironment(): boolean {
     process.env.NODE_TEST_CONTEXT ||
       process.env.VITEST ||
       process.env.JEST_WORKER_ID ||
-      process.env.NODE_ENV === 'test',
+      process.env.NODE_ENV === 'test' ||
+      // CI: a build agent has no business DMing a human, and CI runners set this
+      // universally (GitHub Actions, GitLab, CircleCI...). Cheap, and it closes
+      // any CI harness that invokes a code path outside the runners above.
+      process.env.CI,
   );
 }
 
@@ -178,6 +183,17 @@ function resolveWorkspaceBase(): string {
   const override =
     process.env.OPENCLAW_WORKSPACE_PATH || process.env.OPENCLAW_WORKSPACE_ROOT;
   if (override && override.trim()) return override.trim();
+
+  // ── SAFETY-02 (belt-and-braces to SAFETY-01): a TEST MAY NOT SEE THE LIVE BOX.
+  // Without this, an un-sandboxed test falls through to $HOME/.openclaw and reads
+  // the LIVE openclaw.json — which is how a test resolved the operator's REAL chat
+  // id in the first place. The smoke suites sandbox the DATABASE but never the
+  // config/workspace path. Closing it HERE means that even if the send gate were
+  // bypassed, there is no real chat id to send TO: the leak is removed structurally,
+  // not just gated. Tests that legitimately need a workspace set the explicit
+  // override handled above.
+  if (isTestEnvironment()) return path.join(os.tmpdir(), 'cc-notify-test-sandbox');
+
   const vps = '/data/.openclaw/workspace';
   if (safeIsDir(vps)) return vps;
   return path.join(os.homedir(), '.openclaw', 'workspace');
@@ -363,6 +379,20 @@ export function resolveOperatorChatId(): string | null {
  * Written as append-only JSONL beside the workspace, and mirrored to
  * console.ERROR (not warn) with a greppable tag. Never throws.
  */
+function appendNotificationLog(entry: Record<string, unknown>): void {
+  try {
+    const dir = resolveWorkspaceBase();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(
+      path.join(dir, 'notification-failures.jsonl'),
+      `${JSON.stringify(entry)}\n`,
+      'utf8',
+    );
+  } catch {
+    /* durable record is best-effort — the caller's console line already fired */
+  }
+}
+
 export function recordUndeliverable(kind: string, message: string): void {
   // ATTRIBUTION: an undeliverable alert is the LAST rung — the one a human reads
   // cold, days later, with no other context. It must say which box wrote it.
@@ -379,17 +409,111 @@ export function recordUndeliverable(kind: string, message: string): void {
   };
   // LOUD: error-level, distinctive tag. This is the string to alert on.
   console.error('[notify][UNDELIVERABLE] %s — %s', kind, message);
-  try {
-    const dir = resolveWorkspaceBase();
-    fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(
-      path.join(dir, 'notification-failures.jsonl'),
-      `${JSON.stringify(line)}\n`,
-      'utf8',
-    );
-  } catch {
-    /* durable record is best-effort — the console.error above already fired */
+  appendNotificationLog(line);
+}
+
+/**
+ * ── SAFETY-03: DEDUP + RATE LIMIT for the OPERATOR channel ───────────────────
+ *
+ * notifySystem()'s operator rung had NEITHER. It always runs, and every call
+ * execFile()s a real `openclaw message send`. So a retry loop, a sweep job, or a
+ * test suite could fire an unbounded number of real Telegram DMs at the operator's
+ * phone — which is exactly what happened. SAFETY-01 stops the TEST-driven flood;
+ * this stops the PRODUCTION-driven one, which no env gate can catch.
+ *
+ * Two independent brakes:
+ *   1. TTL DEDUP    — an identical (kind + message) sends at most once per 15m.
+ *                     Kills the "same alert 200×" retry-storm shape.
+ *   2. TOKEN BUCKET — at most 5 operator DMs per rolling minute. The overflow is
+ *                     collapsed and reported as an "N more suppressed" line on the
+ *                     next admitted send, so a flood degrades to a COUNT rather
+ *                     than a phone full of messages.
+ *
+ * Suppression is NEVER data loss: every suppressed alert is still appended to
+ * notification-failures.jsonl in full (recordSuppressed), so the detail survives
+ * on disk even though the DM does not go out.
+ */
+const DEDUP_TTL_MS = 15 * 60_000;
+const BUCKET_WINDOW_MS = 60_000;
+const BUCKET_CAPACITY = 5;
+
+const lastSentAt = new Map<string, number>();
+let windowStart = 0;
+let windowCount = 0;
+let windowSuppressed = 0;
+
+/** Drop dedup entries older than the TTL so the map cannot grow without bound. */
+function pruneDedup(now: number): void {
+  // forEach, not for..of: the repo's tsconfig target predates downlevelIteration,
+  // so iterating a Map directly does not compile. Deleting during forEach is safe.
+  lastSentAt.forEach((ts, fp) => {
+    if (now - ts >= DEDUP_TTL_MS) lastSentAt.delete(fp);
+  });
+}
+
+type Admission = { admit: boolean; reason?: string; suffix?: string };
+
+/** Decide whether ONE operator-bound alert may actually be sent right now. */
+function admitOperatorSend(kind: string, message: string): Admission {
+  const now = Date.now();
+
+  const fp = createHash('sha1').update(`${kind} ${message}`).digest('hex');
+  const last = lastSentAt.get(fp);
+  if (last !== undefined && now - last < DEDUP_TTL_MS) {
+    return { admit: false, reason: 'duplicate' };
   }
+
+  // Roll the rate-limit window, carrying forward whatever we swallowed inside it.
+  let suffix: string | undefined;
+  if (now - windowStart >= BUCKET_WINDOW_MS) {
+    if (windowSuppressed > 0) {
+      suffix =
+        `\n\n(+${windowSuppressed} more operator alert${windowSuppressed === 1 ? '' : 's'} ` +
+        `suppressed in the previous minute — full detail in notification-failures.jsonl)`;
+    }
+    windowStart = now;
+    windowCount = 0;
+    windowSuppressed = 0;
+  }
+
+  if (windowCount >= BUCKET_CAPACITY) {
+    windowSuppressed += 1;
+    return { admit: false, reason: 'rate_limited' };
+  }
+
+  windowCount += 1;
+  lastSentAt.set(fp, now);
+  pruneDedup(now);
+  return { admit: true, suffix };
+}
+
+/** A suppressed alert still leaves its FULL content on disk — quietly. */
+function recordSuppressed(kind: string, reason: string, message: string): void {
+  appendNotificationLog({
+    ts: new Date().toISOString(),
+    kind,
+    suppressed: reason,
+    message,
+  });
+}
+
+/**
+ * TEST-ONLY: reset the throttles above.
+ *
+ * They are module-level and deliberately long-lived — in production this module
+ * loads once per process and the brakes must persist for the whole run. But a test
+ * file re-importing the module does NOT reliably get a fresh instance, so without
+ * this reset one test's counters silently starve the next one's (a suppressed send
+ * is indistinguishable from a send that never happened). Call it when installing a
+ * send double.
+ */
+export function __resetNotifyThrottleForTests(): void {
+  lastSentAt.clear();
+  windowStart = 0;
+  windowCount = 0;
+  windowSuppressed = 0;
+  undeliverableSinceDigest = 0;
+  lastDigestAt = 0;
 }
 
 /**
@@ -449,6 +573,49 @@ export function notifyTelegram(opts: {
 }
 
 /**
+ * ── SAFETY-04: the UNDELIVERABLE escalation, de-fanged ───────────────────────
+ *
+ * KEEP the escalation (MSG-07 exists because ~501 alerts were once silently
+ * dropped — do NOT revert it), but KILL the verbatim 1:1 relay.
+ *
+ * The old code forwarded the FULL task payload to the operator, one DM per
+ * undeliverable notification. On the operator's own box `resolveOwnerChatId()` is
+ * structurally ALWAYS null (every source rejects operator ids, and his box has no
+ * client in `allowFrom`), so EVERY owner notification became an operator DM
+ * carrying the whole task body. That is the flood — and note it is a PRODUCTION
+ * flood, not just a test one: SAFETY-01 would not have stopped it.
+ *
+ * Now: the durable JSONL record is written UNCONDITIONALLY with the full content
+ * (nothing is ever lost), while the operator gets an AGGREGATED, rate-limited
+ * DIGEST carrying a COUNT and a POINTER — never the payload.
+ */
+const DIGEST_INTERVAL_MS = 15 * 60_000;
+let undeliverableSinceDigest = 0;
+let lastDigestAt = 0;
+
+function escalateUndeliverableOwner(reason: string, message: string): void {
+  // 1. DURABLE, UNCONDITIONAL, FULL CONTENT. Never rate-limited, never dropped.
+  //    This is the record whose absence made MSG-07 necessary; it stays as loud.
+  recordUndeliverable('owner_undeliverable', message);
+
+  // 2. The operator digest — aggregated, and itself rate-limited by notifySystem.
+  undeliverableSinceDigest += 1;
+  const now = Date.now();
+  if (now - lastDigestAt < DIGEST_INTERVAL_MS) return; // fold into the next digest
+
+  const n = undeliverableSinceDigest;
+  lastDigestAt = now;
+  undeliverableSinceDigest = 0;
+
+  // NOTE the deliberate absence of `message`. Forwarding it IS the bug.
+  notifySystem(
+    `${n} owner notification${n === 1 ? '' : 's'} undeliverable (${reason}) — ` +
+      `see notification-failures.jsonl for full detail. No client message was sent.`,
+    { agent: 'notify', action: 'escalate' },
+  );
+}
+
+/**
  * Convenience: resolve the owner chat ID then send.
  *
  * Logs a warning (does NOT throw) when chat ID is unavailable.
@@ -482,21 +649,23 @@ export function notifyOwner(message: string): boolean {
     // which is operator-only by construction (validOperatorChatId) and so can
     // never turn this into client spam. Fixing it HERE — at the source — repairs
     // every automated caller at once, rather than at eight call sites.
-    notifySystem(`UNDELIVERABLE owner notification (no owner chat resolvable): ${message}`, {
-      agent: 'notify',
-      action: 'escalate',
-    });
+    //
+    // SAFETY-04: aggregated DIGEST, not the verbatim payload (see above).
+    escalateUndeliverableOwner('no owner chat resolvable', message);
     // Still `false`: callers that DO check (e.g. interview/send-link) must keep
     // reporting "owner not reachable" to the user. The escalation is additive.
     return false;
   }
   const dispatched = notifyTelegram({ chatId, message });
-  if (!dispatched) {
-    // Suppressed (test/CI gate) or not dispatched — record it rather than lose it.
-    notifySystem(`UNDELIVERABLE owner notification (gateway send not dispatched): ${message}`, {
-      agent: 'notify',
-      action: 'escalate',
-    });
+  if (!dispatched && !ownerSendsSuppressed()) {
+    // A GENUINE non-dispatch — record it rather than lose it (SAFETY-04 digest).
+    //
+    // The `!ownerSendsSuppressed()` guard matters: with SAFETY-01, notifyTelegram
+    // returns false for EVERY send inside a test runner. Escalating on that would
+    // turn a DELIBERATE suppression into a false "undeliverable" alarm on every
+    // test that notifies an owner — crying wolf in the very ledger a human is
+    // meant to trust. A mute is not a delivery failure.
+    escalateUndeliverableOwner('gateway send not dispatched', message);
   }
   return dispatched;
 }
@@ -533,8 +702,24 @@ export function notifySystem(
   let dispatched = false;
 
   // ── RUNG 1: Rescue Rangers escalation webhook (when configured). ───────────
+  //
+  // SAFETY-06: gated on isTestEnvironment() too. This rung is an outbound HTTP POST
+  // to a LIVE escalation endpoint, and it was the one send path with NO gate of any
+  // kind — SAFETY-01 guards notifyTelegram(), not fetch(). If RESCUE_RANGERS_WEBHOOK_URL
+  // is present in the environment (a real box, a .env, an inherited shell), a plain
+  // `npm run test:unit` POSTs real escalations to it. That is exactly why ~14 test
+  // files hand-`delete` this env var at module scope: they are each patching a hole
+  // the module itself left open. Closing it HERE makes those 14 deletions redundant
+  // rather than load-bearing — no test can page the on-call channel by omission.
+  //
+  // ESCAPE HATCH (same contract as RUNG 2 / notifyTelegram, MSG-01): a test that
+  // deliberately exercises this rung — and has already replaced globalThis.fetch
+  // with a double so no packet can leave the process — opts back in with
+  // OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1. Default-off still protects the ~14 files
+  // that only `delete` the env var; only an explicit opt-in (which by convention
+  // is coupled to installing the fetch double) can fire the POST in a test run.
   const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
-  if (webhookUrl) {
+  if (webhookUrl && (!isTestEnvironment() || process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST === '1')) {
     // ATTRIBUTION (FIX-5): the body used to carry ONLY {action, agent, message}.
     // No client. No box. So every escalation from every box in the fleet arrived
     // anonymous: the operator could not tell WHOSE box was screaming (during a
@@ -586,9 +771,23 @@ export function notifySystem(
   // known operator id and NEVER a client's — a SYSTEM alert cannot become client
   // spam even in principle. Gateway-only (`openclaw message send`), never a
   // direct call to api.telegram.org.
+  //
+  // SAFETY-03: this rung now passes through DEDUP + a TOKEN BUCKET. It previously
+  // had neither, so a retry loop or a sweep job could fire an unbounded number of
+  // real DMs at the operator's phone.
   const operatorChatId = resolveOperatorChatId();
   if (operatorChatId) {
-    if (notifyTelegram({ chatId: operatorChatId, message })) dispatched = true;
+    const kind = meta?.action ?? 'system_alert';
+    const verdict = admitOperatorSend(kind, message);
+    if (verdict.admit) {
+      const text = verdict.suffix ? `${message}${verdict.suffix}` : message;
+      if (notifyTelegram({ chatId: operatorChatId, message: text })) dispatched = true;
+    } else {
+      // Deliberately COLLAPSED — not undeliverable. The full content still hits
+      // disk, so throttling can never become data loss.
+      recordSuppressed('system_alert', verdict.reason ?? 'suppressed', message);
+      dispatched = true;
+    }
   }
 
   // ── RUNG 3: the durable record. ALWAYS, when nothing above got through. ────

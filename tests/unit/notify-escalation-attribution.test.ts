@@ -57,7 +57,15 @@ interface EscalationBody {
   message?: string;
 }
 
-/** Capture every escalation POST the module fires, without leaving the process. */
+/**
+ * Capture every escalation POST the module fires, without leaving the process.
+ *
+ * The opt-in (OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1) is coupled to installing the
+ * fetch double — mirroring the SAFETY-01 pattern in notify-hardening's
+ * captureSends: the webhook rung (SAFETY-06) is default-closed in a test run and
+ * can ONLY fire once globalThis.fetch is already a test double here, so no packet
+ * can ever leave the process. restore() removes both together.
+ */
 function captureWebhook(): { posts: EscalationBody[]; restore: () => void } {
   const posts: EscalationBody[] = [];
   const realFetch = globalThis.fetch;
@@ -65,10 +73,12 @@ function captureWebhook(): { posts: EscalationBody[]; restore: () => void } {
     posts.push(JSON.parse(String(init?.body ?? '{}')) as EscalationBody);
     return { ok: true } as Response;
   }) as typeof globalThis.fetch;
+  process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST = '1';
   return {
     posts,
     restore: () => {
       globalThis.fetch = realFetch;
+      delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
     },
   };
 }
