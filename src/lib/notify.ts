@@ -36,6 +36,7 @@ import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { resolveBoxIdentity } from '@/lib/box-identity';
 
 /**
  * Owner-send timeout (MSG-01). Bounds the detached child so a truly hung
@@ -363,10 +364,17 @@ export function resolveOperatorChatId(): string | null {
  * console.ERROR (not warn) with a greppable tag. Never throws.
  */
 export function recordUndeliverable(kind: string, message: string): void {
+  // ATTRIBUTION: an undeliverable alert is the LAST rung — the one a human reads
+  // cold, days later, with no other context. It must say which box wrote it.
+  // Identity is metadata only and never gates the write (fail-OPEN).
+  const identity = resolveBoxIdentity();
   const line = {
     ts: new Date().toISOString(),
     kind,
     message,
+    clientName: identity.clientName,
+    boxName: identity.boxName,
+    boxId: identity.boxId,
     // Deliberately NO chat ids — this file is diagnostic, not a contact list.
   };
   // LOUD: error-level, distinctive tag. This is the string to alert on.
@@ -527,13 +535,40 @@ export function notifySystem(
   // ── RUNG 1: Rescue Rangers escalation webhook (when configured). ───────────
   const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
   if (webhookUrl) {
+    // ATTRIBUTION (FIX-5): the body used to carry ONLY {action, agent, message}.
+    // No client. No box. So every escalation from every box in the fleet arrived
+    // anonymous: the operator could not tell WHOSE box was screaming (during a
+    // live flood the source was found only by tracing the webhook's x-real-ip),
+    // and the receiver had no key to enforce the documented "25 exchanges per
+    // client per day" cap — so ALL boxes shared ONE counter and a single runaway
+    // box could eat the whole fleet's escalation budget.
+    //
+    // The identity fields below are the SAME ones every box's AGENTS.md
+    // escalation block already sends (clientName / agentName / boxName / boxType
+    // — see fleet-heartbeat/scripts/propagate-rescue-webhook.sh); the Command
+    // Center was simply the one caller omitting them. `boxId` is the derived
+    // stable `<client>:<box>` slug the receiver should key its per-client cap and
+    // dedup on. Every value is resolved from env / the box's own config at
+    // runtime — no client is named in this repo.
+    //
+    // FAIL-OPEN: resolveBoxIdentity() never throws and degrades to
+    // `unknown-client` / `unknown-box`. Identity is metadata on an ALARM and can
+    // never be a reason NOT to escalate.
+    const identity = resolveBoxIdentity();
     // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
     void fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action: meta?.action ?? 'escalate',
+        // `agent` is kept for backward compatibility with the existing receiver;
+        // `agentName` is the canonical field name in the fleet payload schema.
         agent: meta?.agent ?? 'command-center',
+        agentName: meta?.agent ?? 'command-center',
+        clientName: identity.clientName,
+        boxName: identity.boxName,
+        boxType: identity.boxType,
+        boxId: identity.boxId,
         message,
       }),
     }).catch((err) => {
