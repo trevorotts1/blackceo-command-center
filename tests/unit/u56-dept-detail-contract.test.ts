@@ -243,7 +243,7 @@ const LEGACY_DEMO_FINGERPRINTS: Array<{ department_id: string; title: string }> 
  * Open a BRAND NEW, throwaway SQLite file, apply the base schema (mirroring
  * `getDb()`'s own boot order), and insert the given rows BEFORE any
  * migration has run — simulating a legacy box that seeded these rows before
- * migration 102 existed. Returns the raw handle; caller closes it.
+ * migration 103 existed. Returns the raw handle; caller closes it.
  */
 function openLegacyDbWithDemoRowsPreSeeded(): Database.Database {
   const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bc-u56-migration-')), 'legacy.db');
@@ -260,7 +260,7 @@ function openLegacyDbWithDemoRowsPreSeeded(): Database.Database {
   return db;
 }
 
-test('[U56] a legacy DB with the 5 pre-existing demo rows is purged by a normal boot (runMigrations reaches migration 102) — operator rows untouched', () => {
+test('[U56] a legacy DB with the 5 pre-existing demo rows is purged by a normal boot (runMigrations reaches migration 103) — operator rows untouched', () => {
   const db = openLegacyDbWithDemoRowsPreSeeded();
   try {
     // An operator-authored row sharing a department_id but NOT the exact
@@ -275,7 +275,7 @@ test('[U56] a legacy DB with the 5 pre-existing demo rows is purged by a normal 
     assert.equal(before.count, LEGACY_DEMO_FINGERPRINTS.length + 1, 'sanity: all 6 fixture rows present pre-migration');
 
     // Drive the REAL production boot path — every migration in numeric
-    // order, including 102 — exactly what getDb() does on a real box.
+    // order, including 103 (the purge) — exactly what getDb() does on a real box.
     runMigrations(db);
 
     for (const fp of LEGACY_DEMO_FINGERPRINTS) {
@@ -289,7 +289,7 @@ test('[U56] a legacy DB with the 5 pre-existing demo rows is purged by a normal 
     assert.ok(survivor, 'an operator-authored row sharing a department_id but NOT the exact seeded title must survive');
 
     // Idempotent: running migrations again (a normal second boot) is a no-op
-    // on row count — migration 102 is already recorded applied.
+    // on row count — migration 103 is already recorded applied.
     const before2 = db.prepare('SELECT COUNT(*) as count FROM recommendations').get() as { count: number };
     runMigrations(db);
     const after2 = db.prepare('SELECT COUNT(*) as count FROM recommendations').get() as { count: number };
@@ -299,22 +299,22 @@ test('[U56] a legacy DB with the 5 pre-existing demo rows is purged by a normal 
   }
 });
 
-test('[U56] migration 102 is DEFERRED under OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY=1 (destructive DELETE, INGEST-07 convention) and applies on the next controlled boot', () => {
+test('[U56] migration 103 is DEFERRED under OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY=1 (destructive DELETE, INGEST-07 convention) and applies on the next controlled boot', () => {
   const db = openLegacyDbWithDemoRowsPreSeeded();
   const prevFlag = process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
   try {
     process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY = '1';
     runMigrations(db);
 
-    // Deferred: the demo rows must still be present (migration 102 was
+    // Deferred: the demo rows must still be present (migration 103 was
     // skipped, not recorded as applied) — request-time self-heal must never
     // race a destructive DELETE against live ingest.
     const stillPresent = db
       .prepare('SELECT COUNT(*) as count FROM recommendations WHERE department_id = ? AND title = ?')
       .get(LEGACY_DEMO_FINGERPRINTS[0].department_id, LEGACY_DEMO_FINGERPRINTS[0].title) as { count: number };
-    assert.equal(stillPresent.count, 1, 'migration 102 must be DEFERRED (not applied) while additive-only self-heal is set');
+    assert.equal(stillPresent.count, 1, 'migration 103 must be DEFERRED (not applied) while additive-only self-heal is set');
 
-    // Next controlled boot (flag unset) — migration 102 now runs and purges.
+    // Next controlled boot (flag unset) — migration 103 now runs and purges.
     delete process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
     runMigrations(db);
     const afterControlledBoot = db
