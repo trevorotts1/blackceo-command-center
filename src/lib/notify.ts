@@ -38,11 +38,31 @@ import os from 'os';
 import path from 'path';
 
 /**
- * Owner-send timeout (MSG-01). Kept short so a hung gateway can never pin a
- * send for the old 10s window; the send is fire-and-forget so this only bounds
- * the detached child, never the request/event loop.
+ * Owner-send timeout (MSG-01). Bounds the detached child so a truly hung
+ * gateway can never pin it forever; the send is fire-and-forget, so this
+ * never blocks the request/event loop regardless of its value.
+ *
+ * FLEET-WIDE BUG (fixed): this was previously 5_000ms. A real
+ * `openclaw message send` measured ~6.2s end to end (6.19s / 6.38s, both
+ * exit 0), so the old 5s ceiling SIGTERM-killed EVERY owner send about 1.2s
+ * before completion — every client Command Center silently failed to notify
+ * its owner. Failure signature: "Command failed: openclaw message send" with
+ * EMPTY stderr (a timeout kill, not ENOENT). Raised to 30s: comfortably
+ * clears the observed ~6.2s send while still bounding a genuinely hung CLI.
+ *
+ * Overridable via OWNER_SEND_TIMEOUT_MS (ms) for boxes with a slower gateway
+ * round-trip, consistent with the other env-tunable knobs in this module
+ * (OPENCLAW_OWNER_CHAT_ID, CC_OPERATOR_CHAT_ID, etc). Falls back to the 30s
+ * default on anything non-numeric or <= 0.
  */
-const OWNER_SEND_TIMEOUT_MS = 5_000;
+const DEFAULT_OWNER_SEND_TIMEOUT_MS = 30_000;
+function resolveOwnerSendTimeoutMs(): number {
+  const raw = process.env.OWNER_SEND_TIMEOUT_MS;
+  if (!raw) return DEFAULT_OWNER_SEND_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OWNER_SEND_TIMEOUT_MS;
+}
+const OWNER_SEND_TIMEOUT_MS = resolveOwnerSendTimeoutMs();
 
 /**
  * ── SAFETY-01: A TEST MUST NEVER REACH A HUMAN'S PHONE ───────────────────────
