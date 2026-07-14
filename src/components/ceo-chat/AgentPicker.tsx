@@ -8,10 +8,17 @@
  * switch which agent the chat talks to (U65 gates live agent-switch on the
  * U64 S2 gateway spike) — disabled trigger, honest tooltip "Direct agent chat
  * is coming".
+ *
+ * `GET /api/agents` now returns the enveloped `{ agents: [...] }` shape
+ * (U56, E.2 / JM-U52) — resolution runs through `resolveMasterAgent()`
+ * (pure, `unwrapAgents()`-backed — never a bare-array assumption) so
+ * resolution keeps working post-envelope; `onResolved` always fires (with
+ * `null` when the list is empty), matching pre-U56 behavior.
  */
 import { useEffect, useState } from 'react';
 import { Users } from 'lucide-react';
 import ControlPill from '@/components/ui/ControlPill';
+import { resolveMasterAgent } from './resolveMasterAgent';
 import type { AgentOption } from './types';
 
 interface AgentPickerProps {
@@ -27,9 +34,8 @@ export default function AgentPicker({ onResolved }: AgentPickerProps) {
       try {
         const res = await fetch('/api/agents', { cache: 'no-store' });
         if (!res.ok) return;
-        const rows: AgentOption[] = await res.json();
-        if (cancelled || !Array.isArray(rows)) return;
-        const master = rows.find((a) => a.is_master) || rows[0] || null;
+        const master = resolveMasterAgent(await res.json());
+        if (cancelled) return;
         setAgent(master);
         onResolved(master);
       } catch {
