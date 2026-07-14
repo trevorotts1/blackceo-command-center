@@ -56,7 +56,10 @@ export function MonthlyActivityChart() {
     const totalDone = departments.reduce((s, d) => s + (d.taskCounts?.done || 0), 0);
     const totalInProgress = departments.reduce((s, d) => s + (d.taskCounts?.in_progress || 0), 0);
     const totalAll = totalDone + totalInProgress;
-    const activeCount = agents.filter((a) => a.status === 'active' || a.status === 'working').length;
+    // Agent status enum is standby/working/busy/degraded/offline — 'active'
+    // never matches a real row (same dead-code class as ActiveAgentsStrip.tsx,
+    // fixed U55e). Count 'working' only.
+    const activeCount = agents.filter((a) => a.status === 'working').length;
     const currentMonth = new Date().getMonth();
 
     // Distribute real data across past months with realistic variation

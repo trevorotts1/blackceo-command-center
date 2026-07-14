@@ -173,6 +173,23 @@ export interface LssCompanyMetrics {
   tokensPerTaskDetail: string;
 }
 
+/**
+ * One company-level aggregated input figure (U55 / J.0.2). Task-count-weighted
+ * average of the departments that have a scored value for this input — NOT a
+ * re-derivation of the company score, just an honest roll-up for the "What
+ * drives this grade" breakdown. score: null when no department has data for
+ * this input yet (never a substituted number — same discipline as InputScore).
+ */
+export interface CompanyInputBreakdownEntry {
+  key: GradeInputKey;
+  label: string;
+  /** Nominal weight this input carries in each department's own formula. */
+  weight: number;
+  score: number | null;
+  sampleSize: number;
+  detail: string;
+}
+
 export interface CompanyHealth {
   /** 0-100 task-count-weighted avg; null if no dept has sufficient data */
   score: number | null;
@@ -183,6 +200,26 @@ export interface CompanyHealth {
   generatedAt: string;
   /** PRD 2.14 LSS metrics — optional so existing callers stay backward-compatible */
   lss?: LssCompanyMetrics;
+
+  // ---- U55 additions: window echo, windowed headline stats, company-level
+  // per-input breakdown. All computed over the SAME `windowDays` as `grade`
+  // above — this is what lets the hero card show one set of numbers that
+  // never disagrees with itself (J.0.1 / J.0.2). Additive only; every field
+  // above this comment is unchanged.
+  /** Rolling window size actually used for this response (QS/config/default). */
+  windowDays: number;
+  /** ISO start of the rolling window (now - windowDays). */
+  windowStart: string;
+  /** ISO end of the rolling window (now, same instant as `generatedAt`). */
+  windowEnd: string;
+  /** Tasks created / completed within the window, across all real departments. */
+  windowedTaskCounts: { created: number; completed: number };
+  /** completed/created for the window; null when zero tasks were created (never 0%). */
+  windowedCompletionRate: number | null;
+  /** Agents with status='working' right now (standby/working/busy/degraded/offline enum). */
+  activeAgentCount: number;
+  /** The four PRD inputs aggregated to company level, for the grade breakdown. */
+  companyInputBreakdown: Record<GradeInputKey, CompanyInputBreakdownEntry>;
 }
 
 // ---------------------------------------------------------------------------
@@ -665,6 +702,172 @@ export function computeDepartmentGrade(
 }
 
 // ---------------------------------------------------------------------------
+// U55 additions: windowed headline stats + company-level input breakdown
+// ---------------------------------------------------------------------------
+
+const INPUT_LABELS: Record<GradeInputKey, string> = {
+  throughput: 'Throughput',
+  qcPassRate: 'QC Pass Rate',
+  sopCoverage: 'SOP Coverage',
+  kpiAttainment: 'KPI Attainment',
+};
+
+/**
+ * Company-wide task counts created / completed WITHIN the window — same
+ * self-contained-window shape as `computeThroughput`'s per-department query
+ * (the `completed` sub-count is a subset of the `created` row set, so it can
+ * never exceed it; no artificial cap needed).
+ */
+function getCompanyWindowedTaskCounts(
+  db: Database.Database,
+  windowDays: number,
+  workspaceIds: string[],
+): { created: number; completed: number } {
+  if (workspaceIds.length === 0) return { created: 0, completed: 0 };
+  const placeholders = workspaceIds.map(() => '?').join(',');
+  const row = db.prepare(
+    `SELECT
+       COUNT(*) AS created,
+       SUM(CASE WHEN status = 'done'
+                 AND julianday('now') - julianday(COALESCE(completed_at, updated_at)) <= ?
+                THEN 1 ELSE 0 END) AS completed
+     FROM tasks
+     WHERE workspace_id IN (${placeholders})
+       AND julianday('now') - julianday(created_at) <= ?`
+  ).get(windowDays, ...workspaceIds, windowDays) as
+    | { created: number; completed: number }
+    | undefined;
+
+  return { created: row?.created ?? 0, completed: row?.completed ?? 0 };
+}
+
+/** Agents currently `status = 'working'` (the only "actively working" state). */
+function getActiveAgentCount(db: Database.Database): number {
+  const row = db.prepare(`SELECT COUNT(*) AS cnt FROM agents WHERE status = 'working'`).get() as
+    | { cnt: number }
+    | undefined;
+  return row?.cnt ?? 0;
+}
+
+/**
+ * Aggregates each of the four PRD inputs to company level: a task-count-weighted
+ * average across the departments that have a scored value for that input.
+ * score stays null (never a substituted number) when no department has data.
+ */
+function computeCompanyInputBreakdown(
+  departments: DepartmentGrade[],
+  weights: Record<GradeInputKey, number>,
+): Record<GradeInputKey, CompanyInputBreakdownEntry> {
+  const keys = Object.keys(INPUT_LABELS) as GradeInputKey[];
+  const result = {} as Record<GradeInputKey, CompanyInputBreakdownEntry>;
+
+  for (const key of keys) {
+    const label = INPUT_LABELS[key];
+    const withData = departments.filter((d) => d.inputs[key].score !== null);
+
+    if (withData.length === 0) {
+      result[key] = {
+        key,
+        label,
+        weight: weights[key],
+        score: null,
+        sampleSize: 0,
+        detail: `Insufficient data — no department has a scored ${label} figure this window`,
+      };
+      continue;
+    }
+
+    let totalWeight = 0;
+    let weightedSum = 0;
+    let sampleSize = 0;
+    for (const d of withData) {
+      const inputScore = d.inputs[key];
+      const w = Math.max(inputScore.sampleSize, 1);
+      totalWeight += w;
+      weightedSum += inputScore.score! * w;
+      sampleSize += inputScore.sampleSize;
+    }
+    const score = Math.round((weightedSum / totalWeight) * 100) / 100;
+    const renormNote =
+      withData.length < departments.length
+        ? ` (renormalized across ${withData.length} of ${departments.length} departments with data for this input)`
+        : '';
+
+    result[key] = {
+      key,
+      label,
+      weight: weights[key],
+      score,
+      sampleSize,
+      detail: `${score}% company-wide${renormNote}`,
+    };
+  }
+
+  return result;
+}
+
+export interface DepartmentTaskCounts {
+  workspaceId: string;
+  slug: string;
+  name: string;
+  total: number;
+  done: number;
+  in_progress: number;
+  blocked: number;
+}
+
+/**
+ * All-time (not windowed) task counts per real department, grouped by status.
+ * NOT part of the grading formula (grading uses the four windowed PRD inputs
+ * only) — this feeds the hero's "All time" secondary stat and the shared
+ * Needs Attention classification (`src/lib/ceo-board/attention.ts`), both of
+ * which are deliberately all-time so a department with a long bad history
+ * still surfaces even when its recent window looks fine.
+ */
+export function getRealDepartmentTaskCounts(db: Database.Database): DepartmentTaskCounts[] {
+  const allWorkspaces = db.prepare(
+    `SELECT id, slug, name FROM workspaces ORDER BY sort_order ASC, name ASC`
+  ).all() as WorkspaceRow[];
+  const realWorkspaces = allWorkspaces.filter((ws) => isRealDepartment(ws.slug));
+  if (realWorkspaces.length === 0) return [];
+
+  const placeholders = realWorkspaces.map(() => '?').join(',');
+  const rows = db.prepare(
+    `SELECT workspace_id, status, COUNT(*) AS cnt
+     FROM tasks
+     WHERE workspace_id IN (${placeholders})
+     GROUP BY workspace_id, status`
+  ).all(...realWorkspaces.map((ws) => ws.id)) as Array<{
+    workspace_id: string;
+    status: string;
+    cnt: number;
+  }>;
+
+  const byWorkspace = new Map<string, { total: number; done: number; in_progress: number; blocked: number }>();
+  for (const ws of realWorkspaces) {
+    byWorkspace.set(ws.id, { total: 0, done: 0, in_progress: 0, blocked: 0 });
+  }
+  for (const row of rows) {
+    const bucket = byWorkspace.get(row.workspace_id);
+    if (!bucket) continue;
+    bucket.total += row.cnt;
+    if (row.status === 'done') bucket.done += row.cnt;
+    if (row.status === 'in_progress') bucket.in_progress += row.cnt;
+    if (row.status === 'blocked') bucket.blocked += row.cnt;
+  }
+
+  return realWorkspaces.map((ws) => {
+    const bucket = byWorkspace.get(ws.id)!;
+    return {
+      workspaceId: ws.id,
+      slug: ws.slug,
+      name: ws.name,
+      ...bucket,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Company health roll-up
 // ---------------------------------------------------------------------------
 
@@ -726,13 +929,37 @@ export function computeCompanyHealth(
   // PRD 2.14: Company-level LSS aggregate
   const companyLss = computeCompanyLss(db, departments, realWorkspaces, windowDays);
 
+  // U55: window echo + windowed headline stats + company-level input breakdown —
+  // all computed over the SAME windowDays as the grade above, so the hero card
+  // can render exclusively from this one response (J.0.1 / J.0.2).
+  const generatedAt = new Date().toISOString();
+  const windowStart = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const realWorkspaceIds = realWorkspaces.map((ws) => ws.id);
+  const windowedTaskCounts = getCompanyWindowedTaskCounts(db, windowDays, realWorkspaceIds);
+  const windowedCompletionRate =
+    windowedTaskCounts.created > 0
+      ? Math.round((windowedTaskCounts.completed / windowedTaskCounts.created) * 100)
+      : null;
+  const activeAgentCount = getActiveAgentCount(db);
+  const companyInputBreakdown = computeCompanyInputBreakdown(
+    departments,
+    weights || DEFAULT_INPUT_WEIGHTS,
+  );
+
   return {
     score: companyScore,
     grade: companyScore !== null ? scoreToGrade(companyScore) : null,
     departments,
     worstTrending,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     lss: companyLss,
+    windowDays,
+    windowStart,
+    windowEnd: generatedAt,
+    windowedTaskCounts,
+    windowedCompletionRate,
+    activeAgentCount,
+    companyInputBreakdown,
   };
 }
 

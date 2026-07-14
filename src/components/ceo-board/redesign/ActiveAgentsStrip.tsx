@@ -81,9 +81,13 @@ export function ActiveAgentsStrip() {
         if (agentsRes.ok) agentsData = await agentsRes.json();
         if (tasksRes.ok) tasksData = await tasksRes.json();
 
-        // Map active agents to their current task
+        // Map active agents to their current task.
+        // Agent status enum is standby/working/busy/degraded/offline (DB CHECK
+        // constraint, migrations.ts) — 'active' never matches a real row, so
+        // counting it was dead code that silently overstated nothing but
+        // misled readers of this filter (U55e). Count 'working' only.
         const enriched: AgentWithTask[] = agentsData
-          .filter((a) => a.status === 'active' || a.status === 'working')
+          .filter((a) => a.status === 'working')
           .map((agent) => {
             const task = tasksData.find(
               (t) =>

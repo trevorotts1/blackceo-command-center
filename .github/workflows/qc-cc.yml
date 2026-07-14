@@ -131,6 +131,43 @@ jobs:
       - name: Assert CHANGELOG.md has no uncorrected self-assessed QC entries
         run: bash scripts/check-qc-independence.sh
 
+  # ── U55: CEO-hero contract + real render-level proof ───────────────────────
+  # `npm run test:unit` (the Node built-in --test glob over tests/unit/*.test.ts)
+  # was not previously wired into any CI job — only the dozen suites explicitly
+  # listed in vitest.config.ts ran automatically. This job closes that gap for
+  # the U55/U51 CEO-hero unit specifically: the pure-function single-source
+  # contract test (u55-company-health-client.test.ts), the acceptance-(3)
+  # automated dead-agent-status-code scan (u55-agent-status-dead-code.test.ts),
+  # the windowed-stats fixture-DB suite, the attention-classification predicate
+  # suite (all via test:unit), and the REAL jsdom render-level proof for
+  # CompanyHeroCard + NeedsAttentionSection (test:component) — proving U55
+  # acceptance (f)/(4) actually runs in CI, not just locally.
+  u55-ceo-hero-contract-tests:
+    name: U55 CEO-hero contract + render-level tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests/unit/*.test.ts (Node built-in runner)
+        run: npm run test:unit
+        env:
+          NODE_ENV: test
+
+      - name: Run real render-level proof (jsdom + @testing-library/react)
+        run: npm run test:component
+        env:
+          NODE_ENV: test
+
   # ── B.1 deep-health truth-table suite ────────────────────────────────────
   # Ports every applicable row of docs/B1-truth-table.md into vitest.
   # A wrong verdict on any row blocks merge (per the severity tier table).

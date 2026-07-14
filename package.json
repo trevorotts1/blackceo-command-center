@@ -14,6 +14,7 @@
     "test:deep-health": "vitest run tests/unit/deep-health.test.ts",
     "test:skill6-board-projection": "vitest run tests/unit/skill6-board-projection.test.ts",
     "test:vitest": "vitest run",
+    "test:component": "vitest run --config vitest.component.config.ts",
     "test:prove-zhe-web": "node --import tsx --test tests/e2e/prove-zhe-web.e2e.mjs",
     "test:401-e2e": "node tests/e2e/prove-401-telemetry.e2e.mjs",
     "test:e2e:interview-lock": "playwright test --config=playwright.interview-lock.config.ts",
@@ -63,6 +64,8 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/better-sqlite3": "^7.6.12",
     "@types/css-tree": "^2.3.11",
     "@types/node": "^20.17.12",
@@ -74,6 +77,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^8.57.0",
     "eslint-config-next": "14.2.21",
+    "jsdom": "^25.0.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.19.2",
