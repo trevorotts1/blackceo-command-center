@@ -37,6 +37,75 @@ export interface ProbeFn {
 }
 
 /**
+ * Criticality tier (U46 — "make 'down' mean down").
+ *
+ * `critical` components gate the whole-app `overall` status to `offline`
+ * when unhealthy; everything else is `auxiliary` and can only ever push
+ * `overall` down to `degraded`, never to `offline`.
+ */
+export type ProbeTier = 'critical' | 'auxiliary';
+
+/**
+ * The critical set per U46's binary spec: database + the OpenClaw gateway.
+ * Everything else (telegram, memory, jobs, disk, agents, cli, the two
+ * Cloudflare probes, unauthorized_401, and every provider_* row) is
+ * auxiliary. Kept as a readonly list (not a Set) so it stays trivially
+ * diffable in review.
+ */
+export const CRITICAL_COMPONENTS: readonly string[] = [
+  'database',
+  'openclaw_gateway',
+];
+
+/** Tier lookup used by both the fresh-probe and cached-read code paths. */
+export function tierFor(component: string): ProbeTier {
+  return CRITICAL_COMPONENTS.includes(component) ? 'critical' : 'auxiliary';
+}
+
+/** A probe result once it has been tagged with its criticality tier. */
+export interface TieredProbeResult extends ProbeResult {
+  tier: ProbeTier;
+}
+
+/** Minimal shape `computeOverallTiered` needs — component id, tier, status. */
+export interface TieredStatusInput {
+  component: string;
+  tier: ProbeTier;
+  status: SystemStatus;
+}
+
+/**
+ * Criticality-tiered aggregation (U46).
+ *
+ * `offline` only if a critical component is `offline`.
+ * `degraded` if any critical component is unhealthy-but-not-offline
+ * (degraded/unknown/busy/working — a critical component that isn't a clean
+ * `live` must never be silently reported as fully healthy), OR criticals are
+ * all `live` but at least one auxiliary component is `offline`/`degraded`/
+ * `unknown`.
+ * `live` otherwise.
+ *
+ * Both the fresh-probe path (`runAllProbes`) and the cached-read path
+ * (`readCachedStatus`) in system-status.ts call this SAME function so their
+ * `overall` values are identical for identical inputs by construction.
+ */
+export function computeOverallTiered(components: TieredStatusInput[]): SystemStatus {
+  const critical = components.filter((c) => c.tier === 'critical').map((c) => c.status);
+  const auxiliary = components.filter((c) => c.tier === 'auxiliary').map((c) => c.status);
+
+  if (critical.includes('offline')) return 'offline';
+
+  const criticalUnhealthy = critical.some((s) => s !== 'live');
+  const auxiliaryUnhealthy = auxiliary.some(
+    (s) => s === 'offline' || s === 'degraded' || s === 'unknown'
+  );
+
+  if (criticalUnhealthy || auxiliaryUnhealthy) return 'degraded';
+
+  return 'live';
+}
+
+/**
  * Wrap a probe with a hard timeout. Probes must never block the orchestrator
  * for more than ~3 seconds (PRD 3.12 calls out non-blocking probes).
  */
