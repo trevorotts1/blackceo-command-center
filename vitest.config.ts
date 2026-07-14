@@ -71,6 +71,12 @@ export default defineConfig({
       // gateway_down path) against a fake OpenClawClient EventEmitter, mocked
       // via vi.doMock('@/lib/openclaw/client', ...) — vitest-only, same reason.
       'tests/unit/ceo-chat-gateway-transport.test.ts',
+      // U27 / B-U13 — Skill-6 board projection drift (checkSkill6BoardProjection()).
+      // Same vi.doMock('@/lib/db', ...) + vi.resetModules() re-import pattern as
+      // the anthology_board_projection suite in deep-health.test.ts, kept in its
+      // own file to avoid that file's documented shared-mock-registry gotcha —
+      // vitest-only, never the tsx --test glob (see package.json).
+      'tests/unit/skill6-board-projection.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

@@ -17,6 +17,7 @@ import { debug } from '@/lib/debug';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import { resolveDepartment } from '@/lib/routing/resolve-department';
 import { AnthologyBoardDriftBanner } from '@/components/anthology/BoardDriftBanner';
+import { Skill6BoardDriftBanner } from '@/components/skill6/BoardDriftBanner';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -328,6 +329,13 @@ export default function WorkspacePage() {
       {/* A7 — board projection drift banner (Anthology board only). Read-only,
           fail-soft; renders nothing unless the ledger shows confirmed drift. */}
       {workspace.slug === 'anthology' && <AnthologyBoardDriftBanner />}
+
+      {/* U27 / B-U13 — Skill-6 board projection drift banner (Web Development
+          board — the one department slug Skill-6 funnel/website/survey cards
+          actually resolve to today; see cc_board.py's department_slug routing
+          comment). Read-only, fail-soft; renders nothing unless a run's board
+          card is confirmed never-landed or orphaned. */}
+      {workspace.slug === 'web-development' && <Skill6BoardDriftBanner />}
 
       {/* Department head banner — migration 028. Surfaces the agent designated
           as the head of this workspace so visitors immediately know who owns it. */}

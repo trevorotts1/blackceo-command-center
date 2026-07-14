@@ -24,11 +24,12 @@
  *   },
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
  *     "anthology_board_projection": { "pass": bool, "detail": string, ... },
- *     "sweep_liveness":           { "pass": bool, "detail": string, ... }
+ *     "skill6_board_projection":    { "pass": bool, "detail": string, ... }, // U27 / B-U13
+ *     "sweep_liveness":             { "pass": bool, "detail": string, ... }
  *   }
  * }
  *
- * GATING vs ADVISORY (A7):
+ * GATING vs ADVISORY (A7, extended to Skill 6 by U27 / B-U13):
  *   `checks`  feed the top-level pass/indeterminate verdict that
  *   cc-health-check.sh reads (it consumes ONLY d.pass / d.indeterminate) and
  *   that atomic-deploy.sh (auto-rollback) and standup-heartbeat.sh (task-work
@@ -37,12 +38,12 @@
  *   "NEVER changes the green/red verdict or EXIT_CODE". A board-projection
  *   drift is an operational signal (the S0→board mirror needs reconciling), not
  *   a Command Center correctness fault, so it must NEVER trip auto-rollback or
- *   halt the heartbeat — the very thing A7 exists to detect cannot be allowed
- *   to disable the box that detects it. `sweep_liveness` (C-09 / U40 — "watch
- *   the watchers") is the same posture: an advancer gone silent is an
- *   operational alert (routed separately, cooldown-guarded, via
- *   sweep-liveness.ts's own scheduler.ts cron entry), never a reason to
- *   auto-rollback a healthy deploy or halt the heartbeat.
+ *   halt the heartbeat — the very thing A7 (and its Skill-6 clone, U27) exists
+ *   to detect cannot be allowed to disable the box that detects it.
+ *   `sweep_liveness` (C-09 / U40 — "watch the watchers") is the same posture:
+ *   an advancer gone silent is an operational alert (routed separately,
+ *   cooldown-guarded, via sweep-liveness.ts's own scheduler.ts cron entry),
+ *   never a reason to auto-rollback a healthy deploy or halt the heartbeat.
  *
  * Exit / HTTP semantics:
  *   200 + pass=true              → green
@@ -61,6 +62,7 @@ import {
   checkDiskHeadroom,
   checkNextPublicAppUrl,
   checkAnthologyBoardProjection,
+  checkSkill6BoardProjection,
 } from '@/lib/health/deep-checks';
 import { checkSweepLiveness } from '@/lib/jobs/sweep-liveness';
 
@@ -106,18 +108,34 @@ export async function GET() {
     // reach the outer catch (which would return 500 + pass:false and trip
     // auto-rollback). Any failure degrades the advisory to a self-describing
     // UNKNOWN with pass:true — the verdict stays whatever the gating checks say.
-    let advisory: Record<string, unknown>;
+    const advisory: Record<string, unknown> = {};
     try {
-      advisory = { anthology_board_projection: checkAnthologyBoardProjection() };
+      advisory.anthology_board_projection = checkAnthologyBoardProjection();
     } catch (advErr) {
-      advisory = {
-        anthology_board_projection: {
-          pass: true,
-          indeterminate: true,
-          detail: `anthology_board_projection: advisory probe unavailable — ${
-            advErr instanceof Error ? advErr.message : String(advErr)
-          } (UNKNOWN; non-gating)`,
-        },
+      advisory.anthology_board_projection = {
+        pass: true,
+        indeterminate: true,
+        detail: `anthology_board_projection: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    // U27 / B-U13 — Skill-6 board projection drift. Same isolation posture as
+    // the Anthology advisory above: wrapped in its own try/catch so a throw
+    // here can NEVER reach the outer catch (which would return 500 +
+    // pass:false and trip auto-rollback). Kept OUT of gatingChecks — this is
+    // a non-gating, read-only diagnostic signal (B-U13: "never flips a box
+    // red"), never a Command Center correctness fault.
+    try {
+      advisory.skill6_board_projection = checkSkill6BoardProjection();
+    } catch (advErr) {
+      advisory.skill6_board_projection = {
+        pass: true,
+        indeterminate: true,
+        detail: `skill6_board_projection: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
       };
     }
 
