@@ -127,6 +127,11 @@ export async function chatCompletion(
 export const zaiProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // ZAI_API_KEY is canonical (matches the connector's own error messages
+  // above). ZHIPU_API_KEY / GLM_API_KEY / Z_AI_API_KEY are alternate
+  // spellings some installs use for the same Zhipu/GLM-family key — accept
+  // all of them so detection is never a phantom "key not set" (U48/U60).
+  envCandidates: ['ZAI_API_KEY', 'ZHIPU_API_KEY', 'GLM_API_KEY', 'Z_AI_API_KEY'],
   fetchModels,
   chatCompletion,
 };

@@ -127,6 +127,17 @@ export async function chatCompletion(
 export const xaiProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // NEW verified gap found by the U48/U60 connector sweep: this connector's
+  // own documented Env name is X_AI_API_KEY (see the module docstring and
+  // the fetchModels error above), and every other consumer in this repo
+  // (the TTS route, the Research provider, ENV_FILE_PERSISTENCE.md,
+  // env.example) uses X_AI_API_KEY too. Without an explicit envCandidates
+  // list here, the slug-derived fallback (`defaultEnvVarForSlug('xai')`)
+  // produces XAI_API_KEY — the WRONG canonical spelling — so Intelligence
+  // Settings key detection missed a key stored under the name this
+  // connector itself documents. X_AI_API_KEY is listed first (canonical);
+  // XAI_API_KEY is kept as an accepted alternate spelling.
+  envCandidates: ['X_AI_API_KEY', 'XAI_API_KEY'],
   fetchModels,
   chatCompletion,
 };
