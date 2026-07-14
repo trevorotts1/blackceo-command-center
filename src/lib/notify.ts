@@ -14,6 +14,11 @@
  *     same rule every onboarding-repo script follows.
  *   - Gate: set OWNER_NOTIFY_TELEGRAM_DISABLED=1 to suppress all sends (used
  *     in unit tests and CI environments without openclaw installed).
+ *   - SAFETY-01 / TEST-SAFE BY DEFAULT: sends are ALSO refused whenever we are
+ *     inside a test runner (node:test / vitest / jest), with NO env var needed.
+ *     A test can therefore never reach a real phone even if it forgets the gate
+ *     above — see isTestEnvironment(). Opt back in only via the explicit
+ *     OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1.
  *   - Chat-ID resolution mirrors the fleet's authoritative resolver
  *     (openclaw-onboarding/shared-utils/resolve-owner-chat.sh):
  *       S0  OPENCLAW_OWNER_CHAT_ID env (operator-rejected)
@@ -34,11 +39,91 @@ import path from 'path';
 import { resolveBoxIdentity } from '@/lib/box-identity';
 
 /**
- * Owner-send timeout (MSG-01). Kept short so a hung gateway can never pin a
- * send for the old 10s window; the send is fire-and-forget so this only bounds
- * the detached child, never the request/event loop.
+ * Owner-send timeout (MSG-01). Bounds the detached child so a truly hung
+ * gateway can never pin it forever; the send is fire-and-forget, so this
+ * never blocks the request/event loop regardless of its value.
+ *
+ * FLEET-WIDE BUG (fixed): this was previously 5_000ms. A real
+ * `openclaw message send` measured ~6.2s end to end (6.19s / 6.38s, both
+ * exit 0), so the old 5s ceiling SIGTERM-killed EVERY owner send about 1.2s
+ * before completion — every client Command Center silently failed to notify
+ * its owner. Failure signature: "Command failed: openclaw message send" with
+ * EMPTY stderr (a timeout kill, not ENOENT). Raised to 30s: comfortably
+ * clears the observed ~6.2s send while still bounding a genuinely hung CLI.
+ *
+ * Overridable via OWNER_SEND_TIMEOUT_MS (ms) for boxes with a slower gateway
+ * round-trip, consistent with the other env-tunable knobs in this module
+ * (OPENCLAW_OWNER_CHAT_ID, CC_OPERATOR_CHAT_ID, etc). Falls back to the 30s
+ * default on anything non-numeric or <= 0.
  */
-const OWNER_SEND_TIMEOUT_MS = 5_000;
+const DEFAULT_OWNER_SEND_TIMEOUT_MS = 30_000;
+function resolveOwnerSendTimeoutMs(): number {
+  const raw = process.env.OWNER_SEND_TIMEOUT_MS;
+  if (!raw) return DEFAULT_OWNER_SEND_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OWNER_SEND_TIMEOUT_MS;
+}
+const OWNER_SEND_TIMEOUT_MS = resolveOwnerSendTimeoutMs();
+
+/**
+ * ── SAFETY-01: A TEST MUST NEVER REACH A HUMAN'S PHONE ───────────────────────
+ *
+ * `notifyTelegram()` execFile()s the real `openclaw message send`. Its ONLY
+ * guard used to be an opt-IN env var (OWNER_NOTIFY_TELEGRAM_DISABLED=1) that
+ * each test file had to remember to set at module scope. That is a convention,
+ * not a guarantee — and the convention failed: a test fixture drove tasks
+ * through the QC scorer (which calls notifyOwner/notifyOwnerDone on promote to
+ * done/blocked) WITHOUT setting the var, so every run of the unit suite
+ * delivered live Telegram messages to a real person.
+ *
+ * The defect was never "one file forgot the flag" — it was that a test COULD
+ * send at all. The env var is opt-in, so the SAFE state depended on authors
+ * remembering it; the failure mode of forgetting was spamming a human.
+ *
+ * This inverts that: sends are refused whenever we are demonstrably inside a
+ * test runner, regardless of any env var. Detection is by runner-injected
+ * signals, so it needs no cooperation from test authors and cannot be
+ * defeated by a new test file that forgets the convention.
+ *
+ *   NODE_TEST_CONTEXT  node:test — set to "child-v8"/"child" in EVERY test
+ *                      child process. This is the runner this repo's
+ *                      `npm run test:unit` actually uses. VERIFIED empirically;
+ *                      note NODE_ENV is *undefined* under it, so a NODE_ENV
+ *                      check alone would have caught none of the unit suite.
+ *   VITEST             vitest (test:vitest / test:component / deep-health).
+ *   JEST_WORKER_ID     jest — defensive; not used here today.
+ *   NODE_ENV === test  generic convention; last, not first.
+ *
+ * FAIL-SAFE DIRECTION: a false positive costs one un-sent best-effort
+ * notification (the module contract already permits a dropped send). A false
+ * negative spams a real human. We bias hard toward refusing.
+ *
+ * ESCAPE HATCH: OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1 lets a test deliberately
+ * exercise the dispatch path (against a stub binary on PATH — see
+ * tests/unit/notify-no-send-in-tests.test.ts). It must be set EXPLICITLY, so a
+ * real send can only ever happen on purpose, never by omission.
+ */
+export function isTestEnvironment(): boolean {
+  return Boolean(
+    process.env.NODE_TEST_CONTEXT ||
+      process.env.VITEST ||
+      process.env.JEST_WORKER_ID ||
+      process.env.NODE_ENV === 'test',
+  );
+}
+
+/**
+ * True when owner Telegram sends must be suppressed: either the explicit
+ * operator/CI mute, or we are inside a test runner without the deliberate
+ * opt-in. Single source for both gate sites (notifyTelegram + notifyOwner).
+ */
+export function ownerSendsSuppressed(): boolean {
+  if (process.env.OWNER_NOTIFY_TELEGRAM_DISABLED === '1') return true;
+  if (isTestEnvironment() && process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST !== '1') {
+    return true;
+  }
+  return false;
+}
 
 /**
  * The known OPERATOR chat IDs — never returned as a client owner target.
@@ -327,7 +412,11 @@ export function notifyTelegram(opts: {
   chatId: string;
   message: string;
 }): boolean {
-  if (process.env.OWNER_NOTIFY_TELEGRAM_DISABLED === '1') {
+  // SAFETY-01: refuses on the explicit mute AND inside any test runner. This is
+  // the SINGLE choke point for every Telegram send in this module (notifyOwner,
+  // notifyOwnerDone and notifySystem all funnel through here), so guarding it
+  // guarantees no code path in a test can reach a real phone.
+  if (ownerSendsSuppressed()) {
     return false;
   }
   execFile(
@@ -370,6 +459,14 @@ export function notifyOwner(message: string): boolean {
   // An explicit mute (CI, unit tests) is a DELIBERATE suppression, not a failed
   // delivery — it must not raise an alarm or write an undeliverable record.
   // Only a genuine inability to deliver escalates.
+  // NOTE (SAFETY-01): deliberately gated on the ENV VAR ONLY — NOT on
+  // ownerSendsSuppressed(). The test-runner refusal belongs at the single point
+  // that actually spawns the CLI (notifyTelegram). Short-circuiting HERE would
+  // also skip the MSG-07 undeliverable-escalation below, which is a LOCAL side
+  // effect (a durable record + an operator-only notifySystem alarm), not a
+  // phone send — and which MSG-07's tests legitimately exercise. Leaving this
+  // path intact costs nothing: its escalation funnels into notifyTelegram,
+  // where the test-runner hard-refuse stops the actual send.
   if (process.env.OWNER_NOTIFY_TELEGRAM_DISABLED === '1') return false;
 
   const chatId = resolveOwnerChatId();
