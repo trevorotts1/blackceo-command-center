@@ -23,8 +23,9 @@
  * Run with: npm run test:e2e:my-ai-ceo
  */
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import { test, expect, request, type Page } from 'playwright/test';
-import { BASE_URL, PROOF_DIR } from './my-ai-ceo-responsive.fixture';
+import { BASE_URL, PROOF_DIR, DB_PATH } from './my-ai-ceo-responsive.fixture';
 
 const BREAKPOINTS = [
   { name: '360-mobile', width: 360, height: 780 },
@@ -162,7 +163,14 @@ for (const bp of BREAKPOINTS) {
   test(`My AI CEO chat has no horizontal body scroll @ ${bp.name}`, async ({ page }) => {
     await page.setViewportSize({ width: bp.width, height: bp.height });
     await unlockDashboard(page);
-    await page.goto('/my-ai-ceo', { waitUntil: 'networkidle' });
+    // U60/JM-U63c: the Operations Rail now holds its OWN persistent
+    // `EventSource('/api/events/stream')` connection open for the page's
+    // whole lifetime (the live-status wiring), so — exactly like the board's
+    // own SSE connection below (see gotoBoard's comment) — `networkidle`
+    // never resolves here either. `domcontentloaded` + waiting for the
+    // composer to mount is the same fix already applied to gotoBoard.
+    await page.goto('/my-ai-ceo', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByPlaceholder('Message your AI CEO…')).toBeVisible({ timeout: 15_000 });
     await captureAndAssert(page, 'chat', bp);
   });
 
@@ -230,4 +238,49 @@ test('Clicking a column-picker pill scrolls the board strip to that column @ 360
   expect(before).not.toBeNull();
   expect(after).not.toBeNull();
   expect(after as number).toBeGreaterThan(before as number);
+});
+
+/**
+ * U60 / JM-U63d live proof: drives the REAL Delegate control end-to-end
+ * against the running server — opens the sheet, submits a title, and reads
+ * the row the live server actually wrote (never a mock) straight out of the
+ * fixture's own SQLite file, proving the deterministic requester stamps
+ * (spec (d) / binary acceptance item 4) from the PRIMARY SOURCE, not just the
+ * unit-test fixture DB in tests/unit/ceo-chat-task-endpoint.test.ts.
+ */
+test('Delegate control creates a real task with both requester stamps, visible in the Operations Rail', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await unlockDashboard(page);
+  await page.goto('/my-ai-ceo', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByPlaceholder('Message your AI CEO…')).toBeVisible({ timeout: 15_000 });
+  // Hydration readiness gate: the DOM (SSR'd) is visible well before React
+  // attaches its click handlers. ModelPicker's pill only leaves its static
+  // "Model" label once client JS has hydrated AND its `/api/models` fetch
+  // resolved — a real, non-flaky signal that clicks will now actually fire.
+  await expect(page.getByTestId('control-model-picker')).not.toHaveText('Model', { timeout: 20_000 });
+
+  await page.getByTestId('control-delegate-button').click();
+  const sheet = page.getByTestId('delegate-sheet');
+  await expect(sheet).toBeVisible();
+
+  const uniqueTitle = `E2E delegate proof ${Date.now()}`;
+  await page.locator('#delegate-title').fill(uniqueTitle);
+  await sheet.getByRole('button', { name: 'Delegate' }).click();
+
+  await expect(sheet).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId('ops-rail-card').filter({ hasText: uniqueTitle })).toBeVisible({ timeout: 15_000 });
+
+  const db = new Database(DB_PATH, { readonly: true });
+  try {
+    const row = db
+      .prepare('SELECT title, requester_channel, requester_chat_id FROM tasks WHERE title = ?')
+      .get(uniqueTitle) as
+      | { title: string; requester_channel: string | null; requester_chat_id: string | null }
+      | undefined;
+    expect(row, 'the live server must have written the task row').toBeTruthy();
+    expect(row!.requester_channel).toBe('ceo-chat');
+    expect(row!.requester_chat_id).toBeTruthy();
+  } finally {
+    db.close();
+  }
 });

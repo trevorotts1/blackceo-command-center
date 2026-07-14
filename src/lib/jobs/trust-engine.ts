@@ -49,6 +49,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
 import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import { appendTrustMessage } from '@/lib/ceo-chat/store';
+import { broadcast } from '@/lib/events';
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 /** After ingest, wait up to this long for the triad to advance a task past
@@ -396,16 +397,36 @@ function trustKindFor(plan: PlannedSend): 'trust_ack' | 'trust_progress' | 'trus
  * Telegram; every other channel uses notifyTelegram. Never throws — a write
  * failure returns false so the durable stamp is preserved and the row simply
  * isn't counted as sent (no duplicate risk).
+ *
+ * U60/JM-U63c (J.0.7 threading fix): `plan.stamps[0].taskId` is passed through
+ * to `appendTrustMessage` so the written row can be joined back to the
+ * Operations Rail card that spawned it (previously dropped here). A broadcast
+ * on the existing SSE bus follows the write so a connected rail updates within
+ * ~2s without waiting on its 15s poll fallback; the broadcast is fire-and-forget
+ * and never affects the send's success/failure outcome.
  */
 function defaultTrustSend(plan: PlannedSend): boolean {
   if (plan.channel === CEO_CHAT_CHANNEL) {
+    const taskId = plan.stamps[0]?.taskId ?? null;
+    const kind = trustKindFor(plan);
     try {
-      appendTrustMessage(plan.chatId, plan.message, trustKindFor(plan));
-      return true;
+      appendTrustMessage(plan.chatId, plan.message, kind, taskId);
     } catch (err) {
       console.warn('[trust-engine] ceo-chat report-back write failed:', (err as Error).message);
       return false;
     }
+    try {
+      if (taskId) {
+        broadcast({
+          type: 'ceo_chat_task_status',
+          payload: { taskId, sessionId: plan.chatId, kind, message: plan.message },
+        });
+      }
+    } catch (err) {
+      // Never let a broadcast failure undo an already-durable write.
+      console.warn('[trust-engine] ceo-chat status broadcast failed (non-fatal):', (err as Error).message);
+    }
+    return true;
   }
   return notifyTelegram({ chatId: plan.chatId, message: plan.message });
 }

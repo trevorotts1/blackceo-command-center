@@ -341,7 +341,9 @@ export default function HomePage() {
     description: 'Talk directly to your agent · BETA',
     detail: 'Chat with your main AI agent in a clean UI — send requests, upload documents, images, and videos, and watch what happens live. A direct line, right here.',
     icon: <Sparkles className="w-7 h-7 text-white" />,
-    gradient: 'from-indigo-500 via-purple-500 to-fuchsia-500',
+    // U60/JM-U63b — re-toned off the indigo/purple/fuchsia palette to the
+    // brand-green scale in the same pass that re-skinned /my-ai-ceo itself.
+    gradient: 'from-brand-500 via-brand-600 to-brand-700',
     route: '/my-ai-ceo',
     cta: 'Open My AI CEO',
   };
