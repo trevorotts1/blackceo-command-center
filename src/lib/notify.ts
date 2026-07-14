@@ -711,8 +711,15 @@ export function notifySystem(
   // files hand-`delete` this env var at module scope: they are each patching a hole
   // the module itself left open. Closing it HERE makes those 14 deletions redundant
   // rather than load-bearing — no test can page the on-call channel by omission.
+  //
+  // ESCAPE HATCH (same contract as RUNG 2 / notifyTelegram, MSG-01): a test that
+  // deliberately exercises this rung — and has already replaced globalThis.fetch
+  // with a double so no packet can leave the process — opts back in with
+  // OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1. Default-off still protects the ~14 files
+  // that only `delete` the env var; only an explicit opt-in (which by convention
+  // is coupled to installing the fetch double) can fire the POST in a test run.
   const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
-  if (webhookUrl && !isTestEnvironment()) {
+  if (webhookUrl && (!isTestEnvironment() || process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST === '1')) {
     // ATTRIBUTION (FIX-5): the body used to carry ONLY {action, agent, message}.
     // No client. No box. So every escalation from every box in the fleet arrived
     // anonymous: the operator could not tell WHOSE box was screaming (during a
