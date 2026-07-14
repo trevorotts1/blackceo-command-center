@@ -1,3 +1,13 @@
+## [v6.0.8] — 2026-07-14 — feat(kanban): criticality-tiered health aggregation — make "down" mean down (U46/HL/U46)
+
+**"Systems Down" no longer fires off an auxiliary probe hiccup.** `src/lib/system-status.ts` previously computed `overall` via a flat `worstStatus()` reduction across all 12 probe components with zero criticality tiers — a `disk` probe going offline reported the exact same "Systems Down" severity as the database or the OpenClaw gateway going down.
+
+- **Criticality tiers.** New `src/lib/probes/types.ts` exports: `ProbeTier` (`'critical' | 'auxiliary'`), `CRITICAL_COMPONENTS` (`database` + `openclaw_gateway`), `tierFor()`, and the shared `computeOverallTiered()` aggregation: `offline` only if a critical component is `offline`; `degraded` if a critical is unhealthy-but-not-offline (degraded/unknown/busy/working — never silently reported as fully healthy) OR any auxiliary component is `offline`/`degraded`/`unknown`; `live` otherwise.
+- **Both call sites converge.** `src/lib/system-status.ts` — BOTH the fresh-probe path (`runAllProbes`) and the cached-read path (`readCachedStatus`) now tag every component row with `tier` and call the same `computeOverallTiered()` function, so identical inputs always yield an identical `overall` on either path. `worstStatus()` is left untouched and exported (still used by `src/app/api/operator/health/route.ts`).
+- **Additive.** `TieredProbeResult extends ProbeResult` with `tier`; no consumer of `SystemStatusPayload.components` loses a field on revert.
+- **Tests.** `tests/unit/u46-health-tier-aggregation.test.ts` — 12/12 PASS, covering all 4 spec binary-acceptance criteria (a: one auxiliary offline → degraded; b: `openclaw_gateway` or `database` offline → offline; c: every row carries `tier`; d: cached vs fresh paths deterministic-identical) plus `tierFor` classification and an all-live baseline. `tsc --noEmit` clean; `eslint` on all touched files clean. `npx vitest run tests/unit/deep-health.test.ts`: 79/79 PASS (regression, unaffected).
+- No client names, no secret values, no box identifiers, no model added/removed/substituted. Client skills/engines still run only on the client's own providers.
+
 ## [v6.0.7] — 2026-07-14 — test(kanban): create-task proven end-to-end on-box + department-slug clobber fix (U41/C-10)
 
 **Closes the two remaining coverage holes on "create task doesn't really work."** P2-03's create-task fix (phantom `workspace_id:'default'` foreign-key crash + `CreateTaskSchema` nullable fields) was already shipped and covered by `tests/integration/create-task.spec.ts`; this unit makes it TRUE ON BOXES and extends coverage to the two paths that weren't yet locked.
