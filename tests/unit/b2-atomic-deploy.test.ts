@@ -184,10 +184,21 @@ exit 0
   writeFileSync(path.join(binDir, 'curl'), curlStub, { mode: 0o755 });
 
   // ── stub python3 ─────────────────────────────────────────────────────────
-  const python3Stub = `#!/usr/bin/env python3
-import sys
-# Return empty string for all pm2 queries (no non-canonical apps)
-print('')
+  // The shebang MUST NOT be `#!/usr/bin/env python3`: binDir is prepended to
+  // PATH, so `env python3` would re-resolve to THIS stub itself → infinite exec
+  // recursion. On Linux CI that hangs until the 60s spawnSync timeout (every
+  // deploy fixture that reaches the DB-backup WAL flush then fails with the
+  // wrong exit code); on macOS the fork-storm eventually aborts but still burns
+  // minutes. Use bash instead — bash is NOT stubbed in binDir, so `env bash`
+  // finds the real shell. atomic-deploy.sh calls python3 two ways, both
+  // satisfied by "drain stdin, print nothing, exit 0":
+  //   1) python3 - <db>            (WAL-flush heredoc; best-effort, `|| true`)
+  //   2) pm2 jlist | python3 -s -c (non-canonical-app query; empty ⇒ none)
+  const python3Stub = `#!/usr/bin/env bash
+# Stub python3 for B.2 fixture tests — drain stdin, emit nothing (no
+# non-canonical apps), never invoke a real interpreter.
+cat >/dev/null 2>&1 || true
+exit 0
 `;
   writeFileSync(path.join(binDir, 'python3'), python3Stub, { mode: 0o755 });
 
@@ -603,7 +614,9 @@ esac
   const freeKb = 10 * 1024 * 1024;
   writeFileSync(path.join(binDir, 'df'), `#!/usr/bin/env bash\necho "Filesystem     1K-blocks    Used  Available Use% Mounted on"\necho "/dev/sda1       20971520 1000000  ${freeKb}  10% /"\n`, { mode: 0o755 });
   writeFileSync(path.join(binDir, 'curl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-  writeFileSync(path.join(binDir, 'python3'), '#!/usr/bin/env python3\nimport sys\nprint("")\n', { mode: 0o755 });
+  // python3 stub: bash-based, NOT `#!/usr/bin/env python3` (which recurses via
+  // binDir-first PATH → 60s hang). Drain stdin, print nothing, exit 0.
+  writeFileSync(path.join(binDir, 'python3'), '#!/usr/bin/env bash\ncat >/dev/null 2>&1 || true\nexit 0\n', { mode: 0o755 });
   writeFileSync(path.join(binDir, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
 
   // Health check stub (should never be called in this path — build fails before swap)
