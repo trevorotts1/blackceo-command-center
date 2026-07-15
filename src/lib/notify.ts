@@ -27,6 +27,12 @@
  *       S2  <workspace>/agents/main/sessions/sessions.json direct-session keys
  *     Every source rejects the known OPERATOR chat ids so a client box can
  *     never notify an operator DM as if it were the owner.
+ *   - MSG-08 / CC_OPERATOR_IS_OWNER=1 (opt-in, operator's own box ONLY): when
+ *     no owner chat resolves (guaranteed on the operator's own board — see
+ *     operatorIsOwnerBox() below), notifyOwner() delivers the owner message
+ *     directly to the resolved OPERATOR chat id instead of routing it through
+ *     the UNDELIVERABLE escalation. Never set on a client box; the guardrail
+ *     above is otherwise completely untouched.
  *   - SECRETS: openclaw.json contains a bot token. This module reads the file
  *     to extract allowFrom lists ONLY and never logs or returns any other
  *     field. Never print parsed config contents.
@@ -128,6 +134,42 @@ export function ownerSendsSuppressed(): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * MSG-08 — OPERATOR-OWNER FALLBACK: explicit, config-gated, opt-in ONLY.
+ *
+ * ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+ * `resolveOwnerChatId()` correctly rejects every operator id — a client box
+ * must never resolve the operator as its owner. But that means on the
+ * OPERATOR's OWN board (his `allowFrom` lists only operator ids — there is no
+ * client on that box) `resolveOwnerChatId()` is STRUCTURALLY always null, so
+ * `notifyOwner()` falls into `escalateUndeliverableOwner()` for EVERY owner
+ * report (assigned/started/done) his own tasks generate. SAFETY-04 already
+ * de-fanged that into a rate-limited, no-payload digest — but it is still a
+ * periodic "UNDELIVERABLE" self-DM about his own board's own activity, which
+ * is noise a normal owner report should not have to look like.
+ *
+ * ── THE FIX IS AN EXPLICIT PER-BOX SIGNAL, NOT A GLOBAL LOOSENING ──────────
+ * `validOwnerChatId()` / `resolveOwnerChatId()` are UNCHANGED — the
+ * client-spam guardrail (an operator id can never resolve as a client's
+ * owner) holds exactly as before, on every box that does not set this flag.
+ * This is an opt-in fallback that only ever runs INSIDE `notifyOwner()`,
+ * only AFTER `resolveOwnerChatId()` has already returned null, and only ever
+ * targets an id that passes the pre-existing `validOperatorChatId()` inverse
+ * guard (via `resolveOperatorChatId()`) — so it can never resolve a client id
+ * either. A client box is never provisioned with this env var, so its
+ * behaviour is identical to before this change.
+ *
+ * CC_OPERATOR_IS_OWNER=1 — set ONLY on the operator's own board's environment
+ * (installer/deploy config), never on a client box. When set, and only when
+ * no real owner chat id resolves, `notifyOwner()` delivers the owner-facing
+ * message directly to the resolved operator chat id — cleanly, once, with no
+ * "UNDELIVERABLE" wrapper — instead of routing it through
+ * `escalateUndeliverableOwner()`.
+ */
+function operatorIsOwnerBox(): boolean {
+  return process.env.CC_OPERATOR_IS_OWNER === '1';
 }
 
 /**
@@ -638,6 +680,22 @@ export function notifyOwner(message: string): boolean {
 
   const chatId = resolveOwnerChatId();
   if (!chatId) {
+    // ── MSG-08: OPERATOR'S OWN BOARD — deliver cleanly, once, no wrapper. ────
+    // Explicit opt-in only (see operatorIsOwnerBox() above). A client box never
+    // sets CC_OPERATOR_IS_OWNER, so this branch is a no-op there and behaviour
+    // is byte-for-byte unchanged from before this fix. `resolveOperatorChatId()`
+    // can only ever return a known OPERATOR id (validOperatorChatId inverse
+    // guard) — never a client's — so this can never become client spam even on
+    // a misconfigured box.
+    if (operatorIsOwnerBox()) {
+      const operatorChatId = resolveOperatorChatId();
+      if (operatorChatId) {
+        return notifyTelegram({ chatId: operatorChatId, message });
+      }
+      // Flag set but no operator id resolvable either — fall through to the
+      // durable UNDELIVERABLE escalation below so the alert is never lost.
+    }
+
     // ── MSG-07: NEVER SILENTLY DROP ─────────────────────────────────────────
     // This was a `console.warn` + `return false`. Every automated caller
     // (task-dispatcher, qc-scorer ×2, all 5 owner-reports helpers) throws that
