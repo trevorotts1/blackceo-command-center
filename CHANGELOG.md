@@ -1,3 +1,12 @@
+## [v6.0.21] — 2026-07-15 — Skill 6 blended-persona U42/C-11: task-detail modal FULLY populated (QC 9.2)
+
+v6.0.21 — Merges `skill6-v2/U42` (master unit U42, canonical C-11) of the Skill 6 Blended-Persona Kanban v2 build, `blackceo-command-center`.
+
+- **Feature:** new `PersonaPlanPanel` wired into `TaskModal.tsx` — the modal now surfaces the multi-persona sub-task plan and per-page/per-part scoped-blend rows, reusing the board card's own `PersonaSlotChips`/`PersonaScopeChips` components (single source, no divergence). Renders nothing for a plain single-persona task, mirroring the card's existing >=2 rule. `TaskOverviewPanels.tsx` grows the honest engine-card persona surface + field matrix backing the panel.
+- Test proof re-run independently on the merged tree: new `tests/unit/u42-task-detail-modal-populated.test.tsx` -> `12/12 pass`; `npx tsc --noEmit` clean; `scripts/qc-cc.sh` -> 137/137 green, 4 environmental-skip warnings only; full `npm run test:unit` -> 1311 tests, 1306 pass, 5 fail — the 5 failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) confirmed pre-existing (identical failure set to v6.0.20's independently-reproduced baseline), zero regressions introduced by this merge.
+- Ledger: `ledgers/skill6-blended-persona-kanban-v2-2026-07-13.md` U42 row set to `verified`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.20] — 2026-07-15 — Skill 6 blended-persona U22/B-U8: guards + fixtures + operator-box block proof (QC 9.1, CC half, OFFLINE tier)
 
 v6.0.20 — Merges `skill6-v2/U22` (master unit U22, canonical B-U8) of the Skill 6 Blended-Persona Kanban v2 build, `blackceo-command-center` half of a both-repo unit. Per the OPERATOR RULINGS 2026-07-15 per-repo/offline acceptance doctrine, this ripple covers the **CODE-MERGE tier only**. The **LIVE-PROOF tier** (the ONE end-to-end operator-box fixture funnel run, plus the deferred live producer→CC ingest handshake from B-U7) is this same unit's own separate deliverable and is NOT claimed by this ripple.
