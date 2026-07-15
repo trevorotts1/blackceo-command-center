@@ -1,3 +1,15 @@
+## [v6.0.14] — 2026-07-15 — Skill 6 blended-persona Wave One — U6: board-hygiene Rule-6 companion, persona-blend invariant regression alert (QC 9.0)
+
+**`board-hygiene.ts` gains a companion check to its existing Rule 6 (pipeline-dead) alert: it now also fires when the pipeline is alive but the blend is quietly under-engaging personas.**
+
+- **`processBlendInvariantRegressionCheck()` (new).** Reads CONFIRMED content-task bundles in the trailing regression window and inspects the `rationale.invariant` reading ONB's `validate_blend_invariant` (`persona_blend.py`, A-U6) already persisted into `task_persona_bundle.bundle_json` — this companion never re-derives the invariant itself, it only reads the already-computed reading.
+- **Distinct from Rule 6.** Rule 6 fires on ZERO bundles in the window (pipeline silently dead). This companion fires when bundles ARE being produced, ARE confirmed by the operator, and still read below-min on the min-2/max-4 role-count invariant — a live match-quality regression, not an outage.
+- **Same alert lane, same cooldown.** Reuses the existing `persona_blend_regression` event type and its cooldown window so the two checks never double-fire within one run.
+- **`BoardHygieneResult` gains two new fields:** `blendInvariantRegressionFlagged` (boolean) and `blendInvariantBelowMinCount` (diagnostic count), both defaulted false/0 in `emptyResult()`.
+- **Kill switch:** `DISABLE_BOARD_HYGIENE_BLEND_INVARIANT=1` env var, mirroring the existing Rule-6 kill-switch convention.
+- **Tests.** `tests/unit/board-hygiene-blend-invariant-at-min.test.ts` + `tests/unit/board-hygiene-blend-invariant-below-min.test.ts` — 3/3 PASS (seeded at-or-above-min raises zero alerts; seeded below-min raises exactly one; a second run within cooldown does not double-fire). `tsc --noEmit` clean.
+- No secret values printed/logged. No client names, no box identifiers. No Anthropic model added/removed/substituted — pure Command Center application-layer TypeScript, no provider/LLM wiring touched.
+
 ## [v6.0.13] — 2026-07-14 — fix(kanban): Department detail — close the two hard-wired-empty pairs, purge demo seed, envelope-safe consumer sweep (U56, canonical E.2/JM-U52)
 
 **The `/ceo-board/[dept]` Department Agents and Department Recommendations sections rendered permanently empty — a route/page envelope mismatch, not a data problem — and the recommendations route silently seeded 5 hardcoded demo rows into the live table on every first empty GET.**
