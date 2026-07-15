@@ -180,12 +180,24 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
   }
 
   // 2. Block metadata (transition() sets only status/updated_at/events).
+  //
+  // POISON-STATE FIX: this write is the producer the 2026-07-14 escalation flood
+  // traced back to. It named the human in `blocked_on_human='operator'` but wrote
+  // the actual instruction into `block_needs` — a DIFFERENT column — leaving `ask`
+  // NULL. The stale-task sweep pages the named human with `ask` and rendered that
+  // NULL as the literal "(no ask specified)", so the operator was handed a blocked
+  // task with NO question: unanswerable → never cleared → re-escalated every tick,
+  // forever. `needs` IS the ask (it states exactly what the operator must do), so
+  // persist it into `ask` too. Truncated to 500 to match the column's request-
+  // validation cap (UpdateTaskSchema.ask). See src/lib/blocked-ask.ts — the
+  // migration-104 triggers now REJECT this write outright if `ask` is left blank.
+  const ask = needs.slice(0, 500);
   run(
     `UPDATE tasks
         SET block_reason = ?, block_needs = ?, block_audience = 'SYSTEM',
-            blocked_on_human = 'operator', last_progress_at = ?
+            blocked_on_human = 'operator', ask = ?, last_progress_at = ?
       WHERE id = ?`,
-    [reason, needs, now, task.id],
+    [reason, needs, ask, now, task.id],
   );
 
   // 3. Free the wedged agent.

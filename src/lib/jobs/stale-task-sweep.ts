@@ -27,7 +27,10 @@
  * Reads last_progress_at (migration 071). Falls back to updated_at when
  * last_progress_at is NULL (pre-migration-071 DB).
  *
- * Disable with DISABLE_STALE_TASK_SWEEP=1.
+ * Disable with DISABLE_STALE_TASK_SWEEP=1 — set it in the environment, or
+ * durably (deploy-proof) with `bash scripts/operator-flag.sh set
+ * DISABLE_STALE_TASK_SWEEP 1`. Either source disables the sweep; see
+ * src/lib/ops/operator-kill-flags.ts.
  */
 
 import { queryAll, queryOne, run, sqlTime, parseDbTime } from '@/lib/db';
@@ -36,6 +39,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifySystem } from '@/lib/notify';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
+import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -270,11 +274,13 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
 }
 
 export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
-  if (
-    process.env.DISABLE_STALE_TASK_SWEEP === '1' ||
-    process.env.DISABLE_STALE_TASK_SWEEP === 'true'
-  ) {
-    return { scanned: 0, returned: 0, repinged: 0, skippedReason: 'DISABLE_STALE_TASK_SWEEP set' };
+  // F6 — the kill-flag is resolved from process.env OR a DURABLE operator-overrides
+  // file that lives OUTSIDE the checkout, so a deploy / re-clone / `git clean -fdx`
+  // cannot silently undo an operator's emergency stop. Fails OPEN: any read error
+  // resolves to NOT disabled, so the sweep runs and escalation still happens.
+  const killFlag = resolveStaleTaskSweepKillFlag();
+  if (killFlag.disabled) {
+    return { scanned: 0, returned: 0, repinged: 0, skippedReason: killFlagSkipReason(killFlag) };
   }
 
   // Guard: last_progress_at column must exist (migration 071).

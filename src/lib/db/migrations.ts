@@ -13,7 +13,15 @@ import path from 'path';
 import os from 'os';
 import { seedStarterSOPs } from '../sops-seed';
 import { canonicalDeptSlug } from '../routing/canonical-slug';
+import {
+  safeReaddirNames,
+  safeReadFileUtf8,
+  safeIsFile,
+  safeIsDir,
+  safeStatSync,
+} from '../fs/safe-fs';
 import { seedCompanyGuarded } from './branding-seed';
+import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import {
   dedupeCanonicalWorkspaces,
   reapDuplicateOpenAuthoringTasks,
@@ -4248,6 +4256,81 @@ const migrations: Migration[] = [
       console.log(`[Migration 103] Deleted ${deleted} seeded demo recommendation row(s)`);
     },
   },
+  {
+    id: '104',
+    name: 'reject_blocked_on_human_without_ask',
+    // POISON-STATE GATE (see src/lib/blocked-ask.ts for the full incident note).
+    //
+    // A tasks row with `blocked_on_human` SET and `ask` EMPTY is unanswerable by
+    // construction: the named human is paged with no question in it, cannot clear
+    // it, so the card never leaves Blocked and the stale-task sweep re-pings on
+    // every tick — forever. The API's blocked gate already demanded an `ask`; the
+    // rows that flooded were written by a RAW sweep UPDATE that set
+    // `blocked_on_human='operator'` and put its instruction in `block_needs`
+    // (a different column), leaving `ask` NULL. Code-level validation alone cannot
+    // close that class — any raw `run('UPDATE tasks SET ...')` bypasses it. This
+    // migration closes it in the database.
+    //
+    // WHY TRIGGERS, NOT A CHECK CONSTRAINT — ⛔ NON-NEGOTIABLE:
+    // SQLite cannot ADD a CHECK to an existing table; it requires the 12-step
+    // rebuild, whose `INSERT INTO tasks_new SELECT * FROM tasks` would ABORT on the
+    // very rows this incident already created. That migration would refuse to run
+    // (or, if the rows were "cleaned" first, DESTROY live tasks that carry real
+    // task_deliverables and task_activities). Unacceptable. BEFORE-row triggers
+    // validate only rows WRITTEN FROM NOW ON: every existing row survives byte-for-
+    // byte, stays readable, stays ARCHIVABLE, and stays repairable (setting a real
+    // `ask`, or NULLing `blocked_on_human`, both pass the trigger). Forward-only
+    // enforcement is the entire design.
+    //
+    // The UPDATE trigger is scoped `UPDATE OF blocked_on_human, ask`, so it fires
+    // ONLY when a write names one of those two columns. A sweep that archives a
+    // legacy poisoned row, bumps `updated_at`, or writes `archived_at` never trips
+    // it. This migration is purely additive DDL (no row is read, written, or
+    // deleted), hence it is SAFE in the additive-only self-heal path — no
+    // `deferInAdditiveSelfHeal`.
+    //
+    // Idempotent: CREATE TRIGGER IF NOT EXISTS. Manual rollback (no auto-down in
+    // this framework):
+    //   DROP TRIGGER IF EXISTS trg_tasks_blocked_on_human_requires_ask_insert;
+    //   DROP TRIGGER IF EXISTS trg_tasks_blocked_on_human_requires_ask_update;
+    //   DELETE FROM _migrations WHERE id = '104';
+    up: (db) => {
+      console.log('[Migration 104] Installing blocked_on_human⇒ask invariant triggers...');
+
+      // Guard: the trigger bodies reference tasks.blocked_on_human / tasks.ask,
+      // added by migration 072. On a fresh DB schema.ts creates `tasks` WITHOUT
+      // them, so a box that somehow reaches 104 with 072 unapplied would throw
+      // "no such column" and fail the whole boot. Skip instead — 072 runs first in
+      // every ordered run, so this is belt-and-braces, not an expected path.
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('blocked_on_human') || !cols.includes('ask')) {
+        console.log('[Migration 104] tasks.blocked_on_human / tasks.ask absent — skipping (migration 072 owns them)');
+        return;
+      }
+
+      // Count (do NOT touch) the pre-existing poisoned rows, purely so the boot log
+      // states plainly that they SURVIVED this migration and still need a human
+      // repair/archive decision. ⛔ Never DELETE them: they carry real
+      // task_deliverables + task_activities produced by dispatched agents.
+      const legacy = db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM tasks
+            WHERE blocked_on_human IS NOT NULL AND trim(blocked_on_human) <> ''
+              AND (ask IS NULL OR trim(ask) = '' OR lower(trim(ask)) IN ('(no ask specified)', 'no ask specified'))`,
+        )
+        .get() as { n: number };
+
+      for (const sql of BLOCKED_ASK_TRIGGER_SQL) db.exec(sql);
+
+      if (legacy.n > 0) {
+        console.log(
+          `[Migration 104] ${legacy.n} pre-existing blocked-without-ask row(s) left INTACT ` +
+            '(forward-only enforcement — they keep their deliverables/activities and remain archivable)',
+        );
+      }
+      console.log('[Migration 104] blocked_on_human⇒ask triggers ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -5315,27 +5398,30 @@ function autoSeedStarterSOPs(db: Database.Database) {
 
 const DEPARTMENTS_JSON = 'departments.json';
 
+// TCC-safe metadata checks. On macOS an unprivileged background process can
+// BLOCK FOREVER on open()/opendir() under ~/Downloads · ~/Desktop · ~/Documents,
+// but stat() is measured-safe there — safeIsFile/safeIsDir take the fast direct
+// path on TCC dirs and only bound network/removable volumes. See src/lib/fs/safe-fs.ts.
 function isExistingFile(p: string): boolean {
-  try {
-    return fs.statSync(p).isFile();
-  } catch {
-    return false;
-  }
+  return safeIsFile(p);
 }
 
 function isExistingDir(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
+  return safeIsDir(p);
 }
 
 /** Legacy hard-coded install locations (preserved verbatim, additive). */
 function legacyConfigCandidates(): string[] {
   return [
+    // SAFE, non-TCC canonical location — highest legacy priority so a fixed
+    // install (or a box migrated off ~/Downloads) resolves here first and never
+    // needs to touch a TCC-gated dir. See src/lib/fs/safe-fs.ts.
+    path.join(os.homedir(), '.openclaw', 'master-files', 'company-discovery', DEPARTMENTS_JSON),
     path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', DEPARTMENTS_JSON),
     path.join(os.homedir(), 'projects', 'mission-control', 'config', DEPARTMENTS_JSON),
+    // LEGACY ~/Downloads location (TCC-protected). Retained ONLY so a not-yet-
+    // migrated box is not orphaned; every read of it goes through the bounded,
+    // never-blocking safe-fs helpers — it can never freeze boot again.
     path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', DEPARTMENTS_JSON),
     path.join('/opt', 'mission-control', 'config', DEPARTMENTS_JSON),
   ];
@@ -5347,6 +5433,12 @@ export function zeroHumanCompanyRoots(): string[] {
   const masterFiles = (process.env.MASTER_FILES_DIR || '').trim();
   if (masterFiles) roots.push(path.join(masterFiles, 'zero-human-company'));
   roots.push(
+    // SAFE, non-TCC canonical root FIRST — new/fixed installs land here and the
+    // boot path never has to probe a protected dir.
+    path.join(os.homedir(), '.openclaw', 'master-files', 'zero-human-company'),
+    // LEGACY ~/Downloads root (TCC-protected). Read only via the bounded,
+    // never-blocking safe-fs helpers below so an un-migrated box still resolves
+    // but can never freeze boot.
     path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'zero-human-company'),
     '/data/openclaw-master-files/zero-human-company',
     path.join(os.homedir(), 'clawd', 'zero-human-company')
@@ -5362,20 +5454,14 @@ export function zeroHumanCompanyRoots(): string[] {
 function newestZhcChild(rel: string): string | null {
   let best: { p: string; mtime: number } | null = null;
   for (const root of zeroHumanCompanyRoots()) {
-    let slugs: string[];
-    try {
-      slugs = fs.readdirSync(root);
-    } catch {
-      continue; // root absent
-    }
+    // safeReaddirNames NEVER blocks the event loop: on a TCC-gated / network
+    // root it runs the opendir in a hard-timeout child process and returns []
+    // if it would hang, instead of freezing boot forever (the 13-hour outage).
+    const slugs = safeReaddirNames(root);
     for (const slug of slugs) {
       const candidate = path.join(root, slug, rel);
-      let st: fs.Stats;
-      try {
-        st = fs.statSync(candidate);
-      } catch {
-        continue;
-      }
+      const st = safeStatSync(candidate);
+      if (!st) continue;
       if (!best || st.mtimeMs > best.mtime) best = { p: candidate, mtime: st.mtimeMs };
     }
   }
@@ -5400,34 +5486,48 @@ function newestZhcChild(rel: string): string | null {
 export function resolveDepartmentsConfigPath(): string | null {
   const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
   const ccRoot = (process.env.BLACKCEO_COMMAND_CENTER_ROOT || '').trim();
-  const candidates: string[] = [];
+
+  // SHORT-CIRCUIT (Layer 2 of the TCC fix): evaluate candidates in priority
+  // order and RETURN THE FIRST HIT, never probing a lower-priority candidate we
+  // do not need. The live outage box hung inside step 3 (a ~/Downloads readdir)
+  // even though its step-1 env candidate would have won — because the previous
+  // implementation built the ENTIRE candidate list eagerly (calling
+  // newestZhcChild() up front) before the existence loop. Deferring step 3 means
+  // a box whose ZERO_HUMAN_COMPANY_DIR / BLACKCEO_COMMAND_CENTER_ROOT resolves
+  // never touches the TCC-gated discovery scan at all.
 
   // 1. Explicit active-company folder — the strongest signal of the live client.
-  if (explicitCompany) candidates.push(path.join(explicitCompany, DEPARTMENTS_JSON));
+  if (explicitCompany) {
+    const p = path.join(explicitCompany, DEPARTMENTS_JSON);
+    if (isExistingFile(p)) return p;
+  }
   // 2. Explicit Command Center root (same env the writer's CC copy honors).
   if (ccRoot) {
-    candidates.push(
+    for (const p of [
       path.join(ccRoot, 'config', DEPARTMENTS_JSON),
       path.join(ccRoot, 'data', DEPARTMENTS_JSON),
-      path.join(ccRoot, DEPARTMENTS_JSON)
-    );
+      path.join(ccRoot, DEPARTMENTS_JSON),
+    ]) {
+      if (isExistingFile(p)) return p;
+    }
   }
-  // 3. Discovered real ZHC company build — probed BEFORE the repo-committed
-  //    template so the newest client departments.json takes precedence over
-  //    the 17-demo config/departments.json checked into the repo.
+  // 3. Discovered real ZHC company build — probed only now (LAZY), and BEFORE
+  //    the repo-committed template so the newest client departments.json takes
+  //    precedence over the demo config/departments.json checked into the repo.
+  //    newestZhcChild() reads every ZHC root through the never-blocking safe-fs
+  //    helpers, so even this scan cannot freeze boot.
   const zhcBuild = newestZhcChild(DEPARTMENTS_JSON);
-  if (zhcBuild) candidates.push(zhcBuild);
+  if (zhcBuild && isExistingFile(zhcBuild)) return zhcBuild;
   // 4. The running Command Center itself (process.cwd() === CC root in prod).
-  //    Falls AFTER the real company build so the repo template is only a
-  //    last-resort fallback, never shadowing a real client's departments.json.
-  candidates.push(
+  for (const p of [
     path.join(process.cwd(), 'config', DEPARTMENTS_JSON),
-    path.join(process.cwd(), 'data', DEPARTMENTS_JSON)
-  );
-  // 5. Legacy hard-coded install locations (preserved verbatim).
-  candidates.push(...legacyConfigCandidates());
-
-  for (const p of candidates) {
+    path.join(process.cwd(), 'data', DEPARTMENTS_JSON),
+  ]) {
+    if (isExistingFile(p)) return p;
+  }
+  // 5. Legacy hard-coded install locations (safe location first; the legacy
+  //    ~/Downloads entry is read only via the bounded safe-fs helpers).
+  for (const p of legacyConfigCandidates()) {
     if (isExistingFile(p)) return p;
   }
   return null;
@@ -5522,7 +5622,16 @@ export function reseedWorkspacesFromConfig(
     }
     console.log('[reseed] Using departments.json:', configPath);
 
-    const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    // safeReadFileUtf8 NEVER blocks the event loop: if configPath resolved to a
+    // TCC-gated ~/Downloads path (legacy box) the open() runs in a hard-timeout
+    // child and returns null instead of hanging boot forever. null → treat as
+    // "no config" and skip the reseed (service comes up, does not freeze).
+    const raw = safeReadFileUtf8(configPath);
+    if (raw == null) {
+      console.warn('[reseed] departments.json unreadable (absent or TCC-blocked) — skipping workspace reseed:', configPath);
+      return { created, updated };
+    }
+    const depts = JSON.parse(raw);
     if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
 
     // Ensure company row exists / resolve the ACTIVE company. seedCompanyGuarded
@@ -5742,30 +5851,28 @@ function findCompanyName(): string {
   const envName = process.env.COMPANY_NAME?.trim();
   if (envName) return envName;
 
-  // 2. Try to find from Skill 23 interview answers
+  // 2. Try to find from Skill 23 interview answers.
+  //    SAFE canonical location first; the legacy ~/Downloads path is read only
+  //    via the never-blocking safe-fs helper so a TCC-gated box cannot hang here.
   const answerFiles = [
-    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'workforce-interview-answers.md'),
+    path.join(os.homedir(), '.openclaw', 'master-files', 'company-discovery', 'workforce-interview-answers.md'),
     path.join(os.homedir(), '.openclaw', 'workspace', 'company-discovery', 'workforce-interview-answers.md'),
+    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'workforce-interview-answers.md'),
   ];
 
   for (const f of answerFiles) {
-    if (fs.existsSync(f)) {
-      try {
-        const content = fs.readFileSync(f, 'utf8');
-        // Look for patterns like "Company Name: XYZ" or "## Company Name\nXYZ"
-        const patterns = [
-          /(?:company|business)\s*name\s*[:\-]\s*(.+?)(?:\n|$)/i,
-          /#+\s*(?:company|business)\s*name\s*\n+(.+?)(?:\n|$)/i,
-        ];
-        for (const pattern of patterns) {
-          const match = content.match(pattern);
-          if (match && match[1]) {
-            const name = match[1].trim();
-            if (name) return name;
-          }
-        }
-      } catch {
-        // Continue to next file
+    const content = safeReadFileUtf8(f);
+    if (content == null) continue;
+    // Look for patterns like "Company Name: XYZ" or "## Company Name\nXYZ"
+    const patterns = [
+      /(?:company|business)\s*name\s*[:\-]\s*(.+?)(?:\n|$)/i,
+      /#+\s*(?:company|business)\s*name\s*\n+(.+?)(?:\n|$)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = content.match(pattern);
+      if (match && match[1]) {
+        const name = match[1].trim();
+        if (name) return name;
       }
     }
   }
