@@ -1,3 +1,12 @@
+## [v6.0.31] — 2026-07-15 — feat(U95): orchestrator-only report-back invariant guard (static pin + behavioral fixture + mutation proof)
+
+v6.0.31 — Merges `skill6-v2/U95` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4, unit 2 of 4 (U58 → U95 → U103 → U105), single serial merge-writer, strictly serial in id order.
+
+- **U95:** orchestrator-only report-back invariant guard. Adds a CI workflow (`.github/workflows/report-back-invariant.yml`), a static call-site pin guard (`scripts/guard-report-back-invariant.sh`), and a behavioral fixture + mutation-proof unit test (`tests/unit/report-back-invariant.test.ts`) that pins the report-back path as orchestrator-only and fails if a mutation would let a non-orchestrator surface report back.
+- **Merge:** clean, zero conflicts vs `origin/main` (`84b1139`, v6.0.30 post-U58). Additive only — three new files, no production code touched. Merged via `git merge --no-ff` commit `d8f46fb4` (2-parent: `84b1139` + `8600411`).
+- Test proof re-run independently on the merged tree, pre-ripple: `npx tsc --noEmit` clean (exit 0); `bash scripts/qc-cc.sh` → PASS, 137 checks green, 4 warnings; `npx vitest run --config vitest.component.config.ts` → 6 files, 45/45 PASS; `npm run test:unit` → 1408 tests, 1403 pass, 5 fail — the failing-test-name set is byte-identical to the pre-merge `origin/main` baseline (the same 5 pre-existing `getInterviewState` filesystem-signal cases), confirming zero regressions and +5 net-new passing tests from `report-back-invariant.test.ts`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.30] — 2026-07-15 — feat(U58): individual-agent performance boards (per-agent endpoint + index/detail pages, QC pass)
 
 v6.0.30 — Merges `skill6-v2/U58` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4, unit 1 of 4 (U58 → U95 → U103 → U105), single serial merge-writer, strictly serial in id order.
