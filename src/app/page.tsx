@@ -46,7 +46,13 @@ export default function HomePage() {
   const logoUrl = useLogoUrl();
   const brand = useCompanyBrand();
   const [currentTime, setCurrentTime] = useState(new Date());
-  const [isOnline, setIsOnline] = useState(true);
+  // U47: renamed from the old `isOnline` state/setter pair — this is a
+  // page-local API-reachability ping, unrelated to the global store's
+  // retired `isOnline` field (now `isFeedConnected`, written only by
+  // useSSE.ts) and unrelated to the consolidated <HealthIndicator/>. Kept
+  // local + distinctly named so it can never again read as a second
+  // competing store writer.
+  const [apiReachable, setApiReachable] = useState(true);
   // PRD 3.7: initial state must be empty so white-label deployments never flash "BlackCEO".
   const [companyName, setCompanyName] = useState('');
   const [companyLoaded, setCompanyLoaded] = useState(false);
@@ -105,9 +111,9 @@ export default function HomePage() {
         const timeoutId = setTimeout(() => controller.abort(), 5000);
         const res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
         clearTimeout(timeoutId);
-        setIsOnline(res.ok);
+        setApiReachable(res.ok);
       } catch {
-        setIsOnline(false);
+        setApiReachable(false);
       }
     }
     checkConnection();
@@ -382,12 +388,12 @@ export default function HomePage() {
             {format(currentTime, 'MMM d, HH:mm:ss')}
           </span>
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
-            isOnline
+            apiReachable
               ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
               : 'bg-red-50 border border-red-200 text-red-700'
           }`}>
-            <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-            {isOnline ? 'LIVE' : 'OFFLINE'}
+            <span className={`w-2 h-2 rounded-full ${apiReachable ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+            {apiReachable ? 'LIVE' : 'OFFLINE'}
           </div>
         </div>
       </header>
@@ -505,7 +511,7 @@ export default function HomePage() {
           <motion.div className="mt-12 text-center" variants={cardVariants}>
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
               <Activity className="w-4 h-4 text-indigo-500" />
-              <span>{isOnline ? 'All systems operational' : 'System check failed'}</span>
+              <span>{apiReachable ? 'All systems operational' : 'System check failed'}</span>
               {/* P1-03 step 3: version stamp — makes build-generation drift
                   diagnosable at a glance ("you're on v5.14.0, current is
                   v5.17.0"). Omitted entirely if /api/version hasn't resolved. */}

@@ -20,7 +20,16 @@ interface MissionControlState {
   // UI State
   selectedAgent: Agent | null;
   selectedTask: Task | null;
-  isOnline: boolean;
+  /**
+   * U47 — single source of truth for the SSE stream's own connectivity.
+   * Renamed from `isOnline` (which five independent call sites wrote to for
+   * five different, unrelated reasons — a page-load health ping, a
+   * dashboard-data probe, an SSE open/error event — making the flag mean
+   * nothing specific). Written ONLY by useSSE.ts now. Overall system health
+   * (the thing the Header actually displays) is sourced from
+   * `/api/system/status` via <HealthIndicator/>, not this flag.
+   */
+  isFeedConnected: boolean;
   isLoading: boolean;
   selectedBusiness: string;
   selectedDepartment: string | null;
@@ -36,7 +45,8 @@ interface MissionControlState {
   addMessage: (message: Message) => void;
   setSelectedAgent: (agent: Agent | null) => void;
   setSelectedTask: (task: Task | null) => void;
-  setIsOnline: (online: boolean) => void;
+  /** Written ONLY by useSSE.ts — see the field comment above. */
+  setIsFeedConnected: (connected: boolean) => void;
   setIsLoading: (loading: boolean) => void;
   setSelectedBusiness: (business: string) => void;
   setSelectedDepartment: (department: string | null) => void;
@@ -69,7 +79,7 @@ export const useMissionControl = create<MissionControlState>((set) => ({
   openclawMessages: [],
   selectedAgent: null,
   selectedTask: null,
-  isOnline: true,
+  isFeedConnected: true,
   isLoading: true,
   selectedBusiness: 'all',
   selectedDepartment: null,
@@ -93,9 +103,9 @@ export const useMissionControl = create<MissionControlState>((set) => ({
     debug.store('setSelectedTask called', { id: task?.id, status: task?.status });
     set({ selectedTask: task });
   },
-  setIsOnline: (online) => {
-    debug.store('setIsOnline called', { online });
-    set({ isOnline: online });
+  setIsFeedConnected: (connected) => {
+    debug.store('setIsFeedConnected called', { connected });
+    set({ isFeedConnected: connected });
   },
   setIsLoading: (loading) => set({ isLoading: loading }),
   setSelectedBusiness: (business) => set({ selectedBusiness: business }),

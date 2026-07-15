@@ -3,37 +3,29 @@
 /**
  * SystemStatusDrawer — slide-out drawer with per-component detail (PRD 3.12).
  *
- * Receives the current payload from SystemStatusPill and exposes a refresh
- * button that triggers `?force=1` re-runs. Also exposes a "Re-run bootstrap"
- * admin action that streams `/api/system/bootstrap` SSE output into a modal
- * log view (PRD v4.0.1 P1-13).
+ * U47: reused as-is by the consolidated <HealthIndicator/> (operator
+ * variant only — the client variant never opens this drawer). Receives the
+ * current payload and exposes a refresh button that triggers `?force=1`
+ * re-runs, plus a "Re-run bootstrap" admin action that streams
+ * `/api/system/bootstrap` SSE output into a modal log view (PRD v4.0.1
+ * P1-13) — both carried over unchanged from the retired SystemStatusPill.
+ *
+ * U47 change: rows are grouped by the U46 `tier` field (Critical /
+ * Auxiliary / Model Providers) instead of a hand-maintained component-id
+ * allowlist, so a new probe added to system-status.ts's roster is
+ * automatically classified instead of silently missing from every group.
+ * The drawer is also responsive (`w-full sm:w-96`) instead of a fixed
+ * `w-96` that overflowed a 375px viewport.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, RefreshCw, PlayCircle } from 'lucide-react';
-
-type SystemStatus =
-  | 'live'
-  | 'working'
-  | 'busy'
-  | 'degraded'
-  | 'offline'
-  | 'unknown';
-
-interface ProbeResult {
-  component: string;
-  label: string;
-  status: SystemStatus;
-  latencyMs: number | null;
-  error?: string;
-  detail?: Record<string, unknown>;
-  probedAt: string;
-}
+import type { SystemStatus, TieredProbeResult } from '@/lib/probes/types';
 
 interface StatusPayload {
   overall: SystemStatus;
   probedAt: string;
-  components: ProbeResult[];
+  components: TieredProbeResult[];
   fromCache: boolean;
   cacheAgeMs: number | null;
 }
@@ -43,6 +35,76 @@ interface Props {
   loading: boolean;
   onRefresh: () => void;
   onClose: () => void;
+}
+
+/**
+ * U47: fold the Live Feed connectivity dot (previously only shown inline in
+ * LiveFeed.tsx's own header, PRD's "third independent signal") into the
+ * drawer as an additional auxiliary row, so the operator can see it
+ * alongside every other probe instead of having to notice a tiny dot inside
+ * a separate collapsible rail. Sourced from the SAME client-feed endpoint
+ * LiveFeed.tsx already polls — this is a read-only presentational fetch,
+ * not a new probe registered in system-status.ts's roster (out of this
+ * unit's file lane), so it degrades to 'unknown' rather than throwing if
+ * the endpoint is unreachable.
+ */
+function useLiveFeedRow(open: boolean): TieredProbeResult | null {
+  const [row, setRow] = useState<TieredProbeResult | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      const probedAt = new Date().toISOString();
+      try {
+        const res = await fetch('/api/events/client-feed?limit=1', { cache: 'no-store' });
+        if (cancelled) return;
+        if (!res.ok) {
+          setRow({
+            component: 'live_feed',
+            label: 'Live Feed',
+            status: 'unknown',
+            latencyMs: null,
+            probedAt,
+            tier: 'auxiliary',
+          });
+          return;
+        }
+        const data = (await res.json()) as { source?: string; gateway_error?: string };
+        const unreachable = data.source === 'gateway_unreachable';
+        setRow({
+          component: 'live_feed',
+          label: 'Live Feed',
+          status: unreachable ? 'offline' : 'live',
+          latencyMs: null,
+          error: unreachable ? data.gateway_error : undefined,
+          probedAt,
+          tier: 'auxiliary',
+        });
+      } catch {
+        if (!cancelled) {
+          setRow({
+            component: 'live_feed',
+            label: 'Live Feed',
+            status: 'unknown',
+            latencyMs: null,
+            probedAt,
+            tier: 'auxiliary',
+          });
+        }
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [open]);
+
+  return row;
 }
 
 const STATUS_DOT: Record<SystemStatus, string> = {
@@ -68,11 +130,21 @@ export function SystemStatusDrawer({ payload, loading, onRefresh, onClose }: Pro
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [bootstrapRunning, setBootstrapRunning] = useState(false);
 
-  // Group components by category for readability.
-  const core = components.filter((c) =>
-    ['database', 'openclaw_gateway', 'memory', 'jobs', 'disk', 'agents', 'telegram'].includes(c.component)
-  );
+  // U47: fold the Live Feed dot in as an extra auxiliary row. Only polled
+  // while the drawer is actually open.
+  const liveFeedRow = useLiveFeedRow(true);
+
+  // U47: group by the U46 `tier` field instead of a hand-maintained
+  // component-id allowlist — Critical / Auxiliary / Model Providers.
+  // Providers are carved out of "auxiliary" into their own section for
+  // readability (tierFor() classifies every provider_* row 'auxiliary',
+  // same as every other non-critical probe).
+  const critical = components.filter((c) => c.tier === 'critical');
   const providers = components.filter((c) => c.component.startsWith('provider_'));
+  const auxiliary = components.filter(
+    (c) => c.tier === 'auxiliary' && !c.component.startsWith('provider_')
+  );
+  const auxiliaryWithFeed = liveFeedRow ? [...auxiliary, liveFeedRow] : auxiliary;
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -81,7 +153,9 @@ export function SystemStatusDrawer({ payload, loading, onRefresh, onClose }: Pro
         onClick={onClose}
         aria-hidden
       />
-      <aside className="w-96 bg-white border-l border-gray-200 shadow-xl flex flex-col">
+      {/* U47: responsive — a fixed w-96 (24rem) overflowed a 375px viewport;
+          full-width below sm, fixed width at sm and up. */}
+      <aside className="w-full sm:w-96 bg-white border-l border-gray-200 shadow-xl flex flex-col">
         <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
           <div>
             <h2 className="text-base font-semibold text-gray-900">System Status</h2>
@@ -115,7 +189,8 @@ export function SystemStatusDrawer({ payload, loading, onRefresh, onClose }: Pro
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
-          <Section title="Core" rows={core} />
+          <Section title="Critical" rows={critical} />
+          <Section title="Auxiliary" rows={auxiliaryWithFeed} />
           <Section title="Model Providers" rows={providers} />
         </div>
 
@@ -397,7 +472,7 @@ async function safeReadText(res: Response): Promise<string> {
   }
 }
 
-function Section({ title, rows }: { title: string; rows: ProbeResult[] }) {
+function Section({ title, rows }: { title: string; rows: TieredProbeResult[] }) {
   if (rows.length === 0) return null;
   return (
     <section>

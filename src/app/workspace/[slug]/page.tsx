@@ -29,7 +29,6 @@ export default function WorkspacePage() {
     setAgents,
     setTasks,
     setEvents,
-    setIsOnline,
     setIsLoading,
     setSelectedDepartment,
     isLoading,
@@ -130,25 +129,15 @@ export default function WorkspacePage() {
       }
     }
 
-    // Check dashboard API health (data availability, not gateway connection)
-    async function checkHealth() {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-        const res = await fetch('/api/workspaces', { signal: controller.signal, cache: 'no-store' });
-        clearTimeout(timeoutId);
-        setIsOnline(res.ok);
-      } catch {
-        setIsOnline(false);
-      }
-    }
-
     loadData();
-    checkHealth();
 
     // SSE is the primary real-time mechanism - these are fallback polls with longer intervals
-    // to reduce server load while providing redundancy
+    // to reduce server load while providing redundancy. (U47: this effect
+    // previously also ran its own /api/workspaces health ping — on both
+    // mount and a 30s interval below — writing to the now-retired global
+    // `isOnline` flag. Removed, not replaced; overall health is sourced from
+    // <HealthIndicator/> / /api/system/status, not a per-page data-fetch
+    // side effect.)
 
     // Poll for events every 30 seconds (SSE fallback - increased from 5s)
     const eventPoll = setInterval(async () => {
@@ -192,22 +181,11 @@ export default function WorkspacePage() {
       }
     }, 60000); // Increased from 10000 to 60000
 
-    // Check dashboard health every 30 seconds (data availability, not gateway)
-    const connectionCheck = setInterval(async () => {
-      try {
-        const res = await fetch('/api/workspaces', { cache: 'no-store' });
-        setIsOnline(res.ok);
-      } catch {
-        setIsOnline(false);
-      }
-    }, 30000);
-
     return () => {
       clearInterval(eventPoll);
-      clearInterval(connectionCheck);
       clearInterval(taskPoll);
     };
-  }, [workspace, selectedDepartment, setAgents, setTasks, setEvents, setIsOnline, setIsLoading]);
+  }, [workspace, selectedDepartment, setAgents, setTasks, setEvents, setIsLoading]);
 
   if (notFound) {
     return (

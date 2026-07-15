@@ -107,7 +107,13 @@ export default function HomePage() {
   const reduceMotion = useReducedMotion();
 
   const [now, setNow] = useState<Date | null>(null);
-  const [isOnline, setIsOnline] = useState(true);
+  // U47: renamed from the old `isOnline` state/setter pair — this is a
+  // page-local API-reachability ping, unrelated to the global store's
+  // retired `isOnline` field (now `isFeedConnected`, written only by
+  // useSSE.ts) and unrelated to the consolidated <HealthIndicator/>. Kept
+  // local + distinctly named so it can never again read as a second
+  // competing store writer.
+  const [apiReachable, setApiReachable] = useState(true);
   const [companyName, setCompanyName] = useState('');
   const [companyLoaded, setCompanyLoaded] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -189,9 +195,9 @@ export default function HomePage() {
         const timeoutId = setTimeout(() => controller.abort(), 5000);
         const res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
         clearTimeout(timeoutId);
-        if (!cancelled) setIsOnline(res.ok);
+        if (!cancelled) setApiReachable(res.ok);
       } catch {
-        if (!cancelled) setIsOnline(false);
+        if (!cancelled) setApiReachable(false);
       }
     }
 
@@ -369,17 +375,17 @@ export default function HomePage() {
           )}
           <div
             role="status"
-            aria-label={`Connection status: ${isOnline ? 'live' : 'offline'}`}
+            aria-label={`Connection status: ${apiReachable ? 'live' : 'offline'}`}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
-              isOnline
+              apiReachable
                 ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
                 : 'bg-red-50 border-red-200 text-red-700'
             }`}
           >
             <span
-              className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}
+              className={`w-1.5 h-1.5 rounded-full ${apiReachable ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}
             />
-            {isOnline ? 'Live' : 'Offline'}
+            {apiReachable ? 'Live' : 'Offline'}
           </div>
         </div>
       </header>
@@ -564,15 +570,15 @@ export default function HomePage() {
                 <span className="text-sm text-gray-600">Gateway</span>
                 <span
                   className={`flex items-center gap-1.5 text-xs font-medium ${
-                    isOnline ? 'text-emerald-700' : 'text-red-700'
+                    apiReachable ? 'text-emerald-700' : 'text-red-700'
                   }`}
                 >
-                  {isOnline ? (
+                  {apiReachable ? (
                     <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
                   ) : (
                     <CircleAlert className="w-3.5 h-3.5" aria-hidden="true" />
                   )}
-                  {isOnline ? 'Operational' : 'Unreachable'}
+                  {apiReachable ? 'Operational' : 'Unreachable'}
                 </span>
               </li>
               <li className="flex items-center justify-between gap-2">

@@ -14,6 +14,8 @@ export default defineConfig({
       'tests/unit/u55-company-health-render.test.tsx',
       // A-U5 acceptance (b) — PersonaScopeChips real render proof.
       'tests/unit/a-u5-persona-scope-chips-render.test.tsx',
+      // U47 acceptance (a)/(b)/(c)/(e) — HealthIndicator real render proof.
+      'tests/unit/u47-health-indicator.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

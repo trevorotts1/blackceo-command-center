@@ -34,7 +34,6 @@ export default function AllTasksPage() {
     setAgents,
     setTasks,
     setEvents,
-    setIsOnline,
     setIsLoading,
     setSelectedDepartment,
   } = useMissionControl();
@@ -75,29 +74,17 @@ export default function AllTasksPage() {
       }
     }
 
-    async function checkHealth() {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
-        clearTimeout(timeoutId);
-        if (!cancelled) setIsOnline(res.ok);
-      } catch {
-        if (!cancelled) setIsOnline(false);
-      }
-    }
-
     loadData();
-    checkHealth();
-    const interval = setInterval(checkHealth, 60000);
 
     // SSE-fallback task refetch (mirrors src/app/workspace/[slug]/page.tsx):
-    // this page previously had no polling fallback at all for tasks — only
-    // the 60s /api/health ping above — so if SSE was blocked (proxy/firewall)
-    // the cross-department board would go stale indefinitely with no way to
-    // self-heal short of a manual reload. Reconcile the store only when the
-    // fetched set actually differs (count or any status) to avoid needless
-    // re-renders.
+    // this page previously had no polling fallback at all for tasks — so if
+    // SSE was blocked (proxy/firewall) the cross-department board would go
+    // stale indefinitely with no way to self-heal short of a manual reload.
+    // Reconcile the store only when the fetched set actually differs (count
+    // or any status) to avoid needless re-renders. (U47: the old 60s
+    // /api/health ping that used to sit alongside this poll wrote to the
+    // now-retired global `isOnline` flag — removed, not replaced; overall
+    // health is sourced from <HealthIndicator/> / /api/system/status.)
     const taskPoll = setInterval(async () => {
       try {
         const res = await fetch('/api/tasks');
@@ -124,10 +111,9 @@ export default function AllTasksPage() {
 
     return () => {
       cancelled = true;
-      clearInterval(interval);
       clearInterval(taskPoll);
     };
-  }, [setAgents, setTasks, setEvents, setIsOnline, setIsLoading]);
+  }, [setAgents, setTasks, setEvents, setIsLoading]);
 
   return (
     /* Shell contract (v4.66.0 bottom-cutoff fix):
