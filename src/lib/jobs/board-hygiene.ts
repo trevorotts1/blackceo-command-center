@@ -50,12 +50,23 @@
  * Runs hourly (scheduler-registered — see scheduler.ts). Disable entirely
  * with DISABLE_BOARD_HYGIENE=1. Each of the five sub-checks can also be
  * disabled independently for staged rollout / debugging.
+ *
+ * ── U101: PER-DEPARTMENT SLA OVERRIDES ──────────────────────────────────────
+ * Every threshold below is a GLOBAL default, tunable via env var. `config/
+ * board-slas.json` (src/lib/board-slas.ts) additionally lets the operator
+ * TIGHTEN or LOOSEN any of these on a per-department basis without touching
+ * the global env var (which every department would otherwise inherit). Precedence:
+ * explicit env var (global emergency override) > this task's department entry in
+ * board-slas.json > the hardcoded default below. An absent/malformed config file
+ * is fail-closed to the unchanged, byte-identical global-default behavior — see
+ * board-slas.ts's module header for the full fail-closed contract.
  */
 
 import { queryAll, queryOne, run, sqlTime, parseDbTime, timeNow } from '@/lib/db';
 import { notifyOwner, notifySystem, notifyTelegram } from '@/lib/notify';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { isContentTask } from '@/lib/tasks';
+import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { v4 as uuidv4 } from 'uuid';
 
 export const BOARD_HYGIENE_CRON = '0 * * * *'; // hourly, on the hour
@@ -82,6 +93,18 @@ function numEnv(name: string, fallback: number): number {
   const v = parseFloat(process.env[name] ?? '');
   return Number.isFinite(v) && v > 0 ? v : fallback;
 }
+
+/** U101: this job's global-default thresholds, keyed to match BoardSlaOverrides
+ *  (src/lib/board-slas.ts) — the settings-surface API reads this to render the
+ *  "(default)" row of the effective SLA table. */
+export const BOARD_HYGIENE_GLOBAL_DEFAULTS = {
+  blockedOwnerRepingHours: BLOCKED_OWNER_REPING_HOURS,
+  blockedOperatorEscalateHours: BLOCKED_OPERATOR_ESCALATE_HOURS,
+  reviewUnscoredHours: REVIEW_UNSCORED_HOURS,
+  doneArchiveDays: DONE_ARCHIVE_DAYS,
+  staleBacklogNudgeDays: STALE_BACKLOG_NUDGE_DAYS,
+  staleBacklogArchiveAfterNudgeDays: STALE_BACKLOG_ARCHIVE_AFTER_NUDGE_DAYS,
+} as const;
 
 // ── Event type constants (single source, avoid typo drift across queries) ──
 
@@ -227,6 +250,7 @@ interface BlockedTaskRow {
   ask: string | null;
   last_progress_at: string | null;
   updated_at: string;
+  department: string | null;
 }
 
 async function processBlockedLane(result: BoardHygieneResult): Promise<void> {
@@ -234,7 +258,7 @@ async function processBlockedLane(result: BoardHygieneResult): Promise<void> {
   try {
     rows = queryAll<BlockedTaskRow>(
       `SELECT id, title, block_reason, block_needs, block_audience,
-              ask, last_progress_at, updated_at
+              ask, last_progress_at, updated_at, department
          FROM tasks
         WHERE status = 'blocked' AND archived_at IS NULL`,
       [],
@@ -251,11 +275,15 @@ async function processBlockedLane(result: BoardHygieneResult): Promise<void> {
       if (Number.isNaN(progressMs)) continue;
       const ageHours = (Date.now() - progressMs) / (1000 * 60 * 60);
 
+      // U101: per-department SLA override (falls back to the global default).
+      const ownerRepingHours = resolveSlaThreshold(task.department, 'blockedOwnerRepingHours', BLOCKED_OWNER_REPING_HOURS);
+      const operatorEscalateHours = resolveSlaThreshold(task.department, 'blockedOperatorEscalateHours', BLOCKED_OPERATOR_ESCALATE_HOURS);
+
       // Rule 1: blocked > 48h, audience=OWNER → re-ping the requester, max
       // once/48h. NEVER touches status — re-ping only.
       if (
         task.block_audience === 'OWNER' &&
-        ageHours >= BLOCKED_OWNER_REPING_HOURS &&
+        ageHours >= ownerRepingHours &&
         !hasRecentEvent(task.id, EVT_OWNER_REPINGED, OWNER_REPING_COOLDOWN_HOURS)
       ) {
         const message =
@@ -270,7 +298,7 @@ async function processBlockedLane(result: BoardHygieneResult): Promise<void> {
       // Rule 2: blocked > 7d, ANY audience → escalate to the operator lane.
       // Structurally never archives — this branch only notifies + logs.
       if (
-        ageHours >= BLOCKED_OPERATOR_ESCALATE_HOURS &&
+        ageHours >= operatorEscalateHours &&
         !hasRecentEvent(task.id, EVT_OPERATOR_ESCALATED, OPERATOR_ESCALATE_COOLDOWN_HOURS)
       ) {
         const message =
@@ -296,10 +324,18 @@ async function processReviewLane(result: BoardHygieneResult): Promise<void> {
   // ([QC-HEURISTIC-FINAL] — QC-02; re-scoring a terminal task would corrupt
   // its no-key-pass counter and is explicitly forbidden by qc-scorer's own
   // invariant).
-  let unscored: Array<{ id: string; title: string }>;
+  // U101: the per-row effective threshold can only ever be TIGHTER than or
+  // equal to the widest-possible one — query at the tightest possible value
+  // across all departments (minPossibleSlaThreshold) so no department's
+  // candidates are ever missed, then apply each row's own effective
+  // threshold in JS below (mirrors hasRecentEvent's contract but with a
+  // per-row hours window instead of a fixed one).
+  const widestQueryHours = minPossibleSlaThreshold('reviewUnscoredHours', REVIEW_UNSCORED_HOURS);
+
+  let unscoredCandidates: Array<{ id: string; title: string; department: string | null }>;
   try {
-    unscored = queryAll<{ id: string; title: string }>(
-      `SELECT t.id, t.title
+    unscoredCandidates = queryAll<{ id: string; title: string; department: string | null }>(
+      `SELECT t.id, t.title, t.department
          FROM tasks t
         WHERE t.status = 'review'
           AND t.archived_at IS NULL
@@ -313,12 +349,18 @@ async function processReviewLane(result: BoardHygieneResult): Promise<void> {
              WHERE e.task_id = t.id AND e.type = 'qc_review'
                AND ${sqlTime('e.created_at')} >= datetime('now', ?)
           )`,
-      [`-${REVIEW_UNSCORED_HOURS} hours`],
+      [`-${widestQueryHours} hours`],
     );
   } catch (err) {
     console.warn('[board-hygiene] review-lane query failed:', (err as Error).message);
-    unscored = [];
+    unscoredCandidates = [];
   }
+
+  // Narrow to each row's OWN effective threshold (per-department SLA).
+  const unscored = unscoredCandidates.filter((task) => {
+    const effectiveHours = resolveSlaThreshold(task.department, 'reviewUnscoredHours', REVIEW_UNSCORED_HOURS);
+    return !hasRecentEvent(task.id, 'qc_review', effectiveHours);
+  });
 
   for (const task of unscored) {
     try {
@@ -383,13 +425,14 @@ interface DoneTaskRow {
   id: string;
   completed_at: string | null;
   updated_at: string;
+  department: string | null;
 }
 
 function processDoneLane(result: BoardHygieneResult): void {
   let rows: DoneTaskRow[];
   try {
     rows = queryAll<DoneTaskRow>(
-      `SELECT id, completed_at, updated_at FROM tasks
+      `SELECT id, completed_at, updated_at, department FROM tasks
         WHERE status = 'done' AND archived_at IS NULL`,
       [],
     );
@@ -404,7 +447,8 @@ function processDoneLane(result: BoardHygieneResult): void {
       const ms = parseDbTime(ts);
       if (Number.isNaN(ms)) continue;
       const ageDays = (Date.now() - ms) / (1000 * 60 * 60 * 24);
-      if (ageDays < DONE_ARCHIVE_DAYS) continue;
+      const doneArchiveDays = resolveSlaThreshold(task.department, 'doneArchiveDays', DONE_ARCHIVE_DAYS);
+      if (ageDays < doneArchiveDays) continue;
 
       run(`UPDATE tasks SET archived_at = ? WHERE id = ? AND status = 'done' AND archived_at IS NULL`, [
         timeNow(),
@@ -428,13 +472,14 @@ interface StaleTaskRow {
   last_progress_at: string | null;
   updated_at: string;
   requester_chat_id?: string | null;
+  department: string | null;
 }
 
 function processStaleBacklogLane(result: BoardHygieneResult): void {
   const requesterColPresent = hasRequesterColumn();
   const selectCols = requesterColPresent
-    ? 'id, title, status, last_progress_at, updated_at, requester_chat_id'
-    : 'id, title, status, last_progress_at, updated_at';
+    ? 'id, title, status, last_progress_at, updated_at, requester_chat_id, department'
+    : 'id, title, status, last_progress_at, updated_at, department';
 
   let rows: StaleTaskRow[];
   try {
@@ -456,7 +501,13 @@ function processStaleBacklogLane(result: BoardHygieneResult): void {
       const progressMs = parseDbTime(progressTs);
       if (Number.isNaN(progressMs)) continue;
       const ageDays = (Date.now() - progressMs) / (1000 * 60 * 60 * 24);
-      if (ageDays < STALE_BACKLOG_NUDGE_DAYS) continue;
+      const nudgeDays = resolveSlaThreshold(task.department, 'staleBacklogNudgeDays', STALE_BACKLOG_NUDGE_DAYS);
+      const archiveAfterNudgeDays = resolveSlaThreshold(
+        task.department,
+        'staleBacklogArchiveAfterNudgeDays',
+        STALE_BACKLOG_ARCHIVE_AFTER_NUDGE_DAYS,
+      );
+      if (ageDays < nudgeDays) continue;
 
       const prevNudge = lastEvent(task.id, EVT_STALE_NUDGED);
 
@@ -465,7 +516,7 @@ function processStaleBacklogLane(result: BoardHygieneResult): void {
         // absent a requester id (pre-P1-04 boxes) — queue for the operator
         // digest instead of messaging nobody.
         const requesterId = requesterColPresent ? (task.requester_chat_id ?? null) : null;
-        const message = `[BOARD-HYGIENE] "${task.title}" has sat untouched in ${task.status} for ${Math.round(ageDays)}d — still want this? Reply to keep it active, or it will auto-archive in ${STALE_BACKLOG_ARCHIVE_AFTER_NUDGE_DAYS}d.`;
+        const message = `[BOARD-HYGIENE] "${task.title}" has sat untouched in ${task.status} for ${Math.round(ageDays)}d — still want this? Reply to keep it active, or it will auto-archive in ${archiveAfterNudgeDays}d.`;
 
         if (requesterId) {
           sendOwnerMessage(requesterId, message);
@@ -490,7 +541,7 @@ function processStaleBacklogLane(result: BoardHygieneResult): void {
       const daysSinceNudge = (Date.now() - nudgeMs) / (1000 * 60 * 60 * 24);
       const noActivitySinceNudge = progressMs <= nudgeMs;
 
-      if (daysSinceNudge >= STALE_BACKLOG_ARCHIVE_AFTER_NUDGE_DAYS && noActivitySinceNudge) {
+      if (daysSinceNudge >= archiveAfterNudgeDays && noActivitySinceNudge) {
         run(
           `UPDATE tasks SET archived_at = ? WHERE id = ? AND status IN ('backlog','inbox') AND archived_at IS NULL`,
           [timeNow(), task.id],
