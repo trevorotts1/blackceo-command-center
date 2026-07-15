@@ -7,6 +7,8 @@ import { DepartmentGrid } from './DepartmentGrid';
 import { DepartmentPerformance } from './DepartmentCard';
 import { Building2, TrendingUp } from 'lucide-react';
 import type { WorkspaceStats, Task } from '@/lib/types';
+import { loadCompanyHeroData, type ClientCompanyHealth } from '@/lib/ceo-board/company-health-client';
+import { mergeDepartmentGrades, type DepartmentGradeSource } from '@/lib/ceo-board/department-grade-merge';
 
 const EXCLUDED_WORKSPACE_IDS = ['default'];
 
@@ -86,31 +88,52 @@ export function DepartmentPerformanceSection({ className }: DepartmentPerformanc
       try {
         setIsLoading(true);
         setError(null);
-        
-        // Fetch workspaces with stats and all tasks in parallel
-        const [workspacesRes, tasksRes] = await Promise.all([
+
+        // Fetch workspaces with stats and all tasks in parallel. U57 also
+        // fetches /api/company-health (the SAME single source the CEO Board
+        // overview's DepartmentGradeCards and the /ceo-board/[dept] detail
+        // hero already read) so this grid's headline can be the real grade
+        // instead of a third, independently-computed completion number.
+        // Grade fetch failure degrades gracefully (mergeDepartmentGrades
+        // returns honest nulls below) rather than blocking the whole grid.
+        const [workspacesRes, tasksRes, healthResult] = await Promise.all([
           fetch('/api/workspaces?stats=true'),
           fetch('/api/tasks'),
+          loadCompanyHeroData().catch((err) => {
+            console.error('Failed to load department grades:', err);
+            return null;
+          }),
         ]);
-        
+
         if (!workspacesRes.ok) {
           throw new Error('Failed to fetch workspaces');
         }
         if (!tasksRes.ok) {
           throw new Error('Failed to fetch tasks');
         }
-        
+
         const workspaces: WorkspaceStats[] = await workspacesRes.json();
         const tasks: Task[] = await tasksRes.json();
-        
+        const health: ClientCompanyHealth | null = healthResult;
+
         // Filter out excluded workspaces (e.g., legacy 'default')
         const filteredWorkspaces = workspaces.filter(
           (w) => !EXCLUDED_WORKSPACE_IDS.includes(w.id)
         );
-        
+
         // Calculate department performance from real data
         const performanceData = calculateDepartmentPerformance(filteredWorkspaces, tasks);
-        setDepartments(performanceData);
+
+        // Merge the real grade onto each card (headline); all-time completion
+        // (`progress`, already computed above) stays as the demoted secondary
+        // stat — see DepartmentCard.tsx.
+        const grades = (health?.departments ?? []) as unknown as DepartmentGradeSource[];
+        const windowDays = health?.windowDays;
+        const gradedData = mergeDepartmentGrades(performanceData, grades).map((d) => ({
+          ...d,
+          windowDays,
+        }));
+        setDepartments(gradedData);
       } catch (err) {
         console.error('Failed to load department data:', err);
         setError(err instanceof Error ? err.message : 'Failed to load data');
@@ -120,7 +143,7 @@ export function DepartmentPerformanceSection({ className }: DepartmentPerformanc
     }
 
     loadData();
-    
+
     // Refresh data every 60 seconds
     const interval = setInterval(loadData, 60000);
     return () => clearInterval(interval);

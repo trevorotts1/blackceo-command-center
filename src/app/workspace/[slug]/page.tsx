@@ -7,7 +7,6 @@ import { ChevronLeft } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { AgentsSidebar } from '@/components/AgentsSidebar';
 import { MissionQueue } from '@/components/MissionQueue';
-import { CEODashboard } from '@/components/CEODashboard';
 import { useMissionControl } from '@/lib/store';
 import { LiveFeed } from '@/components/LiveFeed';
 import { SSEDebugPanel } from '@/components/SSEDebugPanel';
@@ -299,8 +298,6 @@ export default function WorkspacePage() {
   const routeDepartment = workspace.slug === 'default' || workspace.slug === 'ceo'
     ? null
     : workspace.slug;
-  // Show task board when a department is selected, even on CEO workspace
-  const showTaskBoard = true;
 
   return (
     /* Shell contract (v4.66.0 bottom-cutoff fix) — see /tasks/all: dvh-sized
@@ -364,16 +361,16 @@ export default function WorkspacePage() {
           onClose={() => setSidebarOpen(false)}
         />
 
-        {/* Main Content Area */}
-        {showTaskBoard ? (
-          <MissionQueue
-            workspaceId={workspace.id}
-            departmentFilter={routeDepartment}
-            boardKind={workspace.slug === 'bugs' ? 'bug' : 'task'}
-          />
-        ) : (
-          <CEODashboard workspace={workspace} />
-        )}
+        {/* Main Content Area — U57: the CEODashboard branch this ternary used
+            to guard was unreachable dead code (showTaskBoard was hardcoded
+            true; VERIFIED sole consumer of CEODashboard.tsx, now deleted).
+            Always the task board; a department-scoped performance view lives
+            at /ceo-board/[dept] instead. */}
+        <MissionQueue
+          workspaceId={workspace.id}
+          departmentFilter={routeDepartment}
+          boardKind={workspace.slug === 'bugs' ? 'bug' : 'task'}
+        />
 
         {/* Live Feed */}
         <LiveFeed />
