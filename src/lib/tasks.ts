@@ -305,21 +305,27 @@ export function deriveDepartmentDefaultPersona(
 }
 
 /**
- * Pin a department-default persona onto a task and mark it persona_fallback=true.
- * Writes a queryable `persona_fallback` audit event (independent of the column so
- * the record exists even on a pre-migration DB) and re-broadcasts the row.
+ * Write the legacy `tasks.persona_id/name/mode/...` mirror columns — the
+ * pre-090 back-compat surface every existing consumer (TaskCard,
+ * PersonaGovernanceBoard, the persona-backfill sweep's `persona_id IS NULL`
+ * scan) still reads. Shared by every "pin a persona without a fresh selector
+ * match" path (department-default fallback, producer-pin) so the
+ * persona_fallback-column-presence branch is expressed exactly once.
  */
-function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPersona): void {
+function writeLegacyPersonaMirror(
+  taskId: string,
+  persona: { persona_id: string; persona_name: string; persona_mode: string },
+  { fallback }: { fallback: boolean },
+): void {
   const now = new Date().toISOString();
-
   if (tasksHasPersonaFallbackColumn()) {
     run(
       `UPDATE tasks
           SET persona_id = ?, persona_name = ?, persona_mode = ?,
               persona_score = NULL, persona_version = 1,
-              persona_selected_at = ?, persona_fallback = 1
+              persona_selected_at = ?, persona_fallback = ?
         WHERE id = ?`,
-      [fb.persona_id, fb.persona_name, fb.persona_mode, now, taskId],
+      [persona.persona_id, persona.persona_name, persona.persona_mode, now, fallback ? 1 : 0, taskId],
     );
   } else {
     run(
@@ -328,9 +334,20 @@ function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPerson
               persona_score = NULL, persona_version = 1,
               persona_selected_at = ?
         WHERE id = ?`,
-      [fb.persona_id, fb.persona_name, fb.persona_mode, now, taskId],
+      [persona.persona_id, persona.persona_name, persona.persona_mode, now, taskId],
     );
   }
+}
+
+/**
+ * Pin a department-default persona onto a task and mark it persona_fallback=true.
+ * Writes a queryable `persona_fallback` audit event (independent of the column so
+ * the record exists even on a pre-migration DB) and re-broadcasts the row.
+ */
+function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPersona): void {
+  const now = new Date().toISOString();
+
+  writeLegacyPersonaMirror(taskId, fb, { fallback: true });
 
   run(
     `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -362,6 +379,131 @@ function pinDepartmentDefaultPersona(taskId: string, fb: DepartmentDefaultPerson
       `[resolvePersonaAndPin] department-default persona pinned for task ${taskId}: ${fb.persona_id} (persona_fallback=true)`,
     );
   }
+}
+
+/** Producer-supplied persona identity accepted by pinProducerPersonaBundle (B-U7). */
+export interface ProducerPersonaBundleInput {
+  voice_persona_id: string;
+  topic_persona_id?: string | null;
+  task_persona_ids?: string[] | null;
+  bundle_sha?: string | null;
+}
+
+/**
+ * B-U7 — Ingest parity: pin a producer-reported persona bundle onto a task
+ * WITHOUT spawning the selector. The producer (a Skill-6 build, or any other
+ * board client that already resolved a bundle via B-U1's threaded/cc/local
+ * rungs) hands the Command Center the SAME field vocabulary
+ * `report_persona_used` (B-U6) posts back later; this function is the
+ * create-time mirror of that trust.
+ *
+ * Writes BOTH mirrors so every existing consumer stays correct:
+ *   1. The legacy `tasks.persona_id/persona_name/persona_mode/...` columns
+ *      (pre-090 back-compat — TaskCard, PersonaGovernanceBoard, the persona-
+ *      backfill sweep's `persona_id IS NULL` scan all read this).
+ *   2. The migration-090 bundle mirror (`tasks.voice_persona_id/
+ *      topic_persona_id/blend_directive` + one `task_persona_bundle` row) via
+ *      the EXACT same `persistPersonaBundle` helper resolvePersonaAndPin uses
+ *      — one write path, never a second implementation to drift.
+ *
+ * `persona_name` has no catalog-verified value available here (that would
+ * require the very selector spawn this unit exists to skip), so it is
+ * deterministically derived from the id via `humanizeSlug` — the same
+ * degrade-honestly pattern `deriveDepartmentDefaultPersona`'s company-config
+ * tier already uses for an id with no selector-returned name.
+ *
+ * `confirm_required: false` (not_required): a `voice_persona_id` reaching
+ * this function has, by the B-U1 ladder's own contract, already cleared any
+ * pending audience confirmation upstream (a genuinely pending bundle HOLDs
+ * before it ever reaches ingest) — so no NEW confirm gate is invented here.
+ *
+ * Fail-soft: any DB error is caught and logged; task creation is never
+ * blocked by a producer-pin failure.
+ *
+ * Returns the pinned voice persona id.
+ */
+export function pinProducerPersonaBundle(taskId: string, producer: ProducerPersonaBundleInput): string {
+  const voicePersonaId = producer.voice_persona_id.trim();
+  const personaName = humanizeSlug(voicePersonaId);
+
+  try {
+    writeLegacyPersonaMirror(
+      taskId,
+      { persona_id: voicePersonaId, persona_name: personaName, persona_mode: 'leadership' },
+      { fallback: false },
+    );
+  } catch (err) {
+    console.warn(`[createTaskCore] producer-pin legacy-column write failed for task ${taskId}:`, (err as Error).message);
+  }
+
+  // The migration-090 bundle mirror — reuses persistPersonaBundle verbatim so
+  // this is the SAME write path resolvePersonaAndPin uses, never a fork.
+  const topicPersonaId = (producer.topic_persona_id || '').trim() || null;
+  const taskPersonaIds = (producer.task_persona_ids || [])
+    .map((p) => (p || '').trim())
+    .filter((p) => p.length > 0);
+  const bundleSha = (producer.bundle_sha || '').trim() || null;
+
+  const bundle: PersonaBundle = {
+    confirm_required: false,
+    voice: {
+      audience_persona: { id: voicePersonaId, why: 'producer-pinned at ingest (B-U7)' },
+      topic_persona: topicPersonaId ? { id: topicPersonaId, why: null } : null,
+      collapsed: false,
+    },
+    blend_directive: '',
+    task_personas: taskPersonaIds.map((persona_id, i) => ({ seq: i + 1, persona_id, why: null })),
+    rationale: { source: 'producer_pinned_ingest', bundle_sha: bundleSha },
+    catalog_version: null,
+  };
+  try {
+    persistPersonaBundle(taskId, bundle);
+  } catch (err) {
+    console.warn(`[createTaskCore] producer-pin bundle persist failed for task ${taskId}:`, (err as Error).message);
+  }
+
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        'persona_producer_pinned',
+        taskId,
+        `[PERSONA-PRODUCER-PIN] ingest carried a resolved bundle — pinned "${voicePersonaId}" ` +
+          `directly (B-U7); no selector spawn.`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch {
+    /* audit-only — never block the pin on it */
+  }
+
+  // Read-back + broadcast are best-effort telemetry — a failure here must
+  // never surface as a thrown error to the caller (createTaskCore calls this
+  // synchronously; an uncaught throw would crash task creation itself, unlike
+  // the async resolvePersonaAndPin path it replaces).
+  try {
+    const updatedTask = queryOne<Task>(
+      `SELECT t.*,
+          aa.name as assigned_agent_name,
+          aa.avatar_emoji as assigned_agent_emoji,
+          ca.name as created_by_agent_name,
+          ca.avatar_emoji as created_by_agent_emoji
+         FROM tasks t
+         LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
+         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
+        WHERE t.id = ?`,
+      [taskId],
+    );
+    if (updatedTask) {
+      broadcast({ type: 'task_updated', payload: updatedTask });
+      console.log(`[createTaskCore] producer-pinned persona for task ${taskId}: ${voicePersonaId} (B-U7, no selector spawn)`);
+    }
+  } catch (err) {
+    console.warn(`[createTaskCore] producer-pin read-back/broadcast failed for task ${taskId}:`, (err as Error).message);
+  }
+
+  return voicePersonaId;
 }
 
 // ─── SOP-AWARE MATCHING (F3.4) ──────────────────────────────────────────────
@@ -1986,6 +2128,23 @@ export interface CreateTaskCoreInput {
    */
   requester_channel?: string | null;
   requester_chat_id?: string | null;
+  /**
+   * B-U7 (ingest parity) — OPTIONAL producer-supplied persona-bundle identity,
+   * the SAME field vocabulary `cc_board.py`'s `report_persona_used` posts back
+   * later (B-U6). The producer (e.g. a Skill-6 build) already resolved its
+   * bundle before creating the card (B-U1's threaded/cc/local rungs), so there
+   * is nothing left to re-match. When `voice_persona_id` is present (non-empty
+   * after trim), createTaskCore SKIPS resolvePersonaAndPin/
+   * resolvePersonaPlanAndPin's selector spawn entirely and pins these
+   * producer-reported personas directly (pinProducerPersonaBundle). Absent /
+   * empty `voice_persona_id` → today's async selector-pin behavior, byte-
+   * identical (voice_persona_id GATES the whole group, mirroring
+   * report_persona_used's voice-required gate).
+   */
+  voice_persona_id?: string | null;
+  topic_persona_id?: string | null;
+  task_persona_ids?: string[] | null;
+  bundle_sha?: string | null;
 }
 
 export interface CreateTaskCoreResult {
@@ -2326,37 +2485,57 @@ export async function createTaskCore(
     (input.department ? canonicalDeptSlug(input.department) : null) ||
     'general';
 
-  // DEP-5 / F3.7 + F3.9 — decide single-persona vs multi-persona decomposition.
-  // Combined mode runs when the resolved SOP declares >1 persona slot OR a free
-  // heuristic probe finds >1 sub-task on a non-mechanical task. The primary
-  // (seq-1) persona is still pinned onto tasks.persona_* for back-compat either
-  // way; combined mode additionally persists the per-sub-task plan rows.
-  // F3.4 (DEP-2): the single-persona path stays SOP-aware by folding the resolved
-  // SOP context into the creation-time match.
-  //
-  // D1 (persona-blend) — a CONTENT task (isContentTask, the TS mirror of
-  // persona_blend.is_content_task) routes to `--blend` INSTEAD of `--combined`,
-  // even when the heuristic probe / SOP slots would otherwise call for combined
-  // decomposition: the blend bundle already decomposes the job into up to 10
-  // task_personas INTERNALLY (persona_blend.py's build_bundle() calls
-  // decompose-task.py's combined_select under the hood), so running --combined
-  // too would double-decompose the same task. Non-content tasks are entirely
-  // unaffected — decideMultiPersona still governs them exactly as before.
-  const personaSlots = loadSopPersonaSlots(sopId);
-  const contentTask = isContentTask(personaTaskDescription);
-  const { combined: useCombinedPersona, reason: decompReason } = decideMultiPersona(
-    personaTaskDescription,
-    personaSlots,
-  );
   let personaPinPromise: Promise<string | null>;
-  if (contentTask) {
-    console.log(`[createTaskCore] task ${id}: content task — routing to --blend (voice-first audience+topic, D1)`);
-    personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext, { blend: true });
-  } else if (useCombinedPersona) {
-    console.log(`[createTaskCore] task ${id}: multi-persona decomposition (${decompReason})`);
-    personaPinPromise = resolvePersonaPlanAndPin(id, personaTaskDescription, personaDepartment, personaSlots);
+
+  // B-U7 (ingest parity) — a producer that already resolved its own bundle
+  // (B-U1's threaded/cc/local rungs) hands the ids straight through ingest.
+  // voice_persona_id GATES the whole group: when present, SKIP the selector
+  // decision tree below entirely (isContentTask/decideMultiPersona/
+  // resolvePersonaAndPin/resolvePersonaPlanAndPin never run — no spawn) and
+  // pin the producer's personas directly. Absent/empty → today's async
+  // selector-pin behavior, byte-identical.
+  const producerVoicePersonaId = (input.voice_persona_id || '').trim();
+  if (producerVoicePersonaId) {
+    personaPinPromise = Promise.resolve(
+      pinProducerPersonaBundle(id, {
+        voice_persona_id: producerVoicePersonaId,
+        topic_persona_id: input.topic_persona_id,
+        task_persona_ids: input.task_persona_ids,
+        bundle_sha: input.bundle_sha,
+      }),
+    );
   } else {
-    personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext);
+    // DEP-5 / F3.7 + F3.9 — decide single-persona vs multi-persona decomposition.
+    // Combined mode runs when the resolved SOP declares >1 persona slot OR a free
+    // heuristic probe finds >1 sub-task on a non-mechanical task. The primary
+    // (seq-1) persona is still pinned onto tasks.persona_* for back-compat either
+    // way; combined mode additionally persists the per-sub-task plan rows.
+    // F3.4 (DEP-2): the single-persona path stays SOP-aware by folding the resolved
+    // SOP context into the creation-time match.
+    //
+    // D1 (persona-blend) — a CONTENT task (isContentTask, the TS mirror of
+    // persona_blend.is_content_task) routes to `--blend` INSTEAD of `--combined`,
+    // even when the heuristic probe / SOP slots would otherwise call for combined
+    // decomposition: the blend bundle already decomposes the job into up to 10
+    // task_personas INTERNALLY (persona_blend.py's build_bundle() calls
+    // decompose-task.py's combined_select under the hood), so running --combined
+    // too would double-decompose the same task. Non-content tasks are entirely
+    // unaffected — decideMultiPersona still governs them exactly as before.
+    const personaSlots = loadSopPersonaSlots(sopId);
+    const contentTask = isContentTask(personaTaskDescription);
+    const { combined: useCombinedPersona, reason: decompReason } = decideMultiPersona(
+      personaTaskDescription,
+      personaSlots,
+    );
+    if (contentTask) {
+      console.log(`[createTaskCore] task ${id}: content task — routing to --blend (voice-first audience+topic, D1)`);
+      personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext, { blend: true });
+    } else if (useCombinedPersona) {
+      console.log(`[createTaskCore] task ${id}: multi-persona decomposition (${decompReason})`);
+      personaPinPromise = resolvePersonaPlanAndPin(id, personaTaskDescription, personaDepartment, personaSlots);
+    } else {
+      personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext);
+    }
   }
   // Swallow at the source so a background failure never becomes an unhandled
   // rejection — both resolvers log internally and never throw to callers.
