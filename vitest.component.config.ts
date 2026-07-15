@@ -17,6 +17,8 @@ export default defineConfig({
       // U42 (C-11) — task-detail modal FULLY populated (multi-persona plan +
       // honest engine-card persona surface) real render proof.
       'tests/unit/u42-task-detail-modal-populated.test.tsx',
+      // U47 acceptance (a)/(b)/(c)/(e) — HealthIndicator real render proof.
+      'tests/unit/u47-health-indicator.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

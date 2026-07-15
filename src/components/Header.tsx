@@ -9,7 +9,7 @@ import { LogoConfig } from '@/lib/logo';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { format } from 'date-fns';
 import type { Workspace } from '@/lib/types';
-import { SystemStatusPill } from './SystemStatusPill';
+import { HealthIndicator } from './HealthIndicator';
 
 // --- AI Settings model & persona options ---
 // openrouter/free intentionally removed — AF-MODEL-SOVEREIGNTY forbids it as a default.
@@ -31,7 +31,7 @@ interface HeaderProps {
 
 export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const router = useRouter();
-  const { agents, tasks, isOnline } = useMissionControl();
+  const { agents, tasks } = useMissionControl();
   // Bug 4 (v4.0.2): mount-gate the live clock. Initial render must be the
   // same on server and client (null), then useEffect populates it after
   // hydration so a fresh Date() does not cause React #418/#423 mismatch.
@@ -377,44 +377,16 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
             <span className="inline-block w-20 h-4 bg-gray-100 rounded animate-pulse" aria-hidden />
           )}
         </span>
-        {/* System status pill (PRD 3.12). Reflects the worst-case component
-         *  status across probes. */}
-        <SystemStatusPill />
-
-        {/* E24 fix: ONE unambiguous connection status pill for the SELECTED
-         *  client (replaces the two adjacent bright ONLINE/OFFLINE buttons that
-         *  could both look "lit"). A single dot+label with no competing
-         *  affordance. For the operator's own box we drive it from the live
-         *  store; remote-client live status is wired by the connection feature
-         *  cluster — until then we show the neutral connected/offline state. */}
-        {(() => {
-          // Selected client's connection state. The live store flag (isOnline)
-          // is the only connection signal available in this foundation; the
-          // connection feature cluster swaps in a per-client probe later. We
-          // reference selectedClient so the pill is explicitly scoped to it.
-          void selectedClient;
-          const online = isOnline;
-          return (
-            /* “Gateway …” wording + sm+ only (v4.66.0): this pill used to say
-               a bare “Online” right next to the system pill's “OFFLINE”, which
-               read as the app contradicting itself. Naming the subject and
-               hiding it on phones (where the system pill is the one status)
-               removes the contradiction. */
-            <div
-              className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border ${
-                online
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                  : 'bg-gray-50 border-gray-200 text-gray-600'
-              }`}
-              role="status"
-              aria-label={`Gateway connection: ${online ? 'online' : 'offline'}`}
-              title={online ? 'Connected to the selected client gateway' : 'Not connected to the selected client gateway'}
-            >
-              <span className={`w-2 h-2 rounded-full ${online ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`} />
-              <span>{online ? 'Gateway Online' : 'Gateway Offline'}</span>
-            </div>
-          );
-        })()}
+        {/* U47: ONE consolidated health affordance, visible at every
+         *  breakpoint (the old Gateway pill was `hidden sm:flex`, invisible
+         *  on phones — that hiding is retired, not carried forward). Source
+         *  of truth is U46's criticality-tiered `overall` from
+         *  /api/system/status, not the retired per-page `isOnline` flag.
+         *  Operator variant: clickable, opens SystemStatusDrawer. */}
+        <HealthIndicator viewerRole="operator" />
+        {/* selectedClient is still read elsewhere in this header (the client
+         *  picker below); nothing in this health affordance is scoped to it —
+         *  system health is box-wide, not per-selected-client. */}
 
         {/* Client (tenant) picker — selects which managed box the whole
          *  dashboard reads. Hidden when only the operator's own box exists. */}

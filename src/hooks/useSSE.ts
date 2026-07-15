@@ -36,7 +36,7 @@ export function useSSE(options?: UseSSEOptions) {
     updateTask,
     addTask,
     removeTask,
-    setIsOnline,
+    setIsFeedConnected,
     selectedTask,
     setSelectedTask,
   } = useMissionControl();
@@ -96,7 +96,7 @@ export function useSSE(options?: UseSSEOptions) {
 
       eventSource.onopen = () => {
         debug.sse('Connected');
-        setIsOnline(true);
+        setIsFeedConnected(true);
         isConnecting = false;
         // Clear any pending reconnect
         if (reconnectTimeoutRef.current) {
@@ -199,14 +199,14 @@ export function useSSE(options?: UseSSEOptions) {
           .then((res) => {
             if (res.ok) {
               debug.sse('SSE failed but API is healthy - staying online');
-              setIsOnline(true);
+              setIsFeedConnected(true);
             } else {
-              setIsOnline(false);
+              setIsFeedConnected(false);
             }
           })
           .catch(() => {
             debug.sse('Both SSE and health check failed - going offline');
-            setIsOnline(false);
+            setIsFeedConnected(false);
           });
 
         // Attempt reconnection after 10 seconds
@@ -233,5 +233,5 @@ export function useSSE(options?: UseSSEOptions) {
     };
   // selectedTask removed from deps to prevent re-connection loop
   // We use selectedTaskIdRef to check the current selected task ID without triggering re-renders
-  }, [addTask, updateTask, removeTask, setIsOnline, setSelectedTask]);
+  }, [addTask, updateTask, removeTask, setIsFeedConnected, setSelectedTask]);
 }
