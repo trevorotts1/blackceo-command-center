@@ -23,10 +23,50 @@
  * canonical definition (TRIO_ROLE_TYPES / canonicalTrioRole in
  * @/lib/db/migrations, the same import qc-scorer.ts's resolveTrioAgents()
  * already uses), not anything U59 introduces.
+ *
+ * --- U58 QC fix-loop addition (getAgentGrade) --------------------------
+ * `getAgentPerformance` above is the pure, ungated tasks x task_qc_results
+ * join primitive — kept exactly as originally shipped (all-time, no sample
+ * gate) because it is a useful low-level building block AND its existing
+ * tests deliberately exercise it at n=1 to prove the "latest QC attempt
+ * wins" tie-break logic in isolation.
+ *
+ * `getAgentGrade` below is the NEW windowed, gated, DepartmentGrade-shaped
+ * surface the endpoint actually serves. It scopes the same four PRD inputs
+ * `src/lib/grading.ts` already computes at department level (throughput /
+ * qcPassRate / sopCoverage / kpiAttainment) down to one agent's own tasks,
+ * using the IDENTICAL formulas, gates (GRADING_THRESHOLDS), and weights
+ * (DEFAULT_INPUT_WEIGHTS) grading.ts exports — just re-scoped from
+ * `workspace_id` to `tasks.assigned_agent_id` (grading.ts has no
+ * agent-scoped variant to import, so the scoped SQL is re-stated here
+ * rather than refactoring the department module's private query
+ * functions). kpiAttainment has no agent-level KPI source (spec (a)) and
+ * always renders "Insufficient data" rather than approximating one.
+ *
+ * blockedCount/blockedTasks/velocity reuse
+ * `computeDepartmentOperationalStats` from @/lib/ceo-board/ verbatim — that
+ * function is generic over any task list (it does not filter by workspace
+ * itself, the caller pre-scopes the rows), so scoping it to one agent's
+ * tasks instead of one department's tasks needs no new code, and gets the
+ * exact same honesty discipline (blockedCount always a real integer,
+ * velocity null only when the agent has zero tasks ever) for free.
  */
 
 import { getDb } from '@/lib/db';
 import { canonicalTrioRole } from '@/lib/db/migrations';
+import {
+  GRADING_THRESHOLDS,
+  DEFAULT_INPUT_WEIGHTS,
+  scoreToGrade,
+  type Grade,
+  type GradeInputKey,
+  type InputScore,
+} from '@/lib/grading';
+import {
+  computeDepartmentOperationalStats,
+  type OperationalTaskInput,
+  type BlockedTaskSummary,
+} from '@/lib/ceo-board/department-operational-stats';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -290,5 +330,281 @@ export function getAgentPerformance(agentId: string): AgentPerformance | null {
     passRate,
     throughputPerWeek,
     trend,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// U58 QC fix-loop — windowed, gated agent grade (mirrors DepartmentGrade)
+// ---------------------------------------------------------------------------
+
+/** Default rolling window, matching computeDepartmentGrade / computeCompanyHealth's default. */
+export const DEFAULT_AGENT_WINDOW_DAYS = 30;
+
+export interface AgentGrade {
+  agentId: string;
+  agentName: string;
+  agentRole: string;
+  /** Rolling window size actually used for this response (the `?window=` query param). */
+  windowDays: number;
+  /** The same four PRD inputs as DepartmentGrade (src/lib/grading.ts), scoped to this
+   *  agent's own tasks. score is null (never a number) below each input's sample gate. */
+  inputs: Record<GradeInputKey, InputScore>;
+  /** Weighted avg over inputs WITH data; null if fewer than MIN_GRADED_INPUTS have data. */
+  score: number | null;
+  grade: Grade | null;
+  sufficientData: boolean;
+  /** completed/created within the window; null only when zero tasks were CREATED in the
+   *  window (never 0%) — same convention as CompanyHealth.windowedCompletionRate. */
+  windowedCompletionRate: number | null;
+  /** Count of this agent's tasks currently status='blocked' — always a real integer,
+   *  0 is an honest zero, never omitted. */
+  blockedCount: number;
+  /** The blocked tasks themselves — length always equals blockedCount (same array). */
+  blockedTasks: BlockedTaskSummary[];
+  /** Completed-per-week rate averaged over windowDays (KPIStatCards.tsx's Avg Velocity
+   *  formula, scoped to this agent) — distinct from the throughput INPUT above (that's a
+   *  %, this is a rate/week). Null only when the agent has zero tasks at all. */
+  velocity: number | null;
+  /** All-time completed count. A plain honest integer (not a derived rate), so unlike the
+   *  gated inputs above it needs no sample gate — 0 is exactly as honest as any other value. */
+  completedCount: number;
+  /** All-time weekly trend series (unchanged from getAgentPerformance). */
+  trend: WeeklyTrendPoint[];
+}
+
+interface AgentIdentityRow {
+  id: string;
+  name: string;
+  role: string;
+}
+
+interface AgentWindowTaskCounts {
+  created: number;
+  completed: number;
+}
+
+function getAgentWindowedTaskCounts(
+  db: ReturnType<typeof getDb>,
+  agentId: string,
+  windowDays: number,
+): AgentWindowTaskCounts {
+  const row = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS created,
+         SUM(CASE WHEN status = 'done'
+                   AND julianday('now') - julianday(COALESCE(completed_at, updated_at)) <= ?
+                  THEN 1 ELSE 0 END) AS completed
+       FROM tasks
+       WHERE assigned_agent_id = ?
+         AND julianday('now') - julianday(created_at) <= ?`,
+    )
+    .get(windowDays, agentId, windowDays) as AgentWindowTaskCounts | undefined;
+
+  return { created: row?.created ?? 0, completed: row?.completed ?? 0 };
+}
+
+/** Mirrors grading.ts's computeThroughput, scoped to one agent's tasks instead of a workspace. */
+function computeAgentThroughputInput(counts: AgentWindowTaskCounts): InputScore {
+  const { created, completed } = counts;
+
+  if (created < GRADING_THRESHOLDS.MIN_TASKS_FOR_THROUGHPUT) {
+    return {
+      key: 'throughput',
+      score: null,
+      sampleSize: created,
+      detail: `Insufficient task data (${created} tasks created, need ${GRADING_THRESHOLDS.MIN_TASKS_FOR_THROUGHPUT}+)`,
+    };
+  }
+
+  // Denominator: max(created, completed) prevents > 100% when clearing backlog.
+  const denom = Math.max(created, completed);
+  const score = Math.min(100, Math.round((completed / denom) * 100));
+  return {
+    key: 'throughput',
+    score,
+    sampleSize: created,
+    detail: `${completed} completed of ${created} created (${score}%)`,
+  };
+}
+
+/** Mirrors grading.ts's computeQcPassRate, scoped via the J.0.4 tasks x task_qc_results join. */
+function computeAgentQcPassRateInput(
+  db: ReturnType<typeof getDb>,
+  agentId: string,
+  windowDays: number,
+): InputScore {
+  const row = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(tqr.passed) AS passes
+       FROM task_qc_results tqr
+       JOIN tasks t ON t.id = tqr.task_id
+       WHERE t.assigned_agent_id = ?
+         AND tqr.scoring_path = 'llm'
+         AND julianday('now') - julianday(tqr.scored_at) <= ?`,
+    )
+    .get(agentId, windowDays) as { total: number; passes: number } | undefined;
+
+  const total = row?.total ?? 0;
+
+  if (total < GRADING_THRESHOLDS.MIN_QC_RESULTS) {
+    return {
+      key: 'qcPassRate',
+      score: null,
+      sampleSize: total,
+      detail: `Awaiting QC scoring (${total} LLM-graded results, need ${GRADING_THRESHOLDS.MIN_QC_RESULTS}+)`,
+    };
+  }
+
+  const passes = row?.passes ?? 0;
+  const score = Math.round((passes / total) * 100);
+  return {
+    key: 'qcPassRate',
+    score,
+    sampleSize: total,
+    detail: `${passes}/${total} tasks passed QC gate (≥8.5) — ${score}%`,
+  };
+}
+
+/** Mirrors grading.ts's computeSopCoverage, scoped to tasks dispatched to this agent. */
+function computeAgentSopCoverageInput(
+  db: ReturnType<typeof getDb>,
+  agentId: string,
+  windowDays: number,
+): InputScore {
+  const row = db
+    .prepare(
+      `SELECT
+         COUNT(DISTINCT e.task_id) AS dispatched,
+         SUM(CASE WHEN t.sop_id IS NOT NULL THEN 1 ELSE 0 END) AS with_sop
+       FROM events e
+       JOIN tasks t ON t.id = e.task_id
+       WHERE e.type = 'task_dispatched'
+         AND t.assigned_agent_id = ?
+         AND julianday('now') - julianday(e.created_at) <= ?`,
+    )
+    .get(agentId, windowDays) as { dispatched: number; with_sop: number } | undefined;
+
+  const dispatched = row?.dispatched ?? 0;
+
+  if (dispatched < GRADING_THRESHOLDS.MIN_DISPATCHED) {
+    return {
+      key: 'sopCoverage',
+      score: null,
+      sampleSize: dispatched,
+      detail: `Insufficient dispatches (${dispatched}, need ${GRADING_THRESHOLDS.MIN_DISPATCHED}+)`,
+    };
+  }
+
+  const withSop = row?.with_sop ?? 0;
+  const score = Math.round((withSop / dispatched) * 100);
+  return {
+    key: 'sopCoverage',
+    score,
+    sampleSize: dispatched,
+    detail: `${withSop}/${dispatched} dispatched tasks had an SOP (${score}%)`,
+  };
+}
+
+/** Spec (a): agent-level KPI attainment has no real source yet — never approximated
+ *  from department-level kpi_snapshots (those are department-scoped, not per-agent). */
+function agentKpiAttainmentInput(): InputScore {
+  return {
+    key: 'kpiAttainment',
+    score: null,
+    sampleSize: 0,
+    detail: 'No agent-level KPI targets tracked yet — kpi_snapshots only tracks department-level targets',
+  };
+}
+
+/** Mirrors computeDepartmentGrade's combine step exactly: only inputs WITH data count
+ *  toward the weighted average, and MIN_GRADED_INPUTS must have data for a score at all. */
+function combineAgentGradeInputs(
+  inputs: Record<GradeInputKey, InputScore>,
+): { score: number | null; grade: Grade | null; sufficientData: boolean } {
+  const presentKeys = (Object.keys(inputs) as GradeInputKey[]).filter(
+    (k) => inputs[k].score !== null,
+  );
+  const sufficientData = presentKeys.length >= GRADING_THRESHOLDS.MIN_GRADED_INPUTS;
+
+  let score: number | null = null;
+  if (sufficientData) {
+    const totalWeight = presentKeys.reduce((s, k) => s + DEFAULT_INPUT_WEIGHTS[k], 0);
+    const weightedSum = presentKeys.reduce(
+      (s, k) => s + inputs[k].score! * DEFAULT_INPUT_WEIGHTS[k],
+      0,
+    );
+    score = Math.round((weightedSum / totalWeight) * 100) / 100;
+  }
+
+  return { score, grade: score !== null ? scoreToGrade(score) : null, sufficientData };
+}
+
+/** Loads this agent's own tasks in the exact shape computeDepartmentOperationalStats needs. */
+function loadAgentOperationalTasks(
+  db: ReturnType<typeof getDb>,
+  agentId: string,
+): OperationalTaskInput[] {
+  return db
+    .prepare(
+      `SELECT id, title, status, block_reason, block_needs, updated_at, completed_at, created_at
+         FROM tasks
+        WHERE assigned_agent_id = ?`,
+    )
+    .all(agentId) as OperationalTaskInput[];
+}
+
+/**
+ * Compute one agent's windowed, gated grade — the endpoint's primary payload.
+ * Returns null when no agent with this id exists (the caller — the API route —
+ * turns that into a 404), matching getAgentPerformance's existence convention.
+ */
+export function getAgentGrade(
+  agentId: string,
+  windowDays: number = DEFAULT_AGENT_WINDOW_DAYS,
+): AgentGrade | null {
+  const db = getDb();
+
+  const agent = db
+    .prepare(`SELECT id, name, role FROM agents WHERE id = ?`)
+    .get(agentId) as AgentIdentityRow | undefined;
+  if (!agent) return null;
+
+  // completedCount + trend are all-time (unwindowed) — reuse the existing, already-tested
+  // pure join primitive rather than recomputing the same numbers a second way.
+  const perf = getAgentPerformance(agentId)!;
+
+  const counts = getAgentWindowedTaskCounts(db, agentId, windowDays);
+  const inputs: Record<GradeInputKey, InputScore> = {
+    throughput: computeAgentThroughputInput(counts),
+    qcPassRate: computeAgentQcPassRateInput(db, agentId, windowDays),
+    sopCoverage: computeAgentSopCoverageInput(db, agentId, windowDays),
+    kpiAttainment: agentKpiAttainmentInput(),
+  };
+  const { score, grade, sufficientData } = combineAgentGradeInputs(inputs);
+
+  const windowedCompletionRate =
+    counts.created > 0 ? Math.round((counts.completed / counts.created) * 100) : null;
+
+  const opsTasks = loadAgentOperationalTasks(db, agentId);
+  const ops = computeDepartmentOperationalStats(opsTasks, windowDays);
+
+  return {
+    agentId: agent.id,
+    agentName: agent.name,
+    agentRole: agent.role,
+    windowDays,
+    inputs,
+    score,
+    grade,
+    sufficientData,
+    windowedCompletionRate,
+    blockedCount: ops.blockedCount,
+    blockedTasks: ops.blockedTasks,
+    velocity: ops.avgVelocity,
+    completedCount: perf.completedCount,
+    trend: perf.trend,
   };
 }

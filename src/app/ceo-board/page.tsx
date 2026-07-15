@@ -348,10 +348,11 @@ export default function CEOPerformanceBoardPage() {
             </div>
           </motion.div>
 
-          {/* 4. Active Agents Strip — anchor target for the header's "Agents"
-              tab (that tab used to router.push('/agent-roster'), a route
-              that doesn't exist; it now scrolls here instead). scroll-mt-24
-              offsets the sticky header so the section isn't tucked under it. */}
+          {/* 4. Active Agents Strip. The header's "Agents" tab (handleTabClick,
+              above) now router.push('/agents') — the real per-agent
+              performance board (U58) — instead of scrolling to this section;
+              this strip's own rows also link to /agents/[id] (U58). id/
+              scroll-mt-24 are kept for any direct in-page anchor links. */}
           <motion.section id="agents-section" variants={sectionVariants} className="scroll-mt-24">
             <SectionContainer title="Active Agents" accentColor="bg-emerald-500">
               <ActiveAgentsStrip />
