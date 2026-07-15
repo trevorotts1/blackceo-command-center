@@ -2164,6 +2164,44 @@ export interface CreateTaskCoreOptions {
   origin?: string | null;
 }
 
+// ─── U103 (E4-6, v1 U48): DUE-DATE SMART DEFAULT ────────────────────────────
+/**
+ * Priority-based, NON-BINDING calendar-day offset ladder used ONLY when a
+ * caller creates a task without supplying a `due_date` key at all
+ * (`input.due_date === undefined`) — the shape a producer/ingest payload has
+ * when it never mentions due dates. Values mirror the E4-6 spec's worked
+ * example (`skill6-blended-persona-kanban-MASTER-SPEC-v2-2026-07-13.md`,
+ * U103: "urgent=+1d, high=+3d, medium=+7d, low=+14d"); `TaskPriority`'s real
+ * enum (`src/lib/types.ts`) names the top tier `critical`, not `urgent`, so
+ * that is the key used here — same ladder, real value.
+ *
+ * Deliberately NOT applied when the caller sends an explicit `due_date:
+ * null` — that is TaskModal's literal "New Task" default-state payload
+ * (`form.due_date || null`, see P2-03 / CreateTaskSchema) and an ingest
+ * payload can send it just as deliberately. An explicit null is a clear "no
+ * due date" signal and must persist as null, byte-identical to pre-U103
+ * behaviour (E4-6 acceptance (c): clearing never re-defaults).
+ *
+ * This is a suggestion, never a gate: nothing reads it to block, escalate,
+ * or notify anyone, and no intake surface gained a due-date question to
+ * produce it (E4-6 acceptance (d)) — it is a plain, editable/clearable
+ * `due_date` column value like any operator- or ingest-supplied one.
+ */
+export const DUE_DATE_SMART_DEFAULT_OFFSET_DAYS: Record<TaskPriority, number> = {
+  critical: 1,
+  high: 3,
+  medium: 7,
+  low: 14,
+};
+
+/** Pure — exported so tests can assert the exact per-priority offset without
+ *  going through the DB. `from` defaults to `new Date()` for real callers;
+ *  tests pin it for a deterministic expected value. */
+export function computeDueDateSmartDefault(priority: TaskPriority, from: Date = new Date()): string {
+  const offsetDays = DUE_DATE_SMART_DEFAULT_OFFSET_DAYS[priority] ?? DUE_DATE_SMART_DEFAULT_OFFSET_DAYS.medium;
+  return new Date(from.getTime() + offsetDays * 24 * 60 * 60 * 1000).toISOString();
+}
+
 /**
  * Insert a task, log the creation event, run persona selection (non-fatal),
  * broadcast over SSE, and (optionally) notify the OpenClaw gateway.
@@ -2352,6 +2390,18 @@ export async function createTaskCore(
       ? canonicalDeptSlug(workspaceSlug)
       : null;
 
+  // U103 (E4-6): resolvedPriority is the SAME value the INSERT already
+  // stamps (`input.priority || 'medium'`, hoisted so the due-date default can
+  // read it too). resolvedDueDate applies the priority-based smart default
+  // ONLY when the caller omitted the due_date key entirely (undefined) — an
+  // explicit null (TaskModal's "no date" default payload) or any supplied
+  // string passes through exactly as before (`input.due_date || null`).
+  const resolvedPriority: TaskPriority = input.priority || 'medium';
+  const resolvedDueDate: string | null =
+    input.due_date !== undefined
+      ? (input.due_date || null)
+      : computeDueDateSmartDefault(resolvedPriority, new Date(now));
+
   run(
     `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2360,13 +2410,13 @@ export async function createTaskCore(
       input.title,
       input.description || null,
       status,
-      input.priority || 'medium',
+      resolvedPriority,
       input.assigned_agent_id || null,
       input.created_by_agent_id || null,
       workspaceId,   // NULL when no valid workspace found — avoids FK crash on 'default'
       input.business_id || null,
       resolvedDepartment,
-      input.due_date || null,
+      resolvedDueDate,
       sopId,
       input.source || null,   // INGEST-10: immutable board-producer provenance, creation-only
       // P1-04: capture the originating client channel so the trust engine can
