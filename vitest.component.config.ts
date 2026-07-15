@@ -28,6 +28,10 @@ export default defineConfig({
       // open/close, a11y roles, and typed copy-map coverage real render
       // proof.
       'tests/unit/field-help.test.tsx',
+      // U50 (HL/U62) — model-catalog honesty: sticky ModelFilterBar + D14
+      // "Show deprecated/stale" toggle + a visible ModelCard badge, real
+      // render proof.
+      'tests/unit/u50-model-catalog-honesty-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

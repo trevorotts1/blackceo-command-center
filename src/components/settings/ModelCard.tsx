@@ -1,7 +1,7 @@
 'use client';
 
 import type { SyntheticEvent } from 'react';
-import { Cpu, Check, Star, Layers } from 'lucide-react';
+import { Cpu, Check, Star, Layers, Archive } from 'lucide-react';
 import { CapabilityBadge } from './CapabilityBadge';
 
 /**
@@ -166,6 +166,22 @@ export function ModelCard({
 
       {/* Provider / family / cost band row */}
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        {/* D14 (D-HL-5) — a clearly visible badge, not just a disabled-button
+            tooltip, whenever this row is only rendering because the "Show
+            deprecated/stale" toggle is on. */}
+        {deprecated && (
+          <span
+            className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700"
+            title={
+              model.status === 'unavailable'
+                ? 'Unavailable — never confirmed by a live provider call. Reference only, not assignable.'
+                : 'Deprecated — no longer returned by the provider’s latest catalog. Existing assignments still resolve; new ones are blocked.'
+            }
+          >
+            <Archive className="w-2.5 h-2.5" />
+            {model.status === 'unavailable' ? 'Unavailable' : 'Deprecated'}
+          </span>
+        )}
         {model.provider && (
           <span className="inline-flex items-center rounded-md border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-700">
             {formatProviderLabel(model.provider)}
