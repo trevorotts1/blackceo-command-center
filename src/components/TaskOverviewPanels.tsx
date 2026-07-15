@@ -62,7 +62,11 @@ const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
 
 const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
 
-function engineSourceLabel(task: Pick<Task, 'source' | 'description'>): string | null {
+// U104 (E4-7) — exported so the OTHER engine-mirrored-honesty surfaces (the
+// GatePanel-adjacent Planning/Activity/Deliverables/Sessions tabs in
+// TaskModal) resolve the SAME producer label this panel already proved out in
+// U42, instead of re-deriving the source→label mapping a second time.
+export function engineSourceLabel(task: Pick<Task, 'source' | 'description'>): string | null {
   const stamped = typeof task.source === 'string' ? task.source.trim().toLowerCase() : '';
   if (stamped && RECOGNIZED_ENGINE_SOURCES[stamped]) return RECOGNIZED_ENGINE_SOURCES[stamped];
   if (!stamped && typeof task.description === 'string') {

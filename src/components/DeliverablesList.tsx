@@ -18,9 +18,22 @@ const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.
 
 interface DeliverablesListProps {
   taskId: string;
+  /**
+   * U104 (E4-7) — the producer's friendly label (e.g. "the Anthology
+   * Engine", "a Skill 6 funnel build") when this task is an engine-ingested
+   * board-producer card. Verified: this tab reads ONLY `task_deliverables`
+   * (see /api/tasks/[id]/deliverables), a table no board-producer engine
+   * writes to, so an engine card's deliverables list is honestly always
+   * empty here — see the card's own face (e.g. the Anthology Gate Panel's
+   * "The work" zone) for where they actually live. Only consulted for the
+   * EMPTY-state copy — a task that DOES have registered deliverables always
+   * renders them, unchanged. `undefined`/`null` keeps the ORIGINAL generic
+   * empty copy.
+   */
+  engineLabel?: string | null;
 }
 
-export function DeliverablesList({ taskId }: DeliverablesListProps) {
+export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps) {
   const [deliverables, setDeliverables] = useState<TaskDeliverable[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -143,6 +156,21 @@ export function DeliverablesList({ taskId }: DeliverablesListProps) {
   }
 
   if (deliverables.length === 0) {
+    if (engineLabel) {
+      return (
+        <div
+          className="flex flex-col items-center justify-center py-8 text-gray-500 text-center px-4"
+          data-testid="engine-card-empty-deliverables"
+        >
+          <div className="text-4xl mb-2">📦</div>
+          <p className="text-sm italic text-gray-400">
+            Captured via {engineLabel} — this card family&apos;s build outputs are not
+            recorded in Command Center&apos;s Deliverables list. Check the card&apos;s own
+            Overview tab for where its outputs actually live.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center py-8 text-gray-500">
         <div className="text-4xl mb-2">📦</div>
