@@ -14,8 +14,14 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown } from 'lucide-react';
+import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users } from 'lucide-react';
 import type { Task } from '@/lib/types';
+// U42 (C-11) — reuse the EXACT card-face chip components for the modal's
+// multi-persona plan + per-page/per-part scoped-blend rows. Single source: the
+// modal must never re-derive or restate what the board card already renders,
+// only surface the SAME rows in the task-detail window (C+I.0 point 10 /
+// spec L1176-1179).
+import { PersonaSlotChips, PersonaScopeChips } from './kanban/TaskCard';
 
 // A slug like "russell-brunson" → "Russell Brunson" for display. Presentation
 // only — the authoritative name is persona_name when the selector resolved one.
@@ -34,6 +40,39 @@ function formatScore(score?: number | null): string | null {
 }
 
 /**
+ * U42 (C-11) sub-item 2 — "honest engine-card persona surface". Recognized
+ * board-producer sources (INGEST-10 `RECOGNIZED_BOARD_SOURCES`,
+ * `app/api/tasks/[id]/status/route.ts:177`): Skill 6 (funnel/survey/
+ * web-development) and the Anthology Engine (anthology). Producer-ingested
+ * cards are NOT routed through the CC selector the way an organic task is
+ * (C+I.0 point 13 / D-C3 grounding: producer cards move themselves, no CC
+ * dispatch routing fires from this card family), so the generic "one is
+ * selected automatically when the task leaves Backlog" empty copy is not true
+ * for them — this UI-only distinction picks an honest producer-specific empty
+ * copy instead, read-only from the already-immutable `tasks.source` column
+ * (falls back to the legacy `Source: <value>` description marker for a
+ * pre-migration row, same fallback order `resolveBoardSource` uses).
+ */
+const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
+  funnel: 'a Skill 6 funnel build',
+  survey: 'a Skill 6 survey build',
+  'web-development': 'a Skill 6 web-development build',
+  anthology: 'the Anthology Engine',
+};
+
+const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
+
+function engineSourceLabel(task: Pick<Task, 'source' | 'description'>): string | null {
+  const stamped = typeof task.source === 'string' ? task.source.trim().toLowerCase() : '';
+  if (stamped && RECOGNIZED_ENGINE_SOURCES[stamped]) return RECOGNIZED_ENGINE_SOURCES[stamped];
+  if (!stamped && typeof task.description === 'string') {
+    const m = task.description.match(LEGACY_ENGINE_SOURCE_MARKER);
+    if (m) return RECOGNIZED_ENGINE_SOURCES[m[1]] ?? null;
+  }
+  return null;
+}
+
+/**
  * "Who's Working On This" — task persona (name + mode + score) with the stored
  * one-sentence WHY, plus voice/topic/audience chips when the task went through a
  * persona blend. `blend_directive` shows on expand.
@@ -41,6 +80,11 @@ function formatScore(score?: number | null): string | null {
 export function WhoIsWorkingPanel({ task }: { task: Task }) {
   const hasPersona = Boolean(task.persona_id);
   const hasBlend = Boolean(task.voice_persona_id || task.topic_persona_id || task.audience_label);
+  // U42 (C-11) sub-item 2 — only consulted for the empty-state COPY below; a
+  // producer card that DOES carry a persona/blend (B-U7 producer-pinned
+  // bundle, or any future producer metadata) always takes the populated
+  // branch above unchanged — this never suppresses a real value.
+  const engineSource = !hasPersona && !hasBlend ? engineSourceLabel(task) : null;
 
   const personaName =
     task.persona_name && task.persona_name !== 'N/A'
@@ -96,6 +140,12 @@ export function WhoIsWorkingPanel({ task }: { task: Task }) {
             </p>
           )}
         </div>
+      ) : engineSource ? (
+        <p className="text-sm italic text-gray-400" data-testid="engine-card-empty-persona">
+          Captured via {engineSource} — this card family does not carry a Command Center
+          persona pin unless the build reported one. No persona/voice metadata was included
+          with this build.
+        </p>
       ) : (
         <p className="text-sm italic text-gray-400">
           No persona assigned yet — one is selected automatically when the task leaves Backlog.
@@ -134,6 +184,79 @@ export function WhoIsWorkingPanel({ task }: { task: Task }) {
               </p>
             </details>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * U42 (C-11) — "Task-detail card FULLY populated — personas included" (master
+ * spec v2 §C+I.2, unit C-11, master id U42).
+ *
+ * Closes the verified gap at C+I.0 point 10: the board card already renders
+ * two families of multi-persona chip rows — `PersonaSlotChips` (the
+ * decomposed sub-task plan, `subtask_personas`, DEP-5/F3.7+F3.9) and
+ * `PersonaScopeChips` (the per-page/per-part scoped blend, `persona_bundle_
+ * scopes`, A-U5 §A.6, generalized to per-part governance by U115 §E6-1) — but
+ * the task-detail modal rendered NEITHER (targeted grep confirmed NOT-FOUND
+ * in `TaskModal.tsx` + `TaskOverviewPanels.tsx`). This panel surfaces BOTH,
+ * reusing the exact card-face components so the modal and the card can never
+ * diverge (single source, no re-derivation).
+ *
+ * Sub-item 4 (U115 per-part governance) reuses this SAME `persona_bundle_
+ * scopes` table and `PersonaScopeChips` component — U115 persists per-part
+ * rows keyed `(task_id, part_id)` into the identical `task_persona_bundle_
+ * scope` table A-U5 already writes for per-PAGE funnel blends (master spec
+ * L2465: "reuses the U5 scoped-bundle table + chip pattern — never a new
+ * bundle store"). Until U115 lands, no producer writes a part-scoped row, so
+ * this block simply has nothing to show — never invented, never a stub
+ * control. DISPLAY side only; ships correctly for today's per-page data and
+ * requires zero further change when U115's per-part rows start arriving.
+ *
+ * Each block independently honors the card face's own >=2-row chip threshold
+ * (`PersonaSlotChips`/`PersonaScopeChips` already return null below that), so
+ * a single-persona / single-scope task renders NO plan block at all — never a
+ * dead "no plan" placeholder for the common case.
+ */
+export function PersonaPlanPanel({
+  task,
+}: {
+  task: Pick<Task, 'subtask_personas' | 'persona_bundle_scopes'>;
+}) {
+  const planCount = Array.isArray(task.subtask_personas) ? task.subtask_personas.length : 0;
+  const scopeCount = Array.isArray(task.persona_bundle_scopes) ? task.persona_bundle_scopes.length : 0;
+  const hasPlan = planCount >= 2;
+  const hasScopes = scopeCount >= 2;
+
+  // Nothing to show: mirrors the card face's own >=2 rule exactly, so the
+  // panel never renders an empty shell for a plain single-persona task.
+  if (!hasPlan && !hasScopes) return null;
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4" data-testid="persona-plan-panel">
+      <div className="mb-3 flex items-center gap-2">
+        <div className="rounded-full bg-violet-100 p-1.5">
+          <Users className="h-4 w-4 text-violet-600" />
+        </div>
+        <h4 className="text-sm font-semibold text-gray-900">Persona Plan</h4>
+      </div>
+
+      {hasPlan && (
+        <div className={hasScopes ? 'mb-3' : undefined}>
+          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Sub-task plan
+          </p>
+          <PersonaSlotChips task={task} />
+        </div>
+      )}
+
+      {hasScopes && (
+        <div>
+          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Per-page / per-part blend
+          </p>
+          <PersonaScopeChips task={task} />
         </div>
       )}
     </div>

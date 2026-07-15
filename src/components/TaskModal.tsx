@@ -25,8 +25,12 @@ import { AudienceConfirmPanel } from './AudienceConfirmPanel';
 // P2-02 — the task-detail panels that fill in and actually USE the modal's
 // fields: who's working on this + why, the SOP link, the QC block transparency,
 // and the planning metadata.
+// U42 (C-11) adds PersonaPlanPanel — the modal's multi-persona plan +
+// per-page/per-part scoped-blend rows, reusing the card face's own chip
+// components (single source, no divergence).
 import {
   WhoIsWorkingPanel,
+  PersonaPlanPanel,
   TaskSopPanel,
   BlockedReasonPanel,
   PlanningMetaPanel,
@@ -524,6 +528,11 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {task && !anthologyAssembly && (
             <div className="mb-4 space-y-3">
               <WhoIsWorkingPanel task={task} />
+              {/* U42 (C-11) — multi-persona sub-task plan + per-page/per-part
+                  scoped blend, mirroring the board card's PersonaSlotChips /
+                  PersonaScopeChips (single source). Renders nothing for a
+                  plain single-persona task (same >=2 rule the card uses). */}
+              <PersonaPlanPanel task={task} />
               <TaskSopPanel task={task} onChangeSop={handleAttachSop} changing={suggestingSop} />
               <BlockedReasonPanel task={task} />
             </div>
