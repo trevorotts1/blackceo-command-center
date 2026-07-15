@@ -32,6 +32,7 @@ import {
   WhoIsWorkingPanel,
   PersonaPlanPanel,
   TaskSopPanel,
+  DispatchHoldPanel,
   BlockedReasonPanel,
   PlanningMetaPanel,
   // U104 (E4-7) — single source for the "which board-producer engine, if
@@ -548,6 +549,11 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
                   plain single-persona task (same >=2 rule the card uses). */}
               <PersonaPlanPanel task={task} />
               <TaskSopPanel task={task} onChangeSop={handleAttachSop} changing={suggestingSop} />
+              {/* U37 (C-06) — class-b "routed but not runnable" hold, verbatim.
+                  Sits alongside BlockedReasonPanel (a task can carry a
+                  dispatch_hold well before the cap flips status to 'blocked';
+                  the two panels render independently, off different fields). */}
+              <DispatchHoldPanel task={task} />
               <BlockedReasonPanel task={task} />
             </div>
           )}

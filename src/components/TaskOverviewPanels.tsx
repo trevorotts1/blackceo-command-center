@@ -348,6 +348,35 @@ export function TaskSopPanel({
 }
 
 /**
+ * U37 (C-06, master spec v2 §C+I.2) — S2 class-b visibility panel: "routed but
+ * not runnable" surfaced in the task-detail modal, not only in the activity
+ * feed. Renders the hold message VERBATIM (task.dispatch_hold.message — the
+ * exact string task-dispatcher.ts wrote, fix instruction included: "Wire the
+ * department runtime to release."), never re-derived or paraphrased. Display
+ * only — no lifecycle change; the existing block-on-cap path
+ * (recordDispatchFailure) is untouched and owns its own BlockedReasonPanel
+ * surface once the cap is actually hit.
+ */
+export function DispatchHoldPanel({ task }: { task: Task }) {
+  if (!task.dispatch_hold) return null;
+
+  return (
+    <div
+      className="rounded-xl border border-orange-300 bg-orange-50 p-4"
+      data-testid="dispatch-hold-panel"
+    >
+      <div className="flex items-center gap-2">
+        <AlertTriangle className="h-4 w-4 text-orange-600" />
+        <h4 className="text-sm font-semibold text-orange-900">Agent not wired on this box</h4>
+      </div>
+      <p className="mt-2 text-xs text-orange-800" data-testid="dispatch-hold-message">
+        {task.dispatch_hold.message}
+      </p>
+    </div>
+  );
+}
+
+/**
  * The QC block-transparency panel (migration 073 block_reason / block_needs /
  * block_audience). Read-only — it explains WHY the scorer blocked the task and
  * what is needed, phrased as "NEEDS YOUR DECISION" for an OWNER-audience block.
