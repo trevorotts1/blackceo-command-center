@@ -1,3 +1,12 @@
+## [v6.0.18] — 2026-07-15 — Skill 6 blended-persona Wave One Stage B — U21/B-U7: ingest parity, pin producer personas (QC 9.0, CC half)
+
+v6.0.18 — Merges `skill6-v2/U21` (master unit U21, canonical B-U7) of the Skill 6 Blended-Persona Kanban v2 build, CC (`blackceo-command-center`) half of a both-repo unit. Third and final unit landed by the Wave One Stage B CC serial merge train (U5 -> U4 -> U21) — CC train complete.
+
+- **Feature:** `createTaskCore` gains a `pinProducerPersonaBundle` skip-branch — when `voice_persona_id` is present on ingest (the ONB producer already resolved its bundle via B-U1's threaded/cc/local rungs), `resolvePersonaAndPin`/`resolvePersonaPlanAndPin` never run (no selector spawn); the producer's ids pin verbatim onto both the legacy `tasks.persona_*` mirror and the migration-090 bundle mirror. Absent fields fall through to today's async selector pin, unchanged. A follow-up refactor commit on the same branch dedupes the legacy persona-mirror write shared between `pinDepartmentDefaultPersona` and the new `pinProducerPersonaBundle`.
+- Test proof re-run independently on the merged tree: `tests/unit/b-u7-ingest-persona-parity.test.ts` -> `4/4 pass`; no regressions on the adjacent ingest suites (`ingest-auto-route-bare-tasks`, `ingest-requester-stamp`, `task-ingest-dedup`, `create-task-phantom-workspace`, `create-task-null-fields`, `ceo-ordering-ingest` — 37/37 pass combined); `npx tsc --noEmit` clean; `scripts/qc-cc.sh` 137/137 green.
+- Ledger: `ledgers/skill6-blended-persona-kanban-v2-2026-07-13.md` U21 row (CC half) set to `verified`; the ONB half already landed on `openclaw-onboarding`. This completes the Wave One Stage B serial merge train on both repos: ONB (U8 -> U24 -> U4 -> U5 -> U21) then CC (U5 -> U4 -> U21).
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted.
+
 ## [v6.0.17] — 2026-07-15 — Skill 6 blended-persona Wave One Stage B — U4/A-U4: per-department confirm-timeout HARD-HOLD companion (QC 8.9, CC half)
 
 v6.0.17 — Merges `skill6-v2/U4` (master unit U4, canonical A-U4) of the Skill 6 Blended-Persona Kanban v2 build, CC (`blackceo-command-center`) half of a both-repo unit. Second unit landed by the Wave One Stage B CC serial merge train (U5 -> U4 -> U21).
