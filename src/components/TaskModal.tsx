@@ -39,6 +39,10 @@ import {
   // tabs below instead of re-deriving it per tab.
   engineSourceLabel,
 } from './TaskOverviewPanels';
+// U105 (E4-8) — in-app "i" help icons next to this form's fields. Reads the
+// typed copy map; presentation only, no change to any field's behavior.
+import { FieldHelp } from './ui/FieldHelp';
+import { TASK_FIELD_HELP } from '@/lib/task-field-help';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -659,7 +663,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
           {/* Title */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
+            <div className="mb-1 flex items-center gap-1">
+              <label className="block text-sm font-medium text-gray-700">Title</label>
+              <FieldHelp label="Title" text={TASK_FIELD_HELP.title} testId="title" />
+            </div>
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -698,7 +705,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {/* Description */}
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label className="block text-sm font-medium text-gray-700">Description</label>
+              <div className="flex items-center gap-1">
+                <label className="block text-sm font-medium text-gray-700">Description</label>
+                <FieldHelp label="Description" text={TASK_FIELD_HELP.description} testId="description" />
+              </div>
               <MicDictateButton
                 label="Dictate description"
                 disabled={isSubmitting}
@@ -758,7 +768,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           <div className="grid grid-cols-2 gap-4">
             {/* Status */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+              <div className="mb-1 flex items-center gap-1">
+                <label className="block text-sm font-medium text-gray-700">Status</label>
+                <FieldHelp label="Status" text={TASK_FIELD_HELP.status} testId="status" />
+              </div>
               <select
                 value={form.status}
                 onChange={(e) => setForm({ ...form, status: e.target.value as TaskStatus })}
@@ -774,7 +787,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
             {/* Priority */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+              <div className="mb-1 flex items-center gap-1">
+                <label className="block text-sm font-medium text-gray-700">Priority</label>
+                <FieldHelp label="Priority" text={TASK_FIELD_HELP.priority} testId="priority" />
+              </div>
               <select
                 value={form.priority}
                 onChange={(e) => setForm({ ...form, priority: e.target.value as TaskPriority })}
@@ -801,7 +817,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Reason</label>
+                  <div className="mb-1 flex items-center gap-1">
+                    <label className="block text-sm font-medium text-gray-700">Reason</label>
+                    <FieldHelp label="Reason" text={TASK_FIELD_HELP.blockedReason} testId="blocked-reason" />
+                  </div>
                   <select
                     value={form.blocked_reason}
                     onChange={(e) => setForm({ ...form, blocked_reason: e.target.value })}
@@ -816,7 +835,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Who is needed?</label>
+                  <div className="mb-1 flex items-center gap-1">
+                    <label className="block text-sm font-medium text-gray-700">Who is needed?</label>
+                    <FieldHelp label="Who is needed?" text={TASK_FIELD_HELP.blockedOnHuman} testId="blocked-on-human" />
+                  </div>
                   <select
                     value={form.blocked_on_human}
                     onChange={(e) => setForm({ ...form, blocked_on_human: e.target.value })}
@@ -832,7 +854,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">What do you need?</label>
+                <div className="mb-1 flex items-center gap-1">
+                  <label className="block text-sm font-medium text-gray-700">What do you need?</label>
+                  <FieldHelp label="What do you need?" text={TASK_FIELD_HELP.blockedAsk} testId="blocked-ask" />
+                </div>
                 <textarea
                   value={form.ask}
                   onChange={(e) => setForm({ ...form, ask: e.target.value })}
@@ -853,7 +878,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
           {/* Assigned Agent */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Assign to</label>
+            <div className="mb-1 flex items-center gap-1">
+              <label className="block text-sm font-medium text-gray-700">Assign to</label>
+              <FieldHelp label="Assign to" text={TASK_FIELD_HELP.assignedAgent} testId="assigned-agent" />
+            </div>
             <select
               value={form.assigned_agent_id}
               onChange={(e) => {
@@ -879,7 +907,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
           {/* Due Date */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Due Date</label>
+            <div className="mb-1 flex items-center gap-1">
+              <label className="block text-sm font-medium text-gray-700">Due Date</label>
+              <FieldHelp label="Due Date" text={TASK_FIELD_HELP.dueDate} testId="due-date" />
+            </div>
             <input
               type="datetime-local"
               value={form.due_date}
