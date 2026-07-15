@@ -1,3 +1,13 @@
+## [v6.0.23] — 2026-07-15 — Skill 6 blended-persona U57/JM-U53: department metric unification + delete dead CEODashboard branch (QC 9.0)
+
+v6.0.23 — Merges `skill6-v2/U57` (master unit U57, canonical JM/U53) of the Skill 6 Blended-Persona Kanban v2 build, `blackceo-command-center`.
+
+- **Feature:** grid-card department grade and detail-hero department grade now resolve through the SAME merge path (`src/lib/ceo-board/department-grade-merge.ts` + `department-operational-stats.ts`) — no more two independently-computed numbers that can silently diverge; insufficient data honestly returns null on both sides rather than fabricating a letter grade. New `DepartmentBlockersPanel.tsx` (blockers/velocity panel) on `ceo-board/[dept]/page.tsx`. DELETED the dead, mislabeled `CEODashboard.tsx` (645 lines) — VERIFIED zero remaining imports anywhere under `src/`; `workspace/[slug]/page.tsx`'s dead ternary branch (`showTaskBoard` flag) removed, now unconditionally renders `MissionQueue`.
+- **Merge note (clean auto-merge):** `src/app/workspace/[slug]/page.tsx` — U47 (already merged this ripple, v6.0.22) touched the health-status wiring near the top of the file, U57 removed the dead ternary branch further down; git's three-way merge resolved both hunks automatically, no conflict markers. Confirmed via `npx tsc --noEmit` clean and both units' own test suites green on the merged tree.
+- Test proof re-run independently on the merged tree: new `tests/unit/u57-department-grade-merge.test.ts` (grid/detail grade parity + honest-null contract), `tests/unit/u57-department-operational-stats.test.ts`, `tests/unit/u57-dept-metric-unification.test.ts` (CEODashboard fully gone, no dangling imports, dead ternary gone) -> `17/17 pass` combined; full component suite (`vitest.component.config.ts`) -> `28/28 pass` across 4 files, no regressions on U42/U47/U55/A-U5's own suites; `npx tsc --noEmit` clean; `scripts/qc-cc.sh` -> 137/137 green, 4 environmental-skip warnings only; full `npm run test:unit` -> 1338 tests, 1333 pass, 5 fail — the 5 failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) confirmed pre-existing (identical failure set), zero regressions introduced by this merge.
+- Ledger: `ledgers/skill6-blended-persona-kanban-v2-2026-07-13.md` U57 row set to `verified`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.22] — 2026-07-15 — Skill 6 blended-persona U47: ONE HealthIndicator, retire five incidental store writers (QC 9.0)
 
 v6.0.22 — Merges `skill6-v2/U47` (master unit U47, canonical HL/U47) of the Skill 6 Blended-Persona Kanban v2 build, `blackceo-command-center`.
