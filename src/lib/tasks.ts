@@ -1399,6 +1399,88 @@ export function evaluateAudienceConfirmGate(
 }
 
 /**
+ * A-U4 / D23 — departments whose confirm-window expiry HARD-HOLDS to 'blocked'
+ * (owner sign-off) instead of releasing under house-voice governance. Content
+ * built for these departments (funnel pages, web pages) is the exact
+ * cookie-cutter-under-a-silent-timeout outcome the operator is fighting —
+ * never ship it unconfirmed. Every other department keeps the existing
+ * 30-minute house-voice release (AUDIENCE_CONFIRM_DEADLINE_MS, unchanged).
+ * Env-overridable (comma-separated canonical slugs) so the operator can widen
+ * the hold list without a code change (D23's own stated trade-off).
+ */
+const DEFAULT_HARD_HOLD_CONFIRM_DEPARTMENTS = ['funnels', 'web-development'];
+
+export function hardHoldConfirmDepartments(): string[] {
+  const raw = process.env.HARD_HOLD_CONFIRM_DEPARTMENTS;
+  if (!raw) return DEFAULT_HARD_HOLD_CONFIRM_DEPARTMENTS;
+  const parsed = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return parsed.length ? parsed : DEFAULT_HARD_HOLD_CONFIRM_DEPARTMENTS;
+}
+
+/** Pure predicate — a canonical department slug is in the HARD-HOLD list. */
+export function isHardHoldConfirmDepartment(department: string | null | undefined): boolean {
+  if (!department) return false;
+  return hardHoldConfirmDepartments().includes(department);
+}
+
+/**
+ * A-U4 / D23 — HARD-HOLD a build-department task past its confirm deadline:
+ * status -> 'blocked', block_audience='OWNER', NEVER released under
+ * house-voice governance (unlike markAudienceDeadlineFallback, which THIS
+ * function replaces for hard-hold departments at the dispatcher call site).
+ * Board-hygiene rule 1 already re-pings blocked-on-OWNER every 48h —
+ * self-escalating with zero new machinery. Idempotent: the status-guarded
+ * UPDATE only fires once; the event + notify only fire on that transition.
+ */
+export function blockForOwnerConfirm(
+  taskId: string,
+  department: string,
+  decision: AudienceConfirmDecision,
+): void {
+  const now = new Date().toISOString();
+  const prompt = decision.prompt
+    ?? 'Confirm the audience / conversion goal before this content task can be written.';
+  let changed = 0;
+  try {
+    const res = run(
+      `UPDATE tasks
+          SET status = 'blocked',
+              block_reason = ?,
+              block_needs = ?,
+              block_audience = 'OWNER',
+              updated_at = ?
+        WHERE id = ? AND status != 'blocked'`,
+      [
+        `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
+        `Owner action required: ${prompt}`,
+        now,
+        taskId,
+      ],
+    );
+    changed = res.changes ?? 0;
+  } catch (err) {
+    console.warn(`[audience-confirm] blockForOwnerConfirm UPDATE failed for task ${taskId}:`, (err as Error).message);
+    return;
+  }
+  if (changed !== 1) return; // already blocked — no duplicate event/notify
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [uuidv4(), 'audience_confirm_blocked_owner', taskId,
+        `[AUDIENCE-CONFIRM] "${department}" is a hard-hold department — unconfirmed past the ${Math.round(AUDIENCE_CONFIRM_DEADLINE_MS / 60000)}-minute window. Blocked for OWNER sign-off; NEVER released under house-voice governance.`,
+        now],
+    );
+  } catch { /* audit best-effort */ }
+  try {
+    notifySystem(
+      `[AUDIENCE-CONFIRM] Task ${taskId} (department: ${department}) BLOCKED for owner sign-off — confirm-window expired and this department never silently releases under house voice. ${prompt}`,
+      { agent: 'audience-confirm', action: 'blocked_owner' },
+    );
+  } catch { /* notify best-effort */ }
+  console.warn(`[audience-confirm] task ${taskId} HARD-HELD (blocked, OWNER) — department "${department}" never releases under house-voice`);
+}
+
+/**
  * Apply a HOLD for audience confirmation: quietly defer the task (short poll window,
  * NOT counted toward the anti-furnace block cap) and surface the prompt to the
  * OPERATOR exactly once (never client spam — MOVE-IN-SILENCE). The dispatcher calls
