@@ -483,7 +483,7 @@ export async function resolvePersonaAndPin(
       // PRD 3.4 SENTINEL GUARD: loudly flag bad ids from a stale selector install.
       if (persona && persona.persona_id && SENTINEL_IDS.has(persona.persona_id)) {
         console.warn(
-          `[resolvePersonaAndPin] ⚠️  STALE INSTALL: selector returned sentinel id ` +
+          `[resolvePersonaAndPin] ⚠️  STALE INSTALL DETECTED: selector returned sentinel id ` +
           `"${persona.persona_id}" (skill ${getInstalledSkillVersion()}, task_id=${taskId}). ` +
           `Update onboarding skills on this box.`,
         );

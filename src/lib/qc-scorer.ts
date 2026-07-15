@@ -58,6 +58,11 @@
 
 import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
+// TCC-safe accessors for the ARTIFACT tree (PROJECTS_PATH, default
+// ~/Documents/Shared — a macOS TCC-protected dir where a raw open()/opendir()
+// blocks the qc-review-sweep event loop forever). Session reads under
+// ~/.openclaw are NOT protected and keep the direct fs.* calls above.
+import { safeReadFileUtf8, safeReadFileBuffer, safeReaddirNames } from '@/lib/fs/safe-fs';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -385,6 +390,17 @@ export function runAFI14Guardrail(
   agentId: string | null,
   department: string | null,
   hasImageOrDeckDeliverable: boolean = false,
+  /**
+   * When true (default), a shipped image/deck deliverable with NO locatable
+   * session trace fails CLOSED (VIOLATION-C) — the caller could not prove the
+   * mandated KIE.ai pipeline produced it. When false, a missing trace is treated
+   * as "no evidence either way" and the guardrail does NOT fire on absence alone
+   * (VIOLATION-A/B/C are still detected from any trace that IS found). The caller
+   * sets this to true only where an exec trace is genuinely expected/recorded
+   * (the Presentations KIE.ai pipeline), so legitimate artifacts on runtimes that
+   * don't record OpenClaw sessions are not blocked purely for lack of a trace.
+   */
+  failClosedWithoutTrace: boolean = true,
 ): AF_I14Result {
   const notViolated: AF_I14Result = { violated: false, violations: [], sessionId: null, traceFound: false };
 
@@ -440,7 +456,7 @@ export function runAFI14Guardrail(
 
   if (!sessionId) {
     // No session trace found.
-    if (hasImageOrDeckDeliverable) {
+    if (hasImageOrDeckDeliverable && failClosedWithoutTrace) {
       // FAIL-CLOSED: an image/deck was delivered but we cannot prove the
       // mandated KIE.ai pipeline produced it. Treat as VIOLATION-C.
       return {
@@ -461,7 +477,7 @@ export function runAFI14Guardrail(
 
   const trace = readSessionTrace(sessionId, sessionRoots);
   if (!trace) {
-    if (hasImageOrDeckDeliverable) {
+    if (hasImageOrDeckDeliverable && failClosedWithoutTrace) {
       return {
         violated: true,
         violations: [
@@ -1873,17 +1889,15 @@ export function collectPipelineRecords(deckArtifactPath: string): PipelineRecord
   let researchBriefComplete = false;
   try {
     const researchDir = path.join(working, 'research');
-    if (existsSync(researchDir)) {
-      for (const f of readdirSync(researchDir)) {
-        if (/^brief-.*\.md$/i.test(f)) {
-          try {
-            const body = readFileSync(path.join(researchDir, f), 'utf8');
-            // tolerate whitespace / quoting variants: research_complete: true
-            if (/research_complete["']?\s*[:=]\s*true/i.test(body)) {
-              researchBriefComplete = true;
-              break;
-            }
-          } catch { /* unreadable file — keep scanning */ }
+    // safeReaddirNames / safeReadFileUtf8 never block the sweep on a TCC-gated
+    // artifact tree (returns [] / null instead of hanging forever).
+    for (const f of safeReaddirNames(researchDir)) {
+      if (/^brief-.*\.md$/i.test(f)) {
+        const body = safeReadFileUtf8(path.join(researchDir, f));
+        // tolerate whitespace / quoting variants: research_complete: true
+        if (body && /research_complete["']?\s*[:=]\s*true/i.test(body)) {
+          researchBriefComplete = true;
+          break;
         }
       }
     }
@@ -2143,8 +2157,9 @@ export function collectCoverageInputs(
   for (const fname of ['intake.json', 'mission_prd.json']) {
     const candidate = path.join(runDir, fname);
     try {
-      if (!existsSync(candidate)) continue;
-      const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as Record<string, unknown>;
+      const rawIntake = safeReadFileUtf8(candidate);
+      if (rawIntake == null) continue;
+      const parsed = JSON.parse(rawIntake) as Record<string, unknown>;
       const t = readNumericKey(parsed, ['slide_count_target', 'slideCountTarget', 'target_slide_count']);
       if (t !== null) slideCountTarget = t;
       const cap = readNumericKey(parsed, [
@@ -2227,14 +2242,10 @@ function measureSourceLineCount(runDir: string): number | null {
   ];
   let maxLines: number | null = null;
   for (const candidate of candidates) {
-    try {
-      if (!existsSync(candidate)) continue;
-      const body = readFileSync(candidate, 'utf8');
-      const lines = body.split('\n').length;
-      if (maxLines === null || lines > maxLines) maxLines = lines;
-    } catch {
-      /* unreadable — skip */
-    }
+    const body = safeReadFileUtf8(candidate);
+    if (body == null) continue;
+    const lines = body.split('\n').length;
+    if (maxLines === null || lines > maxLines) maxLines = lines;
   }
   return maxLines;
 }
@@ -2270,6 +2281,17 @@ export interface CriterionResult {
   description: string;
   pass: boolean;
   reason: string;
+  /**
+   * True when this criterion could NOT be evaluated on this box because no
+   * vision-capable key is configured (a vision-dependent render gate on a
+   * keyless install). A skipped criterion is EXCLUDED from the aggregate score
+   * — it is neither a pass nor a counted failure — so a keyless box is judged on
+   * the deterministic checks instead of silently failing QC on every image/deck.
+   * `pass` stays false (the criterion was not verified), but it does not drag the
+   * score below the gate. A vision key that IS present but errors still FAILS
+   * CLOSED (skipped stays false) so a configured box is never passed blind.
+   */
+  skipped?: boolean;
 }
 
 export interface CriteriaCheckResult {
@@ -2290,6 +2312,19 @@ export async function evaluateCriteria(
 
   const results: CriterionResult[] = [];
   let visionSkipped = false;
+
+  // Whether ANY vision-capable key is configured on this box. When none is, the
+  // vision-dependent render gates (language / numeric / spelling fidelity) cannot
+  // run here, so they are SKIPPED (excluded from the score) instead of counted as
+  // failures — otherwise a keyless install silently fails artifact QC on every
+  // image/deck. When a key IS present but a call errors, those gates still FAIL
+  // CLOSED below (never passed blind).
+  const hasVisionKey = !!(
+    process.env.OPENAI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+    process.env.GEMINI_API_KEY
+  );
 
   for (const c of criteria) {
     switch (c.type) {
@@ -2380,18 +2415,35 @@ export async function evaluateCriteria(
         const expectedLanguage =
           typeof c.params?.expectedLanguage === 'string' ? c.params.expectedLanguage : 'english';
         const langResult = await visionLanguageCheck(manifest, expectedLanguage);
-        if (langResult === null) {
-          // No vision key / vision error → FAIL CLOSED (block until a vision
-          // pass confirms legible expected-language text). This is the AF-LANG
-          // contract: never pass an unverifiable image-text deliverable.
+        if (langResult === null && !hasVisionKey) {
+          // NO vision key on this box → the render-text gate cannot run here.
+          // SKIP it (excluded from the score) so a keyless install is not silently
+          // failed on every image/deck. pass stays false (unverified), but a
+          // skipped criterion is not counted as a failure toward the 8.5 gate.
+          visionSkipped = true;
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            skipped: true,
+            reason:
+              `AF-LANG skipped: no vision key configured, so rendered-text legibility/${expectedLanguage} ` +
+              'could not be verified on this box — not counted toward the artifact score. Configure a ' +
+              'vision-capable LLM key (OPENAI_API_KEY / GOOGLE_API_KEY) for QC to enforce this gate.',
+          });
+        } else if (langResult === null) {
+          // A vision key IS configured but every call errored → FAIL CLOSED
+          // (block until a vision pass confirms legible expected-language text).
+          // This is the AF-LANG contract: never pass an unverifiable text deliverable.
           results.push({
             id: c.id,
             description: c.description,
             pass: false,
             reason:
-              'AF-LANG FAIL-CLOSED: cannot verify rendered text is legible/English ' +
-              `(no vision key available). Blocking until a vision pass confirms the ` +
-              `text is legible and in ${expectedLanguage}. Re-render the deck/image and ensure a vision-capable LLM key (OPENAI_API_KEY / GOOGLE_API_KEY) is configured for QC.`,
+              'AF-LANG FAIL-CLOSED: a vision key is configured but the vision-model check could not be ' +
+              `completed, so rendered-text legibility/${expectedLanguage} is unverified. Blocking until a ` +
+              'vision pass confirms the text is legible and in the expected language (auto-retries once the ' +
+              'vision provider is reachable).',
           });
         } else {
           results.push({
@@ -2417,15 +2469,30 @@ export async function evaluateCriteria(
         //     auto-advance a deck whose numbers were never read.
         const specCopy = typeof c.params?.specCopy === 'string' ? c.params.specCopy : '';
         const ocr = await visionMoneyOCR(manifest);
-        if (ocr === null) {
+        if (ocr === null && !hasVisionKey) {
+          // NO vision key on this box → the numeric-fidelity gate cannot run.
+          // SKIP it (excluded from the score); pass stays false (unverified).
+          visionSkipped = true;
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            skipped: true,
+            reason:
+              'AF-NUM skipped: no vision key configured, so the rendered money amounts could not be read/verified ' +
+              'on this box — not counted toward the artifact score. Configure a vision-capable LLM key ' +
+              '(OPENAI_API_KEY / GOOGLE_API_KEY) for QC to enforce this gate.',
+          });
+        } else if (ocr === null) {
+          // A vision key IS configured but every OCR call errored → FAIL CLOSED.
           results.push({
             id: c.id,
             description: c.description,
             pass: false,
             reason:
-              'AF-NUM FAIL-CLOSED: cannot read the rendered numbers to verify them against the spec copy ' +
-              '(no vision key available, or every OCR call errored). Blocking until a vision pass can read ' +
-              'the rendered money amounts. Configure a vision-capable LLM key (OPENAI_API_KEY / GOOGLE_API_KEY) for QC.',
+              'AF-NUM FAIL-CLOSED: a vision key is configured but the rendered numbers could not be read ' +
+              '(every OCR call errored), so they are unverified against the spec copy. Blocking until a vision ' +
+              'pass can read the rendered money amounts (auto-retries once the vision provider is reachable).',
           });
         } else {
           const cmp = compareNumericFidelity(ocr.renderText, specCopy);
@@ -2453,15 +2520,30 @@ export async function evaluateCriteria(
         //     auto-advance a deck whose rendered text was never read.
         const specCopy = typeof c.params?.specCopy === 'string' ? c.params.specCopy : '';
         const ocr = await visionTextOCR(manifest);
-        if (ocr === null) {
+        if (ocr === null && !hasVisionKey) {
+          // NO vision key on this box → the spelling-fidelity gate cannot run.
+          // SKIP it (excluded from the score); pass stays false (unverified).
+          visionSkipped = true;
+          results.push({
+            id: c.id,
+            description: c.description,
+            pass: false,
+            skipped: true,
+            reason:
+              'AF-SPELL skipped: no vision key configured, so the rendered words could not be read/verified ' +
+              'on this box — not counted toward the artifact score. Configure a vision-capable LLM key ' +
+              '(OPENAI_API_KEY / GOOGLE_API_KEY) for QC to enforce this gate.',
+          });
+        } else if (ocr === null) {
+          // A vision key IS configured but every OCR call errored → FAIL CLOSED.
           results.push({
             id: c.id,
             description: c.description,
             pass: false,
             reason:
-              'AF-SPELL FAIL-CLOSED: cannot read the rendered text to verify its spelling against the spec copy ' +
-              '(no vision key available, or every OCR call errored). Blocking until a vision pass can read ' +
-              'the rendered words. Configure a vision-capable LLM key (OPENAI_API_KEY / GOOGLE_API_KEY) for QC.',
+              'AF-SPELL FAIL-CLOSED: a vision key is configured but the rendered text could not be read ' +
+              '(every OCR call errored), so its spelling is unverified against the spec copy. Blocking until a ' +
+              'vision pass can read the rendered words (auto-retries once the vision provider is reachable).',
           });
         } else {
           const cmp = compareSpellingFidelity(ocr.renderText, specCopy);
@@ -2559,13 +2641,19 @@ export async function evaluateCriteria(
     }
   }
 
-  const passCount = results.filter((r) => r.pass).length;
-  const total = results.length;
+  // Score over the SCORED criteria only — vision gates skipped for lack of a key
+  // are excluded so a keyless box is judged on its deterministic checks
+  // (existence / valid_image / pipeline_complete / coverage) rather than silently
+  // failing on every unverifiable render gate. Skipped criteria stay in `results`
+  // (pass=false) for transparency; they are neither a pass nor a counted failure.
+  const scored = results.filter((r) => !r.skipped);
+  const passCount = scored.filter((r) => r.pass).length;
+  const total = scored.length;
   const ratio = total > 0 ? passCount / total : 1;
 
-  // Score: 10.0 for all pass, scales down proportionally.
-  // Gate: all criteria must pass for ≥ 8.5 (the one "fail" criterion blocks).
-  const allPass = results.every((r) => r.pass);
+  // Score: 10.0 for all (scored) pass, scales down proportionally.
+  // Gate: all scored criteria must pass for ≥ 8.5 (the one "fail" criterion blocks).
+  const allPass = scored.every((r) => r.pass);
   const score = allPass ? 10.0 : Math.max(2.0, ratio * 8.4); // cap at 8.4 if any fail
 
   return {
@@ -2617,17 +2705,16 @@ async function visionMatchCheck(
   const imageItem = manifest.find((m) => m.valid && m.type === 'image' && m.path);
   if (!imageItem?.path) return null; // no image to inspect — existence criterion covers this; neutral
 
-  // Read file as base64
-  let b64: string;
-  try {
-    const buf = readFileSync(imageItem.path);
-    b64 = buf.toString('base64');
-  } catch {
+  // Read file as base64. safeReadFileBuffer never blocks on a TCC-gated artifact
+  // path (returns null instead of hanging the sweep forever).
+  const buf = safeReadFileBuffer(imageItem.path);
+  if (!buf) {
     return {
       unverifiable: true,
       reason: `the artifact could not be read for subject verification (${imageItem.path})`,
     };
   }
+  const b64: string = buf.toString('base64');
 
   const prompt = `Look at this image. Does it depict: "${subject}"?
 Reply with ONLY this JSON (no other text):
@@ -2760,12 +2847,10 @@ Reply with ONLY this JSON (no other text):
 
   for (const imageItem of imageItems) {
     if (!imageItem.path) continue;
-    let b64: string;
-    try {
-      b64 = readFileSync(imageItem.path).toString('base64');
-    } catch {
-      continue;
-    }
+    // safeReadFileBuffer never blocks on a TCC-gated artifact path.
+    const _imgBuf = safeReadFileBuffer(imageItem.path);
+    if (!_imgBuf) continue;
+    const b64: string = _imgBuf.toString('base64');
     const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
 
@@ -2896,12 +2981,10 @@ Reply with ONLY this JSON (no other text):
 
   for (const imageItem of imageItems) {
     if (!imageItem.path) continue;
-    let b64: string;
-    try {
-      b64 = readFileSync(imageItem.path).toString('base64');
-    } catch {
-      continue;
-    }
+    // safeReadFileBuffer never blocks on a TCC-gated artifact path.
+    const _imgBuf = safeReadFileBuffer(imageItem.path);
+    if (!_imgBuf) continue;
+    const b64: string = _imgBuf.toString('base64');
     const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
 
@@ -3026,12 +3109,10 @@ Reply with ONLY this JSON (no other text):
 
   for (const imageItem of imageItems) {
     if (!imageItem.path) continue;
-    let b64: string;
-    try {
-      b64 = readFileSync(imageItem.path).toString('base64');
-    } catch {
-      continue;
-    }
+    // safeReadFileBuffer never blocks on a TCC-gated artifact path.
+    const _imgBuf = safeReadFileBuffer(imageItem.path);
+    if (!_imgBuf) continue;
+    const b64: string = _imgBuf.toString('base64');
     const ext = imageItem.path.slice(imageItem.path.lastIndexOf('.') + 1).toLowerCase();
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
 
@@ -3295,8 +3376,7 @@ function resolveProducerScorecard(taskId: string): ProducerScorecard | null {
 function verifyProducerScorecardFile(scorecardPath: string): boolean {
   try {
     const resolved = scorecardPath.replace(/^~/, process.env.HOME || '');
-    if (!existsSync(resolved)) return false;
-    const raw = readFileSync(resolved, 'utf8');
+    const raw = safeReadFileUtf8(resolved);
     if (!raw || raw.trim().length === 0) return false;
     // Best-effort re-parse: most scorecards are JSON (fab-qc.json / page-qc.json).
     // A parse failure does NOT fail the read — the contract only requires the
@@ -3388,58 +3468,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       ) ?? null;
     }
 
-    // ── AF-I14: KIE.ai image-path guardrail (fleet-wide for image/deck work) ─────
-    // Runs BEFORE artifact scoring. Auto-fails the image phase when the session
-    // trace shows the builder used the native image_generate tool (openai-image-gen
-    // skill) instead of the mandated kie_generate.py script, or called the dead
-    // endpoint /api/v1/image/gpt-image, or produced no KIE.ai API activity at all.
-    //
-    // Hole-fix (v4.45.0): scope is no longer hard-pinned to Presentations. When
-    // the task request describes an image/deck/slide deliverable from ANY
-    // department, the KIE.ai mandate applies and the guardrail FAILS CLOSED if
-    // no session trace proves the pipeline was used.
-    //
-    // This is a HARD FAIL with scoringPath='llm' so the reroute loop fires and
-    // the gaps tell the agent exactly which AF-I14 sub-rule was breached.
-    // The now-in-place tools.deny:["image"] on dept-presentations prevents
-    // VIOLATION-A going forward; this scorer catches historical violations that
-    // slipped through before the tool-layer fix was deployed.
-    const hasImageOrDeckIntent = describesImageOrDeckDeliverable(task.title, task.description);
-    const afi14 = runAFI14Guardrail(taskId, task.assigned_agent_id, task.department, hasImageOrDeckIntent);
-    if (afi14.violated) {
-      const afi14Msg = `[QC-AF-I14] AF-I14 image-path guardrail FAIL — ${afi14.violations.length} violation(s) in session ${afi14.sessionId ?? 'unknown'}. Violations: ${afi14.violations.join(' | ')}`;
-      console.warn(`[QCScorer] Task "${task.title}" (${taskId}): AF-I14 violation — instant fail`);
-
-      const now = new Date().toISOString();
-      run(
-        `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), 'qc_review', taskId, afi14Msg, now],
-      );
-
-      // Increment reroute counter and return task to backlog
-      const prevAttempts = task.qc_reroute_attempts ?? 0;
-      const newAttempts = prevAttempts + 1;
-      const kickbackNote = `[QC-AF-I14 FAIL] AF-I14 violations (attempt ${newAttempts}/${QC_MAX_REROUTES}): ${afi14.violations.join('; ')}`;
-      run(
-        `UPDATE tasks SET status = 'backlog',
-           description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-           qc_reroute_attempts = ?, updated_at = ?
-         WHERE id = ? AND status = 'review'`,
-        [kickbackNote, kickbackNote, newAttempts, now, taskId],
-      );
-
-      return {
-        score: 1.0,
-        pass: false,
-        reason: `AF-I14 guardrail: ${afi14.violations.length} image-path mandate violation(s) detected in session trace.`,
-        gaps: afi14.violations,
-        scoringPath: 'llm',
-      };
-    }
-    if (afi14.traceFound) {
-      console.log(`[QCScorer] AF-I14 guardrail PASS for task "${task.title}" (session: ${afi14.sessionId ?? 'unknown'}) — KIE.ai path confirmed, no native image_generate calls detected`);
-    }
-    // ── End AF-I14 guardrail ──────────────────────────────────────────────────
+    // ── AF-I14 KIE.ai image-path guardrail ──────────────────────────────────────
+    // MOVED: this gate now runs AFTER the artifact-registration checks below
+    // (invariant A + the missing/invalid-file instant-fail), never before them.
+    // It previously ran here, keyed on the TASK TITLE (describesImageOrDeckDeliverable),
+    // so a task that shipped NOTHING (zero deliverables) or an unreachable file was
+    // still reported as having "shipped an image/deck deliverable but no trace" —
+    // a false claim that masked the real, structural gap (no artifact registered /
+    // file not found). See the AF-I14 invocation after the manifest build.
 
     // ── Artifact-aware QC: build deliverable manifest (root-cause fix #10) ──────
     // Artifact-fulfillment is MANDATORY for artifact tasks.
@@ -3709,6 +3745,76 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     }
     // ── End artifact manifest ─────────────────────────────────────────────────
 
+    // ── AF-I14: KIE.ai image-path guardrail (fleet-wide for image/deck work) ─────
+    // Runs AFTER the artifact-registration checks above (invariant A + the
+    // missing/invalid instant-fail), so it only ever fires for a task that
+    // ACTUALLY shipped a valid image/deck deliverable — never for a zero- or
+    // missing-deliverable task (those are already handled with their own,
+    // truthful gaps). Auto-fails the image phase when the session trace shows the
+    // builder used the native image_generate tool (openai-image-gen skill) instead
+    // of the mandated kie_generate.py script, or called the dead endpoint
+    // /api/v1/image/gpt-image, or produced no KIE.ai API activity at all.
+    //
+    // Scope: the KIE.ai mandate is fleet-wide for image/deck DELIVERABLES, so
+    // VIOLATION-A/B/C are detected whenever such a deliverable ships AND a session
+    // trace exists. The fail-CLOSED "no trace found ⇒ VIOLATION-C" branch, however,
+    // only applies where an exec trace is actually expected/recorded — the
+    // Presentations KIE.ai pipeline. On any other box the absence of a trace is not
+    // evidence of a violation (the runtime may not record OpenClaw sessions at all),
+    // so a legitimate, independently-QC'd artifact is not blocked by fail-close.
+    const hasImageOrDeckIntent = describesImageOrDeckDeliverable(task.title, task.description);
+    const shippedValidImageOrDeck =
+      !!deliverableManifest && deliverableManifest.some((m) => m.valid);
+    if (hasImageOrDeckIntent && shippedValidImageOrDeck) {
+      const deptCanon = task.department
+        ? canonicalDeptSlug(task.department) || task.department.toLowerCase()
+        : null;
+      const isPresScope =
+        (deptCanon ? AF_I14_DEPTS.has(deptCanon) : false) ||
+        (task.assigned_agent_id ? AF_I14_AGENT_IDS.has(task.assigned_agent_id) : false);
+      const afi14 = runAFI14Guardrail(
+        taskId,
+        task.assigned_agent_id,
+        task.department,
+        true, // an image/deck deliverable was actually shipped
+        isPresScope, // fail-CLOSED on a missing trace only inside the pipeline scope
+      );
+      if (afi14.violated) {
+        const afi14Msg = `[QC-AF-I14] AF-I14 image-path guardrail FAIL — ${afi14.violations.length} violation(s) in session ${afi14.sessionId ?? 'unknown'}. Violations: ${afi14.violations.join(' | ')}`;
+        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): AF-I14 violation — instant fail`);
+
+        const nowAf = new Date().toISOString();
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'qc_review', taskId, afi14Msg, nowAf],
+        );
+
+        // Increment reroute counter and return task to backlog
+        const prevAttempts = task.qc_reroute_attempts ?? 0;
+        const newAttempts = prevAttempts + 1;
+        const kickbackNote = `[QC-AF-I14 FAIL] AF-I14 violations (attempt ${newAttempts}/${QC_MAX_REROUTES}): ${afi14.violations.join('; ')}`;
+        run(
+          `UPDATE tasks SET status = 'backlog',
+             description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
+             qc_reroute_attempts = ?, updated_at = ?
+           WHERE id = ? AND status = 'review'`,
+          [kickbackNote, kickbackNote, newAttempts, nowAf, taskId],
+        );
+
+        return {
+          score: 1.0,
+          pass: false,
+          reason: `AF-I14 guardrail: ${afi14.violations.length} image-path mandate violation(s) detected in session trace.`,
+          gaps: afi14.violations,
+          scoringPath: 'llm',
+        };
+      }
+      if (afi14.traceFound) {
+        console.log(`[QCScorer] AF-I14 guardrail PASS for task "${task.title}" (session: ${afi14.sessionId ?? 'unknown'}) — KIE.ai path confirmed, no native image_generate calls detected`);
+      }
+    }
+    // ── End AF-I14 guardrail ──────────────────────────────────────────────────
+
     // §4 Criteria-based scoring for artifact tasks.
     // Invariant B: if deliverableManifest is non-empty, score the ARTIFACT.
     // Mode-B (description text re-score) is only reached for confirmed
@@ -3746,7 +3852,10 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         // Evaluate criteria checklist
         const criteriaResult = await evaluateCriteria(criteria, deliverableManifest);
 
-        const failedCriteria = criteriaResult.results.filter((r) => !r.pass);
+        // Skipped criteria (vision gates with no key) are neither passes nor
+        // counted failures, so they are excluded from the gap list — they must not
+        // appear as blocking gaps on an otherwise-passing keyless artifact.
+        const failedCriteria = criteriaResult.results.filter((r) => !r.pass && !r.skipped);
         const failReasons = failedCriteria.map((r) => `${r.id}: ${r.reason}`);
         const passReasons = criteriaResult.results.filter((r) => r.pass).map((r) => r.id);
 

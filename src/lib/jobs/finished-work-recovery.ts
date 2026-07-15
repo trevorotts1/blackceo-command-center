@@ -19,8 +19,8 @@
  * block/bounce.
  */
 
-import { existsSync, readdirSync, statSync } from 'fs';
 import path from 'path';
+import { safeReaddirSync, safeStatSync } from '@/lib/fs/safe-fs';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
@@ -44,18 +44,21 @@ export function taskProjectSlug(title: string): string {
 /** True when `dir` exists and holds at least one non-empty file (shallow, depth-
  * limited so a huge tree can't stall the sweep). Never throws. */
 export function dirHasOutput(dir: string, depth = 2): boolean {
-  try {
-    if (!dir || !existsSync(dir)) return false;
-    const entries = readdirSync(dir, { withFileTypes: true });
-    for (const e of entries) {
-      const full = path.join(dir, e.name);
-      if (e.isFile()) {
-        try { if (statSync(full).size > 0) return true; } catch { /* ignore */ }
-      } else if (e.isDirectory() && depth > 0) {
-        if (dirHasOutput(full, depth - 1)) return true;
-      }
+  if (!dir) return false;
+  // safeReaddirSync NEVER blocks the sweep's event loop: PROJECTS_PATH may be
+  // ~/Documents/Shared/projects (TCC-protected), where a raw opendir would hang
+  // the whole process. On a protected/network dir the opendir runs in a hard-
+  // timeout child and returns [] instead of freezing this every-5-minute cron.
+  const entries = safeReaddirSync(dir);
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isFile()) {
+      const st = safeStatSync(full);
+      if (st && st.size > 0) return true;
+    } else if (e.isDirectory() && depth > 0) {
+      if (dirHasOutput(full, depth - 1)) return true;
     }
-  } catch { /* unreadable dir — treat as no output */ }
+  }
   return false;
 }
 
