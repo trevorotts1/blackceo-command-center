@@ -1,3 +1,13 @@
+## [v6.0.29] — 2026-07-15 — feat(U101): per-department board SLA table (config/board-slas.json, QC 9.4)
+
+v6.0.29 — Merges `skill6-v2/U101` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 4 of 4 (last) (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
+
+- **U101:** `config/board-slas.json` + `src/lib/board-slas.ts` introduce a per-department SLA table (stale-task and board-hygiene thresholds overridable per department instead of one global constant), `src/app/settings/board-slas/page.tsx` surfaces it in Settings, `src/lib/jobs/stale-task-sweep.ts` and `src/lib/jobs/board-hygiene.ts` now read the per-department override with a documented fallback to the prior global default.
+- **Merge:** clean, zero conflicts vs `origin/main` (`f852045`, v6.0.28 post-U49) — file-disjoint from the prior three units in this train (touches `board-hygiene.ts` and `stale-task-sweep.ts`, which U6/U34-U35 had already left in a stable state — this unit's diff lands additively on top).
+- Test proof re-run independently on the merged tree, pre-ripple: `tests/unit/board-slas-config.test.ts` → 10/10 PASS; `tests/unit/board-slas-department-override.test.ts` → 3/3 PASS; `tests/unit/stale-task-sweep-department-override.test.ts` → 3/3 PASS; adjacent zero-regression check on touched files (`board-hygiene.test.ts` 6/6, `board-hygiene-blend-invariant-at-min.test.ts` 1/1, `board-hygiene-blend-invariant-below-min.test.ts` 2/2, `stale-task-recover.test.ts` 2/2 — all PASS); `npx vitest run --config vitest.component.config.ts` (full suite) → 6 files, 45/45 PASS, zero regressions; `npx tsc --noEmit` clean; `npm run test:unit` → 1387 tests, 1382 pass, 5 fail — the same 5 pre-existing failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) as the prior three units in this train, unrelated to and untouched by this merge's diff.
+- This completes Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3's Command Center merge train (U34-U35 → U104 → U49 → U101), all four units serially merged in id order onto `main`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.28] — 2026-07-15 — feat(intelligence): verifyKey() on the five media connectors + honest Prove outcomes (U49/U61, QC 9.0)
 
 v6.0.28 — Merges `skill6-v2/U49` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 3 of 4 (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
