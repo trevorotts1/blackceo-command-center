@@ -1,3 +1,12 @@
+## [v6.0.27] — 2026-07-15 — feat(U104): engine-mirrored card honesty in GatePanel + modal tabs (QC 9.2)
+
+v6.0.27 — Merges `skill6-v2/U104` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 2 of 4 (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
+
+- **U104:** `src/components/anthology/GatePanel.tsx`, `TaskModal.tsx`, `TaskOverviewPanels.tsx`, `PlanningTab.tsx`, `DeliverablesList.tsx`, `SessionsList.tsx`, `ActivityLog.tsx` now mirror engine-side card state honestly instead of a UI-only optimistic view, closing the gap where a card's displayed gate/session/deliverable state could disagree with what the dispatch engine actually recorded.
+- **Merge:** clean, zero conflicts vs `origin/main` (`bc2d789`, v6.0.26 post-U34-U35) — file-disjoint from the prior unit in this train.
+- Test proof re-run independently on the merged tree, pre-ripple: `tests/unit/u104-engine-card-honesty.test.tsx` → 13/13 PASS; `npx vitest run --config vitest.component.config.ts` (full suite) → 5 files, 41/41 PASS, zero regressions; `npx tsc --noEmit` clean; `npm run test:unit` → 1351 tests, 1346 pass, 5 fail — the same 5 pre-existing failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) as the prior unit in this train, unrelated to and untouched by this merge's diff.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.26] — 2026-07-15 — fix(dispatcher): U34+U35 — phantom-agent silent skip becomes loud, capped, self-healing (C-03+C-04, QC 9.2)
 
 v6.0.26 — Merges `skill6-v2/U34-U35` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 1 of 4 (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
