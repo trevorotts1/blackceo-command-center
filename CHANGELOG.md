@@ -1,4 +1,10 @@
-## [v6.0.14] — 2026-07-15 — Skill 6 blended-persona Wave One — U6: board-hygiene Rule-6 companion, persona-blend invariant regression alert (QC 9.0)
+## [v6.0.15] — 2026-07-15 — Skill 6 blended-persona Wave One — U6: board-hygiene Rule-6 companion, persona-blend invariant regression alert (QC 9.0)
+
+**Version note:** originally rippled as v6.0.14, then re-bumped to v6.0.15 in the
+next commit — `v6.0.14` was found already claimed on `origin` by a stale
+premature tag on the *unmerged* `skill6-v2/U5` build branch (not this unit;
+not an ancestor of this merge). Re-bumped rather than reusing/overwriting that
+tag, to avoid any tag/version collision.
 
 **`board-hygiene.ts` gains a companion check to its existing Rule 6 (pipeline-dead) alert: it now also fires when the pipeline is alive but the blend is quietly under-engaging personas.**
 
