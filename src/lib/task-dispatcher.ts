@@ -57,6 +57,7 @@ import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload } from '@/lib/task-lifecycle';
+import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import {
@@ -429,9 +430,53 @@ export async function autoDispatchTask(
     );
 
     if (!agent) {
-      console.warn(
-        `[${context}] autoDispatchTask: agent ${task.assigned_agent_id} not found — skipping`,
-      );
+      // C-03 (skill6-v2 U34) — THE fake-agent root cause, made loud, capped,
+      // and self-healing. This branch used to be `console.warn + return`: no
+      // event, no backoff, no block, no operator alert — the card kept its
+      // phantom assigned_agent_id forever and intake-advance re-selected it
+      // every ~2 minutes, re-skipping it silently on every tick (the
+      // Maria-pattern S2 fake-agent root cause, class (a): a phantom id sits
+      // in the assignment column and nothing owns un-sticking it).
+      //
+      // FIX: heal it instead of skipping it. Clear the phantom
+      // assigned_agent_id (durable events row + one operator SYSTEM alert) so
+      // the NEXT intake-advance tick routes this card through routeTask() —
+      // which only ever returns REAL agent rows — instead of re-selecting
+      // and re-skipping it forever. This is self-healing, not a hard block:
+      // nothing here requires a human to wire anything (compare the
+      // no_specialist_runtime hold below, which genuinely does need a human
+      // to add a runtime directory). CAPPED: healPhantomAgentAssignment() is
+      // CAS-guarded, so a concurrent caller (e.g. intake-advance-sweep's own
+      // phantom-heal tail) racing the SAME phantom id writes at most one
+      // event total, never a duplicate.
+      const deadAgentId = task.assigned_agent_id;
+      const healed = healPhantomAgentAssignment(taskId, deadAgentId, context);
+      if (healed) {
+        console.error(
+          `[${context}] autoDispatchTask: task ${taskId} referenced agent "${deadAgentId}" ` +
+            `which has no agents row on this box — HEALED (assigned_agent_id cleared; ` +
+            `will be re-routed on the next intake-advance tick)`,
+        );
+        try {
+          notifySystem(
+            `Task "${task.title}" (${taskId}) was assigned to a nonexistent agent id ` +
+              `(${deadAgentId}) — auto-healed (unassigned) and will be re-routed to a ` +
+              `real agent automatically. If this recurs on the same box, check for stale ` +
+              `data or a foreign-keys-off migration window.`,
+            { agent: context, action: 'escalate' },
+          );
+        } catch {
+          /* notify best-effort */
+        }
+      } else {
+        // Lost the CAS race — a concurrent healer already cleared this exact
+        // phantom id. No duplicate event, no duplicate alert; the task will
+        // still be re-routed on the next tick.
+        console.warn(
+          `[${context}] autoDispatchTask: task ${taskId}'s phantom agent "${deadAgentId}" ` +
+            `was already healed by a concurrent caller — skipping`,
+        );
+      }
       return;
     }
 
