@@ -1,3 +1,13 @@
+## [v6.0.22] — 2026-07-15 — Skill 6 blended-persona U47: ONE HealthIndicator, retire five incidental store writers (QC 9.0)
+
+v6.0.22 — Merges `skill6-v2/U47` (master unit U47, canonical HL/U47) of the Skill 6 Blended-Persona Kanban v2 build, `blackceo-command-center`.
+
+- **Feature:** new `HealthIndicator.tsx` — ONE health-status component with an operator-clickable variant and a client dot+word variant, mobile-visible, replacing `SystemStatusPill.tsx` (removed). Wired into `Header.tsx`, `overview/page.tsx`, `page.tsx`, `tasks/all/page.tsx`, and `workspace/[slug]/page.tsx`. `useSSE.ts` becomes the SOLE writer of the store's `isFeedConnected` field (renamed from `isOnline`) — the five previously-incidental writer files no longer call any store online/offline setter directly. `SystemStatusDrawer.tsx` now groups rows by U46's tier field instead of a hand-maintained component-id allowlist; the "Re-run bootstrap" admin action is preserved unmodified.
+- **Merge note (additive conflict, hand-resolved):** `vitest.component.config.ts` `include` array — U42 (already merged this ripple, v6.0.21) and U47 both appended a new test-file entry at the same list position; resolved by keeping both entries side by side (no semantic overlap), confirmed via `npx tsc --noEmit` clean and both component suites green.
+- Test proof re-run independently on the merged tree: new `tests/unit/u47-health-indicator.test.tsx` -> `6/6 pass` (component render), `tests/unit/u47-health-single-source.test.ts` -> `10/10 pass` (single-writer contract + five-writer retirement + tier-grouping + bootstrap-action preservation); full component suite (`vitest.component.config.ts`) -> `28/28 pass` across 4 files, no regressions on U42/U55/A-U5's own suites; `npx tsc --noEmit` clean; `scripts/qc-cc.sh` -> 137/137 green, 4 environmental-skip warnings only; full `npm run test:unit` -> 1321 tests, 1316 pass, 5 fail — the 5 failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) confirmed pre-existing (identical failure set), zero regressions introduced by this merge.
+- Ledger: `ledgers/skill6-blended-persona-kanban-v2-2026-07-13.md` U47 row set to `verified`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.21] — 2026-07-15 — Skill 6 blended-persona U42/C-11: task-detail modal FULLY populated (QC 9.2)
 
 v6.0.21 — Merges `skill6-v2/U42` (master unit U42, canonical C-11) of the Skill 6 Blended-Persona Kanban v2 build, `blackceo-command-center`.
