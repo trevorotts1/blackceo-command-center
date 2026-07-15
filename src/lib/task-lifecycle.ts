@@ -70,6 +70,7 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { safeReadFileBuffer } from '@/lib/fs/safe-fs';
 import { queryOne, queryAll, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath } from '@/lib/config';
@@ -587,13 +588,13 @@ export function registerDeliverable(
  * Returns null if the file cannot be read (caller should log and skip).
  */
 export function fileStats(filePath: string): { bytes: number; sha256: string } | null {
-  try {
-    const buf = fs.readFileSync(filePath);
-    const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
-    return { bytes: buf.length, sha256 };
-  } catch {
-    return null;
-  }
+  // safeReadFileBuffer never blocks on a TCC-gated artifact path (PROJECTS_PATH
+  // defaults to ~/Documents/Shared): a raw fs.readFileSync there could freeze
+  // the completion/registration path forever. Returns null instead.
+  const buf = safeReadFileBuffer(filePath);
+  if (!buf) return null;
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+  return { bytes: buf.length, sha256 };
 }
 
 // ---------------------------------------------------------------------------

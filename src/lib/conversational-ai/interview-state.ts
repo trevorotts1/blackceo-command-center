@@ -19,9 +19,9 @@
  * Any positive signal -> complete. No signal -> NOT complete (Layer 1 only).
  */
 
-import fs from 'fs';
 import path from 'path';
 import { loadCompanyConfig } from '@/lib/company-config';
+import { safeReadFileUtf8, safeReaddirNames } from '@/lib/fs/safe-fs';
 import { candidateWorkspaceRoots, resolveLogFile } from './sources';
 import { getClientContext } from '@/lib/clients';
 
@@ -88,15 +88,10 @@ function buildStateSignal(): boolean {
     const completed = readBuildComplete(buildState);
     if (completed) return true;
 
-    // build-progress.json under any company subdir
-    let entries: string[] = [];
-    try {
-      if (!fs.existsSync(root)) continue;
-      entries = fs.readdirSync(root);
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
+    // build-progress.json under any company subdir. safeReaddirNames never
+    // blocks on a TCC-gated workspace root (~/Downloads is a candidate); [] on
+    // absent/blocked.
+    for (const entry of safeReaddirNames(root)) {
       const progressFile = path.join(root, entry, 'build-progress.json');
       if (readBuildComplete(progressFile)) return true;
     }
@@ -105,9 +100,12 @@ function buildStateSignal(): boolean {
 }
 
 function readBuildComplete(file: string): boolean {
+  // safeReadFileUtf8 never blocks on a TCC-gated workspace root; null on absent/
+  // unreadable/blocked.
+  const rawStr = safeReadFileUtf8(file);
+  if (rawStr == null) return false;
   try {
-    if (!fs.existsSync(file)) return false;
-    const data = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+    const data = JSON.parse(rawStr) as Record<string, unknown>;
     const stage = String(data.stage ?? '').toLowerCase();
     const status = String(data.status ?? '').toLowerCase();
     if (stage === 'complete' || stage === 'done' || stage === 'finished') return true;

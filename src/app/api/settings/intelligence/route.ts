@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '@/lib/db';
 import { readFileSync, existsSync, statSync } from 'fs';
+import { safeReadFileUtf8 } from '@/lib/fs/safe-fs';
 import { join, resolve } from 'path';
 import { openclawConfigPath } from '@/lib/platform';
 import { isForbidden, isFree } from '@/lib/model-selector';
@@ -155,13 +156,17 @@ function loadPersonaCategories(): Record<string, PersonaCategoryEntry> {
   ];
 
   for (const p of candidatePaths) {
-    if (existsSync(p)) {
-      try {
-        const raw = JSON.parse(readFileSync(p, 'utf-8'));
-        return raw.personas || {};
-      } catch {
-        console.error(`[Intelligence] Failed to parse ${p}`);
-      }
+    // safeReadFileUtf8: candidatePaths include WORKSPACE_BASE_PATH (default
+    // ~/Documents/Shared) and ~/Downloads — both TCC-protected. A raw
+    // readFileSync there would hang this request thread forever; returns null
+    // instead. existsSync (metadata) is measured-safe, so it is unnecessary here.
+    const rawStr = safeReadFileUtf8(p);
+    if (rawStr == null) continue;
+    try {
+      const raw = JSON.parse(rawStr);
+      return raw.personas || {};
+    } catch {
+      console.error(`[Intelligence] Failed to parse ${p}`);
     }
   }
   console.warn('[Intelligence] No persona-categories.json found, using empty list');
