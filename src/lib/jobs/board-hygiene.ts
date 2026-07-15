@@ -127,6 +127,12 @@ export interface BoardHygieneResult {
   blendWindowContentTasks: number;
   /** Persona bundles written in the regression window (diagnostic). */
   blendWindowBundles: number;
+  /** A-U6 companion — true when a CONFIRMED content-task bundle in the
+   *  trailing window still reports below-min on validate_blend_invariant
+   *  (persona_blend.py's min-2/max-4 role-count invariant). */
+  blendInvariantRegressionFlagged: boolean;
+  /** CONFIRMED content-task bundles in the window reading below-min (diagnostic). */
+  blendInvariantBelowMinCount: number;
 }
 
 function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult {
@@ -151,6 +157,8 @@ function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult 
     blendRegressionFlagged: false,
     blendWindowContentTasks: 0,
     blendWindowBundles: 0,
+    blendInvariantRegressionFlagged: false,
+    blendInvariantBelowMinCount: 0,
   };
 }
 
@@ -594,6 +602,102 @@ function processBlendRegressionCheck(result: BoardHygieneResult): void {
   }
 }
 
+// ── Rule 6 companion: min-2/max-4 invariant BELOW-MIN regression (A-U6) ─────
+//
+// ONB's validate_blend_invariant (23-ai-workforce-blueprint/scripts/
+// persona_blend.py, A-U6) counts the directive's ROLE slots (voice/topic/
+// task) and records the reading on EVERY content bundle as
+// `rationale.invariant` — collapse satisfies min-2 by ROLE COUNT (D-A2,
+// ratified 2026-07-14), and the validator RECORDS/ALERTS, it NEVER BLOCKS
+// the write. `persistPersonaBundle` (tasks.ts) carries that full bundle JSON
+// into `task_persona_bundle.bundle_json` unmodified, so this companion check
+// reads the ALREADY-COMPUTED reading — it never re-runs the Python matcher
+// and never re-derives the invariant itself.
+//
+// Distinct from Rule 6 above (which fires on ZERO bundles in the window —
+// the pipeline being silently DEAD): this fires when the pipeline IS
+// producing bundles, has been CONFIRMED by the operator, and is STILL
+// engaging fewer than 2 named personas — a live, ongoing match-quality
+// regression rather than an outage. Same alert lane
+// (`persona_blend_regression`, board-hygiene.ts:95) per A.7 — one alert per
+// run regardless of how many below-min rows are found in the window; a
+// window with everything at-or-above-min raises zero.
+interface BundledTaskRow {
+  task_id: string;
+  bundle_json: string | null;
+  confirm_state: string | null;
+}
+
+function processBlendInvariantRegressionCheck(result: BoardHygieneResult): void {
+  const windowExpr = `-${BLEND_REGRESSION_WINDOW_DAYS} days`;
+
+  let rows: BundledTaskRow[];
+  try {
+    rows = queryAll<BundledTaskRow>(
+      `SELECT task_id, bundle_json, confirm_state FROM task_persona_bundle
+        WHERE confirm_state = 'confirmed'
+          AND ${sqlTime('created_at')} >= datetime('now', ?)`,
+      [windowExpr],
+    );
+  } catch {
+    return; // no bundle table → feature not present on this box
+  }
+
+  let belowMinCount = 0;
+  for (const row of rows) {
+    if (!row.bundle_json) continue;
+    let bundle: { content_task?: boolean; rationale?: { invariant?: { ok?: boolean; reason?: string } } };
+    try {
+      bundle = JSON.parse(row.bundle_json);
+    } catch {
+      continue; // malformed/legacy bundle_json — never crash the hygiene job on it
+    }
+    if (bundle?.content_task !== true) continue; // exempt, mirrors the ONB validator
+    const invariant = bundle?.rationale?.invariant;
+    if (
+      invariant &&
+      invariant.ok === false &&
+      typeof invariant.reason === 'string' &&
+      invariant.reason.startsWith('below-min')
+    ) {
+      belowMinCount++;
+    }
+  }
+
+  result.blendInvariantBelowMinCount = belowMinCount;
+  if (belowMinCount === 0) return; // at-or-above-min → zero alerts
+
+  result.blendInvariantRegressionFlagged = true;
+
+  // Cooldown: reuse the same lane's cooldown so this and the zero-bundle
+  // check above never double-fire within one window.
+  let recentAlert = 0;
+  try {
+    recentAlert =
+      queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM events
+          WHERE type = ? AND ${sqlTime('created_at')} >= datetime('now', ?)`,
+        [EVT_BLEND_REGRESSION, `-${BLEND_REGRESSION_COOLDOWN_HOURS} hours`],
+      )?.n ?? 0;
+  } catch {
+    recentAlert = 0;
+  }
+  if (recentAlert > 0) return; // already alerted within the cooldown
+
+  const message =
+    `[BOARD-HYGIENE] PERSONA-BLEND INVARIANT REGRESSION: ${belowMinCount} CONFIRMED content-task bundle(s) ` +
+    `in the last ${BLEND_REGRESSION_WINDOW_DAYS}d still report below-min on the min-2/max-4 persona-count ` +
+    `invariant (validate_blend_invariant, ONB persona_blend.py, A-U6) — the blend is engaging FEWER than 2 ` +
+    `named roles after operator confirmation. Investigate audience/topic match quality.`;
+  notifySystem(message, { agent: 'board-hygiene', action: 'blend_invariant_regression' });
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, NULL, ?, ?)`,
+      [uuidv4(), EVT_BLEND_REGRESSION, message, timeNow()],
+    );
+  } catch { /* audit best-effort */ }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function runBoardHygiene(): Promise<BoardHygieneResult> {
@@ -619,6 +723,9 @@ export async function runBoardHygiene(): Promise<BoardHygieneResult> {
   }
   if (!(process.env.DISABLE_BOARD_HYGIENE_BLEND_REGRESSION === '1')) {
     processBlendRegressionCheck(result);
+  }
+  if (!(process.env.DISABLE_BOARD_HYGIENE_BLEND_INVARIANT === '1')) {
+    processBlendInvariantRegressionCheck(result);
   }
 
   return result;
