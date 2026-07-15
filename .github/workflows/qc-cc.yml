@@ -604,3 +604,26 @@ jobs:
             playwright-report/
           retention-days: 7
           if-no-files-found: ignore
+
+  # ── FIX-RESCUE-13 — Rescue Rangers ticket-store + relay-snippet tests ──────
+  # These suites existed but were never wired into CI, so the escalation cap
+  # could regress unnoticed — which is exactly what happened: the cap branch
+  # posted a "cap reached" message PER TASK and turned the brake into the
+  # amplifier. The regression suite pins the contract (past the cap: at most ONE
+  # consolidated notice, never a per-task message) AND the never-silence
+  # invariants (under the cap everything still pages; the gate fails OPEN).
+  # Node 22: the durable store uses `node:sqlite` (built in from 22.5).
+  rescue-rangers-tests:
+    name: Rescue Rangers ticket store + relay snippets (node --test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22 (node:sqlite)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run every fleet-heartbeat rescue suite
+        run: node --test fleet-heartbeat/scripts/lib/*.test.mjs
