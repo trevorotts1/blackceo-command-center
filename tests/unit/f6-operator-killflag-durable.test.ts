@@ -126,8 +126,12 @@ function clearFlagSources(): void {
 }
 
 // ── DB fixtures: ONE blocked task old enough to be re-pinged ─────────────────
-// This is the incident's shape: status=blocked, blocked_on_human='operator',
-// empty ask — the row the */10 sweep re-escalated every 10 minutes.
+// The incident's shape: status=blocked, blocked_on_human='operator', past the
+// re-ping threshold — the row the */10 sweep re-escalated every 10 minutes. A
+// non-empty `ask` is supplied because F3's migration-104 invariant now REJECTS a
+// blocked_on_human row with an empty ask (the unanswerable poison state). The ask
+// content is irrelevant to what THIS suite proves (kill-flag durability); it only
+// lets the fixture satisfy the DB invariant so the stuck row can exist at all.
 
 function hoursAgo(h: number): string {
   return new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
@@ -141,7 +145,7 @@ function seedBlockedStuckTask(): string {
   const taskId = uuidv4();
   run(
     `INSERT INTO tasks (id, title, status, workspace_id, blocked_on_human, ask, updated_at, last_progress_at)
-     VALUES (?, ?, 'blocked', ?, 'operator', '', ?, ?)`,
+     VALUES (?, ?, 'blocked', ?, 'operator', 'Awaiting an operator decision (fixture)', ?, ?)`,
     [taskId, 'F6 stuck task', wsId, hoursAgo(80), hoursAgo(80)], // 80h: past the 72h re-ping threshold
   );
   return taskId;
