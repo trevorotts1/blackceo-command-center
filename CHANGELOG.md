@@ -1,3 +1,13 @@
+## [v6.0.17] — 2026-07-15 — Skill 6 blended-persona Wave One Stage B — U4/A-U4: per-department confirm-timeout HARD-HOLD companion (QC 8.9, CC half)
+
+v6.0.17 — Merges `skill6-v2/U4` (master unit U4, canonical A-U4) of the Skill 6 Blended-Persona Kanban v2 build, CC (`blackceo-command-center`) half of a both-repo unit. Second unit landed by the Wave One Stage B CC serial merge train (U5 -> U4 -> U21).
+
+- **Feature:** `PersonaBundle` gains `conversion_goal` / `goal_source` / `goal_confirm_required` (additive, optional — older bundles persisted before A-U4 still parse). `task-dispatcher.ts` + `tasks.ts` gain the per-department confirm-timeout HARD-HOLD policy (D23) governing what happens after the audience-confirm deadline passes.
+- **Merge note (real conflict, hand-resolved):** `src/lib/types.ts`'s `PersonaBundle` interface — U5 (already on `main`) and U4 both inserted new optional fields at the same point in the interface body; resolved by keeping both additive field blocks (U5's `scope`/`scope_hint`, U4's `conversion_goal`/`goal_source`/`goal_confirm_required`), confirmed via `npx tsc --noEmit` clean.
+- Test proof re-run independently on the merged tree: `tests/unit/persona-blend-goal-confirm-department-policy.test.ts` -> `10/10 pass`; no regressions on `tests/unit/a-u5-scoped-persona-bundle.test.ts` (12/12) or `scripts/qc-cc.sh` (137/137 green).
+- Ledger: `ledgers/skill6-blended-persona-kanban-v2-2026-07-13.md` U4 row (CC half) set to `verified`; the ONB half already landed on `openclaw-onboarding`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted.
+
 ## [v6.0.16] — 2026-07-15 — Skill 6 blended-persona Wave One Stage B — U5/A-U5: per-page scoped persona blends, CC half (QC 8.9)
 
 v6.0.16 — Merges `skill6-v2/U5` (master unit U5, canonical E.2/A-U5) of the Skill 6 Blended-Persona Kanban v2 build, CC (`blackceo-command-center`) half of a both-repo unit. First unit landed by the Wave One Stage B CC serial merge train (U5 -> U4 -> U21).
