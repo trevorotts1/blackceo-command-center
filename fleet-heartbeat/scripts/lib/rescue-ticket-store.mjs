@@ -115,6 +115,22 @@ export function slaDueAt(createdAtISO, severity) {
   return new Date(new Date(createdAtISO).getTime() + mins * 60_000).toISOString();
 }
 
+// === DAILY ESCALATION CAP (FIX-RESCUE-13) ===================================
+// The per-client, per-day ceiling on NEW minted escalations. Historically this
+// number lived only in the relay's head; it is exported here so the durable
+// store, the relay snippet, and the report all read ONE constant.
+//
+// THE CAP IS A BRAKE, NOT A MEGAPHONE. Past the cap the store SUPPRESSES: it
+// mints nothing and — after a single consolidated notice — posts nothing. The
+// suppressed events are still COUNTED durably (cap_suppressions) so the signal
+// is never lost, only quieted. See `capGate()` for the full contract.
+export const DEFAULT_DAILY_CAP = 25;
+
+/** A cap of 0 / negative / non-finite means NO CAP — fail-open, always post. */
+function capEnabled(cap) {
+  return Number.isFinite(cap) && cap > 0;
+}
+
 // === HELPERS ================================================================
 export function formatRr(n) {
   return "RR-" + String(n).padStart(6, "0");
@@ -203,6 +219,23 @@ export class TicketStore {
         count   INTEGER NOT NULL
       );
 
+      -- FIX-RESCUE-13 — the durable record of what the cap SUPPRESSED.
+      -- Suppression must never mean amnesia: every escalation the cap swallows
+      -- is counted here (with the first/last timestamps and the last problem
+      -- text) so a human can always answer "what did we stop paging about?".
+      -- notified_at is the single-notice latch: it is stamped exactly ONCE
+      -- per client per day, the moment the cap is first crossed, and that one
+      -- consolidated notice is the ONLY message the cap branch is ever allowed
+      -- to emit. A per-task "cap reached" message is the defect this fixes.
+      CREATE TABLE IF NOT EXISTS cap_suppressions (
+        day_key      TEXT PRIMARY KEY,
+        count        INTEGER NOT NULL,
+        first_at     TEXT NOT NULL,
+        last_at      TEXT NOT NULL,
+        last_problem TEXT,
+        notified_at  TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS meta (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -267,6 +300,118 @@ export class TicketStore {
       .prepare("SELECT count FROM counters WHERE day_key = :k")
       .get({ k: dayKey(client, iso) });
     return row ? Number(row.count) : 0;
+  }
+
+  // --- daily cap: suppression accounting (FIX-RESCUE-13) --------------------
+
+  /** How many escalations the cap has SUPPRESSED for this client today. */
+  countSuppressedToday(client, iso = nowISO()) {
+    const row = this.db
+      .prepare("SELECT count FROM cap_suppressions WHERE day_key = :k")
+      .get({ k: dayKey(client, iso) });
+    return row ? Number(row.count) : 0;
+  }
+
+  /** The consolidated, human-readable state of today's cap for one client. */
+  capState(client, { cap = DEFAULT_DAILY_CAP, now = Date.now() } = {}) {
+    const iso = new Date(now).toISOString();
+    const row =
+      this.db.prepare("SELECT * FROM cap_suppressions WHERE day_key = :k").get({ k: dayKey(client, iso) }) || null;
+    const used = this.countToday(client, iso);
+    return {
+      client: client ?? null,
+      day: iso.slice(0, 10),
+      cap,
+      used,
+      capReached: capEnabled(cap) && used >= cap,
+      suppressed: row ? Number(row.count) : 0,
+      notifiedAt: row ? row.notified_at : null,
+      firstSuppressedAt: row ? row.first_at : null,
+      lastSuppressedAt: row ? row.last_at : null,
+    };
+  }
+
+  /**
+   * The ONE consolidated line a human ever sees about the cap. Deliberately
+   * carries the running suppressed count so the single notice (and the report)
+   * both answer "how much are we NOT paging you about?".
+   */
+  capSummaryLine(client, opts = {}) {
+    const s = this.capState(client, opts);
+    return (
+      `Daily escalation cap reached (${s.used}/${s.cap}). Further escalations today are ` +
+      `RECORDED and SUPPRESSED — no further per-task pages. Suppressed so far: ${s.suppressed}. ` +
+      `Open tickets are unaffected and still reach a human.`
+    );
+  }
+
+  /**
+   * THE CAP GATE — the fix for the brake that had become the amplifier.
+   *
+   * Called at the exact moment the store is about to mint a NEW ticket. It
+   * answers two questions in ONE atomic step:
+   *
+   *   suppress — is this client past its daily cap? (do not mint, do not page)
+   *   notice   — is this the FIRST suppression today? (the single consolidated
+   *              message a human is allowed to receive about the cap)
+   *
+   * The `notified_at` latch is set inside the same transaction as the counter
+   * bump, so N concurrent sweeps past the cap yield exactly ONE notice — never
+   * one message per task. Everything after that is counted and silent.
+   *
+   * NEVER-SILENCE INVARIANTS (all enforced here):
+   *   • Under the cap, NOTHING is suppressed — a stuck task always pages.
+   *   • Suppressed events are COUNTED durably (never dropped, never deleted).
+   *   • A disabled/absent cap (cap <= 0) suppresses nothing.
+   *   • The caller (`mintOrRecur`) FAILS OPEN if this throws: a broken cap
+   *     table must let the escalation through, not silence it.
+   */
+  capGate({ client, cap = DEFAULT_DAILY_CAP, now = Date.now(), problem = "" } = {}) {
+    const iso = new Date(now).toISOString();
+    const used = this.countToday(client, iso);
+    if (!capEnabled(cap) || used < cap) {
+      return { suppress: false, notice: false, used, cap, suppressed: 0 };
+    }
+
+    const k = dayKey(client, iso);
+    const txn = this.db.prepare("BEGIN IMMEDIATE");
+    txn.run();
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO cap_suppressions(day_key, count, first_at, last_at, last_problem, notified_at)
+             VALUES (:k, 1, :at, :at, :p, NULL)
+           ON CONFLICT(day_key) DO UPDATE SET
+             count        = count + 1,
+             last_at      = :at,
+             last_problem = :p`
+        )
+        .run({ k, at: iso, p: problem ? String(problem).slice(0, 500) : null });
+
+      // Single-notice latch: stamp notified_at only if it is still NULL. The
+      // `changes` count tells us — atomically — whether WE were the one that
+      // stamped it, i.e. whether this call owns today's one consolidated notice.
+      const stamped = this.db
+        .prepare("UPDATE cap_suppressions SET notified_at = :at WHERE day_key = :k AND notified_at IS NULL")
+        .run({ k, at: iso });
+      const row = this.db.prepare("SELECT count FROM cap_suppressions WHERE day_key = :k").get({ k });
+      this.db.prepare("COMMIT").run();
+
+      return {
+        suppress: true,
+        notice: Number(stamped.changes) === 1,
+        used,
+        cap,
+        suppressed: row ? Number(row.count) : 1,
+      };
+    } catch (err) {
+      try {
+        this.db.prepare("ROLLBACK").run();
+      } catch (_) {
+        /* ignore */
+      }
+      throw err;
+    }
   }
 
   // Look up an existing OPEN ticket by semantic dedup key within a time window.
@@ -395,9 +540,19 @@ export class TicketStore {
   //      inside `dedupWindowMs` (default 6h) -> append a "recurred" event to
   //      THAT ticket and return { status:"deduped", ticketId:<existing> }
   //      WITHOUT minting an RR number and WITHOUT touching the 25/day cap.
-  //   3. Otherwise mint a fresh ticket (counts toward the cap by default).
+  //   3. PAST THE DAILY CAP (FIX-RESCUE-13) -> do NOT mint. Count the
+  //      suppression durably and return { status:"cap_suppressed", post:false }.
+  //      EXACTLY ONE call per client per day (the first past the cap) comes back
+  //      with post:true + postKind:"cap_summary" — the single consolidated
+  //      notice. There is NEVER a per-task "cap reached" message: that message
+  //      WAS the flood it claimed to prevent.
+  //   4. Otherwise mint a fresh ticket (counts toward the cap by default).
+  //
   // The uniform return shape lets the caller decide cap accounting once:
-  //   { status:"minted"|"deduped"|"exists", deduped, minted, ticketId, rrNumber, ticket }.
+  //   { status:"minted"|"deduped"|"exists"|"cap_suppressed", deduped, minted,
+  //     post, postKind, ticketId, rrNumber, ticket }.
+  // `post` is the ONLY thing a sender needs to read: post===true => send this
+  // one message; post===false => stay silent (the event is already recorded).
   mintOrRecur(opts = {}) {
     const {
       ticketId,
@@ -407,26 +562,60 @@ export class TicketStore {
       now = Date.now(),
       problem = "",
       decisionMode = null,
+      capPerDay = DEFAULT_DAILY_CAP,
+      enforceCap = true,
     } = opts;
     if (!ticketId) throw new Error("mintOrRecur: ticketId is required");
 
     // (1) exact-id idempotency ALWAYS wins over semantic dedup.
     const exact = this.getTicket(ticketId);
     if (exact) {
-      return { status: "exists", deduped: true, minted: false, ticketId: exact.ticket_id, rrNumber: exact.rr_number, ticket: exact };
+      return { status: "exists", deduped: true, minted: false, post: false, postKind: null, ticketId: exact.ticket_id, rrNumber: exact.rr_number, ticket: exact };
     }
 
-    // (2) semantic dedup against an open sibling.
+    // (2) semantic dedup against an open sibling. Checked BEFORE the cap: a
+    // recurrence folds onto a ticket a human already has, so it neither burns
+    // the cap nor gets swallowed by it.
     const open = this.findByDedup(dedupKey(client, failureClass), dedupWindowMs, now);
     if (open && open.ticket_id !== ticketId) {
       const suffix = problem ? " — " + String(problem).slice(0, 200) : "";
       this.recurrence(open.ticket_id, { decisionMode, note: `recurred (would-be ${ticketId})${suffix}` });
-      return { status: "deduped", deduped: true, minted: false, ticketId: open.ticket_id, rrNumber: open.rr_number, ticket: this.getTicket(open.ticket_id) };
+      return { status: "deduped", deduped: true, minted: false, post: false, postKind: null, ticketId: open.ticket_id, rrNumber: open.rr_number, ticket: this.getTicket(open.ticket_id) };
     }
 
-    // (3) genuinely new -> mint (counts toward the cap unless caller opts out).
+    // (3) the daily cap. FAIL-OPEN: if the cap machinery itself errors we mint
+    // and post. A broken counter must never be able to silence an escalation —
+    // the cost of a duplicate page is trivial next to the cost of a stuck task
+    // no human ever hears about.
+    if (enforceCap) {
+      let gate = null;
+      try {
+        gate = this.capGate({ client, cap: capPerDay, now, problem });
+      } catch (err) {
+        gate = null; // fail-open
+      }
+      if (gate && gate.suppress) {
+        return {
+          status: "cap_suppressed",
+          deduped: false,
+          minted: false,
+          // The single consolidated notice, or silence. Never per-task.
+          post: gate.notice,
+          postKind: gate.notice ? "cap_summary" : null,
+          message: gate.notice ? this.capSummaryLine(client, { cap: capPerDay, now }) : null,
+          ticketId: null,
+          rrNumber: null,
+          ticket: null,
+          cap: gate.cap,
+          used: gate.used,
+          suppressedToday: gate.suppressed,
+        };
+      }
+    }
+
+    // (4) genuinely new -> mint (counts toward the cap unless caller opts out).
     const res = this.createTicket(opts);
-    return { status: "minted", deduped: false, minted: true, ticketId: res.ticket.ticket_id, rrNumber: res.ticket.rr_number, ticket: res.ticket };
+    return { status: "minted", deduped: false, minted: true, post: true, postKind: "ticket", ticketId: res.ticket.ticket_id, rrNumber: res.ticket.rr_number, ticket: res.ticket };
   }
 
   // --- transition -----------------------------------------------------------
@@ -527,9 +716,13 @@ export class TicketStore {
   // Deletes old CLOSED/RESOLVED tickets (their events cascade) and stale daily
   // counters. Mirrors the interim GC the Relay Brain runs against the in-n8n
   // static-data store, but for the durable store.
-  gc({ closedOlderThanDays = 30, counterOlderThanDays = 2, now = Date.now() } = {}) {
+  gc({ closedOlderThanDays = 30, counterOlderThanDays = 2, suppressionOlderThanDays = 30, now = Date.now() } = {}) {
     const ticketCutoff = new Date(now - closedOlderThanDays * 86_400_000).toISOString();
     const counterCutoff = new Date(now - counterOlderThanDays * 86_400_000).toISOString().slice(0, 10);
+    // Cap-suppression rows are EVIDENCE (what we stopped paging about), not
+    // bookkeeping — they are kept far longer than the daily counters they
+    // shadow, so a flood is still reconstructible weeks later.
+    const suppressionCutoff = new Date(now - suppressionOlderThanDays * 86_400_000).toISOString().slice(0, 10);
 
     const delTickets = this.db
       .prepare(
@@ -547,16 +740,25 @@ export class TicketStore {
     const delCounter = this.db.prepare("DELETE FROM counters WHERE day_key = :k");
     for (const r of staleCounters) delCounter.run({ k: r.day_key });
 
+    const staleSuppressions = this.db
+      .prepare("SELECT day_key FROM cap_suppressions")
+      .all()
+      .filter((r) => String(r.day_key).split("|")[1] < suppressionCutoff);
+    const delSuppression = this.db.prepare("DELETE FROM cap_suppressions WHERE day_key = :k");
+    for (const r of staleSuppressions) delSuppression.run({ k: r.day_key });
+
     return {
       ticketsDeleted: delTickets.changes,
       countersDeleted: staleCounters.length,
+      suppressionsDeleted: staleSuppressions.length,
       ticketCutoff,
       counterCutoff,
+      suppressionCutoff,
     };
   }
 
   // --- read view ------------------------------------------------------------
-  readView({ windowDays = 7, repeatThreshold = 3, capPerDay = 25, now = Date.now() } = {}) {
+  readView({ windowDays = 7, repeatThreshold = 3, capPerDay = DEFAULT_DAILY_CAP, now = Date.now() } = {}) {
     const openBySeverity = this.db
       .prepare(
         `SELECT severity, COUNT(*) AS n FROM tickets
@@ -595,6 +797,21 @@ export class TicketStore {
         atCap: Number(r.count) >= capPerDay,
       }));
 
+    // FIX-RESCUE-13 — SUPPRESSION IS NOT AMNESIA. The cap stops the pages, not
+    // the accounting: everything it swallowed today surfaces HERE (and in
+    // rescue-report), which is what makes "post once, then go quiet" safe.
+    const capSuppressed = this.db
+      .prepare("SELECT * FROM cap_suppressions WHERE day_key LIKE :today ORDER BY count DESC")
+      .all({ today: "%|" + today })
+      .map((r) => ({
+        client: String(r.day_key).split("|")[0],
+        suppressed: Number(r.count),
+        cap: capPerDay,
+        firstAt: r.first_at,
+        lastAt: r.last_at,
+        notifiedAt: r.notified_at,
+      }));
+
     return {
       generatedAt: new Date(now).toISOString(),
       windowDays,
@@ -603,6 +820,7 @@ export class TicketStore {
       resolvedInWindow: mttrRow ? Number(mttrRow.resolved_count) : 0,
       repeatOffenders,
       capUsage,
+      capSuppressed,
     };
   }
 
