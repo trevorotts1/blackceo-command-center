@@ -89,6 +89,46 @@ Verifies which fleet clients have NOT completed the AI Workforce Interview (defa
 
 ## 🔴 Accounts, hosts & operational gotchas
 
+<!-- FLEET_TRIAGE_RULE_V1 -->
+### 🌙 A SLEEPING BOX IS NOT AN INCIDENT (Trevor, 2026-07-14 — binding on every agent/heartbeat)
+Boxes go temporarily dark — powered off, asleep, laptop on battery, owner traveling. **A temporarily
+unreachable box is STILL A FULL FLEET MEMBER IN GOOD STANDING.** Do NOT treat a transient `ssh=DOWN`
+as a problem to fix, do not page the owner, do not chase it. Classify every DOWN box, then act ONLY
+on NEEDS-ATTENTION. Triage tool: `~/clawd/fleet-heartbeat/scripts/classify-down.sh` (read-only).
+
+- **EXPECTED-OFFLINE — report as "temporarily dark, no action."** Tunnel record correct + LIVE, but
+  **0 connectors at the edge** (CF Error 1033 / HTTP 530): nothing is reaching Cloudflare, so the box
+  is simply not powered on. It reconnects by itself on wake. **This is the DEFAULT assumption for a
+  DOWN box whose tunnel id is live and whose config is known-good.**
+- **NEEDS-ATTENTION — flag for action.** Dead/mismatched/missing tunnel ID · connector serving stale
+  config (503) · connector crash-looping · origin sshd refusing (rc255) on a box that IS reachable
+  (tunnel healthy, connectors > 0 ⇒ the machine is awake) · VPS reachable but gateway down (OOM/crash).
+
+**THE DISCRIMINATOR:** `0 connectors` ⇒ box is OFF ⇒ expected. `>0 connectors + SSH fails` ⇒ box is
+AWAKE and something is broken ⇒ attention.
+
+**⏳ AGING — EXPECTED-OFFLINE IS FOR *SHORT-TERM* DARKNESS ONLY (Trevor, 2026-07-14).** It covers a
+night, a weekend, a travel day. **A Mac dark for more than ~3 days is PROMOTED to NEEDS-ATTENTION and
+flagged** — a box dark that long may not merely be asleep, and we would rather check than let it sit.
+Duration comes from the `state/down-since.tsv` ledger (written by `heartbeat.sh`); threshold is
+`STALE_DARK_DAYS` (default 3). This is a SOFTER, EARLIER tripwire than the existing 5-day chronic-DOWN
+auto-escalation — it flags for a look, it does not page.
+
+**⚠️ STALE-PROBE GUARD:** never declare "tunnel healthy but SSH refused" from a probe file alone — the
+probe may be minutes stale while the Cloudflare query is live, so a box that woke up in between looks
+exactly like a real fault. **Re-test SSH LIVE before flagging.** (Earned 2026-07-14: Sonatta Camara was
+about to be flagged NEEDS-ATTENTION while fully recovered and reachable.) A box that passes the live
+re-test is reported as RECOVERED, not an incident.
+
+**⚠️ A VPS / Contabo container NEVER SLEEPS** — it is an always-on datacenter server, so EXPECTED-OFFLINE
+NEVER applies to it; any DOWN on a VPS is a real incident. (Earned 2026-07-14: Lyric's VPS probed
+`ssh=DOWN / timeout_20s` and was nearly filed as "asleep." It was UP at **load average 80**, thrashing
+from an OOM storm — the probe's 20s SSH check was merely timing out. A slow box is not a sleeping box.)
+Sleeping is a **Mac** behaviour. Related: a Mac **laptop** with gateway DOWN but SSH OK usually just
+needs a GUI login (cannot be started over SSH, self-recovers) — confirm a console user is logged in
+before calling the gateway genuinely down.
+<!-- END FLEET_TRIAGE_RULE_V1 -->
+
 ### FLEET COVERAGE — complete-roster rule (BINDING, enforced by a gate)
 Every fleet-wide op (version/skill rolls, CC pushes, config/secret propagation, pm2/port cleanups, prove-floor, any "fan out to the fleet") MUST cover the FULL roster across ALL providers: Hostinger VPS (incl. clients' OWN Hostinger accounts), Mac-via-CF-tunnel, AND Contabo. Not a judgment call — enforced by `~/clawd/accounts/fleet-coverage-gate.py`; the op is NOT done until it exits 0.
 - BEFORE an op: `python3 ~/clawd/accounts/fleet-coverage-gate.py --reconcile --check-contabo` (fails if `fleet-roster.json`, heartbeat `probe-fleet.sh ROSTER=()`, `box-registry.json`, or live Contabo disagree — fix drift first).
