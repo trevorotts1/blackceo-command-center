@@ -1,0 +1,84 @@
+name: Report-back invariant guard
+
+# U95 / U-X5 (master spec Section X.2, exec-summary item 12): pins the
+# doctrine that NO code path except the trust engine's outbox
+# (src/lib/jobs/trust-engine.ts) ever messages a task's requester_chat_id.
+#
+# Standalone workflow — deliberately NOT folded into qc-cc.yml, so this guard
+# lane stays independently readable/debuggable and never collides with that
+# workflow's own edit history.
+#
+# Two jobs:
+#   1. static-guard    — runs the mutation-proof test FIRST (a planted rogue
+#                         sender must fail the guard, and PASS once removed),
+#                         THEN the real guard against the actual tree. Proving
+#                         the mutation case before trusting the clean verdict
+#                         mirrors this repo's ceo-chat-color-gate convention.
+#   2. behavioral-fixture — runs the same test file's behavioral half: a
+#                         worker failure path (return-to-orchestrator) and a
+#                         worker completion write must both produce ZERO
+#                         client-lane sends outside the trust engine's own
+#                         stamped plan.
+#
+# Both jobs run the SAME test file (tests/unit/report-back-invariant.test.ts)
+# — split into two jobs only so a static-guard regression and a behavioral
+# regression are distinguishable at a glance in the Actions UI; either job
+# failing already fails the whole file locally via `npm run test:unit`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  static-guard:
+    name: Static call-site guard (+ mutation proof)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Guard script is executable
+        run: |
+          test -x scripts/guard-report-back-invariant.sh || {
+            echo "FAIL: scripts/guard-report-back-invariant.sh is not executable." >&2
+            exit 1
+          }
+
+      - name: Mutation proof + real-tree pass (report-back-invariant.test.ts)
+        run: |
+          node --import tsx --test tests/unit/report-back-invariant.test.ts
+
+      - name: Run the guard directly against the tree (belt-and-braces)
+        run: bash scripts/guard-report-back-invariant.sh
+
+  behavioral-fixture:
+    name: Behavioral fixture — worker paths never message the client
+    runs-on: ubuntu-latest
+    needs: static-guard
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Behavioral proof (same file — the [BEHAVIOR] cases)
+        run: |
+          node --import tsx --test tests/unit/report-back-invariant.test.ts
