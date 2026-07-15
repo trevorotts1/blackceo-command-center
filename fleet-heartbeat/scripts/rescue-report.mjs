@@ -48,6 +48,18 @@ function renderText(v) {
   lines.push("Cap usage today:");
   if (v.capUsage.length === 0) lines.push("  (no tickets today)");
   for (const c of v.capUsage) lines.push(`  ${c.client}: ${c.used}/${c.cap}${c.atCap ? "  AT CAP" : ""}`);
+  lines.push("");
+  // FIX-RESCUE-13 — the cap goes QUIET past its limit, so this is where the
+  // suppressed volume must show up. A big number here is a real signal (a
+  // client is flapping) that no longer arrives as one page per task.
+  lines.push("Suppressed by the daily cap today:");
+  if (!v.capSuppressed || v.capSuppressed.length === 0) lines.push("  (none suppressed)");
+  else
+    for (const c of v.capSuppressed)
+      lines.push(
+        `  ${c.client}: ${c.suppressed} suppressed (cap ${c.cap}) — last ${c.lastAt}` +
+          `${c.notifiedAt ? "  [1 consolidated notice sent]" : "  [NO notice sent]"}`
+      );
   return lines.join("\n");
 }
 

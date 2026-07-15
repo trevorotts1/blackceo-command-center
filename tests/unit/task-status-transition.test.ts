@@ -300,7 +300,7 @@ test('unmarked card (no Skill-6 source marker) → 403 and no mutation', async (
 
   assert.equal(res.status, 403, 'a card without the Skill-6 source marker must return 403');
   const body = (await res.json()) as { error: string; hint: string };
-  assert.match(body.error, /not a Skill-6 producer card/, 'error must explain the scope rejection');
+  assert.match(body.error, /not a signed board-producer card/, 'error must explain the scope rejection');
   assert.equal(currentStatus(UNMARKED_TASK_ID), before, 'status must NOT change on a non-Skill-6 card');
 });
 

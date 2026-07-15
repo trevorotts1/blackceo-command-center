@@ -37,10 +37,15 @@
  * the standalone script, and tests can all reuse them.
  */
 import { v4 as uuidv4 } from 'uuid';
-import fs from 'node:fs';
 import { isTestResidueIngestSlug } from './test-residue';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  safeReaddirNames,
+  safeReadFileUtf8,
+  safeIsDir,
+  safeStatSync,
+} from './fs/safe-fs';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import type { SOPStep, SOP } from '@/lib/sops';
 import { storeEmbeddingForSOP } from '@/lib/sop-embeddings';
@@ -61,6 +66,11 @@ function zeroHumanCompanyRoots(): string[] {
   const masterFiles = (process.env.MASTER_FILES_DIR || '').trim();
   if (masterFiles) roots.push(path.join(masterFiles, 'zero-human-company'));
   roots.push(
+    // SAFE, non-TCC canonical root FIRST (mirrors migrations.ts) so a fixed
+    // install resolves here and never probes a protected dir.
+    path.join(os.homedir(), '.openclaw', 'master-files', 'zero-human-company'),
+    // LEGACY ~/Downloads root (TCC-protected) — read ONLY via the never-blocking
+    // safe-fs helpers below so an un-migrated box cannot freeze on it.
     path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'zero-human-company'),
     '/data/openclaw-master-files/zero-human-company',
     path.join(os.homedir(), 'clawd', 'zero-human-company')
@@ -72,22 +82,12 @@ function zeroHumanCompanyRoots(): string[] {
 function newestZhcDepartmentsTree(): string | null {
   let best: { p: string; mtime: number } | null = null;
   for (const root of zeroHumanCompanyRoots()) {
-    let slugs: string[];
-    try {
-      slugs = fs.readdirSync(root);
-    } catch {
-      continue;
-    }
-    for (const slug of slugs) {
+    // safeReaddirNames never blocks the event loop on a TCC-gated / network root.
+    for (const slug of safeReaddirNames(root)) {
       const tree = path.join(root, slug, 'departments');
-      if (!isDir(tree)) continue;
-      let mtime = 0;
-      try {
-        mtime = fs.statSync(tree).mtimeMs;
-      } catch {
-        continue;
-      }
-      if (!best || mtime > best.mtime) best = { p: tree, mtime };
+      const st = safeStatSync(tree);
+      if (!st || !st.isDirectory()) continue;
+      if (!best || st.mtimeMs > best.mtime) best = { p: tree, mtime: st.mtimeMs };
     }
   }
   return best ? best.p : null;
@@ -116,17 +116,20 @@ export function resolveDepartmentsPath(departmentsPath?: string | null): string 
     return process.env.ROLE_LIBRARY_PATH.trim();
   }
 
+  // SHORT-CIRCUIT (Layer 2 of the TCC fix, identical to
+  // resolveDepartmentsConfigPath in migrations.ts): return the first existing
+  // tree in priority order and NEVER build the newest-ZHC discovery scan (which
+  // reaches ~/Downloads) unless the higher-priority candidates all miss.
   const workspaceDefault = path.join(WORKSPACE_BASE, 'departments');
-  const candidates: string[] = [];
   const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
-  if (explicitCompany) candidates.push(path.join(explicitCompany, 'departments'));
-  candidates.push(workspaceDefault);
-  const newest = newestZhcDepartmentsTree();
-  if (newest) candidates.push(newest);
-
-  for (const cand of candidates) {
+  if (explicitCompany) {
+    const cand = path.join(explicitCompany, 'departments');
     if (isDir(cand)) return cand;
   }
+  if (isDir(workspaceDefault)) return workspaceDefault;
+  // Only now (LAZY) run the discovery scan across the ZHC roots.
+  const newest = newestZhcDepartmentsTree();
+  if (newest && isDir(newest)) return newest;
   return workspaceDefault;
 }
 
@@ -160,11 +163,9 @@ export interface ImportResult {
 // ---------- discovery ----------
 
 function isDir(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
+  // safeIsDir: fast direct stat on non-protected paths; bounded on network/
+  // removable volumes. stat() itself is measured-safe on TCC dirs.
+  return safeIsDir(p);
 }
 
 /** Strip a leading "NN-" numeric prefix from a role folder name. */
@@ -181,7 +182,7 @@ export function discoverRoleHowTos(departmentsPath: string): RoleHowTo[] {
   const out: RoleHowTo[] = [];
   if (!isDir(departmentsPath)) return out;
 
-  for (const deptName of fs.readdirSync(departmentsPath)) {
+  for (const deptName of safeReaddirNames(departmentsPath)) {
     const deptDir = path.join(departmentsPath, deptName);
     if (!isDir(deptDir)) continue;
     const department = deptName.replace(/-dept$/, '');
@@ -206,16 +207,12 @@ export function discoverRoleHowTos(departmentsPath: string): RoleHowTo[] {
       continue;
     }
 
-    for (const roleDirName of fs.readdirSync(deptDir)) {
+    for (const roleDirName of safeReaddirNames(deptDir)) {
       const roleDir = path.join(deptDir, roleDirName);
       if (!isDir(roleDir)) continue;
       const howToPath = path.join(roleDir, 'how-to.md');
-      let markdown = '';
-      try {
-        markdown = fs.readFileSync(howToPath, 'utf8');
-      } catch {
-        continue; // no how-to.md in this role folder
-      }
+      const markdown = safeReadFileUtf8(howToPath);
+      if (markdown == null) continue; // no how-to.md in this role folder
       if (!markdown.trim()) continue;
       out.push({
         department,

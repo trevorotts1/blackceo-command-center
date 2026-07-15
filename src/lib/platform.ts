@@ -21,10 +21,11 @@
  *      safer fallback for any host that does not match the VPS marker.
  */
 
-import { existsSync, readdirSync, statSync } from 'fs';
+import { existsSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import type { Client } from './clients';
+import { safeReaddirNames, safeStatSync } from './fs/safe-fs';
 
 export type Platform = 'mac-mini' | 'vps-docker';
 
@@ -207,22 +208,16 @@ export function zhcLibraryBaseDirs(): string[] {
   for (const root of zhcRoots) {
     for (const containerName of ['zero-human-company', 'zhc']) {
       const container = path.join(root, containerName);
-      let entries: string[] = [];
-      try {
-        if (!existsSync(container)) continue;
-        entries = readdirSync(container);
-      } catch {
-        continue;
-      }
-      for (const slug of entries) {
+      // safeReaddirNames NEVER blocks the event loop: WORKSPACE_BASE_PATH may be
+      // ~/Documents/Shared (TCC-protected), where a raw opendir would hang the
+      // whole process forever. On a protected/network container the opendir runs
+      // in a hard-timeout child and returns [] instead of freezing. Absent dir
+      // → [] too, so the prior existsSync pre-check is folded in.
+      for (const slug of safeReaddirNames(container)) {
         if (slug.startsWith('.')) continue;
         const companyDir = path.join(container, slug);
-        try {
-          const st = statSync(companyDir);
-          if (st.isDirectory()) found.push({ dir: companyDir, mtime: st.mtimeMs });
-        } catch {
-          /* skip */
-        }
+        const st = safeStatSync(companyDir);
+        if (st && st.isDirectory()) found.push({ dir: companyDir, mtime: st.mtimeMs });
       }
     }
   }
