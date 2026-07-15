@@ -10,7 +10,9 @@ export const dynamic = 'force-dynamic';
  * average completion time, agent utilization, department workload, trend
  * buckets, bottlenecks, and persona coverage.
  *
- * Powers the CEODashboard trends / bottlenecks / persona-coverage cards.
+ * Powers the CEO Board's trends / bottlenecks / persona-coverage cards
+ * (KPIStatCards.tsx and related redesign components — the `CEODashboard`
+ * component this comment used to reference was dead code, deleted in U57).
  */
 export async function GET() {
   try {

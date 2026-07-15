@@ -48,6 +48,11 @@ import RecentIncidents from '@/components/ceo-board/ops/RecentIncidents';
 import { KPIStatCardsRow } from '@/components/ceo-board/KPIStatCardsRow';
 import { DeploymentHealthChart } from '@/components/ceo-board/DeploymentHealthChart';
 import { RepositoryStatusCard } from '@/components/ceo-board/RepositoryStatusCard';
+import { DepartmentBlockersPanel } from '@/components/ceo-board/DepartmentBlockersPanel';
+import {
+  computeDepartmentOperationalStats,
+  type OperationalTaskInput,
+} from '@/lib/ceo-board/department-operational-stats';
 
 interface DeptMemoryItem {
   id: string;
@@ -706,6 +711,7 @@ export default function DepartmentSubBoardPage() {
   const [agents, setAgents] = useState<AgentData[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [deptMemories, setDeptMemories] = useState<DeptMemoryItem[]>([]);
+  const [deptTasks, setDeptTasks] = useState<OperationalTaskInput[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -841,6 +847,22 @@ export default function DepartmentSubBoardPage() {
         setDeptMemories([]);
       }
 
+      // U57 — this department's own tasks, for the blocked-count/blockers-
+      // panel/average-velocity operational stats row. Same scoped-fetch
+      // pattern DepartmentPerformanceSection.tsx uses for the grid (compute
+      // locally from a workspace-filtered task list, not a new endpoint).
+      try {
+        const tasksRes = await fetch(`/api/tasks?workspace_id=${dept.id}`);
+        if (tasksRes.ok) {
+          const tasksJson = await tasksRes.json();
+          setDeptTasks(Array.isArray(tasksJson) ? tasksJson : []);
+        } else {
+          setDeptTasks([]);
+        }
+      } catch {
+        setDeptTasks([]);
+      }
+
       setIsLoading(false);
     };
 
@@ -850,6 +872,11 @@ export default function DepartmentSubBoardPage() {
   // never-72 doctrine: no fake 'B' fallback — unresolved/null grade falls
   // through getGradeColor's default (neutral gray), not a fabricated letter's color.
   const gradeColors = getGradeColor(department?.grade ?? '');
+
+  // U57 — blocked count + average velocity + blockers list, computed once
+  // from this department's own task list so the rendered blockers length
+  // always equals the rendered count (same array, never independently derived).
+  const operationalStats = computeDepartmentOperationalStats(deptTasks);
 
   if (isLoading) {
     return <PageSkeleton />;
@@ -1024,6 +1051,14 @@ export default function DepartmentSubBoardPage() {
                 </div>
               </div>
             )}
+          </motion.section>
+
+          {/* U57 — blocked-task count, average velocity, blockers panel.
+              Every department gets this row (not dept-specific like the
+              sections below); the actual blocked tasks are listed and
+              linked to the department's kanban board. */}
+          <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.05 }}>
+            <DepartmentBlockersPanel deptId={deptId} stats={operationalStats} />
           </motion.section>
 
           {creativeDept && (

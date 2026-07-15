@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, useInView } from 'framer-motion';
 import { AlertCircle, Users, Clock } from 'lucide-react';
+import { gradeToColor, type Grade } from '@/lib/grading';
 
 export type DepartmentStatus = 'active' | 'blocked' | 'idle';
 
@@ -11,6 +12,8 @@ export interface DepartmentPerformance {
   name: string;
   icon: string;
   status: DepartmentStatus;
+  /** All-time done/total completion percentage. U57: demoted to a labeled
+   *  secondary stat — the card's headline is `grade`, not this. */
   progress: number;
   stats: {
     inProgress: number;
@@ -22,6 +25,19 @@ export interface DepartmentPerformance {
   blockers?: string[];
   /** Active persona guiding the latest task in this department */
   activePersona?: string;
+  /** U57 — real weighted grade from computeDepartmentGrade() (same formula,
+   *  same window/config as the `/ceo-board/[dept]` detail hero), sourced from
+   *  `GET /api/company-health`. null = insufficient data — never a
+   *  fabricated letter. Optional so callers that haven't merged grade data
+   *  yet (e.g. mid-fetch) still satisfy the type. */
+  grade?: Grade | null;
+  /** Real grade score (0-100); null = insufficient data — never 0 or 72. */
+  gradeScore?: number | null;
+  sufficientData?: boolean;
+  /** Rolling window (days) the grade above was computed over — rendered next
+   *  to the demoted all-time completion stat so the two numbers' different
+   *  scopes are never ambiguous. */
+  windowDays?: number;
 }
 
 interface DepartmentCardProps {
@@ -161,15 +177,39 @@ export function DepartmentCard({ department, index, onClick }: DepartmentCardPro
         <span className="font-medium text-brand-500">{department.stats.inProgress}</span> active · <span className="font-medium text-emerald-500">{department.stats.done}</span> done · <span className="font-medium text-gray-400">{department.stats.backlog}</span> backlog
       </div>
 
-      {/* Progress Bar */}
-      <div className="mb-4">
+      {/* Grade — the headline performance metric (U57: same formula as the
+          `/ceo-board/[dept]` detail hero, never a raw completion percentage).
+          never-72 doctrine: null grade renders as "Insufficient data", never
+          a fabricated letter. */}
+      <div className="mb-3">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-medium text-gray-500">Completion</span>
-          <span className="text-sm font-semibold text-gray-900">
-            {department.progress}%
-          </span>
+          <span className="text-sm font-medium text-gray-500">Grade</span>
+          {department.grade ? (
+            <span
+              className="text-sm font-bold tabular-nums"
+              style={{ color: gradeToColor(department.grade) }}
+            >
+              {department.grade} · {department.gradeScore}%
+            </span>
+          ) : (
+            <span className="text-sm font-semibold text-gray-400">Insufficient data</span>
+          )}
         </div>
-        <ProgressBar progress={department.progress} status={department.status} />
+        <ProgressBar progress={department.gradeScore ?? 0} status={department.status} />
+      </div>
+
+      {/* All-time completion — demoted to a labeled secondary stat (U57).
+          Different scope than the grade above (all-time, not windowed) so
+          the window is called out explicitly to avoid the two numbers
+          reading as disagreement. */}
+      <div className="mb-4 flex items-center justify-between text-xs text-gray-400">
+        <span>All-time completion</span>
+        <span className="font-medium text-gray-500">
+          {department.progress}%
+          {typeof department.windowDays === 'number' && (
+            <span className="text-gray-400"> · grade uses {department.windowDays}d window</span>
+          )}
+        </span>
       </div>
 
       {/* Active Persona */}
