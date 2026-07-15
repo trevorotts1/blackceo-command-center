@@ -41,6 +41,7 @@ import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { routeTask } from '@/lib/routing/department-router';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
+import { healPhantomAssignmentsBatch } from '@/lib/jobs/heal-phantom-assignments';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task, TaskPriority } from '@/lib/types';
 
@@ -90,6 +91,25 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
   const now = timeNow();
   const graceCutoff = new Date(Date.now() - graceSeconds * 1000).toISOString();
   const placeholders = ADVANCEABLE_STATUSES.map(() => '?').join(',');
+
+  // ── C-04 (skill6-v2 U35): phantom-assignment healer, sweep-tail ─────────────
+  // A phantom `assigned_agent_id` (references a nonexistent `agents` row) can
+  // be introduced AFTER C-03 ships — raw SQL, a restored backup, or a
+  // foreign-keys-off migration window (db/migrations.ts). Heal any such row
+  // within the advanceable-status scope BEFORE this tick's selection query
+  // runs below, so a freshly-injected phantom is un-assigned — and therefore
+  // routed by the `!agentId` branch further down — within THIS SAME tick,
+  // not only at the next one. Shares the exact healing primitive (and event
+  // vocabulary: type 'phantom_agent_healed', reason 'assigned_agent_missing')
+  // that autoDispatchTask's own real-time catch uses (task-dispatcher.ts,
+  // C-03) — see src/lib/jobs/heal-phantom-assignments.ts. Never fatal: a
+  // pre-migration DB (no events table) is tolerated exactly like every other
+  // sweep in this file.
+  try {
+    healPhantomAssignmentsBatch({ healedBy: 'intake-advance-sweep', statuses: ADVANCEABLE_STATUSES });
+  } catch (err) {
+    console.warn('[intake-advance] phantom-assignment heal pass failed (non-fatal):', (err as Error).message);
+  }
 
   let rows: IntakeTaskRow[];
   try {

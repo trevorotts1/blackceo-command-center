@@ -18,12 +18,13 @@
  * BINARY acceptance mapped to test names below:
  *   (a) S1/S3/S4 remedies — 'S1 stuck-in-Backlog', 'S3 stuck-not-QCd',
  *       'S4a'+'S4b' (done-block 403 + QC promote)
- *   (b) S2-phantom flip — 'S2a stuck-not-assigned (phantom id)': asserts
- *       the PRE-C-03 silent skip (zero events) — this is EXPECTED TO FLIP
- *       the moment C-03 ships (task-dispatcher.ts:431-436 stops being a
- *       bare console.warn+return). C-03 does not exist at this commit, so
- *       only the pre-fix half of the flip is assertable today; the
- *       assertion text says so explicitly.
+ *   (b) S2-phantom flip — 'S2a stuck-not-assigned (phantom id)': C-03
+ *       (skill6-v2 U34) + its mutual dependency C-04 (U35) have shipped, so
+ *       this now asserts the POST-fix half of the documented flip — a
+ *       `phantom_agent_healed` event (reason `assigned_agent_missing`) is
+ *       written and the phantom id is cleared, instead of the old
+ *       zero-events silent skip (task-dispatcher.ts's former bare
+ *       console.warn+return).
  *   (c) fixture-guard — 'fixture-guard:' tests at the top and bottom of
  *       this file, mirroring src/lib/fixture-guard.ts's own
  *       hard-fail-on-danger pattern (never a real mission-control.db).
@@ -198,19 +199,21 @@ test('S1 stuck-in-Backlog: a 22-day-old ungroomed card gets the stale-backlog nu
 // ============================================================================
 // S2a — stuck-not-assigned, PHANTOM-ID flavor: autoDispatchTask's silent skip.
 //
-// PRE-C-03 state (this commit): task-dispatcher.ts's agent-not-found branch
-// (lines 431-436) console.warns and returns — ZERO event, ZERO
-// recordDispatchFailure, ZERO backoff, ZERO operator alert. This is the exact
-// defect the spec names as THE fake-agent root cause (C+I.1 row 4). This
-// assertion is DESIGNED TO FLIP the day C-03 ships (an `assigned_agent_missing`
-// event should then appear and the phantom id should be nulled) — per the
-// C-01 spec text verbatim: "the harness lands FIRST and encodes today's
-// silent-skip as an expected-failure to prove the defect exists, then flips
-// with C-03." C-03 is not built at this commit (confirmed: no
-// `assigned_agent_missing` reason string exists anywhere in task-dispatcher.ts
-// at this HEAD), so only the pre-fix half of that flip is provable today.
+// POST-C-03 state (this is the flip): task-dispatcher.ts's agent-not-found
+// branch (see the `healPhantomAgentAssignment` call inside the `if (!agent)`
+// guard) used to console.warn and return — ZERO event, ZERO
+// recordDispatchFailure, ZERO backoff, ZERO operator alert. That was the
+// exact defect the spec names as THE fake-agent root cause (C+I.1 row 4).
+// This assertion IS the flip the C-01 spec text predicted verbatim: "the
+// harness lands FIRST and encodes today's silent-skip as an expected-failure
+// to prove the defect exists, then flips with C-03." C-03 (skill6-v2 U34)
+// and its mutual dependency C-04 (U35, the phantom healer shared primitive —
+// src/lib/jobs/heal-phantom-assignments.ts) have now shipped together, so
+// this test asserts the POST-fix half: a `phantom_agent_healed` event is
+// written (reason `assigned_agent_missing`) and the phantom id is cleared —
+// never left to re-select and re-skip forever.
 // ============================================================================
-test('S2a stuck-not-assigned (phantom id): the silent skip produces ZERO events (pre-C-03, expected to flip when C-03 ships)', async () => {
+test('S2a stuck-not-assigned (phantom id): C-03 heals it LOUDLY — the silent skip is gone (post-C-03 flip)', async () => {
   const wsId = seedWorkspace(`s2a-ghost-dept-${uuidv4().slice(0, 8)}`);
   const phantomAgentId = uuidv4(); // deliberately has NO row in `agents`
   const id = uuidv4();
@@ -235,21 +238,39 @@ test('S2a stuck-not-assigned (phantom id): the silent skip produces ZERO events 
 
   await runIntakeAdvanceSweep();
 
-  assert.equal(taskStatus(id), 'assigned', 'S2a: the phantom-agent card never advances (silent skip, pre-C-03)');
-  const eventCount = queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM events WHERE task_id = ?', [id])?.n ?? -1;
+  // Healing (C-03/C-04) never itself advances board status — that remains
+  // autoDispatchTask's CAS claim / QC territory, untouched by this fix.
   assert.equal(
-    eventCount,
-    0,
-    'S2a: the silent skip writes ZERO events — no assigned_agent_missing, no backoff, no alert (verbatim reproduction of task-dispatcher.ts:431-436)',
+    taskStatus(id),
+    'assigned',
+    'S2a (post-C-03): healing the phantom id does not itself change task status',
   );
-  const stillPhantom = queryOne<{ assigned_agent_id: string }>(
+
+  const healedEvents = queryAll<{ message: string; metadata: string | null }>(
+    `SELECT message, metadata FROM events WHERE task_id = ? AND type = 'phantom_agent_healed'`,
+    [id],
+  );
+  assert.equal(
+    healedEvents.length,
+    1,
+    'S2a (post-C-03): exactly one phantom_agent_healed event must be written — the silent skip is gone',
+  );
+  const metadata = JSON.parse(healedEvents[0].metadata ?? '{}');
+  assert.equal(metadata.reason, 'assigned_agent_missing', 'S2a (post-C-03): reason must be assigned_agent_missing');
+  assert.equal(metadata.dead_agent_id, phantomAgentId, 'S2a (post-C-03): the event must name the dead agent id');
+  assert.ok(
+    healedEvents[0].message.includes(phantomAgentId),
+    'S2a (post-C-03): the event message must name the dead id verbatim',
+  );
+
+  const nowAssignedAgentId = queryOne<{ assigned_agent_id: string | null }>(
     'SELECT assigned_agent_id FROM tasks WHERE id = ?',
     [id],
   )?.assigned_agent_id;
-  assert.equal(
-    stillPhantom,
+  assert.notEqual(
+    nowAssignedAgentId,
     phantomAgentId,
-    'S2a: the phantom id is never healed/nulled at this commit — the card re-selects and re-skips every tick forever (C-04 healer not yet built)',
+    'S2a (post-C-03): the phantom id must be healed (cleared, or re-routed by the same C-04 sweep-tail pass) — never left stuck forever',
   );
 });
 
