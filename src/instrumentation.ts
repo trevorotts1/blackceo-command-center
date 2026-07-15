@@ -29,8 +29,26 @@
  * Node-only: better-sqlite3 and node-cron must not load in the edge runtime.
  */
 
+declare global {
+  // eslint-disable-next-line no-var
+  var __CC_SERVER_ENTRYPOINT__: boolean | undefined;
+}
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+
+  // C8 HARD-ISOLATION GUARD: mark this process as the real server BEFORE
+  // anything below (starting with the dynamic `@/lib/db` import two lines
+  // down) can reach src/lib/db/index.ts. That module refuses to fall back to
+  // the live database's default path unless either DATABASE_PATH is set or
+  // this marker is present — see the C8 HARD-ISOLATION GUARD comment there.
+  // Setting it here, as literally the first statement of the Next.js boot
+  // hook, means only this process's own compiled entrypoint can ever flip it
+  // — no ecosystem/pm2 file, .env, or shell export can fake it. Must run
+  // synchronously before the `await import('@/lib/db')` below: dynamic
+  // imports still evaluate the target module body once the promise resolves,
+  // so the marker has to already be set by then.
+  globalThis.__CC_SERVER_ENTRYPOINT__ = true;
 
   // 1. DB init — migrations + first-boot auto-seed (workspaces + starter SOPs).
   //

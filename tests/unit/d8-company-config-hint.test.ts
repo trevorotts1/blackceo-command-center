@@ -16,10 +16,18 @@
  * through to its next candidate (or `undefined`), exactly like the "no file" case
  * behaved before this fix.
  *
- * Node built-in test runner under tsx (`npm run test:unit`). No DB required — pure
- * filesystem logic.
+ * Node built-in test runner under tsx (`npm run test:unit`). The functions under
+ * test are pure filesystem logic, but they're imported from persona-selector.ts,
+ * which STATICALLY imports `@/lib/db` at its top — so merely importing the module
+ * (even via the dynamic `await import(...)` in test.before() below) reaches the DB
+ * singleton and freezes its DB_PATH. This was a latent C8 gap: it silently opened
+ * the default (cwd) database on every run, invisible until the C8 hard-isolation
+ * guard in src/lib/db/index.ts started refusing to resolve a path without either
+ * DATABASE_PATH or the server marker. Isolate first so this suite never touches a
+ * real database at all, live or otherwise.
  */
 
+import './_isolated-db';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
