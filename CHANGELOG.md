@@ -1,3 +1,12 @@
+## [v6.0.32] — 2026-07-15 — feat(U103): priority-based due-date smart default in createTaskCore (non-binding, editable/clearable)
+
+v6.0.32 — Merges `skill6-v2/U103` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4, unit 3 of 4 (U58 → U95 → U103 → U105), single serial merge-writer, strictly serial in id order.
+
+- **U103 (E4-6, v1 U48):** `src/lib/tasks.ts` gains a priority-based due-date smart default. New `DUE_DATE_SMART_DEFAULT_OFFSET_DAYS` ladder (critical=+1d, high=+3d, medium=+7d, low=+14d) and the pure `computeDueDateSmartDefault(priority, from)` helper; `createTaskCore` applies the default ONLY when the caller omits the `due_date` key entirely (`input.due_date === undefined`). An explicit `due_date: null` (TaskModal's "no date" default payload) passes through as null byte-identically — clearing never re-defaults (acceptance (c)) — and no intake surface gained a due-date question (acceptance (d)). The value is a plain, editable/clearable column value; nothing reads it to block, escalate, or notify.
+- **Merge:** clean, zero conflicts vs `origin/main` (`575d182`, v6.0.31 post-U95) — `tasks.ts` was untouched by U58/U95, so the 3-way merge is additive. Merged via `git merge --no-ff` commit `20935e9` (2-parent: `575d182` + `7831aeb`).
+- Test proof re-run independently on the merged tree, pre-ripple: `npx tsc --noEmit` clean (exit 0); `bash scripts/qc-cc.sh` → PASS, 137 checks green, 4 warnings (incl. 7.9/7.10 task-event and 14.9/14.10 gate-helper checks on `tasks.ts` still green); `npx vitest run --config vitest.component.config.ts` → 6 files, 45/45 PASS; `npm run test:unit` → 1423 tests, 1418 pass, 5 fail — the failing-test-name set is byte-identical to the pre-merge `origin/main` baseline (the same 5 pre-existing `getInterviewState` filesystem-signal cases), confirming zero regressions and +15 net-new passing tests from `due-date-smart-default.test.ts`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.31] — 2026-07-15 — feat(U95): orchestrator-only report-back invariant guard (static pin + behavioral fixture + mutation proof)
 
 v6.0.31 — Merges `skill6-v2/U95` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4, unit 2 of 4 (U58 → U95 → U103 → U105), single serial merge-writer, strictly serial in id order.
