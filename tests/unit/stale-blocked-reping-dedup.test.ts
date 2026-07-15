@@ -57,11 +57,22 @@ before(async () => {
   const { port } = server.address() as AddressInfo;
   process.env.RESCUE_RANGERS_WEBHOOK_URL = `http://127.0.0.1:${port}/rescue`;
   process.env.MISSION_CONTROL_URL = `http://127.0.0.1:${port}`;
+  // SAFETY-06 (PR #176) gates the operator escalation webhook off in a test run so
+  // no suite can POST to a LIVE endpoint by omission. This suite's whole point is to
+  // COUNT that operator escalation — and it has already pointed the webhook at its
+  // OWN 127.0.0.1 sink above, so opting in here can only ever reach that capture
+  // server. Telegram stays muted (OWNER_NOTIFY_TELEGRAM_DISABLED, set suite-wide by
+  // tests/setup/no-owner-telegram.ts and re-asserted here so this file is safe run
+  // directly). Without the opt-in the webhook never fires and every CAP/anti-silence
+  // assertion measures 0 escalations.
+  process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
+  process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST = '1';
 });
 
 after(async () => {
   delete process.env.RESCUE_RANGERS_WEBHOOK_URL;
   delete process.env.MISSION_CONTROL_URL;
+  delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
@@ -77,8 +88,10 @@ function hoursAgo(h: number): string {
 /**
  * A blocked task past the 72h re-ping threshold but short of the 144h return
  * threshold — i.e. sitting squarely in the window that used to re-fire every tick.
- * `ask` is left NULL on purpose: that is exactly the shape the live board carried
- * ("(no ask specified)"), and it must not change escalation behaviour.
+ * A non-empty `ask` is supplied because F3's migration-104 invariant now REJECTS a
+ * blocked_on_human row with an empty ask (the unanswerable poison state). The ask
+ * content is irrelevant to what this suite proves — dedup caps the re-ping
+ * regardless of ask text — it exists only so the fixture satisfies the DB invariant.
  */
 function seedBlockedTask(who: 'operator' | 'owner', ageHours = 80): string {
   const id = uuidv4();
@@ -93,7 +106,7 @@ function seedBlockedTask(who: 'operator' | 'owner', ageHours = 80): string {
   // blocked_reason is CHECK-constrained to ('decision','approval','credential','payment').
   run(
     `INSERT INTO tasks (id, title, status, workspace_id, blocked_on_human, blocked_reason, ask, updated_at, last_progress_at)
-     VALUES (?, ?, 'blocked', ?, ?, 'decision', NULL, ?, ?)`,
+     VALUES (?, ?, 'blocked', ?, ?, 'decision', 'Awaiting a human decision (fixture)', ?, ?)`,
     [id, `Blocked task ${id.slice(0, 8)}`, wsId, who, hoursAgo(ageHours), hoursAgo(ageHours)],
   );
   return id;
