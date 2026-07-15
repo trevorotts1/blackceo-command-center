@@ -1,3 +1,12 @@
+## [v6.0.30] — 2026-07-15 — feat(U58): individual-agent performance boards (per-agent endpoint + index/detail pages, QC pass)
+
+v6.0.30 — Merges `skill6-v2/U58` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4, unit 1 of 4 (U58 → U95 → U103 → U105), single serial merge-writer, strictly serial in id order.
+
+- **U58:** individual-agent performance boards. New `src/app/api/agents/[id]/performance/route.ts` (per-agent performance endpoint with a QC join), `src/lib/agents/performance.ts` (trend-series + rollup computation), `src/app/agents/page.tsx` (agents index) + `src/app/agents/[agentId]/page.tsx` (per-agent detail page), and the trio (QC / Research / Devil's-Advocate) is excluded from the client-facing agent roster. `src/app/ceo-board/page.tsx`, `src/app/ceo-board/[dept]/page.tsx`, and `redesign/ActiveAgentsStrip.tsx` wire the new agent-navigation surface; `package.json` gains an additive `test:e2e:agent-navigation` script with a new `playwright.agent-navigation.config.ts`.
+- **Merge:** clean, zero conflicts vs `origin/main` (`a5ab24c`, v6.0.29 post-U101) — the branch's merge-base equals the pre-merge `main` HEAD exactly (cut from current main). Merged via `git merge --no-ff` commit `0e40db1c` (2-parent: `a5ab24c` + `b2d272c1`). `package.json` change is purely additive (new e2e script only, version line untouched); no `claude-*` model literal in the new `performance.ts`.
+- Test proof re-run independently on the merged tree, pre-ripple: `npx tsc --noEmit` clean (exit 0); `bash scripts/qc-cc.sh` → PASS, 137 checks green, 4 warnings; `npx vitest run --config vitest.component.config.ts` → 6 files, 45/45 PASS; `npm run test:unit` → 1403 tests, 1398 pass, 5 fail — the failing-test-name set is byte-identical to the pre-merge `origin/main` baseline (the same 5 pre-existing `tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases), confirming zero regressions and +16 net-new passing tests from `agent-performance-endpoint.test.ts` + `agent-performance-index-detail.test.ts`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.29] — 2026-07-15 — feat(U101): per-department board SLA table (config/board-slas.json, QC 9.4)
 
 v6.0.29 — Merges `skill6-v2/U101` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 4 of 4 (last) (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
