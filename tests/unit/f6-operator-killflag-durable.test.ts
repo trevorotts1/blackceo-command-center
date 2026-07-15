@@ -1,0 +1,363 @@
+/**
+ * f6-operator-killflag-durable.test.ts — F6 REGRESSION SUITE.
+ *
+ * THE DEFECT
+ * ----------
+ * A runaway stale-task sweep flooded an operator escalation channel. The stop
+ * was `DISABLE_STALE_TASK_SWEEP=1` written into the checkout's
+ * `.env.production.local`. That file is gitignored (.gitignore:27 `.env*.local`),
+ * so the emergency stop lived ONLY as an untracked file inside the app checkout:
+ * a re-clone, a `git clean -fdx`, or any deploy step that regenerates the app's
+ * env file wholesale (DEPLOYMENT.md "What runs, in order", step 3 — the
+ * onboarding half of the weekly update writes `.env.local` on every run) silently
+ * re-enables the sweep and the flood returns, with nobody told.
+ *
+ * WHAT THIS SUITE PINS
+ * --------------------
+ *  1. An operator kill-flag set in the DURABLE overrides file (outside the
+ *     checkout) disables the sweep.  <-- FAILS on pre-fix code: pre-fix, the only
+ *     source is process.env, so the sweep runs and re-pings.
+ *  2. That flag SURVIVES a simulated converge/deploy that regenerates the app's
+ *     env file wholesale AND wipes the checkout's ignored files (`git clean -fdx`).
+ *     <-- FAILS on pre-fix code for the same reason.
+ *  3. The env-var path still works (no regression to the existing emergency stop).
+ *  4. FAIL-OPEN, non-negotiable: with no flag, with an UNREADABLE overrides file,
+ *     and with a GARBAGE overrides file, the sweep RUNS and the stuck task is
+ *     still escalated. Nothing here can silence escalation by accident.
+ *  5. scripts/operator-flag.sh MERGES — it never regenerates the overrides file
+ *     wholesale, so it cannot drop an override it did not touch.
+ *
+ * Nothing in this suite deletes a task. The sweep's own reping path is exercised
+ * as-is; assertions read rows and events only.
+ *
+ *   node --import tsx --test tests/unit/f6-operator-killflag-durable.test.ts
+ */
+
+process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
+process.env.OPENCLAW_NOTIFY_DISABLED = '1';
+delete process.env.RESCUE_RANGERS_WEBHOOK_URL;
+delete process.env.DISABLE_STALE_TASK_SWEEP;
+
+import './_isolated-db'; // MUST be first.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { v4 as uuidv4 } from 'uuid';
+import { run, queryAll } from '../../src/lib/db';
+import { runStaleTaskSweep } from '../../src/lib/jobs/stale-task-sweep';
+
+// Same convention as tests/unit/b2-atomic-deploy.test.ts — the unit suite runs
+// from the repo root.
+const OPERATOR_FLAG_SH = path.join(process.cwd(), 'scripts', 'operator-flag.sh');
+
+// ── fake-box scaffolding ─────────────────────────────────────────────────────
+
+interface FakeBox {
+  root: string;
+  /** The app checkout — everything in here is what a deploy owns/can clobber. */
+  appDir: string;
+  /** The durable overrides file — deliberately OUTSIDE appDir. */
+  durableFile: string;
+}
+
+function makeFakeBox(): FakeBox {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'f6-box-'));
+  const appDir = path.join(root, 'projects', 'command-center');
+  const durableFile = path.join(root, 'home', '.blackceo', 'command-center', 'operator-overrides.env');
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.mkdirSync(path.dirname(durableFile), { recursive: true });
+  return { root, appDir, durableFile };
+}
+
+/** The operator's ORIGINAL emergency stop: a line in the checkout's env file. */
+function writeCheckoutEnvKillFlag(box: FakeBox): void {
+  fs.writeFileSync(
+    path.join(box.appDir, '.env.production.local'),
+    'NODE_ENV=production\nDISABLE_STALE_TASK_SWEEP=1\n',
+    'utf-8',
+  );
+}
+
+/**
+ * Models what `next start` does at boot: hydrate process.env from the checkout's
+ * env file. This is the ONLY way the pre-fix kill-flag ever reached the app.
+ */
+function hydrateEnvFromCheckout(box: FakeBox): void {
+  delete process.env.DISABLE_STALE_TASK_SWEEP;
+  const envFile = path.join(box.appDir, '.env.production.local');
+  if (!fs.existsSync(envFile)) return;
+  for (const line of fs.readFileSync(envFile, 'utf-8').split('\n')) {
+    const eq = line.indexOf('=');
+    if (eq <= 0 || line.trim().startsWith('#')) continue;
+    process.env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+}
+
+/**
+ * Models the converge/deploy the operator is worried about:
+ *   (a) the deploy chain REGENERATES the checkout's env file wholesale from its
+ *       own template — every key the deploy does not know about is dropped; and
+ *   (b) the checkout's ignored files are wiped (`git clean -fdx` / a re-clone /
+ *       a container re-create).
+ * It touches ONLY the checkout — exactly like a real deploy.
+ */
+function simulateConvergeDeploy(box: FakeBox): void {
+  fs.rmSync(box.appDir, { recursive: true, force: true });   // fresh checkout
+  fs.mkdirSync(box.appDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(box.appDir, '.env.production.local'),
+    '# regenerated by the deploy — operator keys it does not know about are gone\nNODE_ENV=production\n',
+    'utf-8',
+  );
+}
+
+function pointAppAtDurableFile(box: FakeBox): void {
+  process.env.CC_OPERATOR_OVERRIDES_FILE = box.durableFile;
+}
+
+function clearFlagSources(): void {
+  delete process.env.DISABLE_STALE_TASK_SWEEP;
+  // Empty string = "no durable overrides file" (test isolation: never let a real
+  // box's ~/.blackceo file leak into a unit test).
+  process.env.CC_OPERATOR_OVERRIDES_FILE = '';
+}
+
+// ── DB fixtures: ONE blocked task old enough to be re-pinged ─────────────────
+// The incident's shape: status=blocked, blocked_on_human='operator', past the
+// re-ping threshold — the row the */10 sweep re-escalated every 10 minutes. A
+// non-empty `ask` is supplied because F3's migration-104 invariant now REJECTS a
+// blocked_on_human row with an empty ask (the unanswerable poison state). The ask
+// content is irrelevant to what THIS suite proves (kill-flag durability); it only
+// lets the fixture satisfy the DB invariant so the stuck row can exist at all.
+
+function hoursAgo(h: number): string {
+  return new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+}
+
+function seedBlockedStuckTask(): string {
+  const wsId = `ws-${uuidv4()}`;
+  run('INSERT INTO workspaces (id, name, slug, sort_order) VALUES (?, ?, ?, 1000)', [
+    wsId, 'F6 Workspace', `f6-${uuidv4().slice(0, 8)}`,
+  ]);
+  const taskId = uuidv4();
+  run(
+    `INSERT INTO tasks (id, title, status, workspace_id, blocked_on_human, ask, updated_at, last_progress_at)
+     VALUES (?, ?, 'blocked', ?, 'operator', 'Awaiting an operator decision (fixture)', ?, ?)`,
+    [taskId, 'F6 stuck task', wsId, hoursAgo(80), hoursAgo(80)], // 80h: past the 72h re-ping threshold
+  );
+  return taskId;
+}
+
+function repingEventCount(taskId: string): number {
+  const rows = queryAll<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'stale_repinged'`,
+    [taskId],
+  );
+  return rows[0]?.n ?? 0;
+}
+
+const KILL_FLAG_SKIPPED = /DISABLE_STALE_TASK_SWEEP set/;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. THE REGRESSION. Kill-flag set ONLY in the durable file (env clean).
+//    Pre-fix: the sweep does not know that file exists -> it runs and re-pings.
+// ─────────────────────────────────────────────────────────────────────────────
+test('F6.1 — a kill-flag in the DURABLE overrides file disables the sweep (env has no flag)', async () => {
+  const box = makeFakeBox();
+  const taskId = seedBlockedStuckTask();
+
+  delete process.env.DISABLE_STALE_TASK_SWEEP;                   // nothing in the env
+  fs.writeFileSync(box.durableFile, 'DISABLE_STALE_TASK_SWEEP=1\n', 'utf-8');
+  pointAppAtDurableFile(box);
+
+  const result = await runStaleTaskSweep();
+
+  assert.match(
+    result.skippedReason ?? '<sweep RAN>',
+    KILL_FLAG_SKIPPED,
+    'sweep must be disabled by the durable operator kill-flag alone (pre-fix: it only read process.env)',
+  );
+  assert.equal(result.repinged, 0, 'a disabled sweep must not re-ping anyone');
+  assert.equal(repingEventCount(taskId), 0, 'a disabled sweep must write no stale_repinged event');
+  assert.match(result.skippedReason!, /source:/, 'the skip reason must name WHERE the flag came from');
+  assert.match(result.skippedReason!, /operator-overrides file/, 'the source must be the durable file');
+
+  clearFlagSources();
+  fs.rmSync(box.root, { recursive: true, force: true });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. THE HEADLINE: the operator's stop SURVIVES a converge/deploy.
+// ─────────────────────────────────────────────────────────────────────────────
+test('F6.2 — the operator kill-flag survives a simulated converge/deploy that regenerates the env file', async () => {
+  const box = makeFakeBox();
+  const taskId = seedBlockedStuckTask();
+
+  // The operator stops the flood BOTH ways: the old way (checkout env file) and
+  // the durable way (this fix).
+  writeCheckoutEnvKillFlag(box);
+  fs.writeFileSync(box.durableFile, 'DISABLE_STALE_TASK_SWEEP=1\n', 'utf-8');
+  pointAppAtDurableFile(box);
+  hydrateEnvFromCheckout(box);
+  assert.equal(process.env.DISABLE_STALE_TASK_SWEEP, '1', 'precondition: the stop is live before the deploy');
+
+  const before = await runStaleTaskSweep();
+  assert.match(before.skippedReason ?? '<sweep RAN>', KILL_FLAG_SKIPPED, 'precondition: sweep is stopped before the deploy');
+
+  // ── the deploy runs ──
+  simulateConvergeDeploy(box);
+  hydrateEnvFromCheckout(box);   // the box restarts onto the regenerated env file
+
+  // The OLD mechanism is provably gone — this is the defect, reproduced.
+  assert.equal(
+    fs.existsSync(path.join(box.appDir, '.env.production.local')), true,
+    'the deploy regenerated the checkout env file',
+  );
+  assert.equal(
+    process.env.DISABLE_STALE_TASK_SWEEP, undefined,
+    'the deploy DID drop the checkout-env kill-flag — the pre-fix stop is gone',
+  );
+
+  // ...and the sweep must STILL be stopped, from the durable file the deploy
+  // cannot reach.
+  const after = await runStaleTaskSweep();
+  assert.match(
+    after.skippedReason ?? '<sweep RAN>',
+    KILL_FLAG_SKIPPED,
+    'the operator kill-flag MUST survive the deploy (pre-fix: the sweep silently re-enabled and re-flooded)',
+  );
+  assert.equal(after.repinged, 0, 'no re-ping after the deploy — the stop held');
+  assert.equal(repingEventCount(taskId), 0, 'no stale_repinged event after the deploy — the flood did not return');
+  assert.equal(fs.existsSync(box.durableFile), true, 'the durable file lives outside the checkout and is untouched');
+
+  clearFlagSources();
+  fs.rmSync(box.root, { recursive: true, force: true });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. NO REGRESSION: the existing env-var emergency stop still works.
+// ─────────────────────────────────────────────────────────────────────────────
+test('F6.3 — the env-var kill-flag still works with no durable file present', async () => {
+  const taskId = seedBlockedStuckTask();
+  clearFlagSources();                                  // no durable file
+  process.env.DISABLE_STALE_TASK_SWEEP = '1';
+
+  const result = await runStaleTaskSweep();
+  assert.match(result.skippedReason ?? '<sweep RAN>', KILL_FLAG_SKIPPED);
+  assert.match(result.skippedReason!, /source: env/);
+  assert.equal(repingEventCount(taskId), 0);
+
+  clearFlagSources();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. FAIL-OPEN. Escalation is DEDUPED and CAPPED elsewhere — never MUTED here.
+//    No flag, an unreadable overrides file, and a garbage overrides file must
+//    ALL leave the sweep RUNNING and the stuck task escalated.
+// ─────────────────────────────────────────────────────────────────────────────
+test('F6.4a — no kill-flag anywhere: the sweep RUNS and the stuck task IS escalated', async () => {
+  const taskId = seedBlockedStuckTask();
+  clearFlagSources();
+
+  const result = await runStaleTaskSweep();
+  assert.equal(result.skippedReason, undefined, 'with no kill-flag the sweep must not skip');
+  assert.ok(result.repinged >= 1, 'the stuck task must still reach a human');
+  assert.ok(repingEventCount(taskId) >= 1, 'a stale_repinged event must be written — escalation happened');
+});
+
+test('F6.4b — an UNREADABLE durable overrides file FAILS OPEN (sweep still runs, task still escalated)', async () => {
+  const box = makeFakeBox();
+  const taskId = seedBlockedStuckTask();
+  delete process.env.DISABLE_STALE_TASK_SWEEP;
+
+  // A path that exists but cannot be read as a file (EISDIR) — portable, and it
+  // holds even when the test runs as root (unlike chmod 000).
+  fs.rmSync(box.durableFile, { force: true });
+  fs.mkdirSync(box.durableFile, { recursive: true });
+  pointAppAtDurableFile(box);
+
+  const result = await runStaleTaskSweep();
+  assert.equal(result.skippedReason, undefined, 'an unreadable overrides file must NEVER silence the sweep');
+  assert.ok(repingEventCount(taskId) >= 1, 'escalation still happened despite the broken overrides file');
+
+  clearFlagSources();
+  fs.rmSync(box.root, { recursive: true, force: true });
+});
+
+test('F6.4c — a GARBAGE durable overrides file FAILS OPEN (sweep still runs)', async () => {
+  const box = makeFakeBox();
+  const taskId = seedBlockedStuckTask();
+  delete process.env.DISABLE_STALE_TASK_SWEEP;
+  fs.writeFileSync(box.durableFile, '  not= a =valid\nDISABLE_STALE_TASK_SWEEP\n[section]\n', 'utf-8');
+  pointAppAtDurableFile(box);
+
+  const result = await runStaleTaskSweep();
+  assert.equal(result.skippedReason, undefined, 'a malformed overrides file must NEVER silence the sweep');
+  assert.ok(repingEventCount(taskId) >= 1, 'escalation still happened');
+
+  clearFlagSources();
+  fs.rmSync(box.root, { recursive: true, force: true });
+});
+
+test('F6.4d — an explicit falsy value in the durable file does NOT disable the sweep', async () => {
+  const box = makeFakeBox();
+  const taskId = seedBlockedStuckTask();
+  delete process.env.DISABLE_STALE_TASK_SWEEP;
+  fs.writeFileSync(box.durableFile, 'DISABLE_STALE_TASK_SWEEP=0\n', 'utf-8');
+  pointAppAtDurableFile(box);
+
+  const result = await runStaleTaskSweep();
+  assert.equal(result.skippedReason, undefined, 'only an explicit truthy value may disable the sweep');
+  assert.ok(repingEventCount(taskId) >= 1);
+
+  clearFlagSources();
+  fs.rmSync(box.root, { recursive: true, force: true });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. scripts/operator-flag.sh MERGES — it never regenerates the file wholesale.
+//    (The whole defect class is "a writer regenerated the file and dropped a key".)
+// ─────────────────────────────────────────────────────────────────────────────
+test('F6.5 — operator-flag.sh set/unset PRESERVES every other key and comment (merge, never regenerate)', async () => {
+  const box = makeFakeBox();
+  const preexisting =
+    '# operator notes — must survive\n' +
+    'SOME_OTHER_OVERRIDE=keepme\n' +
+    'ANOTHER_ONE=also-keep\n';
+  fs.writeFileSync(box.durableFile, preexisting, 'utf-8');
+
+  const env = { ...process.env, CC_OPERATOR_OVERRIDES_FILE: box.durableFile };
+  execFileSync('bash', [OPERATOR_FLAG_SH, 'set', 'DISABLE_STALE_TASK_SWEEP', '1'], { env, encoding: 'utf-8' });
+
+  let contents = fs.readFileSync(box.durableFile, 'utf-8');
+  assert.match(contents, /^DISABLE_STALE_TASK_SWEEP=1$/m, 'set must write the flag');
+  assert.match(contents, /^SOME_OTHER_OVERRIDE=keepme$/m, 'set must NOT drop an unrelated key');
+  assert.match(contents, /^ANOTHER_ONE=also-keep$/m, 'set must NOT drop an unrelated key');
+  assert.match(contents, /# operator notes — must survive/, 'set must NOT drop comments');
+
+  // ...and the app must actually see it (the script and the resolver agree on the file).
+  delete process.env.DISABLE_STALE_TASK_SWEEP;
+  pointAppAtDurableFile(box);
+  const taskId = seedBlockedStuckTask();
+  const stopped = await runStaleTaskSweep();
+  assert.match(stopped.skippedReason ?? '<sweep RAN>', KILL_FLAG_SKIPPED, 'the flag the script wrote must stop the sweep');
+  assert.equal(repingEventCount(taskId), 0);
+
+  execFileSync('bash', [OPERATOR_FLAG_SH, 'unset', 'DISABLE_STALE_TASK_SWEEP'], { env, encoding: 'utf-8' });
+
+  contents = fs.readFileSync(box.durableFile, 'utf-8');
+  assert.ok(!/DISABLE_STALE_TASK_SWEEP=/.test(contents), 'unset must remove the flag');
+  assert.match(contents, /^SOME_OTHER_OVERRIDE=keepme$/m, 'unset must NOT drop an unrelated key');
+  assert.match(contents, /^ANOTHER_ONE=also-keep$/m, 'unset must NOT drop an unrelated key');
+
+  // Escalation is BACK ON once the operator clears the flag — no restart needed.
+  const resumed = await runStaleTaskSweep();
+  assert.equal(resumed.skippedReason, undefined, 'clearing the flag re-enables the sweep on the next tick');
+  assert.ok(repingEventCount(taskId) >= 1, 'the stuck task is escalated again once the stop is cleared');
+
+  clearFlagSources();
+  fs.rmSync(box.root, { recursive: true, force: true });
+});

@@ -216,9 +216,47 @@ if [ "$DEPLOY_OK" -ne 1 ]; then
 fi
 
 # ----------------------------------------------------------
+# Operator kill-flag receipt (F6)
+# ----------------------------------------------------------
+# A deploy must never be the reason an operator's emergency stop quietly
+# changed state. Report — after the swap — what the app will actually resolve
+# on its next boot, and from where. This is a REPORT, never a mutation: the
+# updater does not set, clear, or migrate a flag.
+step "Step 6: Operator kill-flag receipt"
+CC_OVERRIDES_FILE="${CC_OPERATOR_OVERRIDES_FILE:-}"
+if [ -z "$CC_OVERRIDES_FILE" ]; then
+  for _cand in "$HOME/.blackceo/command-center/operator-overrides.env" \
+               "/data/.blackceo/command-center/operator-overrides.env"; do
+    [ -f "$_cand" ] && { CC_OVERRIDES_FILE="$_cand"; break; }
+  done
+fi
+KILLFLAG_DURABLE=""
+[ -n "$CC_OVERRIDES_FILE" ] && [ -f "$CC_OVERRIDES_FILE" ] && \
+  KILLFLAG_DURABLE=$(grep -E '^[[:space:]]*(export[[:space:]]+)?DISABLE_STALE_TASK_SWEEP[[:space:]]*=' "$CC_OVERRIDES_FILE" 2>/dev/null | tail -1 || true)
+KILLFLAG_ENVFILE=""
+for _envf in "$INSTALL_DIR/.env.production.local" "$INSTALL_DIR/.env.local"; do
+  [ -f "$_envf" ] && KILLFLAG_ENVFILE=$(grep -E '^[[:space:]]*(export[[:space:]]+)?DISABLE_STALE_TASK_SWEEP[[:space:]]*=' "$_envf" 2>/dev/null | tail -1 || true)
+  [ -n "$KILLFLAG_ENVFILE" ] && break
+done
+
+if [ -n "$KILLFLAG_DURABLE" ] || [ -n "$KILLFLAG_ENVFILE" ]; then
+  warn "STALE-TASK SWEEP KILL-FLAG IS SET on this box — stale/blocked tasks are NOT being escalated."
+  [ -n "$KILLFLAG_DURABLE" ] && warn "  durable override: $CC_OVERRIDES_FILE  ($KILLFLAG_DURABLE)"
+  [ -n "$KILLFLAG_ENVFILE" ] && warn "  app env file (NOT deploy-proof — a re-clone or 'git clean -fdx' erases it): $KILLFLAG_ENVFILE"
+  if [ -n "$KILLFLAG_ENVFILE" ] && [ -z "$KILLFLAG_DURABLE" ]; then
+    warn "  This stop lives ONLY in the checkout. Make it survive the next deploy:"
+    warn "    bash $INSTALL_DIR/scripts/operator-flag.sh set DISABLE_STALE_TASK_SWEEP 1"
+  fi
+  warn "  This is an emergency stop, not a resting state. Undo with:"
+  warn "    bash $INSTALL_DIR/scripts/operator-flag.sh unset DISABLE_STALE_TASK_SWEEP"
+else
+  success "No operator kill-flag set — stale-task sweep will run (escalation active)."
+fi
+
+# ----------------------------------------------------------
 # Write UPDATE PENDING flag for agent
 # ----------------------------------------------------------
-step "Step 6: Notify agent via AGENTS.md flag"
+step "Step 7: Notify agent via AGENTS.md flag"
 if [ -d "/data/clawd" ]; then
   WORKSPACE="/data/clawd"
 else
