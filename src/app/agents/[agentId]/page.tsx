@@ -4,9 +4,13 @@
  * /agents/[agentId] — Individual-agent performance detail (U58, Skill 6
  * Blended-Persona Kanban v2 Stage 2 / exec-summary item 9).
  *
- * Fetches GET /api/agents/[agentId]/performance (@/lib/agents/performance's
+ * Fetches GET /api/agents/[id]/performance (@/lib/agents/performance's
  * on-read tasks x task_qc_results JOIN) and renders the completed count,
  * average QC score, pass rate, throughput, and the weekly trend series.
+ * (The API route's segment is named [id] to match its pre-existing
+ * src/app/api/agents/[id]/ siblings; this page's own segment stays
+ * [agentId] — separate route tree, unaffected. The fetch URL below is
+ * just a string and needs no change.)
  */
 
 import { useEffect, useState } from 'react';

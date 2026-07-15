@@ -3,9 +3,14 @@
  * route + lib-level shape proof for the index/detail data the
  * /agents and /agents/[agentId] pages render.
  *
- *   • GET /api/agents/[agentId]/performance (src/app/api/agents/[agentId]/
+ *   • GET /api/agents/[id]/performance (src/app/api/agents/[id]/
  *     performance/route.ts) — the exact JSON shape AgentPerformanceDetailPage
- *     consumes, for both a real agent and a 404 on an unknown id.
+ *     consumes, for both a real agent and a 404 on an unknown id. The API
+ *     segment is named [id], not [agentId], to match the pre-existing
+ *     sibling routes under src/app/api/agents/[id]/ — Next.js forbids mixed
+ *     dynamic-segment names at the same path position (getSortedRoutes
+ *     hard-fails `next build` for the whole app otherwise). The page route
+ *     src/app/agents/[agentId]/ is a separate, unrelated route tree.
  *   • listPerformanceEligibleAgents() (@/lib/agents/performance) — the exact
  *     shape AgentsIndexPage consumes (id/name/role/avatarEmoji/status),
  *     proving the trio-excluded list is what actually reaches the index page.
@@ -25,7 +30,7 @@ import assert from 'node:assert/strict';
 import { v4 as uuidv4 } from 'uuid';
 import { NextRequest } from 'next/server';
 import { run } from '../../src/lib/db';
-import { GET as performanceGET } from '../../src/app/api/agents/[agentId]/performance/route';
+import { GET as performanceGET } from '../../src/app/api/agents/[id]/performance/route';
 import { listPerformanceEligibleAgents } from '../../src/lib/agents/performance';
 
 // A dedicated fixture workspace — see the matching comment in
@@ -62,7 +67,7 @@ function seedQcResult(opts: { taskId: string; score: number; passed: boolean; sc
 
 function callPerformanceRoute(agentId: string): Promise<Response> {
   return performanceGET(new NextRequest(`http://localhost/api/agents/${agentId}/performance`), {
-    params: Promise.resolve({ agentId }),
+    params: Promise.resolve({ id: agentId }),
   }) as unknown as Promise<Response>;
 }
 
@@ -70,7 +75,7 @@ function callPerformanceRoute(agentId: string): Promise<Response> {
 // Detail route data shape
 // ---------------------------------------------------------------------------
 
-test('[U58] GET /api/agents/[agentId]/performance: 200 with the exact detail-page shape for a real agent', async () => {
+test('[U58] GET /api/agents/[id]/performance: 200 with the exact detail-page shape for a real agent', async () => {
   const agentId = `agent-shape-${uuidv4()}`;
   seedAgent({ id: agentId, name: 'Shape Test Agent', role: 'specialist' });
 
@@ -107,7 +112,7 @@ test('[U58] GET /api/agents/[agentId]/performance: 200 with the exact detail-pag
   assert.equal(point.avgQcScore, 95);
 });
 
-test('[U58] GET /api/agents/[agentId]/performance: an agent that exists but never completed anything renders honest nulls, not 404', async () => {
+test('[U58] GET /api/agents/[id]/performance: an agent that exists but never completed anything renders honest nulls, not 404', async () => {
   const agentId = `agent-shape-empty-${uuidv4()}`;
   seedAgent({ id: agentId, name: 'Never Completed Anything', role: 'specialist' });
 
@@ -121,7 +126,7 @@ test('[U58] GET /api/agents/[agentId]/performance: an agent that exists but neve
   assert.deepEqual(body.trend, []);
 });
 
-test('[U58] GET /api/agents/[agentId]/performance: unknown agent id → 404 with an error field, never a crash', async () => {
+test('[U58] GET /api/agents/[id]/performance: unknown agent id → 404 with an error field, never a crash', async () => {
   const res = await callPerformanceRoute(`agent-unknown-${uuidv4()}`);
   assert.equal(res.status, 404);
   const body = await res.json();
