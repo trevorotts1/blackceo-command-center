@@ -4,17 +4,32 @@
  * Companion to `23-ai-workforce-blueprint/scripts/test-a-u5-scoped-bundle.py`
  * in `openclaw-onboarding` (the ONB matcher-side `build_bundle(scope_hint=...)`
  * proof). This suite proves the CC persistence + surface half against A-U5's
- * own binary acceptance criteria (Section A.10):
+ * BINARY acceptance criteria AS REWRITTEN by the OPERATOR RULINGS 2026-07-15
+ * per-repo/offline doctrine (Section A.10, "A-U5" block — the CC half):
  *
- *   (b) `task_persona_bundle_scope` rows persist per (task_id, scope) and
- *       render as chips (snapshot test lives in the companion .test.tsx —
- *       this file proves the persist/load contract the chip reads from);
- *   (c) all existing single-bundle consumers pass unmodified — proven here by
- *       never touching `task_persona_bundle` (090) rows or mirror columns
- *       from any scoped-bundle write, and by the untouched suite in
- *       p4-02-persona-blend-visibility.test.ts staying green (CI re-runs it);
+ *   (b) the NEW `task_persona_bundle_scope` migration (104) creates the
+ *       table keyed `(task_id, scope)` (composite UNIQUE); rows persist per
+ *       `(task_id, scope)` FROM A SEED FIXTURE and render as per-scope chips
+ *       reusing `PersonaSlotChips` (snapshot test lives in the companion
+ *       .test.tsx — this file proves the persist/load contract the chip
+ *       reads from) — NO funnel build required, every seed below stands in
+ *       for a real producer;
+ *   (c) all existing single-bundle consumers pass unmodified (back-compat
+ *       suite green) — proven here by never touching `task_persona_bundle`
+ *       (090) rows or mirror columns from any scoped-bundle write, and by
+ *       the untouched suite in p4-02-persona-blend-visibility.test.ts
+ *       staying green (CI re-runs it);
  *   (d) the 090 table's schema is byte-identical pre/post migration 104
  *       (schema-dump diff = empty) — proven directly against sqlite_master.
+ *
+ * MOVED TO A-U7 (not proven here): "a fixture funnel build produces N pages
+ * with >=2 DISTINCT blends and exactly N per-page persona-selection-log
+ * entries" exercises A-U7's per-page blend-SELECTION machinery on the ONB
+ * side; this unit's ONB half only proves the scope-key/echo mechanism a
+ * caller like A-U7 uses (see the companion .py suite). The "multiple pages
+ * on the SAME task" test below persists three SEEDED rows directly — it
+ * proves this repo's persistence layer handles >=2 rows per task, never a
+ * producer/selection run, so it stays inside this unit's own (b).
  *
  * Node built-in test runner under tsx (`npm run test:unit`). DB isolation
  * MUST be the first import (see dep5-persona-plan-multi.test.ts's C8 note).
