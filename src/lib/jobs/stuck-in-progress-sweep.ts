@@ -103,7 +103,13 @@ const LIVENESS_NOISE_EVENT_TYPES = [
   'persona_rescored_at_dispatch',
   'routed_but_not_dispatched',
   'task_dispatch_deferred',
+  // The stale sweep's blocked re-ping. BOTH names are listed: 'stale_repinged' is
+  // the legacy type (historical rows still carry it) and 'stale_blocked_repinged'
+  // is what the sweep writes now that the re-ping is deduped (SWEEP-DEDUP). Listing
+  // only one of them would let a re-ping event count as agent LIVENESS and hide a
+  // silently-dead task all over again — the P39 false-negative this list prevents.
   'stale_repinged',
+  'stale_blocked_repinged',
   'af_model_sovereignty_block',
   'sop_library_gap',
 ];

@@ -152,8 +152,12 @@ function seedBlockedStuckTask(): string {
 }
 
 function repingEventCount(taskId: string): number {
+  // F1 (SWEEP-DEDUP) renamed the blocked re-ping's audit event to
+  // 'stale_blocked_repinged' (the dedup key), keeping the legacy 'stale_repinged'
+  // as a superset match. Count BOTH so this durability suite keeps measuring "did
+  // the sweep escalate?" regardless of which name the current sweep writes.
   const rows = queryAll<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'stale_repinged'`,
+    `SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type IN ('stale_repinged', 'stale_blocked_repinged')`,
     [taskId],
   );
   return rows[0]?.n ?? 0;

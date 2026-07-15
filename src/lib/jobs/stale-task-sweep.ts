@@ -18,6 +18,11 @@
  *     for owner / Rescue Rangers webhook for operator). After a second
  *     threshold (STALE_BLOCKED_REPINGED_THRESHOLD_HOURS), return to the
  *     orchestrator to re-classify.
+ *     "Once" is ENFORCED (SWEEP-DEDUP): the sweep runs every 10 minutes but the
+ *     re-ping window is 72h wide, so the re-ping is gated on wasRecentlyRepinged()
+ *     — at most one escalation per task per STALE_REPING_DEDUP_HOURS (default 24h).
+ *     This is a CAP, not a mute: a still-stuck task escalates again next window,
+ *     and the guard FAILS OPEN so a query error can never silence an escalation.
  *
  * Reads last_progress_at (migration 071). Falls back to updated_at when
  * last_progress_at is NULL (pre-migration-071 DB).
@@ -105,6 +110,55 @@ function isParkedInReview(taskId: string): boolean {
     );
     return (row?.n ?? 0) > 0;
   } catch {
+    return false;
+  }
+}
+
+/**
+ * SWEEP-DEDUP: how long a single blocked task stays "already escalated" (hours).
+ * The sweep runs every 10 minutes (STALE_TASK_SWEEP_CRON) but the blocked re-ping
+ * window is 72h wide, so WITHOUT a dedup key every operator-blocked task past the
+ * threshold re-escalated on EVERY tick — 6 escalations/hour/task for 72h straight.
+ * One live board turned 71 blocked tasks into ~426 escalations/hour and buried the
+ * escalation channel in hundreds of identical messages (and ~99k stale_repinged
+ * event rows). This is the cap: one re-ping per task per window, not per tick.
+ */
+const STALE_REPING_DEDUP_HOURS = parseFloat(process.env.STALE_REPING_DEDUP_HOURS || '24');
+
+/**
+ * SWEEP-DEDUP: has this task ALREADY been re-pinged inside the dedup window?
+ *
+ * Matches BOTH event types on purpose:
+ *   - 'stale_blocked_repinged' — the key this sweep writes from now on.
+ *   - 'stale_repinged'         — the legacy type it used to write.
+ * The superset match is what makes deploying this SAFE: on a box that already has
+ * a backlog of legacy 'stale_repinged' rows, those rows immediately satisfy the
+ * dedup, so the first post-deploy tick does NOT emit one final escalation burst.
+ *
+ * ⚠️ FAILS OPEN. A thrown query must NEVER swallow an escalation — a genuinely
+ * stuck task reaching a human is the whole point of this sweep. On error we return
+ * false ("not recently re-pinged") and let the escalation through. The failure mode
+ * of this guard is a duplicate message, never silence.
+ */
+function wasRecentlyRepinged(
+  taskId: string,
+  withinHours: number = STALE_REPING_DEDUP_HOURS,
+): boolean {
+  try {
+    const row = queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE task_id = ?
+          AND type IN ('stale_repinged', 'stale_blocked_repinged')
+          AND ${sqlTime('created_at')} >= ${sqlTime('?')}`,
+      [taskId, hoursAgo(withinHours)],
+    );
+    return (row?.n ?? 0) > 0;
+  } catch (err) {
+    // FAIL-OPEN — see contract above. Escalate anyway; never go quiet.
+    console.warn(
+      `[stale-task-sweep] re-ping dedup check failed for ${taskId} (failing OPEN, will escalate):`,
+      (err as Error).message,
+    );
     return false;
   }
 }
@@ -296,18 +350,35 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
           returnToOrchestrator(task, `Blocked task stale for ${Math.round(ageHours)}h with no human response to: "${task.ask ?? '(no ask)'}"`);
           returned++;
         } else if (ageHours >= repingThreshold) {
+          // SWEEP-DEDUP: re-ping AT MOST ONCE PER WINDOW, not once per 10-min tick.
+          // Without this gate the whole 72h→144h blocked window re-escalates every
+          // single tick (see STALE_REPING_DEDUP_HOURS). We are DEDUPING, not muting:
+          // a still-stuck task escalates again on the next window, and the guard
+          // fails OPEN, so no escalation is ever lost to a query error.
+          if (wasRecentlyRepinged(task.id)) {
+            continue;
+          }
+
           // First threshold: re-ping the named human.
           await repingBlockedHuman(task);
-          // Write stale_returned event for audit trail.
+          // Audit trail AND the dedup key the check above reads. Written on BOTH
+          // branches (operator → notifySystem, owner → /api/events) because this
+          // INSERT is common to both — that is what makes the dedup cover the
+          // operator path, which previously wrote NO dedupable key at all.
           const now = new Date().toISOString();
           try {
             run(
               `INSERT INTO events (id, type, task_id, message, created_at)
-               VALUES (?, 'stale_repinged', ?, ?, ?)`,
+               VALUES (?, 'stale_blocked_repinged', ?, ?, ?)`,
               [uuidv4(), task.id, `Re-pinged ${task.blocked_on_human ?? 'owner'} on blocked task (stale ${Math.round(ageHours)}h)`, now],
             );
-          } catch {
-            // events table issue -- non-fatal
+          } catch (err) {
+            // events table issue -- non-fatal for THIS tick, but it means no dedup
+            // key was written, so the next tick will escalate again (fail-open).
+            console.warn(
+              `[stale-task-sweep] failed to write re-ping dedup key for ${task.id}:`,
+              (err as Error).message,
+            );
           }
           repinged++;
         }
