@@ -1,3 +1,13 @@
+## [v6.0.33] — 2026-07-15 — feat(U105): task-modal in-app field help — typed copy map + reusable <FieldHelp/> popover
+
+v6.0.33 — Merges `skill6-v2/U105` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4, unit 4 of 4 (last) (U58 → U95 → U103 → U105), single serial merge-writer, strictly serial in id order.
+
+- **U105 (E4-8, v1 U50):** task-modal in-app help. New `src/lib/task-field-help.ts` (typed per-field copy map), new reusable `src/components/ui/FieldHelp.tsx` popover, and "i" info icons wired into `src/components/TaskModal.tsx` with accessible roles and mobile behavior. A new render-proof test (`tests/unit/field-help.test.tsx`) is added additively to the `vitest.component.config.ts` include array — all six prior entries (u55/a-u5/u42/u47/u104/u49) kept, the U105 entry appended.
+- **Merge:** clean, zero conflicts vs `origin/main` (`3e0824c`, v6.0.32 post-U103). The only shared file, `vitest.component.config.ts`, auto-merged additively (include array grew by one entry, no existing entry removed). Merged via `git merge --no-ff` commit `737eb62` (2-parent: `3e0824c` + `0711f09`). No `claude-*` model literal in the new `src/lib/task-field-help.ts`.
+- Test proof re-run independently on the merged tree, pre-ripple: `npx tsc --noEmit` clean (exit 0); `bash scripts/qc-cc.sh` → PASS, 137 checks green, 4 warnings; `npx vitest run --config vitest.component.config.ts` → 7 files, 60/60 PASS (the new `field-help.test.tsx` contributes 15/15, all six prior render suites still green); `npm run test:unit` → 1423 tests, 1418 pass, 5 fail — the failing-test-name set is byte-identical to the pre-merge `origin/main` baseline (the same 5 pre-existing `getInterviewState` filesystem-signal cases), confirming zero regressions (the U105 `.tsx` render test runs in the component suite, not the node `--test` unit runner, so the unit count is unchanged from U103).
+- This completes Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4's Command Center merge train (U58 → U95 → U103 → U105), all four units serially merged in id order onto `main`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.32] — 2026-07-15 — feat(U103): priority-based due-date smart default in createTaskCore (non-binding, editable/clearable)
 
 v6.0.32 — Merges `skill6-v2/U103` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 4, unit 3 of 4 (U58 → U95 → U103 → U105), single serial merge-writer, strictly serial in id order.
