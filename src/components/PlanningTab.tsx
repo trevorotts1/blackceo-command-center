@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { CheckCircle, Circle, Lock, AlertCircle, Loader2, X } from 'lucide-react';
+import { CheckCircle, Circle, Lock, AlertCircle, Loader2, X, ShieldAlert } from 'lucide-react';
 
 interface PlanningOption {
   id: string;
@@ -46,9 +46,20 @@ interface PlanningState {
 interface PlanningTabProps {
   taskId: string;
   onSpecLocked?: () => void;
+  /**
+   * U104 (E4-7) — set to the producer's friendly label (e.g. "the Anthology
+   * Engine") for a card sourced from an engine that runs its OWN stage
+   * machine. Command Center Planning would race that machine — two
+   * automations independently deciding what happens next to the same card —
+   * so instead of the "Start Planning" CTA this tab renders an honest notice
+   * and never starts a session. `undefined`/`null` (every non-engine task,
+   * the overwhelming common case) renders the ORIGINAL Start Planning flow,
+   * byte-for-byte unchanged.
+   */
+  engineNotice?: string | null;
 }
 
-export function PlanningTab({ taskId, onSpecLocked }: PlanningTabProps) {
+export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabProps) {
   const [state, setState] = useState<PlanningState | null>(null);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
@@ -435,23 +446,45 @@ export function PlanningTab({ taskId, onSpecLocked }: PlanningTabProps) {
   }
 
   if (!state?.isStarted) {
+    // U104 (E4-7) — engine-sourced cards never get the Start Planning CTA:
+    // the engine already runs its own stage machine for this card, and a
+    // second, CC-driven plan racing it is exactly the two-automation
+    // collision this notice exists to prevent. No session is ever started
+    // from this branch — startPlanning() is unreachable here.
+    if (engineNotice) {
+      return (
+        <div
+          className="flex flex-col items-center justify-center p-8 space-y-3 text-center"
+          data-testid="planning-engine-notice"
+        >
+          <ShieldAlert className="w-8 h-8 text-amber-500" />
+          <h3 className="text-lg font-medium text-gray-900">Driven by {engineNotice}</h3>
+          <p className="text-gray-500 text-sm max-w-md">
+            This card is captured from {engineNotice}&apos;s own pipeline, which runs its
+            own planning and stage machine. Starting Command Center Planning here would
+            create a second, conflicting plan, so Planning is unavailable for this card.
+            Track its progress on the Overview tab.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center p-8 space-y-4">
         <div className="text-center">
           <h3 className="text-lg font-medium text-gray-900 mb-2">Start Planning</h3>
           <p className="text-gray-500 text-sm max-w-md">
-            I&apos;ll ask you a few questions to understand exactly what you need. 
+            I&apos;ll ask you a few questions to understand exactly what you need.
             All questions are multiple choice - just click to answer.
           </p>
         </div>
-        
+
         {error && (
           <div className="flex items-center gap-2 text-red-600 text-sm">
             <AlertCircle className="w-4 h-4" />
             {error}
           </div>
         )}
-        
+
         <button
           onClick={startPlanning}
           disabled={starting}

@@ -34,6 +34,10 @@ import {
   TaskSopPanel,
   BlockedReasonPanel,
   PlanningMetaPanel,
+  // U104 (E4-7) — single source for the "which board-producer engine, if
+  // any" label, reused across the Planning/Activity/Deliverables/Sessions
+  // tabs below instead of re-deriving it per tab.
+  engineSourceLabel,
 } from './TaskOverviewPanels';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
@@ -85,6 +89,12 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
   // U13 — resolve the anthology assembly card behind this task (null for any
   // non-assembly card). Drives whether the Assembly cockpit renders on overview.
   const anthologyAssembly = resolveAnthologyAssembly(task);
+
+  // U104 (E4-7) — the board-producer engine label (e.g. "the Anthology
+  // Engine", "a Skill 6 funnel build"), or null for an ordinary task. Single
+  // computation, reused by the Planning/Activity/Deliverables/Sessions tabs
+  // below so every honest empty-state copy in this modal agrees.
+  const engineLabel = task ? engineSourceLabel(task) : null;
 
   const [form, setForm] = useState({
     title: task?.title || '',
@@ -891,23 +901,29 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
               <PlanningTab
                 taskId={task.id}
                 onSpecLocked={handleSpecLocked}
+                // U104 (E4-7) — scoped to anthology specifically: it is the
+                // one card family verified to run its OWN competing stage
+                // machine (gate_engine.py / mc_board.py), the exact race
+                // Planning-off closes. Other recognized producer sources
+                // (funnel/survey/web-development) keep Planning available.
+                engineNotice={isAnthologyTask(task) ? engineLabel : null}
               />
             </div>
           )}
 
           {/* Activity Tab */}
           {activeTab === 'activity' && task && (
-            <ActivityLog taskId={task.id} />
+            <ActivityLog taskId={task.id} engineLabel={engineLabel} />
           )}
 
           {/* Deliverables Tab */}
           {activeTab === 'deliverables' && task && (
-            <DeliverablesList taskId={task.id} />
+            <DeliverablesList taskId={task.id} engineLabel={engineLabel} />
           )}
 
           {/* Sessions Tab */}
           {activeTab === 'sessions' && task && (
-            <SessionsList taskId={task.id} />
+            <SessionsList taskId={task.id} engineLabel={engineLabel} />
           )}
         </div>
 

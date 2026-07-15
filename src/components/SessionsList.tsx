@@ -25,9 +25,17 @@ interface SessionWithAgent {
 
 interface SessionsListProps {
   taskId: string;
+  /**
+   * U104 (E4-7) — the producer's friendly label (e.g. "the Anthology
+   * Engine", "a Skill 6 funnel build") when this task is an engine-ingested
+   * board-producer card. Only consulted for the EMPTY-state copy — a task
+   * that DOES have sub-agent sessions always renders them, unchanged.
+   * `undefined`/`null` keeps the ORIGINAL generic empty copy.
+   */
+  engineLabel?: string | null;
 }
 
-export function SessionsList({ taskId }: SessionsListProps) {
+export function SessionsList({ taskId, engineLabel }: SessionsListProps) {
   const [sessions, setSessions] = useState<SessionWithAgent[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -131,6 +139,20 @@ export function SessionsList({ taskId }: SessionsListProps) {
   }
 
   if (sessions.length === 0) {
+    if (engineLabel) {
+      return (
+        <div
+          className="flex flex-col items-center justify-center py-8 text-gray-500 text-center px-4"
+          data-testid="engine-card-empty-sessions"
+        >
+          <div className="text-4xl mb-2">🤖</div>
+          <p className="text-sm italic text-gray-400">
+            Captured via {engineLabel} — this card family does not run Command Center
+            sub-agent sessions.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center py-8 text-gray-500">
         <div className="text-4xl mb-2">🤖</div>

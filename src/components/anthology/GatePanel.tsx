@@ -206,10 +206,21 @@ function WorkZone({ artifacts }: { artifacts: Artifact[] }) {
     <section className="space-y-2">
       <ZoneHeading>The work</ZoneHeading>
       {artifacts.length === 0 ? (
+        // U104 (E4-7) — this used to point the producer at the Deliverables
+        // tab ("the full artifact list is on the Deliverables tab"), which is
+        // FALSE for an anthology chapter: that tab reads the Command Center's
+        // own `task_deliverables` table (see DeliverablesList.tsx), a table
+        // the Anthology Engine never writes to. This zone — parsed straight
+        // from the links the editors post into the card's description via
+        // extractArtifacts() — is the ONLY place a chapter's deliverables
+        // ever render; the honest copy says so instead of sending the
+        // producer to a tab that will always be empty for this card.
         <EmptyNote>
           No deliverable is posted for this stage yet. Once the editors post the
-          PDF and Doc, they appear here; the full artifact list is on the
-          Deliverables tab.
+          PDF and Doc, the links appear right here — this Work section is where
+          a chapter&apos;s deliverables live. The Deliverables tab tracks
+          Command Center&apos;s own uploads and never carries them for an
+          Anthology Engine card.
         </EmptyNote>
       ) : (
         <div className="space-y-2">
