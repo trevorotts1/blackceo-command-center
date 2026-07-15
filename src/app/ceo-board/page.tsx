@@ -133,10 +133,10 @@ export default function CEOPerformanceBoardPage() {
       return;
     }
     if (tab === 'Agents') {
-      // '/agent-roster' does not exist (404). This page already renders an
-      // "Active Agents" section further down (Agent Performance lens) — jump
-      // to it instead of navigating to a dead route.
-      document.getElementById('agents-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // U58: the individual-agent performance board now exists at /agents
+      // (index + per-agent detail, trio excluded) — navigate there instead
+      // of the old dead '/agent-roster' route / in-page scroll workaround.
+      router.push('/agents');
     }
   }, [router]);
 
