@@ -13,6 +13,13 @@ import path from 'path';
 import os from 'os';
 import { seedStarterSOPs } from '../sops-seed';
 import { canonicalDeptSlug } from '../routing/canonical-slug';
+import {
+  safeReaddirNames,
+  safeReadFileUtf8,
+  safeIsFile,
+  safeIsDir,
+  safeStatSync,
+} from '../fs/safe-fs';
 import { seedCompanyGuarded } from './branding-seed';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import {
@@ -5391,27 +5398,30 @@ function autoSeedStarterSOPs(db: Database.Database) {
 
 const DEPARTMENTS_JSON = 'departments.json';
 
+// TCC-safe metadata checks. On macOS an unprivileged background process can
+// BLOCK FOREVER on open()/opendir() under ~/Downloads · ~/Desktop · ~/Documents,
+// but stat() is measured-safe there — safeIsFile/safeIsDir take the fast direct
+// path on TCC dirs and only bound network/removable volumes. See src/lib/fs/safe-fs.ts.
 function isExistingFile(p: string): boolean {
-  try {
-    return fs.statSync(p).isFile();
-  } catch {
-    return false;
-  }
+  return safeIsFile(p);
 }
 
 function isExistingDir(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
+  return safeIsDir(p);
 }
 
 /** Legacy hard-coded install locations (preserved verbatim, additive). */
 function legacyConfigCandidates(): string[] {
   return [
+    // SAFE, non-TCC canonical location — highest legacy priority so a fixed
+    // install (or a box migrated off ~/Downloads) resolves here first and never
+    // needs to touch a TCC-gated dir. See src/lib/fs/safe-fs.ts.
+    path.join(os.homedir(), '.openclaw', 'master-files', 'company-discovery', DEPARTMENTS_JSON),
     path.join(os.homedir(), 'clawd', 'projects', 'blackceo-command-center', 'config', DEPARTMENTS_JSON),
     path.join(os.homedir(), 'projects', 'mission-control', 'config', DEPARTMENTS_JSON),
+    // LEGACY ~/Downloads location (TCC-protected). Retained ONLY so a not-yet-
+    // migrated box is not orphaned; every read of it goes through the bounded,
+    // never-blocking safe-fs helpers — it can never freeze boot again.
     path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', DEPARTMENTS_JSON),
     path.join('/opt', 'mission-control', 'config', DEPARTMENTS_JSON),
   ];
@@ -5423,6 +5433,12 @@ export function zeroHumanCompanyRoots(): string[] {
   const masterFiles = (process.env.MASTER_FILES_DIR || '').trim();
   if (masterFiles) roots.push(path.join(masterFiles, 'zero-human-company'));
   roots.push(
+    // SAFE, non-TCC canonical root FIRST — new/fixed installs land here and the
+    // boot path never has to probe a protected dir.
+    path.join(os.homedir(), '.openclaw', 'master-files', 'zero-human-company'),
+    // LEGACY ~/Downloads root (TCC-protected). Read only via the bounded,
+    // never-blocking safe-fs helpers below so an un-migrated box still resolves
+    // but can never freeze boot.
     path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'zero-human-company'),
     '/data/openclaw-master-files/zero-human-company',
     path.join(os.homedir(), 'clawd', 'zero-human-company')
@@ -5438,20 +5454,14 @@ export function zeroHumanCompanyRoots(): string[] {
 function newestZhcChild(rel: string): string | null {
   let best: { p: string; mtime: number } | null = null;
   for (const root of zeroHumanCompanyRoots()) {
-    let slugs: string[];
-    try {
-      slugs = fs.readdirSync(root);
-    } catch {
-      continue; // root absent
-    }
+    // safeReaddirNames NEVER blocks the event loop: on a TCC-gated / network
+    // root it runs the opendir in a hard-timeout child process and returns []
+    // if it would hang, instead of freezing boot forever (the 13-hour outage).
+    const slugs = safeReaddirNames(root);
     for (const slug of slugs) {
       const candidate = path.join(root, slug, rel);
-      let st: fs.Stats;
-      try {
-        st = fs.statSync(candidate);
-      } catch {
-        continue;
-      }
+      const st = safeStatSync(candidate);
+      if (!st) continue;
       if (!best || st.mtimeMs > best.mtime) best = { p: candidate, mtime: st.mtimeMs };
     }
   }
@@ -5476,34 +5486,48 @@ function newestZhcChild(rel: string): string | null {
 export function resolveDepartmentsConfigPath(): string | null {
   const explicitCompany = (process.env.ZERO_HUMAN_COMPANY_DIR || '').trim();
   const ccRoot = (process.env.BLACKCEO_COMMAND_CENTER_ROOT || '').trim();
-  const candidates: string[] = [];
+
+  // SHORT-CIRCUIT (Layer 2 of the TCC fix): evaluate candidates in priority
+  // order and RETURN THE FIRST HIT, never probing a lower-priority candidate we
+  // do not need. The live outage box hung inside step 3 (a ~/Downloads readdir)
+  // even though its step-1 env candidate would have won — because the previous
+  // implementation built the ENTIRE candidate list eagerly (calling
+  // newestZhcChild() up front) before the existence loop. Deferring step 3 means
+  // a box whose ZERO_HUMAN_COMPANY_DIR / BLACKCEO_COMMAND_CENTER_ROOT resolves
+  // never touches the TCC-gated discovery scan at all.
 
   // 1. Explicit active-company folder — the strongest signal of the live client.
-  if (explicitCompany) candidates.push(path.join(explicitCompany, DEPARTMENTS_JSON));
+  if (explicitCompany) {
+    const p = path.join(explicitCompany, DEPARTMENTS_JSON);
+    if (isExistingFile(p)) return p;
+  }
   // 2. Explicit Command Center root (same env the writer's CC copy honors).
   if (ccRoot) {
-    candidates.push(
+    for (const p of [
       path.join(ccRoot, 'config', DEPARTMENTS_JSON),
       path.join(ccRoot, 'data', DEPARTMENTS_JSON),
-      path.join(ccRoot, DEPARTMENTS_JSON)
-    );
+      path.join(ccRoot, DEPARTMENTS_JSON),
+    ]) {
+      if (isExistingFile(p)) return p;
+    }
   }
-  // 3. Discovered real ZHC company build — probed BEFORE the repo-committed
-  //    template so the newest client departments.json takes precedence over
-  //    the 17-demo config/departments.json checked into the repo.
+  // 3. Discovered real ZHC company build — probed only now (LAZY), and BEFORE
+  //    the repo-committed template so the newest client departments.json takes
+  //    precedence over the demo config/departments.json checked into the repo.
+  //    newestZhcChild() reads every ZHC root through the never-blocking safe-fs
+  //    helpers, so even this scan cannot freeze boot.
   const zhcBuild = newestZhcChild(DEPARTMENTS_JSON);
-  if (zhcBuild) candidates.push(zhcBuild);
+  if (zhcBuild && isExistingFile(zhcBuild)) return zhcBuild;
   // 4. The running Command Center itself (process.cwd() === CC root in prod).
-  //    Falls AFTER the real company build so the repo template is only a
-  //    last-resort fallback, never shadowing a real client's departments.json.
-  candidates.push(
+  for (const p of [
     path.join(process.cwd(), 'config', DEPARTMENTS_JSON),
-    path.join(process.cwd(), 'data', DEPARTMENTS_JSON)
-  );
-  // 5. Legacy hard-coded install locations (preserved verbatim).
-  candidates.push(...legacyConfigCandidates());
-
-  for (const p of candidates) {
+    path.join(process.cwd(), 'data', DEPARTMENTS_JSON),
+  ]) {
+    if (isExistingFile(p)) return p;
+  }
+  // 5. Legacy hard-coded install locations (safe location first; the legacy
+  //    ~/Downloads entry is read only via the bounded safe-fs helpers).
+  for (const p of legacyConfigCandidates()) {
     if (isExistingFile(p)) return p;
   }
   return null;
@@ -5598,7 +5622,16 @@ export function reseedWorkspacesFromConfig(
     }
     console.log('[reseed] Using departments.json:', configPath);
 
-    const depts = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    // safeReadFileUtf8 NEVER blocks the event loop: if configPath resolved to a
+    // TCC-gated ~/Downloads path (legacy box) the open() runs in a hard-timeout
+    // child and returns null instead of hanging boot forever. null → treat as
+    // "no config" and skip the reseed (service comes up, does not freeze).
+    const raw = safeReadFileUtf8(configPath);
+    if (raw == null) {
+      console.warn('[reseed] departments.json unreadable (absent or TCC-blocked) — skipping workspace reseed:', configPath);
+      return { created, updated };
+    }
+    const depts = JSON.parse(raw);
     if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
 
     // Ensure company row exists / resolve the ACTIVE company. seedCompanyGuarded
@@ -5818,30 +5851,28 @@ function findCompanyName(): string {
   const envName = process.env.COMPANY_NAME?.trim();
   if (envName) return envName;
 
-  // 2. Try to find from Skill 23 interview answers
+  // 2. Try to find from Skill 23 interview answers.
+  //    SAFE canonical location first; the legacy ~/Downloads path is read only
+  //    via the never-blocking safe-fs helper so a TCC-gated box cannot hang here.
   const answerFiles = [
-    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'workforce-interview-answers.md'),
+    path.join(os.homedir(), '.openclaw', 'master-files', 'company-discovery', 'workforce-interview-answers.md'),
     path.join(os.homedir(), '.openclaw', 'workspace', 'company-discovery', 'workforce-interview-answers.md'),
+    path.join(os.homedir(), 'Downloads', 'openclaw-master-files', 'company-discovery', 'workforce-interview-answers.md'),
   ];
 
   for (const f of answerFiles) {
-    if (fs.existsSync(f)) {
-      try {
-        const content = fs.readFileSync(f, 'utf8');
-        // Look for patterns like "Company Name: XYZ" or "## Company Name\nXYZ"
-        const patterns = [
-          /(?:company|business)\s*name\s*[:\-]\s*(.+?)(?:\n|$)/i,
-          /#+\s*(?:company|business)\s*name\s*\n+(.+?)(?:\n|$)/i,
-        ];
-        for (const pattern of patterns) {
-          const match = content.match(pattern);
-          if (match && match[1]) {
-            const name = match[1].trim();
-            if (name) return name;
-          }
-        }
-      } catch {
-        // Continue to next file
+    const content = safeReadFileUtf8(f);
+    if (content == null) continue;
+    // Look for patterns like "Company Name: XYZ" or "## Company Name\nXYZ"
+    const patterns = [
+      /(?:company|business)\s*name\s*[:\-]\s*(.+?)(?:\n|$)/i,
+      /#+\s*(?:company|business)\s*name\s*\n+(.+?)(?:\n|$)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = content.match(pattern);
+      if (match && match[1]) {
+        const name = match[1].trim();
+        if (name) return name;
       }
     }
   }

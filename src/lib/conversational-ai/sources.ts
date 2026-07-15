@@ -20,6 +20,7 @@
  */
 
 import fs from 'fs';
+import { safeReadFileUtf8, safeReaddirNames } from '@/lib/fs/safe-fs';
 import path from 'path';
 import os from 'os';
 
@@ -128,12 +129,14 @@ export function readJsonl<T = Record<string, unknown>>(
   const source = resolveLogFile(relName);
   if (!source) return { available: false, records: [], source: null, skipped: 0 };
 
-  let raw = '';
-  try {
-    raw = fs.readFileSync(source, 'utf-8');
-  } catch {
+  // safeReadFileUtf8 never blocks on a TCC-gated workspace root (~/Downloads is
+  // a candidate): a raw open() there would hang forever. null → treat as the
+  // prior catch branch (available but unreadable).
+  const rawRead = safeReadFileUtf8(source);
+  if (rawRead == null) {
     return { available: true, records: [], source, skipped: 0 };
   }
+  const raw = rawRead;
 
   const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
   const records: T[] = [];
@@ -162,22 +165,15 @@ export function readJsonlDir<T = Record<string, unknown>>(
   const dir = resolveLogDir(relDir);
   if (!dir) return { available: false, records: [], source: null, skipped: 0 };
 
-  let entries: string[] = [];
-  try {
-    entries = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort();
-  } catch {
-    return { available: true, records: [], source: dir, skipped: 0 };
-  }
+  // safeReaddirNames never blocks on a TCC-gated workspace root; [] on absent/
+  // blocked (matches the prior catch → available:true, records:[]).
+  const entries = safeReaddirNames(dir).filter((f) => f.endsWith('.jsonl')).sort();
 
   const records: T[] = [];
   let skipped = 0;
   for (const file of entries) {
-    let raw = '';
-    try {
-      raw = fs.readFileSync(path.join(dir, file), 'utf-8');
-    } catch {
-      continue;
-    }
+    const raw = safeReadFileUtf8(path.join(dir, file));
+    if (raw == null) continue;
     for (const line of raw.split('\n').map((l) => l.trim()).filter(Boolean)) {
       try {
         records.push(JSON.parse(line) as T);
@@ -203,12 +199,12 @@ export function readMarkdownLog(relName: string): {
 } {
   const source = resolveLogFile(relName);
   if (!source) return { available: false, source: null, lineCount: 0, text: '' };
-  let text = '';
-  try {
-    text = fs.readFileSync(source, 'utf-8');
-  } catch {
+  // safeReadFileUtf8 never blocks on a TCC-gated workspace root.
+  const textRead = safeReadFileUtf8(source);
+  if (textRead == null) {
     return { available: true, source, lineCount: 0, text: '' };
   }
+  const text = textRead;
   const lineCount = text.split('\n').filter((l) => l.trim()).length;
   return { available: true, source, lineCount, text };
 }

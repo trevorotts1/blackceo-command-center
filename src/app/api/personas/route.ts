@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import os from 'os';
+import { safeReadFileUtf8 } from '@/lib/fs/safe-fs';
 
 // ── needs-tags.json reader ────────────────────────────────────────────────
 // Written by box-side converge (sync-extensions.sh --converge) at
@@ -97,13 +98,17 @@ function loadPersonaCategoriesFile(): Record<string, PersonaCategoryEntry> {
   ];
 
   for (const p of candidatePaths) {
-    if (existsSync(p)) {
-      try {
-        const raw = JSON.parse(readFileSync(p, 'utf-8'));
-        return raw.personas || {};
-      } catch (e) {
-        console.error('[Personas API] failed to parse', p, e);
-      }
+    // safeReadFileUtf8: candidatePaths include WORKSPACE_BASE_PATH (default
+    // ~/Documents/Shared) and ~/Downloads — both TCC-protected. A raw
+    // readFileSync there would hang this request thread forever; this returns
+    // null instead. Metadata existsSync is measured-safe, so we skip it entirely.
+    const rawStr = safeReadFileUtf8(p);
+    if (rawStr == null) continue;
+    try {
+      const raw = JSON.parse(rawStr);
+      return raw.personas || {};
+    } catch (e) {
+      console.error('[Personas API] failed to parse', p, e);
     }
   }
   return {};

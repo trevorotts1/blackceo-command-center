@@ -28,6 +28,15 @@
  * not match the tier-2 assertions below word-for-word).
  */
 
+// C8 — DB isolation MUST happen in an IMPORTED module, and this MUST stay the
+// first import. Assigning process.env.DATABASE_PATH in this file's BODY does not
+// work: ES `import` declarations are HOISTED, so `../../src/lib/persona-selector`
+// below is evaluated FIRST — and it statically imports '@/lib/db', freezing
+// `export const DB_PATH = process.env.DATABASE_PATH || <cwd>/mission-control.db`
+// from the un-isolated env and silently opening the LIVE mission-control.db.
+// Enforced by tests/unit/c8-db-isolation-guard.test.ts.
+import './_isolated-db';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 

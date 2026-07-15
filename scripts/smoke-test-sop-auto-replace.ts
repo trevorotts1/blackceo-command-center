@@ -15,6 +15,10 @@
  * Run:  npx tsx scripts/smoke-test-sop-auto-replace.ts
  */
 
+// SAFETY-05 — MUST BE FIRST. Reaches notify.ts via sop-auto-replace.
+// A bare `tsx` run sets no test-runner env, so notify.ts cannot self-detect here.
+import './lib/no-outbound-sends.js';
+
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';

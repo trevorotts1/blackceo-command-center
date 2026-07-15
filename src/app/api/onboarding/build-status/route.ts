@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { safeReaddirNames, safeReadFileUtf8 } from '@/lib/fs/safe-fs';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -31,22 +32,17 @@ function findActiveBuildProgress(): any | null {
   candidates.push(path.join(os.homedir(), '.openclaw', 'workspace', 'zero-human-company'));
 
   for (const root of candidates) {
-    if (!fs.existsSync(root)) continue;
-    let entries: string[] = [];
-    try {
-      entries = fs.readdirSync(root);
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
+    // safeReaddirNames / safeReadFileUtf8 never block this request thread on a
+    // TCC-gated root (~/Downloads is a candidate): a raw opendir/open there
+    // would hang the whole Node process forever. Absent/blocked → [] / null.
+    for (const entry of safeReaddirNames(root)) {
       const progressFile = path.join(root, entry, 'build-progress.json');
-      if (fs.existsSync(progressFile)) {
-        try {
-          const data = JSON.parse(fs.readFileSync(progressFile, 'utf-8'));
-          return data;
-        } catch {
-          continue;
-        }
+      const raw = safeReadFileUtf8(progressFile);
+      if (raw == null) continue;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        continue;
       }
     }
   }
