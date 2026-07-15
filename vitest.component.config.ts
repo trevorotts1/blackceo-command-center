@@ -24,6 +24,10 @@ export default defineConfig({
       // U49/U61 (H+L.7) — Prove action outcome (pass/fail/fail-closed) real
       // render proof, never a silent swallow.
       'tests/unit/u49-prove-action-render.test.tsx',
+      // U105 (E4-8) — task-modal in-app field help: <FieldHelp/> popover
+      // open/close, a11y roles, and typed copy-map coverage real render
+      // proof.
+      'tests/unit/field-help.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
