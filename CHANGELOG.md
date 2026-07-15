@@ -1,3 +1,13 @@
+## [v6.0.26] — 2026-07-15 — fix(dispatcher): U34+U35 — phantom-agent silent skip becomes loud, capped, self-healing (C-03+C-04, QC 9.2)
+
+v6.0.26 — Merges `skill6-v2/U34-U35` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 1 of 4 (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
+
+- **U34 (C-03):** a task dispatched to a phantom `assigned_agent_id` (an agent id with no matching `agents` row) previously failed silently. `src/lib/task-dispatcher.ts` now heals the phantom assignment loudly: NULLs the dead id, writes exactly one `events` row (`type: phantom_agent_healed`, `metadata.reason: assigned_agent_missing`), CAS-guarded so a second heal attempt on the same phantom id is a no-op. `src/lib/jobs/intake-advance-sweep.ts` then routes the healed task to a real agent on its next tick.
+- **U35 (C-04):** `scripts/heal-phantom-assignments.ts` — a one-time, idempotent, migration-safe batch cleanup for phantoms that already exist on a box, delegating to the same `healPhantomAssignmentsBatch()` primitive (`src/lib/jobs/heal-phantom-assignments.ts`) so a batch-healed task produces the identical event vocabulary as one healed live. Scope excludes `done`/archived tasks; history is never rewritten.
+- **Merge:** clean, zero conflicts vs `origin/main` (`cdfc9090`, v6.0.25) — file-disjoint from the concurrent C8 database-isolation fix already on main.
+- Test proof re-run independently on the merged tree, pre-ripple: `tests/unit/heal-phantom-assignments.test.ts` → 3/3 PASS; `tests/unit/phantom-agent-dispatch-heal.test.ts` → 17/17 PASS; `tests/unit/maria-pattern-harness.test.ts` → 9/9 PASS; `npx tsc --noEmit` clean; `npm run test:unit` → 1351 tests, 1346 pass, 5 fail — the 5 failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) independently reproduced byte-identical (5/8 fail, same test names) on a FRESH SEPARATE unmerged `origin/main` baseline clone (HEAD `cdfc9090`, v6.0.25), confirmed pre-existing, zero regressions introduced by this merge.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.25] — 2026-07-15 — fix(C8): hard-fail db resolution for non-server processes, database-isolation live guard (QC 8.7)
 
 v6.0.25 — Merges `cc-fix/db-isolation-live-guard` into `blackceo-command-center`, a standalone CC fix (not part of the Skill 6 Blended-Persona Kanban v2 build; branched off `origin/main` after v6.0.24 had already landed, no overlap with that build's files).
