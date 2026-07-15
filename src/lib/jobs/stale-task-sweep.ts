@@ -31,6 +31,12 @@
  * durably (deploy-proof) with `bash scripts/operator-flag.sh set
  * DISABLE_STALE_TASK_SWEEP 1`. Either source disables the sweep; see
  * src/lib/ops/operator-kill-flags.ts.
+ *
+ * U101: every STALE_THRESHOLDS entry is a global default, additionally
+ * overridable per-department via config/board-slas.json (src/lib/
+ * board-slas.ts) — precedence: explicit env var > that task's department
+ * entry > the hardcoded default. An absent/malformed config file is
+ * fail-closed to the unchanged, byte-identical global-default behavior.
  */
 
 import { queryAll, queryOne, run, sqlTime, parseDbTime } from '@/lib/db';
@@ -40,6 +46,7 @@ import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifySystem } from '@/lib/notify';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
+import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -53,6 +60,17 @@ const STALE_THRESHOLDS: Record<string, number> = {
   // Blocked: first threshold = re-ping; second threshold = return to orchestrator.
   blocked_repinged: parseFloat(process.env.STALE_BLOCKED_REPINGED_HOURS || '144'), // 72+72
 };
+
+/** U101: this job's global-default thresholds, keyed to match BoardSlaOverrides
+ *  (src/lib/board-slas.ts) — the settings-surface API reads this to render the
+ *  "(default)" row of the effective SLA table. */
+export const STALE_TASK_SWEEP_GLOBAL_DEFAULTS = {
+  staleInProgressHours: STALE_THRESHOLDS.in_progress,
+  staleReviewHours: STALE_THRESHOLDS.review,
+  staleBacklogHours: STALE_THRESHOLDS.backlog,
+  staleTodoHours: STALE_THRESHOLDS.todo,
+  staleBlockedRepingedHours: STALE_THRESHOLDS.blocked_repinged,
+} as const;
 
 interface StaleTaskRow {
   id: string;
@@ -169,9 +187,12 @@ function wasRecentlyRepinged(
  */
 async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
   const who = task.blocked_on_human ?? 'owner';
+  // U101: report THIS task's own effective (department-overridden or global)
+  // re-ping threshold, not always the global constant.
+  const returnThreshold = resolveSlaThreshold(task.department, 'staleBlockedRepingedHours', STALE_THRESHOLDS.blocked_repinged);
   const message =
     `[STALE-BLOCKED] Task "${task.title}" (id: ${task.id}) has been waiting in Blocked for over ` +
-    `${STALE_THRESHOLDS['blocked_repinged'] / 2}h without a response. ` +
+    `${returnThreshold / 2}h without a response. ` +
     `Reminder: ${task.ask ?? '(no ask specified)'}`;
 
   if (who === 'operator') {
@@ -298,14 +319,17 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
 
   const progressCol = 'COALESCE(last_progress_at, updated_at)';
 
-  // Select all non-done, non-archived tasks whose progress timestamp is old enough
-  // for ANY column threshold. We filter in-process below.
-  const oldestThreshold = Math.max(
-    STALE_THRESHOLDS.in_progress,
-    STALE_THRESHOLDS.review,
-    STALE_THRESHOLDS.backlog,
-    STALE_THRESHOLDS.todo,
-    STALE_THRESHOLDS.blocked_repinged,
+  // U101: query at the TIGHTEST possible per-column threshold across the
+  // global default AND every configured department override, so a
+  // department-tightened SLA (config/board-slas.json, src/lib/board-slas.ts)
+  // is never missed by this superset fetch — per-row filtering below then
+  // applies each task's OWN effective (env > department > default) threshold.
+  const tightestThreshold = Math.min(
+    minPossibleSlaThreshold('staleInProgressHours', STALE_THRESHOLDS.in_progress),
+    minPossibleSlaThreshold('staleReviewHours', STALE_THRESHOLDS.review),
+    minPossibleSlaThreshold('staleBacklogHours', STALE_THRESHOLDS.backlog),
+    minPossibleSlaThreshold('staleTodoHours', STALE_THRESHOLDS.todo),
+    minPossibleSlaThreshold('staleBlockedRepingedHours', STALE_THRESHOLDS.blocked_repinged) / 2, // re-ping fires at half the return threshold
   );
 
   let candidates: StaleTaskRow[];
@@ -320,7 +344,7 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
          AND ${sqlTime(progressCol)} < ${sqlTime('?')}
        ORDER BY ${sqlTime(progressCol)} ASC
        LIMIT 100`,
-      [hoursAgo(Math.min(STALE_THRESHOLDS.review, oldestThreshold))],
+      [hoursAgo(tightestThreshold)],
     );
   } catch (err) {
     return { scanned: 0, returned: 0, repinged: 0, skippedReason: `Query failed: ${(err as Error).message}` };
@@ -342,8 +366,13 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
 
       if (task.status === 'blocked') {
         // Blocked tasks: re-ping first threshold, return after second.
-        const repingThreshold = STALE_THRESHOLDS.blocked_repinged / 2; // default 72h
-        const returnThreshold = STALE_THRESHOLDS.blocked_repinged; // default 144h total
+        // U101: per-department override (falls back to the global default).
+        const returnThreshold = resolveSlaThreshold(
+          task.department,
+          'staleBlockedRepingedHours',
+          STALE_THRESHOLDS.blocked_repinged,
+        ); // default 144h total
+        const repingThreshold = returnThreshold / 2; // default 72h
 
         if (ageHours >= returnThreshold) {
           // Second threshold passed: return to orchestrator.
@@ -386,10 +415,11 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
       }
 
       // Non-Blocked tasks: check per-column threshold.
+      // U101: per-department override (falls back to the global default).
       const thresholdHours =
-        task.status === 'in_progress' ? STALE_THRESHOLDS.in_progress :
-        task.status === 'review' ? STALE_THRESHOLDS.review :
-        STALE_THRESHOLDS.backlog;
+        task.status === 'in_progress' ? resolveSlaThreshold(task.department, 'staleInProgressHours', STALE_THRESHOLDS.in_progress) :
+        task.status === 'review' ? resolveSlaThreshold(task.department, 'staleReviewHours', STALE_THRESHOLDS.review) :
+        resolveSlaThreshold(task.department, 'staleBacklogHours', STALE_THRESHOLDS.backlog);
 
       if (ageHours >= thresholdHours) {
         // B6: a review task deliberately parked by QC (heuristic no-key /

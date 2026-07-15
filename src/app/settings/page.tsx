@@ -19,7 +19,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Settings, FolderOpen, Brain, Building2, ArrowRight, ChevronDown, ChevronUp } from 'lucide-react';
+import { Settings, FolderOpen, Brain, Building2, ArrowRight, ChevronDown, ChevronUp, Timer } from 'lucide-react';
 import { Breadcrumb } from '@/components/Breadcrumb';
 
 export default function SettingsPage() {
@@ -89,6 +89,27 @@ export default function SettingsPage() {
                 <div className="min-w-0">
                   <h2 className="text-card-title text-gray-900">Company Settings</h2>
                   <p className="text-base text-gray-600">Company name, industry, logo, and brand colors</p>
+                </div>
+              </div>
+              <ArrowRight className="w-5 h-5 text-gray-400 group-hover:text-brand-600 group-hover:translate-x-1 transition-all flex-shrink-0" />
+            </div>
+          </div>
+        </section>
+
+        {/* Board SLAs link (U101) */}
+        <section
+          onClick={() => router.push('/settings/board-slas')}
+          className="bg-white/80 backdrop-blur-sm rounded-2xl border border-gray-200 shadow-sm cursor-pointer hover:shadow-md transition-all group"
+        >
+          <div className="p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 flex-shrink-0 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl flex items-center justify-center">
+                  <Timer className="w-5 h-5 text-white" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-card-title text-gray-900">Board SLAs</h2>
+                  <p className="text-base text-gray-600">Per-department lane thresholds (read-only effective table)</p>
                 </div>
               </div>
               <ArrowRight className="w-5 h-5 text-gray-400 group-hover:text-brand-600 group-hover:translate-x-1 transition-all flex-shrink-0" />
