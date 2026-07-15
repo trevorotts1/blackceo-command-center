@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
+import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Target,
@@ -504,9 +505,14 @@ function MediaPreviewCards() {
 
 // --- Agent Card (inline row style) ---
 
+// U58: department-agents rows navigate to this agent's performance detail
+// page (/agents/[id] — @/lib/agents/performance's getAgentGrade).
 function AgentRow({ agent }: { agent: AgentData }) {
   return (
-    <div className="flex items-center gap-4 px-4 py-3 hover:bg-gray-50/50 transition-colors">
+    <Link
+      href={`/agents/${encodeURIComponent(agent.id)}`}
+      className="flex items-center gap-4 px-4 py-3 hover:bg-gray-50/50 transition-colors"
+    >
       <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-brand-100 to-brand-50 flex items-center justify-center text-2xl flex-shrink-0">
         🤖
       </div>
@@ -536,7 +542,7 @@ function AgentRow({ agent }: { agent: AgentData }) {
           <p className="text-sm text-gray-500">Quality</p>
         </div>
       </div>
-    </div>
+    </Link>
   );
 }
 

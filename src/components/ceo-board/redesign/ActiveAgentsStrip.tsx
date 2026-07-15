@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
+import Link from 'next/link';
 import { unwrapAgents } from '@/lib/api-envelope';
 import type { Agent, Task } from '@/lib/types';
 
@@ -157,44 +158,46 @@ export function ActiveAgentsStrip() {
         {agents.map((agent, index) => {
           const sc = statusConfig[agent.taskStatus || 'Pending'];
           return (
-            <motion.div
-              key={agent.id}
-              variants={itemVariants}
-              className="flex items-center gap-3 py-3 px-4 rounded-xl bg-gray-50/60 flex-shrink-0"
-              style={{ minWidth: '260px' }}
-            >
-              {/* Avatar circle */}
-              <div
-                className="flex h-10 w-10 items-center justify-center rounded-full flex-shrink-0"
-                style={{ backgroundColor: getAgentColor(index) }}
+            <motion.div key={agent.id} variants={itemVariants} className="flex-shrink-0">
+              {/* U58: navigate to this agent's performance detail page. */}
+              <Link
+                href={`/agents/${encodeURIComponent(agent.id)}`}
+                className="flex items-center gap-3 py-3 px-4 rounded-xl bg-gray-50/60 transition-colors hover:bg-gray-100"
+                style={{ minWidth: '260px' }}
               >
-                <span
-                  className="text-white font-semibold"
-                  style={{ fontSize: '14px' }}
+                {/* Avatar circle */}
+                <div
+                  className="flex h-10 w-10 items-center justify-center rounded-full flex-shrink-0"
+                  style={{ backgroundColor: getAgentColor(index) }}
                 >
-                  {getInitials(agent.name)}
-                </span>
-              </div>
-
-              {/* Name + task line */}
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold text-[#1A1A1A] truncate">
-                  {agent.name}
-                </div>
-                <div className="text-[12px] truncate">
-                  <span className="text-gray-500">Working on </span>
-                  <span className="font-semibold text-[#1A1A1A]">
-                    {agent.currentTask}
+                  <span
+                    className="text-white font-semibold"
+                    style={{ fontSize: '14px' }}
+                  >
+                    {getInitials(agent.name)}
                   </span>
                 </div>
-              </div>
 
-              {/* Status badge */}
-              <span
-                className={`text-[11px] font-medium px-2 py-1 rounded-full ${sc.bg} text-gray-800 flex-shrink-0`}
-              >
-                {sc.label}
-              </span>
+                {/* Name + task line */}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold text-[#1A1A1A] truncate">
+                    {agent.name}
+                  </div>
+                  <div className="text-[12px] truncate">
+                    <span className="text-gray-500">Working on </span>
+                    <span className="font-semibold text-[#1A1A1A]">
+                      {agent.currentTask}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Status badge */}
+                <span
+                  className={`text-[11px] font-medium px-2 py-1 rounded-full ${sc.bg} text-gray-800 flex-shrink-0`}
+                >
+                  {sc.label}
+                </span>
+              </Link>
             </motion.div>
           );
         })}
