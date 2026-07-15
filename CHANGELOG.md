@@ -1,3 +1,12 @@
+## [v6.0.28] — 2026-07-15 — feat(intelligence): verifyKey() on the five media connectors + honest Prove outcomes (U49/U61, QC 9.0)
+
+v6.0.28 — Merges `skill6-v2/U49` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 3 of 4 (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
+
+- **U49/U61:** adds a real `verifyKey()` to each of the five media-provider connectors (`elevenlabs`, `fal`, `fish-audio`, `kie`, `replicate`) so `IntelligenceProviderList`'s "Prove" action reflects a genuinely proven key, not an assumed-valid one; a rejected key is honestly `ok:false`, never silently treated as proven. New `u49-prove-action-render.test.tsx` renders the pass/fail/fail-closed outcome states for real.
+- **Merge:** one real conflict, hand-resolved: `vitest.component.config.ts` — both U104 (already on main) and U49 added a new entry to the same `include` array at the same insertion point. Purely additive, no semantic overlap; resolved by keeping BOTH entries. Confirmed correct by re-running the full component suite post-resolve: 6 files, 45/45 PASS (both units' render tests execute correctly side-by-side).
+- Test proof re-run independently on the merged tree, pre-ripple: `tests/unit/u49-verify-key-media-connectors.test.ts` → 20/20 PASS; `tests/unit/p2-04-provider-auth-proof.test.ts` → 14/14 PASS; `npx vitest run --config vitest.component.config.ts` (full suite) → 6 files, 45/45 PASS, zero regressions; `npx tsc --noEmit` clean; `npm run test:unit` → 1371 tests, 1366 pass, 5 fail — the same 5 pre-existing failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) as the prior two units in this train, unrelated to and untouched by this merge's diff.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.27] — 2026-07-15 — feat(U104): engine-mirrored card honesty in GatePanel + modal tabs (QC 9.2)
 
 v6.0.27 — Merges `skill6-v2/U104` into `blackceo-command-center` main. Skill 6 Blended-Persona Kanban v2 Stage 2 Wave 3, unit 2 of 4 (U34-U35 → U104 → U49 → U101), single serial merge-writer, strictly serial in id order.
