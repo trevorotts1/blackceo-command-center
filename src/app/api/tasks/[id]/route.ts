@@ -9,6 +9,7 @@ import {
 import { broadcast } from '@/lib/events';
 import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
+import { isBlankAsk } from '@/lib/blocked-ask';
 import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/types';
 import { checkTriad, getBestSOPForTask } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
@@ -261,7 +262,12 @@ export async function PATCH(
       const missingBlockedFields: string[] = [];
       if (!blocked_reason) missingBlockedFields.push('blocked_reason');
       if (!blocked_on_human) missingBlockedFields.push('blocked_on_human');
-      if (!ask || ask.trim().length === 0) missingBlockedFields.push('ask');
+      // isBlankAsk (src/lib/blocked-ask.ts) is the ONE definition of "no ask":
+      // NULL, whitespace-only, OR a rendered placeholder like "(no ask specified)".
+      // The previous `!ask || ask.trim().length === 0` accepted the placeholder as
+      // a real ask — a blocked task whose ask literally reads "(no ask specified)"
+      // is exactly as unanswerable as one with no ask at all.
+      if (isBlankAsk(ask)) missingBlockedFields.push('ask');
 
       if (missingBlockedFields.length > 0) {
         return NextResponse.json(

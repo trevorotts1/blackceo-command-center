@@ -21,6 +21,7 @@ import {
   safeStatSync,
 } from '../fs/safe-fs';
 import { seedCompanyGuarded } from './branding-seed';
+import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import {
   dedupeCanonicalWorkspaces,
   reapDuplicateOpenAuthoringTasks,
@@ -4253,6 +4254,81 @@ const migrations: Migration[] = [
         deleted += result.changes;
       }
       console.log(`[Migration 103] Deleted ${deleted} seeded demo recommendation row(s)`);
+    },
+  },
+  {
+    id: '104',
+    name: 'reject_blocked_on_human_without_ask',
+    // POISON-STATE GATE (see src/lib/blocked-ask.ts for the full incident note).
+    //
+    // A tasks row with `blocked_on_human` SET and `ask` EMPTY is unanswerable by
+    // construction: the named human is paged with no question in it, cannot clear
+    // it, so the card never leaves Blocked and the stale-task sweep re-pings on
+    // every tick — forever. The API's blocked gate already demanded an `ask`; the
+    // rows that flooded were written by a RAW sweep UPDATE that set
+    // `blocked_on_human='operator'` and put its instruction in `block_needs`
+    // (a different column), leaving `ask` NULL. Code-level validation alone cannot
+    // close that class — any raw `run('UPDATE tasks SET ...')` bypasses it. This
+    // migration closes it in the database.
+    //
+    // WHY TRIGGERS, NOT A CHECK CONSTRAINT — ⛔ NON-NEGOTIABLE:
+    // SQLite cannot ADD a CHECK to an existing table; it requires the 12-step
+    // rebuild, whose `INSERT INTO tasks_new SELECT * FROM tasks` would ABORT on the
+    // very rows this incident already created. That migration would refuse to run
+    // (or, if the rows were "cleaned" first, DESTROY live tasks that carry real
+    // task_deliverables and task_activities). Unacceptable. BEFORE-row triggers
+    // validate only rows WRITTEN FROM NOW ON: every existing row survives byte-for-
+    // byte, stays readable, stays ARCHIVABLE, and stays repairable (setting a real
+    // `ask`, or NULLing `blocked_on_human`, both pass the trigger). Forward-only
+    // enforcement is the entire design.
+    //
+    // The UPDATE trigger is scoped `UPDATE OF blocked_on_human, ask`, so it fires
+    // ONLY when a write names one of those two columns. A sweep that archives a
+    // legacy poisoned row, bumps `updated_at`, or writes `archived_at` never trips
+    // it. This migration is purely additive DDL (no row is read, written, or
+    // deleted), hence it is SAFE in the additive-only self-heal path — no
+    // `deferInAdditiveSelfHeal`.
+    //
+    // Idempotent: CREATE TRIGGER IF NOT EXISTS. Manual rollback (no auto-down in
+    // this framework):
+    //   DROP TRIGGER IF EXISTS trg_tasks_blocked_on_human_requires_ask_insert;
+    //   DROP TRIGGER IF EXISTS trg_tasks_blocked_on_human_requires_ask_update;
+    //   DELETE FROM _migrations WHERE id = '104';
+    up: (db) => {
+      console.log('[Migration 104] Installing blocked_on_human⇒ask invariant triggers...');
+
+      // Guard: the trigger bodies reference tasks.blocked_on_human / tasks.ask,
+      // added by migration 072. On a fresh DB schema.ts creates `tasks` WITHOUT
+      // them, so a box that somehow reaches 104 with 072 unapplied would throw
+      // "no such column" and fail the whole boot. Skip instead — 072 runs first in
+      // every ordered run, so this is belt-and-braces, not an expected path.
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('blocked_on_human') || !cols.includes('ask')) {
+        console.log('[Migration 104] tasks.blocked_on_human / tasks.ask absent — skipping (migration 072 owns them)');
+        return;
+      }
+
+      // Count (do NOT touch) the pre-existing poisoned rows, purely so the boot log
+      // states plainly that they SURVIVED this migration and still need a human
+      // repair/archive decision. ⛔ Never DELETE them: they carry real
+      // task_deliverables + task_activities produced by dispatched agents.
+      const legacy = db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM tasks
+            WHERE blocked_on_human IS NOT NULL AND trim(blocked_on_human) <> ''
+              AND (ask IS NULL OR trim(ask) = '' OR lower(trim(ask)) IN ('(no ask specified)', 'no ask specified'))`,
+        )
+        .get() as { n: number };
+
+      for (const sql of BLOCKED_ASK_TRIGGER_SQL) db.exec(sql);
+
+      if (legacy.n > 0) {
+        console.log(
+          `[Migration 104] ${legacy.n} pre-existing blocked-without-ask row(s) left INTACT ` +
+            '(forward-only enforcement — they keep their deliverables/activities and remain archivable)',
+        );
+      }
+      console.log('[Migration 104] blocked_on_human⇒ask triggers ready');
     },
   },
 ];

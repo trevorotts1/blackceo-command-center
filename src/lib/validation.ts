@@ -1,4 +1,28 @@
 import { z } from 'zod';
+import {
+  BLOCKED_ASK_INVARIANT_MESSAGE,
+  violatesBlockedAskInvariant,
+} from './blocked-ask';
+
+/**
+ * Shared Zod refinement for the blocked-ask invariant (see src/lib/blocked-ask.ts):
+ * a payload that names a human in `blocked_on_human` MUST also carry a real,
+ * non-blank `ask`. Attached to every schema that can persist the pair, so the
+ * unanswerable-forever state is rejected at the request boundary with a 400
+ * rather than written and then re-escalated on every sweep tick.
+ */
+const rejectBlockedWithoutAsk = (
+  data: { blocked_on_human?: unknown; ask?: unknown },
+  ctx: z.RefinementCtx,
+) => {
+  if (violatesBlockedAskInvariant(data)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['ask'],
+      message: BLOCKED_ASK_INVARIANT_MESSAGE,
+    });
+  }
+};
 
 // Task status and priority enums.
 // LOCKSTEP: this enum is the request-validation ENFORCER for TaskStatus and MUST
@@ -95,7 +119,12 @@ export const UpdateTaskSchema = z.object({
   // The API route enforces presence; Zod accepts it as optional so other
   // departments are completely unaffected by this field.
   process_certificate_sha: z.string().optional(),
-});
+})
+  // POISON-STATE GATE: `blocked_on_human` set + blank/placeholder `ask` is
+  // unanswerable-forever and is rejected here (400). Note this is STRICTER than
+  // the route's status=blocked gate: it fires on ANY payload carrying the pair,
+  // including one that names a human without touching `status`.
+  .superRefine(rejectBlockedWithoutAsk);
 
 // Activity validation schema
 export const CreateActivitySchema = z.object({
@@ -232,4 +261,7 @@ export const UpdateAdCampaignStageSchema = z.object({
   blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),
   blocked_on_human: z.enum(['owner', 'operator']).optional().nullable(),
   ask: z.string().max(500).optional().nullable(),
-});
+})
+  // Same poison-state gate as UpdateTaskSchema: an ad stage card parked on a
+  // human with no ask is just as unanswerable as a board card.
+  .superRefine(rejectBlockedWithoutAsk);
