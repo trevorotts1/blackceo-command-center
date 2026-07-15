@@ -21,6 +21,9 @@ export default defineConfig({
       'tests/unit/u47-health-indicator.test.tsx',
       // U104 acceptance (a)/(b)/(c) — engine-mirrored card honesty real render proof.
       'tests/unit/u104-engine-card-honesty.test.tsx',
+      // U49/U61 (H+L.7) — Prove action outcome (pass/fail/fail-closed) real
+      // render proof, never a silent swallow.
+      'tests/unit/u49-prove-action-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

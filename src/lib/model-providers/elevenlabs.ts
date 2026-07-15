@@ -18,6 +18,7 @@ import type {
   ModelCapability,
   ModelProvider,
   ProviderModel,
+  SmokeTestResult,
 } from './types';
 
 const PROVIDER_SLUG = 'elevenlabs';
@@ -26,6 +27,11 @@ const PROVIDER_DISPLAY_NAME = 'ElevenLabs';
 const BASE_URL = process.env.ELEVENLABS_BASE_URL || 'https://api.elevenlabs.io/v1';
 const MODELS_ENDPOINT = `${BASE_URL}/models`;
 const VOICES_ENDPOINT = `${BASE_URL}/voices`;
+// GET /v1/user returns the authenticated caller's own account (subscription
+// tier, character usage/limits). Live-verified (2026-07-15) to 401 with
+// no/garbage key ({"detail":{"type":"authentication_error",...}}) — a
+// genuinely auth-gated endpoint, distinct from /v1/models.
+const USER_ENDPOINT = `${BASE_URL}/user`;
 
 interface ElevenLabsModelRow {
   model_id: string;
@@ -249,6 +255,46 @@ export async function speechToText(
   return (await res.json()) as ElevenLabsSttResult;
 }
 
+/**
+ * U49/U61 (H+L.7) — real authenticated proof, never the model-list mirage.
+ * Hits /v1/user (requires a valid xi-api-key; 401s on missing/bad auth)
+ * instead of /v1/models. Used by `proveProviderAuth()` as the fallback proof
+ * method when no `chatCompletion` exists (ElevenLabs is not a chat
+ * provider). The key is NEVER logged or echoed; only a short, redacted
+ * error snippet is kept.
+ */
+export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {
+  const TIMEOUT_MS = 7_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(USER_ENDPOINT, {
+      method: 'GET',
+      headers: jsonHeaders(apiKey),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      return { ok: true, status: res.status };
+    }
+    const body = await res.text().catch(() => '');
+    const snippet = body.slice(0, 120).replace(/\s+/g, ' ').trim();
+    return {
+      ok: false,
+      status: res.status,
+      message: `${res.status} ${res.statusText}${snippet ? ` — ${snippet}` : ''}`,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = msg.includes('abort') || msg.toLowerCase().includes('timeout');
+    return {
+      ok: false,
+      message: isTimeout ? `timeout after ${TIMEOUT_MS / 1000}s` : msg,
+    };
+  }
+}
+
 export const elevenlabsProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
@@ -258,6 +304,7 @@ export const elevenlabsProvider: ModelProvider = {
   // Intelligence Settings tile's "checked:" hint names it (U48/U60).
   envCandidates: ['ELEVENLABS_API_KEY'],
   fetchModels,
+  verifyKey,
 };
 
 export default elevenlabsProvider;
