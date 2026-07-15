@@ -172,20 +172,55 @@ export function IntelligenceProviderList({
     }
   };
 
-  // P2-04 — "Prove" action: runs (or reuses a cached) real authenticated call
-  // for one provider. Never fires automatically; only on this explicit click.
+  // P2-04 / U49 — "Prove" action: runs (or reuses a cached) real authenticated
+  // call for one provider. Never fires automatically; only on this explicit
+  // click. Every outcome is surfaced on the tile — pass, fail, and transport
+  // error are three DISTINCT visible states, never silently swallowed
+  // (fail-closed: anything short of an explicit ok:true reads as "not
+  // proven", never as a quiet success).
   const [proving, setProving] = useState<string | null>(null);
+  const [proveResult, setProveResult] = useState<{ slug: string; ok: boolean; message: string } | null>(null);
   const handleProve = async (slug: string) => {
     setProving(slug);
+    setProveResult(null);
     try {
-      await fetch('/api/models/provider-status/prove', {
+      const res = await fetch('/api/models/provider-status/prove', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug }),
       });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // HTTP-level failure (400/404/500) — surface it, never swallow it.
+        setProveResult({
+          slug,
+          ok: false,
+          message: json.message || json.error || `Prove failed (HTTP ${res.status})`,
+        });
+      } else if (json.ok === true) {
+        setProveResult({
+          slug,
+          ok: true,
+          message: `Proven via ${json.method === 'chat_completion' ? 'a real chat completion' : 'verifyKey()'}.`,
+        });
+      } else {
+        // The route succeeded but the authenticated call itself failed or
+        // was unavailable — still a visible, honest failure, not silence.
+        setProveResult({
+          slug,
+          ok: false,
+          message: json.detail || (json.method === 'unavailable' ? 'no authenticated-call method available for this provider' : 'Prove call did not succeed'),
+        });
+      }
       await fetchProviderStatus();
-    } catch {
-      /* the tile just stays in its current honest state */
+    } catch (err) {
+      // Network-level failure (fetch itself threw) — fail-closed: this is
+      // reported as a visible failure, never treated as an implicit success.
+      setProveResult({
+        slug,
+        ok: false,
+        message: err instanceof Error ? err.message : 'Prove request failed (network error)',
+      });
     } finally {
       setProving(null);
     }
@@ -710,6 +745,27 @@ export function IntelligenceProviderList({
                     </span>
                   )}
                 </div>
+
+                {/* U49 — visible Prove outcome. Renders once per click, right
+                    under the row it belongs to; replaced by the next click or
+                    cleared once the tile's own authProof state reflects it
+                    (the badge above already turns emerald on success). */}
+                {proveResult && proveResult.slug === p && (
+                  <div
+                    className={`mt-2 text-[11px] rounded-md px-2 py-1.5 border ${
+                      proveResult.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                        : 'bg-red-50 border-red-200 text-red-700'
+                    }`}
+                  >
+                    {proveResult.ok ? (
+                      <CheckCircle2 className="w-3 h-3 inline -mt-0.5 mr-1" />
+                    ) : (
+                      <AlertCircle className="w-3 h-3 inline -mt-0.5 mr-1" />
+                    )}
+                    {proveResult.message}
+                  </div>
+                )}
 
                 {/* Inline add-key form. */}
                 {formOpen && !isLocalEndpoint && (

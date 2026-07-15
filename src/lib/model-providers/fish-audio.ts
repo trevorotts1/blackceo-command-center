@@ -19,13 +19,21 @@
  * `raw_metadata.pricing_per_million_chars` when known.
  */
 
-import type { ModelCapability, ModelProvider, ProviderModel } from './types';
+import type { ModelCapability, ModelProvider, ProviderModel, SmokeTestResult } from './types';
 
 const PROVIDER_SLUG = 'fish-audio';
 const PROVIDER_DISPLAY_NAME = 'Fish Audio';
 
 const BASE_URL = process.env.FISH_AUDIO_BASE_URL || 'https://api.fish.audio/v1';
 const MODELS_ENDPOINT = `${BASE_URL}/models`;
+// GET /wallet/self/api-credit returns the caller's own API credit balance.
+// NOTE this endpoint lives at the API ROOT, not under /v1 (confirmed against
+// Fish Audio's published OpenAPI schema, docs.fish.audio/api-reference/
+// openapi.json, and live-verified 2026-07-15): missing/bad Bearer token ->
+// 401 (docs: "No permission -- see authorization schemes"); the /v1/models
+// path under this same root 404s, confirming /v1 must not be prefixed here.
+const ACCOUNT_ROOT_URL = process.env.FISH_AUDIO_ACCOUNT_BASE_URL || 'https://api.fish.audio';
+const API_CREDIT_ENDPOINT = `${ACCOUNT_ROOT_URL}/wallet/self/api-credit`;
 
 /**
  * Returns true when the FISH_AUDIO_API_KEY env var is set. Used by the
@@ -191,6 +199,50 @@ export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
   }
 }
 
+/**
+ * U49/U61 (H+L.7) — real authenticated proof, never the model-list mirage.
+ * Hits /wallet/self/api-credit (requires a valid Bearer token; 401s on
+ * missing/bad auth) instead of /v1/models. This matters MORE for Fish Audio
+ * than most connectors: fetchModels() above has a bare `catch` that returns
+ * a hardcoded FALLBACK_MODELS list on ANY failure (dead key included), so a
+ * garbage key can make fetchModels() look "successful" — exactly the mirage
+ * this proof exists to kill. verifyKey never touches fetchModels or its
+ * fallback. Used by `proveProviderAuth()` as the fallback proof method when
+ * no `chatCompletion` exists (Fish Audio is not a chat provider). The key is
+ * NEVER logged or echoed; only a short, redacted error snippet is kept.
+ */
+export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {
+  const TIMEOUT_MS = 7_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(API_CREDIT_ENDPOINT, {
+      method: 'GET',
+      headers: jsonHeaders(apiKey),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      return { ok: true, status: res.status };
+    }
+    const body = await res.text().catch(() => '');
+    const snippet = body.slice(0, 120).replace(/\s+/g, ' ').trim();
+    return {
+      ok: false,
+      status: res.status,
+      message: `${res.status} ${res.statusText}${snippet ? ` — ${snippet}` : ''}`,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = msg.includes('abort') || msg.toLowerCase().includes('timeout');
+    return {
+      ok: false,
+      message: isTimeout ? `timeout after ${TIMEOUT_MS / 1000}s` : msg,
+    };
+  }
+}
+
 export const fishAudioProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
@@ -200,6 +252,7 @@ export const fishAudioProvider: ModelProvider = {
   // Intelligence Settings tile's "checked:" hint names it (U48/U60).
   envCandidates: ['FISH_AUDIO_API_KEY'],
   fetchModels,
+  verifyKey,
 };
 
 export default fishAudioProvider;

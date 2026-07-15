@@ -19,6 +19,9 @@ export default defineConfig({
       'tests/unit/u42-task-detail-modal-populated.test.tsx',
       // U47 acceptance (a)/(b)/(c)/(e) — HealthIndicator real render proof.
       'tests/unit/u47-health-indicator.test.tsx',
+      // U49/U61 (H+L.7) — Prove action outcome (pass/fail/fail-closed) real
+      // render proof, never a silent swallow.
+      'tests/unit/u49-prove-action-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

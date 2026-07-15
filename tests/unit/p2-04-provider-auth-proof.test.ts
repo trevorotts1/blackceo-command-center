@@ -103,12 +103,42 @@ test('[P2-04] a provider with neither chatCompletion nor verifyKey is reported u
   assert.equal(result.method, 'unavailable');
 });
 
-test('[P2-04] a REAL registered provider with no chatCompletion/verifyKey (fish-audio) is reported unavailable', async () => {
+// U49/U61 (H+L.7) — fish-audio now implements verifyKey() (one of the five
+// media connectors this unit fixed), so it is NO LONGER an "unavailable"
+// real-provider example; the generic "no proof method at all" case above is
+// covered by the synthetic `fakeProvider` tests instead. This test now locks
+// down the opposite: fish-audio has a real proof method and proveProviderAuth
+// reaches it via the verify_key fallback (no chatCompletion on this
+// connector), without ever calling fetchModels() — the mirage this whole
+// module exists to kill, and doubly relevant here since fetchModels() has its
+// own bare-catch-to-fallback-catalog swallow (see fish-audio.ts).
+test('[P2-04/U49] fish-audio now implements verifyKey() and is reachable via the verify_key fallback, never via fetchModels', async () => {
   assert.equal(fishAudioProvider.chatCompletion, undefined);
-  assert.equal(fishAudioProvider.verifyKey, undefined);
-  const result = await mod.proveProviderAuth(fishAudioProvider, 'fake-key');
-  assert.equal(result.ok, false);
-  assert.equal(result.method, 'unavailable');
+  assert.equal(typeof fishAudioProvider.verifyKey, 'function');
+
+  let verifyKeyCalled = false;
+  let fetchModelsCalled = false;
+  const originalVerifyKey = fishAudioProvider.verifyKey;
+  const originalFetchModels = fishAudioProvider.fetchModels;
+  fishAudioProvider.verifyKey = (async () => {
+    verifyKeyCalled = true;
+    return { ok: true, status: 200 };
+  }) as ModelProvider['verifyKey'];
+  fishAudioProvider.fetchModels = (async () => {
+    fetchModelsCalled = true;
+    throw new Error('fetchModels should NEVER be called by proveProviderAuth');
+  }) as ModelProvider['fetchModels'];
+
+  try {
+    const result = await mod.proveProviderAuth(fishAudioProvider, 'fake-key');
+    assert.equal(verifyKeyCalled, true);
+    assert.equal(fetchModelsCalled, false, 'fetchModels() must never be invoked for auth proof');
+    assert.equal(result.ok, true);
+    assert.equal(result.method, 'verify_key');
+  } finally {
+    fishAudioProvider.verifyKey = originalVerifyKey;
+    fishAudioProvider.fetchModels = originalFetchModels;
+  }
 });
 
 // ── 3. A real chatCompletion call that fails is honestly reported false ──

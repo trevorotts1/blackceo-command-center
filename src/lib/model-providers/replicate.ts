@@ -18,6 +18,7 @@ import type {
   ModelCapability,
   ModelProvider,
   ProviderModel,
+  SmokeTestResult,
 } from './types';
 
 const PROVIDER_SLUG = 'replicate';
@@ -26,6 +27,11 @@ const PROVIDER_DISPLAY_NAME = 'Replicate';
 const BASE_URL = process.env.REPLICATE_BASE_URL || 'https://api.replicate.com/v1';
 const MODELS_ENDPOINT = `${BASE_URL}/models`;
 const PREDICTIONS_ENDPOINT = `${BASE_URL}/predictions`;
+// GET /v1/account returns the authenticated caller's own account (username,
+// type, name). Live-verified (2026-07-15) to 401 with no/garbage token
+// ({"title":"Unauthenticated",...}) — a genuinely auth-gated endpoint,
+// distinct from /v1/models (which is a public catalog, not an auth check).
+const ACCOUNT_ENDPOINT = `${BASE_URL}/account`;
 
 interface ReplicateLatestVersion {
   id?: string;
@@ -208,6 +214,46 @@ export async function cancelPrediction(
   });
 }
 
+/**
+ * U49/U61 (H+L.7) — real authenticated proof, never the model-list mirage.
+ * Hits /v1/account (requires a valid token; 401s on missing/bad auth) instead
+ * of /v1/models (an unauthenticated-safe public catalog for this provider).
+ * Used by `proveProviderAuth()` as the fallback proof method when no
+ * `chatCompletion` exists (Replicate is not a chat provider). The key is
+ * NEVER logged or echoed; only a short, redacted error snippet is kept.
+ */
+export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {
+  const TIMEOUT_MS = 7_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(ACCOUNT_ENDPOINT, {
+      method: 'GET',
+      headers: authHeaders(apiKey),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      return { ok: true, status: res.status };
+    }
+    const body = await res.text().catch(() => '');
+    const snippet = body.slice(0, 120).replace(/\s+/g, ' ').trim();
+    return {
+      ok: false,
+      status: res.status,
+      message: `${res.status} ${res.statusText}${snippet ? ` — ${snippet}` : ''}`,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = msg.includes('abort') || msg.toLowerCase().includes('timeout');
+    return {
+      ok: false,
+      message: isTimeout ? `timeout after ${TIMEOUT_MS / 1000}s` : msg,
+    };
+  }
+}
+
 export const replicateProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
@@ -215,6 +261,7 @@ export const replicateProvider: ModelProvider = {
   // spelling the refresh job's default slug→key convention would generate.
   envCandidates: ['REPLICATE_API_TOKEN', 'REPLICATE_API_KEY'],
   fetchModels,
+  verifyKey,
 };
 
 export default replicateProvider;

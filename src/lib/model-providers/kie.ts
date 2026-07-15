@@ -23,6 +23,7 @@ import type {
   ModelCapability,
   ModelProvider,
   ProviderModel,
+  SmokeTestResult,
 } from './types';
 
 const PROVIDER_SLUG = 'kie';
@@ -30,6 +31,13 @@ const PROVIDER_DISPLAY_NAME = 'Kie.ai';
 
 const BASE_URL = process.env.KIE_BASE_URL || 'https://api.kie.ai/api/v1';
 const MODELS_ENDPOINT = `${BASE_URL}/models`;
+// GET /chat/credit returns the caller's own account credit balance. Kie's
+// gateway is unusual: it ALWAYS answers HTTP 200 and encodes the real
+// outcome in the JSON body's `code` field (live-verified 2026-07-15):
+// missing/bad Authorization -> HTTP 200 body
+// {"code":401,"msg":"Unauthorized – Authentication failed. ..."}. So auth
+// proof here reads `body.code`, never the HTTP status alone.
+const CREDIT_ENDPOINT = `${BASE_URL}/chat/credit`;
 
 interface KieModelRow {
   id?: string;
@@ -202,6 +210,68 @@ export async function getJob(apiKey: string, jobId: string): Promise<KieJobRespo
   });
 }
 
+interface KieCreditResponse {
+  code?: number;
+  msg?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * U49/U61 (H+L.7) — real authenticated proof, never the model-list mirage.
+ * Hits /chat/credit (requires a valid Bearer token) instead of /v1/models.
+ * Kie's gateway always answers HTTP 200 (never a 401 status), so this reads
+ * the JSON body's `code` field for the real outcome — a bare `res.ok` check
+ * would be silently wrong here and would fail OPEN (treat a rejected key as
+ * proven). `code === 200` is the only success case; every other code
+ * (401 unauthorized, or any other value) is reported as a failure, fail-
+ * closed. Used by `proveProviderAuth()` as the fallback proof method when no
+ * `chatCompletion` exists (Kie is not a chat provider). The key is NEVER
+ * logged or echoed.
+ */
+export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {
+  const TIMEOUT_MS = 7_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(CREDIT_ENDPOINT, {
+      method: 'GET',
+      headers: authHeaders(apiKey),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    // Kie answers 200 even on auth failure — never trust res.ok alone.
+    let payload: KieCreditResponse | null = null;
+    try {
+      payload = (await res.json()) as KieCreditResponse;
+    } catch {
+      payload = null;
+    }
+    if (!res.ok) {
+      // Defensive: if a future Kie revision DOES use real HTTP status codes,
+      // still honor a non-2xx as a failure.
+      return { ok: false, status: res.status, message: payload?.msg || `${res.status} ${res.statusText}` };
+    }
+    if (payload && payload.code === 200) {
+      return { ok: true, status: res.status };
+    }
+    return {
+      ok: false,
+      status: res.status,
+      message: payload?.msg
+        ? `code ${payload.code}: ${payload.msg}`
+        : `unexpected credit response shape (no code:200)`,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = msg.includes('abort') || msg.toLowerCase().includes('timeout');
+    return {
+      ok: false,
+      message: isTimeout ? `timeout after ${TIMEOUT_MS / 1000}s` : msg,
+    };
+  }
+}
+
 export const kieProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
@@ -209,6 +279,7 @@ export const kieProvider: ModelProvider = {
   // used by some installs. Both are accepted so no key is missed.
   envCandidates: ['KIE_API_KEY', 'KIEAI_API_KEY', 'KIE_AI_API_KEY'],
   fetchModels,
+  verifyKey,
 };
 
 export default kieProvider;
