@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryAll, queryOne } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
-import { loadSubtaskPersonas } from '@/lib/persona-selector';
+import { loadSubtaskPersonas, loadPersonaBundleScopes } from '@/lib/persona-selector';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import type { Task, CreateTaskRequest } from '@/lib/types';
 
@@ -25,6 +25,24 @@ function bundleTableExists(): boolean {
     _bundleTablePresent = false;
   }
   return _bundleTablePresent;
+}
+
+// A-U5 — does this box carry the scoped-bundle table (migration 104)? Same
+// cached table-existence guard pattern as bundleTableExists() above, so a
+// pre-104 box's board fetch never breaks attaching persona_bundle_scopes.
+let _scopeTablePresent: boolean | null = null;
+function scopeTableExists(): boolean {
+  if (_scopeTablePresent !== null) return _scopeTablePresent;
+  try {
+    const row = queryOne<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='task_persona_bundle_scope'",
+      [],
+    );
+    _scopeTablePresent = !!row;
+  } catch {
+    _scopeTablePresent = false;
+  }
+  return _scopeTablePresent;
 }
 
 // GET /api/tasks - List all tasks with optional filters
@@ -155,6 +173,11 @@ export async function GET(request: NextRequest) {
       // loadSubtaskPersonas is tolerant: [] on a single-persona task or a
       // pre-migration-088 box, so this never breaks the board.
       subtask_personas: loadSubtaskPersonas(task.id),
+      // A-U5 — attach the per-page/scoped persona-blend rows (migration 104)
+      // behind the same table-existence guard as bundleTableExists() above;
+      // loadPersonaBundleScopes is itself tolerant, so this is belt-and-
+      // suspenders — [] on a pre-104 box or a task with no scoped bundles.
+      persona_bundle_scopes: scopeTableExists() ? loadPersonaBundleScopes(task.id) : [],
       // B-U6 / U20 — declared-vs-used comparator. Only a task with a resolved
       // voice_persona_id can ever mismatch (a bundle-less task never blended),
       // so short-circuit the per-row events lookup for every other card.

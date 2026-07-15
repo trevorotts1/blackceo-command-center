@@ -210,6 +210,28 @@ CREATE TABLE IF NOT EXISTS task_persona_bundle (
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_confirm ON task_persona_bundle(confirm_state);
 
+-- A-U5 per-page/scoped persona blends (master spec v2 Section A.6). Migration
+-- 105 also creates this for existing DBs; CREATE TABLE IF NOT EXISTS is
+-- idempotent. One row per (task, page/scope) — the additive companion to
+-- task_persona_bundle above, which stays exactly one row per task (its
+-- UNIQUE(task_id) is NEVER altered by this table's existence).
+CREATE TABLE IF NOT EXISTS task_persona_bundle_scope (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL,
+  page_role TEXT,
+  page_slug TEXT,
+  conversion_goal TEXT,
+  voice_persona_id TEXT,
+  voice_persona_name TEXT,
+  bundle_json TEXT,
+  catalog_version TEXT,
+  scope_reason TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (task_id, scope)
+);
+CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_scope_task ON task_persona_bundle_scope(task_id);
+
 -- "My AI CEO" chat transcript (P5-01). Migration 101 also creates this for
 -- existing DBs; CREATE TABLE IF NOT EXISTS is idempotent. One row per chat event:
 -- the client's messages, the agent's streamed replies, upload receipts, and the

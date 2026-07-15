@@ -522,6 +522,22 @@ function normalizeTaskPersonas(raw: unknown): BundleTaskPersona[] {
  * ALWAYS injected into blend_directive here — even if the matcher omitted it — so
  * the CC is the last, non-bypassable line of defense on the guardrail.
  */
+/**
+ * A-U5 — normalize a raw `scope_hint` echo (persona_blend.py's `build_bundle`
+ * echoes the caller's dict back verbatim on `raw.scope_hint`). Returns null
+ * when absent/malformed — never fabricates a hint the matcher didn't send.
+ */
+function normalizeScopeHint(raw: unknown): PersonaBundle["scope_hint"] {
+  if (!raw || typeof raw !== "object") return null;
+  const h = raw as Record<string, unknown>;
+  return {
+    page_role: asString(h.page_role),
+    page_slug: asString(h.page_slug),
+    conversion_goal: asString(h.conversion_goal),
+    part_id: asString(h.part_id),
+  };
+}
+
 export function parsePersonaBundle(rawResult: unknown): PersonaBundle | null {
   if (!rawResult || typeof rawResult !== "object") return null;
   const raw = rawResult as Record<string, unknown>;
@@ -551,6 +567,11 @@ export function parsePersonaBundle(rawResult: unknown): PersonaBundle | null {
       ? (raw.fallbacks as Record<string, unknown>)
       : undefined,
     catalog_version: asString(raw.catalog_version),
+    // A-U5 — additive: absent on any raw result that never carried a `scope`
+    // key (every pre-A-U5-shaped selector result, and every A-U5-shaped one
+    // where the caller omitted scope_hint) so this is a strict superset add.
+    scope: asString(raw.scope),
+    scope_hint: normalizeScopeHint(raw.scope_hint),
   };
 }
 
@@ -634,6 +655,148 @@ export function persistPersonaBundle(
   }
 
   return wrote;
+}
+
+/**
+ * A-U5 — persist ONE per-page/scope persona bundle: a `task_persona_bundle_scope`
+ * row keyed `(task_id, scope)` (migration 104, composite UNIQUE, idempotent
+ * upsert). Mirrors `persistPersonaBundle` above exactly (same guardrail
+ * defense-in-depth, same fail-soft try/catch posture on a pre-104 DB) but
+ * NEVER touches `task_persona_bundle` (090) or its mirror columns on `tasks`
+ * — the unscoped task-level default stays exactly what `persistPersonaBundle`
+ * last wrote there, untouched by any number of scoped-bundle writes.
+ *
+ * `scope` is the ONB matcher's resolved scope key (persona_blend.py
+ * `build_bundle(scope_hint=...)` -> `bundle.scope`, `_resolve_scope_key`:
+ * page_slug > page_role > part_id). `bundle.scope_hint` (when present) is the
+ * source of the persisted page_role/page_slug/conversion_goal columns.
+ *
+ * @returns true when the scoped row was written, false on a tolerated no-op/error.
+ */
+export function persistPersonaBundleScope(
+  taskId: string,
+  scope: string,
+  bundle: PersonaBundle,
+): boolean {
+  if (!scope || !scope.trim()) {
+    console.warn(`[persona-bundle-scope] refused to persist an empty scope key for task ${taskId}`);
+    return false;
+  }
+  const now = new Date().toISOString();
+  const catalogVersion = bundle.catalog_version ?? null;
+  // Guarantee the guardrail one more time at the persist boundary (defense in
+  // depth) — same discipline as persistPersonaBundle.
+  const blendDirective = ensureBlendGuardrail(bundle.blend_directive);
+  const hint = bundle.scope_hint;
+  const pageRole = hint?.page_role ?? null;
+  const pageSlug = hint?.page_slug ?? null;
+  const conversionGoal = hint?.conversion_goal ?? null;
+  const scopeReason =
+    (bundle.rationale && typeof bundle.rationale.scope === "string" ? bundle.rationale.scope : null);
+
+  // The resolved VOICE persona for THIS page/scope — same precedence
+  // persistPersonaBundle uses for the unscoped path (collapsed > audience >
+  // topic) — stored as a mirror column so the chip row never re-parses JSON.
+  const voice = bundle.voice;
+  const voicePersonaId =
+    (voice.collapsed ? voice.collapsed_persona_id : voice.audience_persona?.id) ||
+    voice.audience_persona?.id ||
+    voice.topic_persona?.id ||
+    null;
+  const voicePersonaName = voicePersonaId
+    ? voicePersonaId.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    : null;
+
+  try {
+    run(
+      `INSERT INTO task_persona_bundle_scope
+         (task_id, scope, page_role, page_slug, conversion_goal,
+          voice_persona_id, voice_persona_name, bundle_json, catalog_version,
+          scope_reason, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(task_id, scope) DO UPDATE SET
+         page_role = excluded.page_role,
+         page_slug = excluded.page_slug,
+         conversion_goal = excluded.conversion_goal,
+         voice_persona_id = excluded.voice_persona_id,
+         voice_persona_name = excluded.voice_persona_name,
+         bundle_json = excluded.bundle_json,
+         catalog_version = excluded.catalog_version,
+         scope_reason = excluded.scope_reason`,
+      [
+        taskId,
+        scope,
+        pageRole,
+        pageSlug,
+        conversionGoal,
+        voicePersonaId,
+        voicePersonaName,
+        JSON.stringify({ ...bundle, blend_directive: blendDirective }),
+        catalogVersion,
+        scopeReason,
+        now,
+      ],
+    );
+    return true;
+  } catch (err) {
+    console.warn(
+      `[persona-bundle-scope] persist row failed for task ${taskId} scope ${scope} (pre-104 DB?):`,
+      (err as Error).message,
+    );
+    return false;
+  }
+}
+
+/**
+ * A-U5 — read every per-page/scope bundle row for a task, ordered by
+ * created_at (stable page order for the chip row). Tolerant: returns []
+ * when `task_persona_bundle_scope` is absent (pre-migration-104 box) or on
+ * any query error — mirrors `loadSubtaskPersonas`'s fail-soft contract so a
+ * board fetch never breaks on a missing table. Reads the `voice_persona_id`/
+ * `voice_persona_name` mirror columns directly — never re-parses bundle_json
+ * (same "mirror columns so consumers don't re-parse the blob" rationale as
+ * migration 090's tasks columns).
+ */
+export interface PersonaBundleScopeRow {
+  scope: string;
+  page_role: string | null;
+  page_slug: string | null;
+  conversion_goal: string | null;
+  persona_id: string | null;
+  persona_name: string | null;
+  scope_reason: string | null;
+}
+
+export function loadPersonaBundleScopes(taskId: string): PersonaBundleScopeRow[] {
+  try {
+    const rows = queryAll<{
+      scope: string;
+      page_role: string | null;
+      page_slug: string | null;
+      conversion_goal: string | null;
+      voice_persona_id: string | null;
+      voice_persona_name: string | null;
+      scope_reason: string | null;
+    }>(
+      `SELECT scope, page_role, page_slug, conversion_goal,
+              voice_persona_id, voice_persona_name, scope_reason
+         FROM task_persona_bundle_scope
+        WHERE task_id = ?
+        ORDER BY created_at ASC`,
+      [taskId],
+    );
+    return rows.map((r) => ({
+      scope: r.scope,
+      page_role: r.page_role,
+      page_slug: r.page_slug,
+      conversion_goal: r.conversion_goal,
+      persona_id: r.voice_persona_id,
+      persona_name: r.voice_persona_name,
+      scope_reason: r.scope_reason,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function resolveOpenClawRoot(): string {

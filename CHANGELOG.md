@@ -1,3 +1,18 @@
+## [v6.0.16] — 2026-07-15 — Skill 6 blended-persona Wave One Stage B — U5/A-U5: per-page scoped persona blends, CC half (QC 8.9)
+
+v6.0.16 — Merges `skill6-v2/U5` (master unit U5, canonical E.2/A-U5) of the Skill 6 Blended-Persona Kanban v2 build, CC (`blackceo-command-center`) half of a both-repo unit. First unit landed by the Wave One Stage B CC serial merge train (U5 -> U4 -> U21).
+
+**A 5-page funnel could only ever carry ONE governing persona blend for all its pages — migration 090's `task_persona_bundle.task_id TEXT NOT NULL UNIQUE` structurally forbids more than one bundle per task. This unit adds the additive per-page/scope bundle table + surfaces it as per-page chips, without touching 090's schema.**
+
+- **New migration `105` (`add_task_persona_bundle_scope`).** `task_persona_bundle_scope`, keyed `(task_id, scope)` composite UNIQUE (never `task_id` alone). Columns: `page_role`, `page_slug`, `conversion_goal`, `voice_persona_id`/`voice_persona_name` mirror columns, `bundle_json`, `catalog_version`, `scope_reason`. Migration 090's `task_persona_bundle` table proven byte-identical pre/post.
+- **Renumbered 104 -> 105 by this merge-writer:** the branch numbered its own migration `104`, but `main` had independently landed migration `104` (`reject_blocked_on_human_without_ask`, part of the already-merged U56/board-hygiene work) before this train ran — a genuine migration-id collision, not a version-marker mechanical conflict. Resolved by keeping `main`'s `104` untouched and appending this unit's migration as `105` (body byte-identical to the branch's own `104`, only the id/log-prefix strings changed); `src/lib/db/schema.ts`'s comment cross-reference updated to match.
+- **`persistPersonaBundleScope()` / `loadPersonaBundleScopes()`** (`src/lib/persona-selector.ts`) mirror the existing fail-soft/tolerant contracts.
+- **`PersonaScopeChips`** (`src/components/kanban/TaskCard.tsx`) reuses the `PersonaSlotChips` pattern verbatim.
+- **Both tasks GET routes** attach `persona_bundle_scopes` behind a table-existence guard.
+- Test proof re-run independently on the merged tree: `tests/unit/a-u5-scoped-persona-bundle.test.ts` (`node --import tsx --test`) and `tests/unit/a-u5-persona-scope-chips-render.test.tsx` (`vitest run --config vitest.component.config.ts`) — see the ledger entry for exact pass counts on the merged tree.
+- Ledger: `ledgers/skill6-blended-persona-kanban-v2-2026-07-13.md` U5 row (CC half) set to `verified`; the ONB half already landed on `openclaw-onboarding`.
+- No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted.
+
 ## [v6.0.15] — 2026-07-15 — Skill 6 blended-persona Wave One — U6: board-hygiene Rule-6 companion, persona-blend invariant regression alert (QC 9.0)
 
 **Version note:** originally rippled as v6.0.14, then re-bumped to v6.0.15 in the

@@ -4331,6 +4331,62 @@ const migrations: Migration[] = [
       console.log('[Migration 104] blocked_on_human⇒ask triggers ready');
     },
   },
+  {
+    id: '105',
+    name: 'add_task_persona_bundle_scope',
+    up: (db) => {
+      // A-U5 (master spec v2 Section A.6) — PER-PAGE / SCOPED persona blends.
+      //
+      // Migration 090 gave every task exactly ONE persona bundle
+      // (`task_persona_bundle.task_id TEXT NOT NULL UNIQUE`) — a 5-page funnel
+      // wrote its opt-in, sales, and thank-you pages under one blend. This
+      // migration is PURELY ADDITIVE: it never touches 090's table, columns,
+      // or UNIQUE constraint (see the A-U5 binary acceptance test that dumps
+      // and diffs 090's schema pre/post this migration).
+      //
+      // New table `task_persona_bundle_scope`, keyed `(task_id, scope)`
+      // composite UNIQUE — one row per PAGE (or, per U115's later
+      // generalization, per PART) of a task, each carrying its own bundle
+      // JSON. `scope` mirrors the ONB matcher's `build_bundle(scope_hint=...)`
+      // resolved scope key (persona_blend.py's `_resolve_scope_key`:
+      // page_slug > page_role > part_id). The unscoped `task_persona_bundle`
+      // row remains the task-level default; every pre-A-U5 consumer (the
+      // tasks GET LEFT JOIN, the dispatch mirror columns, the backfill sweep)
+      // keeps reading it untouched.
+      //
+      // Renumbered 104 -> 105 by the Wave One Stage B merge-writer: main
+      // independently landed migration 104 (`reject_blocked_on_human_without_ask`)
+      // ahead of this branch's own merge; this migration's body is otherwise
+      // byte-identical to what shipped on the branch.
+      console.log('[Migration 105] Adding task_persona_bundle_scope table...');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_persona_bundle_scope (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          scope TEXT NOT NULL,
+          page_role TEXT,
+          page_slug TEXT,
+          conversion_goal TEXT,
+          -- Mirror columns (same rationale as migration 090's tasks mirror
+          -- columns): the resolved VOICE persona for this page/scope, so the
+          -- chip row reads a plain column instead of re-parsing bundle_json.
+          voice_persona_id TEXT,
+          voice_persona_name TEXT,
+          bundle_json TEXT,
+          catalog_version TEXT,
+          scope_reason TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (task_id, scope)
+        )
+      `);
+      db.prepare(
+        'CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_scope_task ON task_persona_bundle_scope(task_id)',
+      ).run();
+
+      console.log('[Migration 105] task_persona_bundle_scope ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
