@@ -5,18 +5,68 @@ import { schema } from './schema';
 import { runMigrations, getLastFailedMigrationId } from './migrations';
 
 /**
- * The authoritative, process-resolved path to mission-control.db.
+ * C8 HARD-ISOLATION GUARD.
+ *
+ * DB_PATH used to be `process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db')`
+ * — a SILENT fallback to the LIVE database for any process that reached this
+ * module without DATABASE_PATH set. That is exactly how test/maintenance
+ * scripts leaked fixtures (test-dept SOPs, smoke-test-dept/no-script-dept
+ * workspaces, the testco company row) straight into a production Kanban board
+ * — the live cron then advanced and Telegram-notified on them (the C8 leak
+ * class; see tests/unit/c8-db-isolation-guard.test.ts, the sop-embedding-provider
+ * and p4-01-persona-reason-blend-rationale test comments, and the July-14
+ * "EMERGENCY DISARM" note in .env.local).
+ *
+ * Resolution order now:
+ *   1. DATABASE_PATH env var — an explicit override always wins. This is how
+ *      the real server's process manager points at the live file (e.g.
+ *      ecosystem.cc-prod.config.cjs), and how every isolated test/script
+ *      points at its own throwaway file (tests/unit/_isolated-db.ts et al.).
+ *   2. The REAL Next.js server process, with NO DATABASE_PATH set — detected
+ *      via an explicit IN-PROCESS marker (`globalThis.__CC_SERVER_ENTRYPOINT__`)
+ *      that src/instrumentation.ts sets as the very first statement of the
+ *      Next.js boot hook, before it ever imports this module. This is
+ *      deliberately NOT an env var: nothing outside this process's own
+ *      compiled code — no ecosystem/pm2 file, no hand-edited .env, no shell
+ *      export a script could inherit or copy — can set it. Only the server's
+ *      own entrypoint running in THIS process can. Falls back to the historic
+ *      default (`process.cwd()/mission-control.db`) so the server keeps
+ *      working with zero box-local config, exactly as before this change.
+ *   3. Anything else — a script, a test, `tsx`/`node` run ad-hoc from the app
+ *      directory, a maintenance one-liner — HARD-FAILS at module-evaluation
+ *      time with a clear, actionable error instead of silently opening the
+ *      live database. This is the actual fix: the failure mode changes from
+ *      "silent corruption of production data" to "the script won't start
+ *      until you set DATABASE_PATH."
  *
  * Exported so other server-side modules (e.g. persona-selector.ts) can pass
- * it as DASHBOARD_DB_PATH in subprocess env — making the Python selector
- * hit the correct DB on both Mac and VPS layouts without its own candidate-
- * list heuristics.
- *
- * Resolution order:
- *   1. DATABASE_PATH env var (explicit override)
- *   2. process.cwd()/mission-control.db  (default install: ~/projects/command-center)
+ * it as DASHBOARD_DB_PATH in subprocess env — making the Python selector hit
+ * the correct DB on both Mac and VPS layouts without its own candidate-list
+ * heuristics.
  */
-export const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db');
+declare global {
+  // eslint-disable-next-line no-var
+  var __CC_SERVER_ENTRYPOINT__: boolean | undefined;
+}
+
+function resolveDbPath(): string {
+  if (process.env.DATABASE_PATH) return process.env.DATABASE_PATH;
+
+  if (globalThis.__CC_SERVER_ENTRYPOINT__ === true) {
+    return path.join(process.cwd(), 'mission-control.db');
+  }
+
+  throw new Error(
+    '[db] C8 GUARD: refusing to resolve a database path. DATABASE_PATH is not set, and this process ' +
+      'is not the Command Center server (no __CC_SERVER_ENTRYPOINT__ marker from src/instrumentation.ts). ' +
+      'Falling through here would silently open the LIVE mission-control.db and let this process write ' +
+      'into a production Kanban board (the C8 leak class). Set DATABASE_PATH to an explicit, non-live ' +
+      'path before importing @/lib/db — e.g. `import \'./_isolated-db\';` as the FIRST import in a test, ' +
+      'or `DATABASE_PATH=/tmp/whatever.db` for a one-off script.',
+  );
+}
+
+export const DB_PATH = resolveDbPath();
 
 let db: Database.Database | null = null;
 
