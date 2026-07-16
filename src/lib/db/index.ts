@@ -33,16 +33,38 @@ import { runMigrations, getLastFailedMigrationId } from './migrations';
  *      default (`process.cwd()/mission-control.db`) so the server keeps
  *      working with zero box-local config, exactly as before this change.
  *   3. Anything else — a script, a test, `tsx`/`node` run ad-hoc from the app
- *      directory, a maintenance one-liner — HARD-FAILS at module-evaluation
- *      time with a clear, actionable error instead of silently opening the
- *      live database. This is the actual fix: the failure mode changes from
- *      "silent corruption of production data" to "the script won't start
- *      until you set DATABASE_PATH."
+ *      directory, a maintenance one-liner — HARD-FAILS with a clear, actionable
+ *      error instead of silently opening the live database. This is the actual
+ *      fix: the failure mode changes from "silent corruption of production
+ *      data" to "the script won't start until you set DATABASE_PATH."
  *
- * Exported so other server-side modules (e.g. persona-selector.ts) can pass
- * it as DASHBOARD_DB_PATH in subprocess env — making the Python selector hit
- * the correct DB on both Mac and VPS layouts without its own candidate-list
- * heuristics.
+ * WHEN the guard fires: at FIRST USE (`getDbPath()`), not at module evaluation.
+ *
+ * This is deliberate and load-bearing. Resolution used to run at import time
+ * (`export const DB_PATH = resolveDbPath()`), which made the module IMPOSSIBLE
+ * TO IMPORT outside the server — including from `next build`, whose page-data
+ * collection imports every route module WITHOUT running src/instrumentation.ts.
+ * The marker was therefore never set, the guard threw, and the build died with
+ * "Failed to collect page data for /api/…". CC v6.0.39 was unbuildable for
+ * exactly this reason.
+ *
+ * Deferring to first use preserves the security property EXACTLY — nothing can
+ * OPEN the database without DATABASE_PATH or the server marker, because every
+ * path that opens it goes through getDbPath() — while letting a module be
+ * imported (type-checked, bundled, page-data-collected) without side effects.
+ * Importing is not accessing. The guard still fires before any file handle is
+ * created; only the moment of the check moved, never its strength.
+ *
+ * The resolved value is MEMOIZED on first success, preserving the old
+ * "frozen for the life of the process" contract that callers rely on: the
+ * DASHBOARD_DB_PATH handed to the Python selector below can never drift from
+ * the file this process actually opened. A THROW is never memoized — a script
+ * that sets DATABASE_PATH and retries still resolves correctly.
+ *
+ * Exposed as a function so other server-side modules (e.g. persona-selector.ts)
+ * can pass the path as DASHBOARD_DB_PATH in subprocess env — making the Python
+ * selector hit the correct DB on both Mac and VPS layouts without its own
+ * candidate-list heuristics.
  */
 declare global {
   // eslint-disable-next-line no-var
@@ -66,7 +88,22 @@ function resolveDbPath(): string {
   );
 }
 
-export const DB_PATH = resolveDbPath();
+let resolvedDbPath: string | null = null;
+
+/**
+ * The resolved database path, or a THROWN C8 guard error for any process that
+ * is neither the server nor explicitly isolated via DATABASE_PATH.
+ *
+ * Call this at USE time. Never hoist the result into a module-level `const` in
+ * a consumer — that re-creates the import-time throw this function exists to
+ * avoid, and would break `next build` all over again.
+ */
+export function getDbPath(): string {
+  // Memoize only on success — see the "frozen for the life of the process"
+  // note above. A cached throw would trap a script that later isolates itself.
+  if (resolvedDbPath === null) resolvedDbPath = resolveDbPath();
+  return resolvedDbPath;
+}
 
 let db: Database.Database | null = null;
 
@@ -94,9 +131,14 @@ export function getDb(): Database.Database {
   // DATA-01). We now build on a LOCAL handle and only assign `db` on full success.
   if (db) return db;
 
-  const isNewDb = !fs.existsSync(DB_PATH);
+  // C8: resolve HERE, at the moment of opening. This is the choke point the
+  // guard protects — an un-isolated process throws before better-sqlite3 is
+  // ever handed a path, so no file is created and no live board is touched.
+  const dbPath = getDbPath();
 
-  const handle = new Database(DB_PATH);
+  const isNewDb = !fs.existsSync(dbPath);
+
+  const handle = new Database(dbPath);
   handle.pragma('journal_mode = WAL');
   // DATA-15: this DB is written by TWO processes — the Node app and the detached
   // Python persona selector (persona-selector.ts spawns it with DASHBOARD_DB_PATH).
@@ -135,7 +177,7 @@ export function getDb(): Database.Database {
   db = handle;
 
   if (isNewDb) {
-    console.log('[DB] New database created at:', DB_PATH);
+    console.log('[DB] New database created at:', dbPath);
   }
   return db;
 }

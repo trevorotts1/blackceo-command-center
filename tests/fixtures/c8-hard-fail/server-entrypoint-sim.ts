@@ -17,7 +17,7 @@
 
 async function main() {
   const dbmod = await import('../../../src/lib/db');
-  console.log('DB_PATH=' + dbmod.DB_PATH);
+  console.log('DB_PATH=' + dbmod.getDbPath());
   // Prove it isn't just a string — the server path actually opens/migrates.
   const handle = dbmod.getDb();
   handle.exec("CREATE TABLE IF NOT EXISTS c8_probe (id INTEGER PRIMARY KEY, val TEXT)");

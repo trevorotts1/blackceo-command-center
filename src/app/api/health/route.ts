@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
-import { getDb, getMigrationStatus, getDbInitFailure, DB_PATH } from '@/lib/db';
+import { getDb, getMigrationStatus, getDbInitFailure, getDbPath } from '@/lib/db';
 import type { DbInitFailure } from '@/lib/db';
 import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embeddings';
 
@@ -127,7 +127,7 @@ async function probeEmbeddingHealthPy(): Promise<Record<string, unknown> | null>
     '--format',
     'json',
     '--sop-db',
-    DB_PATH,
+    getDbPath(),
     '--sop-active-provider',
     activeProvider,
   ];

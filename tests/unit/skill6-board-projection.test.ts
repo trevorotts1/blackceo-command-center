@@ -89,7 +89,7 @@ function mockDbWithTaskIds(existingIds: string[]) {
       }),
     }),
     getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-    DB_PATH: path.join(tmpDir, 'test.db'),
+    getDbPath: () => path.join(tmpDir, 'test.db'),
   };
 }
 
@@ -213,7 +213,7 @@ describe('checkSkill6BoardProjection', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkSkill6BoardProjection } = await loadChecks();
     const result = checkSkill6BoardProjection();
