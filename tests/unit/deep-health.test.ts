@@ -13,8 +13,20 @@
  *   Rows 25-27, 33 (CF tunnel)  — public-URL probe in cc-health-check.sh
  *
  * Rows covered: 1-13, 20-24, 28-32 (applicable to the TypeScript endpoint).
+ *
+ * Most rows here mock '@/lib/db', but the pure-filesystem rows (asset_manifest)
+ * load deep-checks.ts UNMOCKED — and deep-checks.ts STATICALLY imports
+ * '@/lib/db' at its top, so merely importing it (even via the dynamic
+ * `await import(...)` in loadChecks() below) reaches the DB singleton and
+ * resolves its DB_PATH. This is the same latent C8 gap already fixed in
+ * d8-company-config-hint.test.ts: invisible under the old silent-fallback
+ * behavior, and undetected by the c8-db-isolation-guard.test.ts scanner, which
+ * only follows STATIC import chains out of a test file and so cannot see the DB
+ * reach behind this file's dynamic import of an intermediate module. Isolate
+ * first so this suite never resolves — let alone opens — a real database.
  */
 
+import './_isolated-db';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
