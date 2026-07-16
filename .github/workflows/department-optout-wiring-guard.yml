@@ -1,0 +1,52 @@
+name: Department opt-out wiring guard
+
+# U110 (E5-5) send-back D3-R2: "the clause that prevents that 500 is untested
+# ... revert the entire route wiring -> 6/6 green AND tsc clean." Reverting
+# src/app/api/system/converge/route.ts's U110 wiring (the
+# readDepartmentOptoutIds()/syncDepartmentOptoutArchive() calls, the
+# department_optout response surface, and the 2nd — opted-out — argument to
+# listChosenDepartmentIds()) compiled clean and left the unit's own suite
+# green, because nothing read route.ts's own text. This guard closes that:
+# it statically asserts all four wiring markers are present on the one call
+# site the U108 opt-out consumer depends on.
+#
+# Standalone workflow — deliberately NOT folded into qc-cc.yml, mirroring
+# raw-status-writer-guard.yml / report-back-invariant.yml's own convention
+# (independently readable/debuggable, never collides with that workflow's
+# edit history).
+#
+# One job:
+#   static-guard — runs the mutation-proof test FIRST (a route.ts fixture
+#                   missing any one of the four wiring markers must fail the
+#                   guard, and PASS once restored), THEN the guard directly
+#                   against the real tree.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  static-guard:
+    name: Static call-site guard (+ mutation proof)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Mutation proof + real-tree pass (department-optout-wiring-guard.test.ts)
+        run: |
+          node --import tsx --test tests/unit/department-optout-wiring-guard.test.ts
+
+      - name: Run the guard directly against the tree (belt-and-braces)
+        run: npx tsx scripts/guard-department-optout-wiring.ts
