@@ -38,6 +38,7 @@ import {
   recordDeptDecisionScript,
   scriptExists,
   updateInterviewStateScript,
+  verticalDerivationGuardScript,
 } from './paths';
 
 const execFileAsync = promisify(execFile);
@@ -85,6 +86,21 @@ export interface CanonicalReconciliation {
   [k: string]: unknown;
 }
 
+/** One detected vertical pack, exactly as build-workforce.py's
+ *  apply_vertical_packs()/_write_vertical_pack_record() writes it. */
+export interface VerticalPackEntry {
+  pack: string;
+  matchedKeywords?: string[];
+  [k: string]: unknown;
+}
+
+/** The `verticalPacks` build-state block U107's guard reads as the
+ *  authoritative "what did the interview declare" record. */
+export interface VerticalPacksRecord {
+  detectedPacks?: VerticalPackEntry[];
+  [k: string]: unknown;
+}
+
 export interface BuildState {
   interviewComplete?: boolean;
   interviewCompletedAt?: string;
@@ -93,6 +109,11 @@ export interface BuildState {
   interviewQc?: InterviewQc;
   canonicalReconciliation?: CanonicalReconciliation;
   buildCompletedAt?: string;
+  /** U107 (E5-2, closes G2a): the interview-derived vertical packs record —
+   *  written by build-workforce.py's apply_vertical_packs(), read here (never
+   *  hand-written) as the sole "declared" signal for the CC-side derivation
+   *  guard in src/lib/routing/departments.config.ts. */
+  verticalPacks?: VerticalPacksRecord;
   [k: string]: unknown;
 }
 
@@ -213,6 +234,30 @@ export function readInterviewProgress(state?: BuildState | null): InterviewProgr
 export function readInterviewQcStatus(state?: BuildState | null): string {
   const s = state ?? readBuildState();
   return (s?.interviewQc?.status as string) || 'pending';
+}
+
+/**
+ * U107 (E5-2, closes G2a): the interview-declared vertical pack ids, read
+ * SYNCHRONOUSLY and directly from build-state — no re-derivation, no keyword
+ * matching here. Mirrors vertical-derivation-guard.py's
+ * declared_packs_from_build_state() reading of `verticalPacks.detectedPacks`
+ * (the record build-workforce.py's apply_vertical_packs() already writes).
+ *
+ * Absence of a record is NOT the same as an explicit empty record, but both
+ * degrade to the same result here: an empty declared set. Per the guard's own
+ * "FAIL CLOSED" doctrine (absence of information is never permission), a
+ * missing/garbage build-state file never grants an implicit vertical.
+ */
+export function declaredVerticalPacks(state?: BuildState | null): string[] {
+  const s = state ?? readBuildState();
+  const detected = s?.verticalPacks?.detectedPacks;
+  if (!Array.isArray(detected)) return [];
+  const packs = new Set<string>();
+  for (const entry of detected) {
+    const pack = entry && typeof entry === 'object' ? (entry as VerticalPackEntry).pack : undefined;
+    if (typeof pack === 'string' && pack.trim()) packs.add(pack.trim());
+  }
+  return Array.from(packs);
 }
 
 /**
@@ -590,6 +635,58 @@ export async function recordDeptDecision(
 export async function listCanonicalDepartments(): Promise<CanonicalDepartments> {
   const { stdout } = await runScript(listCanonicalDepartmentsScript(), 'python3', ['--json']);
   return JSON.parse(stdout) as CanonicalDepartments;
+}
+
+/** Shape of vertical-derivation-guard.py --check-add --json's stdout. */
+interface CheckAddResult {
+  deptId: string;
+  declaredPacks: string[];
+  allowed: boolean;
+  error: string | null;
+}
+
+/**
+ * U107 (E5-2, closes G2a) REFUSAL primitive: proxy vertical-derivation-guard.py
+ * --check-add DEPT_ID --declared <packs> --json at runtime. This is the LIVE,
+ * independently-shelled verdict — the same authority
+ * departments.config.ts's synchronous checkAddDepartmentSync() mirrors so the
+ * hot fallback path never blocks on a subprocess. A drift between the two is
+ * exactly what the parity fixture (src/lib/routing/__fixtures__/vertical-derivation)
+ * exists to catch.
+ *
+ * FAIL CLOSED: any failure to resolve/run the script (missing on this box,
+ * non-zero exit with unparseable stdout, timeout) returns refused with a named
+ * VERTICAL_NOT_DECLARED error — never silently allows an add this module
+ * could not verify.
+ */
+export async function checkAddDepartment(
+  deptId: string,
+  declaredPacks?: string[],
+): Promise<{ allowed: boolean; error: string | null }> {
+  const packs = declaredPacks ?? declaredVerticalPacks();
+  const argv = ['--check-add', deptId, '--declared', packs.join(','), '--json'];
+  try {
+    const { stdout } = await runScript(verticalDerivationGuardScript(), 'python3', argv);
+    const parsed = JSON.parse(stdout) as CheckAddResult;
+    return { allowed: parsed.allowed, error: parsed.error };
+  } catch (err) {
+    // check_add() exits 1 (refused) with --json output still on stdout — the
+    // script prints its verdict on BOTH exit codes. Recover the real verdict
+    // when present rather than treating a refusal as a script failure.
+    if (err instanceof InterviewScriptError && err.stdout) {
+      try {
+        const parsed = JSON.parse(err.stdout) as CheckAddResult;
+        return { allowed: parsed.allowed, error: parsed.error };
+      } catch {
+        // fall through to fail-closed below
+      }
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      allowed: false,
+      error: `VERTICAL_NOT_DECLARED: could not evaluate '${deptId}' — guard unavailable or failed (${reason}). Fail-closed.`,
+    };
+  }
 }
 
 /* ───────────────── Decline / coverage semantics (mirror the Python) ─────────── */

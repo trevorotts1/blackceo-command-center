@@ -936,6 +936,200 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// U107 (E5-2, closes G2a) — vertical never force-added to a client who is not
+// that vertical.
+//
+// DEFAULT_DEPARTMENTS above is a SEED / KEYWORD-HINT source (see the file
+// header) with 25 entries — that count is a QC gate
+// (tests/unit/intelligent-routing.test.ts "DEFAULT_DEPARTMENTS has exactly 25
+// canonical departments") and stays untouched here. THREE of those 25 are
+// vertical-pack departments, not universal ones: a client who never declared
+// the owning vertical in their interview should never see them provisioned.
+//
+//   client-coaches       -> pack 'personal-pro-dev'
+//   course-creator       -> pack 'personal-pro-dev'
+//   community-management -> pack 'content-creator'
+//
+// Mirrors the LANDED ONB guard's dept_pack_index() over
+// 23-ai-workforce-blueprint/department-naming-map.json (v2.6.1): every dept
+// inside a vertical_packs[*].auto_add_departments list maps to that pack,
+// with LAST-PACK-WINS when a dept id appears in more than one pack (Python
+// dict-iteration order). `presentations` and `podcast` are ALSO pack
+// departments but carry universal_primary=true in their winning pack, so the
+// guard (both here and in the Python) allows them unconditionally — they are
+// NOT in this map. `podcast` in particular is order-fragile: it is
+// non-universal in personal-pro-dev but universal_primary=true in
+// content-creator, and content-creator is the LAST pack in naming-map key
+// order today, so it resolves ALLOWED. If department-naming-map.json's key
+// order ever changes, podcast could flip to REFUSED — this map would then be
+// stale for a 4th id. The parity fixture
+// (src/lib/routing/__fixtures__/vertical-derivation) is the drift detector:
+// regenerate it (scripts/regen-vertical-derivation-golden.sh) whenever the
+// naming map changes and a diff here is the signal to update this table.
+export const VERTICAL_PACK_DEPARTMENTS: Readonly<Record<string, string>> = Object.freeze({
+  'client-coaches': 'personal-pro-dev',
+  'course-creator': 'personal-pro-dev',
+  'community-management': 'content-creator',
+});
+
+/**
+ * U107 config flag: the derivation guard is additive behind this flag per the
+ * spec's revert clause ("revert = flip the flag"). Defaults ON. Set
+ * VERTICAL_DERIVATION_GUARD_ENABLED=false to restore pre-U107 behavior
+ * (DEFAULT_DEPARTMENTS returned unfiltered from the step-3 fallback).
+ */
+export function isVerticalDerivationGuardEnabled(): boolean {
+  return process.env.VERTICAL_DERIVATION_GUARD_ENABLED !== 'false';
+}
+
+export interface CheckAddVerdict {
+  allowed: boolean;
+  error: string | null;
+}
+
+/**
+ * U107 REFUSAL primitive (BINARY acceptance (c)) — pure, synchronous TS
+ * mirror of vertical-derivation-guard.py's check_add(): a department that is
+ * not a vertical-pack department at all (mandatory/universal/custom), or
+ * whose owning pack IS in the declared set, is always allowed. A
+ * vertical-specific department whose pack is NOT declared is refused with the
+ * SAME named error text the Python guard emits (byte-identical modulo the
+ * declared-set rendering), so a log/receipt grep for "VERTICAL_NOT_DECLARED"
+ * matches on both sides of this unit.
+ *
+ * This does not shell out — see seam.ts's checkAddDepartment() for the
+ * independently-executed live Python verdict (defense in depth / drift
+ * detection). This sync version is what the hot step-3 fallback path below
+ * actually uses, since loadDepartments() cannot go async without a much
+ * larger refactor of every caller.
+ */
+export function checkAddDepartmentSync(
+  deptId: string,
+  declaredPacks: readonly string[],
+): CheckAddVerdict {
+  const pack = VERTICAL_PACK_DEPARTMENTS[deptId];
+  if (!pack) return { allowed: true, error: null };
+  const declared = new Set(declaredPacks);
+  if (declared.has(pack)) return { allowed: true, error: null };
+  const declaredList = Array.from(declared).sort();
+  return {
+    allowed: false,
+    error:
+      `VERTICAL_NOT_DECLARED: refusing to add department '${deptId}' — it belongs to ` +
+      `vertical pack '${pack}', which the interview did not declare ` +
+      `(declared packs: ${declaredList.length ? JSON.stringify(declaredList) : "['none']"}).`,
+  };
+}
+
+/**
+ * U107 BINARY acceptance (a)/(b): the default/floor set returned when the
+ * workspaces table is empty (loadDepartments() step 3) STRICTLY derives its
+ * vertical-specific departments from interview-declared signals — zero
+ * declared verticals means zero vertical-specific departments in the floor;
+ * a declared pack means that pack's departments ARE in the floor (no
+ * false-negative). Mandatory + universal-primary departments (the other 22)
+ * are never gated — checkAddDepartmentSync() allows them unconditionally.
+ *
+ * Behind isVerticalDerivationGuardEnabled(): when the flag is off, returns
+ * DEFAULT_DEPARTMENTS unfiltered (pre-U107 behavior) — the spec's revert path.
+ */
+export function getDefaultFloorDepartments(
+  declaredPacksOverride?: readonly string[],
+): DepartmentConfig[] {
+  if (!isVerticalDerivationGuardEnabled()) return DEFAULT_DEPARTMENTS;
+  // Lazy require to avoid a hard module-load-time dependency from routing/ on
+  // interview/ (mirrors the existing dynamic `require('../db')` pattern in
+  // this file) and to keep this function importable in isolation by tests.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { declaredVerticalPacks } = require('../interview/seam') as typeof import('../interview/seam');
+  const declared = declaredPacksOverride ?? declaredVerticalPacks();
+  return DEFAULT_DEPARTMENTS.filter((d) => checkAddDepartmentSync(d.id, declared).allowed);
+}
+
+export interface VerticalDerivationVerdict {
+  declaredVerticals: string[];
+  provisionedVerticalDepartments: { id: string; pack: string }[];
+  violations: { id: string; pack: string; reason: string }[];
+  verdict: 'PASS' | 'FAIL';
+  generatedAt: string;
+}
+
+/**
+ * U107 audit/receipt: evaluate the default floor set that
+ * getDefaultFloorDepartments() would return, asserting provisioned ⊆ declared
+ * for every vertical-specific department — the CC-side mirror of
+ * vertical-derivation-guard.py's evaluate_vertical_derivation(), scoped to
+ * this repo's own floor-set surface (DEFAULT_DEPARTMENTS) rather than an
+ * on-disk department directory (CC has no such directory; its "provisioned
+ * set" IS this array as filtered by the guard).
+ */
+export function evaluateDefaultFloorVerticalDerivation(
+  declaredPacksOverride?: readonly string[],
+): VerticalDerivationVerdict {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { declaredVerticalPacks } = require('../interview/seam') as typeof import('../interview/seam');
+  const declared = declaredPacksOverride ?? declaredVerticalPacks();
+  const declaredSet = new Set(declared);
+  const floor = getDefaultFloorDepartments(declared);
+
+  const provisioned: { id: string; pack: string }[] = [];
+  const violations: { id: string; pack: string; reason: string }[] = [];
+  for (const dept of floor) {
+    const pack = VERTICAL_PACK_DEPARTMENTS[dept.id];
+    if (!pack) continue;
+    provisioned.push({ id: dept.id, pack });
+    if (!declaredSet.has(pack)) {
+      violations.push({
+        id: dept.id,
+        pack,
+        reason: `VERTICAL_NOT_DECLARED: department '${dept.id}' (pack '${pack}') is in the provisioned floor set but pack '${pack}' is not in the declared set (${Array.from(declaredSet).sort().join(', ') || 'none'}).`,
+      });
+    }
+  }
+
+  return {
+    declaredVerticals: Array.from(declaredSet).sort(),
+    provisionedVerticalDepartments: provisioned,
+    violations,
+    verdict: violations.length ? 'FAIL' : 'PASS',
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * U107 receipt writer: persists the verdict to
+ * <workspace>/provisioning/cc-vertical-derivation.json — a CC-specific
+ * filename, deliberately distinct from the ONB leg's own
+ * provisioning/vertical-derivation.json (same workspace root, different
+ * writer; two processes must never race the same file). Never throws — a
+ * disk failure here must not break loadDepartments().
+ */
+export function writeVerticalDerivationReceipt(
+  verdict: VerticalDerivationVerdict,
+  outPath?: string,
+): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { resolveWorkspaceDir } = require('../interview/paths') as typeof import('../interview/paths');
+    const dest =
+      outPath ?? path.join(resolveWorkspaceDir(), 'provisioning', 'cc-vertical-derivation.json');
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(
+      dest,
+      JSON.stringify(
+        { ...verdict, schemaVersion: '1.0', source: 'departments.config.ts evaluateDefaultFloorVerticalDerivation (U107)' },
+        null,
+        2,
+      ) + '\n',
+      'utf-8',
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers for loadDepartments
 // ---------------------------------------------------------------------------
 
@@ -1108,6 +1302,20 @@ export function loadDepartments(): DepartmentConfig[] {
     );
   }
 
-  // ── Step 3: fallback to DEFAULT_DEPARTMENTS ────────────────────────────────
-  return DEFAULT_DEPARTMENTS;
+  // ── Step 3: fallback to the vertical-derivation-guarded floor ──────────────
+  // U107 (E5-2, closes G2a): this is the ONLY path that can hand a client all
+  // 25 DEFAULT_DEPARTMENTS with zero interview context — the exact "vertical
+  // force-added to a client who is not that vertical" shape. Return the
+  // filtered floor (getDefaultFloorDepartments()), never the raw constant.
+  const floor = getDefaultFloorDepartments();
+  const verdict = evaluateDefaultFloorVerticalDerivation();
+  writeVerticalDerivationReceipt(verdict); // best-effort; never throws
+  if (floor.length !== DEFAULT_DEPARTMENTS.length) {
+    console.log(
+      `[DepartmentConfig] U107 guard excluded ${DEFAULT_DEPARTMENTS.length - floor.length} ` +
+        `undeclared vertical-specific department(s) from the fallback floor ` +
+        `(declared: ${verdict.declaredVerticals.length ? verdict.declaredVerticals.join(', ') : 'none'}).`,
+    );
+  }
+  return floor;
 }
