@@ -1270,6 +1270,377 @@ export function checkSkill6BoardProjection(): Skill6BoardProjectionResult {
   };
 }
 
+// ── check: the "mc_board six" + Skill 35's cycle-manifest variant (U100) ───
+//
+// U100 generalizes the producer-reconcile pattern B-U13/U27 shipped for
+// Skill 6 (checkSkill6BoardProjection above) and U79 shipped for the
+// Anthology Engine (checkAnthologyBoardProjection, and
+// 59-anthology-engine/scripts/mc_board.py's own `cmd_reconcile`) to the
+// remaining fail-soft productized-skill producers:
+//   * the "mc_board six" — 49-signature-funnel, 50-email-engine,
+//     53-book-writer, 55-product-bio, 56-sales-page-assets,
+//     57-social-media-in-a-box — each vendoring the SAME shared,
+//     byte-for-byte-identical mc_board.py client (see that file's own
+//     docstring), which gained a `reconcile --json` verb + an opt-in
+//     `evidence_root` receipt (`<evidence_root>/routing/board-ingest-
+//     receipt.json`, `{mc_url_set, ok, task_id}`).
+//   * Skill 35's cycle-manifest variant — run-publishing-cycle.sh, which
+//     stamps `cc_board_attempt: {mc_token_resolved, ok, task_id}` onto its
+//     own `cycle-manifest.json` per publishing cycle (see
+//     35-social-media-planner/scripts/cycle_manifest_reconcile.py).
+//
+// Non-gating, per B-U13: a board-ingest drift here is an operational signal
+// (an evidence_root caller has not been wired, or the board was down for a
+// run), never a Command Center correctness fault — it must never flip the
+// top-level pass/indeterminate verdict. route.ts keeps every field below
+// OUT of the `checks` aggregation, exactly like its skill6/anthology
+// siblings.
+
+export interface ProducerBoardProjectionResult extends CheckResult {
+  ledger_runs?: number;
+  board_landed?: number;
+  drift_count?: number;
+  unwired_count?: number;
+}
+
+interface McBoardSixProducer {
+  /** Advisory field key on /api/health/deep's `advisory` object. */
+  key: string;
+  /** The productized-skill directory this producer's mc_board.py vendors
+   *  into — mirrors mc_board.py's own `resolve_state_dir()`, which derives
+   *  its default evidence base from `Path(__file__).resolve().parents[1].name`
+   *  (this same directory name), so both sides resolve the SAME default path
+   *  without either side hardcoding the other's absolute location. */
+  skillDirName: string;
+  /** Human-readable reconcile hint surfaced in the DRIFT detail string. */
+  reconcileHint: string;
+}
+
+/** The "mc_board six" (U100 spec, verbatim) — the shared, byte-for-byte-
+ *  identical mc_board.py client's own docstring names these six skills. */
+export const MC_BOARD_SIX_PRODUCERS: McBoardSixProducer[] = [
+  {
+    key: 'mc_board_49_signature_funnel_projection',
+    skillDirName: '49-signature-funnel',
+    reconcileHint: '49-signature-funnel/scripts/mc_board.py reconcile --json',
+  },
+  {
+    key: 'mc_board_50_email_engine_projection',
+    skillDirName: '50-email-engine',
+    reconcileHint: '50-email-engine/mc_board.py reconcile --json',
+  },
+  {
+    key: 'mc_board_53_book_writer_projection',
+    skillDirName: '53-book-writer',
+    reconcileHint: '53-book-writer/scripts/mc_board.py reconcile --json',
+  },
+  {
+    key: 'mc_board_55_product_bio_projection',
+    skillDirName: '55-product-bio',
+    reconcileHint: '55-product-bio/scripts/mc_board.py reconcile --json',
+  },
+  {
+    key: 'mc_board_56_sales_page_assets_projection',
+    skillDirName: '56-sales-page-assets',
+    reconcileHint: '56-sales-page-assets/scripts/mc_board.py reconcile --json',
+  },
+  {
+    key: 'mc_board_57_social_media_in_a_box_projection',
+    skillDirName: '57-social-media-in-a-box',
+    reconcileHint: '57-social-media-in-a-box/scripts/mc_board.py reconcile --json',
+  },
+];
+
+interface McBoardIngestReceipt {
+  mc_url_set?: boolean;
+  ok?: boolean;
+  task_id?: string | null;
+}
+
+/** Resolve a "mc_board six" producer's run-evidence base directory.
+ *  `MC_BOARD_EVIDENCE_BASE_DIR` is a SHARED override (mirrors mc_board.py's
+ *  own env var of the same name) — set it and every producer below resolves
+ *  the SAME explicit directory; leave it unset and each producer defaults to
+ *  its own `$HOME/.openclaw/data/<skillDirName>/runs`. */
+function resolveMcBoardSixEvidenceBaseDir(skillDirName: string): string {
+  const explicit = (process.env.MC_BOARD_EVIDENCE_BASE_DIR || '').trim();
+  if (explicit) return explicit;
+  const home = process.env.HOME || os.homedir();
+  if (!home) return '';
+  return path.join(home, '.openclaw', 'data', skillDirName, 'runs');
+}
+
+function listMcBoardSixEvidenceRuns(baseDir: string): string[] {
+  try {
+    if (!baseDir || !fs.existsSync(baseDir) || !fs.statSync(baseDir).isDirectory()) return [];
+    return fs
+      .readdirSync(baseDir)
+      .map((name) => path.join(baseDir, name))
+      .filter((runDir) => {
+        try {
+          return fs.statSync(runDir).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+/** One producer's advisory board-projection check (U100). Cloned from
+ *  `checkSkill6BoardProjection` above, adapted to the mc_board six's flat
+ *  `<run>/routing/board-ingest-receipt.json` receipt (no separate intake
+ *  receipt — every run dir is a candidate, unfiltered). */
+export function checkMcBoardSixProducerProjection(
+  producer: McBoardSixProducer
+): ProducerBoardProjectionResult {
+  const baseDir = resolveMcBoardSixEvidenceBaseDir(producer.skillDirName);
+
+  if (!baseDir || !fs.existsSync(baseDir)) {
+    return {
+      pass: true,
+      detail: `${producer.key}: OK — no run-evidence base directory on this box; not applicable`,
+    };
+  }
+
+  let runDirs: string[];
+  try {
+    runDirs = listMcBoardSixEvidenceRuns(baseDir);
+  } catch {
+    return {
+      pass: false,
+      indeterminate: true,
+      detail: `${producer.key}: evidence-root base present but could not be listed (locked or unreadable) — UNKNOWN`,
+    };
+  }
+
+  if (runDirs.length === 0) {
+    return {
+      pass: true,
+      ledger_runs: 0,
+      detail: `${producer.key}: OK — evidence-root base exists but holds no runs yet (healthy-idle, not drift)`,
+    };
+  }
+
+  const driftRuns: string[] = [];
+  const landedTaskIds: string[] = [];
+  let unwiredCount = 0;
+
+  for (const runDir of runDirs) {
+    const receiptPath = path.join(runDir, 'routing', 'board-ingest-receipt.json');
+    if (!fs.existsSync(receiptPath)) {
+      // No board-ingest receipt: a caller that has not threaded evidence_root=
+      // through to card_open()/begin_run() yet. Informational only — never
+      // counted as drift (mirrors checkSkill6BoardProjection's own module note).
+      unwiredCount += 1;
+      continue;
+    }
+    const receipt = readJsonFile<McBoardIngestReceipt>(receiptPath);
+    if (!receipt) {
+      unwiredCount += 1; // unreadable receipt — treat like unwired, not confirmed drift
+      continue;
+    }
+    if (receipt.mc_url_set === false) {
+      driftRuns.push(path.basename(runDir));
+      continue;
+    }
+    if (!receipt.ok || !receipt.task_id) {
+      driftRuns.push(path.basename(runDir));
+      continue;
+    }
+    landedTaskIds.push(receipt.task_id);
+  }
+
+  // Cross-check: a card that landed at ingest time but no longer exists in
+  // this box's own tasks table — the opposite failure mode a local receipt
+  // alone cannot see. Best-effort: a DB read failure degrades to UNKNOWN,
+  // never fabricates a verdict.
+  let orphanedCount = 0;
+  if (landedTaskIds.length > 0) {
+    try {
+      const db = getDb();
+      for (const taskId of landedTaskIds) {
+        const row = db.prepare('SELECT id FROM tasks WHERE id = ?').get(taskId) as { id: string } | undefined;
+        if (!row) orphanedCount += 1;
+      }
+    } catch {
+      return {
+        pass: false,
+        indeterminate: true,
+        ledger_runs: runDirs.length,
+        unwired_count: unwiredCount,
+        detail: `${producer.key}: could not read this box's task board to confirm landed cards (locked or unavailable) — UNKNOWN`,
+      };
+    }
+  }
+
+  const driftCount = driftRuns.length + orphanedCount;
+
+  if (driftCount > 0) {
+    return {
+      pass: false,
+      indeterminate: false,
+      ledger_runs: runDirs.length,
+      board_landed: landedTaskIds.length - orphanedCount,
+      drift_count: driftCount,
+      unwired_count: unwiredCount,
+      detail: `${producer.key}: DRIFT — ${runDirs.length} run(s), ${driftCount} card(s) never landed or vanished from the board (${driftRuns.length} never-landed, ${orphanedCount} orphaned). Run: ${producer.reconcileHint}`,
+    };
+  }
+
+  return {
+    pass: true,
+    ledger_runs: runDirs.length,
+    board_landed: landedTaskIds.length,
+    drift_count: 0,
+    unwired_count: unwiredCount,
+    detail: `${producer.key}: OK — ${runDirs.length} run(s), ${landedTaskIds.length} card(s) landed and confirmed on the board (projecting)`,
+  };
+}
+
+interface Skill35CycleBoardAttempt {
+  mc_token_resolved?: boolean;
+  ok?: boolean;
+  task_id?: string | null;
+}
+
+interface Skill35CycleManifest {
+  cc_board_attempt?: Skill35CycleBoardAttempt;
+}
+
+function resolveSkill35EvidenceBaseDir(): string {
+  const explicit = (process.env.SKILL35_EVIDENCE_BASE_DIR || '').trim();
+  if (explicit) return explicit;
+  const home = process.env.HOME || os.homedir();
+  if (!home) return '';
+  return path.join(home, '.openclaw', 'data', 'skill-35', 'runs');
+}
+
+function listSkill35EvidenceRuns(baseDir: string): string[] {
+  try {
+    if (!baseDir || !fs.existsSync(baseDir) || !fs.statSync(baseDir).isDirectory()) return [];
+    return fs
+      .readdirSync(baseDir)
+      .map((name) => path.join(baseDir, name))
+      .filter((runDir) => {
+        try {
+          return fs.statSync(runDir).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+/** Skill 35's cycle-manifest variant of the producer-reconcile pattern
+ *  (U100). Same shape as `checkMcBoardSixProducerProjection`, adapted to
+ *  `run-publishing-cycle.sh`'s own `cycle-manifest.json` +
+ *  `cc_board_attempt` field (see cycle_manifest_reconcile.py). */
+export function checkSkill35CycleProjection(): ProducerBoardProjectionResult {
+  const key = 'skill35_cycle_projection';
+  const baseDir = resolveSkill35EvidenceBaseDir();
+
+  if (!baseDir || !fs.existsSync(baseDir)) {
+    return {
+      pass: true,
+      detail: `${key}: OK — no Skill-35 runs-root on this box; not applicable`,
+    };
+  }
+
+  let runDirs: string[];
+  try {
+    runDirs = listSkill35EvidenceRuns(baseDir);
+  } catch {
+    return {
+      pass: false,
+      indeterminate: true,
+      detail: `${key}: runs-root present but could not be listed (locked or unreadable) — UNKNOWN`,
+    };
+  }
+
+  if (runDirs.length === 0) {
+    return {
+      pass: true,
+      ledger_runs: 0,
+      detail: `${key}: OK — runs-root exists but holds no publishing cycles yet (healthy-idle, not drift)`,
+    };
+  }
+
+  const driftRuns: string[] = [];
+  const landedTaskIds: string[] = [];
+  let unwiredCount = 0;
+
+  for (const runDir of runDirs) {
+    const manifestPath = path.join(runDir, 'cycle-manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      unwiredCount += 1;
+      continue;
+    }
+    const manifest = readJsonFile<Skill35CycleManifest>(manifestPath);
+    const attempt = manifest?.cc_board_attempt;
+    if (!attempt) {
+      // A pre-U100 manifest (run-publishing-cycle.sh ran before this unit
+      // shipped) — informational only, never drift.
+      unwiredCount += 1;
+      continue;
+    }
+    if (attempt.mc_token_resolved === false) {
+      driftRuns.push(path.basename(runDir));
+      continue;
+    }
+    if (!attempt.ok || !attempt.task_id) {
+      driftRuns.push(path.basename(runDir));
+      continue;
+    }
+    landedTaskIds.push(attempt.task_id);
+  }
+
+  let orphanedCount = 0;
+  if (landedTaskIds.length > 0) {
+    try {
+      const db = getDb();
+      for (const taskId of landedTaskIds) {
+        const row = db.prepare('SELECT id FROM tasks WHERE id = ?').get(taskId) as { id: string } | undefined;
+        if (!row) orphanedCount += 1;
+      }
+    } catch {
+      return {
+        pass: false,
+        indeterminate: true,
+        ledger_runs: runDirs.length,
+        unwired_count: unwiredCount,
+        detail: `${key}: could not read this box's task board to confirm landed cards (locked or unavailable) — UNKNOWN`,
+      };
+    }
+  }
+
+  const driftCount = driftRuns.length + orphanedCount;
+
+  if (driftCount > 0) {
+    return {
+      pass: false,
+      indeterminate: false,
+      ledger_runs: runDirs.length,
+      board_landed: landedTaskIds.length - orphanedCount,
+      drift_count: driftCount,
+      unwired_count: unwiredCount,
+      detail: `${key}: DRIFT — ${runDirs.length} cycle(s), ${driftCount} card(s) never landed or vanished from the board (${driftRuns.length} never-landed, ${orphanedCount} orphaned). Run: 35-social-media-planner/scripts/cycle_manifest_reconcile.py reconcile --json`,
+    };
+  }
+
+  return {
+    pass: true,
+    ledger_runs: runDirs.length,
+    board_landed: landedTaskIds.length,
+    drift_count: 0,
+    unwired_count: unwiredCount,
+    detail: `${key}: OK — ${runDirs.length} cycle(s), ${landedTaskIds.length} card(s) landed and confirmed on the board (projecting)`,
+  };
+}
+
 // ── check: notification-failures.jsonl size (U102 / C12.3 item 10b) ────────
 //
 // PROBLEM (master spec C12.3 item 10): the MSG-07 undeliverable ledger
