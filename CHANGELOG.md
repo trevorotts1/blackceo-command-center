@@ -1,3 +1,44 @@
+## [Unreleased]
+
+Entries below accumulate ahead of the next batched version bump + annotated tag (single
+serial merge-writer owns that step — see repo convention). NOT a version header itself
+(deliberately does not match the `## [vX.Y.Z]` pattern version-consistency.yml greps for),
+so it does not participate in that gate's version-drift or tag-existence checks.
+
+- **U79 (GK-17) — Command Center leg: Anthology self-heal converged-signal consumption +
+  escalation-of-last-resort banner rewire.** Closes the CC-side half of the ONB leg (merge
+  `b62455b1`) named as owed: "CC-side banner wiring ... must be wired to consume this
+  `converged` signal ... and render the banner ONLY when `converged` is `False`." Prior to
+  this leg, nothing on the Command Center side read anything the ONB daily tick produced
+  (verified: zero hits for `board_reconcile` or the state reports dir on CC main) — the ONB
+  half was structurally inert.
+  - `checkAnthologyBoardProjection()` (`src/lib/health/deep-checks.ts`) now reads the newest
+    `<state_dir>/reports/smoke-test-*.json` (same `resolveAnthologyStateDbPath()` resolver
+    the check already used — no new configuration surface, read-only) and surfaces
+    `board_reconcile_converged` (`true`/`false`/`null`) plus freshness
+    (`board_reconcile_age_seconds`, `board_reconcile_stale`) on the existing non-gating
+    `anthology_board_projection` advisory entry. Fail-soft throughout: a missing reports
+    dir, no matching files, unparseable JSON, a malformed `converged` value, or a report
+    older than 48h (2x the daily-tick cadence) all resolve to `converged: null` — unknown,
+    never a false escalation.
+  - `AnthologyBoardDriftBanner` (`src/components/anthology/BoardDriftBanner.tsx`) is rewired
+    to key SOLELY on `board_reconcile_converged === false` — the pre-existing raw
+    ledger-vs-board count heuristic (`pass`/`board_cards`) that used to be the banner's
+    entire gate no longer drives it at all (proven by a dedicated real-render test: the old
+    drift shape alone, with `converged` true/absent, now renders nothing). Copy is
+    escalation-only ("automatic repair ran and did NOT converge... no operator action is
+    required") — the banner no longer instructs a manual `mc_board.py reconcile --json` run,
+    matching the unit's "zero operator action" acceptance.
+  - Both check functions and gate mutation-tested (staleness guard, newest-report selection,
+    `converged` type-coercion, banner's strict `=== false` gate) — each mutant confirmed red
+    before the real implementation was confirmed green. 91/91 `deep-health.test.ts` +
+    9/9 new `u79-anthology-selfheal-banner.test.tsx` (added to `vitest.component.config.ts`'s
+    explicit include list so it actually runs in CI, not just locally).
+  - Does NOT touch `src/components/skill6/BoardDriftBanner.tsx` (U27's separate Skill-6
+    banner). Advisory posture unchanged: non-gating, no absolute paths in `detail`
+    (unauthenticated `/api/health/deep` bypass), never shells out to `mc_board.py` from this
+    read path. No fleet roll — repo-side leg only, per standing rule.
+
 ## [v6.0.44] — 2026-07-16 — QC judge-provider-down escalation hatch: closes the six-day silent-failure defect
 
 v6.0.44 — Single unit, single serial merge-writer. Lands `fix/qc-provider-down-escalation-hatch` @

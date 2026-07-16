@@ -891,6 +891,25 @@ export interface BoardProjectionResult extends CheckResult {
   ledger_participants?: number;
   ledger_anthologies?: number;
   board_cards?: number;
+  /**
+   * U79 / GK-17 — the converging-repair signal the ONB leg (merge b62455b1)
+   * now emits: `true` = the last daily-tick reconcile fully converged (zero
+   * deferred/error subjects); `false` = it ran but did NOT converge — the
+   * ONLY condition the drift banner (AnthologyBoardDriftBanner) may escalate
+   * on; `null` = unknown (no report, unparseable, stale, or a legacy runner
+   * that never captured stdout) and must NEVER escalate. See
+   * readLatestBoardReconcileSignal().
+   */
+  board_reconcile_converged?: boolean | null;
+  /** The report's own `board_reconcile.status` string, when available
+   *  ("reconciled" | "unconverged" | "error" | "skipped"), for diagnostics. */
+  board_reconcile_status?: string;
+  /** Age of the newest report in whole seconds, when its `utc` field parsed. */
+  board_reconcile_age_seconds?: number;
+  /** True when the newest report is older than BOARD_RECONCILE_REPORT_STALE_MS
+   *  (or its age could not be determined) — staleness forces `converged` to
+   *  null regardless of what the report payload says. */
+  board_reconcile_stale?: boolean;
 }
 
 /**
@@ -909,6 +928,104 @@ export function resolveAnthologyStateDbPath(): string {
 
   const home = process.env.HOME || os.homedir();
   return path.join(home, '.anthology-engine', 'state', 'anthology_state.db');
+}
+
+/**
+ * U79 / GK-17 — resolve the daily tick's report directory: the SAME state
+ * dir resolveAnthologyStateDbPath() already uses (ANTHOLOGY_STATE_DIR >
+ * OPENCLAW_DATA_DIR/anthology-engine/state > ~/.anthology-engine/state),
+ * with a `reports` subdirectory appended — mirroring report_dir() /
+ * default_state_dir() in 59-anthology-engine/scripts/anthology-smoke-test.py
+ * exactly (report_dir() = default_state_dir() / "reports"). No new
+ * configuration surface: this is read-only reuse of an existing resolver.
+ */
+export function resolveAnthologyReportsDir(): string {
+  return path.join(path.dirname(resolveAnthologyStateDbPath()), 'reports');
+}
+
+/**
+ * The newest `smoke-test-*.json` filename stamp is
+ * `%Y%m%dT%H%M%SZ` (fixed-width UTC), so lexicographic sort ==
+ * chronological order — no fs.stat() mtime read needed.
+ */
+const SMOKE_TEST_REPORT_RE = /^smoke-test-\d{8}T\d{6}Z\.json$/;
+
+/**
+ * Staleness window for a `board_reconcile` report: guard-cron-inventory.py
+ * enforces exactly ONE recurring daily-tick cron entry (no heartbeat / sub-
+ * daily trigger), so a healthy box produces one fresh report roughly every
+ * 24h. 48h (2x cadence) tolerates a single missed/delayed run without
+ * treating the install as abandoned, while still aging out a report from an
+ * install whose daily tick has genuinely stopped running — a stale report's
+ * `converged` value describes a repair attempt from a stale point in time
+ * and must never drive today's banner.
+ */
+const BOARD_RECONCILE_REPORT_STALE_MS = 48 * 60 * 60 * 1000;
+
+export interface BoardReconcileSignal {
+  converged: boolean | null;
+  status?: string;
+  ageSeconds?: number;
+  stale: boolean;
+}
+
+/**
+ * U79 / GK-17 — read the newest daily-tick report and extract the
+ * `board_reconcile.converged` signal the ONB leg (merge b62455b1) now emits
+ * (mc_board.py:768 `_reconcile_sweep()`, persisted by
+ * anthology-smoke-test.py's persist_report() to
+ * `<state_dir>/reports/smoke-test-<UTC-stamp>.json`, contract
+ * "anthology-smoke-test-report" schema_version 1). Fully fail-soft: a
+ * missing reports dir, no matching files, unparseable JSON, an unexpected
+ * shape, or a STALE report all resolve to `converged: null` — "unknown",
+ * never a false escalation. This is a pure filesystem read; it never shells
+ * out to mc_board.py (that would let an unauthenticated caller of
+ * /api/health/deep trigger a board-writing subprocess — see
+ * findMcBoardScript()'s doc comment).
+ */
+export function readLatestBoardReconcileSignal(): BoardReconcileSignal {
+  const unknown: BoardReconcileSignal = { converged: null, stale: false };
+  try {
+    const reportsDir = resolveAnthologyReportsDir();
+    if (!fs.existsSync(reportsDir)) return unknown;
+
+    const entries = fs.readdirSync(reportsDir).filter((f) => SMOKE_TEST_REPORT_RE.test(f));
+    if (entries.length === 0) return unknown;
+    entries.sort();
+    const newest = entries[entries.length - 1];
+
+    const raw = fs.readFileSync(path.join(reportsDir, newest), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return unknown;
+    const report = parsed as Record<string, unknown>;
+
+    const utcMs = typeof report.utc === 'string' ? Date.parse(report.utc) : NaN;
+    const hasAge = Number.isFinite(utcMs);
+    const ageSeconds = hasAge ? Math.max(0, Math.round((Date.now() - utcMs) / 1000)) : undefined;
+    // No parseable timestamp at all is treated as stale — never trust an
+    // undated report's converged value.
+    const stale = hasAge ? ageSeconds! * 1000 > BOARD_RECONCILE_REPORT_STALE_MS : true;
+
+    const br = report.board_reconcile;
+    const status =
+      br && typeof br === 'object' && typeof (br as Record<string, unknown>).status === 'string'
+        ? ((br as Record<string, unknown>).status as string)
+        : undefined;
+
+    if (stale) {
+      // Missing/stale/unparseable = unknown, never escalate — even if the
+      // stale payload itself says converged:false.
+      return { converged: null, status, ageSeconds, stale: true };
+    }
+
+    if (!br || typeof br !== 'object') return { converged: null, status, ageSeconds, stale: false };
+    const rawConverged = (br as Record<string, unknown>).converged;
+    const converged = rawConverged === true ? true : rawConverged === false ? false : null;
+    return { converged, status, ageSeconds, stale: false };
+  } catch {
+    // Fail-soft: an unreadable/corrupt report is UNKNOWN, never a drift signal.
+    return unknown;
+  }
 }
 
 /**
@@ -952,11 +1069,28 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
   // because the operator banner needs them to distinguish drift from idle.
   const ledgerDbPath = resolveAnthologyStateDbPath();
 
+  // U79 / GK-17 — always attempt to read the daily tick's converged signal,
+  // independent of whether THIS box's ledger mirror exists: the report file
+  // and the ledger DB share a resolver but are read separately, so reading
+  // one never depends on the other being present. Fully fail-soft (see
+  // readLatestBoardReconcileSignal()) — this call can never throw or block.
+  const reconcileSignal = readLatestBoardReconcileSignal();
+  const reconcileFields: Pick<
+    BoardProjectionResult,
+    'board_reconcile_converged' | 'board_reconcile_status' | 'board_reconcile_age_seconds' | 'board_reconcile_stale'
+  > = {
+    board_reconcile_converged: reconcileSignal.converged,
+    board_reconcile_status: reconcileSignal.status,
+    board_reconcile_age_seconds: reconcileSignal.ageSeconds,
+    board_reconcile_stale: reconcileSignal.stale,
+  };
+
   if (!fs.existsSync(ledgerDbPath)) {
     // Not provisioned on this box at all — legitimate PASS, not UNKNOWN.
     return {
       pass: true,
       detail: 'anthology_board_projection: OK — Anthology Engine not provisioned on this box; not applicable',
+      ...reconcileFields,
     };
   }
 
@@ -989,6 +1123,7 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
       pass: false,
       indeterminate: true,
       detail: 'anthology_board_projection: ledger mirror present but could not be read (locked, mid-write, or corrupt) — UNKNOWN',
+      ...reconcileFields,
     };
   }
 
@@ -1017,6 +1152,7 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
       ledger_participants: ledgerParticipants,
       ledger_anthologies: ledgerAnthologies,
       detail: "anthology_board_projection: could not read this box's task board (locked or unavailable) — UNKNOWN",
+      ...reconcileFields,
     };
   }
 
@@ -1029,6 +1165,7 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
       ledger_anthologies: ledgerAnthologies,
       board_cards: boardCards,
       detail: 'anthology_board_projection: OK — ledger is empty, no anthology work queued (healthy-idle, not drift)',
+      ...reconcileFields,
     };
   }
 
@@ -1040,6 +1177,12 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
     // the board banner runs mc_board.py from their own known install location;
     // findMcBoardScript() is retained (exported, unit-tested) for authenticated
     // CLI/diagnostic callers that are not this endpoint.
+    //
+    // NOTE (U79/GK-17): this raw-count comparison remains the coarse,
+    // zero-vs-nonzero heuristic it always was — it is NOT the authoritative
+    // signal any longer. `board_reconcile_converged` above (from mc_board.py's
+    // own per-subject reconcile sweep) is what AnthologyBoardDriftBanner
+    // actually keys off; this `pass`/`detail` pair stays informational.
     return {
       pass: false,
       indeterminate: false,
@@ -1047,6 +1190,7 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
       ledger_anthologies: ledgerAnthologies,
       board_cards: 0,
       detail: `anthology_board_projection: DRIFT — ledger holds ${ledgerParticipants} participant(s) + ${ledgerAnthologies} anthology row(s) but the board shows 0 anthology card(s) (dead board, not idle). Run: mc_board.py reconcile --json`,
+      ...reconcileFields,
     };
   }
 
@@ -1056,6 +1200,7 @@ export function checkAnthologyBoardProjection(): BoardProjectionResult {
     ledger_anthologies: ledgerAnthologies,
     board_cards: boardCards,
     detail: `anthology_board_projection: OK — ledger holds ${ledgerTotal} row(s), board shows ${boardCards} anthology card(s) (projecting)`,
+    ...reconcileFields,
   };
 }
 

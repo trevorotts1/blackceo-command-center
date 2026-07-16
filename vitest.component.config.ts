@@ -38,6 +38,11 @@ export default defineConfig({
       // "Show deprecated/stale" toggle + a visible ModelCard badge, real
       // render proof.
       'tests/unit/u50-model-catalog-honesty-render.test.tsx',
+      // U79 (GK-17) — AnthologyBoardDriftBanner rewired to the ONB leg's
+      // converged signal: renders ONLY when board_reconcile_converged===false,
+      // never on the old pre-U79 pass/board_cards drift shape alone (proves
+      // the rewire), real render proof.
+      'tests/unit/u79-anthology-selfheal-banner.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
