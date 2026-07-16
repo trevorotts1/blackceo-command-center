@@ -1,3 +1,55 @@
+## [v6.0.44] — 2026-07-16 — QC judge-provider-down escalation hatch: closes the six-day silent-failure defect
+
+v6.0.44 — Single unit, single serial merge-writer. Lands `fix/qc-provider-down-escalation-hatch` @
+`71af8b54` (PR #192, score 9.0/gate 8.5, independent Opus zero-trust review). PR was a draft opened
+only to force CI; marked ready-for-review before this merge.
+
+- **The defect this closes:** a healthy provider's reply could be reported as an outage. The old
+  `try/catch` wrapped the network call AND the response parse together, so any parse failure was
+  caught by the network-error handler and mislabeled "provider-down." Root cause: a reasoning judge
+  model returns `content: ''` with a populated `reasoning` field when its completion budget is too
+  small (the shipped default was 300 tokens) — the provider answered, but the code blamed the
+  network. This produced a six-day silent retry loop with no page reaching a human.
+- **What lands:** the `try` now wraps ONLY the network call; the parse sits outside it and is
+  classified into three distinct, correctly-named failure kinds — `unreachable` (network genuinely
+  failed), `empty-response` (provider answered, budget starved it), `malformed-response` (provider
+  answered, reply unparseable) — each asserted only when actually observed. Judge completion budget
+  raised via one shared resolver (`resolveJudgeMaxTokens()`, default 2048, floor 300) consumed by
+  both the scorer and the health probe, closing a second copy of the same starvation bug in the
+  probe's own `max_tokens: 5`. Retry is bounded (~12 passes / ~1 hour) before a terminal
+  `[QC-JUDGE-FAILED-FINAL]` event permanently excludes the task from further silent retries and
+  triggers a real page — a Rescue Rangers webhook plus an operator-only Telegram DM via the
+  existing `notifySystem` 3-rung escalation (structurally incapable of reaching a client, per the
+  `validOperatorChatId` inverse guard) — carrying the scorer's verbatim diagnosis and a concrete
+  fix prescription (raise `QC_JUDGE_MAX_TOKENS`, or switch judge model) rather than a generic alert.
+  Auth-vs-unreachable is now typed (`OllamaCloudHttpError.status`), not string-matched. 13 files,
+  +1549/-123, one work commit.
+- **Mutation-proven, with the holes disclosed rather than hidden:** 11 mutants run against the new
+  suites — 8 caught (budget regression, mislabel regression, escalation-bound disabled, permanent
+  exclusion removed, the page itself deleted, the probe's twin budget bug restored, probe
+  mislabeling restored); **3 survived**, all recorded as non-blocking test-coverage gaps rather than
+  shipped defects (board-hygiene's force-score exclusion is real but the paging test's fixture can
+  never reach the code path it's meant to guard; the `heuristic.reason` override at the call site
+  has no dedicated regression test; the diagnosis fixture uses `finish_reason: 'length'` on the
+  starved-empty path where the real provider reportedly uses `'stop'`). All shipped behavior is
+  correct on every path the reviewer could test — the gaps are in what would catch a *future*
+  regression, not in what ships today. Two **pre-existing sibling lies** in `failClosed()`
+  (unrelated call sites that still append "no LLM API key configured" when a key may in fact be
+  configured) were also found and are **not** fixed by this PR — routed as a follow-up, not
+  invented as new scope here.
+- **Fleet roll is explicitly NOT authorized by this merge.** The same defect is live on 21 boxes.
+  This lands the repo-side fix only; rolling it to any box — including the operator's own — is a
+  separate, Trevor-gated decision on his own timing. Nothing here schedules or performs a roll.
+
+**Gate proof, re-run by this merge-writer on the merged tree:** `npx tsc --noEmit` → exit 0. The
+three new/extended suites together → 23/23 pass (`qc-judge-failure-diagnosis-and-escalation.test.ts`
+10/10, `qc-judge-failed-paging.test.ts` 4/4, `p1-05-qc-judge-probe.test.ts` 9/9). `npm run build`
+(no `DATABASE_PATH`) → exit 0, zero `mission-control.db*` left behind. CI on the PR head
+(`gh api .../commits/71af8b54.../check-runs`): 20/20 `conclusion: success`.
+
+No secret values, no client names, no box identifiers in this ripple. No Anthropic model
+added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.43] — 2026-07-16 — U109 CC leg (E5-4, closes G2c): regression lock on the workspace-reseed additive-only invariant
 
 v6.0.43 — Single unit, single serial merge-writer. Lands `skill6-v2/U109` @ `b1f8f99f` (PR #195,
