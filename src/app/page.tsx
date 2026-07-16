@@ -295,14 +295,18 @@ export default function HomePage() {
       cta: 'Open Producer Board',
     },
     {
+      // GK-15 / U77: retargeted from the workspace Kanban board
+      // (/workspace/podcast) to the transplanted read-only client dashboard
+      // (/podcast) — the KPI row, 9-segment pipeline meter, episode drawer,
+      // and credit-out queue with the 60-day age meter, not a board.
       slug: 'podcast',
       title: 'Podcast',
       description: 'Episodes and production',
-      detail: 'The Podcast department board — episodes moving through production, from planning to publish. Manage and approve podcast work in one Kanban.',
+      detail: 'The podcast production dashboard — a KPI row, the 9-segment pipeline meter, and the episode queue with its 60-day age meter, all reading live from the production engine.',
       icon: <Mic className="w-7 h-7 text-white" />,
       gradient: 'from-orange-400 via-amber-500 to-red-500',
-      route: '/workspace/podcast',
-      cta: 'Open Podcast Board',
+      route: '/podcast',
+      cta: 'Open Podcast Dashboard',
     },
   ];
 
