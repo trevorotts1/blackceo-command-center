@@ -135,6 +135,65 @@ Every fleet-wide op (version/skill rolls, CC pushes, config/secret propagation, 
 - AFTER: `<your-op> | python3 ~/clawd/accounts/fleet-coverage-gate.py --touched -` — any roster member not in the touched-set is a HARD STOP; unreachable boxes are recorded `DOWN <reason>`, never silently omitted.
 - `accounts.md` = human source of truth; `fleet-roster.json` = machine copy (accounts.md wins on conflict). Add/remove a client → update accounts.md + fleet-roster.json + heartbeat ROSTER + box-registry.json + `changelog.md` per `ADD-A-FLEET-CLIENT.md`, then run the gate. Why it exists (2026-06-29): Beverly Grandison (Contabo) + Dr. Stephanie Brown (own Hostinger) were silently skipped by rolls that built rosters from Hostinger+Mac only.
 
+### 📋 MASTER FLEET LIST — canonical source is `accounts/fleet-roster.json`; count must equal `fleet-coverage-gate.py` (currently 36). Keep in sync.
+Every box Trevor operates, one place to look. **36 total** = 10 Hostinger VPS + 2 Contabo + 23 Mac (via CF tunnel) + 1 operator box. Derived from `~/clawd/accounts/fleet-roster.json` (the enforced machine copy); on any disagreement `accounts.md` wins and this list is reconciled to it. Last synced here: 2026-07-15.
+
+**Hostinger VPS (10)**
+
+| Box slug | Client |
+|---|---|
+| `openclaw-hy5t` | Corey Sams |
+| `openclaw-qxqt` | Maria Anderson (VPS) |
+| `openclaw-0ht9` | Beverly Sanders |
+| `openclaw-c54p` | Evelyn Bethune |
+| `openclaw-prji` | Angela Tennison |
+| `openclaw-lydh` | Angeleen |
+| `openclaw-jdbv` | Monique Tucker |
+| `openclaw-4pkz` | Lyric Hawkins (VPS) |
+| `openclaw-h7rp` | Dr. Tola |
+| `openclaw-a3go` | Dr. Stephanie Brown |
+
+**Contabo (2)**
+
+| Box slug | Client |
+|---|---|
+| `oc-trevor` | Trevor (BlackCEO Staff Clawspace / test — Contabo) |
+| `oc-beverly-grandison` | Beverly Grandison (Premier Health & Wellness — Contabo) |
+
+**Mac via CF tunnel (23)**
+
+| Box slug | Client |
+|---|---|
+| `teresa-pelham` | Teresa Pelham |
+| `rescue-kofi-bryant` | Kofi Bryant |
+| `rescue-cassandra-henriquez` | Cassandra Henriquez |
+| `rescue-karen-vaughn` | Karen Vaughn |
+| `rescue-jill-bulluck` | Jill Bulluck |
+| `rescue-sheila-reynolds` | Sheila Reynolds |
+| `rescue-aurelia-gardner` | Aurelia Gardner (Mac mini) |
+| `rescue-aurelia-gardner-macbookpro` | Aurelia Gardner (MacBook Pro) |
+| `rescue-lyric-hawkins` | Lyric Hawkins (Mac mini) |
+| `rescue-leanne-dolce` | LeAnne Dolce |
+| `rescue-sonatta-camara` | Sonatta Camara |
+| `rescue-talaya-kelley` | Talaya Kelley |
+| `rescue-stephanie-wall` | Stephanie Wall |
+| `rescue-jocelyn-mcclure` | Jocelyn McClure |
+| `rescue-barret-matthews` | Barret Matthews (MacBook Air) |
+| `rescue-barrett-matthews-mini-2026` | Barret Matthews (Mac Mini 2026) |
+| `rescue-maria-anderson` | Maria Anderson (Mac) |
+| `rescue-christy-staples` | Christy Staples |
+| `rescue-erin-garrett` | Erin Garrett |
+| `rescue-star-bobatoon` | Star Bobatoon |
+| `rescue-jennifer-allen` | Jennifer Allen |
+| `rescue-er-spaulding` | E.R. Spaulding — 🛟 RESCUE, added 2026-07-07 (accounts.md §31) |
+| `rescue-eddie-otts` | Eddie Otts — 🛟 RESCUE, added 2026-07-15 (accounts.md §32), SSH user `eddoeotts` (verified, not a typo) |
+
+**Operator (1)**
+
+| Box slug | Client |
+|---|---|
+| `blackceomacmini` | Operator (Trevor — Stefanie) |
+
 ### Contabo VPS — multi-client OpenClaw host (you manage this)
 Box `203382836` @ `109.205.179.254` (16 vCPU/64 GB, Ubuntu 24.04), one isolated Docker container per client. LIVE: `oc-trevor`→18802, `oc-beverly-grandison`→18803 (next free port **18804**). SSH `ssh contabo-host` (key `~/.ssh/contabo_host_ed25519`). Layout `/opt/clients/<slug>/`, container `oc-<slug>`, image PINNED `ghcr.io/openclaw/openclaw:2026.6.8`, tunnel `contabo-agents-host` (id `8c4c8006-c29d-43c8-a36f-f1cf40200cdf`) → `<slug>.agents.zerohumanworkforce.com`. Contabo API = OAuth2 password grant (`CONTABO_*` in secrets `.env`); every request needs an `x-request-id` UUID header. **Iron rule: NEVER share a volume or `.env` between clients — each runs on its OWN funded key.** Gym caps: `mem_limit 16g` + `mem_reservation 1g`, 100 GB/client quota, `cpu_shares 1024`, `pids_limit 1024`. Full guide: TOOLS.md "Contabo VPS" + RUNBOOK §0.
 
@@ -172,9 +231,9 @@ Tell Trevor the whole path up front, then IN ORDER: (1) container `oc-<slug>` on
 ### Rescue Rangers / fleet onboarding
 Client onboarding for remote SSH via the `trevorotts1/rescue-rangers` two-paste flow (install → Cloudflare tunnel → connector + hardening → Access app + service token + `~/.ssh/config` + fleet register → smoke test). **Do NOT drive from memory or a stale doc** — the canonical walkthrough is the operator-only `fleet-onboarding` skill (`~/.openclaw/skills/fleet-onboarding/`, master box ONLY; deliberately EXCLUDED from every fan-out / `update-skills.sh` / client install — never propagate). Registration mechanics: `ADD-A-FLEET-CLIENT.md`; roster: `accounts.md`.
 - **INTENT ROUTING:** on any fuzzy onboarding ask ("add someone to the fleet", "onboard [name]", "new client", "get [name]'s Mac/VPS connected", "rescue install for X"), your FIRST action = LOAD + START the `fleet-onboarding` skill at P0 INTAKE (collect name / platform Mac|VPS|Contabo-container / phone / email), then let the skill conduct one step at a time. Never hand-improvise install/tunnel/Access/registration. Registration REQUIRES phone AND email — ask, never invent.
-- **SSH config — exact working pattern** (the combined `--service-token id:secret` flag does NOT exist — use two separate flags): `ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h --service-token-id ${CF_ACCESS_<CLIENT>_SVC_CLIENT_ID} --service-token-secret ${CF_ACCESS_<CLIENT>_SVC_CLIENT_SECRET}` — env names match the `CF_ACCESS_<CLIENT>_SVC_*` names in `~/.openclaw/secrets/.env`.
+- **SSH config — exact working pattern** (the combined `--service-token id:secret` flag does NOT exist — use two separate flags; and ssh does NOT auto-source `~/.openclaw/secrets/.env` — the ProxyCommand MUST wrap the call in a shell that sources it itself, or cloudflared sees empty service-token vars and silently falls back to an interactive BROWSER Access login popup instead of the headless flow — this exact omission broke Eddie Otts's onboarding 2026-07-15, fixed same day): `ProxyCommand sh -c 'set -a; . "$HOME/.openclaw/secrets/.env" 2>/dev/null; set +a; exec /opt/homebrew/bin/cloudflared access ssh --hostname %h --service-token-id "$CF_ACCESS_<CLIENT>_SVC_ID" --service-token-secret "$CF_ACCESS_<CLIENT>_SVC_SECRET"'` — env names match the short-name `CF_ACCESS_<CLIENT>_SVC_ID` / `_SVC_SECRET` convention actually used in `~/.openclaw/secrets/.env` (NOT the older long-name `_SVC_CLIENT_ID`/`_SVC_CLIENT_SECRET` seen on a few pre-2026-07 Host blocks).
 - **Gotcha — don't over-diagnose a DOWN client.** rc255 (`Connection closed by UNKNOWN port 65535`) flaps on Mac-tunnel clients are usually TRANSIENT and self-recover — a client can look *persistently* down for 3+ cycles and still come back untouched (Aurelia Gardner + Sonatta Camara 2026-07-07; Talaya Kelley 2026-07-10). Confirm across 3+ checks before escalating. A Mac **laptop** showing gateway DOWN but SSH OK = the gateway LaunchAgent needs a GUI login session and CANNOT be started remotely over SSH — not a tunnel/Access fault; it self-recovers when the user logs in (Barret Matthews 2026-07-10). Only a *persistent* rc255 with a healthy tunnel means the Access app policy is missing that client's service-token id (PATCH the include list — operator-level, flag don't auto-apply).
-- **Gotcha — heartbeat notes are NOT evidence; the ledger is.** Never hand-count fleet totals or downtime. 2026-07-11 notes drifted Christy Staples to "5+ days" down when `fleet-heartbeat/state/down-since.tsv` said 3.5, and reported roster sizes of 32/33/35/37/38 against the real **34**-entry `probe-fleet.sh ROSTER`. Truth = the ledger (`<client>\t<first_down_epoch>\t<last_chronic_alert_epoch>`) + ROSTER, never prose from a prior cycle. Chronic-DOWN escalation is AUTOMATIC at 5 days (`CHRONIC_AFTER_SECS`, 7-day re-page backoff) — don't narrate "not escalating," the script owns that call.
+- **Gotcha — heartbeat notes are NOT evidence; the ledger is.** Never hand-count fleet totals or downtime. 2026-07-11 notes drifted Christy Staples to "5+ days" down when `fleet-heartbeat/state/down-since.tsv` said 3.5, and reported roster sizes of 32/33/35/37/38 against the real **34**-entry `probe-fleet.sh ROSTER` (historical figure — that WAS the true count on 2026-07-11; the roster has since grown to **36** with E.R. Spaulding (07-07) and Eddie Otts (07-15) — see MASTER FLEET LIST above for the current count). Truth = the ledger (`<client>\t<first_down_epoch>\t<last_chronic_alert_epoch>`) + ROSTER, never prose from a prior cycle. Chronic-DOWN escalation is AUTOMATIC at 5 days (`CHRONIC_AFTER_SECS`, 7-day re-page backoff) — don't narrate "not escalating," the script owns that call.
 
 ### Trevor's standing preferences
 - **Timezones — default America/New_York (ET) [CRITICAL]:** convert every API timestamp (Zoom/Google/Stripe/GHL) to ET before showing Trevor — "1:05 PM ET", never raw UTC/"Z". Append "(UTC: …)" for non-ET sources in past-meeting summaries. Applies to all fleet agents.
