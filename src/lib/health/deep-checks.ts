@@ -1262,3 +1262,81 @@ export function checkSkill6BoardProjection(): Skill6BoardProjectionResult {
     detail: `skill6_board_projection: OK — ${runDirs.length} run(s) completed intake, ${landedTaskIds.length} card(s) landed and confirmed on the board (projecting)`,
   };
 }
+
+// ── check: trust-coverage health metric (U94 / X.2.3) ───────────────────────
+//
+// "Requester-stamping completeness at every human creation door + a
+// trust-coverage health metric >= 95%." The three enumerated doors
+// (Command-Center UI create, Telegram/CEO-chat ingest, interview-driven
+// department provisioning) each tag their own task_created event with a
+// SEPARATE `requester_stamp_check` event (see src/lib/tasks.ts createTaskCore
+// and src/app/api/departments/route.ts createDepartmentInDbDirect) recording
+// whether THAT call landed a requester stamp — independent of the tasks
+// table's requester_channel/requester_chat_id columns, so the ratio can never
+// be circular (a door that never fires this event is a producer/operator
+// create and correctly stays OUT of the denominator, per "producer-created
+// tasks keep the operator-digest fallback").
+export interface TrustCoverageResult extends CheckResult {
+  human_door_total?: number;
+  human_door_stamped?: number;
+  coverage_pct?: number;
+}
+
+/** The X.2.3 floor: coverage below this on a box with real traffic is DRIFT. */
+export const TRUST_COVERAGE_MIN_PCT = 95;
+
+export function checkTrustCoverage(): TrustCoverageResult {
+  try {
+    const db = getDb();
+    const totalRow = db
+      .prepare(`SELECT COUNT(*) as c FROM events WHERE type = 'requester_stamp_check'`)
+      .get() as { c: number } | undefined;
+    const total = totalRow?.c ?? 0;
+
+    if (total === 0) {
+      // No human-door creation has ever fired on this box — legitimate PASS
+      // (nothing to measure yet), never a false DRIFT on a fresh install.
+      return {
+        pass: true,
+        human_door_total: 0,
+        human_door_stamped: 0,
+        coverage_pct: 100,
+        detail:
+          'trust_coverage: OK — no human-door task creations recorded yet on this box; nothing to measure',
+      };
+    }
+
+    const stampedRow = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM events
+          WHERE type = 'requester_stamp_check'
+            AND json_extract(metadata, '$.hasRequester') = 1`,
+      )
+      .get() as { c: number } | undefined;
+    const stamped = stampedRow?.c ?? 0;
+
+    const pct = Math.round((stamped / total) * 10000) / 100;
+    const pass = pct >= TRUST_COVERAGE_MIN_PCT;
+
+    return {
+      pass,
+      human_door_total: total,
+      human_door_stamped: stamped,
+      coverage_pct: pct,
+      detail: pass
+        ? `trust_coverage: OK — ${stamped}/${total} human-door task(s) (${pct}%) carry a requester stamp (>= ${TRUST_COVERAGE_MIN_PCT}% floor)`
+        : `trust_coverage: DRIFT — only ${stamped}/${total} human-door task(s) (${pct}%) carry a requester stamp (< ${TRUST_COVERAGE_MIN_PCT}% floor)`,
+    };
+  } catch (err) {
+    // Never fabricate a verdict on a read failure (locked/unavailable DB) —
+    // degrade to UNKNOWN, non-gating, same posture as every other advisory
+    // check in this file.
+    return {
+      pass: true,
+      indeterminate: true,
+      detail: `trust_coverage: advisory probe unavailable — ${
+        err instanceof Error ? err.message : String(err)
+      } (UNKNOWN; non-gating)`,
+    };
+  }
+}

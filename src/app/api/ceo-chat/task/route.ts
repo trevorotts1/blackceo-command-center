@@ -181,6 +181,11 @@ export async function POST(request: NextRequest) {
         // trust engine's ceo-chat channel reports back into THIS transcript.
         requester_channel: CEO_CHAT_CHANNEL,
         requester_chat_id: sessionId,
+        // U94 (X.2.3) — this door is the ceo-chat half of the "Telegram/
+        // CEO-chat ingest" enumerated door for the trust-coverage health
+        // metric (checkTrustCoverage()). Always known-human: requester_chat_id
+        // above is deterministic, never conditional, on this route.
+        humanDoorId: 'ceo-chat',
         eventMessage: `Task captured via My AI CEO delegate control: ${title}`,
       },
       { origin: request.headers.get('origin') },
