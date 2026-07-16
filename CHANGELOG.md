@@ -1,3 +1,47 @@
+## [v6.0.49] — 2026-07-16 — Provider defects: Ollama Cloud base-URL 404 + auth-proof model_not_found mislabel
+
+v6.0.49 — Single unit, single serial merge-writer. Lands `fix/ollama-cloud-baseurl-and-authproof-model-not-found-20260716`
+@ `3878ae77` (PR #196, score 9.0/gate 8.5, independent Sonnet zero-trust review). This is a
+FRESH, RECONCILED review of `3878ae77` — the original `d7e4e68b` review (8.9) is superseded;
+that SHA no longer exists in repo history (the original diff conflicted with PR #192/v6.0.44
+and was rebased+reconciled onto it as this single commit). PR was a draft opened only to force
+CI; marked ready-for-review before this merge.
+
+- **Two real defects fixed, both root-caused.** (1) `research/providers.ts` defaulted
+  `OLLAMA_CLOUD_BASE_URL` to `https://ollama.com/api`, which 404s (`curl` live-verified:
+  `{"error":"path \"/api/v1/models\" not found"}`), while `model-providers/ollama-cloud.ts`
+  separately defaulted to the correct host — a two-files-two-defaults split. Both now resolve
+  through one new `resolveOllamaCloudBaseUrl()` module. (2) the auth-proof failure classifier
+  mislabeled `model_not_found` as a whole-key `auth` rejection; it now distinguishes
+  empty-response, malformed-response, auth, and model_not_found kinds, retrying
+  `model_not_found` across up to 3 catalogued models before giving up.
+- **One instruction override, disclosed not buried:** told to default the base URL to the local
+  daemon (127.0.0.1:11434), the builder defaulted to the hosted host instead, reasoned in the
+  module's own docstring (most fleet boxes are Docker/VPS with no signed-in daemon; a loopback
+  default 500s everywhere there). The daemon route is fully preserved as an opt-in override.
+  Flagged for Trevor's explicit sign-off as a policy decision, not silently blessed as routine.
+- Full unit suite reproduces the commit's exact claimed numbers: `1674/1669/5` on the merged
+  tree (branch alone: `1649/1644/5`), the 5 failures the same pre-existing `getInterviewState`
+  failures verified BY NAME on a pristine v6.0.44 worktree — environmental, unrelated to this
+  PR. New test file re-run standalone: 14/14. `tsc --noEmit` and `eslint` on all 7 changed
+  source files: clean. Migration 106 checked for collision against the merged tree's full
+  migration table: 104 entries, max id 106, zero duplicates.
+- CI 20/20 green on the exact head SHA (paginated GraphQL check-suites/check-runs cross-check,
+  corroborated by `gh pr checks`; the REST `commits/{sha}/check-runs` endpoint was returning
+  transient 5xx across the whole repo at merge time, confirmed not SHA-specific by testing it
+  against `origin/main`'s own tip). Zero AI-authorship trailers; author/committer both Trevor
+  Otts <trevor@blackceo.com> on the sole commit. Merge-clean against current main (v6.0.48)
+  verified via `git merge --no-commit --no-ff` dry run, zero conflicts.
+- **One residual, non-blocking, pre-existing risk carries forward unchanged (not introduced or
+  fixed by this PR):** `proveProviderAuth` still returns immediately on an `auth` (401/403)
+  classification without trying a second catalogued model, so a per-model permission/gating 403
+  on the FIRST catalogued model would still misreport as a whole-key rejection — a narrower echo
+  of the exact defect class this PR closes on the 404 path. No current provider was found to
+  exhibit this; tracked as hardening, not urgent.
+- **Repo bug-fix, not a numbered spec unit — does not change the /117 all-legs count either way.**
+
+Ticket: `~/skill6-merge-queue/CC/provider-defects-fix.json`.
+
 ## [v6.0.48] — 2026-07-16 — U51 (HL/U66) dead-heartbeat / exit-3 fix: a red box could not alert before this
 
 v6.0.48 — Single unit, single serial merge-writer. Lands `fix/u51-heartbeat-exit3-and-ledger` @
