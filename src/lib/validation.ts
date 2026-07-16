@@ -96,6 +96,16 @@ export const CreateTaskSchema = z.object({
   department: z.string().optional(),
   due_date: z.string().optional().nullable(),
   sop_id: z.string().uuid().optional().nullable(),
+  // U94 (X.2.3) — Command-Center UI create is one of the three enumerated
+  // requester-stamping doors (trust-engine report-back loop). Optional/
+  // nullable, matching assigned_agent_id/due_date above: a caller that knows
+  // which human this task is for (e.g. a future "on behalf of" picker, or an
+  // operator relaying a specific client's ask) can now attach that identity
+  // at create time instead of it being silently dropped. Absent/null on a
+  // normal operator create — that task correctly stays unstamped and falls
+  // back to the operator digest (never a client-facing send).
+  requester_channel: z.string().min(1).max(64).optional().nullable(),
+  requester_chat_id: z.string().min(1).max(128).optional().nullable(),
 });
 
 export const UpdateTaskSchema = z.object({

@@ -609,6 +609,10 @@ export interface CreateTaskRequest {
   department?: string;
   workspace_id?: string;
   sop_id?: string | null;
+  // U94 (X.2.3) — requester-stamping completeness, in lockstep with
+  // CreateTaskSchema (src/lib/validation.ts). See that field's comment.
+  requester_channel?: string | null;
+  requester_chat_id?: string | null;
 }
 
 export interface UpdateTaskRequest extends Partial<CreateTaskRequest> {
