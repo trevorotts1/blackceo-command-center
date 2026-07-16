@@ -47,94 +47,92 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as Response;
 }
 
-/** Asserts the banner never renders for the given advisory payload — polls
- *  briefly (the effect is async) then confirms the testid never appeared. */
-async function expectNoBanner(advisory: unknown): Promise<void> {
-  global.fetch = stubFetch(() => jsonResponse({ advisory })) as unknown as typeof fetch;
+/** Renders the banner against a given fetch stub and asserts it never
+ *  appears — polls briefly (the effect is async) then confirms the testid
+ *  never showed up. */
+async function expectNoBannerWithStub(handler: () => Promise<Response> | Response | 'error'): Promise<void> {
+  const fetchStub = stubFetch(handler);
+  global.fetch = fetchStub as unknown as typeof fetch;
   render(<AnthologyBoardDriftBanner />);
-  // Give the effect's fetch/then chain a real microtask/macrotask turn.
-  await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+  await waitFor(() => expect(fetchStub).toHaveBeenCalled());
   await new Promise((r) => setTimeout(r, 10));
   expect(screen.queryByTestId('anthology-selfheal-banner')).toBeNull();
 }
 
+// The pre-U79 drift shape shared by two of the table rows below: the OLD
+// banner's entire gate (pass:false, board_cards:0, ledger rows>0). Reused
+// verbatim so the only variable between those two rows is the new
+// board_reconcile_converged field — proving the rewire actually decoupled
+// the banner from this shape.
+const OLD_DRIFT_SHAPE = {
+  pass: false,
+  indeterminate: false,
+  ledger_participants: 5,
+  ledger_anthologies: 2,
+  board_cards: 0,
+  detail:
+    'anthology_board_projection: DRIFT — ledger holds 5 participant(s) + 2 anthology row(s) but the board shows 0 anthology card(s) (dead board, not idle). Run: mc_board.py reconcile --json',
+};
+
 describe('AnthologyBoardDriftBanner — U79/GK-17 converged-only gate', () => {
-  it('renders nothing when advisory.anthology_board_projection is absent', async () => {
-    await expectNoBanner(undefined);
-  });
-
-  it('renders nothing when board_reconcile_converged is true', async () => {
-    await expectNoBanner({
-      anthology_board_projection: {
-        pass: true,
-        detail: 'anthology_board_projection: OK — ledger holds 6 row(s), board shows 6 anthology card(s) (projecting)',
-        board_reconcile_converged: true,
+  // All rows here share identical setup (fetch resolves { advisory }) and an
+  // identical assertion (banner never renders) — only the advisory payload
+  // varies. Data-driven per test-guard Rule 3 rather than six near-duplicate
+  // test bodies.
+  it.each<[string, unknown]>([
+    ['advisory.anthology_board_projection is absent', undefined],
+    [
+      'board_reconcile_converged is true',
+      {
+        anthology_board_projection: {
+          pass: true,
+          detail: 'anthology_board_projection: OK — ledger holds 6 row(s), board shows 6 anthology card(s) (projecting)',
+          board_reconcile_converged: true,
+        },
       },
-    });
-  });
-
-  it('renders nothing when board_reconcile_converged is null (unknown — legacy runner / no report / stale)', async () => {
-    await expectNoBanner({
-      anthology_board_projection: {
-        pass: true,
-        detail: 'anthology_board_projection: OK — ledger holds 6 row(s), board shows 6 anthology card(s) (projecting)',
-        board_reconcile_converged: null,
+    ],
+    [
+      'board_reconcile_converged is null (unknown — legacy runner / no report / stale)',
+      {
+        anthology_board_projection: {
+          pass: true,
+          detail: 'anthology_board_projection: OK — ledger holds 6 row(s), board shows 6 anthology card(s) (projecting)',
+          board_reconcile_converged: null,
+        },
       },
-    });
-  });
-
-  it('renders nothing when board_reconcile_converged is entirely absent from the advisory object', async () => {
-    await expectNoBanner({
-      anthology_board_projection: {
-        pass: true,
-        detail: 'anthology_board_projection: OK — Anthology Engine not provisioned on this box; not applicable',
+    ],
+    [
+      'board_reconcile_converged is entirely absent from the advisory object',
+      {
+        anthology_board_projection: {
+          pass: true,
+          detail: 'anthology_board_projection: OK — Anthology Engine not provisioned on this box; not applicable',
+        },
       },
-    });
+    ],
+    // REWIRE proof (acceptance-critical): the pre-U79 shape used to be the
+    // banner's ENTIRE gate. Post-rewire it must be COMPLETELY inert on its
+    // own — the banner must key off board_reconcile_converged alone.
+    [
+      'old pre-U79 drift shape (pass:false/board_cards:0) with board_reconcile_converged:true — proves the rewire',
+      { anthology_board_projection: { ...OLD_DRIFT_SHAPE, board_reconcile_converged: true } },
+    ],
+    [
+      'old pre-U79 drift shape (pass:false/board_cards:0) with board_reconcile_converged absent (no report yet)',
+      { anthology_board_projection: OLD_DRIFT_SHAPE },
+    ],
+  ])('renders nothing: %s', async (_label, advisory) => {
+    await expectNoBannerWithStub(() => jsonResponse({ advisory }));
   });
 
-  // REWIRE proof (acceptance-critical): the pre-U79 shape (pass:false,
-  // indeterminate:false, board_cards:0, ledger rows>0) used to be the banner's
-  // ENTIRE gate. Post-rewire it must be COMPLETELY inert on its own — the
-  // banner must key off board_reconcile_converged alone.
-  it('renders NOTHING for the old pre-U79 drift shape (pass:false/board_cards:0) when board_reconcile_converged is true — proves the rewire', async () => {
-    await expectNoBanner({
-      anthology_board_projection: {
-        pass: false,
-        indeterminate: false,
-        ledger_participants: 5,
-        ledger_anthologies: 2,
-        board_cards: 0,
-        detail: 'anthology_board_projection: DRIFT — ledger holds 5 participant(s) + 2 anthology row(s) but the board shows 0 anthology card(s) (dead board, not idle). Run: mc_board.py reconcile --json',
-        board_reconcile_converged: true,
-      },
-    });
-  });
-
-  it('renders NOTHING for the old pre-U79 drift shape when board_reconcile_converged is absent (no report yet)', async () => {
-    await expectNoBanner({
-      anthology_board_projection: {
-        pass: false,
-        indeterminate: false,
-        ledger_participants: 5,
-        ledger_anthologies: 2,
-        board_cards: 0,
-        detail: 'anthology_board_projection: DRIFT — ledger holds 5 participant(s) + 2 anthology row(s) but the board shows 0 anthology card(s) (dead board, not idle). Run: mc_board.py reconcile --json',
-      },
-    });
-  });
-
-  it('renders nothing on a fetch network failure (fail-soft, preserved)', async () => {
-    global.fetch = stubFetch(() => 'error') as unknown as typeof fetch;
-    render(<AnthologyBoardDriftBanner />);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(screen.queryByTestId('anthology-selfheal-banner')).toBeNull();
-  });
-
-  it('renders nothing on a non-ok HTTP response (fail-soft, preserved)', async () => {
-    global.fetch = stubFetch(() => jsonResponse({}, false)) as unknown as typeof fetch;
-    render(<AnthologyBoardDriftBanner />);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(screen.queryByTestId('anthology-selfheal-banner')).toBeNull();
+  // Same assertion, two different fetch-failure MODES (throw vs ok:false) —
+  // kept as a small table rather than a single case since the stub shape
+  // genuinely differs, not just a value.
+  it.each<[string, () => Promise<Response> | Response | 'error']>([
+    ['a fetch network failure', () => 'error'],
+    ['a non-ok HTTP response', () => jsonResponse({}, false)],
+  ])('renders nothing on %s (fail-soft, preserved)', async (_label, handler) => {
+    await expectNoBannerWithStub(handler);
   });
 
   it('renders the escalation banner ONLY when board_reconcile_converged is false — the fixture repair-path-broken case', async () => {

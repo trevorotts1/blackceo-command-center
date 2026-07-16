@@ -1922,46 +1922,50 @@ describe('anthology_board_projection', () => {
       expect(result.board_reconcile_converged).toBeNull();
     });
 
-    it('newest report has converged:true → surfaced as true', async () => {
+    // Pure value-mapping cases: identical setup (one ledger, one report, same
+    // db mock), differing only in the report's `board_reconcile` payload and
+    // the expected `board_reconcile_converged` output. Data-driven per
+    // test-guard Rule 3 rather than five near-duplicate test bodies.
+    it.each<[string, unknown, boolean | null]>([
+      [
+        'converged:true → surfaced as true',
+        { status: 'reconciled', exit: 0, converged: true, counts: { synced: 2, deferred: 0, error: 0 } },
+        true,
+      ],
+      [
+        'converged:false (fresh report) → surfaced as false, the ONLY escalation signal',
+        { status: 'unconverged', exit: 0, converged: false, counts: { synced: 1, deferred: 1, error: 0 } },
+        false,
+      ],
+      [
+        'converged:null (legacy runner, exit-code-only) → surfaced as null, must NEVER escalate',
+        { status: 'reconciled', exit: 0, converged: null },
+        null,
+      ],
+      [
+        // A truthy-but-non-boolean value must NOT be read as "converged:true"
+        // (or worse, as a truthy escalation) by a loose type coercion.
+        'converged is a non-boolean value (malformed report) → coerced to null, never escalate',
+        { status: 'reconciled', exit: 0, converged: 'yes' },
+        null,
+      ],
+      [
+        // writeSmokeTestReport({ boardReconcile: undefined }) still sets the
+        // key present-with-undefined, which JSON.stringify then OMITS —
+        // exactly reproducing a report with no board_reconcile field at all
+        // (e.g. a reconcile:false run).
+        'board_reconcile missing entirely from the report → null',
+        undefined,
+        null,
+      ],
+    ])('%s', async (_label, boardReconcile, expectedConverged) => {
       const stateDir = path.join(tmpDir, 'anthology-state');
       makeAnthologyLedger(stateDir, { participants: 2 });
-      writeSmokeTestReport(stateDir, {
-        boardReconcile: { status: 'reconciled', exit: 0, converged: true, counts: { synced: 2, deferred: 0, error: 0 } },
-      });
+      writeSmokeTestReport(stateDir, { boardReconcile });
       vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
       const { checkAnthologyBoardProjection } = await loadChecks();
       const result = checkAnthologyBoardProjection();
-      expect(result.board_reconcile_converged).toBe(true);
-    });
-
-    it('newest FRESH report has converged:false → surfaced as false (the ONLY escalation signal)', async () => {
-      const stateDir = path.join(tmpDir, 'anthology-state');
-      makeAnthologyLedger(stateDir, { participants: 2 });
-      writeSmokeTestReport(stateDir, {
-        boardReconcile: {
-          status: 'unconverged',
-          exit: 0,
-          converged: false,
-          counts: { synced: 1, deferred: 1, error: 0 },
-        },
-      });
-      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(1));
-      const { checkAnthologyBoardProjection } = await loadChecks();
-      const result = checkAnthologyBoardProjection();
-      expect(result.board_reconcile_converged).toBe(false);
-      expect(result.board_reconcile_stale).not.toBe(true);
-    });
-
-    it('converged:null (legacy runner, exit-code-only) → surfaced as null, must NEVER escalate', async () => {
-      const stateDir = path.join(tmpDir, 'anthology-state');
-      makeAnthologyLedger(stateDir, { participants: 2 });
-      writeSmokeTestReport(stateDir, {
-        boardReconcile: { status: 'reconciled', exit: 0, converged: null },
-      });
-      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
-      const { checkAnthologyBoardProjection } = await loadChecks();
-      const result = checkAnthologyBoardProjection();
-      expect(result.board_reconcile_converged).toBeNull();
+      expect(result.board_reconcile_converged).toBe(expectedConverged);
     });
 
     it('STALE report with converged:false → surfaced as null (missing/stale/unparseable = unknown, never escalate)', async () => {
@@ -1985,28 +1989,6 @@ describe('anthology_board_projection', () => {
       vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
       const { checkAnthologyBoardProjection } = await loadChecks();
       expect(() => checkAnthologyBoardProjection()).not.toThrow();
-      const result = checkAnthologyBoardProjection();
-      expect(result.board_reconcile_converged).toBeNull();
-    });
-
-    it('board_reconcile.converged is a non-boolean value (malformed report) → coerced to null, never escalate', async () => {
-      const stateDir = path.join(tmpDir, 'anthology-state');
-      makeAnthologyLedger(stateDir, { participants: 2 });
-      // A truthy-but-non-boolean value must NOT be read as "converged:true"
-      // (or worse, as a truthy escalation) by a loose type coercion.
-      writeSmokeTestReport(stateDir, { boardReconcile: { status: 'reconciled', exit: 0, converged: 'yes' } });
-      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
-      const { checkAnthologyBoardProjection } = await loadChecks();
-      const result = checkAnthologyBoardProjection();
-      expect(result.board_reconcile_converged).toBeNull();
-    });
-
-    it('report missing board_reconcile entirely (e.g. reconcile:false run) → null', async () => {
-      const stateDir = path.join(tmpDir, 'anthology-state');
-      makeAnthologyLedger(stateDir, { participants: 2 });
-      writeSmokeTestReport(stateDir, {}); // no boardReconcile key at all
-      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
-      const { checkAnthologyBoardProjection } = await loadChecks();
       const result = checkAnthologyBoardProjection();
       expect(result.board_reconcile_converged).toBeNull();
     });
