@@ -1,3 +1,49 @@
+## [v6.0.43] — 2026-07-16 — U109 CC leg (E5-4, closes G2c): regression lock on the workspace-reseed additive-only invariant
+
+v6.0.43 — Single unit, single serial merge-writer. Lands `skill6-v2/U109` @ `b1f8f99f` (PR #195,
+score 8.8/gate 8.5, independent Opus zero-trust review).
+
+- **What it guards against:** a client's departments being silently wiped — replaced instead of
+  merged — by a second provisioning run or a partial interview against a shrunk `departments.json`.
+  The onboarding-repo half of this unit fixes the writer that could cause that; this leg is the
+  Command Center's own read-side lock.
+- **No production change was needed on this leg, and that's the point.** The reviewer read
+  `reseedWorkspacesFromConfig` end to end (`src/lib/db/migrations.ts`) and confirmed it was already
+  additive-only: the only write is `INSERT ... ON CONFLICT(id) DO UPDATE` — no `DELETE`, no
+  "reconcile to the manifest" truncation anywhere in the function. A department missing from a
+  shrunk manifest is simply never visited by the reseed loop, so its workspace row survives
+  untouched. This merge-writer independently re-derived that same finding by reading the function
+  directly (`grep`-free python scan: zero `DELETE FROM workspaces`, confirmed `ON CONFLICT(id) DO
+  UPDATE` present) rather than trusting the ticket's claim.
+- **What lands:** one new regression case appended to the existing
+  `tests/unit/floor-department-invariant.test.ts` suite — seed a full manifest, reseed against a
+  smaller one, assert the previously-provisioned departments absent from the smaller manifest
+  survive untouched (`created: 0`, board unchanged), naming the four departments that must survive
+  so the failure message is diagnostic rather than a bare set-mismatch. 1 file, +41/-0.
+- **Mutation-proven, not just green:** because this leg changes zero production code, a
+  fail-then-pass cycle would prove nothing — the test passes identically before and after. The
+  reviewer instead mutated `reseedWorkspacesFromConfig` to inject a reconcile-`DELETE` (exactly the
+  "manifest is the source of truth, prune the rest" pattern a future refactor could plausibly
+  introduce) and confirmed the suite went red specifically on the new U109 assertion, with the other
+  5 pre-existing tests in the file staying green. Converts an invariant that held by accident into
+  one enforced by CI.
+- **CI-wiring verified, not assumed:** `floor-department-invariant.test.ts` is explicitly excluded
+  from the `test:unit` node-runner glob but is named in `vitest.config.ts`'s `include` array and
+  runs under the `B.1 deep-health truth table (vitest)` GitHub Actions job — one of the 20 green
+  check-runs, not dead code.
+- **U109 is NOT fully shipped by this merge.** The onboarding-repo half (the actual write-side
+  guard) scored 7.9 and was sent back with defects; it is not landing today and is a different
+  repo's writer's concern. This CC leg locks an invariant that already held and has zero dependency
+  on that fix, so it is correct and safe to land on its own merit — but the unit as a whole remains
+  half-shipped until the onboarding leg lands separately.
+
+**Gate proof, re-run by this merge-writer on the merged tree:** `npx tsc --noEmit` → exit 0.
+`npx vitest run tests/unit/floor-department-invariant.test.ts` → 6/6 pass, including the named U109
+case. CI on the PR head (`gh api .../commits/b1f8f99f.../check-runs`): 20/20 `conclusion: success`.
+
+No secret values, no client names, no box identifiers in this ripple. No Anthropic model
+added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.42] — 2026-07-16 — U59 CC leg (D15 Option A): Devil's Advocate write path — migration 024, POST /api/da-challenges, demo-seed purge
 
 v6.0.42 — Single unit, single serial merge-writer. Lands `skill6-v2/U59-cc-d15` @ `6490fe8a`
