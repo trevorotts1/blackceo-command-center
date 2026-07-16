@@ -1,3 +1,54 @@
+## [v6.0.42] — 2026-07-16 — U59 CC leg (D15 Option A): Devil's Advocate write path — migration 024, POST /api/da-challenges, demo-seed purge
+
+v6.0.42 — Single unit, single serial merge-writer. Lands `skill6-v2/U59-cc-d15` @ `6490fe8a`
+(PR #193, score 8.8/gate 8.5, independent Opus zero-trust review) — the exact scored commit, not
+the branch's later tip (`d0f3558`, a post-score self-correction to a vocabulary claim, deliberately
+left unmerged since it postdates this score).
+
+- **The defect this closes:** `GET /api/da-challenges` seeded demo rows naming `department_id`,
+  `challenge_text`, `response_text`, `response_deadline` — four columns no migration has ever
+  created (`schema.ts` no longer defines the table at all). The route's INSERT against the real
+  schema raises `no column named ...`, caught into an HTTP 500 on **every single request** — the
+  Devil's Advocate feed has never once rendered on a canonically migrated box. Root cause: migration
+  020 no-ops on the legacy table and defers to migration 024, which was reserved by an earlier PR and
+  never implemented (id sequence jumps `021 → 025`).
+- **What lands:** migration 024 in its reserved slot (reconciles both canonical and legacy shapes
+  onto one table, adds `department_id` + `raw_response`, moves status to the PRD lifecycle,
+  `deferInAdditiveSelfHeal`, all indexes replayed); `POST /api/da-challenges` matching the bridge's
+  wire contract field-for-field (closes a dangling integration — the ONB-side bridge already POSTs
+  here); deletes the demo seed rather than repairing it (never functional — fires only on an empty
+  table, and its INSERT cannot execute against any migrated shape, so it has only ever produced a
+  500 — nothing to repair, an empty feed is the honest result); moves the feed component to the
+  reconciled shape and PRD statuses. 4 files, +651/-111.
+- **Provenance (D15/D-J1 — content-visibility ruling, separate from the code):** the underlying
+  decision — that Devil's Advocate challenge *content* surfaces on client boards while the *agent*
+  stays internal — was originally ratified by a coordinating agent under a claimed standing
+  autonomy directive, not by Trevor. This merge-writer refused to land the branch on two independent
+  grounds: no recorded score, and provenance (merging is the act that first puts this content on a
+  client board). Both gaps were closed on durable, independently-read evidence, not on say-so: the
+  score at `~/skill6-merge-queue/CC/U59.json` (8.8, full category breakdown, judge-reproduced
+  regression/schema/mutation proof), and the ratification at commit `84c0ead3` in
+  `openclaw-onboarding:ledgers/ratified-decisions-2026-07-16.md` — Trevor's own binding-spec file,
+  migrated out of an agent-ratified quarantine file only after he ratified it himself, with an
+  explicit attestation-limit disclosure preserved rather than laundered into a stronger claim than
+  the evidence supports. Both artifacts were read directly by this merge-writer, not summarized.
+- **Known non-blocking defects, owned by a separate agent on a separate branch, deliberately NOT
+  fixed here:** stale department display-color/name maps in the feed component keyed to the deleted
+  seed's fabricated ids (client-visible, cosmetic — renders a gray chip with the raw id instead of a
+  colored/labeled one); a missing `COALESCE` on the legacy challenge-text migration expression,
+  proven unreachable on the real legacy DDL; a dead `persona` render branch; one inaccurate sentence
+  in the original PR body about the status-vocabulary count (independently corrected on the branch
+  post-score, not part of this merge).
+- **Gate proof, re-run by this merge-writer on the merged tree:** `npx tsc --noEmit` → exit 0.
+  `tests/unit/u59-da-challenges-round-trip.test.ts` → 9/9 pass (real GET/POST handlers, real
+  NextRequest, real better-sqlite3 persistence — not mocked). `npm run build` with no
+  `DATABASE_PATH` set → exit 0, zero `mission-control.db*` left behind (C8 guard intact through this
+  merge too). CI on the PR head (`gh api .../commits/6490fe8a.../check-runs`): 20/20
+  `conclusion: success`.
+
+No secret values, no client names, no box identifiers in this ripple. No Anthropic model
+added/removed/substituted anywhere in the shipped code.
+
 ## [v6.0.41] — 2026-07-16 — Dual-repo leg reconciliation: U93 (retired-term scrub) + U100 (mc_board six / Skill 35 advisory projections)
 
 v6.0.41 — Single batched ripple, single serial merge-writer. Two units land whose Command Center legs were
