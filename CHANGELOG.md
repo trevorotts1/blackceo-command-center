@@ -1,3 +1,58 @@
+## [v6.0.54] — 2026-07-16 — U116 (E6-2, closes G8) CC leg: comms-audience board chip — BINARY (e)
+
+v6.0.54 — Single unit, single serial merge-writer. Lands `skill6-v2/U116-cc-leg` @ `1e65a94`
+(PR #201, score 8.9/gate 8.5, independent Sonnet zero-trust review). PR was a draft opened
+only to force CI; marked ready-for-review before this merge.
+
+- **What lands:** `CommsAudienceChip` renders the chosen standard-vs-specific comms audience
+  on the board card, reading `task.comms_audience_source` — a deliberately distinct column
+  from migration 090's `task.audience_source` (different vocabulary, different provenance;
+  the two fields legitimately coexist on the same bundle and must never collapse into one
+  column, a name-collision trap the judge independently verified is correctly avoided).
+- **Scope confirmed, not inherited:** BINARY acceptance (a)-(d) are ONB-side, already landed
+  and scored 9.0 (`openclaw-onboarding` @ `f9ddcf29`, verbatim: "CC leg (board-card audience
+  chip, BINARY e) OWED — ONB leg only"). This leg builds ONLY (e).
+- **Every fail-then-pass and mutation-test number independently re-derived** by the judge;
+  two of three mutations broke MORE tests than the author's own PR body claimed (5/10 not 4,
+  2/10 not 1) — the author undercounted its own coverage, in the safe direction, not a defect.
+  94/94 component (at QC time), 1640/1645 node:test (5 pre-existing `interview-detection`
+  flakes, identical on parent and fix). No unratified D4/D7–D22 decision touched.
+- **MERGE-WRITER CONFLICT RESOLUTION — migration id collision, resolved by renumbering**
+  (per the judge's own flagged mandatory pre-merge step): this branch was scored/built with
+  its new migration at id `106`. Between QC and this merge, main independently landed TWO
+  other migrations that would have collided at that id: provider-defects-fix's real
+  migration 106 (already on main since v6.0.49), and U115's own migration (originally scored
+  as 106, renumbered to 107 earlier in this same batch, v6.0.51). None of this was
+  foreseeable at U116's authoring time — its commit predates the colliding
+  provider-defects-fix merge by 5+ hours. Renumbered to the next free id, `108`, per
+  `migrations.ts`'s own DATA-03 duplicate-id fail-fast guard. Neither U116 test asserts on
+  the numeric id, only on column existence via `PRAGMA table_info`. All in-file comment
+  references to "migration 106" within U116's own files were updated to "108"; one stale
+  reference to U115's ORIGINAL id (predating this batch's own U115 renumber) was also
+  corrected from 106 to 107 in `TaskCard.tsx`'s docstring. **Extra verification beyond the
+  standard gate re-run:** ran migration 108's `up()` body against a constructed pre-existing
+  DB shape (migrations 106+107 already applied, a real row present) — 2 columns added,
+  preexisting row survived with migration 090's `audience_source` untouched and the new
+  columns NULL, `_migrations` records exactly one row for `108` and one each for `106`/`107`.
+  `vitest.component.config.ts`'s include-array conflict (adjacent append, same shape as
+  U12/U79) resolved by keeping all entries; verified all 13 expected test files remain
+  registered.
+- Merged-tree gate re-run: `tsc --noEmit` clean; U116's own suites 10/10 (node:test persist)
+  + 10/10 (component render); full `test:unit` (node:test) 1712/1717 (5 pre-existing
+  `getInterviewState` environmental failures, unrelated); `test:component` 128/128 across 15
+  files; `lint` clean; `build` clean. 20/20 CI green on the exact head SHA (unauthenticated
+  REST + `gh pr checks` cross-check).
+- **Known, disclosed, non-blocking:** the live CC→`persona-selector-v2.py` spawn does not yet
+  call `build_comms_trigger`, so `comms_audience_source`/`comms_type` will be null on every
+  real task until that ONB-side seam is wired — explicitly out of scope for this leg, matching
+  the already-accepted A-U5/`scope_hint` precedent already shipped in this same codebase (the
+  same producer-wiring gap class as U11/U115).
+- **Repo/surface = `both` per master spec §E.2.** U116's ONB leg is already merged
+  (`f9ddcf29`, scored 9.0). This CC leg is the second and final leg — **U116 is now fully
+  landed across both repos, moving the /117 count 96 → 97.**
+
+Ticket: `~/skill6-merge-queue/CC/U116.json`.
+
 ## [v6.0.53] — 2026-07-16 — U12 (A/A-U12) CC leg: persona_match deep-health advisory + persona_grounding_degraded board chip
 
 v6.0.53 — Single unit, single serial merge-writer. Lands `skill6-v2/U12` @ `d9649e5` (PR #206,
