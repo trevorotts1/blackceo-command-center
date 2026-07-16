@@ -4,6 +4,7 @@ import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { extractJSON, getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { Task } from '@/lib/types';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -26,8 +27,18 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
   let dispatchError: string | null = null;
   let firstAgentId: string | null = null;
 
+  // Captured BEFORE the transaction below so the U99-RAW-STATUS-WRITER audit
+  // calls record the true observed from-status (this route only reaches here
+  // from an active planning session, i.e. status='planning', but we read it
+  // rather than assume it).
+  const priorStatus = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId])?.status ?? 'planning';
+
   // Wrap all database operations in a transaction for atomicity
   // Set status to 'pending_dispatch' first - don't mark as complete until dispatch succeeds
+  // U99-RAW-STATUS-WRITER: compound single-row UPDATE (planning_messages /
+  // planning_spec / planning_agents must land atomically with the status
+  // flip); audited via recordStatusEvent (DISP-10) right after `transaction()`
+  // returns below, once the commit is known to have succeeded.
   const transaction = db.transaction(() => {
     // Update task with completion data but keep planning_complete = 0 until dispatch succeeds
     db.prepare(`
@@ -73,6 +84,10 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
 
   // Execute the transaction to create agents and set pending_dispatch status
   firstAgentId = transaction();
+  recordStatusEvent(taskId, priorStatus, 'pending_dispatch', {
+    actor: 'planning-poll',
+    reason: 'planning session reported complete',
+  });
 
   // Re-check for other orchestrators before dispatching (prevents race condition)
   if (firstAgentId) {
@@ -141,6 +156,10 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
   }
 
   // Final transaction: mark as complete or store error for retry
+  // U99-RAW-STATUS-WRITER: both success branches compound status with
+  // planning_complete/assigned_agent_id in one atomic UPDATE; each is audited
+  // via recordStatusEvent (DISP-10) right after the transaction commits below
+  // (the dispatchError branch does not touch status — no audit needed there).
   db.transaction(() => {
     if (dispatchError) {
       // Store the error but don't mark as complete - user can retry
@@ -152,6 +171,9 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
       `).run(dispatchError, taskId);
     } else if (firstAgentId) {
       // Success - mark complete and assign
+      // U99-RAW-STATUS-WRITER: see the block comment above `db.transaction(`
+      // — audited via recordStatusEvent (DISP-10) right after this
+      // transaction commits.
       db.prepare(`
         UPDATE tasks
         SET planning_complete = 1,
@@ -164,6 +186,9 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
       console.log(`[Planning Poll] Planning complete and dispatched to agent ${firstAgentId}`);
     } else {
       // No agent to dispatch to, but planning is complete
+      // U99-RAW-STATUS-WRITER: see the block comment above `db.transaction(`
+      // — audited via recordStatusEvent (DISP-10) right after this
+      // transaction commits.
       db.prepare(`
         UPDATE tasks
         SET planning_complete = 1,
@@ -174,6 +199,12 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
       `).run(taskId);
     }
   })();
+  if (!dispatchError) {
+    recordStatusEvent(taskId, 'pending_dispatch', 'backlog', {
+      actor: 'planning-poll',
+      reason: firstAgentId ? 'planning dispatched to agent' : 'planning complete, no agent to dispatch',
+    });
+  }
 
   // Broadcast task update
   const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);

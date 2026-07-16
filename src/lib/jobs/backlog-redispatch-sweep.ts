@@ -50,6 +50,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { broadcast } from '@/lib/events';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task } from '@/lib/types';
 
 export interface BacklogRedispatchResult {
@@ -102,7 +103,12 @@ function escalateStuckBacklogTask(
     `escalating to blocked for operator action. Likely a config problem or an unresolved hold the executor ` +
     `cannot clear by retrying.`;
 
-  run(
+  // U99-RAW-STATUS-WRITER: compound single-row UPDATE (the block_* metadata
+  // must land atomically with the status flip, mirroring recordDispatchFailure);
+  // audited immediately below via recordStatusEvent (DISP-10). The `changes`
+  // count also gates the audit call so a lost CAS race (another advancer moved
+  // the task off backlog first) never writes a false task_events row.
+  const escalateRes = run(
     `UPDATE tasks
         SET status = 'blocked',
             block_reason = ?,
@@ -119,6 +125,12 @@ function escalateStuckBacklogTask(
       row.id,
     ],
   );
+  if ((escalateRes.changes ?? 0) > 0) {
+    recordStatusEvent(row.id, 'backlog', 'blocked', {
+      actor: 'backlog-redispatch-sweep',
+      reason: `re-dispatch cap: ${priorCount} attempts over ≥${hours}h`,
+    });
+  }
 
   // Operator-feed events (SYSTEM audience → no client Telegram, per silent-updates doctrine).
   run(
