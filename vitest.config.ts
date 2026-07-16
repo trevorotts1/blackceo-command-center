@@ -77,6 +77,12 @@ export default defineConfig({
       // own file to avoid that file's documented shared-mock-registry gotcha —
       // vitest-only, never the tsx --test glob (see package.json).
       'tests/unit/skill6-board-projection.test.ts',
+      // U100 — the "mc_board six" + Skill 35 cycle-manifest producer-reconcile
+      // advisories (checkMcBoardSixProducerProjection() / checkSkill35CycleProjection()).
+      // Same vi.doMock('@/lib/db', ...) + vi.resetModules() re-import pattern as
+      // skill6-board-projection.test.ts above, kept in its own file for the same
+      // shared-mock-registry reason — vitest-only, never the tsx --test glob.
+      'tests/unit/mc-board-producer-projection.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

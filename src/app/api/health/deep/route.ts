@@ -25,6 +25,13 @@
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
  *     "anthology_board_projection": { "pass": bool, "detail": string, ... },
  *     "skill6_board_projection":    { "pass": bool, "detail": string, ... }, // U27 / B-U13
+ *     "mc_board_49_signature_funnel_projection":     { "pass": bool, "detail": string, ... }, // U100
+ *     "mc_board_50_email_engine_projection":         { "pass": bool, "detail": string, ... }, // U100
+ *     "mc_board_53_book_writer_projection":          { "pass": bool, "detail": string, ... }, // U100
+ *     "mc_board_55_product_bio_projection":          { "pass": bool, "detail": string, ... }, // U100
+ *     "mc_board_56_sales_page_assets_projection":    { "pass": bool, "detail": string, ... }, // U100
+ *     "mc_board_57_social_media_in_a_box_projection":{ "pass": bool, "detail": string, ... }, // U100
+ *     "skill35_cycle_projection":    { "pass": bool, "detail": string, ... }, // U100
  *     "sweep_liveness":             { "pass": bool, "detail": string, ... },
  *     "notification_failures_log":  { "pass": bool, "detail": string, ... }, // U102 / C12.3 item 10b
  *     "trust_coverage":             { "pass": bool, "detail": string, ... }  // U94 / X.2.3
@@ -50,6 +57,12 @@
  *   again: the size of the MSG-07 undeliverable ledger is an operational
  *   signal (something downstream of notify.ts needs attention), never a
  *   Command Center correctness fault.
+ *   The `mc_board_*_projection` (the "mc_board six") and `skill35_cycle_
+ *   projection` fields (U100) generalize the SAME B-U13/U27 pattern to the
+ *   remaining fail-soft productized-skill producers — non-gating for the
+ *   identical reason: a board-ingest drift there is an operational signal
+ *   (an evidence_root caller not yet wired, or a board outage for one run),
+ *   never a Command Center correctness fault.
  *
  * Exit / HTTP semantics:
  *   200 + pass=true              → green
@@ -69,6 +82,9 @@ import {
   checkNextPublicAppUrl,
   checkAnthologyBoardProjection,
   checkSkill6BoardProjection,
+  checkMcBoardSixProducerProjection,
+  checkSkill35CycleProjection,
+  MC_BOARD_SIX_PRODUCERS,
   checkNotificationFailuresLog,
   checkTrustCoverage,
 } from '@/lib/health/deep-checks';
@@ -142,6 +158,40 @@ export async function GET() {
         pass: true,
         indeterminate: true,
         detail: `skill6_board_projection: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    // U100 — the "mc_board six" producer-reconcile advisories. Same isolation
+    // posture as the skill6/anthology blocks above: EACH producer gets its
+    // OWN try/catch so a throw in one producer's probe can never take down
+    // another producer's field or reach the outer catch (which would return
+    // 500 + pass:false and trip auto-rollback). Non-gating (B-U13: "never
+    // flips a box red").
+    for (const producer of MC_BOARD_SIX_PRODUCERS) {
+      try {
+        advisory[producer.key] = checkMcBoardSixProducerProjection(producer);
+      } catch (advErr) {
+        advisory[producer.key] = {
+          pass: true,
+          indeterminate: true,
+          detail: `${producer.key}: advisory probe unavailable — ${
+            advErr instanceof Error ? advErr.message : String(advErr)
+          } (UNKNOWN; non-gating)`,
+        };
+      }
+    }
+
+    // U100 — Skill 35's cycle-manifest variant of the same producer-reconcile
+    // pattern. Same isolation posture as every advisory block in this file.
+    try {
+      advisory.skill35_cycle_projection = checkSkill35CycleProjection();
+    } catch (advErr) {
+      advisory.skill35_cycle_projection = {
+        pass: true,
+        indeterminate: true,
+        detail: `skill35_cycle_projection: advisory probe unavailable — ${
           advErr instanceof Error ? advErr.message : String(advErr)
         } (UNKNOWN; non-gating)`,
       };
