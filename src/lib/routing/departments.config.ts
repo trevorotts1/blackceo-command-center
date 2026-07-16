@@ -863,7 +863,7 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
   // (general-task-recurrence.ts) watches patterns in tasks that land here and
   // recommends standing up a dedicated dept when >3/month recur.
   //
-  // D-C2 (master spec v2) — SLUG vs DISPLAY NAME: the slug `id: 'general-task'`
+  // D-C2 (master spec v2) — SLUG vs DISPLAY NAME: the slug (below, general-task)
   // is FROZEN — routing (this file), the ingest fallbacks
   // (ingest/route.ts INGEST-06 + tier-4), migration 059's sort-order pin, and
   // the recurrence detector above all key on it. ONLY the client-facing `name`
