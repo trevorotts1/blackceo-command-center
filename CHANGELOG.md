@@ -1,3 +1,60 @@
+## [v6.0.55] — 2026-07-16 — U110 (E5-5, G2d — CC leg; ONB caller-wiring owed): board wiring for a below-floor department set, round-3 send-back fixes
+
+v6.0.55 — Single unit, single serial merge-writer. Lands `skill6-v2/U110` @ `25ba6c6`
+(PR #197, score 9.2/gate 8.5, independent Sonnet zero-trust review, round 3 — up from
+6.8 → 8.2 → 9.2). PR was a draft opened only to force CI; GitHub auth was locally broken
+(invalid keyring token, known and pre-existing, not touched or rotated) so the draft flag
+and the PR's stale title/body could not be synced via `gh` — landed anyway per explicit
+instruction that this is a merge-writer chore, not a gate. Landed via direct `git push` to
+`main` using the working `osxkeychain`-backed git credential (independent of `gh`'s broken
+keyring token); GitHub auto-closes the PR once the commit lands on the base branch.
+
+- **What lands:** `archive.ts`'s `listChosenDepartmentIds` now carries two independent Sets
+  (`declinedNorm`, `optoutNorm`) — only the opt-out-file side consults
+  `isDepartmentOptoutExempt()`, matching `syncDeclinedWorkspaceArchive`'s no-exemption
+  decline-pass exactly. A new static call-site guard (`scripts/guard-department-optout-wiring.ts`
+  + a 6-case mutation-proof test + its own CI workflow, mirroring the repo's established
+  `guard-raw-status-writers.ts` convention) closes the blind spot that previously let a full
+  revert of `converge/route.ts` to its pre-U110 shape pass 6/6 with `tsc` clean — re-verified
+  on this merged tree: the guard script and its CI test both pass clean against the live wiring.
+- **D1/D4-R2 correction carried forward, restated here:** this fix has ZERO standalone
+  production value. Pristine main converges 200 on the same fixture — the 500 the fix
+  removes was a regression introduced by this same unit's own round 1, not a pre-existing
+  production bug. This leg undoes a self-inflicted regression; it does not repair production.
+- **Merge-writer conflict resolution — `package.json` `test:unit` exclusion list**, same
+  adjacent-append shape as U12/U79/U116: resolved as the union of main's addition
+  (`u12-a-persona-grounding-health.test.ts`) and this branch's own addition
+  (`department-optout-board-wiring.test.ts`) — both DB-backed suites kept excluded from the
+  `node:test` glob and still run via `vitest.config.ts`'s own `include` array (verified all
+  19 entries present, no sibling dropped). `vitest.component.config.ts` was untouched by this
+  branch and required no resolution (still holds all 15 entries). No migration in this PR —
+  no id-collision risk.
+- Merged-tree gate re-run (re-verified against current main tip v6.0.54, not round 3's
+  v6.0.52): `tsc --noEmit` clean; `eslint` clean on all 6 changed/new files; full `lint`
+  clean (only pre-existing, unrelated warnings); `build` clean; the new guard script PASS
+  (all 4 markers present); `vitest run` 287/287 across 19 files; `test:component` 128/128
+  across 15 files; `test:unit` (node:test) 1718/1723 — the 5 failures are the known
+  pre-existing `getInterviewState` failures, confirmed by name, identical set/order to
+  round 3's fresh-main-tip re-run. CI 21/21 green on the exact scored SHA (unauthenticated
+  paginated REST — the invalid-keyring 503 is the same known, non-blocking local credential
+  issue; not touched, not rotated).
+- **Known, disclosed, non-blocking:** two residuals carried forward from round 3 QC, neither
+  required to clear the gate — (a) the new guard's mutation-proof suite proves markers 1/2
+  (the two function-call markers) only via the bundled full-revert case, not an isolated
+  mutation each (the guard script itself, run every CI push against the real tree, would
+  still catch an isolated deletion); (b) `department-optout-board-wiring.test.ts`'s 6 cases
+  still share mutable DB state and depend on file execution order (matches how vitest and CI
+  actually run it; unrelated to this leg's fix). PR title/body on GitHub remain stale
+  (still read "closes G2d" / round-0 numbers) — disclosed by the builder, not correctable via
+  `gh` this session, a metadata chore not a code defect.
+- **Repo/surface = `both` per master spec §E.2.** U110's ONB leg is a SEPARATE, still-owed
+  branch (draft PR #600 on `openclaw-onboarding`, not yet QC'd) — **this CC leg alone does
+  NOT complete U110 and does NOT move the /117 count.** A unit needs every leg the spec
+  requires; the /117 count stays at whatever it was immediately before this merge until the
+  ONB leg lands and is independently verified.
+
+Ticket: `~/skill6-merge-queue/CC/U110.json`.
+
 ## [v6.0.54] — 2026-07-16 — U116 (E6-2, closes G8) CC leg: comms-audience board chip — BINARY (e)
 
 v6.0.54 — Single unit, single serial merge-writer. Lands `skill6-v2/U116-cc-leg` @ `1e65a94`
