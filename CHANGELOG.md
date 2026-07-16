@@ -1,3 +1,56 @@
+## [v6.0.53] — 2026-07-16 — U12 (A/A-U12) CC leg: persona_match deep-health advisory + persona_grounding_degraded board chip
+
+v6.0.53 — Single unit, single serial merge-writer. Lands `skill6-v2/U12` @ `d9649e5` (PR #206,
+score 9.0/gate 8.5, independent Sonnet zero-trust review — the highest of this batch). PR was
+a draft opened only to force CI; marked ready-for-review before this merge.
+
+- **What lands: blend observability.** `checkPersonaGrounding()` folds a non-gating
+  `persona_match {count, mean, buckets}` advisory into `GET /api/health/deep` — structurally
+  separate from the gating `checks` object, computed before the advisory block runs; box
+  pass/indeterminate is unchanged by any value (proven structurally and behaviorally).
+  `persona-grounding-sweep.ts` registers a real cron job (every 5 min) that fires exactly one
+  cooldown-guarded `persona_grounding_degraded` event on a confirmed degrade, proven against a
+  real isolated DB. `PersonaGroundingBanner` mounts unconditionally in the real workspace page
+  tree and clears on the very next healthy poll on the SAME mounted component instance (not a
+  mount/remount pair, which the PR's own second commit correctly diagnosed as unable to prove
+  the clearing branch).
+- **Not inert:** three genuine, wired production callers — `route.ts`'s GET handler,
+  `scheduler.ts`'s cron registration, and an unconditional mount in `page.tsx`. Notably better
+  than several sibling units this batch that were built atop mechanisms nothing connects.
+- **Every fail-then-pass and mutation-test number claimed in the PR body was independently
+  re-derived exact match** by the judge in a separate scratch worktree: 13/14, 1/1, and a
+  0-tests-collected failure against the parent; all pass at head; 4/4 mutation guards killed,
+  each matching the claimed result precisely.
+- **No unratified-decision violation** — the disclosed "chip clears live, event stays durable"
+  design choice (reconciling ACCEPT (c) against the append-only events-feed convention other
+  advisories use) was checked against the spec's full D4/D7–D22 inventory and touches none of
+  it. Materially different from U44's D8 problem.
+- Regression-safe: full merged-tree re-run — `tsc --noEmit` clean; U12's own suites 14/14
+  (`u12-a-persona-grounding-health.test.ts`, vitest) + 6/6 (`persona-grounding-sweep.test.ts`,
+  node:test) + 8/8 (`u12-a-persona-grounding-chip-render.test.tsx`, component); full
+  `test:unit` (node:test) 1702/1707 (5 pre-existing `getInterviewState` environmental
+  failures, unrelated); full `vitest run` 280/280 across 18 files (includes pre-existing
+  `deep-health.test.ts` 91/91, zero collateral regression); `test:component` 118/118 across 14
+  files; `lint` clean; `build` clean.
+- CI 20/20 green on the exact head SHA (unauthenticated REST + `gh pr checks` cross-check).
+  Zero AI trailers; author/committer both Trevor Otts on both commits.
+- **MERGE-WRITER CONFLICT RESOLUTION — one mechanical, disclosed-in-advance conflict:**
+  branch was cut at v6.0.44; main had moved to v6.0.52 through U107/U115/U79 by merge time.
+  `vitest.component.config.ts`'s include array: this branch and two already-landed siblings
+  (da-chips-fix, U79) each appended one line at the same anchor. Resolved by keeping all
+  entries; verified all 12 expected test files remain registered after resolution (none
+  silently dropped — a careless resolution here would mean a unit's tests never run again).
+  `package.json` auto-merged cleanly (version field untouched by this branch's own diff; the
+  branch's `test:unit` exclusion-list addition for its own DB-backed vitest suite merged in
+  without conflict).
+- **Repo/surface = `CC (+ONB probe)` per master spec §E.2** (a genuine cross-repo
+  code-shipping unit, distinct from the `live (read-only)` and doc-only precedents that do not
+  move the count). U12's ONB probe dependency (`persona_grounding_health_probe.py`) is already
+  merged and independently confirmed present on ONB main. This CC leg is the second and final
+  leg — **U12 is now fully landed across both repos, moving the /117 count 95 → 96.**
+
+Ticket: `~/skill6-merge-queue/CC/U12.json`.
+
 ## [v6.0.52] — 2026-07-16 — U79 (GK-17) CC leg: Anthology self-heal converged-signal consumption + banner rewire
 
 v6.0.52 — Single unit, single serial merge-writer. Lands `u79-gk17-cc-anthology-selfheal-banner`
