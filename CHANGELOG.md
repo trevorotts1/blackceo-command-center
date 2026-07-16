@@ -1,3 +1,41 @@
+## [v6.0.47] — 2026-07-16 — U11 (A/A-U11) CC leg: live operator-approval + board-hygiene surfacing for the winner-harvest flywheel
+
+v6.0.47 — Single unit, single serial merge-writer. Lands `skill6-v2/U11` @ `d618f33` (PR #205,
+score 8.7/gate 8.5, independent Sonnet zero-trust review). PR was a draft opened only to force CI;
+marked ready-for-review before this merge.
+
+- **What lands:** `POST /api/harvest-cards/[id]/approve` (real operator-approval action) plus
+  board-hygiene Rule 8 (surfaces pending harvest cards on the operator's board). `winner-harvest.ts`
+  mirrors the onboarding repo's ledger contract byte-for-byte (card id format, field names, UTC
+  timestamp format) and closes onboarding's own non-atomic read-modify-write race with an atomic
+  temp-file-plus-rename write. The API route derives `client_id` exclusively from a box-derived
+  resolver, never from the request body — verified in source, never read there.
+- **Completes a two-repo unit.** The onboarding leg is already merged and its own module docstring
+  states verbatim that the live operator-approval half is "OWED separately... this is the ONB-only
+  leg." This CC leg is that owed half; U11 is complete across both repos once this lands (91 → 92
+  on the /117 all-legs count).
+- **Disclosed, not hidden: the flywheel this leg approves cards for has no producer anywhere in
+  either repo.** Nothing in ONB's production code calls `run_harvest_sweep`/`propose_harvest_card`
+  outside its own test, and the master spec assigns that producer-wiring responsibility to no unit
+  on either side. Board-hygiene Rule 8 will run every hour, read an empty ledger, and surface
+  nothing — not because anything here is broken, but because no producer exists yet. Both legs are
+  individually correct and safe; the flywheel itself remains functionally inert in production until
+  a future, currently-unowned unit (most naturally on the ONB side, where QC-pass scoring happens)
+  wires a real completion event to the producer. Logged as an owed leg, not papered over.
+- 22 new tests (workspace-resolution, sweep-idempotent, approve-roundtrip, cross-client-isolation),
+  all green; 4/4 targeted mutation-testing guards go RED and are load-bearing. Zero AI-authorship
+  trailers; author/committer both Trevor Otts <trevor@blackceo.com> on the sole commit. CI 20/20
+  green on the exact scored SHA (paginated verification, not the legacy combined-status endpoint).
+  Full unit suite re-run clean on the merged tree post-merge: 1655/1660, the same 5 pre-existing
+  `getInterviewState` failures every other recent CC ticket has logged as environmental — unrelated
+  to this leg, not introduced by it.
+- **Non-blocking, disclosed-unverified:** `resolveHarvestClientId()` is the best available candidate
+  for matching ONB's literal client_id workspace-directory name, but nothing in either repo proves
+  the two strings are identical on a real provisioned box. Fails closed (404, never wrong-client
+  access) if they diverge — a functionality risk, not a security risk.
+
+Ticket: `~/skill6-merge-queue/CC/U11.json`.
+
 ## [v6.0.46] — 2026-07-16 — Devil's Advocate feed: real department-id chips (QC defect 1, round 2)
 
 v6.0.46 — Single unit, single serial merge-writer. Lands `fix/devils-advocate-write-path-qc` @
