@@ -36,11 +36,14 @@ import type {
   SmokeTestResult,
   UsageSnapshot,
 } from './types';
+import { resolveOllamaCloudBaseUrl, OLLAMA_CLOUD_DEFAULT_BASE_URL } from './ollama-cloud-base-url';
 
 const PROVIDER_SLUG = 'ollama-cloud';
 const PROVIDER_DISPLAY_NAME = 'Ollama Cloud';
 
-export const OLLAMA_CLOUD_DEFAULT_BASE_URL = 'https://ollama.com';
+// Re-exported for API stability: callers that imported the default straight
+// off this module (its home before it moved) keep working unchanged.
+export { OLLAMA_CLOUD_DEFAULT_BASE_URL };
 
 /**
  * The base URL is resolved at CALL time, not module-import time.
@@ -52,9 +55,19 @@ export const OLLAMA_CLOUD_DEFAULT_BASE_URL = 'https://ollama.com';
  * live env (and made the failure untestable without real network calls). Call-
  * time resolution keeps `getOllamaCloudBaseUrl()` honest for both the error
  * messages and the escalation the QC scorer now raises.
+ *
+ * The normalization itself (default to the hosted host, strip a legacy `/api`
+ * suffix) is owned by `resolveOllamaCloudBaseUrl()` in `./ollama-cloud-base-url`
+ * — the SINGLE source of truth also consumed by `research/providers.ts`'s
+ * Ollama web-search call site. Two files reading the same env var with two
+ * different defaults (this file's correct `https://ollama.com` vs. the other's
+ * 404-producing `https://ollama.com/api`) was itself a defect; routing both
+ * through one resolver is what keeps that class of bug from recurring. This
+ * function stays call-time so that fix composes with the QC-judge fix above
+ * instead of re-freezing the value the QC judge needs live.
  */
 export function getOllamaCloudBaseUrl(): string {
-  return process.env.OLLAMA_CLOUD_BASE_URL || OLLAMA_CLOUD_DEFAULT_BASE_URL;
+  return resolveOllamaCloudBaseUrl();
 }
 
 const modelsEndpoint = () => `${getOllamaCloudBaseUrl()}/v1/models`;

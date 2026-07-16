@@ -29,7 +29,7 @@
  *   `choices[].message.annotations[]` of type `url_citation`. Scope: web.
  *
  * OLLAMA CLOUD  (https://ollama.com / OpenAI-compatible per the repo connector)
- *   POST https://ollama.com/api/v1/chat/completions  with the hosted
+ *   POST https://ollama.com/v1/chat/completions  with the hosted
  *   `web_search` tool declared in `tools` and `tool_choice:"auto"`. Bearer
  *   OLLAMA_CLOUD_API_KEY. The model calls the tool, we surface tool-result
  *   URLs as citations. Scope: web search via Ollama's hosted tool.
@@ -42,6 +42,7 @@
 
 import fs from 'fs/promises';
 
+import { resolveOllamaCloudBaseUrl } from '@/lib/model-providers/ollama-cloud-base-url';
 import type { ResearchProviderSlug } from './provider-discovery';
 
 export interface ResearchCitation {
@@ -219,7 +220,11 @@ async function runOpenAI(p: RunSearchParams): Promise<ResearchProviderResult> {
 async function runOllama(p: RunSearchParams): Promise<ResearchProviderResult> {
   const fixture = await readFixture<ChatEnvelope>('OLLAMA_FIXTURE_JSON_PATH');
   const { timeoutMs } = breadth(p.depth);
-  const baseUrl = process.env.OLLAMA_CLOUD_BASE_URL || 'https://ollama.com/api';
+  // Resolved through the shared resolver so this can never drift from the
+  // ollama-cloud connector again. The old inline default ('https://ollama.com/api')
+  // produced `/api/v1/chat/completions` -> HTTP 404 on every box that had no
+  // OLLAMA_CLOUD_BASE_URL override. See ollama-cloud-base-url.ts.
+  const baseUrl = resolveOllamaCloudBaseUrl();
   const body = {
     model: p.model,
     messages: [
