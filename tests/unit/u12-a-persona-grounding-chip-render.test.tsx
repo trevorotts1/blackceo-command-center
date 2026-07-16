@@ -143,21 +143,31 @@ describe('PersonaGroundingBanner — ACCEPT (b): deleted fixture company-config 
 });
 
 describe('PersonaGroundingBanner — ACCEPT (c): restoring the fixture clears the chip', () => {
-  it('a probe cycle reporting healthy renders no chip, even immediately after a degraded cycle would have shown one — live-derived, not sticky', async () => {
-    // Cycle 1 (modeled as its own mount): grounding degraded → chip renders.
-    global.fetch = stubFetch(() => jsonResponse(deepHealthBody(degradedAdvisory()))) as unknown as typeof fetch;
-    const { unmount } = render(<PersonaGroundingBanner />);
-    await screen.findByTestId(CHIP_TESTID);
-    unmount();
-    cleanup();
+  it('the SAME mounted instance clears the chip when a LATER poll reports healthy — real poll, real state transition, no remount', async () => {
+    // A mount/remount pair would always start from a fresh useState(null),
+    // so it can never prove the `else` branch (the one that actually clears
+    // an EXISTING degraded state) runs — a deleted clear-on-restore branch
+    // would still pass a mount-only test. Drive a REAL second poll on the
+    // SAME instance instead, via the test-only pollIntervalMs override
+    // (real timers, no fake-timer/act() interleaving risk).
+    let call = 0;
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url !== HEALTH_URL) throw new Error(`Unexpected fetch to unlisted URL: ${url}`);
+      call += 1;
+      // Cycle 1: degraded (fixture company-config deleted). Cycle 2+: restored.
+      return jsonResponse(deepHealthBody(call === 1 ? degradedAdvisory() : healthyAdvisory()));
+    }) as unknown as typeof fetch;
 
-    // Cycle 2 (company-config restored): the SAME component, freshly probed,
-    // must show NOTHING — proving the chip is a pure function of the latest
-    // read, never a sticky/cached "was degraded once" flag.
-    global.fetch = stubFetch(() => jsonResponse(deepHealthBody(healthyAdvisory()))) as unknown as typeof fetch;
-    render(<PersonaGroundingBanner />);
-    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
-    expect(screen.queryByTestId(CHIP_TESTID)).toBeNull();
+    render(<PersonaGroundingBanner pollIntervalMs={15} />);
+
+    // Cycle 1 lands: the chip renders.
+    await screen.findByTestId(CHIP_TESTID);
+
+    // Cycle 2 (the next poll tick, ~15ms later): the SAME instance must
+    // clear the chip — this is the acceptance (c) proof.
+    await waitFor(() => expect(screen.queryByTestId(CHIP_TESTID)).toBeNull(), { timeout: 2000 });
+    expect(call).toBeGreaterThanOrEqual(2);
   });
 
   it('MUTATION GUARD: an advisory that FAILS to flip degraded back to false is still caught — the restored-fixture assertion actually bites', async () => {
@@ -168,8 +178,8 @@ describe('PersonaGroundingBanner — ACCEPT (c): restoring the fixture clears th
     global.fetch = stubFetch(() => jsonResponse(deepHealthBody(brokenRestoreAdvisory))) as unknown as typeof fetch;
     render(<PersonaGroundingBanner />);
     const chip = await screen.findByTestId(CHIP_TESTID);
-    // The chip DOES render here — confirming the "renders nothing" assertion
-    // in the sibling test above would have failed had healthyAdvisory() not
+    // The chip DOES render here — confirming the "clears" assertion in the
+    // sibling test above would have failed had healthyAdvisory() not
     // actually flipped degraded to false.
     expect(chip).toBeTruthy();
   });

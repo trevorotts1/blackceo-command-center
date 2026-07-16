@@ -59,7 +59,14 @@ interface DegradedState {
 
 const POLL_INTERVAL_MS = 30_000;
 
-export function PersonaGroundingBanner() {
+/** `pollIntervalMs` is a TEST-ONLY override (defaults to the real 30s
+ *  cadence) — it lets a render test exercise the actual clear-on-restore
+ *  transition on ONE mounted instance (a real poll firing twice) instead of
+ *  only proving a fresh mount reads correctly, which would miss a "sticky
+ *  chip" regression entirely (a mount/remount pair always starts from a
+ *  fresh `useState(null)`, so it can never catch the `else` branch being
+ *  deleted). No production caller passes this prop. */
+export function PersonaGroundingBanner({ pollIntervalMs = POLL_INTERVAL_MS }: { pollIntervalMs?: number } = {}) {
   const [degraded, setDegraded] = useState<DegradedState | null>(null);
 
   useEffect(() => {
@@ -93,12 +100,12 @@ export function PersonaGroundingBanner() {
     }
 
     check();
-    const interval = setInterval(check, POLL_INTERVAL_MS);
+    const interval = setInterval(check, pollIntervalMs);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [pollIntervalMs]);
 
   if (!degraded) return null;
 
