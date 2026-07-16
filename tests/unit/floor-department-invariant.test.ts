@@ -160,4 +160,45 @@ describe('floor invariant: displayed == manifest − opt-outs (active company)',
     // The active board is still exactly the chosen manifest minus opt-outs.
     expect(displayed.sort()).toEqual([...expectedDisplayed].sort());
   });
+
+  // ── U109 (E5-4, closes G2c) — the CC-side leg of the floor-wipe guard ────────
+  // The ONB writer (build-workforce.write_chosen_departments_artifact) now
+  // merges rather than replaces the durable chosen-list on a partial/aborted
+  // re-run — but that fix only matters if the CC READ/INGEST side does not
+  // itself amplify a manifest that shrank for some OTHER reason (a stale
+  // partial write, a hand-edited config, a bad sync) into lost departments.
+  // This proves the CC leg of the SAME invariant: reseedWorkspacesFromConfig
+  // is additive-only (upsert, never delete) — a SECOND converge run against a
+  // SMALLER departments.json must never remove a department that a PRIOR,
+  // larger manifest already provisioned onto the board.
+  it('U109: a SHRUNK departments.json on a later reseed never wipes previously-provisioned departments', () => {
+    // Sanity precondition: the full board from the earlier tests is up.
+    const before = displayedSlugs().sort();
+    expect(before).toEqual([...expectedDisplayed].sort());
+
+    // Simulate the exact failure class U109 closes: a second provisioning
+    // pass (re-run / partial interview / late edit) that writes a SMALLER
+    // manifest — here, only the CEO column and one department survive the
+    // rewrite. This is the WIPE scenario reproduced offline, at the CC
+    // ingest boundary rather than the ONB write boundary.
+    const shrunkManifest = [
+      { id: 'master-orchestrator', name: 'CEO', slug: 'master-orchestrator', emoji: '🧠' },
+      { id: 'marketing', name: 'Marketing', slug: 'marketing', emoji: '📣' },
+    ];
+    fs.writeFileSync(path.join(zhcDir, 'departments.json'), JSON.stringify(shrunkManifest), 'utf8');
+
+    const r = reseedWorkspacesFromConfig(getDb(), { force: true });
+    // Additive contract: nothing NEW is created (both depts already existed),
+    // and — the load-bearing assertion — nothing is REMOVED.
+    expect(r.created).toBe(0);
+
+    const after = displayedSlugs().sort();
+    expect(after).toEqual(before);
+    // Explicitly name the departments that were NOT in the shrunk manifest —
+    // they must still be on the board (sales, app-development, engineering,
+    // general-task were all present before and absent from shrunkManifest).
+    for (const slug of ['sales', 'app-development', 'engineering', 'general-task']) {
+      expect(after).toContain(slug);
+    }
+  });
 });
