@@ -1,0 +1,40 @@
+{
+  "meta": {
+    "note": "Input for scripts/vertical-derivation-golden.py. deptIds is CC's DEFAULT_DEPARTMENTS id list (departments.config.ts) — checked in verbatim so a drift in that array is a visible diff here, not a silent skip.",
+    "deptIdsSource": "src/lib/routing/departments.config.ts DEFAULT_DEPARTMENTS (25 entries)"
+  },
+  "deptIds": [
+    "master-orchestrator",
+    "marketing",
+    "sales",
+    "billing-finance",
+    "customer-support",
+    "crm",
+    "openclaw-maintenance",
+    "legal",
+    "social-media",
+    "paid-advertisement",
+    "web-development",
+    "app-development",
+    "graphics",
+    "video",
+    "audio",
+    "research",
+    "communications",
+    "presentations",
+    "client-coaches",
+    "course-creator",
+    "podcast",
+    "community-management",
+    "personal-assistant",
+    "general-task",
+    "security"
+  ],
+  "declaredCases": [
+    { "name": "none-declared", "declaredPacks": [] },
+    { "name": "personal-pro-dev-declared", "declaredPacks": ["personal-pro-dev"] },
+    { "name": "content-creator-declared", "declaredPacks": ["content-creator"] },
+    { "name": "both-cc-relevant-declared", "declaredPacks": ["personal-pro-dev", "content-creator"] },
+    { "name": "real-estate-declared", "declaredPacks": ["real-estate"] }
+  ]
+}

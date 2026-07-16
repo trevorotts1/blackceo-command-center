@@ -152,6 +152,16 @@ export function listCanonicalDepartmentsScript(): string {
   return path.join(resolveSkillScriptsDir(), 'list-canonical-departments.py');
 }
 
+/**
+ * Absolute path to vertical-derivation-guard.py (U107 / E5-2, closes G2a) —
+ * the independent auditor that asserts a vertical-specific department is
+ * never provisioned unless the interview declared that vertical. Mirrors the
+ * resolution used by listCanonicalDepartmentsScript() above.
+ */
+export function verticalDerivationGuardScript(): string {
+  return path.join(resolveSkillScriptsDir(), 'vertical-derivation-guard.py');
+}
+
 /** True when the given script file is present (for 503/graceful-degrade paths). */
 export function scriptExists(scriptPath: string): boolean {
   return safeIsFile(scriptPath);

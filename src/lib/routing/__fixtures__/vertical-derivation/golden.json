@@ -1,0 +1,716 @@
+{
+  "cases": [
+    {
+      "declaredPacks": [],
+      "name": "none-declared",
+      "results": [
+        {
+          "allowed": true,
+          "deptId": "master-orchestrator",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "marketing",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "sales",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "billing-finance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "customer-support",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "crm",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "openclaw-maintenance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "legal",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "social-media",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "paid-advertisement",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "web-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "app-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "graphics",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "video",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "audio",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "research",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "communications",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "presentations",
+          "error": null
+        },
+        {
+          "allowed": false,
+          "deptId": "client-coaches",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'client-coaches' — it belongs to vertical pack 'personal-pro-dev', which the interview did not declare (declared packs: ['none'])."
+        },
+        {
+          "allowed": false,
+          "deptId": "course-creator",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'course-creator' — it belongs to vertical pack 'personal-pro-dev', which the interview did not declare (declared packs: ['none'])."
+        },
+        {
+          "allowed": true,
+          "deptId": "podcast",
+          "error": null
+        },
+        {
+          "allowed": false,
+          "deptId": "community-management",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'community-management' — it belongs to vertical pack 'content-creator', which the interview did not declare (declared packs: ['none'])."
+        },
+        {
+          "allowed": true,
+          "deptId": "personal-assistant",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "general-task",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "security",
+          "error": null
+        }
+      ]
+    },
+    {
+      "declaredPacks": [
+        "personal-pro-dev"
+      ],
+      "name": "personal-pro-dev-declared",
+      "results": [
+        {
+          "allowed": true,
+          "deptId": "master-orchestrator",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "marketing",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "sales",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "billing-finance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "customer-support",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "crm",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "openclaw-maintenance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "legal",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "social-media",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "paid-advertisement",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "web-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "app-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "graphics",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "video",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "audio",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "research",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "communications",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "presentations",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "client-coaches",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "course-creator",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "podcast",
+          "error": null
+        },
+        {
+          "allowed": false,
+          "deptId": "community-management",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'community-management' — it belongs to vertical pack 'content-creator', which the interview did not declare (declared packs: ['personal-pro-dev'])."
+        },
+        {
+          "allowed": true,
+          "deptId": "personal-assistant",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "general-task",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "security",
+          "error": null
+        }
+      ]
+    },
+    {
+      "declaredPacks": [
+        "content-creator"
+      ],
+      "name": "content-creator-declared",
+      "results": [
+        {
+          "allowed": true,
+          "deptId": "master-orchestrator",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "marketing",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "sales",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "billing-finance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "customer-support",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "crm",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "openclaw-maintenance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "legal",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "social-media",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "paid-advertisement",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "web-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "app-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "graphics",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "video",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "audio",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "research",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "communications",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "presentations",
+          "error": null
+        },
+        {
+          "allowed": false,
+          "deptId": "client-coaches",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'client-coaches' — it belongs to vertical pack 'personal-pro-dev', which the interview did not declare (declared packs: ['content-creator'])."
+        },
+        {
+          "allowed": false,
+          "deptId": "course-creator",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'course-creator' — it belongs to vertical pack 'personal-pro-dev', which the interview did not declare (declared packs: ['content-creator'])."
+        },
+        {
+          "allowed": true,
+          "deptId": "podcast",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "community-management",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "personal-assistant",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "general-task",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "security",
+          "error": null
+        }
+      ]
+    },
+    {
+      "declaredPacks": [
+        "personal-pro-dev",
+        "content-creator"
+      ],
+      "name": "both-cc-relevant-declared",
+      "results": [
+        {
+          "allowed": true,
+          "deptId": "master-orchestrator",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "marketing",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "sales",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "billing-finance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "customer-support",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "crm",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "openclaw-maintenance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "legal",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "social-media",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "paid-advertisement",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "web-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "app-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "graphics",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "video",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "audio",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "research",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "communications",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "presentations",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "client-coaches",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "course-creator",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "podcast",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "community-management",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "personal-assistant",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "general-task",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "security",
+          "error": null
+        }
+      ]
+    },
+    {
+      "declaredPacks": [
+        "real-estate"
+      ],
+      "name": "real-estate-declared",
+      "results": [
+        {
+          "allowed": true,
+          "deptId": "master-orchestrator",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "marketing",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "sales",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "billing-finance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "customer-support",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "crm",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "openclaw-maintenance",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "legal",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "social-media",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "paid-advertisement",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "web-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "app-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "graphics",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "video",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "audio",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "research",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "communications",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "presentations",
+          "error": null
+        },
+        {
+          "allowed": false,
+          "deptId": "client-coaches",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'client-coaches' — it belongs to vertical pack 'personal-pro-dev', which the interview did not declare (declared packs: ['real-estate'])."
+        },
+        {
+          "allowed": false,
+          "deptId": "course-creator",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'course-creator' — it belongs to vertical pack 'personal-pro-dev', which the interview did not declare (declared packs: ['real-estate'])."
+        },
+        {
+          "allowed": true,
+          "deptId": "podcast",
+          "error": null
+        },
+        {
+          "allowed": false,
+          "deptId": "community-management",
+          "error": "VERTICAL_NOT_DECLARED: refusing to add department 'community-management' — it belongs to vertical pack 'content-creator', which the interview did not declare (declared packs: ['real-estate'])."
+        },
+        {
+          "allowed": true,
+          "deptId": "personal-assistant",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "general-task",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "security",
+          "error": null
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "generatedBy": "scripts/vertical-derivation-golden.py",
+    "namingMapVersion": "2.6.1",
+    "note": "Regenerate ONLY via scripts/regen-vertical-derivation-golden.sh. Do not hand-edit.",
+    "pythonVersion": "3.14.5"
+  },
+  "packMembership": {
+    "app-development": null,
+    "audio": null,
+    "billing-finance": null,
+    "client-coaches": {
+      "pack": "personal-pro-dev",
+      "universalPrimary": false
+    },
+    "communications": null,
+    "community-management": {
+      "pack": "content-creator",
+      "universalPrimary": false
+    },
+    "course-creator": {
+      "pack": "personal-pro-dev",
+      "universalPrimary": false
+    },
+    "crm": null,
+    "customer-support": null,
+    "general-task": null,
+    "graphics": null,
+    "legal": null,
+    "marketing": null,
+    "master-orchestrator": null,
+    "openclaw-maintenance": null,
+    "paid-advertisement": null,
+    "personal-assistant": null,
+    "podcast": {
+      "pack": "content-creator",
+      "universalPrimary": true
+    },
+    "presentations": {
+      "pack": "personal-pro-dev",
+      "universalPrimary": true
+    },
+    "research": null,
+    "sales": null,
+    "security": null,
+    "social-media": null,
+    "video": null,
+    "web-development": null
+  }
+}
