@@ -719,6 +719,42 @@ check "14.11" "persona-blend-audience-confirm behavioral test present (test:unit
   "keep the DB-backed persona-blend / audience-confirm behavioral test"
 
 blue ""
+blue "── 15. Whole-app responsive audit PROGRAM (U54 / spec HL-U69) ──"
+#
+# Stage 1 (inventory) + stage 2 (measure, extending dev-shots.mjs's existing
+# invocation) + stage 4 (gate) mechanism checks. These are STRUCTURAL checks
+# only — they gate that the tooling exists, is exported correctly, and is
+# wired into package.json; they do NOT require a live baseline to exist.
+#
+# 15.6 mirrors this file's own established graceful-skip idiom (see 12.3,
+# 12.5-12.7): a missing live baseline ledger warns (does not fail) on a
+# fresh clone / CI box with no seeded server behind it. Once a real baseline
+# lands from `npm run audit:responsive` on the operator's own box, 15.6
+# starts enforcing the ledger + wave-C invariants for real, same as those
+# precedent checks do for their own artifacts.
+
+check "15.1" "scripts/dev-shots.mjs still present (audit program extends it, never replaces it)" \
+  '[ -f scripts/dev-shots.mjs ]'
+check "15.2" "scripts/responsive-route-inventory.mjs exports discoverPageRoutes + buildRouteInventory" \
+  "grep -q 'export function discoverPageRoutes' scripts/responsive-route-inventory.mjs && grep -q 'export function buildRouteInventory' scripts/responsive-route-inventory.mjs"
+check "15.3" "scripts/responsive-audit.mjs exports runAuditForRoutes (stage-2 wrapper, ledgered + resumable)" \
+  "grep -q 'export function runAuditForRoutes' scripts/responsive-audit.mjs"
+check "15.4" "scripts/responsive-gate.mjs exports evaluateLedgerCells + scanHiddenAffordances + runGate" \
+  "grep -q 'export function evaluateLedgerCells' scripts/responsive-gate.mjs && grep -q 'export function scanHiddenAffordances' scripts/responsive-gate.mjs && grep -q 'export function runGate' scripts/responsive-gate.mjs"
+check "15.5" "package.json wires audit:responsive + audit:responsive:gate npm scripts" \
+  "node -e \"const s=require('./package.json').scripts; if(!s['audit:responsive']||!s['audit:responsive:gate']) process.exit(1)\""
+
+RESPONSIVE_LEDGER_DIR="${RESPONSIVE_LEDGER_DIR:-${TMPDIR:-/tmp}/skill6-u54-responsive}"
+if [ -f "$RESPONSIVE_LEDGER_DIR/responsive-ledger.json" ]; then
+  check "15.6" "responsive gate PASSES against the live baseline ledger (zero horizOverflow/clipped + wave-C justified)" \
+    "node scripts/responsive-gate.mjs" \
+    "run npm run audit:responsive fix waves, then re-run npm run audit:responsive:gate until green"
+else
+  yellow "  ! 15.6  responsive gate baseline ledger (skip — no live baseline yet; owed operator-box leg, run \`npm run audit:responsive\` on a seeded build first)"
+  WARN=$((WARN+1))
+fi
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"
