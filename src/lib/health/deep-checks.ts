@@ -21,9 +21,21 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+// Bare specifiers (not the 'node:child_process' URI scheme src/app/api/health/
+// route.ts uses) — this module is reachable from src/instrumentation.ts's
+// dynamic `await import('@/lib/jobs/scheduler')` (register cron jobs), which
+// Next.js also bundles for the edge runtime target even though a runtime
+// guard skips execution there. The edge webpack config errors on the
+// 'node:' URI scheme (UnhandledSchemeError) but tolerates the bare
+// specifier — the same pattern src/lib/notify.ts (already reachable from
+// this exact import chain) already relies on.
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
 import { getNotificationFailuresLogStats } from '@/lib/notify';
+
+const execFileAsync = promisify(execFile);
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -1800,6 +1812,207 @@ export function checkTrustCoverage(): TrustCoverageResult {
       pass: true,
       indeterminate: true,
       detail: `trust_coverage: advisory probe unavailable — ${
+        err instanceof Error ? err.message : String(err)
+      } (UNKNOWN; non-gating)`,
+    };
+  }
+}
+
+// ── check: persona match/grounding observability probe (A-U12) ─────────────
+//
+// CC half of the both-repo unit (ONB half: shared-utils/persona_grounding_
+// health_probe.py, merged 2026-07-16, commit 4411c87b). The probe's own
+// module docstring names this file + this posture explicitly: "The Command
+// Center's deep-health check (src/lib/health/*) is expected to invoke this
+// script as a subprocess (`--json`) exactly as it already does for its other
+// box-local checks, and fold `persona_match` + `grounding` into its own
+// deep-health response."
+//
+// The probe is a SIBLING of shared-utils/embedding_health.py in every way
+// that matters here (single `--json`-emitting CLI, spawned with execFile,
+// degrade-on-any-failure), so this check clones probeEmbeddingHealthPy's
+// shape (src/app/api/health/route.ts) rather than inventing a new one.
+//
+// CRITICAL: the probe's imports are relative to the INSTALLED skill root
+// (`../23-ai-workforce-blueprint/scripts/persona_blend.py`), and CC tracks
+// NO `23-ai-workforce-blueprint` directory (0 files) — vendoring the probe
+// into CC's own `shared-utils/` (the embedding_health.py pattern) would
+// break its imports. Resolve it at the installed skills root instead, the
+// same `resolveOpenClawRoot()` precedent persona-selector.ts already
+// established for `persona-selector-v2.py` (same root, same `skills/`
+// layout, siblings on every box that has both skill folders installed).
+//
+// The probe ALWAYS exits 0 by design (its docstring: "a non-zero exit would
+// tempt a caller into treating an advisory read as a health gate") —
+// degraded/healthy is conveyed ONLY via `grounding.degraded` in the JSON
+// body, never via exit code. This check never keys on exit code for that
+// reason; a non-zero exit / thrown execFile error is treated exactly like
+// any other probe-unavailable failure (degrade to UNKNOWN, non-gating).
+
+export interface PersonaMatchDistribution {
+  count: number;
+  mean: number | null;
+  min: number | null;
+  max: number | null;
+  buckets: { low: number; mid: number; high: number };
+}
+
+export interface PersonaGroundingInfo {
+  degraded: boolean;
+  event?: string;
+  reasons?: string[];
+  layers?: unknown;
+}
+
+export interface PersonaGroundingCheckResult extends CheckResult {
+  persona_match?: PersonaMatchDistribution;
+  grounding?: PersonaGroundingInfo;
+}
+
+const PERSONA_GROUNDING_PROBE_TIMEOUT_MS = 5_000;
+
+function resolveOpenClawRootForPersonaGrounding(): string {
+  if (process.env.OPENCLAW_ROOT) return process.env.OPENCLAW_ROOT;
+  // VPS / Hostinger Docker default — mirrors persona-selector.ts's
+  // resolveOpenClawRoot() precedent exactly.
+  if (process.env.OPENCLAW_PLATFORM === 'vps') return '/data/.openclaw';
+  return path.join(os.homedir(), '.openclaw');
+}
+
+/** Env-var override for tests / non-standard installs, mirroring
+ *  EMBEDDING_HEALTH_SCRIPT's precedent in src/app/api/health/route.ts. */
+export function resolvePersonaGroundingHealthScript(): string {
+  const override = process.env.PERSONA_GROUNDING_HEALTH_SCRIPT;
+  if (override) return override;
+  return path.join(
+    resolveOpenClawRootForPersonaGrounding(),
+    'skills',
+    'shared-utils',
+    'persona_grounding_health_probe.py',
+  );
+}
+
+/** Type-guard the trio the A-U12 acceptance schema requires: {count, mean,
+ *  buckets}. The probe's real shape is a superset (also min/max) — accept
+ *  the superset, but never fabricate a distribution when the required trio
+ *  is absent or malformed. */
+function isValidPersonaMatchShape(v: unknown): v is Partial<PersonaMatchDistribution> & {
+  count: number;
+  buckets: { low: number; mid: number; high: number };
+} {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  if (typeof o.count !== 'number') return false;
+  if (!(o.mean === null || o.mean === undefined || typeof o.mean === 'number')) return false;
+  const b = o.buckets as Record<string, unknown> | undefined;
+  if (!b || typeof b !== 'object') return false;
+  return typeof b.low === 'number' && typeof b.mid === 'number' && typeof b.high === 'number';
+}
+
+/**
+ * Pure read for the deep-health advisory surface (A-U12 acceptance (a)).
+ * Spawns the ONB-shipped probe with `--json`, schema-validates the
+ * `persona_match` trio, and folds `grounding` alongside it. NEVER gates the
+ * top-level pass/indeterminate verdict — the caller (the deep health route)
+ * must place this under `advisory`, mirroring every other check in this
+ * file's posture. `pass: false` here reflects a confirmed grounding
+ * degrade for the field's OWN value only (same posture as
+ * checkSweepLiveness's `pass: false` on a stale watcher) — it carries no
+ * gating weight because `advisory` is structurally excluded from
+ * `gatingChecks` in the route.
+ */
+export async function checkPersonaGrounding(): Promise<PersonaGroundingCheckResult> {
+  try {
+    const script = resolvePersonaGroundingHealthScript();
+    if (!fs.existsSync(script)) {
+      return {
+        pass: true,
+        indeterminate: true,
+        detail: `persona_match: probe script not found at ${script} — not yet deployed on this box (UNKNOWN; non-gating)`,
+      };
+    }
+
+    let stdout: string;
+    try {
+      const res = await execFileAsync('python3', [script, '--json'], {
+        timeout: PERSONA_GROUNDING_PROBE_TIMEOUT_MS,
+        encoding: 'utf-8',
+        maxBuffer: 1_000_000,
+      });
+      stdout = res.stdout;
+    } catch (spawnErr) {
+      return {
+        pass: true,
+        indeterminate: true,
+        detail: `persona_match: advisory probe unavailable — ${
+          spawnErr instanceof Error ? spawnErr.message : String(spawnErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(stdout) as Record<string, unknown>;
+    } catch {
+      return {
+        pass: true,
+        indeterminate: true,
+        detail: 'persona_match: probe emitted non-JSON output (UNKNOWN; non-gating)',
+      };
+    }
+
+    const personaMatch = parsed.persona_match;
+    if (!isValidPersonaMatchShape(personaMatch)) {
+      return {
+        pass: true,
+        indeterminate: true,
+        detail:
+          'persona_match: probe output failed schema validation (missing/malformed count|mean|buckets) — (UNKNOWN; non-gating)',
+      };
+    }
+
+    const groundingRaw = parsed.grounding as Record<string, unknown> | undefined;
+    const degraded = groundingRaw?.degraded === true;
+
+    const distribution: PersonaMatchDistribution = {
+      count: personaMatch.count,
+      mean: personaMatch.mean ?? null,
+      min: typeof personaMatch.min === 'number' ? personaMatch.min : null,
+      max: typeof personaMatch.max === 'number' ? personaMatch.max : null,
+      buckets: {
+        low: personaMatch.buckets.low,
+        mid: personaMatch.buckets.mid,
+        high: personaMatch.buckets.high,
+      },
+    };
+
+    const grounding: PersonaGroundingInfo = {
+      degraded,
+      event: typeof groundingRaw?.event === 'string' ? groundingRaw.event : undefined,
+      reasons: Array.isArray(groundingRaw?.reasons) ? (groundingRaw!.reasons as string[]) : undefined,
+      layers: groundingRaw?.layers,
+    };
+
+    return {
+      pass: !degraded,
+      persona_match: distribution,
+      grounding,
+      detail: degraded
+        ? `persona_match: grounding DEGRADED — ${distribution.count} sample(s) in the match-score log, mean ${
+            distribution.mean ?? 'n/a'
+          } (advisory only, non-gating)`
+        : `persona_match: OK — ${distribution.count} sample(s) in the match-score log, mean ${
+            distribution.mean ?? 'n/a'
+          }, grounding healthy`,
+    };
+  } catch (err) {
+    // Absolute last resort — never let an unexpected throw here reach the
+    // route's outer catch (which would return 500 + pass:false and could
+    // trip auto-rollback).
+    return {
+      pass: true,
+      indeterminate: true,
+      detail: `persona_match: advisory probe unavailable — ${
         err instanceof Error ? err.message : String(err)
       } (UNKNOWN; non-gating)`,
     };

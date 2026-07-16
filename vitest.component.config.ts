@@ -38,6 +38,10 @@ export default defineConfig({
       // "Show deprecated/stale" toggle + a visible ModelCard badge, real
       // render proof.
       'tests/unit/u50-model-catalog-honesty-render.test.tsx',
+      // A-U12 acceptance (b)/(c) — PersonaGroundingBanner real render proof
+      // (chip appears on a confirmed grounding degrade, clears on the next
+      // healthy probe cycle, and the 30s poll is actually wired).
+      'tests/unit/u12-a-persona-grounding-chip-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

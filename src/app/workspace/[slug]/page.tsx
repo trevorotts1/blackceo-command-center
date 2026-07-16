@@ -17,6 +17,7 @@ import { Breadcrumb } from '@/components/Breadcrumb';
 import { resolveDepartment } from '@/lib/routing/resolve-department';
 import { AnthologyBoardDriftBanner } from '@/components/anthology/BoardDriftBanner';
 import { Skill6BoardDriftBanner } from '@/components/skill6/BoardDriftBanner';
+import { PersonaGroundingBanner } from '@/components/skill6/PersonaGroundingBanner';
 import { unwrapAgents } from '@/lib/api-envelope';
 import type { Task, Workspace } from '@/lib/types';
 
@@ -312,6 +313,14 @@ export default function WorkspacePage() {
           comment). Read-only, fail-soft; renders nothing unless a run's board
           card is confirmed never-landed or orphaned. */}
       {workspace.slug === 'web-development' && <Skill6BoardDriftBanner />}
+
+      {/* A-U12 — persona grounding degraded chip. Unlike the two banners
+          above, this is NOT workspace-scoped: company-config grounding is a
+          box-wide condition (every persona-blended card everywhere), not
+          tied to one department's board. Read-only, fail-soft; renders
+          nothing unless the deep-health probe confirms a degrade, and
+          clears itself on the very next healthy probe cycle. */}
+      <PersonaGroundingBanner />
 
       {/* Department head banner — migration 028. Surfaces the agent designated
           as the head of this workspace so visitors immediately know who owns it. */}

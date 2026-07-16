@@ -34,7 +34,8 @@
  *     "skill35_cycle_projection":    { "pass": bool, "detail": string, ... }, // U100
  *     "sweep_liveness":             { "pass": bool, "detail": string, ... },
  *     "notification_failures_log":  { "pass": bool, "detail": string, ... }, // U102 / C12.3 item 10b
- *     "trust_coverage":             { "pass": bool, "detail": string, ... }  // U94 / X.2.3
+ *     "trust_coverage":             { "pass": bool, "detail": string, ... }, // U94 / X.2.3
+ *     "persona_match":              { "pass": bool, "detail": string, "persona_match"?: {...}, "grounding"?: {...} } // A-U12
  *   }
  * }
  *
@@ -57,6 +58,14 @@
  *   again: the size of the MSG-07 undeliverable ledger is an operational
  *   signal (something downstream of notify.ts needs attention), never a
  *   Command Center correctness fault.
+ *   `persona_match` (A-U12) is the same posture again: a company-config
+ *   grounding fallback to the neutral floor (checkPersonaGrounding, spawning
+ *   ONB's shared-utils/persona_grounding_health_probe.py) is a persona
+ *   match-quality signal, never a Command Center correctness fault — it
+ *   never gates the box's pass/indeterminate verdict. The board-visible
+ *   `persona_grounding_degraded` event/chip is a SEPARATE, additive surface
+ *   (src/lib/jobs/persona-grounding-sweep.ts's cron entry point + the
+ *   read-only PersonaGroundingBanner component), not this route.
  *   The `mc_board_*_projection` (the "mc_board six") and `skill35_cycle_
  *   projection` fields (U100) generalize the SAME B-U13/U27 pattern to the
  *   remaining fail-soft productized-skill producers — non-gating for the
@@ -87,6 +96,7 @@ import {
   MC_BOARD_SIX_PRODUCERS,
   checkNotificationFailuresLog,
   checkTrustCoverage,
+  checkPersonaGrounding,
 } from '@/lib/health/deep-checks';
 import { checkSweepLiveness } from '@/lib/jobs/sweep-liveness';
 
@@ -242,6 +252,26 @@ export async function GET() {
         pass: true,
         indeterminate: true,
         detail: `trust_coverage: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    // A-U12 — persona match/grounding observability probe (CC half of the
+    // both-repo unit; ONB shipped shared-utils/persona_grounding_health_
+    // probe.py). Own try/catch for the same reason as every advisory block
+    // above: a throw here must NEVER reach the outer catch (which would
+    // return 500 + pass:false and could trip auto-rollback/heartbeat-gate
+    // consumers that only read d.pass / d.indeterminate). Awaited (not
+    // Promise.resolve()-wrapped like the sync checks above) because this
+    // one spawns a python subprocess, exactly like checkDiskHeadroom above.
+    try {
+      advisory.persona_match = await checkPersonaGrounding();
+    } catch (advErr) {
+      advisory.persona_match = {
+        pass: true,
+        indeterminate: true,
+        detail: `persona_match: advisory probe unavailable — ${
           advErr instanceof Error ? advErr.message : String(advErr)
         } (UNKNOWN; non-gating)`,
       };
