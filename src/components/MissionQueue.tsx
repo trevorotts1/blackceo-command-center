@@ -22,6 +22,7 @@ import {
   triadMissingFields,
   triadMissingPillText,
 } from '@/lib/board-labels';
+import { taskToColumnId, columnIdToStatus } from '@/lib/board-projection';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
 // 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
@@ -106,31 +107,11 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
   ],
 };
 
-/**
- * Reverse of the six-column bucketing rule below (backlog / todo / review are
- * synthetic UI columns that aggregate several underlying TaskStatus values).
- * Single source of truth for "which column is this task visually in" — used
- * by both getTasksByStatus (filtering) and the per-card Move menu (so the
- * touch affordance's "current column" always agrees with where the card is
- * actually rendered).
- */
-function taskToColumnId(task: Pick<Task, 'status'>): string {
-  if (task.status === 'backlog') return 'backlog';
-  if (['inbox', 'planning', 'assigned', 'pending_dispatch'].includes(task.status)) return 'todo';
-  if (['review', 'testing'].includes(task.status)) return 'review';
-  return task.status; // in_progress, blocked, done map 1:1
-}
-
-/**
- * The inverse mapping, used when a NEW task is seeded from a column's "+"
- * button or the touch Move menu: 'todo' is synthetic (no such TaskStatus), so
- * it becomes 'assigned' — the same target handleDrop uses for a card dropped
- * on To-Do (groomed/queued but not started).
- */
-function columnIdToStatus(columnId: string): TaskStatus {
-  if (columnId === 'todo') return 'assigned';
-  return columnId as TaskStatus; // backlog/in_progress/review/blocked/done map 1:1
-}
+// U45/C-14: taskToColumnId / columnIdToStatus (the six-column bucketing rule
+// and its inverse) now live in src/lib/board-projection.ts — imported above
+// — so the mapping is unit-tested (tests/unit/u45-c14-board-truth-regression.test.ts)
+// without pulling this whole 'use client' component into the test's module
+// graph. Logic and names are unchanged; this is a pure extraction.
 
 const departmentEmojis: Record<string, string> = {
   'ceo-com': '👔', 'ceo': '👔',
