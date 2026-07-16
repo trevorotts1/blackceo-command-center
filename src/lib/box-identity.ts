@@ -85,8 +85,12 @@ export interface BoxIdentity {
   boxId: string;
 }
 
-/** Lowercase, punctuation-free slug safe to use as a counter key. */
-function slugify(value: string): string {
+/**
+ * Lowercase, punctuation-free slug safe to use as a counter key. Exported so
+ * other modules that need the SAME slug convention (e.g. winner-harvest.ts's
+ * client_id derivation) never fork a second, drifting implementation.
+ */
+export function slugify(value: string): string {
   return value
     .trim()
     .toLowerCase()
