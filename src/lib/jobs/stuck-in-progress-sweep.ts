@@ -55,7 +55,7 @@
 import { queryAll, queryOne, run, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { notifyByAudience } from '@/lib/notify';
-import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { probeSessionLiveness } from './execution-watcher';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
@@ -164,10 +164,16 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
     await transition(task.id, 'blocked', { actor: 'stuck-in-progress-sweep', reason });
   } catch (err) {
     if (err instanceof TransitionError) {
-      run(
+      // U99-RAW-STATUS-WRITER: fallback-of-last-resort for when transition()
+      // itself rejects the edge. Audited via recordStatusEvent immediately
+      // below, gated on the CAS actually landing.
+      const fallbackRes = run(
         `UPDATE tasks SET status='blocked', updated_at=? WHERE id=? AND status='in_progress'`,
         [now, task.id],
       );
+      if ((fallbackRes.changes ?? 0) > 0) {
+        recordStatusEvent(task.id, 'in_progress', 'blocked', { actor: 'stuck-in-progress-sweep', reason });
+      }
       try {
         run(
           `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
