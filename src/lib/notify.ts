@@ -435,6 +435,38 @@ function appendNotificationLog(entry: Record<string, unknown>): void {
   }
 }
 
+/**
+ * U102 (C12.3 item 10, part b) — read-only stats for the durable undeliverable
+ * ledger, so a health probe can surface its size "without reading server
+ * logs" (spec wording). Resolves the SAME path `appendNotificationLog()`
+ * writes to (resolveWorkspaceBase()/notification-failures.jsonl) — never a
+ * second, possibly-divergent guess at the file location.
+ *
+ * Fail-soft: an unreadable/absent file reports `exists: false` with zeroed
+ * counters rather than throwing — this is a diagnostic read, never a reason
+ * to fail a caller.
+ */
+export interface NotificationFailuresLogStats {
+  /** Absolute path this box resolves the ledger to (diagnostic; callers that
+   *  surface stats through an unauthenticated endpoint should omit it). */
+  path: string;
+  exists: boolean;
+  sizeBytes: number;
+  lineCount: number;
+}
+
+export function getNotificationFailuresLogStats(): NotificationFailuresLogStats {
+  const filePath = path.join(resolveWorkspaceBase(), 'notification-failures.jsonl');
+  try {
+    const stat = fs.statSync(filePath);
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const lineCount = raw.split('\n').filter((line) => line.trim().length > 0).length;
+    return { path: filePath, exists: true, sizeBytes: stat.size, lineCount };
+  } catch {
+    return { path: filePath, exists: false, sizeBytes: 0, lineCount: 0 };
+  }
+}
+
 export function recordUndeliverable(kind: string, message: string): void {
   // ATTRIBUTION: an undeliverable alert is the LAST rung — the one a human reads
   // cold, days later, with no other context. It must say which box wrote it.

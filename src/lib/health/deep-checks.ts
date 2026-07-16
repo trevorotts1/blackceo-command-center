@@ -23,6 +23,7 @@ import path from 'path';
 import os from 'os';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, DB_PATH } from '@/lib/db';
+import { getNotificationFailuresLogStats } from '@/lib/notify';
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -1261,4 +1262,91 @@ export function checkSkill6BoardProjection(): Skill6BoardProjectionResult {
     unwired_count: unwiredCount,
     detail: `skill6_board_projection: OK — ${runDirs.length} run(s) completed intake, ${landedTaskIds.length} card(s) landed and confirmed on the board (projecting)`,
   };
+}
+
+// ── check: notification-failures.jsonl size (U102 / C12.3 item 10b) ────────
+//
+// PROBLEM (master spec C12.3 item 10): the MSG-07 undeliverable ledger
+// (`notify.ts`'s `notification-failures.jsonl` — the last rung of the
+// escalation ladder, written whenever an owner/system notification could not
+// be delivered by any other means) is durable and complete, but it is only
+// ever discoverable by reading server logs / SSHing into the box. This check
+// surfaces its SIZE as an advisory health field so an operator can see
+// "undeliverables are accumulating" from the same JSON payload that already
+// reports every other posture check — no shell access required.
+//
+// DESIGN NOTE — same posture as every other advisory check in this file
+// (anthology/skill6 board projection, sweep_liveness): non-gating. A pile of
+// undeliverable records is an OPERATIONAL signal (something downstream —
+// Telegram config, an operator chat id — needs attention), never a Command
+// Center correctness fault, so it must never flip the top-level pass/
+// indeterminate verdict or trip auto-rollback. The route wrapper (route.ts)
+// enforces that by keeping this OUT of the `checks` aggregation, exactly like
+// its siblings.
+//
+// The absolute file path is deliberately OMITTED from the returned detail —
+// this check is surfaced through the unauthenticated /api/health/deep bypass
+// (same discipline `checkAnthologyBoardProjection` / `checkSkill6BoardProjection`
+// already apply to their own resolved paths).
+
+/** Default advisory threshold (line count) above which the check flags
+ *  accumulation. Purely informational — see DESIGN NOTE above; overridable
+ *  via NOTIFICATION_FAILURES_LOG_WARN_LINES for a box with different traffic. */
+export const NOTIFICATION_FAILURES_LOG_WARN_LINES_DEFAULT = 25;
+
+function resolveNotificationFailuresWarnLines(): number {
+  const parsed = parseInt(process.env.NOTIFICATION_FAILURES_LOG_WARN_LINES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : NOTIFICATION_FAILURES_LOG_WARN_LINES_DEFAULT;
+}
+
+export interface NotificationFailuresLogCheckResult extends CheckResult {
+  exists: boolean;
+  size_bytes: number;
+  line_count: number;
+}
+
+export function checkNotificationFailuresLog(): NotificationFailuresLogCheckResult {
+  try {
+    const stats = getNotificationFailuresLogStats();
+
+    if (!stats.exists) {
+      return {
+        pass: true,
+        exists: false,
+        size_bytes: 0,
+        line_count: 0,
+        detail: 'notification_failures_log: OK — no notification-failures.jsonl on this box (no undeliverable notifications ever recorded)',
+      };
+    }
+
+    const warnLines = resolveNotificationFailuresWarnLines();
+
+    if (stats.lineCount > warnLines) {
+      return {
+        pass: false,
+        indeterminate: false,
+        exists: true,
+        size_bytes: stats.sizeBytes,
+        line_count: stats.lineCount,
+        detail: `notification_failures_log: ${stats.lineCount} undeliverable notification(s) recorded (${stats.sizeBytes} bytes) — above the ${warnLines}-line advisory threshold; review notification-failures.jsonl on this box (non-gating)`,
+      };
+    }
+
+    return {
+      pass: true,
+      exists: true,
+      size_bytes: stats.sizeBytes,
+      line_count: stats.lineCount,
+      detail: `notification_failures_log: OK — ${stats.lineCount} undeliverable notification(s) recorded (${stats.sizeBytes} bytes), within the ${warnLines}-line advisory threshold`,
+    };
+  } catch (err) {
+    return {
+      pass: true,
+      indeterminate: true,
+      exists: false,
+      size_bytes: 0,
+      line_count: 0,
+      detail: `notification_failures_log: could not read log stats — ${err instanceof Error ? err.message : String(err)} (UNKNOWN; non-gating)`,
+    };
+  }
 }

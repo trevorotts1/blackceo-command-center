@@ -44,6 +44,11 @@ import { runPortIntegrityCheck } from './port-integrity';
 import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
 import { runSweepLivenessSweep } from './sweep-liveness';
+import {
+  runOperatorColumnAgeDigest,
+  OPERATOR_COLUMN_AGE_DIGEST_CRON_EXPR,
+  OPERATOR_COLUMN_AGE_DIGEST_CRON_TIMEZONE,
+} from './operator-column-age-digest';
 import { runEnvAudit } from '@/lib/env-auditor';
 import {
   resolveStaleTaskSweepKillFlag,
@@ -700,6 +705,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
           `[cron] board-hygiene: owner-repinged=${result.ownerRepinged}, operator-escalated=${result.operatorEscalated}, ` +
             `review-force-scored=${result.reviewForceScored}, qc-starved=${result.qcStarved}, ` +
             `done-archived=${result.doneArchived}, stale-nudged=${result.staleNudged}, stale-archived=${result.staleArchived}`,
+        );
+      }
+    },
+  },
+
+  // operator-column-age-digest: daily at 06:45 America/New_York — U102 /
+  // C12.3 item 10a. Reads every non-archived task in the nine non-terminal
+  // columns, groups by (department, status), and sends ONE batched
+  // notifySystem() digest carrying the count + oldest card per non-empty
+  // group. Cooldown-guarded (not just cron-gated) so a restart or a double
+  // tick on the same day never sends a second copy; an empty board sends
+  // nothing. Disable with DISABLE_OPERATOR_COLUMN_AGE_DIGEST=1.
+  {
+    name: 'operator-column-age-digest',
+    expr: OPERATOR_COLUMN_AGE_DIGEST_CRON_EXPR,
+    timezone: OPERATOR_COLUMN_AGE_DIGEST_CRON_TIMEZONE,
+    fn: async () => {
+      const result = await runOperatorColumnAgeDigest();
+      if (result.skippedReason) {
+        console.log(`[cron] operator-column-age-digest: skipped — ${result.skippedReason}`);
+      } else {
+        console.log(
+          `[cron] operator-column-age-digest: sent — ${result.departmentCount} department(s), ${result.totalTasks} task(s)`,
         );
       }
     },
