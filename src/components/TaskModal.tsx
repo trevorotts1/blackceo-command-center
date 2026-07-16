@@ -34,6 +34,9 @@ import {
   TaskSopPanel,
   DispatchHoldPanel,
   BlockedReasonPanel,
+  // U38 (C-07) — S3 closure human-promote control: "Promote to Done
+  // (operator)" for a review card the QC heuristic fallback parked.
+  QcPromotePanel,
   PlanningMetaPanel,
   // U104 (E4-7) — single source for the "which board-producer engine, if
   // any" label, reused across the Planning/Activity/Deliverables/Sessions
@@ -555,6 +558,11 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
                   the two panels render independently, off different fields). */}
               <DispatchHoldPanel task={task} />
               <BlockedReasonPanel task={task} />
+              {/* U38 (C-07) — human-promote control, review cards the QC
+                  heuristic fallback parked only ([QC-HEURISTIC] /
+                  [QC-HEURISTIC-FINAL]). Renders nothing for every other
+                  card — see QcPromotePanel's own render gate. */}
+              <QcPromotePanel task={task} />
             </div>
           )}
             <form onSubmit={handleSubmit} className="space-y-4">
