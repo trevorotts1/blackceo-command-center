@@ -42,9 +42,15 @@ import fs from 'fs';
 import type Database from 'better-sqlite3';
 import { norm, readBuildState, computeDecisionCoverage } from '@/lib/interview/seam';
 import { resolveDepartmentsConfigPath, isDepartmentOptedOut } from '@/lib/db/migrations';
+import {
+  DEPARTMENT_OPTOUT_REASON,
+  isDepartmentOptoutExempt,
+  readDepartmentOptoutIds,
+} from '@/lib/workspaces/department-optout';
 
 /** `archived_reason` written by the decline path. Un-archive is scoped to this. */
 export const DECLINED_REASON = 'declined';
+export { DEPARTMENT_OPTOUT_REASON, readDepartmentOptoutIds };
 
 export interface DeclineArchiveResult {
   /** Honored declined dept ids read out of build-state (raw, as recorded). */
@@ -226,6 +232,114 @@ export function syncDeclinedWorkspaceArchive(
   return result;
 }
 
+/**
+ * U110 (E5-5, G2d — CC leg; ONB caller-wiring owed) — THE BOARD-WIRING FIX.
+ *
+ * Closes the gap `syncDeclinedWorkspaceArchive` above does NOT cover: a
+ * department the owner explicitly opted OUT of via U108's provenance-gated
+ * `provisioning/department-optout.json` (see `department-optout.ts`), which is
+ * a SEPARATE durable record from build-state's `canonicalReconciliation`
+ * declines. Before this unit, nothing on the CC side ever read that file back,
+ * so an opted-out department kept its workspace row and kept rendering as a
+ * live Kanban column — a ghost column for a department the owner explicitly,
+ * provably said no to. A client whose real chosen set is smaller than the
+ * 28-department floor never saw a board that matched their own decisions.
+ *
+ * SOFT, NEVER HARD (same posture as `syncDeclinedWorkspaceArchive`): stamps
+ * `archived_at` + `archived_reason = DEPARTMENT_OPTOUT_REASON`. Never deletes.
+ * Idempotent and reversible — a department un-archived here the moment it
+ * leaves the opted-out set (the owner reversed their decision; U108's own
+ * record carries `reversible: true`), scoped STRICTLY to rows THIS pass
+ * archived so an operator's manual archive or a build-state decline are never
+ * silently undone by it, and vice versa.
+ *
+ * ORCHESTRATOR COLUMN — ALWAYS EXEMPT: `ceo` / `master-orchestrator` is NEVER
+ * archived by this pass regardless of what the opt-out file says. `general-task`
+ * is deliberately NOT exempt (operator ruling, 2026-07-16, U110 send-back D1):
+ * ONB's `department-naming-map.json` authors a `loss_warning` specifically for
+ * declining the catch-all, so an opted-out or declined `general-task` is
+ * archived exactly like any other department — see `department-optout.ts`'s
+ * module docstring for the full ruling and the parity failure it fixes.
+ *
+ * DOES NOT ACT ON BARE MANIFEST OMISSION — only on an id present in
+ * `optedOutIds` (which the caller reads from the provenance-gated opt-out
+ * file). A department that is merely absent from the CURRENT departments.json,
+ * with no opt-out record, is untouched here — that is U109's invariant
+ * (reseedWorkspacesFromConfig's own additive-only contract) and this module
+ * does not, and must not, second-guess it.
+ */
+export function syncDepartmentOptoutArchive(
+  db: Database.Database,
+  optedOutIds: string[] = readDepartmentOptoutIds(),
+): DeclineArchiveResult {
+  const result: DeclineArchiveResult = {
+    declined: optedOutIds,
+    archived: [],
+    alreadyArchived: [],
+    unarchived: [],
+    noWorkspace: [],
+  };
+
+  if (!hasWorkspaceArchiveColumn(db)) {
+    console.warn(
+      '[U110] workspaces.archived_at absent (migration 095 not applied) — skipping opt-out archive.',
+    );
+    return result;
+  }
+
+  // Catch-all / orchestrator exemption — filtered BEFORE resolution so an
+  // exempt id can never appear in `declinedWorkspaceIds` below, regardless of
+  // what raw spelling the opt-out file used.
+  const eligibleIds = optedOutIds.filter((id) => !isDepartmentOptoutExempt(id));
+
+  const resolved = resolveWorkspaceIds(db, eligibleIds);
+  const resolvedEntries = Array.from(resolved.entries());
+  const optedOutWorkspaceIds = new Set<string>();
+  for (const [, ids] of resolvedEntries) for (const id of ids) optedOutWorkspaceIds.add(id);
+
+  const tx = db.transaction(() => {
+    for (const [optedOut, wsIds] of resolvedEntries) {
+      if (wsIds.length === 0) {
+        result.noWorkspace.push(optedOut);
+        continue;
+      }
+      for (const wsId of wsIds) {
+        // Defense in depth: never archive a workspace whose OWN id/slug
+        // normalizes into the exempt set, even if it was resolved via some
+        // other opted-out id's alias match.
+        if (isDepartmentOptoutExempt(wsId)) continue;
+        if (archiveWorkspace(db, wsId, DEPARTMENT_OPTOUT_REASON)) result.archived.push(wsId);
+        else result.alreadyArchived.push(wsId);
+      }
+    }
+
+    // Reversal: a workspace archived AS opted-out that is no longer in the
+    // opted-out set means the owner reversed the decision. Scoped to
+    // archived_reason = DEPARTMENT_OPTOUT_REASON so an operator's own archive,
+    // or a build-state decline archive, is never silently undone.
+    const optoutArchived = db
+      .prepare(
+        `SELECT id FROM workspaces
+          WHERE archived_at IS NOT NULL AND archived_reason = ?`,
+      )
+      .all(DEPARTMENT_OPTOUT_REASON) as { id: string }[];
+
+    for (const row of optoutArchived) {
+      if (!optedOutWorkspaceIds.has(row.id) && unarchiveWorkspace(db, row.id)) {
+        result.unarchived.push(row.id);
+      }
+    }
+  });
+  tx();
+
+  console.log(
+    `[U110] opt-out archive — opted_out=${optedOutIds.length} archived=${result.archived.length} ` +
+      `already=${result.alreadyArchived.length} unarchived=${result.unarchived.length} ` +
+      `no-workspace=${result.noWorkspace.length}`,
+  );
+  return result;
+}
+
 /* ───────────────────── converge parity assertion (chosen == provisioned == displayed) ──────────────── */
 
 export interface ConvergeParity {
@@ -300,13 +414,21 @@ export function assertConvergeParity(args: {
 /**
  * The `chosen` set: what the owner actually asked for.
  *
- *   departments.json  −  opt-outs (isDepartmentOptedOut)  −  honored declines
+ *   departments.json − opt-outs (isDepartmentOptedOut) − honored declines
+ *     − U108 provenance-gated opt-outs (department-optout.json)
  *
- * Both subtractions are load-bearing and they are NOT the same thing:
+ * All three subtractions are load-bearing and they are NOT the same thing:
  *   • an OPT-OUT is expressed in the manifest — the dept is never provisioned;
  *   • a DECLINE is expressed in build-state, usually AFTER provisioning — the row
  *     already exists and a manifest that still lists the dept will keep re-upserting
  *     it on every converge. Subtracting only opt-outs is exactly the hole C6 closes.
+ *   • a U108 department-optout.json entry (U110) is ALSO expressed AFTER
+ *     provisioning, through the newer provenance-gated (functionality-loss-
+ *     warning-acknowledged) channel — a separate durable record from build-
+ *     state's declines. Without subtracting it here too, a correctly opt-out-
+ *     archived department (syncDepartmentOptoutArchive) would still show up as
+ *     "chosen" and the C6 parity assertion would wrongly flag it as
+ *     missingFromProvisioned.
  *
  * Returns null when no departments.json can be resolved — the caller must then
  * SKIP the parity assertion rather than assert against an empty manifest (which
@@ -315,6 +437,7 @@ export function assertConvergeParity(args: {
  */
 export function listChosenDepartmentIds(
   declinedIds: string[] = readHonoredDeclinedIds(),
+  optedOutFileIds: string[] = readDepartmentOptoutIds(),
 ): string[] | null {
   const configPath = resolveDepartmentsConfigPath();
   if (!configPath) return null;
@@ -327,7 +450,20 @@ export function listChosenDepartmentIds(
   }
   if (!Array.isArray(depts) || depts.length === 0) return null;
 
+  // U110 send-back D4-R2: the exemption belongs to ONLY ONE of these two sets,
+  // never to their union. `declinedIds` mirrors `syncDeclinedWorkspaceArchive`,
+  // which has NO exemption concept at all — a build-state decline of
+  // master-orchestrator (or any id) is archived unconditionally there, so
+  // `chosen` must drop it unconditionally too, or the two sides disagree and
+  // assertConvergeParity hard-fails (missingFromProvisioned, 500 — QC's proved
+  // A/B probe). `optedOutFileIds` mirrors `syncDepartmentOptoutArchive`, which
+  // DOES exempt the orchestrator column — so only THIS half may consult
+  // isDepartmentOptoutExempt(). Collapsing the two into one `excludedNorm` set
+  // (the pre-fix shape) applied the exemption to both-and-neither: it protected
+  // an id from the decline pass it was never protected from on the archive
+  // side. See department-optout.ts's module docstring for the full ruling.
   const declinedNorm = new Set(declinedIds.map(norm).filter(Boolean));
+  const optoutNorm = new Set(optedOutFileIds.map(norm).filter(Boolean));
 
   const chosen: string[] = [];
   for (const dept of depts) {
@@ -336,7 +472,10 @@ export function listChosenDepartmentIds(
     const id = String(d.id || d.slug || '');
     if (!id) continue;
     if (isDepartmentOptedOut(dept)) continue;
+    // Decline pass — matches syncDeclinedWorkspaceArchive exactly: NO exemption.
     if (declinedNorm.has(norm(id))) continue;
+    // Opt-out-file pass — matches syncDepartmentOptoutArchive exactly: exempt.
+    if (optoutNorm.has(norm(id)) && !isDepartmentOptoutExempt(id)) continue;
     chosen.push(id);
   }
   return chosen;

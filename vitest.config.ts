@@ -22,6 +22,12 @@ export default defineConfig({
       // foreign-company leakage / silent cap). DB-backed vitest suite; the Node
       // built-in `npm run test:unit` glob skips it (see below) so it only runs here.
       'tests/unit/floor-department-invariant.test.ts',
+      // U110 (E5-5, G2d — CC leg; ONB caller-wiring owed): the board-wiring fix for a below-floor
+      // department set — U108's provenance-gated department-optout.json is
+      // consumed and the board renders exactly the chosen set (no ghost
+      // columns; catch-all always honored). DB-backed vitest suite, same
+      // reason as floor-department-invariant.test.ts above.
+      'tests/unit/department-optout-board-wiring.test.ts',
       // P3-7: seam <-> onboarding-Python parity harness. Lives under src/ (not
       // tests/unit/) so `npm run test:unit` (tsx --test glob) does NOT also pick it
       // up — it uses vitest globals and only runs here via `npm run test:vitest`.

@@ -63,6 +63,8 @@ import { resolveActiveCompanyId } from '@/lib/company';
 import {
   readHonoredDeclinedIds,
   syncDeclinedWorkspaceArchive,
+  readDepartmentOptoutIds,
+  syncDepartmentOptoutArchive,
   listChosenDepartmentIds,
   listProvisionedWorkspaceIds,
   assertConvergeParity,
@@ -174,6 +176,15 @@ export async function POST(req: NextRequest): Promise<Response> {
       unarchived: string[];
       no_workspace: string[];
     };
+    // U110 (E5-5, G2d): what the U108 provenance-gated opt-out file did to the
+    // board on this run — the ghost/orphan-column close for a below-floor set.
+    department_optout?: {
+      opted_out: string[];
+      archived: string[];
+      already_archived: string[];
+      unarchived: string[];
+      no_workspace: string[];
+    };
     // C6: the chosen == provisioned == displayed proof.
     converge_parity?: ConvergeParity;
     sops?: { imported: number; updated: number; active_total?: number };
@@ -217,6 +228,28 @@ export async function POST(req: NextRequest): Promise<Response> {
         no_workspace: archive.noWorkspace,
       };
 
+      // ── Step 1b-2 (U110 / E5-5, G2d — CC leg; ONB caller-wiring owed): honor the U108 provenance-gated
+      // opt-out file — THE BOARD-WIRING FIX for a below-floor department set.
+      //
+      // A SEPARATE durable record from build-state's honored declines above:
+      // department-optout.json is written by department-optout-sync.py (U108)
+      // only for a FULLY provenanced, functionality-loss-warning-acknowledged
+      // decision. Reading it here (and archiving what it names) is what makes a
+      // below-floor chosen set actually render as exactly that set on the board
+      // — no ghost columns for a department the owner explicitly opted out of.
+      // MUST also run AFTER the reseed for the same resurrection reason as 1b,
+      // and BEFORE the chosen/parity computation below so `chosen` (which now
+      // subtracts this same set) and `provisioned`/`displayed` agree.
+      const optedOut = readDepartmentOptoutIds();
+      const optoutArchive = syncDepartmentOptoutArchive(db, optedOut);
+      result.department_optout = {
+        opted_out: optoutArchive.declined,
+        archived: optoutArchive.archived,
+        already_archived: optoutArchive.alreadyArchived,
+        unarchived: optoutArchive.unarchived,
+        no_workspace: optoutArchive.noWorkspace,
+      };
+
       // ── Step 1c (C6): the converge ASSERTION — chosen == provisioned == displayed.
       //
       // This is what makes the decline PROVABLE instead of merely coded. If a
@@ -225,7 +258,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       // that disagrees with the owner's own answers. `displayed` comes from the
       // BOARD'S OWN query (shared boardWhereClause), so the assertion cannot pass
       // against a re-implementation that has drifted from what users actually see.
-      const chosen = listChosenDepartmentIds(declined);
+      const chosen = listChosenDepartmentIds(declined, optedOut);
       if (chosen !== null) {
         const parity = assertConvergeParity({
           chosen,
@@ -251,6 +284,7 @@ export async function POST(req: NextRequest): Promise<Response> {
                 `displayed_not_provisioned=[${parity.displayedNotProvisioned.join(', ')}]`,
               converge_parity: parity,
               declined_workspaces: result.declined_workspaces,
+              department_optout: result.department_optout,
             },
             { status: 500 },
           );
