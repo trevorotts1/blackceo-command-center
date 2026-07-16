@@ -22,7 +22,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import BetterSqlite3 from 'better-sqlite3';
-import { getDb, getMigrationStatus, DB_PATH } from '@/lib/db';
+import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
 import { getNotificationFailuresLogStats } from '@/lib/notify';
 
 // ── constants ────────────────────────────────────────────────────────────────
@@ -668,12 +668,18 @@ export function checkDatabasePath(): CheckResult {
   const envPath = process.env.DATABASE_PATH;
 
   if (!envPath) {
-    // Row 21: unset is valid — uses process.cwd() default
+    // Row 21: unset is valid — uses process.cwd() default.
+    // Resolve at USE time (C8 lazy resolution): on the real server the
+    // __CC_SERVER_ENTRYPOINT__ marker is set, so this returns the historic
+    // cwd default. Anywhere else the C8 guard throws rather than name a live
+    // path — which is the correct answer for a health probe that has no
+    // business resolving one.
+    const resolved = getDbPath();
     return {
       pass: true,
-      detail: `database_path: unset — using default process.cwd() path (${DB_PATH}). Set DATABASE_PATH for cwd-drift resilience (B.4 hardening).`,
+      detail: `database_path: unset — using default process.cwd() path (${resolved}). Set DATABASE_PATH for cwd-drift resilience (B.4 hardening).`,
       database_path_set: false,
-      resolved_path: DB_PATH,
+      resolved_path: resolved,
     };
   }
 

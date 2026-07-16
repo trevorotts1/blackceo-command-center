@@ -144,7 +144,7 @@ function mockDbWithAnthologyCardCount(n: number) {
       }),
     }),
     getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-    DB_PATH: path.join(tmpDir, 'test.db'),
+    getDbPath: () => path.join(tmpDir, 'test.db'),
   };
 }
 
@@ -312,7 +312,7 @@ describe('company_branding — config file rules', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -337,7 +337,7 @@ describe('company_branding — config file rules', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -400,7 +400,7 @@ describe('company_branding — config file rules', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -426,7 +426,7 @@ describe('company_branding — config file rules', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -455,7 +455,7 @@ describe('company_branding — config file rules', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -479,7 +479,7 @@ describe('company_branding — config file rules', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -508,7 +508,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -537,7 +537,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -561,7 +561,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -583,7 +583,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -604,7 +604,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -631,7 +631,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -657,7 +657,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -696,7 +696,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -722,7 +722,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -741,7 +741,7 @@ describe('company_branding — DB branding checks', () => {
         }),
       }),
       getMigrationStatus: () => { throw new Error('SQLITE_BUSY: database is locked'); },
-      DB_PATH: '/tmp/test.db',
+      getDbPath: () => '/tmp/test.db',
     }));
     const { checkCompanyBranding } = await loadChecks();
     const result = checkCompanyBranding();
@@ -812,7 +812,7 @@ describe('migrations', () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({}),
       getMigrationStatus: () => ({ applied: ['001', '002', '003'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkMigrations } = await loadChecks();
     const result = checkMigrations();
@@ -825,7 +825,7 @@ describe('migrations', () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({}),
       getMigrationStatus: () => ({ applied: ['001', '002'], pending: ['003', '004'] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkMigrations } = await loadChecks();
     const result = checkMigrations();
@@ -839,7 +839,7 @@ describe('migrations', () => {
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({}),
       getMigrationStatus: () => { throw new Error('SQLITE_BUSY: database is locked'); },
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkMigrations } = await loadChecks();
     const result = checkMigrations();
@@ -1448,7 +1448,7 @@ describe('GET /api/health/deep — response shape', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
 
     // REDO #2 FIX: mock the deep-checks module factory with the diskReader override
@@ -1495,7 +1495,7 @@ describe('GET /api/health/deep — response shape', () => {
         }),
       }),
       getMigrationStatus: () => { throw new Error('SQLITE_BUSY: database is locked'); },
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
 
     // REDO #2 FIX: same module-instance fix — inject diskReader override via factory
@@ -1550,7 +1550,7 @@ describe('GET /api/health/deep — response shape', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     };
   }
 
@@ -1789,7 +1789,7 @@ describe('anthology_board_projection', () => {
         }),
       }),
       getMigrationStatus: () => ({ applied: [], pending: [] }),
-      DB_PATH: path.join(tmpDir, 'test.db'),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
     }));
     const { checkAnthologyBoardProjection } = await loadChecks();
     const result = checkAnthologyBoardProjection();

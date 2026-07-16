@@ -32,7 +32,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { v4 as uuidv4 } from "uuid";
-import { DB_PATH, queryAll, queryOne, run } from "@/lib/db";
+import { getDbPath, queryAll, queryOne, run } from "@/lib/db";
 import { broadcast } from "@/lib/events";
 import { ensureBlendGuardrail } from "@/lib/persona-dispatch";
 import type { PersonaSlot } from "@/lib/sops";
@@ -908,7 +908,7 @@ export async function selectPersonaForTask(
     const audienceOverride = opts?.audienceOverride?.trim();
     const spawnEnv = {
       ...process.env,
-      DASHBOARD_DB_PATH: DB_PATH,
+      DASHBOARD_DB_PATH: getDbPath(),
       OPENCLAW_TASK_ID: taskId,
       ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
       ...(audienceOverride ? { OPENCLAW_AUDIENCE: audienceOverride } : {}),
@@ -1061,7 +1061,7 @@ export async function selectPersonaPlanForTask(
   const baseArgs = [scriptPath, "--task", taskDescription, "--department", dept, "--format", "json"];
   const env = {
     ...process.env,
-    DASHBOARD_DB_PATH: DB_PATH,
+    DASHBOARD_DB_PATH: getDbPath(),
     OPENCLAW_TASK_ID: taskId,
     ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
   };
@@ -1273,7 +1273,7 @@ function runRecordCompletionSpawn(
     {
       detached: true,
       stdio: "pipe",
-      env: { ...process.env, DASHBOARD_DB_PATH: DB_PATH },
+      env: { ...process.env, DASHBOARD_DB_PATH: getDbPath() },
     }
   );
 

@@ -26,10 +26,12 @@
  */
 import fs from 'fs';
 import Database from 'better-sqlite3';
-import { DB_PATH } from '../src/lib/db/index';
+import { getDbPath } from '../src/lib/db/index';
 import { checkDispatchSchemaHealth } from '../src/lib/db/migrations';
 
-const dbPath = process.env.DATABASE_PATH || DB_PATH;
+// Short-circuits before getDbPath() when DATABASE_PATH is set, so this script
+// stays runnable while an un-isolated invocation still hits the C8 guard.
+const dbPath = process.env.DATABASE_PATH || getDbPath();
 
 if (!fs.existsSync(dbPath)) {
   console.error(`[cc-schema-health] no database found at ${dbPath} — set DATABASE_PATH to point at mission-control.db`);
