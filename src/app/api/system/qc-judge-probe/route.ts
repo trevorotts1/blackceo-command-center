@@ -3,7 +3,7 @@
  *
  * On-demand QC judge-proof probe (P1-05). Fires ONE real chat-completion call
  * to the box's configured QC_JUDGE_MODEL and reports
- * `judge_ok | judge_auth_dead | judge_unprovisioned` — never trusting
+ * `judge_ok | judge_auth_dead | judge_empty_response | judge_unreachable | judge_unprovisioned` — never trusting
  * `GET /v1/models` alone (the documented mirage: an unauthenticated or dead
  * key can still return 200 + a full model catalog).
  *
@@ -40,11 +40,17 @@ export async function GET() {
     );
   } catch (err) {
     console.error('[/api/system/qc-judge-probe] failed:', err);
+    // checkJudgeProvisioning() never throws, so reaching here means the PROBE
+    // ITSELF broke — which proves nothing about the judge's credential. Reporting
+    // 'judge_auth_dead' here would be the borrowed diagnosis this probe was just
+    // cured of: it would send a human to rotate a key over a bug in this route.
     return NextResponse.json(
       {
-        verdict: 'judge_auth_dead',
+        verdict: 'judge_unreachable',
         judgeModel: process.env.QC_JUDGE_MODEL || null,
-        reason: err instanceof Error ? err.message : String(err),
+        reason:
+          `The QC judge probe itself failed to run: ${err instanceof Error ? err.message : String(err)}. ` +
+          `This says NOTHING about the judge's key or reachability — it is a fault in the probe route.`,
         probedAt: new Date().toISOString(),
       },
       { status: 500, headers: { 'Cache-Control': 'no-store' } },

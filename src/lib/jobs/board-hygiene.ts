@@ -102,6 +102,11 @@ const TRIAD_STALL_HOURS = numEnv('BOARD_HYGIENE_TRIAD_STALL_HOURS', 48);
 const OWNER_REPING_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_OWNER_REPING_COOLDOWN_HOURS', 48);
 const OPERATOR_ESCALATE_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_ESCALATE_COOLDOWN_HOURS', 48);
 const QC_STARVED_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_QC_STARVED_COOLDOWN_HOURS', 48);
+// The judge-FAILED page (a judge IS configured but failed every call up to the
+// scorer's bound). Same 48h cadence as its qc_starved sibling, on its OWN
+// cooldown so a keyless page can never mask a broken-judge page or vice versa —
+// they are different faults with different fixes.
+const QC_JUDGE_FAILED_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_QC_JUDGE_FAILED_COOLDOWN_HOURS', 48);
 const TRIAD_STALL_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_TRIAD_STALL_COOLDOWN_HOURS', 48);
 
 function numEnv(name: string, fallback: number): number {
@@ -126,6 +131,10 @@ export const BOARD_HYGIENE_GLOBAL_DEFAULTS = {
 const EVT_OWNER_REPINGED = 'board_hygiene_owner_repinged';
 const EVT_OPERATOR_ESCALATED = 'board_hygiene_operator_escalated';
 const EVT_QC_STARVED = 'qc_starved';
+// The judge-FAILED alert. Distinct from qc_starved: 'starved' means NO judge is
+// provisioned; this means one IS provisioned and is broken (unreachable, or
+// answering empty/unparseable because its completion budget is starved).
+const EVT_QC_JUDGE_FAILED = 'qc_judge_failed';
 const EVT_DONE_ARCHIVED = 'board_hygiene_auto_archived_done';
 const EVT_STALE_NUDGED = 'board_hygiene_stale_nudged';
 const EVT_STALE_ARCHIVED = 'auto_archived_stale';
@@ -153,6 +162,11 @@ export interface BoardHygieneResult {
   reviewForceScoredIds: string[];
   qcStarved: number;
   qcStarvedIds: string[];
+  /** Review cards paged this run because their configured judge FAILED every
+   *  attempt up to the scorer's bound ([QC-JUDGE-FAILED-FINAL]). Distinct from
+   *  qcStarved, which means no judge is provisioned at all. */
+  qcJudgeFailed: number;
+  qcJudgeFailedIds: string[];
   doneArchived: number;
   doneArchivedIds: string[];
   staleNudged: number;
@@ -191,6 +205,8 @@ function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult 
     reviewForceScoredIds: [],
     qcStarved: 0,
     qcStarvedIds: [],
+    qcJudgeFailed: 0,
+    qcJudgeFailedIds: [],
     doneArchived: 0,
     doneArchivedIds: [],
     staleNudged: 0,
@@ -346,7 +362,10 @@ async function processReviewLane(result: BoardHygieneResult): Promise<void> {
   // the SLA window, and not already permanently terminal
   // ([QC-HEURISTIC-FINAL] — QC-02; re-scoring a terminal task would corrupt
   // its no-key-pass counter and is explicitly forbidden by qc-scorer's own
-  // invariant).
+  // invariant). [QC-JUDGE-FAILED-FINAL] is excluded for the SAME reason: it is
+  // the escalated "the judge is broken" state, and force-rescoring it would both
+  // corrupt the deferral counter and quietly restore the very retry loop the
+  // scorer's bound exists to kill.
   // U101: the per-row effective threshold can only ever be TIGHTER than or
   // equal to the widest-possible one — query at the tightest possible value
   // across all departments (minPossibleSlaThreshold) so no department's
@@ -366,6 +385,11 @@ async function processReviewLane(result: BoardHygieneResult): Promise<void> {
             SELECT 1 FROM events e
              WHERE e.task_id = t.id AND e.type = 'qc_review'
                AND e.message LIKE '%[QC-HEURISTIC-FINAL]%'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM events e
+             WHERE e.task_id = t.id AND e.type = 'qc_review'
+               AND e.message LIKE '%[QC-JUDGE-FAILED-FINAL]%'
           )
           AND NOT EXISTS (
             SELECT 1 FROM events e
@@ -439,6 +463,70 @@ async function processReviewLane(result: BoardHygieneResult): Promise<void> {
     writeEvent(task.id, EVT_QC_STARVED, message);
     result.qcStarved++;
     result.qcStarvedIds.push(task.id);
+  }
+
+  // ── Terminal JUDGE-FAILED lane — the page that ends the silence ────────────
+  // A task the scorer escalated to [QC-JUDGE-FAILED-FINAL]: a judge IS
+  // configured and it failed every call up to the bound. Like its
+  // [QC-HEURISTIC-FINAL] sibling above, such a task will NEVER re-enter the
+  // force-score scan, so without this block it is silently starved forever.
+  //
+  // WHY THIS BLOCK IS THE POINT OF THE WHOLE FIX: the scorer's terminal marker
+  // only writes an event and a console.warn. The OPERATOR PAGE lives here, in
+  // board-hygiene — exactly as it does for the no-key hatch. A terminal state
+  // that this scan does not match is a hatch into a soundproof room, which is
+  // the six-day defect rebuilt one layer up.
+  //
+  // ONCE, NOT PER RETRY: the unbounded lane was originally left unbounded out of
+  // fear of an alert storm (qc-review-sweep.ts). This is the answer to that
+  // fear, not a repeat of it — the scorer retries ~12 times silently, escalates
+  // exactly ONCE, and only THEN does this page fire, cooldown-guarded on its own
+  // dedicated event type. Six days of silence is the disease; one page after
+  // ~1 hour is not a storm. Uses the SAME notifySystem the no-key hatch uses —
+  // no new alerting mechanism is introduced.
+  let judgeFailed: Array<{ id: string; title: string }>;
+  try {
+    judgeFailed = queryAll<{ id: string; title: string }>(
+      `SELECT t.id, t.title
+         FROM tasks t
+        WHERE t.status = 'review'
+          AND t.archived_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM events e
+             WHERE e.task_id = t.id AND e.type = 'qc_review'
+               AND e.message LIKE '%[QC-JUDGE-FAILED-FINAL]%'
+          )`,
+      [],
+    );
+  } catch (err) {
+    console.warn('[board-hygiene] terminal judge-failed query failed:', (err as Error).message);
+    judgeFailed = [];
+  }
+
+  for (const task of judgeFailed) {
+    if (hasRecentEvent(task.id, EVT_QC_JUDGE_FAILED, QC_JUDGE_FAILED_COOLDOWN_HOURS)) continue;
+    // Quote the scorer's own escalation verbatim rather than re-deriving a
+    // diagnosis here. The scorer SAW the failure; this job did not. Re-deriving
+    // would be exactly the borrowed-diagnosis habit that cost six days.
+    const scorerEscalation = queryOne<{ message: string }>(
+      `SELECT message FROM events
+        WHERE task_id = ? AND type = 'qc_review'
+          AND message LIKE '%[QC-JUDGE-FAILED-FINAL]%'
+        ORDER BY created_at DESC LIMIT 1`,
+      [task.id],
+    );
+    const message =
+      `[BOARD-HYGIENE] QC judge FAILING for task "${task.title}" (id: ${task.id}) — a judge IS ` +
+      `configured but produced no verdict on every attempt up to the bound, so QC has stopped ` +
+      `retrying and this task can no longer auto-advance review→done. It needs a human: fix the ` +
+      `judge, or promote the task manually. ` +
+      (scorerEscalation?.message
+        ? `Scorer's verbatim escalation: ${scorerEscalation.message}`
+        : `(no [QC-JUDGE-FAILED-FINAL] detail found — check the task's qc_review events)`);
+    notifySystem(message, { agent: 'board-hygiene', action: 'qc_judge_failed' });
+    writeEvent(task.id, EVT_QC_JUDGE_FAILED, message);
+    result.qcJudgeFailed++;
+    result.qcJudgeFailedIds.push(task.id);
   }
 }
 

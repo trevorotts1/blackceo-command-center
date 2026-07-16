@@ -40,10 +40,30 @@ import type {
 const PROVIDER_SLUG = 'ollama-cloud';
 const PROVIDER_DISPLAY_NAME = 'Ollama Cloud';
 
-const BASE_URL = process.env.OLLAMA_CLOUD_BASE_URL || 'https://ollama.com';
-const MODELS_ENDPOINT = `${BASE_URL}/v1/models`;
-const USAGE_ENDPOINT = `${BASE_URL}/v1/usage`;
-const CHAT_ENDPOINT = `${BASE_URL}/v1/chat/completions`;
+export const OLLAMA_CLOUD_DEFAULT_BASE_URL = 'https://ollama.com';
+
+/**
+ * The base URL is resolved at CALL time, not module-import time.
+ *
+ * Why this matters (and why it used to be a module-level `const`): a QC judge
+ * misconfiguration — one wrong address in `OLLAMA_CLOUD_BASE_URL` — parked
+ * tasks in review for SIX DAYS. Diagnosing that requires reporting the address
+ * we ACTUALLY dialled; an import-time snapshot can silently disagree with the
+ * live env (and made the failure untestable without real network calls). Call-
+ * time resolution keeps `getOllamaCloudBaseUrl()` honest for both the error
+ * messages and the escalation the QC scorer now raises.
+ */
+export function getOllamaCloudBaseUrl(): string {
+  return process.env.OLLAMA_CLOUD_BASE_URL || OLLAMA_CLOUD_DEFAULT_BASE_URL;
+}
+
+const modelsEndpoint = () => `${getOllamaCloudBaseUrl()}/v1/models`;
+const usageEndpoint = () => `${getOllamaCloudBaseUrl()}/v1/usage`;
+
+/** The exact endpoint the QC judge dials. Exported so a failure can NAME it. */
+export function getOllamaCloudChatEndpoint(): string {
+  return `${getOllamaCloudBaseUrl()}/v1/chat/completions`;
+}
 
 /**
  * Raw shape returned by Ollama Cloud's `/v1/models`. Best-effort, matches
@@ -149,11 +169,37 @@ function inferFamily(modelId: string): string | undefined {
   return undefined;
 }
 
+/**
+ * A non-2xx response from Ollama Cloud, carrying the STATUS as data.
+ *
+ * Why typed: callers need to tell "your key is dead" (401/403) apart from "the
+ * server erred" (5xx) apart from "nothing answered" (network). The status used
+ * to be legible only by pattern-matching it back out of an English message —
+ * i.e. guessing. Guessed diagnoses are what cost six days of QC silence, so the
+ * status travels as a field.
+ */
+export class OllamaCloudHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly statusText: string,
+    readonly url: string,
+    body: string,
+  ) {
+    super(`Ollama Cloud request to ${url} failed: ${status} ${statusText} ${body}`.trim());
+    this.name = 'OllamaCloudHttpError';
+  }
+}
+
+/** True for the ONLY statuses that actually establish a dead credential. */
+export function isAuthStatus(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
 async function fetchJson<T>(url: string, init: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Ollama Cloud request to ${url} failed: ${res.status} ${res.statusText} ${body}`.trim());
+    throw new OllamaCloudHttpError(res.status, res.statusText, url, body);
   }
   return (await res.json()) as T;
 }
@@ -168,7 +214,7 @@ export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
   if (!apiKey) {
     throw new Error('Ollama Cloud fetchModels called without an apiKey (set OLLAMA_CLOUD_API_KEY)');
   }
-  const payload = await fetchJson<OllamaCloudModelsResponse>(MODELS_ENDPOINT, {
+  const payload = await fetchJson<OllamaCloudModelsResponse>(modelsEndpoint(), {
     method: 'GET',
     headers: authHeaders(apiKey),
   });
@@ -188,7 +234,7 @@ export async function fetchUsage(apiKey: string): Promise<UsageSnapshot> {
   if (!apiKey) {
     throw new Error('Ollama Cloud fetchUsage called without an apiKey (set OLLAMA_CLOUD_API_KEY)');
   }
-  const payload = await fetchJson<OllamaCloudUsageResponse>(USAGE_ENDPOINT, {
+  const payload = await fetchJson<OllamaCloudUsageResponse>(usageEndpoint(), {
     method: 'GET',
     headers: authHeaders(apiKey),
   });
@@ -222,7 +268,7 @@ export async function chatCompletion(
   if (!apiKey) {
     throw new Error('Ollama Cloud chatCompletion called without an apiKey');
   }
-  return fetchJson<ChatCompletionResponse>(CHAT_ENDPOINT, {
+  return fetchJson<ChatCompletionResponse>(getOllamaCloudChatEndpoint(), {
     method: 'POST',
     headers: authHeaders(apiKey),
     body: JSON.stringify(request),
@@ -240,7 +286,7 @@ export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(MODELS_ENDPOINT, {
+    const res = await fetch(modelsEndpoint(), {
       method: 'GET',
       headers: authHeaders(apiKey),
       signal: controller.signal,

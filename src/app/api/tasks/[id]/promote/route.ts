@@ -61,11 +61,15 @@ export async function POST(
     }
 
     // ── Route guard (server-side, independent of the button's own render
-    // gate) — this route only EVER promotes a review card the QC heuristic
-    // fallback actually parked. A forged POST at a normal in-progress card,
-    // a Blocked card, or an LLM-scored review card (latest qc_review event is
-    // [QC-AUTO] / [QC-DEFERRED-PROVIDER-DOWN], not a heuristic marker) is
-    // refused here exactly as the button never renders for it. ──
+    // gate) — this route only EVER promotes a review card QC actually parked
+    // for a human: a heuristic (no-key) park, or a judge escalated as
+    // FAILING ([QC-JUDGE-FAILED-FINAL]). A forged POST at a
+    // normal in-progress card, a Blocked card, or an LLM-scored review card
+    // (latest qc_review event is [QC-AUTO], or a still-retrying
+    // [QC-DEFERRED-PROVIDER-DOWN]) is refused here exactly as the button never
+    // renders for it. NOTE the escalated-judge case is deliberately promotable:
+    // telling a human "your judge is failing and this task is stuck" while
+    // refusing to let them unstick it would just be a politer six-day park. ──
     if (existing.status !== 'review') {
       return NextResponse.json(
         {
@@ -80,10 +84,11 @@ export async function POST(
         {
           error:
             "Forbidden: this task's latest QC review is not a heuristic-parked state " +
-            '([QC-HEURISTIC] / [QC-HEURISTIC-FINAL]). Only a card the QC heuristic ' +
-            'fallback parked for human review (no LLM/judge key configured) may be ' +
-            'promoted this way. An LLM-scored review card is decided only by the ' +
-            'independent QC auto-scorer or PATCH /api/tasks/{id}.',
+            '([QC-HEURISTIC] / [QC-HEURISTIC-FINAL] / [QC-JUDGE-FAILED-FINAL]). ' +
+            'Only a card the QC heuristic fallback parked for human review — no LLM/judge ' +
+            'key configured, or a judge escalated as failing — may be promoted this ' +
+            'way. An LLM-scored card, or one still auto-retrying a provider blip, is ' +
+            'decided only by the independent QC auto-scorer or PATCH /api/tasks/{id}.',
         },
         { status: 403 },
       );
@@ -151,13 +156,14 @@ export async function GET() {
     endpoint: '/api/tasks/[id]/promote',
     method: 'POST',
     scope:
-      'U38 (C-07) — promotes a review card the QC heuristic fallback parked ' +
-      '(latest qc_review event is [QC-HEURISTIC] or [QC-HEURISTIC-FINAL], i.e. the ' +
-      'box has no LLM/judge key configured) straight to done via the shared ' +
-      "transition() state machine, actor:'operator'. Refuses (403) any task that " +
-      "isn't currently 'review', and any review card whose latest qc_review event " +
-      "is NOT a heuristic marker (an LLM-scored card stays owned by the QC " +
-      'auto-scorer / PATCH /api/tasks/{id}). Refuses (409 CAS_CONFLICT) if the task ' +
+      'U38 (C-07) — promotes a review card QC parked for a human (latest qc_review ' +
+      'event is [QC-HEURISTIC] / [QC-HEURISTIC-FINAL], i.e. no LLM/judge key, or ' +
+      '[QC-JUDGE-FAILED-FINAL], i.e. the judge failed every call up to the ' +
+      'bound and is misconfigured) straight to done via the shared transition() state ' +
+      "machine, actor:'operator'. Refuses (403) any task that isn't currently 'review', " +
+      'and any review card whose latest qc_review event is NOT a parked marker — an ' +
+      'LLM-scored card, or one still auto-retrying a provider blip, stays owned by the ' +
+      'QC auto-scorer / PATCH /api/tasks/{id}. Refuses (409 CAS_CONFLICT) if the task ' +
       'moved out of review between the button rendering and the click.',
     returns:
       '200 with the updated task JSON; 403 out-of-scope card, 404 unknown id, ' +

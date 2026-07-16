@@ -118,13 +118,19 @@ function progressTimestamp(row: StaleTaskRow): string {
  * / 5,616 stale_repinged furnace), so the stale sweep must leave it alone.
  * NOTE: SQLite LIKE treats '[' literally (no bracket char-classes), so the
  * '%[QC-HEURISTIC%' pattern matches both [QC-HEURISTIC] and [QC-HEURISTIC-FINAL].
+ * [QC-JUDGE-FAILED-FINAL] — the terminal "the judge failed every call up to the
+ * bound, a human must look" escalation — is matched explicitly. It is parked ON
+ * PURPOSE and is precisely the task a human has been asked to look at, so
+ * bouncing it to the orchestrator would destroy the alarm just raised.
  */
 function isParkedInReview(taskId: string): boolean {
   try {
     const row = queryOne<{ n: number }>(
       `SELECT COUNT(*) AS n FROM events
         WHERE task_id = ? AND type = 'qc_review'
-          AND (message LIKE '%[QC-HEURISTIC%' OR message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%')`,
+          AND (message LIKE '%[QC-HEURISTIC%'
+               OR message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%'
+               OR message LIKE '%[QC-JUDGE-FAILED-FINAL]%')`,
       [taskId],
     );
     return (row?.n ?? 0) > 0;
