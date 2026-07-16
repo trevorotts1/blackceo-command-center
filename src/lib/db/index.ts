@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { schema } from './schema';
 import { runMigrations, getLastFailedMigrationId } from './migrations';
 
@@ -54,6 +55,37 @@ function resolveDbPath(): string {
 
   if (globalThis.__CC_SERVER_ENTRYPOINT__ === true) {
     return path.join(process.cwd(), 'mission-control.db');
+  }
+
+  // BUILD-06: `next build`'s "Collecting page data" step statically imports
+  // every route module (to read its exported `dynamic`/`runtime` config) in a
+  // worker process that never runs the Next.js instrumentation `register()`
+  // hook — that hook only fires for a REAL server boot (`next dev`/`next
+  // start`), never for this build-time introspection pass. Every route that
+  // imports `@/lib/db` at module scope (queryOne/queryAll/run/getDb are all
+  // called from inside handler functions, never at module scope — see the
+  // route files) therefore hit this guard on a plain `next build`, even
+  // though getDb() is never actually invoked at build time: no request is
+  // served, so nothing opens this path. Next.js sets
+  // `NEXT_PHASE=phase-production-build` for exactly this worker process (see
+  // node_modules/next/dist/build/index.js) — a signal only the Next.js build
+  // CLI itself sets, so it cannot be forged by a script/test and does not
+  // weaken the guard for the case it exists to catch. Deliberately narrow to
+  // phase-production-build only — phase-production-server (the real `next
+  // start` boot) still requires the real marker/env, unchanged.
+  if (process.env.NEXT_PHASE === 'phase-production-build') {
+    // os.tmpdir(), not process.cwd(): the build's static-generation step runs
+    // SEVERAL PARALLEL worker processes, each importing this module and
+    // independently resolving DB_PATH. A shared, fixed path made every worker
+    // open + migrate the SAME sqlite file concurrently — cross-process WAL
+    // contention (SQLITE_BUSY_SNAPSHOT) and racing `_migrations` inserts
+    // (UNIQUE constraint failures), and it littered the repo working tree
+    // with a throwaway build-time file. Key on pid + a random suffix so every
+    // worker gets its own private file; it is never queried for real data —
+    // see the guard header above, getDb() is only reached here by a trial
+    // static-render Next.js performs to decide static-optimization
+    // eligibility, not by an actual request.
+    return path.join(os.tmpdir(), `cc-build-phase-${process.pid}-${Math.random().toString(36).slice(2)}.db`);
   }
 
   throw new Error(
