@@ -984,6 +984,10 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
         const subFrom =
           queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [subTaskId])?.status ??
           'in_progress';
+        // U99-RAW-STATUS-WRITER: in_progress→done is not a legal transition()
+        // edge (see the DISP-10 note just above) and this write also sets
+        // completed_at atomically; audited immediately below via
+        // recordStatusEvent.
         const res = run(
           `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ? AND status NOT IN ('done')`,
           [fileNow, fileNow, subTaskId],

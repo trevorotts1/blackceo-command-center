@@ -56,7 +56,7 @@ import { getBestSOPForTask } from '@/lib/sops';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { artifactDispatchPayload } from '@/lib/task-lifecycle';
+import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
@@ -122,8 +122,8 @@ export function recordDispatchFailure(
   },
 ): void {
   try {
-    const row = queryOne<{ dispatch_attempts: number | null; title: string }>(
-      'SELECT dispatch_attempts, title FROM tasks WHERE id = ?',
+    const row = queryOne<{ dispatch_attempts: number | null; title: string; status: string }>(
+      'SELECT dispatch_attempts, title, status FROM tasks WHERE id = ?',
       [taskId],
     );
     const attempts = (row?.dispatch_attempts ?? 0) + 1;
@@ -142,12 +142,22 @@ export function recordDispatchFailure(
           `attempt ${attempts} (not retried). ${opts.needs}`
         : `[dispatch-blocked] ${opts.reason} after ${attempts} failed advance attempt(s) ` +
           `(cap ${MAX_DISPATCH_ATTEMPTS}). ${opts.needs}`;
-      run(
+      // U99-RAW-STATUS-WRITER: compound single-row UPDATE (the full dispatch-
+      // accounting + block_* metadata must land atomically with the status
+      // flip); audited immediately below via recordStatusEvent (DISP-10),
+      // gated on the CAS actually landing.
+      const blockRes = run(
         `UPDATE tasks SET status = 'blocked', dispatch_attempts = ?, last_dispatch_attempt_at = ?,
            next_dispatch_eligible_at = NULL, block_reason = ?, block_needs = ?, block_audience = ?, updated_at = ?
          WHERE id = ? AND status NOT IN ('done') AND archived_at IS NULL`,
         [attempts, now, opts.reason, opts.needs, opts.audience, now, taskId],
       );
+      if ((blockRes.changes ?? 0) > 0) {
+        recordStatusEvent(taskId, row?.status ?? 'unknown', 'blocked', {
+          actor: opts.context,
+          reason: blockNote,
+        });
+      }
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), 'task_blocked', agentId, taskId, blockNote, now],
@@ -1117,6 +1127,11 @@ If you need help or clarification, ask the orchestrator.`;
     // win the swap (changes !== 1) another advancer already claimed it — return
     // WITHOUT sending. Pairs with the stable idempotencyKey (DISP-01) so even a
     // same-instant collision the CAS didn't serialize is collapsed at the gateway.
+    // U99-RAW-STATUS-WRITER: multi-status CAS claim (the WHERE IN clause
+    // matches any of 5 legal from-statuses in one atomic UPDATE — a shape
+    // transition()'s single expectedFrom can't express); audited immediately
+    // below via recordStatusEvent (DISP-10 / DATA-07 — closes the CROSS-LANE
+    // note this same function used to carry).
     const claim = run(
       `UPDATE tasks SET status = 'in_progress', updated_at = ?
          WHERE id = ? AND status IN ('backlog','inbox','planning','pending_dispatch','assigned')`,
@@ -1129,6 +1144,10 @@ If you need help or clarification, ask the orchestrator.`;
       );
       return;
     }
+    recordStatusEvent(task.id, task.status, 'in_progress', {
+      actor: context,
+      reason: 'auto-dispatch claim (DISP-02)',
+    });
 
     // DISP-01: stable idempotency key. Was `Date.now()`, which handed every
     // re-fire — including two advancers racing the SAME window — a UNIQUE key,
@@ -1150,10 +1169,20 @@ If you need help or clarification, ask the orchestrator.`;
       // never re-fires every tick.
       console.error(`[${context}] autoDispatchTask: chat.send failed for task ${task.id} — rolling back claim:`, sendErr);
       const rollbackNow = new Date().toISOString();
-      run(
+      // U99-RAW-STATUS-WRITER: restores the pre-claim status captured above
+      // (dynamic target — not a fixed literal transition() edge); audited
+      // immediately below via recordStatusEvent (DISP-10), gated on the CAS
+      // actually landing.
+      const rollbackRes = run(
         `UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'in_progress'`,
         [task.status, rollbackNow, task.id],
       );
+      if ((rollbackRes.changes ?? 0) > 0) {
+        recordStatusEvent(task.id, 'in_progress', task.status, {
+          actor: context,
+          reason: 'chat.send failed — rollback of DISP-02 claim',
+        });
+      }
       try {
         const rolledBack = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
         if (rolledBack) broadcast({ type: 'task_updated', payload: rolledBack });
@@ -1177,10 +1206,12 @@ If you need help or clarification, ask the orchestrator.`;
     // fast agent has meanwhile moved to review. Instead pin the resolved model_id
     // and broadcast the CURRENT row so the board reflects live state.
     //
-    // CROSS-LANE NOTE (DISP-10 / DATA-07, Lane L3): the CAS claim is a raw status
-    // write that bypasses transition()'s task_events audit. The dispatch is still
-    // recorded via the 'task_dispatched' events row + task_activities below; L3's
-    // lifecycle-funnel work should fold this claim into the audited path.
+    // CROSS-LANE NOTE (DISP-10 / DATA-07, U99 — Raw-writer convergence):
+    // resolved. The CAS claim above is a raw status write (a multi-status IN
+    // clause transition() cannot express as a single expectedFrom), but it is
+    // now audited via recordStatusEvent immediately after the claim succeeds,
+    // so task_events is complete for this path too. The dispatch is also
+    // recorded via the 'task_dispatched' events row + task_activities below.
     if (settings.model) {
       run('UPDATE tasks SET model_id = ?, updated_at = ? WHERE id = ?', [settings.model, now, task.id]);
     }

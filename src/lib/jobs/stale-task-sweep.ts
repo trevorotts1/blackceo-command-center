@@ -47,6 +47,7 @@ import { notifySystem } from '@/lib/notify';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -271,6 +272,10 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
     : '';
 
   try {
+    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description /
+    // qc_reroute_attempts / dispatch-accounting reset must land atomically
+    // with the status flip, mirroring return-to-orchestrator/route.ts);
+    // audited immediately below via recordStatusEvent (DISP-10).
     run(
       `UPDATE tasks SET
         status = 'backlog',
@@ -281,6 +286,10 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
        WHERE id = ?`,
       [updatedDescription, newAttempts, now, now, task.id],
     );
+    recordStatusEvent(task.id, task.status, 'backlog', {
+      actor: 'stale-task-sweep',
+      reason,
+    });
 
     run(
       `INSERT INTO events (id, type, task_id, message, created_at)
