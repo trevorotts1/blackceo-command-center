@@ -59,6 +59,13 @@ echo "$probe_out" > "${LOG_DIR}/last-probe.txt"
 # hourly with unreadable lock-JSON, falsely "clearing" SSH login banners as
 # locks, and nuking LIVE locks. Off until rewritten read-only + de-duped.
 # (session-health.sh itself also early-exits 0 as a second safety.)
+# TRIPWIRE (2026-07-16, fix/fleet-heartbeat-cf-token-failclosed): session-health.sh's
+# check_one() still contains its OWN hand-maintained CF-token `case` default (the
+# same fall-through-to-a-wrong-client's-token bug class fixed elsewhere in this repo
+# via accounts/cf-token-map.json + _cf_token_for_tunnel()). It is inert only because
+# BOTH this call site and session-health.sh's own top-of-file `exit 0` are disabled.
+# Before ever re-enabling this line, port check_one()'s CF-token resolution to
+# _cf_token_for_tunnel() first, or the fixed bug class comes back through this path.
 # HEARTBEAT_MODE="$mode" "$SESSION_HEALTH" >>"${LOG_DIR}/heartbeat.log" 2>&1 &
 true & _SH_PID=$!
 
