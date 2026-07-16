@@ -7,6 +7,14 @@
 set -uo pipefail
 PORT="${CC_PORT:-4000}"; CANONICAL_DIR="${CC_CANONICAL_DIR:-}"; SKIP_PM2=0; JSON_ONLY=0
 PUBLIC_URL="${CC_PUBLIC_URL:-}"
+# U51 build item: cc_port fact + override_ack_set fact, read-only, snapshotted
+# at invocation time — reported in every JSON shape this script emits so a
+# sweep can ledger "did this box report canonical port 4000 with no override
+# ACK set" without a second probe. override_ack_set only reflects whether the
+# ACK is set in THIS script's own environment right now; it is not a claim
+# about what env the running pm2 process was actually launched with.
+PORT_OVERRIDE_ACK_SET="false"
+[[ "${CC_PORT_OVERRIDE_ACK:-0}" == "1" ]] && PORT_OVERRIDE_ACK_SET="true"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port)          PORT="$2";          shift 2 ;;
@@ -51,18 +59,18 @@ DEEP_BODY=$(printf '%s\n' "$DEEP_RAW" | awk 'NR>1{print prev} {prev=$0}')
 HTTP_CODE=$(printf '%s\n' "$DEEP_RAW" | awk 'END{print}' | py "d.get('_http_code',0)" 0)
 
 if [[ "$HTTP_CODE" == "0" ]]; then
-  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"server unreachable"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"server unreachable","cc_port":%s,"override_ack_set":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
   exit 3
 fi
 # FIX (Issue 2): 5xx from /api/health/deep → exit 3 UNKNOWN, not exit 1.
 # route.ts comment mandates: 500 = internal error, treat as indeterminate by caller.
 if [[ "$HTTP_CODE" -ge 500 && "$HTTP_CODE" -le 599 ]] 2>/dev/null; then
   log "UNKNOWN: /api/health/deep returned HTTP ${HTTP_CODE} (server error — indeterminate)"
-  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"HTTP %s (5xx indeterminate)"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HTTP_CODE"
+  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"HTTP %s (5xx indeterminate)","cc_port":%s,"override_ack_set":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HTTP_CODE" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
   exit 3
 fi
 if [[ "$HTTP_CODE" != "200" ]]; then
-  printf '{"pass":false,"indeterminate":false,"timestamp":"%s","checks":{},"detail":"HTTP %s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HTTP_CODE"
+  printf '{"pass":false,"indeterminate":false,"timestamp":"%s","checks":{},"detail":"HTTP %s","cc_port":%s,"override_ack_set":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HTTP_CODE" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
   exit 1
 fi
 
@@ -70,15 +78,68 @@ fi
 # A proxy splash page or error page returned as 200 means we cannot determine health.
 if ! python3 -s -c "import sys,json; json.loads(sys.stdin.read())" <<< "$DEEP_BODY" 2>/dev/null; then
   log "UNKNOWN: /api/health/deep returned HTTP 200 but body is not valid JSON (P3 fix)"
-  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"HTTP 200 but non-JSON body — ambiguous (P3: exit 3 UNKNOWN)"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"source":"cc-health-check.sh","detail":"HTTP 200 but non-JSON body — ambiguous (P3: exit 3 UNKNOWN)","cc_port":%s,"override_ack_set":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
   exit 3
 fi
 
 DEEP_PASS=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('pass') else 'false'" "false")
 DEEP_INDET=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('indeterminate') else 'false'" "false")
-[[ "$DEEP_INDET" == "true" ]] && { printf '%s\n' "$DEEP_BODY"; exit 3; }
-[[ "$DEEP_PASS"  != "true"  ]] && { printf '%s\n' "$DEEP_BODY"; exit 1; }
-log "/api/health/deep: PASS"
+
+# FIX (exit-3 structural defect, U51 priority two): the previous form here was
+#   [[ "$DEEP_INDET" == "true" ]] && { printf ...; exit 3; }
+#   [[ "$DEEP_PASS"  != "true"  ]] && { printf ...; exit 1; }
+# which had two bugs, both proved live against the healthy baseline box:
+#   1. It exits the instant ANY gating check (e.g. html_title finding no
+#      pre-rendered HTML — a routine, permanent condition on a middleware-
+#      gated root route, not a transient one) is indeterminate — BEFORE the
+#      pm2 topology, outside-in asset probe, and CF public-URL probe below
+#      ever run. html_title's own detail string says "use cc-health-check.sh
+#      outside-in probe for live-server title verification" — the very stage
+#      this short-circuit skipped past. So a fully healthy box reported
+#      exit 3 (UNKNOWN) forever, and a genuinely dead box ALSO reports exit 3
+#      (line ~61 above) — the fleet's health verdict could not tell the two
+#      apart.
+#   2. Checking DEEP_INDET before DEEP_PASS meant a GENUINE, definitive
+#      gating failure on one check (e.g. company_branding returning
+#      pass:false, indeterminate:false) was masked as UNKNOWN whenever ANY
+#      OTHER gating check (e.g. html_title) was merely indeterminate — a real
+#      red was silently downgraded to a channel this script's own header
+#      defines as transient and both standup-heartbeat.sh and
+#      sunday-cron-sweep.sh are built to ignore.
+# Fix: detect a genuine hard fail — a `checks.*` entry with pass:false and
+# indeterminate NOT true — FIRST and independently of DEEP_INDET; that is
+# always definitive RED. Only when no check is a genuine hard fail does an
+# indeterminate verdict get DEFERRED (not exited on) to the verdict section
+# below, after pm2/outside-in/CF have had a chance to run and contribute.
+DEEP_HARD_FAIL=$(printf '%s' "$DEEP_BODY" | py \
+  "'true' if any((v.get('pass') is False and v.get('indeterminate') is not True) for v in d.get('checks',{}).values()) else 'false'" \
+  "false")
+if [[ "$DEEP_HARD_FAIL" == "true" ]]; then
+  log "RED: /api/health/deep reports a genuine gating check failure (not masked by a co-occurring indeterminate on a different check)"
+  printf '%s' "$DEEP_BODY" | python3 -s -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+try:
+    d['cc_port'] = int(sys.argv[1])
+except Exception:
+    d['cc_port'] = None
+d['override_ack_set'] = (sys.argv[2] == 'true')
+print(json.dumps(d, indent=2))
+" "$PORT" "$PORT_OVERRIDE_ACK_SET" 2>/dev/null || printf '%s\n' "$DEEP_BODY"
+  exit 1
+elif [[ "$DEEP_INDET" == "true" ]]; then
+  log "UNKNOWN (deferred): /api/health/deep indeterminate on a non-hard-fail check — continuing to pm2/outside-in/CF probes before a final verdict"
+elif [[ "$DEEP_PASS" != "true" ]]; then
+  # Defensive fallback: should be unreachable given route.ts's aggregation
+  # (pass=false with indeterminate=false implies a hard fail, caught above),
+  # but never silently swallow an unexpected shape as a false PASS.
+  printf '%s\n' "$DEEP_BODY"; exit 1
+else
+  log "/api/health/deep: PASS"
+fi
 
 # ── (b1) pm2 topology — CC-scoped ────────────────────────────────────────────
 # FIX: write PM2_RAW and Python to temp files — heredoc binds stdin, pipe data
@@ -222,6 +283,14 @@ FINAL_PASS=true; EXIT_CODE=0; FINAL_INDET=false
 [[ "$CF_PASS"    == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
 [[ "$CF_INDET"   == "true" ]]  && FINAL_INDET=true
 [[ "$ASSET_INDET" == "true" ]] && FINAL_INDET=true  # P2 FIX: no-ref path → exit 3
+# U51 fix: DEEP_INDET (deferred above, not exited on) now feeds the SAME
+# verdict aggregation as CF_INDET/ASSET_INDET instead of forcing an early
+# exit that skipped pm2/outside-in/CF entirely. A deep-check indeterminate
+# still yields exit 3 UNKNOWN if nothing else resolves it — but the box now
+# gets a real chance for its OTHER probes to confirm health first, and the
+# emitted JSON always carries pm2_topology/outside_in_asset/cf_probe so a
+# ledger consumer never sees a payload that stopped before those stages ran.
+[[ "$DEEP_INDET"  == "true" ]] && FINAL_INDET=true
 [[ "$FINAL_INDET" == "true" && "$EXIT_CODE" -eq 0 ]] && FINAL_PASS=false && EXIT_CODE=3
 printf '%s\n' "$DEEP_BODY" | python3 -s -c "
 import sys,json
@@ -234,7 +303,12 @@ try:
     d['embedding_health']=json.loads(sys.argv[8])
 except Exception:
     d['embedding_health']=None
+try:
+    d['cc_port']=int(sys.argv[9])
+except Exception:
+    d['cc_port']=None
+d['override_ack_set']=(sys.argv[10]=='true')
 print(json.dumps(d,indent=2))
-" "$FINAL_PASS" "$PM2_JSON" "$ASSET_PASS" "${ASSET_REF:-none}" "$CF_PASS" "$FINAL_INDET" "$CF_DETAIL" "${EMB_JSON:-null}" 2>/dev/null || \
-  printf '{"pass":%s,"indeterminate":%s,"timestamp":"%s"}\n' "$FINAL_PASS" "$FINAL_INDET" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+" "$FINAL_PASS" "$PM2_JSON" "$ASSET_PASS" "${ASSET_REF:-none}" "$CF_PASS" "$FINAL_INDET" "$CF_DETAIL" "${EMB_JSON:-null}" "$PORT" "$PORT_OVERRIDE_ACK_SET" 2>/dev/null || \
+  printf '{"pass":%s,"indeterminate":%s,"timestamp":"%s","cc_port":%s,"override_ack_set":%s}\n' "$FINAL_PASS" "$FINAL_INDET" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
 exit "$EXIT_CODE"

@@ -27,10 +27,25 @@ log "Mission Control URL: $MISSION_CONTROL_URL"
 
 # B.1: check box health before doing task work.
 # Exit 3 (UNKNOWN/indeterminate) = transient — log it but do NOT alert or fail.
+#
+# FIX (dead-code bug): under `set -e` (line 11), a bare simple command that
+# exits non-zero kills the script IMMEDIATELY — before the next line runs.
+# The previous form here was:
+#   bash "$HEALTH_SCRIPT" --json-only >> "$LOG_FILE" 2>&1
+#   HEALTH_EXIT=$?
+# which meant a RED (exit 1) or UNKNOWN (exit 3) health check killed this
+# script on the `bash "$HEALTH_SCRIPT"` line itself, before `HEALTH_EXIT=$?`
+# ever assigned — so BOTH the "ALERT: RED" branch and the "WARN: UNKNOWN"
+# branch below were unreachable dead code, and the entire INBOX/TESTING/
+# IN_PROGRESS/ASSIGNED task-checking body (below) never ran on any box whose
+# health check returned non-zero. Wiring the failing command into an `||`
+# list is the standard set-e-safe capture: bash's errexit rule exempts any
+# command that is not the final one in a `&&`/`||` list, so a non-zero exit
+# here runs `HEALTH_EXIT=$?` instead of killing the script.
 if [[ -x "$HEALTH_SCRIPT" ]]; then
   log "Running cc-health-check.sh..."
-  bash "$HEALTH_SCRIPT" --json-only >> "$LOG_FILE" 2>&1
-  HEALTH_EXIT=$?
+  HEALTH_EXIT=0
+  bash "$HEALTH_SCRIPT" --json-only >> "$LOG_FILE" 2>&1 || HEALTH_EXIT=$?
   if [[ "$HEALTH_EXIT" -eq 1 ]]; then
     log "ALERT: cc-health-check reports RED — box is not healthy, skipping task work"
     exit 1
