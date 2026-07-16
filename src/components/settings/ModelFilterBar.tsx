@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { Search, X } from 'lucide-react';
+import { Search, X, Archive } from 'lucide-react';
 import { CapabilityBadge } from './CapabilityBadge';
 import type { Capability } from './CapabilityBadge';
 import type { ModelCardData, CostBand } from './ModelCard';
@@ -69,6 +69,15 @@ export interface ModelFilterState {
   providers: string[];
   capabilities: string[];
   costBands: CostBand[];
+  /**
+   * D14 (Decision D-HL-5) — opt-in "Show deprecated/stale" toggle. Default
+   * `false`: deprecated/unavailable rows stay excluded from the browser AND
+   * from the per-card assignment actions (see `ModelCard`'s own `deprecated`
+   * gate), exactly as before this unit. When `true`, those rows are included
+   * and rendered with a visible "Deprecated" badge — inspectable, never
+   * assignable.
+   */
+  showDeprecated: boolean;
 }
 
 export const EMPTY_FILTER_STATE: ModelFilterState = {
@@ -76,7 +85,11 @@ export const EMPTY_FILTER_STATE: ModelFilterState = {
   providers: [],
   capabilities: [],
   costBands: [],
+  showDeprecated: false,
 };
+
+/** Statuses hidden from the default view; only shown when `showDeprecated`. */
+const STALE_STATUSES = new Set(['deprecated', 'unavailable']);
 
 const COST_BANDS: { id: CostBand; label: string }[] = [
   { id: 'free', label: 'Free' },
@@ -122,10 +135,15 @@ export function ModelFilterBar({ models, state, onChange, visibleCount }: ModelF
     state.query.length > 0 ||
     state.providers.length > 0 ||
     state.capabilities.length > 0 ||
-    state.costBands.length > 0;
+    state.costBands.length > 0 ||
+    state.showDeprecated;
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl shadow-sm">
+    // U50/H+L.8 — sticky above the model grid (D-HL-5 / PRD discoverability
+    // gap): the container previously scrolled away over a multi-hundred-row
+    // catalog. `top-0` pins it to the viewport once its own scroll position
+    // reaches the top; `z-20` keeps it above the card grid beneath it.
+    <div className="sticky top-0 z-20 bg-white border border-gray-200 rounded-xl shadow-sm">
       {/* Search + summary */}
       <div className="px-4 py-3 flex items-center gap-3 flex-wrap border-b border-gray-100">
         <div className="w-full sm:flex-1 sm:min-w-[200px] relative">
@@ -143,6 +161,19 @@ export function ModelFilterBar({ models, state, onChange, visibleCount }: ModelF
           <span className="font-semibold text-gray-700">{visibleCount ?? models.length}</span>{' '}
           of <span className="font-semibold text-gray-700">{models.length}</span> models
         </div>
+        {/* D14 (D-HL-5) — opt-in deprecated/stale visibility toggle. Explicitly
+            NOT a new search interface; it lives inside the existing filter bar
+            per the ratified decision. Default off. */}
+        <label className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={state.showDeprecated}
+            onChange={(e) => onChange({ ...state, showDeprecated: e.target.checked })}
+            className="w-3.5 h-3.5 rounded border-gray-300 text-brand-600 focus:ring-brand-400"
+          />
+          <Archive className="w-3.5 h-3.5" />
+          Show deprecated/stale
+        </label>
         {hasAnyFilter && (
           <button
             type="button"
@@ -279,6 +310,12 @@ export function applyModelFilters(
 ): ModelCardData[] {
   const query = state.query.trim().toLowerCase();
   return models.filter((m) => {
+    // D14 (D-HL-5) — deprecated/unavailable rows stay excluded from the
+    // default view (and therefore from the per-card assign actions, since
+    // hidden rows never render a card at all) unless the operator opts in.
+    if (!state.showDeprecated && m.status && STALE_STATUSES.has(m.status)) {
+      return false;
+    }
     if (state.providers.length > 0 && (!m.provider || !state.providers.includes(m.provider))) {
       return false;
     }
