@@ -290,6 +290,20 @@ export interface Task {
     role: string | null;
     created_at: string;
   } | null;
+  // U38 (C-07) — S3 closure human-promote control (src/lib/qc-promote.ts).
+  // Present ONLY when this task is `status:'review'` AND its NEWEST
+  // `qc_review` event is a QC-heuristic-parked marker ([QC-HEURISTIC] /
+  // [QC-HEURISTIC-FINAL] — the QC scorer ran with no LLM/judge key and left
+  // the task in review awaiting a human). NOT a tasks column — computed
+  // per-row in the tasks GET routes, derived from the LATEST qc_review event
+  // so a later LLM re-score (once a key is configured) clears it
+  // automatically. Powers the task-detail modal's QcPromotePanel /
+  // "Promote to Done (operator)" button.
+  qc_heuristic_park?: {
+    marker: 'QC-HEURISTIC' | 'QC-HEURISTIC-FINAL';
+    message: string;
+    created_at: string;
+  } | null;
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;

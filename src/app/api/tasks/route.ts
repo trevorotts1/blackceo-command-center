@@ -5,6 +5,7 @@ import { createTaskCore } from '@/lib/tasks';
 import { loadSubtaskPersonas, loadPersonaBundleScopes } from '@/lib/persona-selector';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
+import { getQcHeuristicPark } from '@/lib/qc-promote';
 import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -192,6 +193,12 @@ export async function GET(request: NextRequest) {
       // board, and derives from the LATEST activity so a later successful
       // dispatch clears the chip automatically.
       dispatch_hold: getOpenDispatchHold(task.id),
+      // U38 (C-07) — human-promote control gate. Short-circuited to every
+      // non-review card (mirrors the persona_mismatch short-circuit above):
+      // only a `review` task can ever carry a heuristic-parked qc_review
+      // event, so this skips the per-row events lookup for the rest of the
+      // board. getQcHeuristicPark is fail-soft: never breaks the board.
+      qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
     }));
 
     return NextResponse.json(transformedTasks);

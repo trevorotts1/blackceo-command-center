@@ -18,6 +18,7 @@ import { selectPersonaForTask, buildPersonaReason, loadPersonaBundleScopes } fro
 import { recordPersonaCompletions } from '@/lib/tasks';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
+import { getQcHeuristicPark } from '@/lib/qc-promote';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
@@ -61,11 +62,15 @@ export async function GET(
     // U37 (C-06) — same class-b hold field the tasks-list GET attaches
     // (src/app/api/tasks/route.ts); powers the task-detail modal's
     // DispatchHoldPanel. Fail-soft, derived from the latest activity.
+    // U38 (C-07) — same human-promote control gate the tasks-list GET
+    // attaches; powers the task-detail modal's QcPromotePanel. Short-circuited
+    // to review-status tasks only (see route.ts's short-circuit comment).
     const withMismatch: Task = {
       ...task,
       persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
       persona_bundle_scopes: loadPersonaBundleScopes(task.id),
       dispatch_hold: getOpenDispatchHold(task.id),
+      qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
     };
 
     return NextResponse.json(withMismatch);
