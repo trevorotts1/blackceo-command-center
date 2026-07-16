@@ -426,10 +426,18 @@ jobs:
       - name: cc-start.sh non-4000 drift ACK guard test (P1-02 Unit B)
         run: bash tests/unit/cc-start-port-ack-guard.test.sh
 
+  # ── Build smoke test — BLOCKING ───────────────────────────────────────────
+  # This job used to carry `continue-on-error: true` ("Don't block the QC gate
+  # on build issues — track separately"). Nothing tracked it. The job went RED
+  # while the workflow rolled up GREEN, so branch protection never saw it and
+  # main shipped UNBUILDABLE at v6.0.39: commit 8a0155e made src/lib/db/index.ts
+  # throw at module evaluation, and `next build`'s page-data collection — which
+  # imports every route module WITHOUT running src/instrumentation.ts — died on
+  # "Failed to collect page data for /api/ad-campaigns/[id]". A red job that
+  # blocks nothing is indistinguishable from no job at all. It blocks now.
   build-smoke:
     name: Build smoke test
     runs-on: ubuntu-latest
-    continue-on-error: true  # Don't block the QC gate on build issues — track separately.
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -440,8 +448,26 @@ jobs:
           cache: "npm"
       - name: Install
         run: npm ci
+      # Deliberately NO DATABASE_PATH: the build must succeed on a bare checkout,
+      # which is exactly the condition that exposed the C8 module-eval throw.
       - name: Build
         run: npm run build
+      # C8 build-time regression guard. `next build` imports every route module,
+      # so if DB resolution ever becomes eager again — or someone "fixes" a build
+      # break by setting __CC_SERVER_ENTRYPOINT__/DATABASE_PATH during the build —
+      # the build would OPEN a database and leave the file behind. Importing must
+      # never mean accessing: a clean build creates no database.
+      - name: C8 — the build must not open a database
+        run: |
+          if ls mission-control.db* >/dev/null 2>&1; then
+            echo "::error::C8 REGRESSION: 'next build' created a database file:"
+            ls -la mission-control.db*
+            echo "The build must IMPORT route modules without OPENING the database."
+            echo "Resolve the db path lazily (getDbPath()) — never at module evaluation,"
+            echo "and never by setting the server marker during a build."
+            exit 1
+          fi
+          echo "OK: build completed and opened no database (C8 guard intact)."
 
   # ── Authoritative client-name scan (PRD P0-3 / P2-5) ──────────────────────
   # qc-blocked-gate.sh Assertion 5 only scans the git DIFF, so client names that
