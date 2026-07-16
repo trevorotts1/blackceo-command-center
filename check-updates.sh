@@ -13,19 +13,40 @@ GH_RAW="https://raw.githubusercontent.com/trevorotts1/${REPO_NAME}/main"
 # ----------------------------------------------------------
 # Detect install location
 # ----------------------------------------------------------
-CANDIDATES=(
-  "$HOME/clawd/projects/blackceo-command-center"
-  "/data/clawd/projects/blackceo-command-center"
-  "$HOME/blackceo-command-center"
-  "/data/blackceo-command-center"
-)
+# U53 (HL/U68) fix: this list was NEVER updated with the canonical
+# `~/projects/command-center` (Mac) / `/data/projects/command-center` (VPS)
+# layout that update.sh:42-50 already lists FIRST and that every other
+# install/runtime script in this repo treats as "the canonical layout used
+# fleet-wide" (scripts/atomic-deploy.sh, scripts/watchdog-cc.sh,
+# scripts/seed-workspaces.py, scripts/install/mac-mini-bootstrap.sh,
+# scripts/install/vps-docker-bootstrap.sh). Consequence before this fix: on
+# every canonically-installed box, INSTALL_DIR resolved empty -> LOCAL_VERSION
+# empty -> HAS_UPDATE computed true whenever the GitHub fetch succeeded ->
+# permanent false "update available" on the Sunday cron. This also never
+# honored a CC_APP_DIR override, unlike update.sh. Fixed by mirroring
+# update.sh:27-57 exactly: honor CC_APP_DIR first, then fall back to the
+# canonical paths prepended ahead of the legacy last-resort candidates.
 INSTALL_DIR=""
-for c in "${CANDIDATES[@]}"; do
-  if [ -d "$c" ] && [ -f "$c/package.json" ]; then
-    INSTALL_DIR="$c"
-    break
-  fi
-done
+if [ -n "${CC_APP_DIR:-}" ] && [ -d "$CC_APP_DIR" ] && [ -f "$CC_APP_DIR/package.json" ]; then
+  INSTALL_DIR="$CC_APP_DIR"
+fi
+
+if [ -z "$INSTALL_DIR" ]; then
+  CANDIDATES=(
+    "$HOME/projects/command-center"
+    "/data/projects/command-center"
+    "$HOME/clawd/projects/blackceo-command-center"
+    "/data/clawd/projects/blackceo-command-center"
+    "$HOME/blackceo-command-center"
+    "/data/blackceo-command-center"
+  )
+  for c in "${CANDIDATES[@]}"; do
+    if [ -d "$c" ] && [ -f "$c/package.json" ]; then
+      INSTALL_DIR="$c"
+      break
+    fi
+  done
+fi
 
 # Detect platform
 if [ -d "/data/.openclaw" ]; then

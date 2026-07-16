@@ -17,6 +17,7 @@ import { runQCOnReview } from '@/lib/qc-scorer';
 import { selectPersonaForTask, buildPersonaReason, loadPersonaBundleScopes } from '@/lib/persona-selector';
 import { recordPersonaCompletions } from '@/lib/tasks';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
+import { getOpenDispatchHold } from '@/lib/dispatch-hold';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
@@ -57,10 +58,14 @@ export async function GET(
     // A-U5 — per-page/scoped persona-blend rows (migration 104). Fail-soft:
     // loadPersonaBundleScopes tolerates a pre-104 box or a table-read error
     // by returning [], never breaking this single-task fetch.
+    // U37 (C-06) — same class-b hold field the tasks-list GET attaches
+    // (src/app/api/tasks/route.ts); powers the task-detail modal's
+    // DispatchHoldPanel. Fail-soft, derived from the latest activity.
     const withMismatch: Task = {
       ...task,
       persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
       persona_bundle_scopes: loadPersonaBundleScopes(task.id),
+      dispatch_hold: getOpenDispatchHold(task.id),
     };
 
     return NextResponse.json(withMismatch);

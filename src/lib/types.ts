@@ -272,6 +272,21 @@ export interface Task {
     used_voice_persona_id: string | null;
     page: string | null;
   } | null;
+  // U37 (C-06) — S2 class-b visibility (src/lib/dispatch-hold.ts). Present
+  // ONLY when this task's NEWEST task_activities row is a
+  // `routed_but_not_dispatched` hold (the agent is routed but has no OpenClaw
+  // runtime wired on this box — `task-dispatcher.ts` RESOLVER-DISPATCH gate).
+  // NOT a tasks column — computed per-row in the tasks GET routes, derived
+  // from the LATEST activity so a later successful dispatch clears it
+  // automatically (never a stale banner). Powers the kanban-card class-b hold
+  // chip and the task-detail modal's DispatchHoldPanel.
+  dispatch_hold?: {
+    message: string;
+    reason: string | null;
+    workspace_id: string | null;
+    role: string | null;
+    created_at: string;
+  } | null;
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;

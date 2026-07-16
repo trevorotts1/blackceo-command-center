@@ -266,8 +266,26 @@ AGENTS_FILE="$WORKSPACE/AGENTS.md"
 mkdir -p "$WORKSPACE"
 touch "$AGENTS_FILE"
 
-# Remove old command-center flag if present
-grep -v "COMMAND CENTER UPDATE PENDING" "$AGENTS_FILE" > "$AGENTS_FILE.tmp" 2>/dev/null || true
+# Remove old command-center flag SECTION if present.
+# U53 (HL/U68) fix: this used to be a bare `grep -v` on the header line ONLY
+# ("## 🔴 COMMAND CENTER UPDATE PENDING"), which stripped the header but left
+# the numbered-steps body (the "was updated from X to Y" line through the
+# "Backup of pre-update state:" line) orphaned in AGENTS.md on every repeat
+# run — those stale bodies accumulate forever and mislead the box agent. This
+# now removes the ENTIRE section (header through the trailing "Backup of
+# pre-update state:" line) as one block. It also self-heals any header-less
+# orphan bodies a previous run already left behind, by recognizing the same
+# body's unique opening line even without its header still present.
+awk '
+  BEGIN { skip = 0 }
+  /^##.*COMMAND CENTER UPDATE PENDING/ { skip = 1; next }
+  skip == 0 && /^BlackCEO Command Center was updated from / { skip = 1; next }
+  skip == 1 {
+    if ($0 ~ /^Backup of pre-update state:/) { skip = 0 }
+    next
+  }
+  { print }
+' "$AGENTS_FILE" > "$AGENTS_FILE.tmp" 2>/dev/null || true
 mv "$AGENTS_FILE.tmp" "$AGENTS_FILE" 2>/dev/null || true
 
 cat >> "$AGENTS_FILE" <<EOF

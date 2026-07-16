@@ -847,7 +847,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   );
 }
 
-interface TaskCardProps {
+export interface TaskCardProps {
   task: Task;
   onDragStart: (e: React.DragEvent, task: Task) => void;
   onClick: () => void;
@@ -861,7 +861,11 @@ interface TaskCardProps {
   onMove: (task: Task, targetColumnId: string) => void;
 }
 
-function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns, currentColumnId, onMove }: TaskCardProps) {
+// Exported (not just used internally) so the U37 (C-06) class-b hold chip has
+// a direct render-level test target, matching the existing pattern of
+// exporting card-face pieces for testability (kanban/TaskCard.tsx's
+// PersonaSlotChips/PersonaScopeChips).
+export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns, currentColumnId, onMove }: TaskCardProps) {
   // Status pill styles
   const statusPillStyles: Record<string, string> = {
     backlog: 'bg-gray-100 text-gray-600',
@@ -1030,6 +1034,25 @@ function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns
             }
           >
             🚨 Persona mismatch
+          </span>
+        )}
+
+        {/* Class-b hold chip (U37 / C-06) — "routed but not runnable". The
+            dispatcher already HOLDs a task loudly (durable
+            routed_but_not_dispatched activity + events row, capped +
+            self-healing — task-dispatcher.ts RESOLVER-DISPATCH gate) when an
+            agent is routed but has no OpenClaw runtime wired on this box; that
+            signal was previously visible ONLY in the activity feed. Derived
+            from the LATEST activity (dispatch_hold, src/lib/dispatch-hold.ts),
+            so this chip disappears the instant the runtime is wired and one
+            dispatch succeeds — never a stale banner (binary acceptance (b)). */}
+        {task.dispatch_hold && (
+          <span
+            data-testid="dispatch-hold-chip"
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 border border-orange-300"
+            title={task.dispatch_hold.message}
+          >
+            🔌 Agent not wired on this box
           </span>
         )}
 

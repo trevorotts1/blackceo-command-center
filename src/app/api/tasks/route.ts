@@ -4,6 +4,7 @@ import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
 import { loadSubtaskPersonas, loadPersonaBundleScopes } from '@/lib/persona-selector';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
+import { getOpenDispatchHold } from '@/lib/dispatch-hold';
 import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -183,6 +184,14 @@ export async function GET(request: NextRequest) {
       // so short-circuit the per-row events lookup for every other card.
       // getOpenPersonaMismatch is fail-soft: never breaks the board.
       persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
+      // U37 (C-06) — S2 class-b visibility: the "routed but not runnable" hold
+      // (task-dispatcher.ts RESOLVER-DISPATCH gate) surfaced onto the card.
+      // No status/type guard needed (unlike persona_mismatch, which only ever
+      // applies to a blended task) — any card can be routed to an agent with
+      // no wired runtime. getOpenDispatchHold is fail-soft: never breaks the
+      // board, and derives from the LATEST activity so a later successful
+      // dispatch clears the chip automatically.
+      dispatch_hold: getOpenDispatchHold(task.id),
     }));
 
     return NextResponse.json(transformedTasks);
