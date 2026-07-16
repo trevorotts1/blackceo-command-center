@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users } from 'lucide-react';
+import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users, CheckCircle2 } from 'lucide-react';
 import type { Task } from '@/lib/types';
 // U42 (C-11) — reuse the EXACT card-face chip components for the modal's
 // multi-persona plan + per-page/per-part scoped-blend rows. Single source: the
@@ -445,6 +445,92 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
           thread or activity trail for context.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * U38 (C-07, master spec v2 §C+I.2) — S3 closure human-promote control.
+ *
+ * Renders "Promote to Done (operator)" ONLY for a review card the QC
+ * heuristic fallback actually parked (`task.qc_heuristic_park` — present iff
+ * `status:'review'` AND the task's newest `qc_review` event is
+ * `[QC-HEURISTIC]` / `[QC-HEURISTIC-FINAL]`, computed server-side by
+ * `src/lib/qc-promote.ts` in the tasks GET routes; NEVER for an LLM-scored
+ * review card or any other status — see that module's doc comment). The
+ * message shown is the VERBATIM qc_review event text the scorer wrote, same
+ * "never re-derived" discipline as the sibling DispatchHoldPanel above.
+ *
+ * Clicking POSTs /api/tasks/[id]/promote, which independently re-verifies the
+ * SAME gate server-side (never a UI-only check) before calling
+ * `transition(id,'done',{actor:'operator',operatorOverride:true,
+ * expectedFrom:'review'})`. A concurrent status change surfaces the route's
+ * 409 CAS_CONFLICT here as an inline error — never a silent overwrite, never
+ * a swallowed failure.
+ */
+export function QcPromotePanel({ task }: { task: Task }) {
+  const [promoting, setPromoting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (task.status !== 'review' || !task.qc_heuristic_park) return null;
+
+  const handlePromote = async () => {
+    setPromoting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${task.id}/promote`, { method: 'POST' });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        setError(
+          body.code === 'CAS_CONFLICT'
+            ? 'Someone else already moved this task. Reload the card and try again.'
+            : body.error || 'Failed to promote this task.',
+        );
+        return;
+      }
+      // The task just left review→done — reload so every tab/panel (and the
+      // board behind the modal) reflects the new state. Mirrors the sibling
+      // AudienceConfirmPanel's onConfirmed={() => window.location.reload()}
+      // wiring in TaskModal.
+      window.location.reload();
+    } catch {
+      setError('Could not reach the server. Check your connection and try again.');
+    } finally {
+      setPromoting(false);
+    }
+  };
+
+  return (
+    <div
+      className="rounded-xl border border-emerald-300 bg-emerald-50 p-4"
+      data-testid="qc-promote-panel"
+    >
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 rounded-full bg-emerald-100 p-1.5">
+          <CheckCircle2 className="h-4 w-4 text-emerald-700" />
+        </div>
+        <div className="flex-1">
+          <h4 className="text-sm font-semibold text-emerald-900">Parked for human review</h4>
+          <p className="mt-1 text-xs text-emerald-800" data-testid="qc-promote-message">
+            {task.qc_heuristic_park.message}
+          </p>
+          {error && (
+            <p className="mt-2 text-xs font-medium text-red-700" data-testid="qc-promote-error" role="alert">
+              {error}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handlePromote}
+            disabled={promoting}
+            data-testid="qc-promote-button"
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:opacity-60"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            {promoting ? 'Promoting…' : 'Promote to Done (operator)'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
