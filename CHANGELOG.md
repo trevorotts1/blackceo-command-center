@@ -1,3 +1,59 @@
+## [v6.0.56] — 2026-07-16 — U117 (E6-3/G9) CC leg: comms-artifact QC conformance gate
+
+v6.0.56 — Single unit, single serial merge-writer. Lands `skill6-v2/U117-cc` @ `518792c`
+(PR #208, score 9.0/gate 8.5, independent Sonnet zero-trust review). PR was a draft opened
+only to force CI; GitHub auth is locally broken (same known invalid keyring token as U110's
+merge, not touched or rotated) so the draft flag could not be synced via `gh` — landed via
+direct `git push` to `main` using the working `osxkeychain` git credential; GitHub
+auto-closes the PR once the commit is an ancestor of main.
+
+- **What lands:** a comms-artifact QC conformance gate in `qc-scorer.ts` — when enabled,
+  `resolveProducerScorecard()`'s existing single-row read is extended to parse
+  `commsQcPassed`/`commsHardMisses` off the same JSON blob as `qc_gate`/`page_qc_score`
+  (no new INSERT — the additive-same-row design structurally avoids the field-collision risk
+  a second write path would create). The gate condition only turns an already-PASSing
+  producer scorecard into a FAIL when `commsQcPassed === false` explicitly; the `null`
+  (disabled/SKIP) shape never blocks. No department allowlist — gates on any department that
+  posts comms QC evidence, avoiding the D7–D22 unratified-decision register by construction.
+- **Genuinely new build, not a duplicate:** independently confirmed zero pre-existing U117
+  references anywhere in repo history (all refs, all PRs, all commit messages) before this
+  branch existed.
+- **Repo/surface = `both` per master spec §E.2.** U117's ONB leg is already merged
+  (`252d6cce`, folded in at `cf03b647`, scored 9.2), and that leg's own merge commit states
+  verbatim the CC leg is "OWED, routed to blackceo-command-center." **This CC leg is the
+  second and final leg — U117 is now fully landed across both repos, moving the /117 count.**
+- Merge-writer re-verification: merge-cleanliness re-checked against current main tip
+  `010ad0e` (moved from `ca1d553`/v6.0.52 at QC time via four intervening releases, including
+  this same session's U110 leg and its version-file hotfix) — clean, 0 conflicts, exactly the
+  5 files this commit touches; `package.json`/`version` untouched by the merge itself.
+- Merged-tree gate re-run: `tsc --noEmit` clean; `eslint` clean on both changed/new files;
+  full `lint` clean (pre-existing unrelated warnings only); the mutation-proof script
+  (`scripts/u117-comms-qc-mutation-proof.sh`) re-run directly — mutated=FAIL, restored=PASS,
+  byte-for-byte, verified via empty `git status`; the U117 test file 7/7 pass; sibling
+  `u26-b-u12-qc-producer-scorecard-contract.test.ts` 6/6 pass, unaffected; `vitest run`
+  287/287 across 19 files; `test:component` 128/128 across 15 files; `test:unit` (node:test)
+  1725/1730 — the 5 failures are the known pre-existing `getInterviewState` failures,
+  confirmed by name; `scripts/qc-cc.sh` 142/142 green, 5 pre-existing environment-skip
+  warnings. CI 21/21 green on the exact scored SHA (unauthenticated REST, no 503 this pass).
+- **Merge-writer hotfix, disclosed:** the prior release commit (v6.0.55, U110) bumped
+  `package.json` but missed the root `/version` file, breaking `qc-cc.sh` check 1.2 on main
+  for a short window between that push and this one. Caught while running `qc-cc.sh` as part
+  of this leg's own gate re-run; fixed forward immediately in a dedicated commit (`010ad0e`,
+  "fix(release): sync /version to v6.0.55") before this leg was merged, re-verified 142/142
+  green, then this leg was built on top of the corrected tip.
+- **Known, disclosed, non-blocking (per QC judge):** (1) the builder's own `test:unit` count
+  claim in its commit message is off by 2 from the judge's twice-reproduced, by-name-exact
+  count — informational, not a regression; (2) the CI job/commit prose label this leg's
+  mutation-proof against spec acceptance letter (e), when (e) as literally written was
+  already fully satisfied by the already-merged ONB leg's own mutation-proof — this leg's
+  actual, correctly-discharged obligation is acceptance (d) (review→done refused when any of
+  the four comms-QC checks fails). The gate is inert on production boxes today until a
+  separate, smaller producer-side wiring unit (invoking `page_qc.py --comms` and posting
+  `comms_qc_passed`) is built — same "consumer wired ahead of producer" posture already
+  accepted for `page_qc_score` in this same file.
+
+Ticket: `~/skill6-merge-queue/CC/U117.json`.
+
 ## [v6.0.55] — 2026-07-16 — U110 (E5-5, G2d — CC leg; ONB caller-wiring owed): board wiring for a below-floor department set, round-3 send-back fixes
 
 v6.0.55 — Single unit, single serial merge-writer. Lands `skill6-v2/U110` @ `25ba6c6`
