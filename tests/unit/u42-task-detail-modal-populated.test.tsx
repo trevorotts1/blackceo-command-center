@@ -20,11 +20,15 @@
  *   (d)/(e) empty-safe: no subtask plan, no scoped blend, no engine-card
  *       metadata — nothing crashes, nothing is invented.
  *
- * U115 (per-part governance) is PENDING at this commit — no producer writes a
- * part-scoped `persona_bundle_scopes` row yet, so its data-shape is identical
- * to today's per-PAGE A-U5 rows (same table, `scope` generalizes from a page
- * key to a part key). The "renders N per-page/per-part rows" test below
- * exercises that same code path today; U115 landing changes zero lines here.
+ * U115 (E6-1, closes G7 — per-part governance) landed its CC leg reusing this
+ * exact panel unmodified: it added migration-106 mirror columns + persist/
+ * load/chip-render support in TaskCard.tsx (part_role fallback + audience),
+ * but no producer wires a part-scoped `persona_bundle_scopes` row on a live
+ * box yet, so a real fixture's data-shape here is identical to today's
+ * per-PAGE A-U5 rows (same table, `scope` generalizes from a page key to a
+ * part key). The "renders N per-page/per-part rows" test below exercises
+ * that same code path; see u115-per-part-chips-render.test.tsx for the
+ * dedicated part_role/audience render proof.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';

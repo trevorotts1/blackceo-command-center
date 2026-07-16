@@ -535,6 +535,12 @@ function normalizeScopeHint(raw: unknown): PersonaBundle["scope_hint"] {
     page_slug: asString(h.page_slug),
     conversion_goal: asString(h.conversion_goal),
     part_id: asString(h.part_id),
+    // U115 (E6-1, closes G7) — carry the per-part role/stage through when a
+    // caller's scope_hint supplies them (see PersonaBundleScopeHint's header
+    // comment for why this is a CC-side persist contract, not an echo of the
+    // ONB matcher's own internal call).
+    part_role: asString(h.part_role),
+    stage: asString(h.stage),
   };
 }
 
@@ -707,13 +713,28 @@ export function persistPersonaBundleScope(
     ? voicePersonaId.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
     : null;
 
+  // U115 (E6-1, closes G7) — the 5 per-part governance mirror columns
+  // (migration 106). Mirrors the ONB `govern_task_parts` map-record's own
+  // field names verbatim: part_role/stage (from this call's scope_hint —
+  // see PersonaBundleScopeHint's header comment), topic_persona_id (the
+  // TOPIC-expertise persona, distinct from the VOICE persona above),
+  // audience_label/audience_source (the resolved+confirmed audience —
+  // acceptance (c)'s "naming its blend + audience"). Every field NEVER
+  // fabricated: null when the caller's bundle didn't carry it.
+  const partRole = hint?.part_role ?? null;
+  const stage = hint?.stage ?? null;
+  const topicPersonaId = voice.topic_persona?.id ?? null;
+  const audienceLabel = bundle.resolved_audience?.label ?? null;
+  const audienceSource = bundle.resolved_audience?.source ?? null;
+
   try {
     run(
       `INSERT INTO task_persona_bundle_scope
          (task_id, scope, page_role, page_slug, conversion_goal,
           voice_persona_id, voice_persona_name, bundle_json, catalog_version,
-          scope_reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          scope_reason, part_role, stage, topic_persona_id, audience_label,
+          audience_source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(task_id, scope) DO UPDATE SET
          page_role = excluded.page_role,
          page_slug = excluded.page_slug,
@@ -722,7 +743,12 @@ export function persistPersonaBundleScope(
          voice_persona_name = excluded.voice_persona_name,
          bundle_json = excluded.bundle_json,
          catalog_version = excluded.catalog_version,
-         scope_reason = excluded.scope_reason`,
+         scope_reason = excluded.scope_reason,
+         part_role = excluded.part_role,
+         stage = excluded.stage,
+         topic_persona_id = excluded.topic_persona_id,
+         audience_label = excluded.audience_label,
+         audience_source = excluded.audience_source`,
       [
         taskId,
         scope,
@@ -734,6 +760,11 @@ export function persistPersonaBundleScope(
         JSON.stringify({ ...bundle, blend_directive: blendDirective }),
         catalogVersion,
         scopeReason,
+        partRole,
+        stage,
+        topicPersonaId,
+        audienceLabel,
+        audienceSource,
         now,
       ],
     );
@@ -765,6 +796,13 @@ export interface PersonaBundleScopeRow {
   persona_id: string | null;
   persona_name: string | null;
   scope_reason: string | null;
+  // U115 (E6-1, closes G7; migration 106) — per-part governance mirror
+  // columns. Null on every pre-U115 (per-page) row.
+  part_role: string | null;
+  stage: string | null;
+  topic_persona_id: string | null;
+  audience_label: string | null;
+  audience_source: string | null;
 }
 
 export function loadPersonaBundleScopes(taskId: string): PersonaBundleScopeRow[] {
@@ -777,9 +815,15 @@ export function loadPersonaBundleScopes(taskId: string): PersonaBundleScopeRow[]
       voice_persona_id: string | null;
       voice_persona_name: string | null;
       scope_reason: string | null;
+      part_role: string | null;
+      stage: string | null;
+      topic_persona_id: string | null;
+      audience_label: string | null;
+      audience_source: string | null;
     }>(
       `SELECT scope, page_role, page_slug, conversion_goal,
-              voice_persona_id, voice_persona_name, scope_reason
+              voice_persona_id, voice_persona_name, scope_reason,
+              part_role, stage, topic_persona_id, audience_label, audience_source
          FROM task_persona_bundle_scope
         WHERE task_id = ?
         ORDER BY created_at ASC`,
@@ -793,6 +837,11 @@ export function loadPersonaBundleScopes(taskId: string): PersonaBundleScopeRow[]
       persona_id: r.voice_persona_id,
       persona_name: r.voice_persona_name,
       scope_reason: r.scope_reason,
+      part_role: r.part_role,
+      stage: r.stage,
+      topic_persona_id: r.topic_persona_id,
+      audience_label: r.audience_label,
+      audience_source: r.audience_source,
     }));
   } catch {
     return [];

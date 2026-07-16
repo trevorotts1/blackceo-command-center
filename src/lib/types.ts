@@ -142,9 +142,10 @@ export interface TaskSubtaskPersona {
 
 /**
  * A-U5 (master spec v2 Section A.6) — one PAGE's (or, per U115, one PART's)
- * scoped persona blend — a `task_persona_bundle_scope` row (migration 104).
- * Rendered as a per-scope chip on the kanban card, reusing the
- * `PersonaSlotChips` pattern with scope rows (`PersonaScopeChips`).
+ * scoped persona blend — a `task_persona_bundle_scope` row (migration 104,
+ * extended by U115's migration 106). Rendered as a per-scope chip on the
+ * kanban card, reusing the `PersonaSlotChips` pattern with scope rows
+ * (`PersonaScopeChips`).
  */
 export interface TaskPersonaBundleScope {
   scope: string;
@@ -155,6 +156,18 @@ export interface TaskPersonaBundleScope {
   persona_name?: string | null;
   /** The different-blends-allowed invariant's WHY, for the chip tooltip. */
   scope_reason?: string | null;
+  // U115 (E6-1, closes G7; migration 106) — per-part governance mirror
+  // columns. Nullable/additive: absent on every pre-U115 (per-page) row.
+  /** The declared communication-part role (e.g. "sales-page", "nurture-email-2", "social-post-1"). */
+  part_role?: string | null;
+  /** The long-horizon stage this part belongs to (e.g. "launch-week-1"), for multi-stage sequence tracking. */
+  stage?: string | null;
+  /** The TOPIC-expertise persona for this part (distinct from `persona_id`, the VOICE persona). */
+  topic_persona_id?: string | null;
+  /** The resolved audience this part's blend was governed for — acceptance (c) "naming its blend + audience". */
+  audience_label?: string | null;
+  /** How the audience was resolved: onboarding_icp | operator_confirmed | asked. */
+  audience_source?: string | null;
 }
 
 export interface Task {
@@ -847,12 +860,23 @@ export interface BundleTaskPersona {
  * `build_bundle(scope_hint=...)` accepts and echoes back verbatim on
  * `PersonaBundle.scope_hint` when it resolved a scope key. All fields optional;
  * `part_id` is U115's later per-part generalization of this same mechanism.
+ *
+ * `part_role`/`stage` (U115, E6-1) mirror the ONB `govern_task_parts` map-
+ * record's own `part_role`/`stage` fields. NOTE: `govern_task_parts`'s own
+ * internal `build_bundle(scope_hint={"part_id": part_id})` call does not
+ * (today) echo them back on the bundle itself — they live on that function's
+ * separate `part_persona_map` wrapper. A per-part CC ingest caller that wants
+ * them mirrored into `task_persona_bundle_scope` supplies them on ITS OWN
+ * `scope_hint` (this is a CC-side persist contract, not a re-statement of
+ * what any one ONB call site happens to pass today).
  */
 export interface PersonaBundleScopeHint {
   page_role?: string | null;
   page_slug?: string | null;
   conversion_goal?: string | null;
   part_id?: string | null;
+  part_role?: string | null;
+  stage?: string | null;
 }
 
 /**

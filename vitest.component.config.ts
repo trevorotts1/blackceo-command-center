@@ -14,6 +14,9 @@ export default defineConfig({
       'tests/unit/u55-company-health-render.test.tsx',
       // A-U5 acceptance (b) — PersonaScopeChips real render proof.
       'tests/unit/a-u5-persona-scope-chips-render.test.tsx',
+      // U115 (E6-1, closes G7) acceptance (c) — PersonaScopeChips per-part
+      // governance real render proof (part_role fallback + audience).
+      'tests/unit/u115-per-part-chips-render.test.tsx',
       // U42 (C-11) — task-detail modal FULLY populated (multi-persona plan +
       // honest engine-card persona surface) real render proof.
       'tests/unit/u42-task-detail-modal-populated.test.tsx',

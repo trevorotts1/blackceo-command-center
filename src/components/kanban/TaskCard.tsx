@@ -11,13 +11,19 @@
  * inferred task category, plus the persona that filled it. A mechanical / empty
  * sub-task (no persona) renders a muted "—" chip so the plan stays legible.
  *
- * `PersonaScopeChips` (A-U5, master spec v2 Section A.6) is the per-PAGE analog:
- * one chip per `task.persona_bundle_scopes` row (a `task_persona_bundle_scope`
- * table row, migration 104) — a multi-page funnel build's opt-in/sales/thank-you
- * pages, each carrying its OWN governing blend. Reuses the exact chip visuals +
+ * `PersonaScopeChips` (A-U5, master spec v2 Section A.6; generalized to
+ * per-PART governance by U115 §E6-1, closes G7) is the per-PAGE/per-PART
+ * analog: one chip per `task.persona_bundle_scopes` row (a
+ * `task_persona_bundle_scope` table row, migration 104 + U115's migration
+ * 106) — a multi-page funnel build's opt-in/sales/thank-you pages, OR a
+ * multi-part campaign's sales page + nurture emails + social posts, each
+ * carrying its OWN governing blend + audience. Reuses the exact chip visuals +
  * gating pattern above verbatim (≥2 rows required, same colors, same overflow
  * "+N" affordance) so a scoped funnel and a decomposed multi-persona task read
- * as ONE consistent visual language on the board.
+ * as ONE consistent visual language on the board. U115 acceptance (c): the
+ * SAME component renders on the board card AND (via `PersonaPlanPanel`,
+ * TaskOverviewPanels.tsx) the task-detail modal — single source, no
+ * divergence — so this is the ONE place the per-part row is ever assembled.
  *
  * The card itself (drag handlers, status, etc.) lives in `MissionQueue.tsx`; this
  * module is the ONE place the per-sub-task slot chips (and per-scope chips) are
@@ -96,11 +102,15 @@ export function PersonaSlotChips({
 }
 
 /** A-U5 chip label: the page's role/slug (whichever is present), falling back
- * to the bare scope key so a chip never renders empty. */
+ * — U115 (E6-1) — to the part's declared role, then to the bare scope key so
+ * a chip never renders empty. A per-PAGE row (funnel) always has page_role/
+ * page_slug and never reaches the part_role fallback; a per-PART row
+ * (U115, no page concept) has neither and falls through to part_role. */
 function scopeChipLabel(row: TaskPersonaBundleScope): string {
   return (
     (row.page_role && row.page_role.trim()) ||
     (row.page_slug && row.page_slug.trim()) ||
+    (row.part_role && row.part_role.trim()) ||
     row.scope
   );
 }
@@ -131,6 +141,11 @@ export function PersonaScopeChips({
       {shown.map((row) => {
         const label = scopeChipLabel(row);
         const persona = row.persona_id ? row.persona_name || humanize(row.persona_id) : null;
+        // U115 (E6-1, closes G7) acceptance (c): the chip names its blend AND
+        // its audience — never fabricated; absent on every pre-U115 row (no
+        // audience_label column value), so a plain funnel/page chip renders
+        // exactly as before.
+        const audience = row.audience_label && row.audience_label.trim() ? row.audience_label.trim() : null;
         return (
           <span
             key={`${row.scope}-${row.persona_id ?? 'none'}`}
@@ -142,13 +157,16 @@ export function PersonaScopeChips({
             }
             title={
               persona
-                ? `${label}: ${persona}${row.scope_reason ? ` — ${row.scope_reason}` : ''}`
+                ? `${label}: ${persona}${audience ? ` for ${audience}` : ''}${row.scope_reason ? ` — ${row.scope_reason}` : ''}`
                 : `${label}: no persona required`
             }
           >
             <span className="uppercase tracking-wide opacity-70">{label}</span>
             <span aria-hidden>→</span>
             <span>{persona ?? '—'}</span>
+            {audience && (
+              <span className="normal-case tracking-normal opacity-60">for {audience}</span>
+            )}
           </span>
         );
       })}
