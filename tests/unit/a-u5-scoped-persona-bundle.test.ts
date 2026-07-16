@@ -221,6 +221,9 @@ test('parsePersonaBundle echoes scope + scope_hint through when the raw result c
     page_slug: 'sales',
     conversion_goal: 'book-a-call',
     part_id: null,
+    // U115 (E6-1) additive fields — absent from this raw fixture, so null.
+    part_role: null,
+    stage: null,
   });
 });
 

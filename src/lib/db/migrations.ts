@@ -4617,6 +4617,71 @@ export const migrations: Migration[] = [
       console.log('[Migration 106] provider_auth_proof_cache.failure_kind ready');
     },
   },
+  {
+    id: '107',
+    name: 'add_task_persona_bundle_scope_per_part_fields',
+    up: (db) => {
+      // U115 (E6-1, closes G7; master spec v2 Section E6, ADD-1) — per-part /
+      // per-persona governance across multi-item & long-horizon tasks. The CC
+      // leg of U115 (the ONB leg landed on openclaw-onboarding main,
+      // c396225187a5b61d028a95b2e1aa256b3a4fae0e, and explicitly left this leg
+      // OWED). PURELY ADDITIVE: never touches migration 090's task_persona_
+      // bundle table or its UNIQUE(task_id); never touches migration 105's
+      // UNIQUE(task_id, scope) on task_persona_bundle_scope — this migration
+      // only ADDS nullable mirror columns to the EXISTING 105 table.
+      //
+      // The ONB matcher's `govern_task_parts` (persona_blend.py) emits an
+      // 8-key record PER PART into routing/part-persona-map.json:
+      //   part_id, part_role, voice_persona_id, topic_persona_id,
+      //   audience_label, audience_source, stage, reason.
+      // Migration 105 already gave 3 of those 8 a home: part_id -> `scope`
+      // (U115 generalizes A-U5's page-scope key to a part-scope key, per
+      // 105's own header comment), voice_persona_id -> `voice_persona_id`,
+      // reason -> `scope_reason`. The remaining 5 — part_role, stage,
+      // topic_persona_id, audience_label, audience_source — get NEW columns
+      // here. `audience_label`/`audience_source` close acceptance (c)'s
+      // explicit "naming its blend + audience" requirement, which was absent
+      // from every CC layer before this migration.
+      //
+      // Column-existence-guarded ALTER TABLE (same pattern as every additive
+      // mirror-column migration in this file, e.g. the CRITICAL_TASKS_
+      // DISPATCH_COLUMNS driven ALTERs below) so this migration is a safe
+      // no-op on a box where schema.ts already created these columns on a
+      // fresh DB (schema.ts's task_persona_bundle_scope CREATE TABLE is kept
+      // in sync with the post-107 shape — see schema.ts).
+      //
+      // MERGE-WRITER RENUMBER NOTE: this migration was scored and built as id
+      // '106' (skill6-v2/U115 @ 64ccd7ab). Between QC and merge, main picked
+      // up an unrelated, independently-scored migration 106 (provider-defects-
+      // fix, PR #196: provider_auth_proof_cache.failure_kind) that collided on
+      // the same id. Both migrations are purely additive and touch entirely
+      // disjoint tables (provider_auth_proof_cache vs task_persona_bundle_
+      // scope) — no semantic conflict, only an id collision. Renumbered to
+      // '107' by the merge writer per this file's own DATA-03 fail-fast
+      // guard below. Neither test file asserts on the numeric id, only on
+      // column existence, so this renumber does not change test behavior.
+      console.log('[Migration 107] Adding per-part governance columns to task_persona_bundle_scope...');
+
+      const scopeInfo = db.prepare("PRAGMA table_info(task_persona_bundle_scope)").all() as { name: string }[];
+      const hasCol = (name: string) => scopeInfo.some((c) => c.name === name);
+
+      const newColumns: { name: string; ddl: string }[] = [
+        { name: 'part_role', ddl: 'ALTER TABLE task_persona_bundle_scope ADD COLUMN part_role TEXT' },
+        { name: 'stage', ddl: 'ALTER TABLE task_persona_bundle_scope ADD COLUMN stage TEXT' },
+        { name: 'topic_persona_id', ddl: 'ALTER TABLE task_persona_bundle_scope ADD COLUMN topic_persona_id TEXT' },
+        { name: 'audience_label', ddl: 'ALTER TABLE task_persona_bundle_scope ADD COLUMN audience_label TEXT' },
+        { name: 'audience_source', ddl: 'ALTER TABLE task_persona_bundle_scope ADD COLUMN audience_source TEXT' },
+      ];
+      for (const col of newColumns) {
+        if (!hasCol(col.name)) {
+          db.exec(col.ddl);
+          console.log(`[Migration 107] Added ${col.name} to task_persona_bundle_scope`);
+        }
+      }
+
+      console.log('[Migration 107] task_persona_bundle_scope per-part columns ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

@@ -210,9 +210,12 @@ CREATE TABLE IF NOT EXISTS task_persona_bundle (
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_confirm ON task_persona_bundle(confirm_state);
 
--- A-U5 per-page/scoped persona blends (master spec v2 Section A.6). Migration
--- 105 also creates this for existing DBs; CREATE TABLE IF NOT EXISTS is
--- idempotent. One row per (task, page/scope) — the additive companion to
+-- A-U5 per-page/scoped persona blends (master spec v2 Section A.6), extended
+-- by U115 (E6-1, closes G7) to per-PART governance. Migration 105 also
+-- creates this base table for existing DBs; migration 107 adds the 5 U115
+-- mirror columns (part_role, stage, topic_persona_id, audience_label,
+-- audience_source) for existing DBs. CREATE TABLE/ADD COLUMN IF NOT EXISTS is
+-- idempotent. One row per (task, page/part/scope) — the additive companion to
 -- task_persona_bundle above, which stays exactly one row per task (its
 -- UNIQUE(task_id) is NEVER altered by this table's existence).
 CREATE TABLE IF NOT EXISTS task_persona_bundle_scope (
@@ -228,6 +231,14 @@ CREATE TABLE IF NOT EXISTS task_persona_bundle_scope (
   catalog_version TEXT,
   scope_reason TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- U115 (migration 107) — mirror columns for the 5 ONB govern_task_parts()
+  -- map-record fields migration 105 had no home for. Nullable/additive; NULL
+  -- on every pre-U115 row and on any scope row a caller writes without them.
+  part_role TEXT,
+  stage TEXT,
+  topic_persona_id TEXT,
+  audience_label TEXT,
+  audience_source TEXT,
   UNIQUE (task_id, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_scope_task ON task_persona_bundle_scope(task_id);

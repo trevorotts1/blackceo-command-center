@@ -208,15 +208,25 @@ export function WhoIsWorkingPanel({ task }: { task: Task }) {
  * reusing the exact card-face components so the modal and the card can never
  * diverge (single source, no re-derivation).
  *
- * Sub-item 4 (U115 per-part governance) reuses this SAME `persona_bundle_
- * scopes` table and `PersonaScopeChips` component — U115 persists per-part
- * rows keyed `(task_id, part_id)` into the identical `task_persona_bundle_
- * scope` table A-U5 already writes for per-PAGE funnel blends (master spec
- * L2465: "reuses the U5 scoped-bundle table + chip pattern — never a new
- * bundle store"). Until U115 lands, no producer writes a part-scoped row, so
- * this block simply has nothing to show — never invented, never a stub
- * control. DISPLAY side only; ships correctly for today's per-page data and
- * requires zero further change when U115's per-part rows start arriving.
+ * Sub-item 4 (U115 per-part governance, E6-1, closes G7) reuses this SAME
+ * `persona_bundle_scopes` table and `PersonaScopeChips` component — U115
+ * persists per-part rows keyed `(task_id, part_id)` into the identical
+ * `task_persona_bundle_scope` table A-U5 already writes for per-PAGE funnel
+ * blends (master spec L2465: "reuses the U5 scoped-bundle table + chip
+ * pattern — never a new bundle store"). No producer currently writes a
+ * part-scoped row (that ingest wiring is separate, un-landed work — see
+ * U115's PR), so this block has nothing to show on a live box today — never
+ * invented, never a stub control.
+ *
+ * CORRECTION (U115 build note): an earlier version of this comment claimed
+ * the render side would "require zero further change" once U115's per-part
+ * rows arrive. That was FALSE for acceptance (c)'s audience half — audience
+ * was absent from the schema (migration 105), the type (`TaskPersonaBundleScope`),
+ * the loader (`loadPersonaBundleScopes`), and the chip (`PersonaScopeChips`).
+ * U115's migration 107 + the accompanying persist/load/render changes closed
+ * that gap directly in this same component chain (via `PersonaScopeChips`,
+ * TaskCard.tsx) — the panel itself needed no changes, but the claim that
+ * NOTHING needed to change anywhere was not accurate before this landed.
  *
  * Each block independently honors the card face's own >=2-row chip threshold
  * (`PersonaSlotChips`/`PersonaScopeChips` already return null below that), so
