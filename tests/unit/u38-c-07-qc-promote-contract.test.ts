@@ -26,6 +26,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { NextRequest } from 'next/server';
 
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-u38-qc-promote-'));
@@ -424,4 +425,96 @@ test('[U38-c] the promote route independently re-verifies scope against CURRENT 
   assert.equal(currentStatus(taskId), 'blocked', 'status must remain exactly what the concurrent writer set — never silently overwritten to done');
   const evt = taskEventsFor(taskId);
   assert.equal(evt?.n ?? 0, 0, 'no task_events done row may be written when the promote is refused');
+});
+
+// ─── (c) the CAS wiring itself — call-site pin + the degradation it prevents ──
+//
+// QC gap closed here. The two tests above prove transition() refuses a stale
+// 'review' assumption, and that the route re-verifies scope. Neither pins the
+// ROUTE to actually PASS `expectedFrom:'review'` INTO transition(): deleting
+// that one line left every test above GREEN (mutation-proved). The line is not
+// reachable behaviourally from a single-process test — better-sqlite3 is fully
+// synchronous and transition()'s body contains no `await` at all
+// (task-lifecycle.ts:384-496), so no in-process yield point exists between the
+// route's guard reads and transition()'s own status read; the TOCTOU window
+// `expectedFrom` closes is cross-process only. It is therefore pinned the U95
+// (X/U-X5) way — static call-site pin + behavioural fixture + mutation proof.
+//
+// The second test below proves WHY the line is load-bearing rather than
+// decorative: without `expectedFrom`, a task a concurrent writer already moved
+// to 'done' hits transition()'s idempotent short-circuit
+// (task-lifecycle.ts:417-421) and returns a SILENT SUCCESS — precisely the
+// "silent overwrite" acceptance (c) forbids. With it, the same call fails
+// loudly with CAS_CONFLICT.
+
+test("[U38-c] PIN: the promote route wires expectedFrom:'review' + actor:'operator' + operatorOverride into its transition() call — the CAS guarantee acceptance (c) rests on", () => {
+  const routeSrc = fs.readFileSync(
+    fileURLToPath(new URL('../../src/app/api/tasks/[id]/promote/route.ts', import.meta.url)),
+    'utf8',
+  );
+
+  const callStart = routeSrc.indexOf('transition(id, ');
+  assert.notEqual(callStart, -1, "the route must call transition(id, 'done', {...}) — the ONE audited done-path");
+  const callEnd = routeSrc.indexOf('});', callStart);
+  assert.notEqual(callEnd, -1, 'transition() call site must be parseable');
+  const callArgs = routeSrc.slice(callStart, callEnd);
+
+  assert.ok(
+    /transition\(id,\s*'done'/.test(callArgs),
+    "the route must transition to 'done'",
+  );
+  assert.ok(
+    /expectedFrom:\s*'review'/.test(callArgs),
+    "REGRESSION: the promote route dropped expectedFrom:'review'. Without it a task a " +
+      "concurrent writer already advanced returns a SILENT 200 via transition()'s idempotent " +
+      'short-circuit instead of a loud CAS_CONFLICT — acceptance (c) violated.',
+  );
+  assert.ok(
+    /actor:\s*'operator'/.test(callArgs),
+    "REGRESSION: the promote route must stamp actor:'operator' — the audit row acceptance (b) requires.",
+  );
+  assert.ok(
+    /operatorOverride:\s*true/.test(callArgs),
+    'REGRESSION: the promote route must pass operatorOverride:true.',
+  );
+});
+
+test("[U38-c] the expectedFrom:'review' guard is load-bearing: WITHOUT it an already-done task returns a silent success; WITH it the same call fails loudly with CAS_CONFLICT", async () => {
+  const taskId = nextId('cas-idempotent-silent');
+  insertTask(taskId, 'review');
+  insertQcReviewEvent(
+    taskId,
+    '[QC-HEURISTIC] Score: 7.2/10 | QC ran in heuristic mode (pass 2/3).',
+    '2026-07-15T11:00:00.000Z',
+  );
+
+  // A concurrent writer promotes it first (the real race, simulated by a direct
+  // lifecycle write — this is the state the route's caller cannot see).
+  await transition(taskId, 'done', { actor: 'operator', expectedFrom: 'review' });
+  assert.equal(currentStatus(taskId), 'done');
+
+  // WITHOUT expectedFrom (what the mutation produces): transition's idempotent
+  // branch returns the row, status unchanged — a SILENT no-op success.
+  const silent = await transition(taskId, 'done', { actor: 'operator', operatorOverride: true });
+  assert.equal(silent.status, 'done', 'the un-guarded call silently succeeds — the defect expectedFrom exists to prevent');
+
+  // WITH expectedFrom:'review' (what the route actually passes): the SAME call
+  // against the SAME already-advanced task fails loudly instead.
+  await assert.rejects(
+    () =>
+      transition(taskId, 'done', {
+        actor: 'operator',
+        operatorOverride: true,
+        expectedFrom: 'review',
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TransitionError, 'must throw TransitionError');
+      assert.equal(
+        (err as InstanceType<typeof TransitionError>).code,
+        'CAS_CONFLICT',
+        'an already-advanced task must surface CAS_CONFLICT, never a silent no-op',
+      );
+      return true;
+    },
+  );
 });
