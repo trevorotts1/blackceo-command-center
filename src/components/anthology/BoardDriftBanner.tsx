@@ -1,22 +1,37 @@
 'use client';
 
 /**
- * A7 — empty-vs-idle board drift banner.
+ * U79 (GK-17) — self-heal escalation-of-last-resort banner.
  *
- * An empty Anthology board (0 cards) is visually identical whether there is
- * genuinely no work queued right now, or the S0→mc_board mirror silently
- * dropped every card while the engine's own ledger kept accumulating
- * participants (the confirmed A7 failure: 5 ledger participants sat
- * invisible for 3 days against 0 cards, with no distinguishing signal).
+ * ORIGIN (A7): an empty Anthology board (0 cards) used to be visually
+ * identical whether there was genuinely no work queued, or the S0→mc_board
+ * mirror silently dropped cards while the engine's own ledger kept
+ * accumulating participants (the confirmed A7 failure: 5 ledger participants
+ * sat invisible for 3 days against 0 cards, with no distinguishing signal).
+ * The v5.4.0 banner made that visible — but only detected the FULLY-empty
+ * case (board_cards === 0) and, worse, was the operator's FIRST and ONLY
+ * response: it told them to hand-run the reconcile command.
  *
- * This banner makes the two cases distinguishable for the operator viewing
- * the board: it reads the `anthology_board_projection` entry off the existing
- * `/api/health/deep` endpoint (src/lib/health/deep-checks.ts). That entry is a
- * NON-GATING advisory — it lives under the response's `advisory` object, not
- * the gating `checks` object, so a drift never flips the box red or trips
- * auto-rollback (A7 refix). The banner renders ONLY when the advisory reports a
- * confirmed drift (ledger has rows, board has none) — a healthy-idle board
- * (ledger empty) or a healthy-projecting board renders nothing here.
+ * U79/GK-17 makes the underlying reconcile a CONVERGING repair (ONB leg,
+ * merge b62455b1): `mc_board.py reconcile --json` now re-posts every ledger
+ * subject missing from the board and reports whether the sweep actually
+ * converged (zero deferred/error subjects) — persisted by the daily tick to
+ * `<state_dir>/reports/smoke-test-*.json` under `board_reconcile.converged`.
+ * This banner is the CC half of that unit: it reads the newest such report
+ * (surfaced by checkAnthologyBoardProjection() as `board_reconcile_converged`
+ * on the SAME `anthology_board_projection` advisory entry) and renders ONLY
+ * when the automatic repair ran and did NOT converge — the escalation of
+ * last resort the unit's title promises, never the first response. A repair
+ * that converged (`true`), an unknown/no-report state (`null`), or the
+ * pre-U79 raw ledger-vs-board count heuristic ALONE are never sufficient —
+ * this banner keys off `board_reconcile_converged === false` and nothing
+ * else. Because the repair is automatic (zero operator action per the
+ * unit's acceptance), this copy is escalation-only — it no longer instructs
+ * a manual reconcile command.
+ *
+ * NON-GATING advisory, unchanged: `anthology_board_projection` lives under
+ * the response's `advisory` object, not the gating `checks` object, so this
+ * signal never flips the box red or trips auto-rollback.
  *
  * Read-only, fail-soft: this is a diagnostic aid, never a page dependency —
  * any fetch/parse failure renders nothing rather than breaking the board.
@@ -35,25 +50,19 @@ interface AnthologyBoardProjectionCheck {
   ledger_participants?: number;
   ledger_anthologies?: number;
   board_cards?: number;
+  board_reconcile_converged?: boolean | null;
+  board_reconcile_status?: string;
+  board_reconcile_age_seconds?: number;
+  board_reconcile_stale?: boolean;
 }
 
-interface DriftState {
-  ledgerParticipants: number;
-  ledgerAnthologies: number;
-  detail: string;
-}
-
-/** Extracts the generic, path-free `mc_board.py reconcile --json` command from
- *  the advisory detail string (the endpoint deliberately omits the resolved
- *  absolute script path — see deep-checks.ts drift branch). Returns null if the
- *  detail carries no `Run:` marker. */
-function extractCommand(detail: string): string | null {
-  const m = detail.match(/Run:\s*(.+)$/);
-  return m ? m[1].trim() : null;
+interface EscalationState {
+  status?: string;
+  ageSeconds?: number;
 }
 
 export function AnthologyBoardDriftBanner() {
-  const [drift, setDrift] = useState<DriftState | null>(null);
+  const [escalation, setEscalation] = useState<EscalationState | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,20 +72,19 @@ export function AnthologyBoardDriftBanner() {
         const res = await fetch('/api/health/deep', { cache: 'no-store' });
         if (!res.ok) return;
         const data = await res.json();
-        // Non-gating advisory field (A7 refix) — read from `advisory`, not the
-        // gating `checks` object.
+        // Non-gating advisory field — read from `advisory`, not the gating
+        // `checks` object.
         const c: AnthologyBoardProjectionCheck | undefined = data?.advisory?.anthology_board_projection;
         if (!c || cancelled) return;
 
-        // Only a CONFIRMED drift (not indeterminate — engine unreadable is a
-        // different failure mode, not this banner's job) with ledger rows
-        // present and zero board cards counts as drift.
-        const ledgerTotal = (c.ledger_participants ?? 0) + (c.ledger_anthologies ?? 0);
-        if (c.pass === false && c.indeterminate !== true && ledgerTotal > 0 && (c.board_cards ?? 0) === 0) {
-          setDrift({
-            ledgerParticipants: c.ledger_participants ?? 0,
-            ledgerAnthologies: c.ledger_anthologies ?? 0,
-            detail: c.detail,
+        // U79/GK-17: the ONLY escalation condition. `true` (converged) and
+        // `null` (unknown — no report yet, stale, or a legacy runner) must
+        // both render nothing; the old pass/board_cards heuristic is no
+        // longer consulted here at all.
+        if (c.board_reconcile_converged === false) {
+          setEscalation({
+            status: c.board_reconcile_status,
+            ageSeconds: c.board_reconcile_age_seconds,
           });
         }
       } catch {
@@ -90,28 +98,24 @@ export function AnthologyBoardDriftBanner() {
     };
   }, []);
 
-  if (!drift) return null;
-
-  const command = extractCommand(drift.detail);
+  if (!escalation) return null;
 
   return (
-    <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 sm:px-6 lg:px-8">
+    <div
+      data-testid="anthology-selfheal-banner"
+      className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 sm:px-6 lg:px-8"
+    >
       <div className="flex items-start gap-2.5">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-amber-900">
-            Board projection drift — this board may be dead, not idle
+            Board self-heal did not converge
           </p>
           <p className="mt-0.5 text-xs text-amber-800">
-            The Anthology Engine ledger holds {drift.ledgerParticipants} participant row(s) and{' '}
-            {drift.ledgerAnthologies} anthology row(s), but this board shows zero cards. Reconcile
-            the mirror:
+            The automatic reconcile ran on the last scheduled cycle and did not resolve every
+            ledger participant onto this board. This is an escalation, not an instruction — no
+            operator action is required; the next scheduled cycle retries automatically.
           </p>
-          {command && (
-            <code className="mt-1.5 block w-fit max-w-full overflow-x-auto rounded bg-amber-100 px-2 py-1 text-[11px] text-amber-950">
-              {command}
-            </code>
-          )}
         </div>
       </div>
     </div>

@@ -134,6 +134,48 @@ function makeAnthologyLedger(
   return dbPath;
 }
 
+/** Format a Date the exact way anthology-smoke-test.py's persist_report()
+ *  does: datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"). */
+function fmtStamp(d: Date): string {
+  const iso = d.toISOString(); // e.g. 2026-07-16T12:41:38.123Z
+  return `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}Z`;
+}
+
+/** Write a fixture `board_reconcile` daily-tick report under
+ *  <stateDir>/reports/, mirroring the exact `anthology-smoke-test-report`
+ *  contract (schema_version 1) persist_report() writes (U79/GK-17 — the ONB
+ *  leg's contract this unit's CC half consumes). `ageMs` back-dates both the
+ *  filename stamp AND the `utc` field so staleness can be exercised
+ *  deterministically. */
+function writeSmokeTestReport(
+  stateDir: string,
+  opts: {
+    ageMs?: number;
+    boardReconcile?: unknown;
+    omitUtc?: boolean;
+    rawOverride?: string;
+    filenameSuffix?: string;
+  } = {}
+): string {
+  const reportsDir = path.join(stateDir, 'reports');
+  fs.mkdirSync(reportsDir, { recursive: true });
+  const when = new Date(Date.now() - (opts.ageMs ?? 0));
+  const stamp = fmtStamp(when) + (opts.filenameSuffix ?? '');
+  const filePath = path.join(reportsDir, `smoke-test-${stamp}.json`);
+  if (opts.rawOverride !== undefined) {
+    fs.writeFileSync(filePath, opts.rawOverride);
+    return filePath;
+  }
+  const report: Record<string, unknown> = {
+    contract: 'anthology-smoke-test-report',
+    schema_version: 1,
+  };
+  if (!opts.omitUtc) report.utc = when.toISOString();
+  if ('boardReconcile' in opts) report.board_reconcile = opts.boardReconcile;
+  fs.writeFileSync(filePath, JSON.stringify(report, null, 2));
+  return filePath;
+}
+
 /** A getDb() mock returning a fixed anthology-card count from `tasks`. */
 function mockDbWithAnthologyCardCount(n: number) {
   return {
@@ -1853,6 +1895,184 @@ describe('anthology_board_projection', () => {
       process.env.ANTHOLOGY_MC_BOARD_SCRIPT = scriptPath;
       const { findMcBoardScript } = await loadChecks();
       expect(findMcBoardScript()).toBe(scriptPath);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // U79 / GK-17 — the CC leg consumes the ONB leg's `converged` signal.
+  //
+  // The ONB leg (merge b62455b1) made `mc_board.py reconcile --json` a
+  // CONVERGING repair and made `anthology-smoke-test.py`'s daily tick persist
+  // that outcome to `<state_dir>/reports/smoke-test-<UTC-stamp>.json` under
+  // the `board_reconcile.converged` field (true|false|null). Until this unit,
+  // NOTHING on the Command Center side read that file — the ONB half was
+  // inert. checkAnthologyBoardProjection() now reads the NEWEST report under
+  // the SAME state-dir resolution order (resolveAnthologyStateDbPath())
+  // mc_board.py itself uses, and surfaces `board_reconcile_converged` (plus
+  // freshness) on the result — the field the rewired banner keys off.
+  // ──────────────────────────────────────────────────────────────────────────
+  describe('board_reconcile signal (U79/GK-17 — consumes the ONB converged contract)', () => {
+    it('no reports/ directory at all → board_reconcile_converged is null, never escalates', async () => {
+      // Ledger present (so the pre-existing drift comparison is exercised too)
+      // but no reports dir was ever written by the daily tick.
+      makeAnthologyLedger(path.join(tmpDir, 'anthology-state'), { participants: 2 });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      const result = checkAnthologyBoardProjection();
+      expect(result.board_reconcile_converged).toBeNull();
+    });
+
+    // Pure value-mapping cases: identical setup (one ledger, one report, same
+    // db mock), differing only in the report's `board_reconcile` payload and
+    // the expected `board_reconcile_converged` output. Data-driven per
+    // test-guard Rule 3 rather than five near-duplicate test bodies.
+    it.each<[string, unknown, boolean | null]>([
+      [
+        'converged:true → surfaced as true',
+        { status: 'reconciled', exit: 0, converged: true, counts: { synced: 2, deferred: 0, error: 0 } },
+        true,
+      ],
+      [
+        'converged:false (fresh report) → surfaced as false, the ONLY escalation signal',
+        { status: 'unconverged', exit: 0, converged: false, counts: { synced: 1, deferred: 1, error: 0 } },
+        false,
+      ],
+      [
+        'converged:null (legacy runner, exit-code-only) → surfaced as null, must NEVER escalate',
+        { status: 'reconciled', exit: 0, converged: null },
+        null,
+      ],
+      [
+        // A truthy-but-non-boolean value must NOT be read as "converged:true"
+        // (or worse, as a truthy escalation) by a loose type coercion.
+        'converged is a non-boolean value (malformed report) → coerced to null, never escalate',
+        { status: 'reconciled', exit: 0, converged: 'yes' },
+        null,
+      ],
+      [
+        // writeSmokeTestReport({ boardReconcile: undefined }) still sets the
+        // key present-with-undefined, which JSON.stringify then OMITS —
+        // exactly reproducing a report with no board_reconcile field at all
+        // (e.g. a reconcile:false run).
+        'board_reconcile missing entirely from the report → null',
+        undefined,
+        null,
+      ],
+    ])('%s', async (_label, boardReconcile, expectedConverged) => {
+      const stateDir = path.join(tmpDir, 'anthology-state');
+      makeAnthologyLedger(stateDir, { participants: 2 });
+      writeSmokeTestReport(stateDir, { boardReconcile });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      const result = checkAnthologyBoardProjection();
+      expect(result.board_reconcile_converged).toBe(expectedConverged);
+    });
+
+    it('STALE report with converged:false → surfaced as null (missing/stale/unparseable = unknown, never escalate)', async () => {
+      const stateDir = path.join(tmpDir, 'anthology-state');
+      makeAnthologyLedger(stateDir, { participants: 2 });
+      writeSmokeTestReport(stateDir, {
+        ageMs: 72 * 60 * 60 * 1000, // 72h — well past the daily-tick cadence
+        boardReconcile: { status: 'unconverged', exit: 0, converged: false },
+      });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      const result = checkAnthologyBoardProjection();
+      expect(result.board_reconcile_converged).toBeNull();
+      expect(result.board_reconcile_stale).toBe(true);
+    });
+
+    it('unparseable JSON report → fail-soft null, does not throw', async () => {
+      const stateDir = path.join(tmpDir, 'anthology-state');
+      makeAnthologyLedger(stateDir, { participants: 2 });
+      writeSmokeTestReport(stateDir, { rawOverride: '{ this is not valid json' });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      expect(() => checkAnthologyBoardProjection()).not.toThrow();
+      const result = checkAnthologyBoardProjection();
+      expect(result.board_reconcile_converged).toBeNull();
+    });
+
+    it('reads the NEWEST report when multiple exist, not an older one', async () => {
+      const stateDir = path.join(tmpDir, 'anthology-state');
+      makeAnthologyLedger(stateDir, { participants: 2 });
+      // Older report says converged:true; newest says converged:false.
+      writeSmokeTestReport(stateDir, {
+        ageMs: 60 * 60 * 1000, // 1h ago
+        boardReconcile: { status: 'reconciled', exit: 0, converged: true },
+      });
+      writeSmokeTestReport(stateDir, {
+        ageMs: 0, // now — the newest
+        boardReconcile: { status: 'unconverged', exit: 0, converged: false },
+      });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      const result = checkAnthologyBoardProjection();
+      expect(result.board_reconcile_converged).toBe(false);
+    });
+
+    // LEAK POSTURE: same rule as the rest of this check — nothing in the
+    // reconcile-signal fields or `detail` may contain the resolved absolute
+    // reports-dir path (the unauthenticated /api/health/deep bypass).
+    it('does not leak the resolved reports-dir absolute path through any field', async () => {
+      const stateDir = path.join(tmpDir, 'anthology-state');
+      makeAnthologyLedger(stateDir, { participants: 2 });
+      writeSmokeTestReport(stateDir, {
+        boardReconcile: { status: 'unconverged', exit: 0, converged: false },
+      });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(2));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      const result = checkAnthologyBoardProjection();
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(tmpDir);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // U79 / GK-17 — a PARTIAL drop (board count short of ledger total by less
+  // than the whole ledger, e.g. one participant missing) is exactly the class
+  // the pre-existing `boardCards === 0`-only heuristic is structurally blind
+  // to (deep-checks.ts's raw ledger-vs-board COUNT comparison can only ever
+  // see "some cards landed" vs "zero cards landed" — it cannot tell WHICH
+  // subject dropped, or distinguish a real drop from a sync still mid-flight).
+  // That coarse heuristic is intentionally left UNCHANGED here (it is not
+  // this unit's authoritative signal and changing its equality semantics
+  // risks new false positives on installs that legitimately never reach 1:1
+  // ledger/board parity). The precise, per-subject fix is exactly what the
+  // ONB leg's `converged` signal provides — it comes from mc_board.py's own
+  // reconcile sweep, which walks every subject individually. This block
+  // proves the escalation path this unit actually ships: the same partial
+  // drop the coarse heuristic misses is correctly caught via
+  // `board_reconcile_converged`, which is what the rewired banner reads.
+  // ──────────────────────────────────────────────────────────────────────────
+  describe('partial drop is caught via the converged signal, not the coarse legacy heuristic (U79/GK-17)', () => {
+    it('ledger=5, board=4 (one participant short): legacy pass/board_cards heuristic still reads "projecting" (unchanged, coarse), but board_reconcile_converged correctly flags the drop', async () => {
+      const stateDir = path.join(tmpDir, 'anthology-state');
+      makeAnthologyLedger(stateDir, { participants: 5, anthologies: 0 });
+      writeSmokeTestReport(stateDir, {
+        boardReconcile: { status: 'unconverged', exit: 0, converged: false, counts: { synced: 4, deferred: 1, error: 0 } },
+      });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(4));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      const result = checkAnthologyBoardProjection();
+      // Documents the pre-existing coarse heuristic's actual (unchanged)
+      // behavior — a nonzero board count still reads "projecting" here.
+      expect(result.pass).toBe(true);
+      // The authoritative signal this unit adds correctly flags the drop.
+      expect(result.board_reconcile_converged).toBe(false);
+    });
+
+    it('ledger=6 (5 participants + 1 anthology), board=6, converged:true → both signals agree: no drift', async () => {
+      const stateDir = path.join(tmpDir, 'anthology-state');
+      makeAnthologyLedger(stateDir, { participants: 5, anthologies: 1 });
+      writeSmokeTestReport(stateDir, {
+        boardReconcile: { status: 'reconciled', exit: 0, converged: true, counts: { synced: 6, deferred: 0, error: 0 } },
+      });
+      vi.doMock('@/lib/db', () => mockDbWithAnthologyCardCount(6));
+      const { checkAnthologyBoardProjection } = await loadChecks();
+      const result = checkAnthologyBoardProjection();
+      expect(result.pass).toBe(true);
+      expect(result.board_reconcile_converged).toBe(true);
     });
   });
 });

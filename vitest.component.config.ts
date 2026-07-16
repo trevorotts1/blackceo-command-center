@@ -45,6 +45,11 @@ export default defineConfig({
       // fabricated seed ids), rebuilt against the current post-U59 API
       // contract, real render proof.
       'tests/unit/devils-advocate-feed-render.test.tsx',
+      // U79 (GK-17) — AnthologyBoardDriftBanner rewired to the ONB leg's
+      // converged signal: renders ONLY when board_reconcile_converged===false,
+      // never on the old pre-U79 pass/board_cards drift shape alone (proves
+      // the rewire), real render proof.
+      'tests/unit/u79-anthology-selfheal-banner.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

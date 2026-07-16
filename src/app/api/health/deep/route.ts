@@ -23,7 +23,17 @@
  *     "disk_headroom":    { "pass": bool, "detail": string }
  *   },
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
- *     "anthology_board_projection": { "pass": bool, "detail": string, ... },
+ *     "anthology_board_projection": { "pass": bool, "detail": string, ...,
+ *       // U79 (GK-17): the converging-repair signal read from the daily
+ *       // tick's newest persisted report (see readLatestBoardReconcileSignal()
+ *       // in deep-checks.ts). `board_reconcile_converged` is the ONLY signal
+ *       // AnthologyBoardDriftBanner escalates on — false|true|null (null =
+ *       // unknown: no report yet, unparseable, or stale; never escalates).
+ *       "board_reconcile_converged"?: boolean | null,
+ *       "board_reconcile_status"?: string,
+ *       "board_reconcile_age_seconds"?: number,
+ *       "board_reconcile_stale"?: boolean
+ *     },
  *     "skill6_board_projection":    { "pass": bool, "detail": string, ... }, // U27 / B-U13
  *     "mc_board_49_signature_funnel_projection":     { "pass": bool, "detail": string, ... }, // U100
  *     "mc_board_50_email_engine_projection":         { "pass": bool, "detail": string, ... }, // U100
