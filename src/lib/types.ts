@@ -252,6 +252,25 @@ export interface Task {
   audience_source?: string | null;
   voice_collapsed?: number | null;
   blend_directive?: string | null;
+  // U116 (E6-2, master spec v2 Section E6-2 / ADD-2, closes G8) — comms-
+  // audience-prompt mirror columns (migration 106). Written by
+  // persistPersonaBundle from the BUNDLE-ROOT `audience_source` / `comms_type`
+  // fields (PersonaBundle.comms_audience_source / .comms_type below), which a
+  // comms-producing write stamps via the ONB-side comms_audience_trigger.py.
+  // ⚠️ DISTINCT from `audience_source` above: that column mirrors
+  // `resolved_audience.source` (onboarding_icp | operator_confirmed | asked —
+  // migration 090's resolution-provenance vocabulary). This pair mirrors the
+  // separate bundle-ROOT U116 stamp (standard | specific — the ADD-2
+  // standard-vs-specific audience-confirmation outcome). Both may be
+  // non-null on the SAME task with DIFFERENT values; neither is derived from
+  // the other. Additive + nullable — absent on a pre-106 row and on any task
+  // whose bundle was never produced through the U116 comms trigger; the board
+  // card's CommsAudienceChip (TaskCard.tsx) renders empty-state (returns
+  // null) when comms_audience_source is absent, per the U116 revert clause.
+  //   comms_audience_source — 'standard' | 'specific'.
+  //   comms_type            — 'page' | 'blog' | 'email' | 'sms' | 'social'.
+  comms_audience_source?: 'standard' | 'specific' | null;
+  comms_type?: 'page' | 'blog' | 'email' | 'sms' | 'social' | null;
   // P4-02 step 5 — the audience-confirm state of this task's persona bundle,
   // surfaced onto the board row (LEFT JOIN task_persona_bundle in the tasks GET
   // route) so the Kanban card can show an "awaiting audience confirm" chip when
@@ -891,6 +910,31 @@ export interface PersonaBundle {
    *  `confirm_required`): true when a content task's conversion goal is not
    *  yet resolved/confirmed. */
   goal_confirm_required?: boolean;
+  /**
+   * U116 (E6-2 / ADD-2) — the bundle-ROOT standard-vs-specific audience
+   * choice, stamped by the ONB-side comms_audience_trigger.py:350
+   * (`bundle["audience_source"] = audience_conf["audience_source"]`) onto
+   * the bundle's TOP level — never nested under `resolved_audience`.
+   *
+   * ⚠️ NOT the same field as `resolved_audience.source` above. That field is
+   * `ResolvedAudience.source` (onboarding_icp | operator_confirmed | asked —
+   * migration 090's resolution-PROVENANCE vocabulary: "how was the audience
+   * figured out"). This field is the ADD-2 comms-audience-CONFIRMATION
+   * outcome (standard | specific — "did the operator want the standard
+   * audience or name a specific one for this one message"). A comms bundle
+   * legitimately carries BOTH fields with independent values at once.
+   * Absent on any bundle not produced through the U116 comms trigger
+   * (`COMMS_AUDIENCE_PROMPT` flag off, or a non-comms task) — never
+   * fabricated when missing.
+   */
+  comms_audience_source?: 'standard' | 'specific' | null;
+  /**
+   * U116 — the bundle-ROOT comms type stamped alongside comms_audience_source
+   * (`bundle["comms_type"]`, comms_audience_trigger.py:352). One of the five
+   * ADD-2 outside-world comms types. Absent under the same conditions as
+   * comms_audience_source.
+   */
+  comms_type?: 'page' | 'blog' | 'email' | 'sms' | 'social' | null;
 }
 
 /** Lifecycle of the audience confirmation for a task's persona bundle. */

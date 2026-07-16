@@ -4582,6 +4582,62 @@ export const migrations: Migration[] = [
       console.log('[Migration 105] task_persona_bundle_scope ready');
     },
   },
+  {
+    id: '106',
+    name: 'add_comms_audience_mirror_columns',
+    up: (db) => {
+      // U116 (E6-2; master spec v2 Section E6-2, implements ADD-2, closes G8)
+      // — Command Center leg, BINARY acceptance (e): "the board card renders
+      // the chosen audience (standard vs specific) alongside the persona-
+      // blend chips (snapshot)".
+      //
+      // ⚠️ NAME-COLLISION TRAP (do not "simplify" this to reuse `audience_source`):
+      // `tasks.audience_source` already exists (migration 090) and mirrors
+      // `bundle.resolved_audience.source` — vocabulary
+      // onboarding_icp | operator_confirmed | asked (persona_blend.py's
+      // resolve_audience provenance). U116 introduces a SECOND, semantically
+      // DIFFERENT field stamped onto the bundle ROOT (not nested under
+      // resolved_audience) by the ONB-side comms_audience_trigger.py:350 —
+      // `bundle["audience_source"]` — vocabulary standard | specific (the
+      // ADD-2 "should I use your standard audience, or a specific one"
+      // confirmation outcome). These two fields legitimately coexist on the
+      // SAME bundle with DIFFERENT values and must never collapse into one
+      // column. This migration adds `comms_audience_source` as a distinctly
+      // named mirror column so the two are structurally unable to collide.
+      //
+      // Two additive, nullable mirror columns on `tasks` (same mirror-column
+      // rationale as migration 090's tasks columns — the board reads a plain
+      // column instead of re-parsing bundle_json):
+      //   comms_audience_source — 'standard' | 'specific' | null. Written by
+      //     persistPersonaBundle from the bundle-ROOT `audience_source` field
+      //     (parsePersonaBundle's `comms_audience_source`), NEVER from
+      //     `resolved_audience.source`.
+      //   comms_type — 'page' | 'blog' | 'email' | 'sms' | 'social' | null.
+      //     Written from the bundle-ROOT `comms_type` field, stamped by the
+      //     same ONB-side trigger.
+      //
+      // ADDITIVE ONLY — never touches migration 090's `audience_source`
+      // column, `task_persona_bundle`, or `task_persona_bundle_scope` (105).
+      // A pre-106 row simply lacks these columns and the board renders the
+      // U116 chip's empty-state (the U116 revert clause: "the audience chip
+      // renders empty-state when the field is absent").
+      console.log('[Migration 106] Adding comms_audience_source + comms_type mirror columns...');
+
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      const columnNames = tasksInfo.map((c) => c.name);
+      const adds: Record<string, string> = {
+        comms_audience_source: 'TEXT',
+        comms_type: 'TEXT',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.includes(col)) {
+          db.prepare(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+
+      console.log('[Migration 106] comms_audience_source + comms_type ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
