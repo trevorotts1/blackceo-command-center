@@ -44,6 +44,7 @@ import { runPortIntegrityCheck } from './port-integrity';
 import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
 import { runSweepLivenessSweep } from './sweep-liveness';
+import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
 import {
   runOperatorColumnAgeDigest,
   OPERATOR_COLUMN_AGE_DIGEST_CRON_EXPR,
@@ -439,6 +440,30 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else if (result.staleJobs.length > 0) {
         console.warn(
           `[cron] sweep-liveness: STALE — ${result.staleJobs.join(', ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
+        );
+      }
+    },
+  },
+
+  // persona-grounding-health: every 5 minutes — A-U12 CC half. Spawns ONB's
+  // shared-utils/persona_grounding_health_probe.py and, when it reports a
+  // confirmed company-config grounding degrade, fires ONE cooldown-guarded
+  // `persona_grounding_degraded` event (SYSTEM audience only). The same
+  // underlying probe is exposed read-only, non-gating, via /api/health/deep's
+  // advisory.persona_match (checkPersonaGrounding in deep-checks.ts) — the
+  // box stays green overall while the board chip goes amber, same posture as
+  // the sweep-liveness entry above. Disable with
+  // DISABLE_PERSONA_GROUNDING_SWEEP=1.
+  {
+    name: 'persona-grounding-health',
+    expr: '*/5 * * * *',
+    fn: async () => {
+      const result = await runPersonaGroundingHealthSweep();
+      if (result.skippedReason) {
+        console.log(`[cron] persona-grounding-health: skipped — ${result.skippedReason}`);
+      } else if (result.degraded) {
+        console.warn(
+          `[cron] persona-grounding-health: DEGRADED${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
         );
       }
     },

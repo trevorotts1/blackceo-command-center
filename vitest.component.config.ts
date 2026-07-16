@@ -50,6 +50,10 @@ export default defineConfig({
       // never on the old pre-U79 pass/board_cards drift shape alone (proves
       // the rewire), real render proof.
       'tests/unit/u79-anthology-selfheal-banner.test.tsx',
+      // A-U12 acceptance (b)/(c) — PersonaGroundingBanner real render proof
+      // (chip appears on a confirmed grounding degrade, clears on the next
+      // healthy probe cycle, and the 30s poll is actually wired).
+      'tests/unit/u12-a-persona-grounding-chip-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

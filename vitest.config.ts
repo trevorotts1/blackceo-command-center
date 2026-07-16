@@ -83,6 +83,13 @@ export default defineConfig({
       // skill6-board-projection.test.ts above, kept in its own file for the same
       // shared-mock-registry reason — vitest-only, never the tsx --test glob.
       'tests/unit/mc-board-producer-projection.test.ts',
+      // A-U12 — persona match/grounding observability probe (CC half).
+      // checkPersonaGrounding() spawns a subprocess via execFile + a
+      // PERSONA_GROUNDING_HEALTH_SCRIPT env override, and the route-level
+      // suite uses the same vi.doMock('@/lib/db', ...) + vi.resetModules()
+      // re-import pattern as skill6-board-projection.test.ts — kept in its
+      // own file for the same shared-mock-registry reason, vitest-only.
+      'tests/unit/u12-a-persona-grounding-health.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
