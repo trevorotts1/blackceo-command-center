@@ -73,3 +73,46 @@ fail and bring the total below 8.5:
 | Build fails after dep upgrade | #9 | Smoke check |
 | Artifact task with zero deliverables falls through to Mode-B description re-score | #12 | Root-cause of false-blocked bug (design item #10) |
 | `isArtifactTask` guard removed from qc-scorer.ts | #12 | Reverts fix #10, re-enables false-done loop |
+
+---
+
+## Whole-app Responsive Audit Program (U54 / spec crosswalk HL-U69)
+
+`qc-cc.sh` section 15 wires a four-stage, ledgered, resumable responsive
+audit that extends `scripts/dev-shots.mjs`'s existing invocation to EVERY
+Next.js App Router page route — mechanically discovered from
+`src/app/**/page.tsx` at run time, so a new page can never silently escape
+the audit (the harness's old default list covered 7 of 38+ routes).
+
+- **Stage 1 — inventory freeze:** `scripts/responsive-route-inventory.mjs`
+  (`npm run audit:responsive:inventory`). Discovers every route and resolves
+  dynamic segments (`[dept]`, `[id]`, `[slug]`, `[[...token]]`) to one pinned
+  fixture per route, from a live seeded DB when reachable, else an honest
+  `unresolved: true` — never a fabricated value.
+- **Stage 2 — measure:** `scripts/responsive-audit.mjs`
+  (`npm run audit:responsive`). Invokes `dev-shots.mjs` once per resolved
+  route against a live server, persisting one ledger file per
+  route/breakpoint (`$TMPDIR/skill6-u54-responsive/responsive-<route>-<bp>.json`)
+  plus a consolidated `responsive-ledger.json`, so an interrupted run resumes
+  without re-shooting already-ledgered routes. **Requires a live, seeded
+  Next.js server — this real run happens on the operator's own box first,
+  never a client box.**
+- **Stage 3 — fix in waves (by defect class, not by page):** wave A
+  (`horizOverflow > 0`), wave B (non-empty `clipped`), wave C (interactive
+  affordances hidden below a breakpoint with no documented mobile
+  substitute). Each wave is its own merge with a stage-2 re-run as its QC.
+- **Stage 4 — gate:** `scripts/responsive-gate.mjs`
+  (`npm run audit:responsive:gate`), wired into `qc-cc.sh` 15.6. The wave-C
+  static scan (which `hidden sm:*`/`hidden md:*` classes sit on an
+  interactive element without an adjacent `mobile-substitute:` comment) runs
+  unconditionally against source on disk — no live server needed. The
+  ledger half (zero `horizOverflow`, zero `clipped`) requires the stage-2
+  baseline; until that baseline exists, 15.6 warns (never a silent pass)
+  rather than failing a fresh clone / CI box that has never run a live
+  audit.
+
+**Status as of this unit's merge:** the four-stage mechanism (stages 1, 2,
+4) is real, tested, and wired. Stage 3's fixes and the first live stage-2
+baseline are the owed operator-box leg — they require an actual seeded,
+running build and (for wave C's semantic judgment calls) screenshot review,
+neither of which a code-only merge can fake.

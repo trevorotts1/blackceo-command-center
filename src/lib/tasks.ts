@@ -56,6 +56,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
@@ -1582,8 +1583,16 @@ export function blockForOwnerConfirm(
   const now = new Date().toISOString();
   const prompt = decision.prompt
     ?? 'Confirm the audience / conversion goal before this content task can be written.';
+  // Read the observed pre-block status for the audit call below — the WHERE
+  // clause guards on "!= 'blocked'" (any non-blocked status is eligible), so
+  // the exact from-status is not a fixed literal the way most other raw
+  // writers in this file are.
+  const fromStatus = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId])?.status ?? 'unknown';
   let changed = 0;
   try {
+    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (the block_* metadata
+    // must land atomically with the status flip); audited immediately below
+    // via recordStatusEvent (DISP-10), gated on the CAS actually landing.
     const res = run(
       `UPDATE tasks
           SET status = 'blocked',
@@ -1605,6 +1614,10 @@ export function blockForOwnerConfirm(
     return;
   }
   if (changed !== 1) return; // already blocked — no duplicate event/notify
+  recordStatusEvent(taskId, fromStatus, 'blocked', {
+    actor: 'audience-confirm',
+    reason: `hard-hold department "${department}" unconfirmed past deadline`,
+  });
   try {
     run(
       `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -2129,6 +2142,21 @@ export interface CreateTaskCoreInput {
   requester_channel?: string | null;
   requester_chat_id?: string | null;
   /**
+   * U94 (X.2.3) — tags this create call as having come through one of the
+   * three ENUMERATED human-facing creation doors (Command-Center UI create,
+   * Telegram/CEO-chat ingest, interview-driven department provisioning) —
+   * i.e. "this door is CAPABLE of knowing a human", independent of whether
+   * requester_channel/requester_chat_id actually landed non-null on THIS
+   * call. Deliberately NOT derived from requester_channel/requester_chat_id
+   * presence (that would make the trust-coverage metric circular — it could
+   * never show anything but 100%). Only the three door call sites pass this;
+   * every other caller (producers, backfills, internal/system creates) omits
+   * it, which is exactly the "producer-created tasks keep the operator-
+   * digest fallback" carve-out — they are excluded from the metric, not
+   * counted against it. See checkTrustCoverage() (src/lib/health/deep-checks.ts).
+   */
+  humanDoorId?: 'command-center-ui' | 'ceo-chat' | 'telegram-ingest' | 'interview-department-provision' | null;
+  /**
    * B-U7 (ingest parity) — OPTIONAL producer-supplied persona-bundle identity,
    * the SAME field vocabulary `cc_board.py`'s `report_persona_used` posts back
    * later (B-U6). The producer (e.g. a Skill-6 build) already resolved its
@@ -2630,6 +2658,35 @@ export async function createTaskCore(
      VALUES (?, ?, ?, ?, ?, ?)`,
     [uuidv4(), 'task_created', input.created_by_agent_id || null, id, eventMessage, now]
   );
+
+  // U94 (X.2.3) — trust-coverage instrumentation. ONLY written when the
+  // calling route identifies itself as one of the three enumerated human-
+  // facing creation doors (humanDoorId set). Records, independent of the
+  // outcome, whether THIS call actually landed a requester stamp — the
+  // non-circular signal checkTrustCoverage() aggregates into the
+  // tasks-with-requester / total-client-initiated ratio. Best-effort: a
+  // write failure (e.g. a very old box pre-events-metadata) must never fail
+  // task creation, so it is swallowed exactly like every other telemetry
+  // insert in this function.
+  if (input.humanDoorId) {
+    const hasRequester = !!(input.requester_channel && input.requester_chat_id);
+    try {
+      run(
+        `INSERT INTO events (id, type, task_id, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          'requester_stamp_check',
+          id,
+          `requester_stamp_check: door=${input.humanDoorId} hasRequester=${hasRequester}`,
+          JSON.stringify({ door: input.humanDoorId, hasRequester }),
+          now,
+        ]
+      );
+    } catch (err) {
+      console.warn('[createTaskCore] requester_stamp_check telemetry failed (non-fatal):', err);
+    }
+  }
 
   // Fetch created task with all joined fields BEFORE persona selection so we can
   // broadcast task_created immediately and return < 500ms (PRD 1.6).

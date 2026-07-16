@@ -34,6 +34,10 @@ export default defineConfig({
       // U38 (C-07) — S3 closure human-promote control: "Promote to Done
       // (operator)" (QcPromotePanel, task-detail modal) real render proof.
       'tests/unit/u38-c-07-qc-promote-render.test.tsx',
+      // U50 (HL/U62) — model-catalog honesty: sticky ModelFilterBar + D14
+      // "Show deprecated/stale" toggle + a visible ModelCard badge, real
+      // render proof.
+      'tests/unit/u50-model-catalog-honesty-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

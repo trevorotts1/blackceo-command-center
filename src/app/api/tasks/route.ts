@@ -249,6 +249,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // U94 (X.2.3) — requester-stamping completeness, Command-Center UI create
+    // door. Mirrors the ingest route's own trim + empty-to-null + "chat id
+    // present with no channel named defaults to telegram" normalization
+    // (tests/unit/ingest-requester-stamp.test.ts) so the trust engine sees
+    // identical semantics regardless of which door a task came through.
+    const rawRequesterChatId =
+      typeof validatedData.requester_chat_id === 'string' ? validatedData.requester_chat_id.trim() : '';
+    const requesterChatId = rawRequesterChatId || null;
+    const requesterChannel = requesterChatId
+      ? (typeof validatedData.requester_channel === 'string' && validatedData.requester_channel.trim()
+          ? validatedData.requester_channel.trim()
+          : 'telegram')
+      : null;
+
     // Delegate to the shared task-creation core so the UI create path and the
     // universal ingest endpoint (POST /api/tasks/ingest) can never drift.
     // UI creates use skipWindowDedup:true — if an operator manually creates the
@@ -266,6 +280,11 @@ export async function POST(request: NextRequest) {
         department: validatedData.department,
         due_date: validatedData.due_date,
         sop_id: validatedData.sop_id ?? null,
+        requester_channel: requesterChannel,
+        requester_chat_id: requesterChatId,
+        // U94 — this is the Command-Center UI create door for the
+        // trust-coverage health metric (checkTrustCoverage()).
+        humanDoorId: 'command-center-ui',
         // UI creates are intentional — skip the window dedup but still honour
         // any explicit idempotency_key the operator supplies.
         skipWindowDedup: true,

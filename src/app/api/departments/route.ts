@@ -6,6 +6,7 @@ import { randomBytes } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { getDb } from '@/lib/db';
 import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
+import { getSession } from '@/lib/interview/store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -97,6 +98,20 @@ function createDepartmentInDbDirect(args: {
   icon: string;
   headName: string;
   description: string;
+  /**
+   * U94 (X.2.3) — "interview flows" is one of three enumerated requester-
+   * stamping doors. This JS-only fallback path is the ONLY department/
+   * starter-task creation surface this repo owns (the primary path shells
+   * out to add-department.sh, which lives in Skill 32 — outside this repo).
+   * When the caller resolved a live interview session (see POST handler
+   * below), the client identity that session captured is threaded through
+   * here so the starter task can be reported on by the trust engine like any
+   * other client-initiated task. Both null when no session was resolved —
+   * the starter task then correctly stays unstamped (operator-digest
+   * fallback), exactly like a producer-created task.
+   */
+  requesterChannel?: string | null;
+  requesterChatId?: string | null;
 }): { status: 'created' | 'already_exists'; workspace_id: string; head_agent_id?: string; starter_task_id?: string } {
   const db = getDb();
 
@@ -157,15 +172,43 @@ function createDepartmentInDbDirect(args: {
     if (existingStarterTask) {
       starterTaskId = existingStarterTask.id;
     } else {
+      const requesterChannel = args.requesterChatId ? (args.requesterChannel || 'telegram') : null;
+      const requesterChatId = args.requesterChatId || null;
       db.prepare(`
-        INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id)
-        VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?)
+        INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id, requester_channel, requester_chat_id)
+        VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?, ?, ?)
       `).run(
         taskId, wsId, args.slug,
         `Welcome to ${args.name}`,
         `This is your ${args.name} department's first task. Click to edit. Your AI workforce will populate real tasks as work comes in.`,
         headAgentId, headAgentId,
+        requesterChannel, requesterChatId,
       );
+
+      // U94 (X.2.3) — trust-coverage instrumentation, "interview flows" door.
+      // Same non-circular signal createTaskCore writes for its own three
+      // doors (see src/lib/tasks.ts): only recorded when this creation
+      // ACTUALLY came through a resolved interview session (requesterChatId
+      // set on the args this function received), independent of whether the
+      // stamp above landed. A plain operator "add department" with no
+      // session is a producer/operator create and is deliberately NOT
+      // tagged — excluded from the coverage denominator, not counted
+      // against it. Best-effort: never fails department creation.
+      if (args.requesterChatId) {
+        try {
+          db.prepare(
+            `INSERT INTO events (id, type, task_id, message, metadata, created_at)
+             VALUES (?, 'requester_stamp_check', ?, ?, ?, datetime('now'))`
+          ).run(
+            randomBytes(8).toString('hex'),
+            taskId,
+            `requester_stamp_check: door=interview-department-provision hasRequester=${!!requesterChatId}`,
+            JSON.stringify({ door: 'interview-department-provision', hasRequester: !!requesterChatId }),
+          );
+        } catch (err) {
+          console.warn('[createDepartmentInDbDirect] requester_stamp_check telemetry failed (non-fatal):', err);
+        }
+      }
     }
   });
   tx();
@@ -228,6 +271,31 @@ export async function POST(request: NextRequest) {
     const description = (typeof b.description === 'string' && b.description) || `${name} department workspace`;
     const allowUnwired = b.allow_unwired === true;
 
+    // U94 (X.2.3) — "interview flows" requester-stamping door. Optional:
+    // when the caller (the interview-completion flow) names the live
+    // interview session this provisioning call is acting on behalf of, we
+    // resolve the client identity that session already captured (owner_id +
+    // channel — the exact fields interview-nudge-sweep.ts already reuses for
+    // its own owner re-engagement send) so the starter task this creates can
+    // be reported on by the trust engine. Best-effort: an unresolvable /
+    // absent session id leaves the starter task correctly unstamped, never
+    // blocks department creation.
+    const interviewSessionId =
+      typeof b.interviewSessionId === 'string' ? b.interviewSessionId.trim() : '';
+    let sessionRequesterChannel: string | null = null;
+    let sessionRequesterChatId: string | null = null;
+    if (interviewSessionId) {
+      try {
+        const session = getSession(interviewSessionId);
+        if (session?.owner_id) {
+          sessionRequesterChatId = session.owner_id;
+          sessionRequesterChannel = session.channel || 'telegram';
+        }
+      } catch (err) {
+        console.warn('[/api/departments] interview session lookup failed (non-fatal):', err);
+      }
+    }
+
     // Require the host script (full-wire path). FAIL LOUD if absent.
     const scriptResult = runAddDepartmentScript({ slug, name, icon, headName, description });
 
@@ -273,7 +341,11 @@ export async function POST(request: NextRequest) {
 
     // allow_unwired=true: legacy JS-only path (explicit operator override only)
     try {
-      const result = createDepartmentInDbDirect({ slug, name, icon, headName, description });
+      const result = createDepartmentInDbDirect({
+        slug, name, icon, headName, description,
+        requesterChannel: sessionRequesterChannel,
+        requesterChatId: sessionRequesterChatId,
+      });
       return NextResponse.json(
         {
           success: true,

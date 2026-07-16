@@ -3,6 +3,7 @@ import { getDb, queryAll, queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { extractJSON } from '@/lib/planning-utils';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -167,11 +168,18 @@ Respond with ONLY valid JSON in this format:
     // Store the session key and initial message
     const messages = [{ role: 'user', content: planningPrompt, timestamp: Date.now() }];
 
+    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (planning_session_key
+    // / planning_messages must land atomically with the status flip); audited
+    // immediately below via recordStatusEvent (DISP-10).
     getDb().prepare(`
       UPDATE tasks
       SET planning_session_key = ?, planning_messages = ?, status = 'backlog'
       WHERE id = ?
     `).run(sessionKey, JSON.stringify(messages), taskId);
+    recordStatusEvent(taskId, task.status, 'backlog', {
+      actor: 'planning-start',
+      reason: 'planning session started',
+    });
 
     // Return immediately - frontend will poll for updates
     // This eliminates the aggressive polling loop that was making 30+ OpenClaw API calls
@@ -210,6 +218,9 @@ export async function DELETE(
     }
 
     // Clear planning-related fields
+    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (the planning_* reset
+    // must land atomically with the status flip); audited immediately below
+    // via recordStatusEvent (DISP-10).
     run(`
       UPDATE tasks
       SET planning_session_key = NULL,
@@ -221,6 +232,10 @@ export async function DELETE(
           updated_at = datetime('now')
       WHERE id = ?
     `, [taskId]);
+    recordStatusEvent(taskId, task.status, 'backlog', {
+      actor: 'planning-cancel',
+      reason: 'planning session cancelled',
+    });
 
     // Broadcast task update
     const updatedTask = queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
