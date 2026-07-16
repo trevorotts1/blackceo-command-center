@@ -194,7 +194,7 @@ NEVER leave a client deployment in a half-updated state. The rollback is the con
 
 ## 9. One client at a time
 
-  1. Start with the operator's own deployment (Trevor's personal one if it exists) as the canary. Verify everything works end to end before touching any client.
+  1. Start with the operator's own deployment (Trevor's personal one if it exists) and prove it there first. Verify everything works end to end before touching any client.
   2. Then update one client. Wait for their Telegram confirmation that the dashboard works for them before proceeding.
   3. Then the next. One at a time.
   4. If any client rejects the update (rolls back, refuses, etc.), PAUSE the entire rollout and notify the operator before proceeding to subsequent clients. The operator decides whether to investigate before resuming.
