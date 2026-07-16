@@ -8,7 +8,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
-import { PersonaSlotChips, PersonaScopeChips, humanize } from './kanban/TaskCard';
+import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
 import { AnthologyCardFace } from './anthology/AnthologyCardFace';
 import { isAnthologyTask } from './anthology/anthology-card';
 import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
@@ -1073,6 +1073,10 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
 
       {/* A-U5 — per-page/scoped persona blend chips (multi-page funnel builds only) */}
       <PersonaScopeChips task={task} />
+
+      {/* U116 (E6-2 / ADD-2) — standard-vs-specific comms-audience chip
+          (outside-world comms artifacts only; empty-state when absent) */}
+      <CommsAudienceChip task={task} />
 
       {/* Sprint and Due Date */}
       {(task.sprint || task.due_date) && (

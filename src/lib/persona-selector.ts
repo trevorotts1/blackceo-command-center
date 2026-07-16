@@ -544,6 +544,40 @@ function normalizeScopeHint(raw: unknown): PersonaBundle["scope_hint"] {
   };
 }
 
+/** U116 — the five ADD-2 outside-world comms types (COMMS_TYPES in the
+ * ONB-side comms_audience_trigger.py, kept in sync manually — that module is
+ * out of this repo). */
+const COMMS_TYPES = ["page", "blog", "email", "sms", "social"] as const;
+
+/**
+ * U116 (E6-2 / ADD-2) — normalize the bundle-ROOT `audience_source` field
+ * (comms_audience_trigger.py:350, `bundle["audience_source"] =
+ * audience_conf["audience_source"]`) into the strict standard|specific
+ * union, or null when absent/malformed.
+ *
+ * ⚠️ Reads `raw.audience_source` — the TOP-LEVEL key on the raw selector
+ * result — NEVER `raw.resolved_audience.source` (that is the migration-090
+ * provenance field `normalizeResolvedAudience` above already owns, values
+ * onboarding_icp|operator_confirmed|asked). A future edit that redirects
+ * this function to read the nested field would silently reproduce the exact
+ * two-different-`audience_source`-fields collision the U116 CC-leg scope
+ * analysis flagged as the single biggest trap in this build — see
+ * tests/unit/u116-comms-audience-persist.test.ts's dedicated collision
+ * regression test.
+ */
+function normalizeCommsAudienceSource(raw: unknown): 'standard' | 'specific' | null {
+  return raw === 'standard' || raw === 'specific' ? raw : null;
+}
+
+/** U116 — normalize the bundle-ROOT `comms_type` field
+ * (comms_audience_trigger.py:352) into one of the five ADD-2 comms types,
+ * or null when absent/malformed/unrecognized. */
+function normalizeCommsType(raw: unknown): PersonaBundle["comms_type"] {
+  return typeof raw === "string" && (COMMS_TYPES as readonly string[]).includes(raw)
+    ? (raw as PersonaBundle["comms_type"])
+    : null;
+}
+
 export function parsePersonaBundle(rawResult: unknown): PersonaBundle | null {
   if (!rawResult || typeof rawResult !== "object") return null;
   const raw = rawResult as Record<string, unknown>;
@@ -578,6 +612,11 @@ export function parsePersonaBundle(rawResult: unknown): PersonaBundle | null {
     // where the caller omitted scope_hint) so this is a strict superset add.
     scope: asString(raw.scope),
     scope_hint: normalizeScopeHint(raw.scope_hint),
+    // U116 — additive: absent on any raw result not produced through the
+    // comms trigger (every pre-U116-shaped selector result, and any
+    // COMMS_AUDIENCE_PROMPT=0 revert-path result).
+    comms_audience_source: normalizeCommsAudienceSource(raw.audience_source),
+    comms_type: normalizeCommsType(raw.comms_type),
   };
 }
 
@@ -617,6 +656,15 @@ export function persistPersonaBundle(
   const audienceLabel =
     audience?.label ?? (audience?.candidates.length === 1 ? audience.candidates[0] : null);
   const audienceSource = audience?.source ?? null;
+  // U116 (E6-2 / ADD-2, migration 108) — the BUNDLE-ROOT comms-audience-prompt
+  // fields, DISTINCT from `audienceSource` above (that reads
+  // `bundle.resolved_audience.source`; these read `bundle.comms_audience_source`
+  // / `bundle.comms_type`, the top-level fields the ONB-side
+  // comms_audience_trigger.py stamps). Never conflate the two — see the
+  // dedicated collision regression test
+  // (tests/unit/u116-comms-audience-persist.test.ts).
+  const commsAudienceSource = bundle.comms_audience_source ?? null;
+  const commsType = bundle.comms_type ?? null;
 
   let wrote = false;
   try {
@@ -643,7 +691,9 @@ export function persistPersonaBundle(
               audience_label = ?,
               audience_source = ?,
               voice_collapsed = ?,
-              blend_directive = ?
+              blend_directive = ?,
+              comms_audience_source = ?,
+              comms_type = ?
         WHERE id = ?`,
       [
         voicePersonaId,
@@ -653,11 +703,13 @@ export function persistPersonaBundle(
         audienceSource,
         voice.collapsed ? 1 : 0,
         blendDirective,
+        commsAudienceSource,
+        commsType,
         taskId,
       ],
     );
   } catch (err) {
-    console.warn(`[persona-bundle] mirror-column update failed for task ${taskId} (pre-090 DB?):`, (err as Error).message);
+    console.warn(`[persona-bundle] mirror-column update failed for task ${taskId} (pre-090/pre-108 DB?):`, (err as Error).message);
   }
 
   return wrote;

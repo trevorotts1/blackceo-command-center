@@ -54,6 +54,9 @@ export default defineConfig({
       // (chip appears on a confirmed grounding degrade, clears on the next
       // healthy probe cycle, and the 30s poll is actually wired).
       'tests/unit/u12-a-persona-grounding-chip-render.test.tsx',
+      // U116 (E6-2) CC leg, BINARY acceptance (e) — CommsAudienceChip
+      // standard-vs-specific board-card render proof.
+      'tests/unit/u116-comms-audience-chip-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

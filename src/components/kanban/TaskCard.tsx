@@ -15,7 +15,7 @@
  * per-PART governance by U115 §E6-1, closes G7) is the per-PAGE/per-PART
  * analog: one chip per `task.persona_bundle_scopes` row (a
  * `task_persona_bundle_scope` table row, migration 104 + U115's migration
- * 106) — a multi-page funnel build's opt-in/sales/thank-you pages, OR a
+ * 107) — a multi-page funnel build's opt-in/sales/thank-you pages, OR a
  * multi-part campaign's sales page + nurture emails + social posts, each
  * carrying its OWN governing blend + audience. Reuses the exact chip visuals +
  * gating pattern above verbatim (≥2 rows required, same colors, same overflow
@@ -25,9 +25,17 @@
  * TaskOverviewPanels.tsx) the task-detail modal — single source, no
  * divergence — so this is the ONE place the per-part row is ever assembled.
  *
+ * `CommsAudienceChip` (U116, master spec v2 Section E6-2 / ADD-2) renders the
+ * chosen standard-vs-specific audience for an outside-world comms artifact
+ * (`task.comms_audience_source`, migration 108) alongside the chips above.
+ * Empty-state (renders nothing) when the field is absent — see its own
+ * docstring for the migration-090-vs-108 `audience_source` field collision
+ * this component must never fall into.
+ *
  * The card itself (drag handlers, status, etc.) lives in `MissionQueue.tsx`; this
- * module is the ONE place the per-sub-task slot chips (and per-scope chips) are
- * rendered, so the board and any future card surface stay consistent.
+ * module is the ONE place the per-sub-task slot chips (and per-scope / comms-
+ * audience chips) are rendered, so the board and any future card surface stay
+ * consistent.
  */
 'use client';
 
@@ -175,6 +183,68 @@ export function PersonaScopeChips({
           +{overflow}
         </span>
       )}
+    </div>
+  );
+}
+
+/** U116 (E6-2 / ADD-2) chip label per comms_audience_source. Standard gets a
+ * quieter/neutral treatment (the default path); specific is visually
+ * distinguished since it means the operator named a one-off audience
+ * override for this message. */
+const COMMS_AUDIENCE_LABEL: Record<'standard' | 'specific', string> = {
+  standard: 'Standard audience',
+  specific: 'Specific audience',
+};
+
+/**
+ * U116 (E6-2; implements ADD-2, closes G8) — BINARY acceptance (e): "the
+ * board card renders the chosen audience (standard vs specific) alongside
+ * the persona-blend chips (snapshot)".
+ *
+ * Reads `task.comms_audience_source` — the U116 bundle-ROOT field mirrored by
+ * migration 108, DISTINCT from `task.audience_source` (migration 090, which
+ * mirrors `resolved_audience.source`: onboarding_icp | operator_confirmed |
+ * asked). Rendering `task.audience_source` here would be the exact
+ * name-collision trap the U116 CC-leg scope analysis flagged — this
+ * component must never read that column.
+ *
+ * Revert clause (master spec v2 §E6-2): "the audience chip renders
+ * empty-state when the field is absent" — returns null (renders nothing)
+ * when `comms_audience_source` is null/undefined/unrecognized, exactly the
+ * same empty-state contract `PersonaScopeChips` already established for
+ * A-U5. Reuses the identical chip visuals (rounded-full, text-[10px],
+ * violet-500/15 ring) so it reads as ONE consistent chip row with the
+ * persona-blend chips it renders alongside.
+ */
+export function CommsAudienceChip({
+  task,
+}: {
+  task: Pick<Task, 'comms_audience_source' | 'comms_type'>;
+}) {
+  const source = task.comms_audience_source;
+  if (source !== 'standard' && source !== 'specific') return null;
+
+  const label = COMMS_AUDIENCE_LABEL[source];
+  const typeLabel = task.comms_type ? ` — ${humanize(task.comms_type)}` : '';
+
+  return (
+    <div
+      className="mt-1 flex flex-wrap items-center gap-1"
+      data-testid="comms-audience-chip"
+      aria-label="Communication audience"
+    >
+      <span
+        className={
+          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ' +
+          (source === 'specific'
+            ? 'bg-violet-500/15 text-violet-300 ring-1 ring-inset ring-violet-500/30'
+            : 'bg-zinc-500/10 text-zinc-400 ring-1 ring-inset ring-zinc-500/20')
+        }
+        title={`${label}${typeLabel}`}
+      >
+        <span aria-hidden>🎯</span>
+        <span>{label}</span>
+      </span>
     </div>
   );
 }
