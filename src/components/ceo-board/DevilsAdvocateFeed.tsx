@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Shield, AlertTriangle, Clock, CheckCircle2, XCircle } from 'lucide-react';
+import { CANONICAL_SLUGS, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 /**
  * U59 [JM/U55] / decision D15 (D-J1): this surface renders the Devil's
@@ -33,21 +34,79 @@ interface DAChallenge {
   persona?: string;
 }
 
-const departmentColors: Record<string, string> = {
-  'sales-dept': 'bg-blue-100 text-blue-700 border-blue-200',
-  'marketing-dept': 'bg-purple-100 text-purple-700 border-purple-200',
-  'operations-dept': 'bg-orange-100 text-orange-700 border-orange-200',
-  'creative-dept': 'bg-pink-100 text-pink-700 border-pink-200',
-  'support-dept': 'bg-teal-100 text-teal-700 border-teal-200',
+/**
+ * QC defect (DA-CHIPS-FIX): this map used to be keyed to sales-dept /
+ * marketing-dept / operations-dept / creative-dept / support-dept --
+ * fabricated demo-seed ids that never matched a real workspace id. Real
+ * department ids look like `marketing`, `sales`, `billing-finance` (see
+ * src/lib/routing/canonical-slug.ts's CANONICAL_SLUGS, imported above as the
+ * one authoritative source -- never hand-copied here again). Every real
+ * challenge silently degraded to a raw lowercase gray chip instead of a
+ * colored, Title-Case one; it never crashed, which is exactly why it
+ * survived an otherwise-excellent test suite with nothing rendering this
+ * component. `canonicalDeptSlug()` is applied before lookup below so a raw
+ * variant (`dept-marketing`, `billing`) still resolves, and
+ * devils-advocate-feed-render.test.tsx asserts every id in CANONICAL_SLUGS
+ * has an entry here so this map can never again silently drift stale.
+ */
+const departmentNames: Record<string, string> = {
+  'master-orchestrator': 'CEO / COM',
+  marketing: 'Marketing',
+  sales: 'Sales',
+  'billing-finance': 'Billing / Finance',
+  'customer-support': 'Customer Support',
+  'web-development': 'Web Development',
+  'app-development': 'App Development',
+  graphics: 'Graphics',
+  video: 'Video Production',
+  audio: 'Audio Production',
+  research: 'Research',
+  communications: 'Communications',
+  crm: 'CRM',
+  'openclaw-maintenance': 'OpenClaw Maintenance',
+  legal: 'Legal / Compliance',
+  'social-media': 'Social Media',
+  'paid-advertisement': 'Paid Advertisement',
+  presentations: 'Presentations',
+  'client-coaches': 'Client Coaches',
+  'course-creator': 'Course Creator',
+  podcast: 'Podcast',
+  'community-management': 'Community Management',
+  'personal-assistant': 'Personal Assistant',
+  'general-task': 'General Task',
+  engineering: 'Engineering',
 };
 
-const departmentNames: Record<string, string> = {
-  'sales-dept': 'Sales',
-  'marketing-dept': 'Marketing',
-  'operations-dept': 'Operations',
-  'creative-dept': 'Creative',
-  'support-dept': 'Support',
-};
+/**
+ * Badge color classes, assigned by POSITION in CANONICAL_SLUGS rather than a
+ * per-id lookup table -- see departmentNames' doc comment above for why a
+ * hardcoded map (even one with correct-today values) is exactly the shape of
+ * bug this replaces: it can silently go stale the next time a department is
+ * added or renamed, quietly falling back to the generic gray chip. Cycling a
+ * fixed palette by canonical position means every id in the authoritative
+ * set always gets a real color with no map entry to forget.
+ */
+const DEPARTMENT_COLOR_PALETTE = [
+  'bg-purple-100 text-purple-700 border-purple-200',
+  'bg-blue-100 text-blue-700 border-blue-200',
+  'bg-yellow-100 text-yellow-700 border-yellow-200',
+  'bg-teal-100 text-teal-700 border-teal-200',
+  'bg-indigo-100 text-indigo-700 border-indigo-200',
+  'bg-pink-100 text-pink-700 border-pink-200',
+  'bg-cyan-100 text-cyan-700 border-cyan-200',
+  'bg-lime-100 text-lime-700 border-lime-200',
+  'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200',
+  'bg-violet-100 text-violet-700 border-violet-200',
+  'bg-orange-100 text-orange-700 border-orange-200',
+  'bg-sky-100 text-sky-700 border-sky-200',
+];
+const CANONICAL_SLUG_LIST = Array.from(CANONICAL_SLUGS);
+const departmentColors: Record<string, string> = Object.fromEntries(
+  CANONICAL_SLUG_LIST.map((slug, i) => [
+    slug,
+    DEPARTMENT_COLOR_PALETTE[i % DEPARTMENT_COLOR_PALETTE.length],
+  ]),
+);
 
 /** The PRD lifecycle, ratified as canonical by D15 (D-J1) sub-part (ii). */
 const statusConfig = {
@@ -213,6 +272,12 @@ export function DevilsAdvocateFeed() {
           const isEscalated = status === 'escalated';
           const hasResponse = Boolean(challenge.outcome);
           const severity = challenge.severity ? severityConfig[challenge.severity] : null;
+          // QC defect fix: canonicalize BEFORE lookup so a raw alias
+          // (dept-marketing, billing) or already-canonical id both resolve;
+          // an unrecognized id canonicalizes to itself (canonicalDeptSlug's
+          // graceful Step-5 fallback) so lookup below misses cleanly rather
+          // than throwing.
+          const canonicalDeptId = canonicalDeptSlug(challenge.department_id);
 
           return (
             <motion.div
@@ -231,12 +296,12 @@ export function DevilsAdvocateFeed() {
                 <div className="flex items-center gap-2">
                   <span
                     className={`px-3 py-1 rounded-full text-xs font-medium border ${
-                      (challenge.department_id && departmentColors[challenge.department_id]) ||
+                      departmentColors[canonicalDeptId] ||
                       'bg-gray-100 text-gray-700 border-gray-200'
                     }`}
                   >
-                    {(challenge.department_id && departmentNames[challenge.department_id]) ||
-                      challenge.department_id ||
+                    {(challenge.department_id &&
+                      (departmentNames[canonicalDeptId] || challenge.department_id)) ||
                       'Unassigned'}
                   </span>
                   {severity && (

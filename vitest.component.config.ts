@@ -38,6 +38,10 @@ export default defineConfig({
       // "Show deprecated/stale" toggle + a visible ModelCard badge, real
       // render proof.
       'tests/unit/u50-model-catalog-honesty-render.test.tsx',
+      // DA-CHIPS-FIX — DevilsAdvocateFeed real department-id chips (never
+      // fabricated seed ids), rebuilt against the current post-U59 API
+      // contract, real render proof.
+      'tests/unit/devils-advocate-feed-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
