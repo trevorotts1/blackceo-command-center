@@ -15,8 +15,23 @@
  * (slug, displayName, fetchModels) for the registry / refresh loop.
  *
  * Note on /models: Kie's catalog endpoint is sparse and shape-volatile. We
- * try it first, then fall back to a small curated catalog of high-traffic
- * model ids the operator uses today.
+ * try it first; the live call's result is authoritative (see U50 note).
+ *
+ * U50/H+L.8 — CATALOG HONESTY (swallow-audit closure). This connector used
+ * to wrap the `/models` call in a bare `try/catch` that fell through to
+ * `CURATED_MODELS` (stamped `status: 'active'`) on ANY failure — a dead
+ * key, a network error, a non-2xx response, ALL of it. That is the
+ * identical "Fish Audio fallback never `active`" mirage the swallow-audit
+ * closes: a dead/invalid Kie key made `refreshOneProvider()` log
+ * `success: true` and re-stamp the hardcoded catalog `active` every cycle.
+ * Fixed the same way as `fish-audio.ts`:
+ *   - a live-call failure now PROPAGATES (no try/catch) so
+ *     `refreshOneProvider()` records `success: false` with the real error;
+ *   - an authenticated, successful call that legitimately lists zero
+ *     models resolves to an EMPTY catalog, never substituted with
+ *     `CURATED_MODELS`;
+ *   - `CURATED_MODELS` is retained as documentation-only reference data
+ *     (see the constant below) and is NEVER returned by `fetchModels()`.
  */
 
 import type {
@@ -78,6 +93,17 @@ function authHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+/**
+ * U50/H+L.8 — CATALOG HONESTY. This list is documentation-only as of this
+ * unit. It is NEVER returned by `fetchModels()` as live data (that silent
+ * substitution — a hardcoded catalog stamped `active` on any live-call
+ * failure, including a dead/invalid key — was the swallow this unit closes;
+ * see the retired fallback behavior in git history). Kept only so a reader
+ * knows which high-traffic model ids the operator uses today.
+ * `normalizeCurated()` below stamps `status: 'unavailable'` (never
+ * confirmed against a live call) so this data can never masquerade as a
+ * verified, assignable model if it is ever wired into a seed path.
+ */
 const CURATED_MODELS: Array<{ id: string; kind: ModelCapability; family: string }> = [
   { id: 'veo-3', kind: 'video_generation', family: 'veo' },
   { id: 'veo-3-fast', kind: 'video_generation', family: 'veo' },
@@ -133,6 +159,12 @@ function normalizeRow(row: KieModelRow): ProviderModel | null {
   };
 }
 
+/**
+ * U50/H+L.8 — documentation-only normalizer for `CURATED_MODELS`. Never
+ * called from `fetchModels()`. `status: 'unavailable'` is deliberate: this
+ * data has never been confirmed against a live call and must never
+ * masquerade as an assignable model.
+ */
 function normalizeCurated(entry: { id: string; kind: ModelCapability; family: string }): ProviderModel {
   return {
     model_id: `${PROVIDER_SLUG}/${entry.id}`,
@@ -142,8 +174,8 @@ function normalizeCurated(entry: { id: string; kind: ModelCapability; family: st
     pricing_model: 'per_token',
     pricing_source: 'hardcoded',
     capabilities: inferCapabilities(entry.id),
-    status: 'active',
-    raw_metadata: { source: 'curated' },
+    status: 'unavailable',
+    raw_metadata: { source: 'curated', note: 'Never confirmed live — reference only (U50/H+L.8).' },
   };
 }
 
@@ -156,22 +188,33 @@ async function fetchJson<T>(url: string, init: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * Fetch the Kie.ai model catalog.
+ *
+ * U50/H+L.8 — CATALOG HONESTY. This used to swallow EVERY failure (a dead
+ * key, a network error, a non-2xx response) into a bare `catch` that
+ * returned `CURATED_MODELS` stamped `active` — so a garbage key made the
+ * weekly refresh log `success: true` and re-stamped a hardcoded catalog
+ * `active` forever. That swallow is gone:
+ *   - a live-call failure now PROPAGATES (via `fetchJson`, no try/catch
+ *     here) so `refreshOneProvider()` catches it and records
+ *     `success: false` with the real error detail, exactly like every
+ *     other connector;
+ *   - an authenticated, successful call that legitimately lists zero
+ *     models is treated as an EMPTY catalog, never substituted with
+ *     `CURATED_MODELS` — presence of a key and a 200 is not a license to
+ *     invent rows.
+ */
 export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
   if (!apiKey) {
     throw new Error('Kie.ai fetchModels called without an apiKey (set KIE_API_KEY)');
   }
-  try {
-    const res = await fetch(MODELS_ENDPOINT, { method: 'GET', headers: authHeaders(apiKey) });
-    if (res.ok) {
-      const payload = (await res.json()) as KieModelsResponse;
-      const rows = payload?.data || payload?.models || [];
-      const normalized = rows.map(normalizeRow).filter((m): m is ProviderModel => m !== null);
-      if (normalized.length > 0) return normalized;
-    }
-  } catch {
-    // fall through
-  }
-  return CURATED_MODELS.map(normalizeCurated);
+  const payload = await fetchJson<KieModelsResponse>(MODELS_ENDPOINT, {
+    method: 'GET',
+    headers: authHeaders(apiKey),
+  });
+  const rows = payload?.data || payload?.models || [];
+  return rows.map(normalizeRow).filter((m): m is ProviderModel => m !== null);
 }
 
 /**

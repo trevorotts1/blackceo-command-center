@@ -7,15 +7,25 @@
  *
  *   - POST /v1/text/chatcompletion_v2     native shape
  *   - POST /v1/chat/completions           OpenAI-compatible (preferred here)
- *
- * MiniMax does not expose a public /models discovery endpoint of the same
- * shape, so fetchModels returns a curated static catalog of the families
- * MiniMax currently publishes. The weekly refresh will keep this in sync
- * after a manual roll, which is acceptable because MiniMax's catalog turns
- * over slowly.
+ *   - GET  /v1/models                     model list (best-effort; see U50 note)
  *
  * Auth: Bearer token in the Authorization header.
  * Env:  MINIMAX_API_KEY
+ *
+ * U50/H+L.8 — CATALOG HONESTY (swallow-audit closure). This connector used
+ * to wrap the `/v1/models` call in a bare `try/catch` that fell through to
+ * `CURATED_MODELS` (stamped `status: 'active'`) on ANY failure — a dead key,
+ * a network error, a non-2xx response, ALL of it. That is the identical
+ * "Fish Audio fallback never `active`" mirage the swallow-audit closes: a
+ * dead/invalid MiniMax key made `refreshOneProvider()` log `success: true`
+ * and re-stamp the hardcoded catalog `active` every cycle. Fixed the same
+ * way as `fish-audio.ts`:
+ *   - a live-call failure now PROPAGATES (no try/catch) so
+ *     `refreshOneProvider()` records `success: false` with the real error;
+ *   - an authenticated, successful call that legitimately lists zero models
+ *     resolves to an EMPTY catalog, never substituted with `CURATED_MODELS`;
+ *   - `CURATED_MODELS` is retained as documentation-only reference data
+ *     (see the constant below) and is NEVER returned by `fetchModels()`.
  */
 
 import type {
@@ -54,8 +64,15 @@ function authHeaders(apiKey: string): Record<string, string> {
 }
 
 /**
- * Curated catalog as of mid-2026. The weekly refresh job overlays anything
- * the /models endpoint returns on top of this baseline.
+ * U50/H+L.8 — CATALOG HONESTY. This list is documentation-only as of this
+ * unit. It is NEVER returned by `fetchModels()` as live data (that silent
+ * substitution — a hardcoded catalog stamped `active` on any live-call
+ * failure, including a dead/invalid key — was the swallow this unit closes;
+ * see the retired fallback behavior in git history). Kept only so a reader
+ * knows which model families this connector targets, current as of
+ * mid-2026. `normalizeCurated()` below stamps `status: 'unavailable'`
+ * (never confirmed against a live call) so this data can never masquerade
+ * as a verified, assignable model if it is ever wired into a seed path.
  */
 const CURATED_MODELS: Array<{ id: string; ctx: number; caps: ModelCapability[]; family: string }> = [
   { id: 'MiniMax-M2', ctx: 192000, caps: ['text', 'streaming', 'tool_use', 'long_context', 'reasoning'], family: 'minimax-m' },
@@ -77,6 +94,12 @@ function inferFamily(modelId: string): string | undefined {
   return undefined;
 }
 
+/**
+ * U50/H+L.8 — documentation-only normalizer for `CURATED_MODELS`. Never
+ * called from `fetchModels()`. `status: 'unavailable'` is deliberate: this
+ * data has never been confirmed against a live call and must never
+ * masquerade as an assignable model.
+ */
 function normalizeCurated(entry: { id: string; ctx: number; caps: ModelCapability[]; family: string }): ProviderModel {
   return {
     model_id: `${PROVIDER_SLUG}/${entry.id}`,
@@ -87,8 +110,8 @@ function normalizeCurated(entry: { id: string; ctx: number; caps: ModelCapabilit
     pricing_model: 'per_token',
     pricing_source: 'hardcoded',
     capabilities: entry.caps,
-    status: 'active',
-    raw_metadata: { source: 'curated' },
+    status: 'unavailable',
+    raw_metadata: { source: 'curated', note: 'Never confirmed live — reference only (U50/H+L.8).' },
   };
 }
 
@@ -120,35 +143,32 @@ async function fetchJson<T>(url: string, init: RequestInit): Promise<T> {
 }
 
 /**
- * Try the optional /models endpoint first; if it 404s or returns an
- * unexpected shape, fall back to the curated catalog. The refresh job
- * still gets a usable, normalized catalog either way.
+ * Fetch the MiniMax model catalog.
+ *
+ * U50/H+L.8 — CATALOG HONESTY. This used to swallow EVERY failure (a dead
+ * key, a network error, a non-2xx response) into a bare `catch` that
+ * returned `CURATED_MODELS` stamped `active` — so a garbage key made the
+ * weekly refresh log `success: true` and re-stamped a hardcoded catalog
+ * `active` forever. That swallow is gone:
+ *   - a live-call failure now PROPAGATES (via `fetchJson`, no try/catch
+ *     here) so `refreshOneProvider()` catches it and records
+ *     `success: false` with the real error detail, exactly like every
+ *     other connector;
+ *   - an authenticated, successful call that legitimately lists zero
+ *     models is treated as an EMPTY catalog, never substituted with
+ *     `CURATED_MODELS` — presence of a key and a 200 is not a license to
+ *     invent rows.
  */
 export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
   if (!apiKey) {
     throw new Error('MiniMax fetchModels called without an apiKey (set MINIMAX_API_KEY)');
   }
-
-  try {
-    const res = await fetch(MODELS_ENDPOINT_OPTIONAL, {
-      method: 'GET',
-      headers: authHeaders(apiKey),
-    });
-    if (res.ok) {
-      const payload = (await res.json()) as MinimaxModelsResponse;
-      const rows = Array.isArray(payload?.data) ? payload.data : [];
-      const normalized = rows
-        .map(normalizeRow)
-        .filter((m): m is ProviderModel => m !== null);
-      if (normalized.length > 0) {
-        return normalized;
-      }
-    }
-  } catch {
-    // Fall through to curated catalog.
-  }
-
-  return CURATED_MODELS.map(normalizeCurated);
+  const payload = await fetchJson<MinimaxModelsResponse>(MODELS_ENDPOINT_OPTIONAL, {
+    method: 'GET',
+    headers: authHeaders(apiKey),
+  });
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  return rows.map(normalizeRow).filter((m): m is ProviderModel => m !== null);
 }
 
 export async function chatCompletion(

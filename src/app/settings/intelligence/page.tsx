@@ -126,13 +126,23 @@ export default function IntelligenceSettingsPage() {
     try {
       const [settingsRes, modelsRes] = await Promise.all([
         fetch('/api/settings/intelligence', { cache: 'no-store' }),
-        // MODEL-07: READ, do not refresh. This used to be `?refresh=1`, so simply
-        // OPENING this settings page kicked a destructive catalog refresh — the
-        // very refresh that (with the self-destruct bug) deprecated the whole
-        // registry. Rendering a "last refreshed" badge must never TRIGGER a
-        // refresh. The explicit "Refresh now" button (IntelligenceProviderList)
-        // still does it deliberately via POST /api/cron/refresh-models.
-        fetch('/api/models', { cache: 'no-store' }),
+        // MODEL-07: the `refresh` and `status` QUERY PARAMS below are pure
+        // READS against /api/models — neither one ever triggers a catalog
+        // refresh (that destructive path is gated on the registry being
+        // genuinely empty, independent of these params; see
+        // bootstrapRefreshIfEmpty() in the route). Rendering this page must
+        // never TRIGGER a refresh. The explicit "Refresh now" button
+        // (IntelligenceProviderList) still does that deliberately via
+        // POST /api/cron/refresh-models.
+        //   - refresh=1  includes `refresh_log` in the response so the
+        //     provider tile can surface a failed refresh (U50/H+L.8 item 3 —
+        //     the log was already written, this page just wasn't asking for
+        //     it, so a dead key's failure was invisible on the tile).
+        //   - status=all returns every status, not just `active`, so the D14
+        //     "Show deprecated/stale" toggle has real deprecated/unavailable
+        //     rows to reveal. `applyModelFilters` still hides them by default
+        //     (see ModelFilterBar's STALE_STATUSES gate).
+        fetch('/api/models?status=all&refresh=1', { cache: 'no-store' }),
       ]);
       if (!settingsRes.ok) throw new Error('Failed to load settings');
       const settingsJson = (await settingsRes.json()) as IntelligenceData;

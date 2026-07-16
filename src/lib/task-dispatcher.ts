@@ -26,6 +26,9 @@
  *   3. Already in_progress / review / done / blocked / archived → skip.
  *   4. QC loop cap: qc_reroute_attempts > QC_MAX_REROUTES → skip (task already blocked).
  *   5. Fire-and-forget: errors logged, never thrown. Routing always succeeds.
+ *   7. (skill6-v2 U33 / C-02) Triad-incomplete (checkTriad, sops.ts:432) → HOLD,
+ *      loudly (`triad_gate_hold` event) — never claimable until description +
+ *      SOP + persona are all real, same gate the UI PATCH path enforces.
  *
  * USAGE (call after routing sets assigned_agent_id):
  *   // non-blocking — routing must not fail if OpenClaw is down
@@ -52,7 +55,8 @@ import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
-import { getBestSOPForTask } from '@/lib/sops';
+import { getBestSOPForTask, checkTriad } from '@/lib/sops';
+import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -517,6 +521,42 @@ export async function autoDispatchTask(
         `[${context}] autoDispatchTask: task ${taskId} in dispatch backoff until ${nextEligibleAt} — skip`,
       );
       return;
+    }
+
+    // GUARD 7 (skill6-v2 U33 / C-02 — gate-consistency pin): the automatic
+    // advancer must honor the SAME Triad gate the UI PATCH path already
+    // enforces (checkTriad, sops.ts:432; PATCH gate
+    // api/tasks/[id]/route.ts:357–436) before claiming a card — closing the
+    // exact asymmetry the master spec records (C+I.0 point 4): today the UI
+    // blocks a Triad-incomplete card from leaving Backlog while the CAS claim
+    // below (DISP-02) does not care. A HELD card is NEVER silent: a
+    // queryable event is written every time this branch fires, naming the
+    // missing field(s) in the SAME vocabulary the card pill uses
+    // (board-labels.ts triadMissingPillText). Kill switch
+    // TRIAD_ADVANCER_GATE=0 restores the pre-U33 bypass (documented revert
+    // path).
+    if (process.env.TRIAD_ADVANCER_GATE !== '0') {
+      const triad = checkTriad({
+        description: task.description,
+        sop_id: task.sop_id,
+        persona_id: task.persona_id,
+      });
+      if (triad.missing.length > 0) {
+        const holdMsg =
+          `[triad_gate_hold] Task "${task.title}" (${task.id}) held from auto-dispatch — ` +
+          `${triadMissingPillText(triad.missing as TriadMissingKey[])}. The advancer will not claim a ` +
+          `Triad-incomplete card — same gate the UI PATCH enforces. Complete grooming to release.`;
+        console.warn(`[${context}] autoDispatchTask: ${holdMsg}`);
+        try {
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [uuidv4(), 'triad_gate_hold', task.id, holdMsg, new Date().toISOString()],
+          );
+        } catch {
+          /* audit best-effort — never block the hold on the write itself */
+        }
+        return; // NOT claimable — held, loudly, never silently skipped
+      }
     }
 
     // ── OpenClaw connection ─────────────────────────────────────────────────
