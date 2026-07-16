@@ -46,6 +46,31 @@ _read_env_var() {
 CF_ACCESS_TERESA_SVC_CLIENT_ID="${CF_ACCESS_TERESA_SVC_CLIENT_ID:-$(_read_env_var CF_ACCESS_TERESA_SVC_CLIENT_ID "$SECRETS_ENV")}"
 CF_ACCESS_TERESA_SVC_CLIENT_SECRET="${CF_ACCESS_TERESA_SVC_CLIENT_SECRET:-$(_read_env_var CF_ACCESS_TERESA_SVC_CLIENT_SECRET "$SECRETS_ENV")}"
 export PATH="/opt/homebrew/bin:$PATH"
+
+# Mac-tunnel client -> CF Access service-token NAME lookup.
+#
+# SINGLE SOURCE OF TRUTH: accounts/cf-token-map.json (keyed by tunnel hostname,
+# i.e. the exact probe_match value from accounts/fleet-roster.json for that
+# box). This function is the ONLY place in this file that reads it, and it is
+# called from BOTH the probe (probe_mac_tunnel) and the auto-update block
+# below — there is no second hand-maintained case statement to let drift out
+# of sync. That drift is exactly how E.R. Spaulding ended up present in one
+# switch and missing from the other, and how a client missing from BOTH (Eddie
+# Otts) silently inherited Teresa Pelham's credential via a wildcard default.
+# accounts/fleet-coverage-gate.py --reconcile fails loudly if a roster mac-kind
+# box has no entry in the map file; see accounts/ADD-A-FLEET-CLIENT.md step D2d.
+#
+# No match / map file missing / jq missing -> prints nothing. Callers MUST
+# treat an empty result as a configuration error (fail closed), never as
+# license to fall through to another client's token.
+CF_TOKEN_MAP="${CF_TOKEN_MAP:-/Users/blackceomacmini/clawd/accounts/cf-token-map.json}"
+_JQ="/usr/bin/jq"
+[ -x "$_JQ" ] || _JQ="$(command -v jq 2>/dev/null || echo jq)"
+_cf_token_for_tunnel() {
+  local tunnelhost="$1"
+  [ -f "$CF_TOKEN_MAP" ] || return 0
+  "$_JQ" -r --arg h "$tunnelhost" '.tokens[$h] // empty' "$CF_TOKEN_MAP" 2>/dev/null
+}
 # Per-host hard wall-clock cap for mac-tunnel probes. Each attempt gets this many
 # seconds; with 2 retries a worst-case hanging probe burns 2×timeout + 3s sleep.
 # Kofi's tunnel fails instantly (bad handshake, rc255) so his cost is trivial.
@@ -160,42 +185,21 @@ probe_mac_tunnel() {
   local client="$1" persona="$2" sshuser="$3" tunnelhost="$4"
 
   # Per-client Access service token: each mac-tunnel client (Teresa/Kofi/Cassandra)
-  # has its OWN CF Access app + service token. Pick the right vars by client name.
-  # Without them the tunnel cannot authenticate -> DOWN.
+  # has its OWN CF Access app + service token. Resolve it via the single-source
+  # map (accounts/cf-token-map.json, keyed by tunnel hostname) instead of a
+  # hand-maintained case statement. Without a token the tunnel cannot
+  # authenticate -> DOWN.
   local _tk cid csec
-  case "$client" in
-    *Cassandra*) _tk=CASSANDRA ;;
-    *Kofi*)      _tk=KOFI ;;
-    *Teresa*)    _tk=TERESA ;;
-    *Karen*)     _tk=KAREN ;;
-    *Jill*)      _tk=JILL ;;
-    *Sheila*)    _tk=SHEILA ;;
-    *Aurelia*)   _tk=AURELIA ;;
-    *LeAnne*)   _tk=LEANNE_DOLCE ;;
-    *Sonatta*)  _tk=SONATTA_CAMARA ;;
-    *Talaya*)   _tk=TALAYA ;;
-    *Stephanie*) _tk=STEPHANIE ;;
-    *Jocelyn*)   _tk=JOCELYN ;;
-    *"Barret Matthews (Mac Mini"*)    _tk=BARRETT_MINI ;;
-    *Barret*)    _tk=BARRET ;;
-    *"Jennifer Allen"*)    _tk=JENNIFER ;;
-    *"E.R. Spaulding"*)    _tk=ER_SPAULDING ;;
-    *Eddie*)     _tk=EDDIE_OTTS ;;
-    *Maria*)     _tk=MARIA ;;
-    *Christy*)   _tk=CHRISTY ;;
-    *Erin*)      _tk=ERIN ;;
-    *Lyric*)     _tk=LYRIC_HAWKINS ;;
-    *Star*)      _tk=STAR ;;
-    # No match: FAIL LOUDLY as a configuration error. A silent fall-through to
-    # another client's token previously mis-probed Eddie Otts with Teresa
-    # Pelham's credential and reported him UNREACHABLE — he was fine, the
-    # token was wrong. A wrong-token probe must never be indistinguishable
-    # from a real DOWN box. Any client landing here is missing a case in this
-    # switch (an onboarding gap), not evidence the box is dead.
-    *)           _tk="" ;;
-  esac
+  _tk=$(_cf_token_for_tunnel "$tunnelhost")
   if [ -z "$_tk" ]; then
-    echo "${client}|${persona}|${sshuser}|${tunnelhost}|unknown|UNKNOWN|DOWN|cf_token_unmapped_add_case_to_probe_mac_tunnel_in_probe-fleet.sh"
+    # FAIL LOUDLY as a configuration error. A silent fall-through to another
+    # client's token previously mis-probed Eddie Otts with Teresa Pelham's
+    # credential and reported him UNREACHABLE — he was fine, the token was
+    # wrong. A wrong-token probe must never be indistinguishable from a real
+    # DOWN box. Any client landing here has no entry for this tunnel hostname
+    # in accounts/cf-token-map.json (an onboarding gap), not evidence the box
+    # is dead.
+    echo "${client}|${persona}|${sshuser}|${tunnelhost}|unknown|UNKNOWN|DOWN|cf_token_unmapped_add_entry_to_accounts/cf-token-map.json"
     return
   fi
   # Legacy naming used _SVC_ID/_SVC_SECRET for some newer clients; prefer the
@@ -571,37 +575,13 @@ else
 
     # Mac-tunnel clients: SSH over CF tunnel + Access token
     if echo "$_notes" | grep -q "mac-tunnel"; then
-      # Pull the same CF credentials used in probe_mac_tunnel
+      # Same single-source lookup as probe_mac_tunnel() above — one map, two
+      # call sites, no second switch to drift out of sync. Never borrow
+      # another client's token to drive an update run either.
       local _tk2
-      case "$_client" in
-        *Cassandra*) _tk2=CASSANDRA ;;
-        *Kofi*)      _tk2=KOFI ;;
-        *Teresa*)    _tk2=TERESA ;;
-        *Karen*)     _tk2=KAREN ;;
-        *Jill*)      _tk2=JILL ;;
-        *Sheila*)    _tk2=SHEILA ;;
-        *Aurelia*)   _tk2=AURELIA ;;
-        *LeAnne*)    _tk2=LEANNE_DOLCE ;;
-        *Sonatta*)   _tk2=SONATTA_CAMARA ;;
-        *Talaya*)    _tk2=TALAYA ;;
-        *Stephanie*) _tk2=STEPHANIE ;;
-        *Jocelyn*)   _tk2=JOCELYN ;;
-        *"Barret Matthews (Mac Mini"*)    _tk2=BARRETT_MINI ;;
-        *Barret*)    _tk2=BARRET ;;
-        *"Jennifer Allen"*)    _tk2=JENNIFER ;;
-        *"E.R. Spaulding"*)    _tk2=ER_SPAULDING ;;
-        *Eddie*)     _tk2=EDDIE_OTTS ;;
-        *Maria*)     _tk2=MARIA ;;
-        *Christy*)   _tk2=CHRISTY ;;
-        *Erin*)      _tk2=ERIN ;;
-        *Lyric*)     _tk2=LYRIC_HAWKINS ;;
-        *Star*)      _tk2=STAR ;;
-        # No match: FAIL LOUDLY, same reasoning as probe_mac_tunnel() above.
-        # Never borrow another client's token to drive an update run either.
-        *)           _tk2="" ;;
-      esac
+      _tk2=$(_cf_token_for_tunnel "$_container")
       if [ -z "$_tk2" ]; then
-        echo "[version-check] $_client: no CF token mapping in probe-fleet.sh — skipping auto-update (config error, add a case to probe_mac_tunnel()/this switch)" >&2
+        echo "[version-check] $_client: no CF token mapping for '$_container' in accounts/cf-token-map.json — skipping auto-update (config error, add an entry keyed by tunnel hostname)" >&2
         continue
       fi
       _cid2=$(_read_env_var "CF_ACCESS_${_tk2}_SVC_CLIENT_ID" "$SECRETS_ENV")
