@@ -134,7 +134,15 @@ const departmentEmojis: Record<string, string> = {
   'general-task': '🗂️', 'general': '🗂️',
 };
 
-const departmentNames: Record<string, string> = {
+// D-C2 (master spec v2) — exported (not just used internally) so this exact
+// board-rendering map is a regression-testable, non-reimplemented surface.
+// The 'general-task' entry is the slug-vs-display-name split D-C2 warns
+// about: departments.config.ts / workspaces.name drive OTHER surfaces
+// (AgentsSidebar.tsx reads `d.name` from the DB), but the board HEADER (:510)
+// and every card's department CHIP (:1055 below) read ONLY this hardcoded
+// map — a DB-only rename without updating this value produces a split-brain
+// display (sidebar says "General Stuff", board says "General Task").
+export const departmentNames: Record<string, string> = {
   'ceo-com': 'CEO / COM',
   'marketing': 'Marketing',
   'sales': 'Sales',
@@ -152,7 +160,7 @@ const departmentNames: Record<string, string> = {
   'openclaw-maintenance': 'OpenClaw Maintenance',
   'social-media': 'Social Media',
   'paid-advertisement': 'Paid Advertisement',
-  'general-task': 'General Task',
+  'general-task': 'General Stuff',
 };
 
 export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task' }: MissionQueueProps) {

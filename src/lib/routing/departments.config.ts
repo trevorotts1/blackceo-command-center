@@ -862,9 +862,22 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
   // wrong dept when routing confidence is low. The recurrence detector
   // (general-task-recurrence.ts) watches patterns in tasks that land here and
   // recommends standing up a dedicated dept when >3/month recur.
+  //
+  // D-C2 (master spec v2) — SLUG vs DISPLAY NAME: the slug `id: 'general-task'`
+  // is FROZEN — routing (this file), the ingest fallbacks
+  // (ingest/route.ts INGEST-06 + tier-4), migration 059's sort-order pin, and
+  // the recurrence detector above all key on it. ONLY the client-facing `name`
+  // changes ("General Stuff"). This config value is the FRESH-INSTALL seed;
+  // an already-provisioned box's existing `workspaces.name` row is renamed by
+  // migration 106 (idempotent, slug-keyed UPDATE). Never rename via the `name`
+  // field alone without also extending the ingest name-fallback lists
+  // (`ingest/route.ts` — isWorkforceProvisioned's exclusion list, the
+  // INGEST-06 query, and the tier-4 general-task fallback query) — those match
+  // display-name variants case-insensitively so the rename can never make the
+  // box look "materialized" by accident or break the catch-all fallback.
   {
     id: 'general-task',
-    name: 'General Task',
+    name: 'General Stuff',
     purpose:
       'Catch-all department for tasks that do not confidently match any dedicated department. Triages, executes one-off work, or re-routes once classified. Monitors recurring patterns and recommends new dedicated departments.',
     keywords: [], // intentionally empty — never wins keyword routing

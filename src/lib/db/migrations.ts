@@ -4750,6 +4750,55 @@ export const migrations: Migration[] = [
       console.log('[Migration 108] comms_audience_source + comms_type ready');
     },
   },
+
+  // ── Migration 109 (originally authored/scored as '106') — D-C2: rename the
+  //    catch-all's DISPLAY NAME on already-provisioned boxes ("General Task"
+  //    -> "General Stuff") ────────────────────────────────────────────────
+  {
+    id: '109',
+    name: 'rename_general_task_display_to_general_stuff',
+    up: (db) => {
+      // MERGE-WRITER RENUMBER NOTE: this migration was originally authored
+      // and scored as id '106' (skill6-v2/U44 @ 3eb6093). Between authoring
+      // and rebase onto current main, main independently picked up a
+      // DIFFERENT migration 106 (provider-defects-fix, PR #196) and two
+      // sibling branches (U115, U116) already renumbered their own id-106
+      // collisions to 107 and 108. Renumbered to the next free id, '109',
+      // per this file's own DATA-03 fail-fast guard below. Neither this
+      // unit's test file asserts on the numeric id, only on the resulting
+      // `workspaces.name` value, so this renumber does not change test
+      // behavior.
+      //
+      // Master spec v2 D-C2 / C-13(b): the SLUG stays FROZEN at
+      // 'general-task' (routing, ingest fallbacks, migration 059's sort pin,
+      // and the recurrence detector all key on it — see
+      // departments.config.ts:854-878). ONLY the client-facing `name` column
+      // changes. departments.config.ts's DEFAULT_DEPARTMENTS seed already
+      // covers FRESH installs; this migration is what covers a box that was
+      // already provisioned BEFORE this unit landed — migration 059's own
+      // comment conceded exactly this gap ("Non-fatal — row may not exist
+      // yet on a fresh install", i.e. it may already exist on an upgraded
+      // one). Idempotent: matches on slug OR the pre-rename name variants, so
+      // re-running this migration (or running it against a box that already
+      // has 'General Stuff') is always a safe no-op UPDATE.
+      console.log('[Migration 109] Renaming general-task workspace display name to "General Stuff"...');
+      try {
+        const result = db
+          .prepare(
+            `UPDATE workspaces
+                SET name = 'General Stuff'
+              WHERE lower(slug) = 'general-task'
+                 OR lower(name) IN ('general task', 'general tasks')`
+          )
+          .run();
+        console.log(`[Migration 109] Renamed ${result.changes} general-task workspace row(s) to "General Stuff"`);
+      } catch (e) {
+        // Non-fatal — mirrors migration 059's own guard: the row may not
+        // exist yet on a fresh install (DEFAULT_DEPARTMENTS seeds it there).
+        console.log('[Migration 109] Skipped:', (e as Error).message);
+      }
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
