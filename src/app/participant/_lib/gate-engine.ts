@@ -143,7 +143,7 @@ const PARTICIPANT_GATES: ReadonlySet<string> = new Set<ParticipantGateId>([
  * When the Command Center runs inside the OpenClaw container the payload lives
  * under /data/.openclaw/skills/59-anthology-engine/scripts/; fall back to a
  * $HOME-relative path for Mac dev installs. An explicit ANTHOLOGY_GATE_ENGINE
- * override wins (used by the canary box / tests).
+ * override wins (used by the operator box / tests).
  */
 function findGateEngineScript(): string | null {
   const candidates = [

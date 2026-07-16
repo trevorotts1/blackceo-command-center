@@ -1526,8 +1526,9 @@ const migrations: Migration[] = [
     up: (db) => {
       // Bug 3 cleanup (v4.0.2): deletes orphan rows in persona_selection_log
       // whose task_id is null/empty/sentinel/no-longer-exists. These rows
-      // were the trigger for the migration-034 FK breakage on a client
-      // canary deploy.
+      // were the trigger for the migration-034 FK breakage on a staged
+      // client deploy. (D20 wording fix, U93 — same incident, retired-term
+      // vocabulary swapped for plain language; no behavior change.)
       console.log('[Migration 045] Cleaning persona_selection_log orphans...');
       const info = db.prepare(`SELECT COUNT(*) as c FROM persona_selection_log`).get() as { c: number } | undefined;
       if (!info || info.c === 0) {
