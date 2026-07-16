@@ -49,6 +49,15 @@ export interface AuthProofSummary {
   stale: boolean;
   method: string | null;
   provenAt: string | null;
+  /**
+   * Why the last proof failed: 'none' | 'auth' | 'model_not_found' | 'network'
+   * | 'unknown'. null when no proof row exists. A tile must NOT paint an
+   * "auth failed" state unless this is 'auth' — 'model_not_found' means this
+   * box's model catalog is stale and the key was never disproven.
+   */
+  failureKind: string | null;
+  /** True ONLY when the key itself was actually rejected. */
+  authDisproven: boolean;
 }
 
 export interface ProviderStatusEntry {
@@ -179,6 +188,7 @@ export async function GET() {
         };
       }
 
+
       const candidates = envCandidatesForProvider(p);
       // Pass the slug so source (4) — OpenClaw's SQLite auth store — is consulted.
       const found = detectKey(candidates, p.slug);
@@ -186,11 +196,20 @@ export async function GET() {
       // Cache-only read (no network call) — see AuthProofSummary docstring.
       const cachedProof = getCachedAuthProof(p.slug);
       const fresh = isProofFresh(cachedProof);
+      // Rows predating migration 106 carry no failure_kind — report the honest
+      // 'unknown' rather than inventing a cause for an old failure.
+      const failureKind =
+        cachedProof === null ? null : (cachedProof.failure_kind ?? (cachedProof.ok === 1 ? 'none' : 'unknown'));
       const authProof: AuthProofSummary = {
         proven: fresh && cachedProof!.ok === 1,
         stale: cachedProof !== null && !fresh,
         method: cachedProof?.method ?? null,
         provenAt: cachedProof?.proven_at ?? null,
+        failureKind,
+        // ONLY a genuine key rejection counts as auth-disproven. A stale local
+        // catalog ('model_not_found') or a transport blip ('network') must never
+        // paint this provider as an auth failure.
+        authDisproven: failureKind === 'auth',
       };
 
       return {

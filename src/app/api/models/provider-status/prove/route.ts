@@ -51,6 +51,11 @@ export async function POST(req: NextRequest) {
       modelId: proof.modelId,
       detail: proof.detail,
       provenAt: proof.provenAt,
+      // `ok:false` alone was being read as "auth failed". failureKind says which
+      // kind of false it is — critically, 'model_not_found' means the key was
+      // never disproven (this box's model catalog is stale), NOT a bad key.
+      failureKind: proof.failureKind,
+      authDisproven: proof.failureKind === 'auth',
     });
   } catch (err) {
     console.error('[POST /api/models/provider-status/prove] failed:', err);

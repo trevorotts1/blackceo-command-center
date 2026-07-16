@@ -4582,6 +4582,41 @@ export const migrations: Migration[] = [
       console.log('[Migration 105] task_persona_bundle_scope ready');
     },
   },
+  {
+    id: '106',
+    name: 'add_provider_auth_proof_failure_kind',
+    up: (db) => {
+      // PURELY ADDITIVE — one nullable column on migration 100's
+      // provider_auth_proof_cache. Never rewrites an existing row: rows written
+      // before this migration keep failure_kind NULL, and provider-auth-proof.ts
+      // reports those as the honest 'unknown' rather than inventing a cause.
+      //
+      // WHY: a failed proof was being stored as a bare ok:0, so the Model
+      // Settings tile rendered "model not found" (a STALE local catalog row —
+      // e.g. ollama-cloud/deepseek-v3.1:671b, which no longer exists upstream)
+      // identically to "your key was rejected". That manufactured phantom auth
+      // incidents on boxes whose keys were perfectly good. failure_kind keeps
+      // the two apart: 'auth' is a real rejection; 'model_not_found' means auth
+      // was never disproven and the catalog needs a refresh.
+      console.log('[Migration 106] Adding provider_auth_proof_cache.failure_kind...');
+
+      const cols = db.prepare(`PRAGMA table_info(provider_auth_proof_cache)`).all() as { name: string }[];
+      const hasColumn = cols.some((c) => c.name === 'failure_kind');
+
+      if (cols.length === 0) {
+        // Table not present yet (fresh DB where 100 hasn't run): nothing to
+        // alter — migration 100 creates it and this is a no-op.
+        console.log('[Migration 106] provider_auth_proof_cache absent — skipping (no-op)');
+        return;
+      }
+
+      if (!hasColumn) {
+        db.exec(`ALTER TABLE provider_auth_proof_cache ADD COLUMN failure_kind TEXT`);
+      }
+
+      console.log('[Migration 106] provider_auth_proof_cache.failure_kind ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
