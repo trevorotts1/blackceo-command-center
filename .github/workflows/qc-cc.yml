@@ -45,6 +45,43 @@ jobs:
       - name: Run the real gate against the tree
         run: npm run lint:ceo-chat-colors
 
+  # ── U117 (E6-3/G9) — comms-artifact QC conformance gate + mutation proof ──
+  # Extends U26/B-U12 (runQCOnReview's producer-scorecard contract) with a
+  # comms-artifact-specific requirement: review→done for a comms/content
+  # source card additionally requires the ONB-posted `comms_qc_passed`
+  # verdict (per-part governance/topic/audience/blend-used, U115+U116 folded
+  # into QC — master spec §E6-3) to PASS. BINARY acceptance (e): the CI
+  # conformance guard FAILS on a scratch-branch mutation that neuters the
+  # gate, then passes when restored — proven by
+  # scripts/u117-comms-qc-mutation-proof.sh, which seeds a real one-line
+  # source mutation, proves the guard test goes RED, restores the file byte
+  # for byte, and proves it goes GREEN again. Additive, flag-gated behind
+  # COMMS_QC_CONFORMANCE (see .env.example) — inert until a producer posts
+  # comms_qc_passed onto a review card.
+  u117-comms-qc-conformance-guard:
+    name: U117 comms-QC conformance gate + mutation proof
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Mutation proof — neutering the U117 gate MUST fail the guard test, restoring MUST pass it again
+        run: bash scripts/u117-comms-qc-mutation-proof.sh
+
+      - name: Run the real guard test against the unmodified tree
+        run: node --import tsx --import ./tests/setup/no-owner-telegram.ts --test tests/unit/u117-e6-3-comms-qc-conformance.test.ts
+        env:
+          NODE_ENV: test
+
   qc-cc:
     name: QC Command Center
     runs-on: ubuntu-latest

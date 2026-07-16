@@ -589,6 +589,31 @@ export function isQCProducerScorecardEnabled(): boolean {
 }
 
 /**
+ * U117 (E6-3/G9) — comms-artifact QC + per-part-governance / audience-prompt
+ * conformance invariant. The ONB (`openclaw-onboarding`) leg is merged
+ * (`shared-utils/page_qc.py`'s `grade_comms_conformance()`, folded into main
+ * at `cf03b647`) and scores four checks on an outside-world communication
+ * artifact — per-part persona governance (U115), topic considered, audience
+ * confirmed (U116), blend actually used (semantic) — returning
+ * `{applicable, passed, checks, hard_misses}`. When set, a producer that ran
+ * that check can post its verdict as `comms_qc_passed` (+ optional
+ * `comms_hard_misses`) on the SAME metadata row as its base gate (mirrors
+ * the `page_qc_score`/`page_qc_passed` precedent immediately below — see
+ * `ProducerScorecard`), and `runQCOnReview` requires it to PASS alongside
+ * the existing gate(s) before review→done. Unset (default) → the comms
+ * fields are never read; byte-identical to pre-U117 (this unit's own
+ * revert contract).
+ *
+ * Read LIVE — same reason as isQCProducerScorecardEnabled().
+ */
+export function isCommsQcConformanceEnabled(): boolean {
+  return (
+    process.env.COMMS_QC_CONFORMANCE === '1' ||
+    process.env.COMMS_QC_CONFORMANCE === 'true'
+  );
+}
+
+/**
  * Disagreement threshold (score points) between a producer-posted scorecard
  * and the Command Center judge's own score above which a review card is HELD
  * (never silently kicked back) and a single `qc_disagreement` operator event
@@ -3531,6 +3556,17 @@ interface ProducerScorecard {
   /** B-U11 (Page-QC v2) extension fields — read now, populated later. */
   pageQcScore: number | null;
   pageQcPassed: boolean | null;
+  /**
+   * U117 (E6-3/G9) extension fields — the ONB `grade_comms_conformance()`
+   * verdict, posted as additive fields on this SAME row (never a second
+   * activity — see `isCommsQcConformanceEnabled`'s docstring).
+   * `commsQcPassed === null` covers BOTH "no producer ever ran the comms
+   * check" and the ONB SKIP shape (`applicable:false` / no-judge-key) —
+   * both must never block (SKIP-never-blocks); only an explicit `false`
+   * blocks.
+   */
+  commsQcPassed: boolean | null;
+  commsHardMisses: string[] | null;
 }
 
 /**
@@ -3562,6 +3598,8 @@ function resolveProducerScorecard(taskId: string): ProducerScorecard | null {
   const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const bool = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
   const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const strArr = (v: unknown): string[] | null =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0) : null;
 
   return {
     activityId: row.id,
@@ -3571,6 +3609,9 @@ function resolveProducerScorecard(taskId: string): ProducerScorecard | null {
     scorecardPath: str(parsed.scorecard_path),
     pageQcScore: num(parsed.page_qc_score),
     pageQcPassed: bool(parsed.page_qc_passed),
+    // U117 (E6-3/G9) — additive fields, same row (see interface docstring).
+    commsQcPassed: bool(parsed.comms_qc_passed),
+    commsHardMisses: strArr(parsed.comms_hard_misses),
   };
 }
 
@@ -4252,6 +4293,43 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           gaps: [...result.gaps, 'page_qc_failed'],
         };
       }
+
+      // ── U117 (E6-3/G9): comms-artifact QC + per-part-governance / audience- ──
+      // prompt conformance gate. Sibling of the page_qc both-gates rule above,
+      // independently flag-gated ($COMMS_QC_CONFORMANCE — this unit's OWN
+      // revert switch, never requires the page_qc-specific department set):
+      // when a producer has posted a comms-conformance verdict
+      // (`comms_qc_passed`, the ONB `grade_comms_conformance()` result folded
+      // additively onto this SAME row), review→done additionally requires it
+      // to PASS. Can only turn an existing PASS into a FAIL (mirrors the
+      // `result.pass &&` guard above) — never rescues an already-failing
+      // card, never runs a fresh re-score. `commsQcPassed === null` (no
+      // producer ever ran the check, OR the ONB SKIP shape) never blocks —
+      // SKIP-never-blocks, same doctrine `grade_comms_conformance()` itself
+      // uses. Inert today: no ONB producer call site posts `comms_qc_passed`
+      // yet (the same "consumer wired ahead of the producer" posture as the
+      // page_qc_passed both-gates rule immediately above — see this unit's
+      // PR description for the open producer-wiring gap).
+      if (
+        isCommsQcConformanceEnabled() &&
+        result.pass &&
+        producerScorecard.commsQcPassed === false
+      ) {
+        const misses = producerScorecard.commsHardMisses ?? [];
+        const missNote = misses.length > 0 ? ` (${misses.join(', ')})` : '';
+        result = {
+          ...result,
+          pass: false,
+          reason:
+            `${result.reason} — comms conformance FAILED${missNote}: per-part governance / ` +
+            `topic-considered / audience-confirmed / blend-actually-used did not all pass (U117).`,
+          gaps: [...result.gaps, 'comms_qc_conformance_failed', ...misses],
+        };
+        console.warn(
+          `[QCScorer] Task "${task.title}" (${taskId}): U117 comms-conformance gate FAILED${missNote} — blocked review→done.`,
+        );
+      }
+      // ── End U117 comms-artifact QC conformance gate ──────────────────────────
     }
     // ── End producer/judge agreement check + both-gates rule ──────────────────
 
