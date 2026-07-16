@@ -1,3 +1,51 @@
+## [v6.0.48] — 2026-07-16 — U51 (HL/U66) dead-heartbeat / exit-3 fix: a red box could not alert before this
+
+v6.0.48 — Single unit, single serial merge-writer. Lands `fix/u51-heartbeat-exit3-and-ledger` @
+`08313a61` (PR #207, round 3, score 8.9/gate 8.5, independent Sonnet zero-trust review; rounds 1-2
+sent back and are nested as history in the same ticket). PR was a draft opened only to force CI;
+marked ready-for-review before this merge.
+
+- **What lands:** repairs the dead fleet-alerting path and exit-3 masking in `cc-health-check.sh`,
+  `standup-heartbeat.sh`, and `sunday-cron-sweep.sh`. Before this fix, `standup-heartbeat.sh`'s bare
+  `bash ... ; HEALTH_EXIT=$?` form under `set -e` made BOTH the RED-alert and UNKNOWN-warn branches
+  unreachable dead code — a box in a genuinely red or unknown health state produced no alert and no
+  warning, silently. The fixed `HEALTH_EXIT=0; bash ... || HEALTH_EXIT=$?` form restores both
+  branches. `sunday-cron-sweep.sh` carried a second, independent instance of the same class. Round 3
+  reproduced the dead-branch behavior a third time with a newly-authored, independent mutation
+  harness (distinct from rounds 1 and 2's), confirmed both branches were genuinely unreachable
+  before and genuinely reached after.
+- **Round 3 closes round 2's sole disqualifier** (the scored commit did not exist on GitHub — it
+  lived only in a local unpushed directory). Independently re-verified from a fresh HTTPS clone (not
+  a `file://` clone of any local dir, closing the round-2 chain-of-custody gap) that origin's branch
+  tip is exactly `08313a61`, matches PR #207's head, and is content-identical to what round 2
+  examined (same 6 files, same merge-base `d2f3ac1`) by diffstat, not SHA trust alone.
+- CI 20/20 green on the exact scored SHA (paginated GraphQL check-suites/check-runs cross-check;
+  the REST `commits/{sha}/check-runs` endpoint was returning transient 5xx at merge time, so the
+  paginated GraphQL equivalent — 7 check suites, 20 check runs, 20/20 SUCCESS — was used instead of
+  falling back to the legacy combined-status endpoint, which stays out of scope). Zero
+  AI-authorship trailers; author/committer both Trevor Otts <trevor@blackceo.com> on the sole
+  commit. Full unit suite re-run clean on the merged tree post-merge: 1660/1655, the same 5
+  pre-existing `getInterviewState` failures every other recent CC ticket has logged as
+  environmental — unrelated to this leg, not introduced by it. All three shipped shell-test suites
+  re-run directly on the merged tree: 7/7, 8/8, 9/9.
+- **Does NOT move the /117 all-legs count.** Master spec §E.2 lists U51 (crosswalk `HL/U66`) with
+  Repo/surface = **`live (read-only)`**, not `CC` or `both` — its binary acceptance is a live,
+  read-only proof on the operator's own box first (ledger row `cc_port=4000`,
+  `override_ack_set=false`, `public_probe=pass`), a fleet-wide sweep after the batched roll (P4,
+  Trevor's timing alone), and a live on-box negative/drift test — none of which a repo merge can
+  satisfy. This CC code change is the prerequisite that makes the live alerting path capable of
+  firing at all; it is not itself the counted leg. U51's live legs remain owed. Count stays at
+  **92** (unchanged from U11).
+- **Carried forward, not relitigated, operator ruling still owed (unchanged across rounds 1-3):** a
+  three-way spec self-contradiction on read-only-vs-write (E.2 says "live (read-only)"; binary
+  acceptance (c) mandates a live port-drift write-and-restore test); acceptance (c) as written has
+  no ACK pass-through in the ecosystem env block and needs re-scoping; one defensive/unreachable
+  JSON branch in `cc-health-check.sh` doesn't inject `cc_port`/`override_ack_set` before re-printing
+  `DEEP_BODY` (low severity, documented).
+
+Ticket: `~/skill6-merge-queue/ONB/U51.json` (round 3 top-level; rounds 1-2 nested as history — PR
+lives in this repo, ticket in the ONB queue dir).
+
 ## [v6.0.47] — 2026-07-16 — U11 (A/A-U11) CC leg: live operator-approval + board-hygiene surfacing for the winner-harvest flywheel
 
 v6.0.47 — Single unit, single serial merge-writer. Lands `skill6-v2/U11` @ `d618f33` (PR #205,
