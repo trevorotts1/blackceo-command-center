@@ -1,3 +1,54 @@
+## [v6.0.50] — 2026-07-16 — U107 (E5-2, closes G2a) CC leg: vertical never force-added to a client who is not that vertical
+
+v6.0.50 — Single unit, single serial merge-writer. Lands `skill6-v2/U107` @ `fb6d7520`
+(PR #203, score 8.8/gate 8.5, independent Sonnet zero-trust review). PR was a draft opened
+only to force CI; marked ready-for-review before this merge.
+
+- **What lands:** `loadDepartments()` step-3 fallback (`src/lib/routing/departments.config.ts`)
+  previously handed a client all 25 `DEFAULT_DEPARTMENTS` — including 3 vertical-pack
+  departments (client-coaches, course-creator, community-management) — unfiltered whenever the
+  workspaces table was empty or the DB query threw. The fix filters the fallback floor to only
+  the client's declared verticals, refusing an undeclared force-add with a named error
+  (`VERTICAL_NOT_DECLARED`), behind a `VERTICAL_DERIVATION_GUARD_ENABLED` revert flag.
+- **Production-wired, not inert:** verified live callers at `department-router.ts:858`/`:891`
+  (the routing engine) and `settings/board-slas/page.tsx:42`. 18 new tests; fail-then-pass and
+  two-layer mutation proof (wiring layer + data-table layer) independently re-derived by the
+  judge, exact match to the builder's claimed numbers.
+- **Parity fixture independently re-derived byte-identical** against the real landed ONB
+  `vertical-derivation-guard.py` — not a self-serving fixture.
+- Merged tree re-verified on this pass: `tsc --noEmit` clean; U107's own suite 18/18; full
+  `test:unit` 1687/1692 pass (5 failures are the same pre-existing `getInterviewState`
+  environmental failures verified by name across every other ticket in this batch, unrelated to
+  this PR); `lint` clean (only pre-existing `no-img-element`/`exhaustive-deps` warnings, zero
+  errors); `build` clean.
+- CI 20/20 green on the exact head SHA, cross-checked two ways: unauthenticated REST
+  `commits/{sha}/check-runs` (the authenticated `gh api` REST path returned transient 5xx —
+  confirmed a repo-wide GitHub API issue that day, not SHA-specific) AND `gh pr checks`. Zero AI
+  authorship trailers; author/committer both Trevor Otts <trevor@blackceo.com> on the sole
+  commit. Merge-clean against current main (v6.0.49) verified via `git merge --no-commit
+  --no-ff` dry run, zero conflicts.
+- **Merge-train ordering note (spec-common: U107→U108→U109→U110 serialized):** U109's CC leg
+  was already merged (test-only, zero production-file overlap with U107 — confirmed disjoint
+  file sets); U108 has no CC ticket yet; U110 is SEND BACK (8.2, not landed). The prescribed
+  strict order is therefore already partly out of sequence upstream of this merge, through no
+  action of this merge. Assessed as benign for this specific merge: U107's branch diff touches
+  only `departments.config.ts`/`seam.ts`/`paths.ts`/its own fixtures/tests, disjoint from U109's
+  single test-file change, and this merge re-verified clean and green against the CURRENT tree
+  (which already includes U109's CC leg) rather than against a stale snapshot — so no hidden
+  conflict was papered over. U108/U110 remain correctly unmerged; landing U107 does not put
+  either at risk since neither has landed anything for this branch to have raced against.
+- **Two secondary, non-blocking gaps (owner-worthy, not blockers):** the receipt half of
+  "guard + receipt" (`writeVerticalDerivationReceipt()`) is functionally correct but has zero
+  test coverage (a no-op mutation left the suite green); `seam.ts`'s async
+  `checkAddDepartment()` defense-in-depth proxy has zero callers anywhere and its backing Python
+  script is absent from this operator box's live skill tree — safe (fails closed) but untested
+  end-to-end.
+- **Repo/surface = `both` per master spec §E.2.** U107's ONB leg is already merged. This CC leg
+  is the second and final leg — **U107 is now fully landed across both repos, moving the /117
+  count 92 → 93.**
+
+Ticket: `~/skill6-merge-queue/CC/U107.json`.
+
 ## [v6.0.49] — 2026-07-16 — Provider defects: Ollama Cloud base-URL 404 + auth-proof model_not_found mislabel
 
 v6.0.49 — Single unit, single serial merge-writer. Lands `fix/ollama-cloud-baseurl-and-authproof-model-not-found-20260716`
