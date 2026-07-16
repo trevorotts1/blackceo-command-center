@@ -10,11 +10,14 @@ export type AgentStatus = 'standby' | 'working' | 'offline' | 'active';
 // TIMESTAMP (`Task.archived_at` — IS NOT NULL = archived; NULL = live on the
 // board), never a status value. Any code that excludes archived tasks must
 // filter on `archived_at IS NULL`, NOT `status = 'archived'` / a status set that
-// contains 'archived'. task-dispatcher.ts currently references a phantom
+// contains 'archived'. task-dispatcher.ts USED TO reference a phantom
 // 'archived' status (SKIP_STATUSES + a block WHERE-clause `status NOT IN
-// ('done','archived')`); because 'archived' can never equal any real status,
-// those clauses are inert today but drift-prone — the fix is to drop 'archived'
-// there and use `archived_at IS NULL` (owned by lane L1; see L3 hand-off note).
+// ('done','archived')`) — those clauses were inert (no real status ever equals
+// 'archived') but drift-prone, so DISP-12 dropped 'archived' from both and the
+// block WHERE-clause now filters on `archived_at IS NULL` instead (shipped;
+// see task-dispatcher.ts's SKIP_STATUSES comment). U45/C-14 pins this with a
+// regression test (tests/unit/u45-c14-board-truth-regression.test.ts) that
+// fails if a status-set 'archived' literal is ever reintroduced there.
 export type TaskStatus = 'backlog' | 'inbox' | 'planning' | 'in_progress' | 'assigned' | 'review' | 'testing' | 'blocked' | 'pending_dispatch' | 'done';
 
 // Bug ticket lifecycle (T3-001) -- dedicated 7-stage status for the Bugs Department.

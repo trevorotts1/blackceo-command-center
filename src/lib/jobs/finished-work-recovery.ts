@@ -23,7 +23,7 @@ import path from 'path';
 import { safeReaddirSync, safeStatSync } from '@/lib/fs/safe-fs';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { getProjectsPath } from '@/lib/config';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
@@ -140,10 +140,18 @@ export async function recoverFinishedTaskToReview(
     await transition(task.id, 'review', { actor, reason: recoverReason });
   } catch (err) {
     if (err instanceof TransitionError) {
-      run(
+      // U99-RAW-STATUS-WRITER: fallback-of-last-resort for when transition()
+      // itself rejects the edge (e.g. a concurrent writer already moved the
+      // row); compound with last_progress_at so the stale sweep's own
+      // no-progress clock resets on recovery. Audited via recordStatusEvent
+      // immediately below, gated on the CAS actually landing.
+      const fallbackRes = run(
         `UPDATE tasks SET status='review', updated_at=?, last_progress_at=? WHERE id=? AND status='in_progress'`,
         [now, now, task.id],
       );
+      if ((fallbackRes.changes ?? 0) > 0) {
+        recordStatusEvent(task.id, 'in_progress', 'review', { actor, reason: recoverReason });
+      }
     } else {
       throw err;
     }
