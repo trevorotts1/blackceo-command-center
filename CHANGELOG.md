@@ -1,3 +1,34 @@
+## [v6.0.45] — 2026-07-16 — U39 (C-08) CC leg: S4 producer→review→done lifecycle contract, QC FAIL path
+
+v6.0.45 — Single unit, single serial merge-writer. Lands `skill6-v2/U39` @ `163e75eb` (PR #199,
+score 9.0/gate 8.5, independent Opus zero-trust review). PR was a draft opened only to force CI;
+marked ready-for-review before this merge.
+
+- **What lands:** one new test file (`tests/unit/u39-c-08-s4-lifecycle-contract.test.ts`, +315),
+  zero production files touched. Closes acceptance (c)-FAIL — the only CC-side acceptance owed for
+  C-08's S4 lifecycle contract: a QC FAIL on a review card lands the task back in `backlog`,
+  persists gap notes, and increments `qc_reroute_attempts` by exactly one (accumulating across
+  repeat FAILs rather than resetting). A chained test drives one fixture card through consumer
+  403-on-done (auth present) → QC FAIL (backlog, gap notes, reroute++) → resubmit → QC PASS (done,
+  audited event, reroute count untouched).
+- **The coverage gap was real, proven by mutating pristine main, not by reading:** the judge
+  mutated origin/main two ways — removing the reroute increment, and flipping the FAIL target
+  status from `backlog` to `blocked` — and ran the full unit suite each time. Both mutations left
+  main's suite fully green (1635/1630, same 5 pre-existing failures); neither is caught by anything
+  that existed before this leg. With this file present, both mutations go RED, plus two more (a
+  gap-notes removal and disabling the 403 done-gate) — 4/4 mutations caught.
+- **Completes a two-repo unit.** The onboarding leg (`dd5d18f9`, already on ONB main) carried an
+  executable `pytest.skip` explicitly owing acceptance (b)+(c) to this repo. This leg delivers it;
+  U39 is complete across both repos once this lands.
+- Zero AI-authorship trailers; author/committer both Trevor Otts <trevor@blackceo.com> on the sole
+  commit. CI 20/20 green on the exact scored SHA (paginated verification, not the legacy
+  combined-status endpoint). One LOW, non-blocking finding (an undisclosed pre-existing
+  fire-and-forget fetch at a live Mission Control URL in the QC FAIL path) is pre-existing
+  production behavior inherited by every landed FAIL-path test, not introduced here — routed as an
+  owed leg, not fixed in this merge.
+
+Ticket: `~/skill6-merge-queue/CC/U39.json`.
+
 ## [v6.0.44] — 2026-07-16 — QC judge-provider-down escalation hatch: closes the six-day silent-failure defect
 
 v6.0.44 — Single unit, single serial merge-writer. Lands `fix/qc-provider-down-escalation-hatch` @
