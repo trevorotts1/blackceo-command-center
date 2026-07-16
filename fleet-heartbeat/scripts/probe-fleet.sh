@@ -105,6 +105,8 @@ ROSTER=(
   "Star Bobatoon|*(no bot)*|starbobatoon|rescue-star-bobatoon.zerohumanworkforce.com|mac-tunnel"
   "Barret Matthews (Mac Mini 2026)|*(no bot)*|barret|rescue-barrett-matthews-mini-2026.zerohumanworkforce.com|mac-tunnel"
   "Jennifer Allen|*(no bot)*|jennjack|rescue-jennifer-allen.zerohumanworkforce.com|mac-tunnel"
+  "E.R. Spaulding|*(no bot)*|erspaulding|rescue-er-spaulding.zerohumanworkforce.com|mac-tunnel"
+  "Eddie Otts|*(no bot)*|eddoeotts|rescue-eddie-otts.zerohumanworkforce.com|mac-tunnel"
   # --- Separate-account / other-provider boxes (added 2026-06-29 per fleet-coverage-gate) ---
   # Dr. Stephanie Brown — HER OWN Hostinger account (NOT Trevor's). Standard root@IP + docker probe.
   "Dr. Stephanie Brown|*(own Hostinger)*|2.25.210.81|openclaw-a3go-openclaw-1"
@@ -177,13 +179,25 @@ probe_mac_tunnel() {
     *"Barret Matthews (Mac Mini"*)    _tk=BARRETT_MINI ;;
     *Barret*)    _tk=BARRET ;;
     *"Jennifer Allen"*)    _tk=JENNIFER ;;
+    *"E.R. Spaulding"*)    _tk=ER_SPAULDING ;;
+    *Eddie*)     _tk=EDDIE_OTTS ;;
     *Maria*)     _tk=MARIA ;;
     *Christy*)   _tk=CHRISTY ;;
     *Erin*)      _tk=ERIN ;;
     *Lyric*)     _tk=LYRIC_HAWKINS ;;
     *Star*)      _tk=STAR ;;
-    *)           _tk=TERESA ;;
+    # No match: FAIL LOUDLY as a configuration error. A silent fall-through to
+    # another client's token previously mis-probed Eddie Otts with Teresa
+    # Pelham's credential and reported him UNREACHABLE — he was fine, the
+    # token was wrong. A wrong-token probe must never be indistinguishable
+    # from a real DOWN box. Any client landing here is missing a case in this
+    # switch (an onboarding gap), not evidence the box is dead.
+    *)           _tk="" ;;
   esac
+  if [ -z "$_tk" ]; then
+    echo "${client}|${persona}|${sshuser}|${tunnelhost}|unknown|UNKNOWN|DOWN|cf_token_unmapped_add_case_to_probe_mac_tunnel_in_probe-fleet.sh"
+    return
+  fi
   # Legacy naming used _SVC_ID/_SVC_SECRET for some newer clients; prefer the
   # canonical _SVC_CLIENT_ID/_SVC_CLIENT_SECRET names, but fall back.
   cid=$(_read_env_var "CF_ACCESS_${_tk}_SVC_CLIENT_ID" "$SECRETS_ENV")
@@ -575,13 +589,21 @@ else
         *"Barret Matthews (Mac Mini"*)    _tk2=BARRETT_MINI ;;
         *Barret*)    _tk2=BARRET ;;
         *"Jennifer Allen"*)    _tk2=JENNIFER ;;
+        *"E.R. Spaulding"*)    _tk2=ER_SPAULDING ;;
+        *Eddie*)     _tk2=EDDIE_OTTS ;;
         *Maria*)     _tk2=MARIA ;;
         *Christy*)   _tk2=CHRISTY ;;
         *Erin*)      _tk2=ERIN ;;
         *Lyric*)     _tk2=LYRIC_HAWKINS ;;
         *Star*)      _tk2=STAR ;;
-        *)           _tk2=TERESA ;;
+        # No match: FAIL LOUDLY, same reasoning as probe_mac_tunnel() above.
+        # Never borrow another client's token to drive an update run either.
+        *)           _tk2="" ;;
       esac
+      if [ -z "$_tk2" ]; then
+        echo "[version-check] $_client: no CF token mapping in probe-fleet.sh — skipping auto-update (config error, add a case to probe_mac_tunnel()/this switch)" >&2
+        continue
+      fi
       _cid2=$(_read_env_var "CF_ACCESS_${_tk2}_SVC_CLIENT_ID" "$SECRETS_ENV")
       _csec2=$(_read_env_var "CF_ACCESS_${_tk2}_SVC_CLIENT_SECRET" "$SECRETS_ENV")
       CFD="/opt/homebrew/bin/cloudflared"
