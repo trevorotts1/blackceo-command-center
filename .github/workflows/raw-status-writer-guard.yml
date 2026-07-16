@@ -1,0 +1,75 @@
+name: Raw status-writer guard
+
+# U99 (v1 U9; v1 ref C12.3 item 1; master spec Section E4): "Raw-writer
+# convergence to transition() + CI guard against new raw `UPDATE tasks SET
+# status` writers." task-lifecycle.ts's own header names the defect: raw
+# `UPDATE tasks SET … status` writers outside transition() made task_events a
+# PARTIAL audit trail. Every surviving raw writer is now either migrated to
+# transition() or paired with recordStatusEvent() (the DISP-10 "thin variant")
+# AND annotated in-code with a `U99-RAW-STATUS-WRITER:` comment — this guard
+# enforces that ANY new raw status writer, anywhere under src/, either goes
+# through transition()/recordStatusEvent() + gets that annotation, or fails CI.
+#
+# Standalone workflow — deliberately NOT folded into qc-cc.yml, mirroring the
+# report-back-invariant guard's own convention (independently readable/
+# debuggable, never collides with that workflow's edit history).
+#
+# Two jobs:
+#   1. static-guard      — runs the mutation-proof test FIRST (a planted
+#                           unannotated writer must fail the guard, and PASS
+#                           once removed/annotated), THEN the guard directly
+#                           against the real tree.
+#   2. behavioral-fixture — proves acceptance criterion (c): task_events rows
+#                           now appear for two representative call sites that
+#                           had ZERO task_events coverage before U99.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  static-guard:
+    name: Static call-site guard (+ mutation proof)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Mutation proof + real-tree pass (raw-status-writer-guard.test.ts)
+        run: |
+          node --import tsx --test tests/unit/raw-status-writer-guard.test.ts
+
+      - name: Run the guard directly against the tree (belt-and-braces)
+        run: npx tsx scripts/guard-raw-status-writers.ts
+
+  behavioral-fixture:
+    name: Behavioral fixture — task_events now appears for previously-unaudited paths
+    runs-on: ubuntu-latest
+    needs: static-guard
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Behavioral proof (raw-status-writer-audit-fixture.test.ts)
+        run: |
+          node --import tsx --test tests/unit/raw-status-writer-audit-fixture.test.ts

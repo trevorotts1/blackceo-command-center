@@ -65,61 +65,54 @@ interface FishAudioModelsResponse {
 }
 
 /**
- * Manually-maintained fallback catalog when the live API is unreachable
- * (no key, network sandboxed, etc.). These are the Fish Audio "Speech 1.5"
- * (S1) family models documented at https://docs.fish.audio.
+ * U50/H+L.8 — CATALOG HONESTY. This list is documentation-only. It is NEVER
+ * returned by `fetchModels()` as live data (that silent substitution — a
+ * hardcoded catalog stamped `active` on any live-call failure, including a
+ * dead/invalid key — was exactly the "Fish Audio fallback never `active`"
+ * mirage this unit fixes; see the retired `FALLBACK_MODELS` behavior in git
+ * history). Kept only so a reader knows which model families this connector
+ * targets, and updated from the retired Speech-1.5 (S1) family to the
+ * current Speech-2 / Speech-2.1-Pro (S2) generation — the connector's own
+ * `inferFamily()` below already recognizes the `s2` id prefix. `status` is
+ * intentionally NON-`active` (`unavailable`: never confirmed against a live
+ * call) so that if this list is ever wired into a seed/migration path in the
+ * future, it can never masquerade as a verified, assignable model.
  *
  * Pricing reference (2026): Fish Audio bills TTS at roughly $15 per
- * million characters for s1, $7.50 for s1-mini. Stored in raw_metadata
- * for the UI to surface without a schema change.
+ * million characters for s2, $7.50 for the lighter-weight tier. Stored in
+ * raw_metadata for the UI to surface without a schema change.
  */
-const FALLBACK_MODELS: ProviderModel[] = [
+const KNOWN_MODEL_FAMILIES: ProviderModel[] = [
   {
-    model_id: `${PROVIDER_SLUG}/s1`,
-    label: 'Fish Speech 1.5 (S1)',
+    model_id: `${PROVIDER_SLUG}/s2`,
+    label: 'Fish Speech 2 (S2)',
     provider: PROVIDER_SLUG,
-    family: 'fish-speech-1.5',
+    family: 'fish-speech-2',
     pricing_model: 'per_token',
     pricing_source: 'manual',
     capabilities: ['audio_generation'],
-    status: 'active',
+    status: 'unavailable',
     raw_metadata: {
       tier: 'quality',
       pricing_per_million_chars: 15,
       pricing_unit: 'characters',
-      note: 'Highest-quality Fish Speech 1.5 voice synthesis model.',
+      note: 'Current-generation Fish Speech 2 voice synthesis model. Never confirmed live — reference only.',
     },
   },
   {
-    model_id: `${PROVIDER_SLUG}/s1-mini`,
-    label: 'Fish Speech 1.5 Mini (S1 Mini)',
+    model_id: `${PROVIDER_SLUG}/s2.1-pro`,
+    label: 'Fish Speech 2.1 Pro (S2.1 Pro)',
     provider: PROVIDER_SLUG,
-    family: 'fish-speech-1.5',
+    family: 'fish-speech-2',
     pricing_model: 'per_token',
     pricing_source: 'manual',
     capabilities: ['audio_generation'],
-    status: 'active',
+    status: 'unavailable',
     raw_metadata: {
-      tier: 'speed',
-      pricing_per_million_chars: 7.5,
-      pricing_unit: 'characters',
-      note: 'Lower-latency Fish Speech 1.5 variant for real-time use.',
-    },
-  },
-  {
-    model_id: `${PROVIDER_SLUG}/s1-base`,
-    label: 'Fish Speech 1.5 Base (S1 Base)',
-    provider: PROVIDER_SLUG,
-    family: 'fish-speech-1.5',
-    pricing_model: 'per_token',
-    pricing_source: 'manual',
-    capabilities: ['audio_generation'],
-    status: 'active',
-    raw_metadata: {
-      tier: 'base',
+      tier: 'pro',
       pricing_per_million_chars: 15,
       pricing_unit: 'characters',
-      note: 'Base Fish Speech 1.5 voice model for cloned voices.',
+      note: 'Fish Speech 2.1 Pro voice synthesis model. Never confirmed live — reference only.',
     },
   },
 ];
@@ -172,43 +165,48 @@ async function fetchJson<T>(url: string, init: RequestInit): Promise<T> {
 }
 
 /**
- * Fetch the Fish Audio model catalog. Falls back to the manually-maintained
- * list when the API is unreachable or returns an unexpected shape, so the
- * refresh job always populates at least the canonical S1 family.
+ * Fetch the Fish Audio model catalog.
+ *
+ * U50/H+L.8 — CATALOG HONESTY. This used to swallow EVERY failure (a dead
+ * key, a network error, a non-2xx response) into a bare `catch` that
+ * returned a hardcoded catalog stamped `active` — so a garbage key made the
+ * weekly refresh log `success: true` and re-stamped a stale S1 catalog
+ * `active` forever (the connector's swallow, not the refresh job's
+ * logging). That swallow is gone:
+ *   - a live-call failure now PROPAGATES (no try/catch here) so
+ *     `refreshOneProvider()` catches it and records `success: false` with
+ *     the real error detail, exactly like every other connector;
+ *   - an authenticated, successful call that legitimately lists zero
+ *     models is treated as an EMPTY catalog, never substituted with
+ *     `KNOWN_MODEL_FAMILIES` — presence of a key and a 200 is not a
+ *     license to invent rows.
  */
 export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
   if (!apiKey) {
     throw new Error('Fish Audio fetchModels called without an apiKey (set FISH_AUDIO_API_KEY)');
   }
-  try {
-    const payload = await fetchJson<FishAudioModelsResponse | FishAudioModelRow[]>(MODELS_ENDPOINT, {
-      method: 'GET',
-      headers: jsonHeaders(apiKey),
-    });
-    const rows: FishAudioModelRow[] = Array.isArray(payload)
-      ? payload
-      : payload.items || payload.data || [];
-    if (rows.length === 0) {
-      return FALLBACK_MODELS;
-    }
-    return rows.map(normalizeModel);
-  } catch {
-    // Live endpoint unreachable; ship the manually-maintained catalog so
-    // Intelligence Settings still has a usable Fish Audio voice list.
-    return FALLBACK_MODELS;
-  }
+  const payload = await fetchJson<FishAudioModelsResponse | FishAudioModelRow[]>(MODELS_ENDPOINT, {
+    method: 'GET',
+    headers: jsonHeaders(apiKey),
+  });
+  const rows: FishAudioModelRow[] = Array.isArray(payload)
+    ? payload
+    : payload.items || payload.data || [];
+  return rows.map(normalizeModel);
 }
 
 /**
  * U49/U61 (H+L.7) — real authenticated proof, never the model-list mirage.
  * Hits /wallet/self/api-credit (requires a valid Bearer token; 401s on
  * missing/bad auth) instead of /v1/models. This matters MORE for Fish Audio
- * than most connectors: fetchModels() above has a bare `catch` that returns
- * a hardcoded FALLBACK_MODELS list on ANY failure (dead key included), so a
- * garbage key can make fetchModels() look "successful" — exactly the mirage
- * this proof exists to kill. verifyKey never touches fetchModels or its
- * fallback. Used by `proveProviderAuth()` as the fallback proof method when
- * no `chatCompletion` exists (Fish Audio is not a chat provider). The key is
+ * than most connectors: fetchModels() above used to have a bare `catch` that
+ * returned a hardcoded fallback list on ANY failure (dead key included), so a
+ * garbage key could make fetchModels() look "successful" — exactly the
+ * mirage this proof exists to kill. U50/H+L.8 removed that swallow at the
+ * source (fetchModels() now propagates live-call failures instead), and
+ * verifyKey here never touched fetchModels or its former fallback either
+ * way. Used by `proveProviderAuth()` as the fallback proof method when no
+ * `chatCompletion` exists (Fish Audio is not a chat provider). The key is
  * NEVER logged or echoed; only a short, redacted error snippet is kept.
  */
 export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {

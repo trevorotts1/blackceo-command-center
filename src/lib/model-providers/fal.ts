@@ -14,6 +14,19 @@
  * shape, so fetchModels returns a curated catalog of the high-traffic models
  * the operator uses. The weekly refresh keeps it normalized; the operator
  * can extend via FAL_EXTRA_MODELS (comma-separated slugs) without redeploy.
+ *
+ * U50/H+L.8 — SWALLOW-AUDIT, explicit documented decision (not a defect).
+ * `fetchModels()` below never calls `fetch()` at all — there is no live
+ * endpoint to swallow a failure from, so the "dead key silently re-stamps a
+ * stale catalog `active`" mirage the swallow-audit closes structurally
+ * cannot occur here (a bad `FAL_KEY` cannot make this function lie, because
+ * nothing here ever checks the key against a live call). `status: 'active'`
+ * on the curated rows is therefore a conscious, standing decision — not an
+ * unverified live-call result — made because Fal genuinely has no discovery
+ * endpoint to verify against (per the note above). Live-key validity is
+ * proven separately by `verifyKey()` below (U49/U61), which DOES make a
+ * real authenticated call. Revisit only if Fal ships a stable /models
+ * endpoint in the future.
  */
 
 import type {

@@ -102,6 +102,9 @@ export async function POST(
       : handbackNote;
 
     // Update the task: set status=backlog, increment attempt counter, bump progress.
+    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
+    // qc_reroute_attempts + last_progress_at must land atomically with the
+    // status flip); audited immediately below via recordStatusEvent (DISP-10).
     run(
       `UPDATE tasks SET
         status = 'backlog',

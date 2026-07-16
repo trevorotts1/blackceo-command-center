@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, run, getDb } from '@/lib/db';
 import { triggerAutoDispatch } from '@/lib/auto-dispatch';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -60,6 +61,9 @@ export async function POST(
     });
 
     // Use transaction to ensure atomic updates
+    // U99-RAW-STATUS-WRITER: both branches compound status with
+    // planning_dispatch_error in one atomic UPDATE; audited via
+    // recordStatusEvent (DISP-10) right after the transaction commits below.
     const db = getDb();
     const transaction = db.transaction(() => {
       if (result.success) {
@@ -73,8 +77,11 @@ export async function POST(
         `, [taskId]);
       } else {
         // Store the error for display, keep as 'pending_dispatch'
+        // U99-RAW-STATUS-WRITER: see the block comment above `const db =
+        // getDb()` — audited via recordStatusEvent (DISP-10) right after this
+        // transaction commits.
         run(`
-          UPDATE tasks 
+          UPDATE tasks
           SET planning_dispatch_error = ?,
               status = 'pending_dispatch',
               updated_at = datetime('now')
@@ -84,6 +91,10 @@ export async function POST(
     });
 
     transaction();
+    recordStatusEvent(taskId, task.status, result.success ? 'backlog' : 'pending_dispatch', {
+      actor: 'planning-retry-dispatch',
+      reason: result.success ? 'dispatch retry succeeded' : `dispatch retry failed: ${result.error ?? 'unknown'}`,
+    });
 
     if (result.success) {
       return NextResponse.json({ 
