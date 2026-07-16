@@ -1,3 +1,44 @@
+## [v6.0.41] — 2026-07-16 — Dual-repo leg reconciliation: U93 (retired-term scrub) + U100 (mc_board six / Skill 35 advisory projections)
+
+v6.0.41 — Single batched ripple, single serial merge-writer. Two units land whose Command Center legs were
+recorded in the onboarding repo's ticket queue (`~/skill6-merge-queue/ONB/{U93,U100}.json`, each carrying an
+embedded `ccLeg`/`legs.CC` sub-object) rather than the Command Center queue (`~/skill6-merge-queue/CC/`) this
+merge-writer originally scanned — the prior pass's queue-discovery method only listed `CC/*.json` and assumed
+ticket location matched target repo, which does not hold for dual-repo units. Both re-derived and re-verified
+independently against current `origin/main` before merging (not trusted from ticket prose): `git merge-base
+--is-ancestor` confirmed neither leg was already merged; `git merge-tree --write-tree origin/main <branch>`
+returned exit 0 (zero conflicts) for both against the CURRENT main tip, not the stale tip the tickets recorded;
+both branches' single commits carry author=committer=`Trevor Otts <trevor@blackceo.com>` and empty `%(trailers)`
+(structural check, never substring).
+
+- **U93 (X/U-X3) CC leg — score 9.0/8.5, `skill6-v2/U93` @ `c063dd9b`:** retired-term doctrine scrub, comment-only,
+  zero behavior change. Two code comments (`src/lib/db/migrations.ts` migration 045's historical incident note;
+  `src/app/participant/_lib/gate-engine.ts`'s override comment) plus one doc line (`docs/MULTI_CLIENT_ROLLOUT.md`
+  Section 9) reworded to the ratified D20 Option B vocabulary (operator-box-proof, not the retired term). 3 files,
+  +5/-4 lines. Merged clean, 0 conflicts.
+- **U100 CC leg — score 9.4, `skill6-v2/U100` @ `9eb12a45`:** adds 7 non-gating advisory fields to
+  `GET /api/health/deep`: `checkMcBoardSixProducerProjection()` (parameterized over the mc_board six —
+  49-signature-funnel, 50-email-engine, 53-book-writer, 55-product-bio, 56-sales-page-assets,
+  57-social-media-in-a-box) and `checkSkill35CycleProjection()`, cloning the established B-U13/U27
+  `checkSkill6BoardProjection` pattern. Each field is wrapped in its own try/catch and kept OUT of the gating
+  `checks` aggregation — a board-ingest drift here is an operational signal, never a CC correctness fault; cannot
+  trip auto-rollback. `tests/unit/mc-board-producer-projection.test.ts` (new, 20 tests) proves the same binary
+  acceptance shape as `skill6-board-projection.test.ts`: a suppressed-ingest fixture surfaces as drift within one
+  probe, a clean run reports zero drift across 3 consecutive probes, an orphaned/DB-down cross-check degrades
+  correctly. Also adds a `test:mc-board-producer-projection` npm script and excludes the new vitest-based test
+  file from the plain `node --test` runner (same pattern as every other vitest test already excluded). 5 files,
+  +770/-1 lines.
+
+**Gate proof, this batch, re-run on the merged tree by the merge-writer (not assumed from either ticket):**
+`npx tsc --noEmit` → exit 0. `npx vitest run tests/unit/mc-board-producer-projection.test.ts` → 20/20 pass.
+`npx vitest run tests/unit/deep-health.test.ts tests/unit/skill6-board-projection.test.ts` → 91/91 pass (no
+regression from the U100 route/deep-checks additions). `npm run build` with no `DATABASE_PATH` set → exit 0,
+zero `mission-control.db*` files left behind (C8 guard intact through this merge too). CI verdict confirmed via
+`gh api` on the pushed commit, not local-only — see the git log for the exact check-run results.
+
+No secret values, no client names, no box identifiers in this ripple. No Anthropic model added/removed/substituted
+anywhere in the shipped code.
+
 ## [v6.0.40] — 2026-07-16 — GREEN GATE: lazy C8 DB-path resolution unblocks `next build` + owed-leg test merges (U38, U102)
 
 v6.0.40 — Single batched ripple, single serial merge-writer. Three merges land in dependency-safe order: the CC main-unblocking fix, then two branch-only "owed leg" test commits flagged by prior QC rounds as landed-implementation-but-unmerged-proof.
