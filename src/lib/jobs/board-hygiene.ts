@@ -80,6 +80,7 @@ import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { checkTriad } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { v4 as uuidv4 } from 'uuid';
+import { listPendingHarvestCards, resolveHarvestClientId, resolveWorkspaceBase } from '@/lib/winner-harvest';
 
 export const BOARD_HYGIENE_CRON = '0 * * * *'; // hourly, on the hour
 
@@ -191,6 +192,11 @@ export interface BoardHygieneResult {
   blendInvariantRegressionFlagged: boolean;
   /** CONFIRMED content-task bundles in the window reading below-min (diagnostic). */
   blendInvariantBelowMinCount: number;
+  /** A-U11 CC-repo half — pending_approval winner-harvest cards NEWLY
+   *  surfaced as an operator-approval board signal THIS run (idempotent:
+   *  a card already surfaced on a prior run is never counted again). */
+  winnerHarvestCardsSurfaced: number;
+  winnerHarvestCardsSurfacedIds: string[];
 }
 
 function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult {
@@ -221,6 +227,8 @@ function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult 
     blendWindowBundles: 0,
     blendInvariantRegressionFlagged: false,
     blendInvariantBelowMinCount: 0,
+    winnerHarvestCardsSurfaced: 0,
+    winnerHarvestCardsSurfacedIds: [],
   };
 }
 
@@ -924,6 +932,81 @@ function processBlendInvariantRegressionCheck(result: BoardHygieneResult): void 
   } catch { /* audit best-effort */ }
 }
 
+// ── Rule 8: winner-harvest card surfacing (A-U11 CC-repo half) ──────────────
+//
+// ONB's `shared-utils/winner_harvest.py` proposes a client-local, on-disk
+// approval card (`<workspace>/<client_id>/routing/harvest-cards.json`,
+// `status: 'pending_approval'`) for every build clearing Quality Control at
+// >= 9.0 — but nothing in production ever flips it to approved (the ONB
+// module docstring names the CC-repo half as OWED). This Rule is the
+// SURFACING half of that owed leg: for every pending_approval card in THIS
+// box's own client-scoped ledger, raise EXACTLY ONE operator-approval board
+// signal on the `events` lane — event-ledger dedupe, the SAME idempotence
+// pattern every other Rule in this file uses (a card already surfaced on a
+// prior run is never counted or alerted again).
+//
+// This Rule NEVER approves anything — it only reads pending cards and writes
+// a surfacing event. The auto-approve guard (A-U11 CC-half criterion (g)) is
+// proven behaviorally in tests/unit/winner-harvest-approve-roundtrip.test.ts:
+// a card seeded pending_approval stays pending_approval across repeated
+// sweeps of this Rule. The only function anywhere in this codebase that may
+// set a card's status to 'approved' is `approveHarvestCard`
+// (src/lib/winner-harvest.ts), called exclusively from
+// `POST /api/harvest-cards/[id]/approve` — a deliberate, separate operator
+// action.
+//
+// task_id is left NULL on these events (harvest cards are not CC `tasks`
+// rows — they come from an external, ONB-side ledger, and `events.task_id`
+// carries a real FK to `tasks(id)` with `foreign_keys = ON`). The dedupe key
+// instead lives in `message` as `<client_id>::<card_id>` — `card_id` is
+// already derived from a sha256 of the identity tuple INCLUDING client_id
+// (winner_harvest.py::candidate_id), so this is collision-safe on its own;
+// the explicit client_id prefix is defense-in-depth, never load-bearing.
+const EVT_WINNER_HARVEST_CARD_SURFACED = 'winner_harvest_card_surfaced';
+
+function processWinnerHarvestSweep(result: BoardHygieneResult): void {
+  let workspaceBase: string;
+  let clientId: string | null;
+  try {
+    workspaceBase = resolveWorkspaceBase();
+    clientId = resolveHarvestClientId();
+  } catch {
+    return; // resolution must never crash the hygiene job
+  }
+  if (!workspaceBase || !clientId) return; // unbranded box / no HOME — nothing to sweep
+
+  let pending: ReturnType<typeof listPendingHarvestCards>;
+  try {
+    pending = listPendingHarvestCards(workspaceBase, clientId);
+  } catch {
+    return; // a corrupt/unreadable ledger must never crash the hygiene job
+  }
+
+  for (const card of pending) {
+    const dedupeKey = `${clientId}::${card.card_id}`;
+    let alreadySurfaced = 0;
+    try {
+      alreadySurfaced =
+        queryOne<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM events WHERE type = ? AND message = ?`,
+          [EVT_WINNER_HARVEST_CARD_SURFACED, dedupeKey],
+        )?.n ?? 0;
+    } catch {
+      alreadySurfaced = 0;
+    }
+    if (alreadySurfaced > 0) continue; // already surfaced — idempotent, never a second card
+
+    result.winnerHarvestCardsSurfaced++;
+    result.winnerHarvestCardsSurfacedIds.push(card.card_id);
+    try {
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, NULL, ?, ?)`,
+        [uuidv4(), EVT_WINNER_HARVEST_CARD_SURFACED, dedupeKey, timeNow()],
+      );
+    } catch { /* audit best-effort, mirrors every other Rule in this file */ }
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function runBoardHygiene(): Promise<BoardHygieneResult> {
@@ -955,6 +1038,9 @@ export async function runBoardHygiene(): Promise<BoardHygieneResult> {
   }
   if (!(process.env.DISABLE_BOARD_HYGIENE_BLEND_INVARIANT === '1')) {
     processBlendInvariantRegressionCheck(result);
+  }
+  if (!(process.env.DISABLE_BOARD_HYGIENE_WINNER_HARVEST === '1')) {
+    processWinnerHarvestSweep(result);
   }
 
   return result;
