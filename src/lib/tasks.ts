@@ -56,6 +56,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
@@ -1582,8 +1583,16 @@ export function blockForOwnerConfirm(
   const now = new Date().toISOString();
   const prompt = decision.prompt
     ?? 'Confirm the audience / conversion goal before this content task can be written.';
+  // Read the observed pre-block status for the audit call below — the WHERE
+  // clause guards on "!= 'blocked'" (any non-blocked status is eligible), so
+  // the exact from-status is not a fixed literal the way most other raw
+  // writers in this file are.
+  const fromStatus = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId])?.status ?? 'unknown';
   let changed = 0;
   try {
+    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (the block_* metadata
+    // must land atomically with the status flip); audited immediately below
+    // via recordStatusEvent (DISP-10), gated on the CAS actually landing.
     const res = run(
       `UPDATE tasks
           SET status = 'blocked',
@@ -1605,6 +1614,10 @@ export function blockForOwnerConfirm(
     return;
   }
   if (changed !== 1) return; // already blocked — no duplicate event/notify
+  recordStatusEvent(taskId, fromStatus, 'blocked', {
+    actor: 'audience-confirm',
+    reason: `hard-hold department "${department}" unconfirmed past deadline`,
+  });
   try {
     run(
       `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,

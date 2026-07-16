@@ -272,6 +272,9 @@ export async function probeSessionLiveness(
  */
 function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): void {
   const now = new Date().toISOString();
+  // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the caller
+  // only ever selecting in_progress tasks; audited immediately below via
+  // recordStatusEvent (DISP-10).
   run('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?', ['review', now, taskId]);
   // DISP-10: complete the task_events audit sink for this in_progress→review
   // advance (the watcher only ever selects in_progress tasks).

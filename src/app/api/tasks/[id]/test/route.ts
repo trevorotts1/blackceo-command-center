@@ -171,6 +171,9 @@ export async function POST(
 
     if (passed) {
       // Tests passed -> stays in review for human approval
+      // U99-RAW-STATUS-WRITER: two-column write with no CAS guard on the
+      // observed from-status (route already loaded+validated `task` above);
+      // audited immediately below via recordStatusEvent (DISP-10).
       run(
         'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
         ['review', now, taskId]
@@ -195,6 +198,9 @@ export async function POST(
       );
     } else {
       // Tests failed -> move back to in_progress for agent to fix
+      // U99-RAW-STATUS-WRITER: two-column write with no CAS guard on the
+      // observed from-status; audited immediately below via recordStatusEvent
+      // (DISP-10).
       run(
         'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
         ['in_progress', now, taskId]

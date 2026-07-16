@@ -71,7 +71,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
-import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { getProvider } from '@/lib/model-providers';
 import { chatCompletion as ollamaCloudChat } from '@/lib/model-providers/ollama-cloud';
@@ -3586,7 +3586,13 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           .join('\n');
 
         const writeStructuredHandbackFallback = (): void => {
-          run(
+          // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
+          // last_progress_at must land atomically with the status flip, and
+          // this is the in-process SQL fallback for when the HTTP handback to
+          // return-to-orchestrator is unreachable/rejected); audited
+          // immediately below via recordStatusEvent (DISP-10), gated on the
+          // CAS actually landing.
+          const fallbackRes = run(
             `UPDATE tasks SET status = 'backlog',
                description = CASE
                  WHEN description IS NULL OR description = '' THEN ?
@@ -3597,6 +3603,12 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
              WHERE id = ? AND status = 'review'`,
             [structuredHandbackNote, structuredHandbackNote, now, now, taskId],
           );
+          if ((fallbackRes.changes ?? 0) > 0) {
+            recordStatusEvent(taskId, 'review', 'backlog', {
+              actor: 'qc-scorer',
+              reason: `no-artifact handback fallback: ${noArtifactReason}`,
+            });
+          }
           run(
             `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
             [
@@ -3728,13 +3740,20 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           const prevAttempts = task.qc_reroute_attempts ?? 0;
           const newAttempts = prevAttempts + 1;
           const kickbackNote = `[QC-FAIL] Score 2.0/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Missing deliverables: ${missingReasons.join('; ')}`;
-          run(
+          // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
+          // qc_reroute_attempts must land atomically with the status flip);
+          // audited immediately below via recordStatusEvent (DISP-10), gated
+          // on the CAS actually landing.
+          const missingRes = run(
             `UPDATE tasks SET status = 'backlog',
                description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
                qc_reroute_attempts = ?, updated_at = ?
              WHERE id = ? AND status = 'review'`,
             [kickbackNote, kickbackNote, newAttempts, now, taskId],
           );
+          if ((missingRes.changes ?? 0) > 0) {
+            recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
+          }
           return failResult;
         }
       }
@@ -3793,13 +3812,20 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         const prevAttempts = task.qc_reroute_attempts ?? 0;
         const newAttempts = prevAttempts + 1;
         const kickbackNote = `[QC-AF-I14 FAIL] AF-I14 violations (attempt ${newAttempts}/${QC_MAX_REROUTES}): ${afi14.violations.join('; ')}`;
-        run(
+        // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
+        // qc_reroute_attempts must land atomically with the status flip);
+        // audited immediately below via recordStatusEvent (DISP-10), gated on
+        // the CAS actually landing.
+        const afi14Res = run(
           `UPDATE tasks SET status = 'backlog',
              description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
              qc_reroute_attempts = ?, updated_at = ?
            WHERE id = ? AND status = 'review'`,
           [kickbackNote, kickbackNote, newAttempts, nowAf, taskId],
         );
+        if ((afi14Res.changes ?? 0) > 0) {
+          recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
+        }
 
         return {
           score: 1.0,
@@ -4354,7 +4380,12 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
         const blockedNote = `[QC-BLOCKED] Task failed QC ${newAttempts} time(s) (cap: ${QC_MAX_REROUTES}). Last score: ${result.score.toFixed(1)}/10. Audience: ${blockAudience}. ${result.reason}`;
 
-        run(
+        // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
+        // qc_reroute_attempts + the full block_* metadata must land atomically
+        // with the status flip, mirroring recordDispatchFailure); audited
+        // immediately below via recordStatusEvent (DISP-10), gated on the CAS
+        // actually landing.
+        const blockRes = run(
           `UPDATE tasks SET status = 'blocked',
              description = CASE
                WHEN description IS NULL OR description = '' THEN ?
@@ -4377,6 +4408,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             taskId,
           ],
         );
+        if ((blockRes.changes ?? 0) > 0) {
+          recordStatusEvent(taskId, 'review', 'blocked', { actor: 'qc-scorer', reason: blockedNote });
+        }
 
         run(
           `INSERT INTO events (id, type, task_id, message, created_at)
@@ -4459,7 +4493,11 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         ? `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Rework needed: ${result.gaps.join('; ')}`
         : `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
 
-      run(
+      // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
+      // qc_reroute_attempts must land atomically with the status flip);
+      // audited immediately below via recordStatusEvent (DISP-10), gated on
+      // the CAS actually landing.
+      const rerouteRes = run(
         `UPDATE tasks SET status = 'backlog',
            description = CASE
              WHEN description IS NULL OR description = '' THEN ?
@@ -4470,6 +4508,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
          WHERE id = ? AND status = 'review'`,
         [kickbackNote, kickbackNote, newAttempts, now, taskId],
       );
+      if ((rerouteRes.changes ?? 0) > 0) {
+        recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
+      }
 
       // Write task_status_changed event — visible on the board timeline.
       run(
@@ -4523,10 +4564,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       }).then(async (resp) => {
         if (resp.ok) {
           // Auto-route succeeded: move the task to in_progress so it leaves backlog.
-          run(
+          // U99-RAW-STATUS-WRITER: fire-and-forget continuation of an async
+          // fetch().then() — not a good fit for the async transition() call
+          // inside a non-async .then() callback without restructuring the
+          // surrounding promise chain; audited immediately below via
+          // recordStatusEvent (DISP-10), gated on the CAS actually landing.
+          const autoRouteRes = run(
             `UPDATE tasks SET status = 'in_progress', updated_at = ? WHERE id = ? AND status = 'backlog'`,
             [new Date().toISOString(), taskId],
           );
+          if ((autoRouteRes.changes ?? 0) > 0) {
+            recordStatusEvent(taskId, 'backlog', 'in_progress', {
+              actor: 'qc-scorer',
+              reason: 'auto-route succeeded after QC reroute',
+            });
+          }
           console.log(`[QCScorer] Auto-route succeeded for task "${task.title}" (${taskId}) → in_progress`);
         } else {
           console.warn(`[QCScorer] Auto-route returned ${resp.status} for task ${taskId} — stays in backlog for ceo-delegation-sweep`);
