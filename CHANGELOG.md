@@ -1,3 +1,61 @@
+## [v6.0.52] — 2026-07-16 — U79 (GK-17) CC leg: Anthology self-heal converged-signal consumption + banner rewire
+
+v6.0.52 — Single unit, single serial merge-writer. Lands `u79-gk17-cc-anthology-selfheal-banner`
+@ `d8cc1ad` (PR #202, score 8.7/gate 8.5, independent Sonnet zero-trust review). PR was a draft
+opened only to force CI; marked ready-for-review before this merge.
+
+- **What lands: closes the CC-side half of the ONB leg** (merge `b62455b1`) named as owed
+  verbatim: "CC-side banner wiring ... must be wired to consume this `converged` signal ...
+  and render the banner ONLY when `converged` is `False`." Prior to this leg, nothing on the
+  Command Center side read anything the ONB daily tick produced — the ONB half was
+  structurally inert.
+  - `checkAnthologyBoardProjection()` (`src/lib/health/deep-checks.ts`) now reads the newest
+    `<state_dir>/reports/smoke-test-*.json` (same existing resolver, read-only, no new config
+    surface) and surfaces `board_reconcile_converged` (`true`/`false`/`null`) plus freshness
+    on the existing non-gating `anthology_board_projection` advisory entry. Fail-soft
+    throughout: missing dir, no files, unparseable JSON, malformed value, or a report older
+    than 48h all resolve to `converged: null` — unknown, never a false escalation.
+  - `AnthologyBoardDriftBanner` is rewired to key SOLELY on
+    `board_reconcile_converged === false` — the pre-existing raw ledger-vs-board count
+    heuristic no longer drives it at all (proven: the old drift shape alone, with `converged`
+    true/absent, now renders nothing). Copy is escalation-only; no longer instructs a manual
+    reconcile run.
+- **Cross-repo schema alignment independently verified** against the real ONB `mc_board.py`/
+  `anthology-smoke-test.py` diffs — contract name, `schema_version`, `utc` field,
+  `board_reconcile.{status,converged,counts}`, and the report filename regex all match
+  byte-for-byte what ONB writes and what CC reads. Not inert: the banner is a real production
+  caller mounted at `src/app/workspace/[slug]/page.tsx:307` on both branch and main.
+- 11/11 fail-then-pass re-derived exactly on `deep-checks.ts`; 4/4 mutation guards (staleness,
+  newest-report selection, `converged` type-coercion, banner's strict gate) killed cleanly.
+  20/20 CI green on the exact head SHA (unauthenticated REST + `gh pr checks` cross-check).
+  Zero AI trailers; author/committer both Trevor Otts on both commits.
+- **MERGE-WRITER CONFLICT RESOLUTION — two trivial/additive conflicts against current main**
+  (branch was cut at v6.0.44; main had moved to v6.0.51), both resolved by keeping both
+  sides' content: (1) `vitest.component.config.ts` — this branch and an already-landed
+  sibling (da-chips-fix) each appended one line to the same `include` array; kept both plus
+  U115's own already-landed entry. (2) `CHANGELOG.md` — this branch's content was authored as
+  an `## [Unreleased]` accumulator section anticipating a future batched bump; folded its
+  bullet content into this merge commit as a proper versioned entry instead, matching this
+  repo's now-established one-bump-per-unit serial release convention, rather than leaving a
+  stale Unreleased stub that would never be promoted.
+- Merged-tree gate re-run: `tsc --noEmit` clean; U79's own suites 91/91 (`deep-health.test.ts`)
+  + 9/9 (`u79-anthology-selfheal-banner.test.tsx`); full `test:unit` (node:test) 1696/1701 (5
+  pre-existing `getInterviewState` environmental failures, unrelated); full `vitest run`
+  266/266 across 17 files; `test:component` 110/110 across 13 files; `lint` clean; `build`
+  clean.
+- **One honest, non-blocking QC finding, not fixed in this merge:** the commit message's
+  fail-then-pass claim is overstated for 8 of 9 banner-component assertions — they pass
+  vacuously against the parent because the `data-testid` itself is new, so the element cannot
+  be found regardless of gating logic. Not a functional defect: the judge independently
+  re-proved the same 4 guards are real via mutation testing on the fixed code. Routed as an
+  owed testing-rigor note, not re-litigated here.
+- **Repo/surface = `CC (+ONB)` per master spec §E.2** (a genuine cross-repo code-shipping
+  unit, distinct from the `live (read-only)` and doc-only precedents that do not move the
+  count). U79's ONB leg is already merged (`b62455b1`, scored 9.0). This CC leg is the second
+  and final leg — **U79 is now fully landed across both repos, moving the /117 count 94 → 95.**
+
+Ticket: `~/skill6-merge-queue/CC/U79.json`.
+
 ## [v6.0.51] — 2026-07-16 — U115 (E6-1, closes G7) CC leg: per-part governance kanban/modal audience row
 
 v6.0.51 — Single unit, single serial merge-writer. Lands `skill6-v2/U115` @ `64ccd7ab`
