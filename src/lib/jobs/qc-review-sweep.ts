@@ -27,6 +27,22 @@
  * DOWN], which keeps retrying. The card stays board-visible in Review / QC for a
  * human to manually promote (or to add an LLM key, which re-enables scoring).
  *
+ * JUDGE-FAILURE TERMINAL: the deferral above retries on the assumption the
+ * provider RETURNS. When that assumption is false it retried forever and told no
+ * one — one live board sat SIX DAYS because the judge (a REASONING model) was
+ * starved by a 300-token completion budget, answered with EMPTY content, and the
+ * scorer called that "provider-down". The scorer now bounds the deferrals
+ * (QC_JUDGE_FAILURE_MAX_PASSES, default 12 ≈ 1h at the 5-min cadence) and then
+ * escalates ONCE to a terminal [QC-JUDGE-FAILED-FINAL] naming the OBSERVED
+ * failure (unreachable vs empty vs malformed), the judge model, and the exact
+ * endpoint it dialled. This sweep excludes THAT marker PERMANENTLY too — it is
+ * the escalated "a human must look at the judge" state, and re-scoring it would
+ * just restore the silent loop the bound exists to kill.
+ *
+ * The terminal marker is deliberately NOT named "…PROVIDER-DOWN-FINAL": on the
+ * real incident the provider was UP the whole time. An escalation that asserts a
+ * guessed category is what cost the six days in the first place.
+ *
  * Disable: DISABLE_QC_REVIEW_SWEEP=1
  *
  * Structure mirrors weekly-done-clear.ts / general-task-recurrence.ts.
@@ -92,6 +108,12 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
          WHERE e.task_id = t.id
            AND e.type = 'qc_review'
            AND e.message LIKE '%[QC-HEURISTIC-FINAL]%'
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM events e
+         WHERE e.task_id = t.id
+           AND e.type = 'qc_review'
+           AND e.message LIKE '%[QC-JUDGE-FAILED-FINAL]%'
        )
        AND NOT EXISTS (
          SELECT 1 FROM events e

@@ -30,7 +30,10 @@
  */
 import { queryOne } from '@/lib/db';
 
-export type QcHeuristicParkMarker = 'QC-HEURISTIC' | 'QC-HEURISTIC-FINAL';
+export type QcHeuristicParkMarker =
+  | 'QC-HEURISTIC'
+  | 'QC-HEURISTIC-FINAL'
+  | 'QC-JUDGE-FAILED-FINAL';
 
 /** Promote-panel payload — mirrors the `qc_heuristic_park` field the tasks GET
  * routes attach to each row (src/lib/types.ts). */
@@ -72,6 +75,19 @@ export function getQcHeuristicPark(taskId: string): QcHeuristicParkInfo | null {
     }
     if (row.message.includes('[QC-HEURISTIC]')) {
       return { marker: 'QC-HEURISTIC', message: row.message, created_at: row.created_at };
+    }
+    // A judge that has failed every call up to the bound is escalated terminally
+    // by the scorer and MUST surface here. A plain [QC-DEFERRED-PROVIDER-DOWN]
+    // still returns null ON PURPOSE (still working — alarming on every blip
+    // would be noise), but before the hatch existed the ESCALATED state ALSO
+    // returned null, so a task stuck for six days looked pixel-identical to one
+    // scored ten seconds ago. That silence was the defect.
+    if (row.message.includes('[QC-JUDGE-FAILED-FINAL]')) {
+      return {
+        marker: 'QC-JUDGE-FAILED-FINAL',
+        message: row.message,
+        created_at: row.created_at,
+      };
     }
     return null;
   } catch (err) {

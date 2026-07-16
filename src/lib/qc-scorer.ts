@@ -74,8 +74,12 @@ import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { getProvider } from '@/lib/model-providers';
-import { chatCompletion as ollamaCloudChat } from '@/lib/model-providers/ollama-cloud';
+import {
+  chatCompletion as ollamaCloudChat,
+  getOllamaCloudChatEndpoint,
+} from '@/lib/model-providers/ollama-cloud';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection';
+import type { ChatCompletionResponse } from '@/lib/model-providers/types';
 
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
@@ -725,9 +729,134 @@ export interface QCResult {
    *   - 'provider-down': a key IS configured but every LLM call failed (outage /
    *                      network blip) → DEFER and auto-rescore when the provider
    *                      returns, rather than presenting as human-required.
+   *   - 'judge-empty-response':     the judge ANSWERED and the provider is UP,
+   *                                 but message.content was EMPTY. On a
+   *                                 REASONING model this is what completion-
+   *                                 budget starvation looks like: the hidden
+   *                                 `reasoning` field consumes the whole
+   *                                 max_tokens budget and `content` arrives
+   *                                 empty. NOT a network fault.
+   *   - 'judge-malformed-response': the judge ANSWERED and the provider is UP,
+   *                                 but the content did not parse as JSON —
+   *                                 typically truncated mid-document by the
+   *                                 completion budget (finish_reason=length).
+   *                                 NOT a network fault.
    * Undefined for the 'llm' / 'no-criteria' paths.
+   *
+   * WHY THE LAST TWO EXIST — this is the six-day lesson. Every judge failure
+   * used to collapse into `return null`, and the caller labelled ALL of them
+   * 'provider-down'. The provider was never down: it answered perfectly and the
+   * code blamed the network. That one wrong label sent three consecutive
+   * analyses chasing a routing problem that did not exist. An unreachable
+   * provider and an empty answer are OPPOSITE failures with OPPOSITE fixes; a
+   * wrong diagnosis printed confidently is worse than no diagnosis, because it
+   * looks like evidence. These reasons keep them distinguishable.
    */
-  heuristicReason?: 'no-key' | 'provider-down';
+  heuristicReason?:
+    | 'no-key'
+    | 'provider-down'
+    | 'judge-empty-response'
+    | 'judge-malformed-response';
+  /**
+   * Judge-failure DIAGNOSTICS — WHAT failed and WHERE we called. Populated on
+   * every judge-failure path so the deferral, the operator log and the terminal
+   * escalation can all report the REAL failure instead of a guessed category.
+   */
+  judgeModel?: string;
+  judgeEndpoint?: string;
+  /** Verbatim, human-readable statement of what actually went wrong. */
+  judgeFailureDetail?: string;
+}
+
+/**
+ * The QC judge's completion budget.
+ *
+ * THIS NUMBER CAUSED A SIX-DAY OUTAGE. It was 300. The configured judge
+ * (`deepseek-v4-flash:cloud`) is a REASONING model: its reply carries a hidden
+ * `reasoning` field alongside `content`, and reasoning is billed against the
+ * SAME completion budget. At 300 tokens the reasoning ate the entire budget and
+ * `content` came back EMPTY — which the code then reported as "provider-down".
+ * Proven on the live path: 300 → empty content; 1500 → 587 completion tokens →
+ * clean parse → a real verdict.
+ *
+ * So 300 was not marginally low, it was wrong by a factor. The ceiling here is
+ * deliberately generous rather than fitted to that one 587-token sample:
+ * max_tokens is a CAP, not an allocation — an unused cap costs nothing, while a
+ * cap one token too low costs six days of silence. Reasoning length also varies
+ * with prompt complexity, so a snug bound would re-arm the same trap on a
+ * harder task. 2048 leaves ~3.5x margin over the observed need.
+ *
+ * Not derived from the model registry on purpose: `ProviderModel` exposes
+ * `context_window` (an INPUT bound), not a max-output bound, so there is no
+ * capability field that actually answers this question — deriving it would mean
+ * inventing one. Overridable per-box via QC_JUDGE_MAX_TOKENS.
+ *
+ * The budget is a mitigation, NOT the guarantee: a verbose enough model could
+ * still truncate. That is why truncation is DETECTED and reported
+ * (finish_reason=length → 'judge-malformed-response') rather than swallowed.
+ */
+export const QC_JUDGE_MAX_TOKENS_DEFAULT = 2048;
+
+/**
+ * Floor of 300 keeps a fat-fingered override from re-creating the original bug.
+ * Exported so the QC judge PROBE uses the identical budget: the probe is the
+ * instrument a human trusts to tell them whether the judge works, and it shipped
+ * with `max_tokens: 5` — this same bug's identical twin, guaranteed to starve a
+ * reasoning model and then report the credential as dead. One resolver, one
+ * budget, no second place for the trap to live.
+ */
+export function resolveJudgeMaxTokens(): number {
+  const parsed = parseInt(process.env.QC_JUDGE_MAX_TOKENS || '', 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return QC_JUDGE_MAX_TOKENS_DEFAULT;
+  return Math.max(300, parsed);
+}
+
+/**
+ * WHY the judge produced no verdict. These are OPPOSITE failures:
+ *   - 'unreachable'        → the provider never answered (network/DNS/refused/HTTP error).
+ *   - 'empty-response'     → the provider answered; content was empty (budget starvation).
+ *   - 'malformed-response' → the provider answered; content was unparseable (truncation).
+ * Only the FIRST one means the provider is down.
+ */
+export type JudgeFailureKind = 'unreachable' | 'empty-response' | 'malformed-response';
+
+type JudgeOutcome =
+  | { ok: true; result: QCResult }
+  | { ok: false; kind: JudgeFailureKind; detail: string };
+
+/** Map the true failure kind onto the heuristic reason carried in QCResult. */
+function judgeKindToHeuristicReason(kind: JudgeFailureKind): NonNullable<QCResult['heuristicReason']> {
+  switch (kind) {
+    case 'unreachable':
+      return 'provider-down';
+    case 'empty-response':
+      return 'judge-empty-response';
+    case 'malformed-response':
+      return 'judge-malformed-response';
+  }
+}
+
+/** Is this heuristic reason a JUDGE FAILURE (bounded-retry + escalation lane)? */
+export function isJudgeFailureReason(reason: QCResult['heuristicReason']): boolean {
+  return (
+    reason === 'provider-down' ||
+    reason === 'judge-empty-response' ||
+    reason === 'judge-malformed-response'
+  );
+}
+
+/** Short human label for the operator log / event text. Never guesses. */
+function judgeFailureLabel(reason: QCResult['heuristicReason']): string {
+  switch (reason) {
+    case 'provider-down':
+      return 'provider UNREACHABLE (never answered)';
+    case 'judge-empty-response':
+      return 'judge answered but content was EMPTY (provider is UP)';
+    case 'judge-malformed-response':
+      return 'judge answered but content was UNPARSEABLE (provider is UP)';
+    default:
+      return 'judge produced no verdict';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -951,37 +1080,95 @@ async function llmScoreViaOllamaCloud(
   prompt: string,
   apiKey: string,
   judgeModelId: string,
-): Promise<QCResult | null> {
+): Promise<JudgeOutcome> {
+  const maxTokens = resolveJudgeMaxTokens();
+  const endpoint = getOllamaCloudChatEndpoint();
+
+  // The connector wants the raw Ollama model name; strip the registry
+  // 'ollama-cloud/' prefix but keep any ':cloud' tag (that IS the raw name).
+  const rawModel = judgeModelId.startsWith('ollama-cloud/')
+    ? judgeModelId.slice('ollama-cloud/'.length)
+    : judgeModelId;
+
+  // ── UNREACHABLE — and ONLY unreachable ─────────────────────────────────────
+  // This try wraps the NETWORK CALL ALONE. It used to wrap the parse too, which
+  // is how a perfectly healthy provider's reply got reported as an outage.
+  let resp: ChatCompletionResponse;
   try {
-    // The connector wants the raw Ollama model name; strip the registry
-    // 'ollama-cloud/' prefix but keep any ':cloud' tag (that IS the raw name).
-    const rawModel = judgeModelId.startsWith('ollama-cloud/')
-      ? judgeModelId.slice('ollama-cloud/'.length)
-      : judgeModelId;
-    const resp = await ollamaCloudChat(apiKey, {
+    resp = await ollamaCloudChat(apiKey, {
       model: rawModel,
       messages: [
         { role: 'system', content: 'You are a precise QC agent. Reply only with valid JSON.' },
         { role: 'user', content: prompt },
       ],
-      max_tokens: 300,
+      max_tokens: maxTokens,
       temperature: 0,
     });
+  } catch (err) {
+    const detail =
+      `the judge at ${endpoint} never answered: ${(err as Error).message} ` +
+      `(model "${judgeModelId}"). The provider is genuinely UNREACHABLE.`;
+    console.warn(`[QCScorer] QC judge UNREACHABLE: ${detail}`);
+    return { ok: false, kind: 'unreachable', detail };
+  }
 
-    const raw = resp?.choices?.[0]?.message?.content?.trim() ?? '';
-    if (!raw) return null;
+  // Past this line the provider ANSWERED. Whatever else goes wrong, it is NOT
+  // down, and nothing below may ever say that it is.
+  const choice = resp?.choices?.[0];
+  const finishReason = choice?.finish_reason ?? '(none)';
+  const completionTokens = resp?.usage?.completion_tokens;
+  // Reasoning models return a third `reasoning` key beside content; it is billed
+  // against the SAME completion budget. Not in the OpenAI-compatible interface,
+  // so read it defensively — it is the single most diagnostic field we have.
+  const message = choice?.message as
+    | { role: string; content: string; reasoning?: string }
+    | undefined;
+  const raw = message?.content?.trim() ?? '';
+  const budgetNote =
+    `finish_reason=${finishReason}, completion_tokens=${completionTokens ?? 'unknown'}, ` +
+    `max_tokens=${maxTokens}`;
 
-    // Strip markdown code fences if present
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const parsed = JSON.parse(cleaned) as {
-      score: number;
-      pass: boolean;
-      reason: string;
-      gaps: string[];
-    };
+  // ── EMPTY RESPONSE — the six-day bug, correctly named ─────────────────────
+  if (!raw) {
+    const reasoningChars = message?.reasoning?.length ?? 0;
+    const detail =
+      `the judge "${judgeModelId}" at ${endpoint} ANSWERED, but message.content was EMPTY ` +
+      `(${budgetNote}, reasoning_chars=${reasoningChars}). THE PROVIDER IS UP — do not chase ` +
+      `routing, addresses or credentials. On a REASONING model this is completion-budget ` +
+      `starvation: the hidden reasoning field consumes the whole max_tokens budget and content ` +
+      `arrives empty. Raise QC_JUDGE_MAX_TOKENS (default ${QC_JUDGE_MAX_TOKENS_DEFAULT}) or use a ` +
+      `non-reasoning judge.`;
+    console.warn(`[QCScorer] QC judge EMPTY RESPONSE (provider is UP, NOT down): ${detail}`);
+    return { ok: false, kind: 'empty-response', detail };
+  }
 
-    const score = typeof parsed.score === 'number' ? Math.max(1, Math.min(10, parsed.score)) : 5;
-    return {
+  // Strip markdown code fences if present
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+  // ── MALFORMED RESPONSE — never silently swallowed ─────────────────────────
+  let parsed: { score: number; pass: boolean; reason: string; gaps: string[] };
+  try {
+    parsed = JSON.parse(cleaned) as typeof parsed;
+  } catch (err) {
+    // finish_reason=length is DEFINITIVE: the reply was cut off by the budget,
+    // not malformed by the model. This is the "Unterminated string" signature.
+    const truncated = finishReason === 'length';
+    const detail =
+      `the judge "${judgeModelId}" at ${endpoint} ANSWERED, but its content did not parse as ` +
+      `JSON: ${(err as Error).message} (${budgetNote}, content_chars=${cleaned.length})` +
+      (truncated
+        ? `. finish_reason=length means the reply was CUT OFF by the completion budget — raise ` +
+          `QC_JUDGE_MAX_TOKENS (default ${QC_JUDGE_MAX_TOKENS_DEFAULT}).`
+        : `. The model returned a complete but non-JSON reply.`) +
+      ` THE PROVIDER IS UP — do not chase routing, addresses or credentials.`;
+    console.warn(`[QCScorer] QC judge MALFORMED RESPONSE (provider is UP, NOT down): ${detail}`);
+    return { ok: false, kind: 'malformed-response', detail };
+  }
+
+  const score = typeof parsed.score === 'number' ? Math.max(1, Math.min(10, parsed.score)) : 5;
+  return {
+    ok: true,
+    result: {
       score,
       pass: score >= QC_PASS_THRESHOLD,
       // QC-06: the reason is LLM-authored prose, not a deterministic verdict.
@@ -991,11 +1178,8 @@ async function llmScoreViaOllamaCloud(
       reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
-    };
-  } catch (err) {
-    console.warn('[QCScorer] Ollama Cloud judge scoring failed:', (err as Error).message);
-    return null;
-  }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,15 +1240,19 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
 
   const prompt = buildQCPrompt(input);
 
-  // PROVIDER-DOWN vs FAIL-CLOSED: a heuristic fallback means one of two very
+  // JUDGE-FAILURE vs FAIL-CLOSED: a heuristic fallback means one of two very
   // different things. If the client has NO Ollama Cloud judge model/key
   // configured, this box cannot auto-score → fail CLOSED to human review
   // ('no-key'); we NEVER borrow an operator/shared paid key. If a judge IS
-  // configured but the call failed (outage / blip), DEFER and auto-rescore when
-  // it returns ('provider-down') so a blip doesn't storm the board into review.
+  // configured but the call produced no verdict, DEFER and auto-rescore.
   //
-  // QC_SIMULATE_PROVIDER_DOWN forces the provider-down branch (when a judge is
-  // configured) for a known outage window or deterministic tests.
+  // The judge-failure branch reports the REAL failure — 'provider-down' ONLY
+  // when the provider genuinely never answered, 'judge-empty-response' /
+  // 'judge-malformed-response' when it answered and the fault is ours. Calling
+  // an empty answer "provider-down" is what cost six days.
+  //
+  // QC_SIMULATE_PROVIDER_DOWN forces a genuine UNREACHABLE outage (when a judge
+  // is configured) for a known outage window or deterministic tests.
   const simulateProviderDown =
     process.env.QC_SIMULATE_PROVIDER_DOWN === '1' ||
     process.env.QC_SIMULATE_PROVIDER_DOWN === 'true';
@@ -1104,16 +1292,36 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
     return failClosed('no client Ollama Cloud API key found (OLLAMA_CLOUD_API_KEY / OLLAMA_API_KEY)');
   }
 
-  if (!simulateProviderDown) {
-    const result = await llmScoreViaOllamaCloud(prompt, ollamaKey, judgeModel);
-    if (result) return result;
+  let failure: { kind: JudgeFailureKind; detail: string };
+  if (simulateProviderDown) {
+    failure = {
+      kind: 'unreachable',
+      detail: `QC_SIMULATE_PROVIDER_DOWN is set — a genuine provider outage is being simulated for judge "${judgeModel}".`,
+    };
+  } else {
+    const outcome = await llmScoreViaOllamaCloud(prompt, ollamaKey, judgeModel);
+    if (outcome.ok) return outcome.result;
+    failure = { kind: outcome.kind, detail: outcome.detail };
   }
 
-  // Judge IS configured and a key is present, but the call failed (or was
-  // simulated down): DEFER + auto-rescore when the provider returns — not
-  // human-required. This is a transient outage, distinct from fail-closed.
+  // Judge IS configured and a key is present, but the call produced no verdict:
+  // DEFER + auto-rescore, bounded, then escalate (see runQCOnReview). Carry the
+  // TRUE failure forward — the deferral, the operator log and the escalation all
+  // report what actually happened rather than a guessed category.
   const heuristic = heuristicScore(input);
-  heuristic.heuristicReason = 'provider-down';
+  heuristic.heuristicReason = judgeKindToHeuristicReason(failure.kind);
+  heuristic.judgeModel = judgeModel;
+  heuristic.judgeEndpoint = getOllamaCloudChatEndpoint();
+  heuristic.judgeFailureDetail = failure.detail;
+  // heuristicScore() hard-codes "no LLM API key configured" in its reason — TRUE
+  // on the no-key path, FALSE here: a client judge IS configured, it just failed.
+  // Leaving it would append a lie to every deferral and escalation, flatly
+  // contradicting the diagnosis above it. Same defect class as the six-day
+  // mislabel, so it gets the same treatment: say what actually happened.
+  heuristic.reason =
+    `Heuristic QC fallback — a client judge IS configured, but the judge call produced no verdict ` +
+    `(${judgeFailureLabel(heuristic.heuristicReason)}). Score: ${heuristic.score.toFixed(1)}/10. ` +
+    `Human review required.`;
   return heuristic;
 }
 
@@ -4100,18 +4308,141 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       const scoredBy = qcAgent ? ` [scorer:${qcAgent.name}]` : ' [scorer:global-heuristic]';
       const gapNote = result.gaps.length > 0 ? ` Gaps: ${result.gaps.join('; ')}` : '';
 
-      // ── Provider-down deferral (Point 6 fix 1) ────────────────────────────
-      // A scoring key IS configured but every LLM scorer failed → transient
-      // provider outage, NOT a keyless install. Hold in `review` with a DISTINCT
-      // [QC-DEFERRED-PROVIDER-DOWN] marker (never [QC-HEURISTIC]) so the task is
-      // NOT presented as human-required. The qc-review-sweep retries deferred
-      // tasks on a short cadence and auto-rescores them the moment the provider
-      // returns (an `llm` score then drives the normal pass / fail / reroute
-      // path). This is what prevents a human-escalation storm on a provider blip.
-      if (result.heuristicReason === 'provider-down') {
+      // ── Judge-failure deferral (Point 6 fix 1) ────────────────────────────
+      // A scoring key IS configured but the judge produced no verdict → hold in
+      // `review` with a DISTINCT [QC-DEFERRED-PROVIDER-DOWN] marker (never
+      // [QC-HEURISTIC]) so the task is NOT presented as human-required. The
+      // qc-review-sweep retries deferred tasks on a short cadence and auto-
+      // rescores them the moment the judge works again (an `llm` score then
+      // drives the normal pass / fail / reroute path). This is what prevents a
+      // human-escalation storm on a genuine blip.
+      //
+      // NOTE the marker token is a LEGACY LANE KEY, not a diagnosis. It is kept
+      // verbatim because live boards already carry these rows and the sweep /
+      // stale-sweep / promote read-paths all key off it. The DIAGNOSIS lives in
+      // the message text and comes from result.heuristicReason, which now tells
+      // the truth (unreachable vs empty vs malformed).
+      if (isJudgeFailureReason(result.heuristicReason)) {
+        // ── BOUNDED RETRY + ESCALATION HATCH ──────────────────────────────
+        // The deferral above is correct for a BLIP. It was catastrophic for a
+        // PERMANENT fault: "the provider will come back" is an assumption, and
+        // when it is wrong it is wrong FOREVER. On the real incident the judge
+        // was a REASONING model starved by a 300-token completion budget: it
+        // answered, its content came back empty, and the code called that
+        // "provider-down" and re-deferred every 5 minutes for SIX DAYS (~1,700
+        // silent retries) while exempting itself from every escalation path.
+        // A permanent failure wore the costume of a transient one.
+        //
+        // The no-key branch below already solved this exact shape (QC-02):
+        // bounded passes → ONE terminal marker → permanently excluded from the
+        // sweep → visible to a human. This is the SAME hatch, deliberately
+        // mirroring it (marker naming, LIKE-counting, idempotent re-entry,
+        // console.warn, terminal-then-stop) rather than inventing a new one.
+        //
+        // Bound arithmetic: qc-review-sweep retries deferred tasks every
+        // QC_DEFERRED_RETRY_MINUTES (default 5), so the default 12 passes ≈ 1
+        // hour of UNBROKEN failure before we stop calling it transient. A real
+        // blip recovers long before that and never sees this code; an hour of
+        // continuous failure is not a blip, it is a fault a human must see.
+        const judgeFailureMaxPasses = Math.max(
+          1,
+          parseInt(process.env.QC_JUDGE_FAILURE_MAX_PASSES || '12', 10) || 12,
+        );
+
+        // Already escalated? Idempotent no-op — mirrors the no-key `alreadyFinal`
+        // guard. The sweep should already exclude this task permanently; this is
+        // the defensive second line so we never write a second alarm or re-enter
+        // the retry loop through another caller (webhook, watcher).
+        const alreadyJudgeFinal = queryOne<{ one: number }>(
+          `SELECT 1 AS one FROM events
+           WHERE task_id = ? AND type = 'qc_review'
+             AND message LIKE '%[QC-JUDGE-FAILED-FINAL]%'
+           LIMIT 1`,
+          [taskId],
+        );
+        if (alreadyJudgeFinal) {
+          console.log(
+            `[QCScorer] Task "${task.title}" (${taskId}): already [QC-JUDGE-FAILED-FINAL] (judge needs a human) — no re-score, stays in review`,
+          );
+          return result;
+        }
+
+        // Count prior deferrals. SQLite LIKE treats '[' / ']' literally, so
+        // '%[QC-DEFERRED-PROVIDER-DOWN]%' matches ONLY the per-pass marker and
+        // NOT the terminal '[QC-JUDGE-FAILED-FINAL]' (a different token
+        // entirely) — the same bracket discipline the no-key counter relies on.
+        const priorDeferralsRow = queryOne<{ c: number }>(
+          `SELECT COUNT(*) AS c FROM events
+           WHERE task_id = ? AND type = 'qc_review'
+             AND message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%'`,
+          [taskId],
+        );
+        const thisDeferral = (priorDeferralsRow?.c ?? 0) + 1;
+
+        // WHAT failed and WHERE — the six-day questions. Every field below is
+        // OBSERVED, never inferred: the kind comes from the call site that saw
+        // the failure, the endpoint from the same resolver the judge call used.
+        const judgeEndpoint = result.judgeEndpoint ?? getOllamaCloudChatEndpoint();
+        const judgeModelName = result.judgeModel ?? '(unresolved judge model)';
+        const failureLabel = judgeFailureLabel(result.heuristicReason);
+        const failureDetail = result.judgeFailureDetail ?? '(no detail captured)';
+        const providerIsUp = result.heuristicReason !== 'provider-down';
+
+        if (thisDeferral >= judgeFailureMaxPasses) {
+          // Terminal escalation — written ONCE. Two rules this message obeys, both
+          // paid for in days:
+          //   1. It does NOT reuse the deferral's "NOT human-required" language.
+          //      This IS human-required.
+          //   2. It reports the OBSERVED failure and prescribes a fix that matches
+          //      it. The previous draft of this alarm told every reader to "CHECK
+          //      THE ADDRESS FIRST" — which, for the failure that actually
+          //      happened (a starved reasoning-model budget), would have been the
+          //      same wrong lead that burned three analyses. An escalation that
+          //      guesses a category rebuilds the exact defect one layer up.
+          // DETAIL above already states the observed facts and that the provider
+          // is UP; this is the ACTION only. Keep them non-overlapping — an alarm
+          // nobody finishes reading is another way of saying nothing.
+          const nextStep = providerIsUp
+            ? result.heuristicReason === 'judge-empty-response'
+              ? `FIX: raise QC_JUDGE_MAX_TOKENS (default ${QC_JUDGE_MAX_TOKENS_DEFAULT}), or configure a ` +
+                `non-reasoning judge model.`
+              : `FIX: if finish_reason=length the reply was truncated — raise QC_JUDGE_MAX_TOKENS (default ` +
+                `${QC_JUDGE_MAX_TOKENS_DEFAULT}). If the reply is complete but simply not JSON, the judge ` +
+                `model is not honouring the JSON contract — change the judge model.`
+            : `FIX: check that ${judgeEndpoint} is reachable from this box, that OLLAMA_CLOUD_BASE_URL has ` +
+              `no typo, and that OLLAMA_CLOUD_API_KEY is valid for that address.`;
+
+          const finalMsg =
+            `[QC-JUDGE-FAILED-FINAL] Score: ${result.score.toFixed(1)}/10 | QC judge FAILED ${thisDeferral} ` +
+            `consecutive times — this is NOT a transient blip. OBSERVED FAILURE: ${failureLabel}. ` +
+            `Judge model "${judgeModelName}" called at ${judgeEndpoint}. DETAIL: ${failureDetail} ${nextStep} ` +
+            `MANUAL REVIEW REQUIRED: this task can no longer auto-advance review→done — promote it manually, or ` +
+            `fix the judge and clear this marker to re-enable scoring. It is now excluded from the QC review ` +
+            `sweep permanently. ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [uuidv4(), 'qc_review', taskId, finalMsg, now],
+          );
+
+          console.warn(
+            `[QCScorer] Task "${task.title}" (${taskId}): QC judge failed ${thisDeferral}/${judgeFailureMaxPasses} consecutive times — ` +
+              `${failureLabel} (model="${judgeModelName}" endpoint=${judgeEndpoint}) — escalated ONCE to ` +
+              `[QC-JUDGE-FAILED-FINAL]; permanently excluded from qc-review-sweep. ${failureDetail}`,
+          );
+
+          return result;
+        }
+
+        // Per-pass deferral. The marker token stays [QC-DEFERRED-PROVIDER-DOWN]
+        // (legacy lane key — live rows and every read-path depend on it), but the
+        // TEXT no longer claims the provider is down unless it actually is.
         const deferredMsg =
-          `[QC-DEFERRED-PROVIDER-DOWN] Score: ${result.score.toFixed(1)}/10 | QC scorer provider is down — ` +
-          `holding in review and auto-rescoring when it returns (NOT human-required). ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
+          `[QC-DEFERRED-PROVIDER-DOWN] Score: ${result.score.toFixed(1)}/10 | QC judge produced no verdict — ` +
+          `${failureLabel}; holding in review and auto-rescoring (NOT human-required; attempt ` +
+          `${thisDeferral}/${judgeFailureMaxPasses}, judge "${judgeModelName}" at ${judgeEndpoint}). ` +
+          `${failureDetail} ${result.reason}${gapNote} [path:heuristic]${scoredBy}`;
 
         run(
           `INSERT INTO events (id, type, task_id, message, created_at)
@@ -4120,12 +4451,12 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         );
 
         console.log(
-          `[QCScorer] Task "${task.title}" (${taskId}): provider-down — DEFERRED in review, will auto-rescore when the scorer returns (qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
+          `[QCScorer] Task "${task.title}" (${taskId}): judge failure — ${failureLabel} — DEFERRED in review (attempt ${thisDeferral}/${judgeFailureMaxPasses}), will auto-rescore (qc_reroute_attempts unchanged at ${task.qc_reroute_attempts ?? 0})`,
         );
 
         return result;
       }
-      // ── End provider-down deferral ────────────────────────────────────────
+      // ── End judge-failure deferral + escalation hatch ─────────────────────
 
       // ── No-key heuristic (keyless install by design) ─────────────────────
       // QC-02: a keyless box can NEVER auto-advance review→done, so without an

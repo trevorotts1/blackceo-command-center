@@ -179,9 +179,17 @@ test('[P1-05] live chat-completion succeeds with real content -> judge_ok', asyn
   }
 });
 
-// ── 6. 200 OK but empty completion body -> judge_auth_dead ────────────────────
-
-test('[P1-05] chat-completion 200 but empty content -> judge_auth_dead (a 200 is never proof by itself)', async () => {
+// ── 6. 200 OK but empty completion body -> judge_empty_response (NOT auth_dead) ─
+//
+// CHANGED, deliberately: this test used to assert `judge_auth_dead`, encoding a
+// borrowed diagnosis. An HTTP 200 means the request was ACCEPTED — the key
+// WORKED. Calling that "auth dead" sends a human to rotate a healthy credential.
+// Combined with the probe's old `max_tokens: 5`, a REASONING judge would return
+// empty content 100% of the time and this probe would have false-reported auth
+// as dead on a perfectly good box — the six-day story, inside the tool built to
+// prevent it. A 200 with no content is still NOT judge_ok (nothing was scored);
+// it now gets its own honest name.
+test('[P1-05] chat-completion 200 but empty content -> judge_empty_response (the key WORKED; never auth_dead)', async () => {
   process.env.QC_JUDGE_MODEL = 'deepseek-v3:cloud';
   process.env.OLLAMA_CLOUD_API_KEY = 'sk-half-alive-key';
 
@@ -198,7 +206,102 @@ test('[P1-05] chat-completion 200 but empty content -> judge_auth_dead (a 200 is
 
   try {
     const outcome = await checkJudgeProvisioning();
-    assert.equal(outcome.verdict, 'judge_auth_dead');
+    assert.equal(outcome.verdict, 'judge_empty_response');
+    assert.notEqual(outcome.verdict, 'judge_ok', 'a 200 with no content never proves the judge can score');
+    assert.match(outcome.reason, /NOT an auth failure|do not rotate/i);
+  } finally {
+    restore();
+  }
+});
+
+// ── 6b. THE PROBE'S OWN TWIN OF THE SIX-DAY BUG ──────────────────────────────
+//
+// The probe shipped with `max_tokens: 5`. Against a reasoning model — whose
+// hidden `reasoning` field is billed against the SAME completion budget — that
+// is GUARANTEED to return empty content. This asserts the probe now sends a
+// budget a reasoning judge can actually answer within, and so reports judge_ok
+// instead of false-reporting the credential dead.
+test('[P1-05] a REASONING judge is probed with a real budget -> judge_ok, never a false judge_auth_dead', async () => {
+  process.env.QC_JUDGE_MODEL = 'deepseek-v4-flash:cloud';
+  process.env.OLLAMA_CLOUD_API_KEY = 'sk-real-working-key';
+
+  const REASONING_TOKEN_COST = 587; // measured on the live box
+  let sentMaxTokens: number | undefined;
+
+  const restore = stubFetch(async (url, init) => {
+    const u = String(url);
+    if (u.includes('/v1/chat/completions')) {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      sentMaxTokens = body.max_tokens;
+      // Reasoning is emitted first and billed against the same budget: under it,
+      // content is empty. This is the real model's behaviour, not a contrivance.
+      if ((body.max_tokens ?? 0) < REASONING_TOKEN_COST) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: '', reasoning: 'r'.repeat(400) },
+                finish_reason: 'length',
+              },
+            ],
+            usage: { completion_tokens: body.max_tokens },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+          usage: { completion_tokens: REASONING_TOKEN_COST },
+        }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`unexpected fetch to ${u}`);
+  });
+
+  try {
+    const outcome = await checkJudgeProvisioning();
+    assert.ok(
+      (sentMaxTokens ?? 0) >= REASONING_TOKEN_COST,
+      `the probe must send a budget a reasoning judge can answer within (sent ${sentMaxTokens}; ` +
+        `it shipped with 5, which guarantees empty content)`,
+    );
+    assert.equal(
+      outcome.verdict,
+      'judge_ok',
+      `a healthy reasoning judge must probe as judge_ok, not a false auth failure (got ${outcome.verdict})`,
+    );
+  } finally {
+    restore();
+  }
+});
+
+// ── 6c. A non-auth HTTP error must NOT be called auth-dead ───────────────────
+
+test('[P1-05] chat-completion 500 -> judge_unreachable, never judge_auth_dead (5xx says nothing about the key)', async () => {
+  process.env.QC_JUDGE_MODEL = 'deepseek-v3:cloud';
+  process.env.OLLAMA_CLOUD_API_KEY = 'sk-real-working-key';
+
+  const restore = stubFetch(async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/chat/completions')) {
+      return new Response(JSON.stringify({ error: 'upstream exploded' }), {
+        status: 500,
+        statusText: 'Internal Server Error',
+      });
+    }
+    throw new Error(`unexpected fetch to ${u}`);
+  });
+
+  try {
+    const outcome = await checkJudgeProvisioning();
+    assert.equal(
+      outcome.verdict,
+      'judge_unreachable',
+      `a 5xx is a server fault and implicates nothing about the credential (got ${outcome.verdict})`,
+    );
   } finally {
     restore();
   }

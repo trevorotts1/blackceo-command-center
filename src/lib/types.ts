@@ -292,15 +292,20 @@ export interface Task {
   } | null;
   // U38 (C-07) — S3 closure human-promote control (src/lib/qc-promote.ts).
   // Present ONLY when this task is `status:'review'` AND its NEWEST
-  // `qc_review` event is a QC-heuristic-parked marker ([QC-HEURISTIC] /
-  // [QC-HEURISTIC-FINAL] — the QC scorer ran with no LLM/judge key and left
-  // the task in review awaiting a human). NOT a tasks column — computed
-  // per-row in the tasks GET routes, derived from the LATEST qc_review event
-  // so a later LLM re-score (once a key is configured) clears it
-  // automatically. Powers the task-detail modal's QcPromotePanel /
-  // "Promote to Done (operator)" button.
+  // `qc_review` event is a QC-parked marker awaiting a human:
+  //   - [QC-HEURISTIC] / [QC-HEURISTIC-FINAL] — the QC scorer ran with no
+  //     LLM/judge key and left the task in review awaiting a human.
+  //   - [QC-JUDGE-FAILED-FINAL] — a judge IS configured but failed every call up
+  //     to the bound: unreachable, or (the real incident) answering with empty /
+  //     unparseable content because its completion budget was starved. A plain
+  //     [QC-DEFERRED-PROVIDER-DOWN] deliberately does NOT appear here: that
+  //     task is still working and auto-recovers.
+  // NOT a tasks column — computed per-row in the tasks GET routes, derived from
+  // the LATEST qc_review event so a later LLM re-score (once a key is
+  // configured / the judge is fixed) clears it automatically. Powers the
+  // task-detail modal's QcPromotePanel / "Promote to Done (operator)" button.
   qc_heuristic_park?: {
-    marker: 'QC-HEURISTIC' | 'QC-HEURISTIC-FINAL';
+    marker: 'QC-HEURISTIC' | 'QC-HEURISTIC-FINAL' | 'QC-JUDGE-FAILED-FINAL';
     message: string;
     created_at: string;
   } | null;
