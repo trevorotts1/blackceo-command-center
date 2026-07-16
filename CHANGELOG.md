@@ -1,3 +1,31 @@
+## [v6.0.46] — 2026-07-16 — Devil's Advocate feed: real department-id chips (QC defect 1, round 2)
+
+v6.0.46 — Single unit, single serial merge-writer. Lands `fix/devils-advocate-write-path-qc` @
+`f1160f9` (PR #198, round 2, score 9.0/gate 8.5, independent Opus zero-trust review). PR was a
+draft opened only to force CI; marked ready-for-review before this merge.
+
+- **What lands:** DevilsAdvocateFeed.tsx's department lookup maps were keyed to a demo seed's
+  fabricated department ids (`sales-dept`, `marketing-dept`, `operations-dept`, `creative-dept`,
+  `support-dept`) rather than the real resolved workspace ids the write path now produces (U59 CC
+  leg, `marketing`, `sales`, etc., already on main). Every real Devil's Advocate challenge rendered
+  as a raw lowercase gray chip instead of a Title-Case colored one. The component now derives its
+  color/name maps positionally from `CANONICAL_SLUGS`, so a future workspace id structurally cannot
+  drift stale again.
+- **Round 2, and the round-1 blocker is genuinely cured, not patched over:** round 1 was killed for
+  building fixtures against a stale, fictional `DAChallenge` shape. This round's fixtures are
+  read field-for-field off the real `src/app/api/da-challenges/route.ts` contract. Fail-then-pass
+  re-derived from scratch on a pristine current-main worktree (5/11 fail before the fix, 11/11
+  pass after); two independent mutations each go red. Regression safety proven by NAME diff
+  against pristine main (not by count): zero regressions introduced.
+- CI 20/20 green on the exact scored SHA (paginated verification). Zero AI-authorship trailers;
+  author/committer both Trevor Otts <trevor@blackceo.com> on the sole commit.
+- **One non-blocking finding, disclosed by the judge, not fixed in this merge:** `canonicalDeptSlug`
+  handles a leading `dept-` prefix but not a trailing `-dept` suffix, so five legacy fabricated ids
+  would still render raw+gray. Impact assessed near-zero — no live write path can produce such an
+  id, and migration 103 purges them — routed as an owed leg for whoever touches this next.
+
+Ticket: `~/skill6-merge-queue/CC/da-chips-fix.json`.
+
 ## [v6.0.45] — 2026-07-16 — U39 (C-08) CC leg: S4 producer→review→done lifecycle contract, QC FAIL path
 
 v6.0.45 — Single unit, single serial merge-writer. Lands `skill6-v2/U39` @ `163e75eb` (PR #199,
