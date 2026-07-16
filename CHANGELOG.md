@@ -1,3 +1,54 @@
+## [v6.0.51] — 2026-07-16 — U115 (E6-1, closes G7) CC leg: per-part governance kanban/modal audience row
+
+v6.0.51 — Single unit, single serial merge-writer. Lands `skill6-v2/U115` @ `64ccd7ab`
+(PR #200, score 8.6/gate 8.5, independent Sonnet zero-trust review). PR was a draft opened
+only to force CI; marked ready-for-review before this merge.
+
+- **What lands:** extends migration 105's `task_persona_bundle_scope` with 5 nullable mirror
+  columns (`part_role`, `stage`, `topic_persona_id`, `audience_label`, `audience_source`)
+  mirroring ONB's `govern_task_parts()` 8-key map-record shape byte-for-byte (independently
+  verified against actual ONB source). Persist/load extended in `persona-selector.ts`; render
+  wired through `TaskCard.tsx`'s `PersonaScopeChips`, reused unmodified by the task-detail
+  modal (`PersonaPlanPanel` -> `TaskModal` -> `MissionQueue.tsx`).
+- **15 new tests** across persist/load/render; fail-then-pass and 3/3 mutation proof
+  independently re-derived exact match to the builder's claimed numbers. 20/20 CI green on
+  the exact head SHA (cross-checked via unauthenticated REST + `gh pr checks`; authenticated
+  `gh api` REST returned the same transient repo-wide 5xx already documented on this day).
+  Zero AI trailers; author/committer both Trevor Otts on the sole commit.
+- **MERGE-WRITER CONFLICT RESOLUTION — migration id collision, resolved by renumbering:**
+  the branch was scored/built with its new migration at id `106`. Between QC and this merge,
+  main independently landed a DIFFERENT migration `106` (provider-defects-fix, v6.0.49,
+  `provider_auth_proof_cache.failure_kind`) — an id collision, not a semantic conflict: both
+  migrations are purely additive and touch entirely disjoint tables. Resolved by renumbering
+  U115's migration to the next free id, `107`, per `migrations.ts`'s own DATA-03 duplicate-id
+  fail-fast guard. Neither U115 test asserts on the numeric migration id (only on column
+  existence via `PRAGMA table_info`), so the renumber does not change test behavior. All
+  in-file comment/log-string references to "migration 106" within U115's own files were
+  updated to "107" for consistency; provider-defects-fix's own migration 106 is untouched.
+  **Extra verification beyond the standard gate re-run:** ran migration 107's `up()` body
+  against a constructed pre-existing DB shape (migrations 105+106 already applied, a real
+  row present, no U115 columns) — all 5 columns added, the pre-existing row survived with
+  the new columns NULL, `_migrations` records exactly one row for `107` and exactly one for
+  `106` (no duplicates, no gaps), and migration 106's own column was untouched.
+- Merged-tree gate re-run: `tsc --noEmit` clean; U115's own suites 9/9 (node:test) + 6/6
+  (vitest component); full `test:unit` 1696/1701 (5 pre-existing `getInterviewState`
+  environmental failures, identical names, unrelated to this PR); `test:component` 101/101;
+  `lint` clean (pre-existing warnings only); `build` clean.
+- **Known, disclosed, non-blocking (priced into the QC score, not a blocker):**
+  `persistPersonaBundleScope` (the write side) has zero production callers on either repo
+  today — the ONB→CC producer bridge for `routing/part-persona-map.json` does not exist yet
+  on either side (same doctrine finding as U11). The READ side (`loadPersonaBundleScopes`) IS
+  production-wired (`api/tasks/[id]/route.ts`, `api/tasks/route.ts`). This is the SECOND unit
+  (after A-U5) to build render/persist plumbing atop this table without a producer; flagged
+  for the operator to log a dedicated wiring unit rather than let a third render-layer unit
+  land on the same unwired table.
+- **Repo/surface = `both` per master spec §E.2.** U115's ONB leg is already merged
+  (`c396225` on `trevorotts1/openclaw-onboarding` main, scored 9.5). This CC leg is the
+  second and final leg — **U115 is now fully landed across both repos, moving the /117
+  count 93 → 94.**
+
+Ticket: `~/skill6-merge-queue/CC/U115.json`.
+
 ## [v6.0.50] — 2026-07-16 — U107 (E5-2, closes G2a) CC leg: vertical never force-added to a client who is not that vertical
 
 v6.0.50 — Single unit, single serial merge-writer. Lands `skill6-v2/U107` @ `fb6d7520`
