@@ -2,16 +2,32 @@
 
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Shield, AlertTriangle, Clock, MessageSquare } from 'lucide-react';
+import { Shield, AlertTriangle, Clock, CheckCircle2, XCircle } from 'lucide-react';
 
+/**
+ * U59 [JM/U55] / decision D15 (D-J1): this surface renders the Devil's
+ * Advocate's challenge CONTENT — ratified as client-visible — while the AGENT
+ * itself stays internal (migration 065 keeps it off client rosters and agent
+ * pickers, and never promotes a trio agent to department head; none of that is
+ * touched here).
+ *
+ * Shape follows the reconciled da_challenges table (migration 024). The prior
+ * version of this interface named challenge_text / response_text /
+ * response_deadline and a status enum of open|responded|escalated — none of
+ * which existed in any migration. It matched a phantom shape, which is why the
+ * feed's own endpoint 500'd on every canonically-migrated box.
+ */
 interface DAChallenge {
   id: string;
-  department_id: string;
-  challenge_text: string;
-  response_text: string | null;
-  status: 'open' | 'responded' | 'escalated';
+  department_id: string | null;
+  trigger_type: string;
+  challenge: string;
+  specific_concern: string | null;
+  severity: 'low' | 'medium' | 'high' | null;
+  /** A department's reply to the challenge, once one exists. */
+  outcome: string | null;
+  status: 'pending' | 'approved' | 'rejected' | 'escalated';
   created_at: string;
-  response_deadline: string | null;
   resolved_at: string | null;
   /** Which persona the DA is operating under for this challenge */
   persona?: string;
@@ -33,22 +49,34 @@ const departmentNames: Record<string, string> = {
   'support-dept': 'Support',
 };
 
+/** The PRD lifecycle, ratified as canonical by D15 (D-J1) sub-part (ii). */
 const statusConfig = {
-  open: {
-    label: 'Open',
+  pending: {
+    label: 'Pending',
     className: 'bg-amber-100 text-amber-700 border-amber-200',
     icon: Clock,
   },
-  responded: {
-    label: 'Responded',
+  approved: {
+    label: 'Approved',
     className: 'bg-emerald-100 text-emerald-700 border-emerald-200',
-    icon: MessageSquare,
+    icon: CheckCircle2,
+  },
+  rejected: {
+    label: 'Rejected',
+    className: 'bg-gray-100 text-gray-700 border-gray-200',
+    icon: XCircle,
   },
   escalated: {
     label: 'Escalated',
     className: 'bg-red-100 text-red-700 border-red-200',
     icon: AlertTriangle,
   },
+} as const;
+
+const severityConfig: Record<string, { label: string; className: string }> = {
+  low: { label: 'Low', className: 'bg-gray-100 text-gray-600 border-gray-200' },
+  medium: { label: 'Medium', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+  high: { label: 'High', className: 'bg-red-50 text-red-700 border-red-200' },
 };
 
 function formatTimeAgo(dateString: string): string {
@@ -63,10 +91,12 @@ function formatTimeAgo(dateString: string): string {
   return 'Just now';
 }
 
-function isOverdue(deadline: string | null): boolean {
-  if (!deadline) return false;
-  return new Date(deadline) < new Date();
-}
+// NOTE: the previous version carried an isOverdue(response_deadline) helper.
+// The reconciled table has no response_deadline column and no migration ever
+// created one, so a deadline was never persisted and the "Response deadline
+// passed" banner could only ever have fired on fabricated demo rows. Removed
+// rather than faked — a Service-Level window for challenges belongs in the
+// per-department SLA table, not invented in a feed component.
 
 export function DevilsAdvocateFeed() {
   const [challenges, setChallenges] = useState<DAChallenge[]>([]);
@@ -175,10 +205,14 @@ export function DevilsAdvocateFeed() {
       {/* Challenges List */}
       <div className="space-y-4">
         {challenges.map((challenge, index) => {
-          const StatusIcon = statusConfig[challenge.status].icon;
-          const isEscalated = challenge.status === 'escalated';
-          const hasResponse = challenge.status === 'responded' && challenge.response_text;
-          const overdue = isOverdue(challenge.response_deadline);
+          // Fall back to 'pending' rather than crashing on an unrecognised
+          // status: a row written by an older box mid-roll must never blank
+          // the whole board with an undefined-index throw.
+          const status = statusConfig[challenge.status] ? challenge.status : 'pending';
+          const StatusIcon = statusConfig[status].icon;
+          const isEscalated = status === 'escalated';
+          const hasResponse = Boolean(challenge.outcome);
+          const severity = challenge.severity ? severityConfig[challenge.severity] : null;
 
           return (
             <motion.div
@@ -192,21 +226,32 @@ export function DevilsAdvocateFeed() {
                   : 'border-gray-200 bg-white'
               }`}
             >
-              {/* Top Row: Department & Status */}
+              {/* Top Row: Department, Severity & Status */}
               <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-medium border ${
+                      (challenge.department_id && departmentColors[challenge.department_id]) ||
+                      'bg-gray-100 text-gray-700 border-gray-200'
+                    }`}
+                  >
+                    {(challenge.department_id && departmentNames[challenge.department_id]) ||
+                      challenge.department_id ||
+                      'Unassigned'}
+                  </span>
+                  {severity && (
+                    <span
+                      className={`px-2 py-1 rounded-full text-xs font-medium border ${severity.className}`}
+                    >
+                      {severity.label}
+                    </span>
+                  )}
+                </div>
                 <span
-                  className={`px-3 py-1 rounded-full text-xs font-medium border ${
-                    departmentColors[challenge.department_id] ||
-                    'bg-gray-100 text-gray-700 border-gray-200'
-                  }`}
-                >
-                  {departmentNames[challenge.department_id] || challenge.department_id}
-                </span>
-                <span
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${statusConfig[challenge.status].className}`}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${statusConfig[status].className}`}
                 >
                   <StatusIcon className="h-3 w-3" />
-                  {statusConfig[challenge.status].label}
+                  {statusConfig[status].label}
                 </span>
               </div>
 
@@ -222,25 +267,23 @@ export function DevilsAdvocateFeed() {
 
               {/* Challenge Text */}
               <p className="text-sm text-gray-700 leading-relaxed mb-3">
-                {challenge.challenge_text}
+                {challenge.challenge}
               </p>
+
+              {/* Specific Concern */}
+              {challenge.specific_concern && (
+                <div className="p-3 rounded-lg bg-indigo-50/60 border border-indigo-100 mb-3">
+                  <p className="text-xs text-indigo-500 font-medium mb-1">Specific concern:</p>
+                  <p className="text-sm text-gray-700">{challenge.specific_concern}</p>
+                </div>
+              )}
 
               {/* Escalation Warning */}
               {isEscalated && (
                 <div className="flex items-center gap-2 p-3 rounded-lg bg-red-100 border border-red-200 mb-3">
                   <AlertTriangle className="h-4 w-4 text-red-600 flex-shrink-0" />
                   <p className="text-xs text-red-700 font-medium">
-                    ⚠️ No response in 72 hours
-                  </p>
-                </div>
-              )}
-
-              {/* Overdue Warning (for open status) */}
-              {challenge.status === 'open' && overdue && (
-                <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-100 border border-amber-200 mb-3">
-                  <AlertTriangle className="h-4 w-4 text-amber-600 flex-shrink-0" />
-                  <p className="text-xs text-amber-700 font-medium">
-                    ⚠️ Response deadline passed
+                    ⚠️ Escalated for review
                   </p>
                 </div>
               )}
@@ -249,7 +292,7 @@ export function DevilsAdvocateFeed() {
               {hasResponse && (
                 <div className="p-3 rounded-lg bg-gray-50 border border-gray-200 mb-3">
                   <p className="text-badge text-gray-500 font-medium mb-1">Department Response:</p>
-                  <p className="text-base text-gray-700">{challenge.response_text}</p>
+                  <p className="text-base text-gray-700">{challenge.outcome}</p>
                 </div>
               )}
 

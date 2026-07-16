@@ -103,7 +103,13 @@ export interface DispatchSchemaHealth {
 }
 
 // All migrations in order - NEVER remove or reorder existing migrations
-const migrations: Migration[] = [
+// Exported (additive — runMigrations remains the only caller in app code) so a
+// single migration can be unit-tested in isolation against a fixture database.
+// Applying the whole array to a bare fixture is not a viable test: later
+// migrations depend on tables an isolated fixture has no reason to carry, so a
+// test that wants to prove ONE migration's data mapping must be able to reach
+// that migration's own `up`.
+export const migrations: Migration[] = [
   {
     id: '001',
     name: 'initial_schema',
@@ -798,10 +804,198 @@ const migrations: Migration[] = [
     }
   },
   // ============================================================
+  // U59 [JM/U55] — the da_challenges shape reconciliation migration 020
+  // explicitly defers to. Reserved by PR #11 and never implemented; the
+  // slot sat empty while migration 020's own comment ("Migration 024 owns
+  // the legacy -> canonical reconciliation; here we just no-op and let 024
+  // do the work on the next pass") promised it, and the index-repair
+  // migration's comment ("migration 020 defers a legacy da_challenges to
+  // 024, which reconciles the table") assumed it had landed. Neither was
+  // true. Consequences this closes, both VERIFIED against the operator's
+  // live database this pass:
+  //   1. On a CANONICAL box (020 created the table fresh — the normal
+  //      case), GET /api/da-challenges seeded demo rows naming columns
+  //      department_id / challenge_text / response_text / response_deadline
+  //      that migration 020 never creates. Reproduced exactly against a
+  //      byte-copy of the live DB: "table da_challenges has no column named
+  //      department_id" -> the route's own try/catch turns it into HTTP 500.
+  //      The Devil's Advocate feed has therefore NEVER rendered on a
+  //      canonically-migrated box.
+  //   2. On a LEGACY box (a pre-020 da_challenges already present), 020
+  //      no-ops forever waiting for a 024 that does not exist, so the table
+  //      keeps a shape no current code targets.
+  // This migration reconciles BOTH shapes onto one canonical table and
+  // adopts the PRD status lifecycle per decision D15 (D-J1) sub-part (ii).
+  //
+  // Rebuild (not ALTER): SQLite cannot alter a CHECK constraint in place,
+  // and the status CHECK must change. A rebuild drops every index on the
+  // table (the exact hazard the index-repair migration documents), so the
+  // three canonical indexes are replayed explicitly at the end.
+  // deferInAdditiveSelfHeal: a rebuild is not additive-only DDL — it must
+  // never run during a request-time self-heal racing live traffic.
+  {
+    id: '024',
+    name: 'reconcile_da_challenges_shape',
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      const RECONCILED = `
+        CREATE TABLE da_challenges_new (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          task_id TEXT,
+          campaign_id TEXT,
+          department_id TEXT,
+          trigger_type TEXT NOT NULL,
+          challenge TEXT NOT NULL,
+          specific_concern TEXT,
+          assumptions TEXT,
+          severity TEXT CHECK(severity IN ('low', 'medium', 'high')),
+          confidence REAL,
+          raw_response TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'approved', 'rejected', 'escalated')),
+          dismissal_reason TEXT,
+          outcome TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT
+        )
+      `;
+
+      const replayIndexes = () => {
+        db.prepare('CREATE INDEX IF NOT EXISTS idx_da_task ON da_challenges(task_id)').run();
+        db.prepare('CREATE INDEX IF NOT EXISTS idx_da_status ON da_challenges(status)').run();
+        db.prepare('CREATE INDEX IF NOT EXISTS idx_da_severity ON da_challenges(severity)').run();
+        db.prepare(
+          'CREATE INDEX IF NOT EXISTS idx_da_department ON da_challenges(department_id)',
+        ).run();
+      };
+
+      const existing = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='da_challenges'`)
+        .get() as { name: string } | undefined;
+
+      // No table at all (a box where 020 has not run yet): create the
+      // reconciled shape directly. 020's CREATE TABLE IF NOT EXISTS then
+      // no-ops behind us, and numeric ordering means 020 runs first anyway
+      // on a fresh box — this branch is belt-and-braces, never the hot path.
+      if (!existing) {
+        db.prepare(RECONCILED).run();
+        db.prepare('ALTER TABLE da_challenges_new RENAME TO da_challenges').run();
+        replayIndexes();
+        console.log('[Migration 024] da_challenges created in reconciled shape (no prior table)');
+        return;
+      }
+
+      const cols = (
+        db.prepare(`PRAGMA table_info(da_challenges)`).all() as { name: string }[]
+      ).map((c) => c.name);
+
+      // Already reconciled (idempotent re-entry guard): the two columns this
+      // migration adds are both present AND the status CHECK already names
+      // the PRD lifecycle. Nothing to do.
+      const ddl =
+        (
+          db
+            .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='da_challenges'`)
+            .get() as { sql: string } | undefined
+        )?.sql ?? '';
+      if (
+        cols.includes('department_id') &&
+        cols.includes('raw_response') &&
+        ddl.includes("'pending'")
+      ) {
+        replayIndexes();
+        console.log('[Migration 024] da_challenges already reconciled — indexes verified');
+        return;
+      }
+
+      const has = (c: string) => cols.includes(c);
+      const isCanonical = has('task_id');
+
+      // Status vocabularies in play, all three real:
+      //   canonical (migration 020 CHECK): open | accepted | dismissed | overridden
+      //   legacy    (route.ts TS type)   : open | responded | escalated
+      //   PRD (D15 (ii), the target)     : pending | approved | rejected | escalated
+      // NOTE for the record: D15's own text framed sub-part (ii) as "the
+      // code's open/responded/escalated" vs the PRD's four. That premise was
+      // incomplete — open/responded/escalated is the TypeScript interface in
+      // route.ts, never a DB constraint. The actual migrated CHECK is
+      // open/accepted/dismissed/overridden, a THIRD vocabulary the decision
+      // text never mentions. Both are mapped below so neither box class
+      // loses a row.
+      const statusExpr = isCanonical
+        ? `CASE status
+             WHEN 'open' THEN 'pending'
+             WHEN 'accepted' THEN 'approved'
+             WHEN 'dismissed' THEN 'rejected'
+             WHEN 'overridden' THEN 'escalated'
+             ELSE 'pending'
+           END`
+        : `CASE status
+             WHEN 'open' THEN 'pending'
+             WHEN 'responded' THEN 'approved'
+             WHEN 'escalated' THEN 'escalated'
+             ELSE 'pending'
+           END`;
+
+      // Build the SELECT defensively from the columns that actually exist —
+      // a legacy table's exact shape is not guaranteed across boxes.
+      const pick = (c: string, fallback = 'NULL') => (has(c) ? c : fallback);
+      const challengeExpr = has('challenge')
+        ? 'challenge'
+        : has('challenge_text')
+          ? 'challenge_text'
+          : `''`;
+      // trigger_type is NOT NULL; legacy rows carry none.
+      const triggerExpr = has('trigger_type') ? `COALESCE(trigger_type, 'legacy_import')` : `'legacy_import'`;
+      // A legacy response_text is a human reply to the challenge — the
+      // closest canonical home is outcome, not a dropped column.
+      const outcomeExpr = has('outcome') ? 'outcome' : has('response_text') ? 'response_text' : 'NULL';
+
+      db.prepare(RECONCILED).run();
+      db.prepare(
+        `INSERT INTO da_challenges_new
+           (id, task_id, campaign_id, department_id, trigger_type, challenge,
+            specific_concern, assumptions, severity, confidence, raw_response,
+            status, dismissal_reason, outcome, created_at, resolved_at)
+         SELECT
+           id,
+           ${pick('task_id')},
+           ${pick('campaign_id')},
+           ${pick('department_id')},
+           ${triggerExpr},
+           ${challengeExpr},
+           ${pick('specific_concern')},
+           ${pick('assumptions')},
+           ${pick('severity')},
+           ${pick('confidence')},
+           ${pick('raw_response')},
+           ${has('status') ? statusExpr : `'pending'`},
+           ${pick('dismissal_reason')},
+           ${outcomeExpr},
+           ${has('created_at') ? `COALESCE(created_at, datetime('now'))` : `datetime('now')`},
+           ${pick('resolved_at')}
+         FROM da_challenges`,
+      ).run();
+
+      const moved = (
+        db.prepare('SELECT COUNT(*) AS n FROM da_challenges_new').get() as { n: number }
+      ).n;
+
+      db.prepare('DROP TABLE da_challenges').run();
+      db.prepare('ALTER TABLE da_challenges_new RENAME TO da_challenges').run();
+      replayIndexes();
+
+      console.log(
+        `[Migration 024] da_challenges reconciled from ${isCanonical ? 'canonical' : 'legacy'} ` +
+          `shape -> PRD lifecycle (D15/D-J1 (ii)); ${moved} row(s) carried over; indexes replayed`,
+      );
+    },
+  },
+  // ============================================================
   // Track S — Auto-research + auto-replace deleted SOPs
   // ============================================================
-  // NOTE: migration 024 is reserved by PR #11 (da_challenges shape
-  // reconciliation). Track S takes 025.
+  // Track S takes 025. (Migration 024 above is the da_challenges shape
+  // reconciliation formerly reserved by PR #11 — now implemented.)
   // ============================================================
   // v3.7.0 — Eval v2.0 backlog clearance migrations
   // ============================================================
