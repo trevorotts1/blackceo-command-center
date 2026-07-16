@@ -23,6 +23,7 @@ import path from 'path';
 import os from 'os';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, DB_PATH } from '@/lib/db';
+import { getNotificationFailuresLogStats } from '@/lib/notify';
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -1261,4 +1262,169 @@ export function checkSkill6BoardProjection(): Skill6BoardProjectionResult {
     unwired_count: unwiredCount,
     detail: `skill6_board_projection: OK — ${runDirs.length} run(s) completed intake, ${landedTaskIds.length} card(s) landed and confirmed on the board (projecting)`,
   };
+}
+
+// ── check: notification-failures.jsonl size (U102 / C12.3 item 10b) ────────
+//
+// PROBLEM (master spec C12.3 item 10): the MSG-07 undeliverable ledger
+// (`notify.ts`'s `notification-failures.jsonl` — the last rung of the
+// escalation ladder, written whenever an owner/system notification could not
+// be delivered by any other means) is durable and complete, but it is only
+// ever discoverable by reading server logs / SSHing into the box. This check
+// surfaces its SIZE as an advisory health field so an operator can see
+// "undeliverables are accumulating" from the same JSON payload that already
+// reports every other posture check — no shell access required.
+//
+// DESIGN NOTE — same posture as every other advisory check in this file
+// (anthology/skill6 board projection, sweep_liveness): non-gating. A pile of
+// undeliverable records is an OPERATIONAL signal (something downstream —
+// Telegram config, an operator chat id — needs attention), never a Command
+// Center correctness fault, so it must never flip the top-level pass/
+// indeterminate verdict or trip auto-rollback. The route wrapper (route.ts)
+// enforces that by keeping this OUT of the `checks` aggregation, exactly like
+// its siblings.
+//
+// The absolute file path is deliberately OMITTED from the returned detail —
+// this check is surfaced through the unauthenticated /api/health/deep bypass
+// (same discipline `checkAnthologyBoardProjection` / `checkSkill6BoardProjection`
+// already apply to their own resolved paths).
+
+/** Default advisory threshold (line count) above which the check flags
+ *  accumulation. Purely informational — see DESIGN NOTE above; overridable
+ *  via NOTIFICATION_FAILURES_LOG_WARN_LINES for a box with different traffic. */
+export const NOTIFICATION_FAILURES_LOG_WARN_LINES_DEFAULT = 25;
+
+function resolveNotificationFailuresWarnLines(): number {
+  const parsed = parseInt(process.env.NOTIFICATION_FAILURES_LOG_WARN_LINES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : NOTIFICATION_FAILURES_LOG_WARN_LINES_DEFAULT;
+}
+
+export interface NotificationFailuresLogCheckResult extends CheckResult {
+  exists: boolean;
+  size_bytes: number;
+  line_count: number;
+}
+
+export function checkNotificationFailuresLog(): NotificationFailuresLogCheckResult {
+  try {
+    const stats = getNotificationFailuresLogStats();
+
+    if (!stats.exists) {
+      return {
+        pass: true,
+        exists: false,
+        size_bytes: 0,
+        line_count: 0,
+        detail: 'notification_failures_log: OK — no notification-failures.jsonl on this box (no undeliverable notifications ever recorded)',
+      };
+    }
+
+    const warnLines = resolveNotificationFailuresWarnLines();
+
+    if (stats.lineCount > warnLines) {
+      return {
+        pass: false,
+        indeterminate: false,
+        exists: true,
+        size_bytes: stats.sizeBytes,
+        line_count: stats.lineCount,
+        detail: `notification_failures_log: ${stats.lineCount} undeliverable notification(s) recorded (${stats.sizeBytes} bytes) — above the ${warnLines}-line advisory threshold; review notification-failures.jsonl on this box (non-gating)`,
+      };
+    }
+
+    return {
+      pass: true,
+      exists: true,
+      size_bytes: stats.sizeBytes,
+      line_count: stats.lineCount,
+      detail: `notification_failures_log: OK — ${stats.lineCount} undeliverable notification(s) recorded (${stats.sizeBytes} bytes), within the ${warnLines}-line advisory threshold`,
+    };
+  } catch (err) {
+    return {
+      pass: true,
+      indeterminate: true,
+      exists: false,
+      size_bytes: 0,
+      line_count: 0,
+      detail: `notification_failures_log: could not read log stats — ${err instanceof Error ? err.message : String(err)} (UNKNOWN; non-gating)`,
+    };
+  }
+}
+
+// ── check: trust-coverage health metric (U94 / X.2.3) ───────────────────────
+//
+// "Requester-stamping completeness at every human creation door + a
+// trust-coverage health metric >= 95%." The three enumerated doors
+// (Command-Center UI create, Telegram/CEO-chat ingest, interview-driven
+// department provisioning) each tag their own task_created event with a
+// SEPARATE `requester_stamp_check` event (see src/lib/tasks.ts createTaskCore
+// and src/app/api/departments/route.ts createDepartmentInDbDirect) recording
+// whether THAT call landed a requester stamp — independent of the tasks
+// table's requester_channel/requester_chat_id columns, so the ratio can never
+// be circular (a door that never fires this event is a producer/operator
+// create and correctly stays OUT of the denominator, per "producer-created
+// tasks keep the operator-digest fallback").
+export interface TrustCoverageResult extends CheckResult {
+  human_door_total?: number;
+  human_door_stamped?: number;
+  coverage_pct?: number;
+}
+
+/** The X.2.3 floor: coverage below this on a box with real traffic is DRIFT. */
+export const TRUST_COVERAGE_MIN_PCT = 95;
+
+export function checkTrustCoverage(): TrustCoverageResult {
+  try {
+    const db = getDb();
+    const totalRow = db
+      .prepare(`SELECT COUNT(*) as c FROM events WHERE type = 'requester_stamp_check'`)
+      .get() as { c: number } | undefined;
+    const total = totalRow?.c ?? 0;
+
+    if (total === 0) {
+      // No human-door creation has ever fired on this box — legitimate PASS
+      // (nothing to measure yet), never a false DRIFT on a fresh install.
+      return {
+        pass: true,
+        human_door_total: 0,
+        human_door_stamped: 0,
+        coverage_pct: 100,
+        detail:
+          'trust_coverage: OK — no human-door task creations recorded yet on this box; nothing to measure',
+      };
+    }
+
+    const stampedRow = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM events
+          WHERE type = 'requester_stamp_check'
+            AND json_extract(metadata, '$.hasRequester') = 1`,
+      )
+      .get() as { c: number } | undefined;
+    const stamped = stampedRow?.c ?? 0;
+
+    const pct = Math.round((stamped / total) * 10000) / 100;
+    const pass = pct >= TRUST_COVERAGE_MIN_PCT;
+
+    return {
+      pass,
+      human_door_total: total,
+      human_door_stamped: stamped,
+      coverage_pct: pct,
+      detail: pass
+        ? `trust_coverage: OK — ${stamped}/${total} human-door task(s) (${pct}%) carry a requester stamp (>= ${TRUST_COVERAGE_MIN_PCT}% floor)`
+        : `trust_coverage: DRIFT — only ${stamped}/${total} human-door task(s) (${pct}%) carry a requester stamp (< ${TRUST_COVERAGE_MIN_PCT}% floor)`,
+    };
+  } catch (err) {
+    // Never fabricate a verdict on a read failure (locked/unavailable DB) —
+    // degrade to UNKNOWN, non-gating, same posture as every other advisory
+    // check in this file.
+    return {
+      pass: true,
+      indeterminate: true,
+      detail: `trust_coverage: advisory probe unavailable — ${
+        err instanceof Error ? err.message : String(err)
+      } (UNKNOWN; non-gating)`,
+    };
+  }
 }

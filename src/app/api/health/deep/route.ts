@@ -25,7 +25,9 @@
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
  *     "anthology_board_projection": { "pass": bool, "detail": string, ... },
  *     "skill6_board_projection":    { "pass": bool, "detail": string, ... }, // U27 / B-U13
- *     "sweep_liveness":             { "pass": bool, "detail": string, ... }
+ *     "sweep_liveness":             { "pass": bool, "detail": string, ... },
+ *     "notification_failures_log":  { "pass": bool, "detail": string, ... }, // U102 / C12.3 item 10b
+ *     "trust_coverage":             { "pass": bool, "detail": string, ... }  // U94 / X.2.3
  *   }
  * }
  *
@@ -44,6 +46,10 @@
  *   an advancer gone silent is an operational alert (routed separately,
  *   cooldown-guarded, via sweep-liveness.ts's own scheduler.ts cron entry),
  *   never a reason to auto-rollback a healthy deploy or halt the heartbeat.
+ *   `notification_failures_log` (U102 / C12.3 item 10b) is the same posture
+ *   again: the size of the MSG-07 undeliverable ledger is an operational
+ *   signal (something downstream of notify.ts needs attention), never a
+ *   Command Center correctness fault.
  *
  * Exit / HTTP semantics:
  *   200 + pass=true              → green
@@ -63,6 +69,8 @@ import {
   checkNextPublicAppUrl,
   checkAnthologyBoardProjection,
   checkSkill6BoardProjection,
+  checkNotificationFailuresLog,
+  checkTrustCoverage,
 } from '@/lib/health/deep-checks';
 import { checkSweepLiveness } from '@/lib/jobs/sweep-liveness';
 
@@ -150,6 +158,40 @@ export async function GET() {
         pass: true,
         indeterminate: true,
         detail: `sweep_liveness: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    // U102 / C12.3 item 10b — notification-failures.jsonl size. Own try/catch
+    // for the same reason as the two blocks above: a throw here must NEVER
+    // reach the outer catch (which would return 500 + pass:false and could
+    // trip auto-rollback/heartbeat-gate consumers that only read
+    // d.pass / d.indeterminate).
+    try {
+      advisory.notification_failures_log = checkNotificationFailuresLog();
+    } catch (advErr) {
+      advisory.notification_failures_log = {
+        pass: true,
+        indeterminate: true,
+        detail: `notification_failures_log: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    // U94 (X.2.3) — trust-coverage advisory. Same isolation posture as the
+    // three blocks above: a throw here must NEVER reach the outer catch. A
+    // requester-stamping gap is an operational signal (some human-facing
+    // door regressed), never a Command Center correctness fault, so it must
+    // NEVER trip auto-rollback or halt the heartbeat.
+    try {
+      advisory.trust_coverage = checkTrustCoverage();
+    } catch (advErr) {
+      advisory.trust_coverage = {
+        pass: true,
+        indeterminate: true,
+        detail: `trust_coverage: advisory probe unavailable — ${
           advErr instanceof Error ? advErr.message : String(advErr)
         } (UNKNOWN; non-gating)`,
       };

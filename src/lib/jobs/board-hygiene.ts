@@ -22,6 +22,16 @@
  *      `auto_archived_stale` event. Tasks WITHOUT a requester id → operator
  *      digest instead (batched into ONE message per run, never a per-task
  *      drip — MOVE-IN-SILENCE / 2.5 batching doctrine).
+ *   6. (skill6-v2 U33 / C-02) backlog card with an incomplete Triad
+ *      (checkTriad, src/lib/sops.ts:432 — missing description / SOP /
+ *      persona) sitting untouched > 48h → ONE operator-lane alert naming the
+ *      missing field(s) in the SAME vocabulary the card pill uses
+ *      (board-labels.ts). Closes the day-0→day-21 dead zone BEFORE rule 5's
+ *      21-day stale nudge above ever fires — a Triad-incomplete card
+ *      currently has no escalation between creation and day 21. Anchored on
+ *      `created_at` (day 0), not `last_progress_at`/`updated_at`, since an
+ *      ungroomed card that has never been touched has no progress timestamp
+ *      to anchor on.
  *
  * ── TRUST-ENGINE INTEGRATION SEAM (P1-04) ───────────────────────────────────
  * The spec's part (c).1 says the owner-facing re-ping and the stale-backlog
@@ -67,6 +77,8 @@ import { notifyOwner, notifySystem, notifyTelegram } from '@/lib/notify';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { isContentTask } from '@/lib/tasks';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
+import { checkTriad } from '@/lib/sops';
+import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { v4 as uuidv4 } from 'uuid';
 
 export const BOARD_HYGIENE_CRON = '0 * * * *'; // hourly, on the hour
@@ -79,6 +91,8 @@ const REVIEW_UNSCORED_HOURS = numEnv('BOARD_HYGIENE_REVIEW_UNSCORED_HOURS', 24);
 const DONE_ARCHIVE_DAYS = numEnv('BOARD_HYGIENE_DONE_ARCHIVE_DAYS', 30);
 const STALE_BACKLOG_NUDGE_DAYS = numEnv('BOARD_HYGIENE_STALE_BACKLOG_NUDGE_DAYS', 21);
 const STALE_BACKLOG_ARCHIVE_AFTER_NUDGE_DAYS = numEnv('BOARD_HYGIENE_STALE_ARCHIVE_AFTER_NUDGE_DAYS', 7);
+// skill6-v2 U33 / C-02 — Triad-stall alert threshold (day-0→day-21 dead zone).
+const TRIAD_STALL_HOURS = numEnv('BOARD_HYGIENE_TRIAD_STALL_HOURS', 48);
 
 // Re-fire cooldowns — not individually specified by the spec beyond the
 // explicit "max once/48h" on the owner re-ping (rule 1); the same cadence is
@@ -88,6 +102,7 @@ const STALE_BACKLOG_ARCHIVE_AFTER_NUDGE_DAYS = numEnv('BOARD_HYGIENE_STALE_ARCHI
 const OWNER_REPING_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_OWNER_REPING_COOLDOWN_HOURS', 48);
 const OPERATOR_ESCALATE_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_ESCALATE_COOLDOWN_HOURS', 48);
 const QC_STARVED_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_QC_STARVED_COOLDOWN_HOURS', 48);
+const TRIAD_STALL_COOLDOWN_HOURS = numEnv('BOARD_HYGIENE_TRIAD_STALL_COOLDOWN_HOURS', 48);
 
 function numEnv(name: string, fallback: number): number {
   const v = parseFloat(process.env[name] ?? '');
@@ -114,6 +129,8 @@ const EVT_QC_STARVED = 'qc_starved';
 const EVT_DONE_ARCHIVED = 'board_hygiene_auto_archived_done';
 const EVT_STALE_NUDGED = 'board_hygiene_stale_nudged';
 const EVT_STALE_ARCHIVED = 'auto_archived_stale';
+// skill6-v2 U33 / C-02 — Triad-stall alert.
+const EVT_TRIAD_STALLED = 'board_hygiene_triad_stalled';
 // P4-02 step 6 — the board-level silent-blend-regression lock.
 const EVT_BLEND_REGRESSION = 'persona_blend_regression';
 
@@ -142,6 +159,10 @@ export interface BoardHygieneResult {
   staleNudgedIds: string[];
   staleArchived: number;
   staleArchivedIds: string[];
+  /** skill6-v2 U33 / C-02 — backlog cards alerted for a stalled (>48h,
+   *  Triad-incomplete) grooming state this run. */
+  triadStalled: number;
+  triadStalledIds: string[];
   operatorDigestSent: boolean;
   /** P4-02 step 6 — true when the trailing window had content tasks created but
    *  ZERO persona bundles written (the D1 silent-regression signal fired). */
@@ -176,6 +197,8 @@ function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult 
     staleNudgedIds: [],
     staleArchived: 0,
     staleArchivedIds: [],
+    triadStalled: 0,
+    triadStalledIds: [],
     operatorDigestSent: false,
     blendRegressionFlagged: false,
     blendWindowContentTasks: 0,
@@ -569,7 +592,71 @@ function processStaleBacklogLane(result: BoardHygieneResult): void {
   }
 }
 
-// ── Rule 6: Persona-blend silent-regression check (P4-02 step 6) ────────────
+// ── Rule 6 (skill6-v2 U33 / C-02): Triad-stall alert ────────────────────────
+//
+// The Triad gate (checkTriad, src/lib/sops.ts:432) is what holds a card in
+// Backlog: description + a real, non-deleted SOP + a real persona. Today a
+// Triad-incomplete card has NO escalation between creation (day 0) and rule
+// 5's 21-day stale-backlog nudge above — a silent grooming-stalled dead
+// zone. This closes it: ONE operator-lane alert per card once it has sat in
+// `backlog` Triad-incomplete for > TRIAD_STALL_HOURS, on the SAME
+// event-ledger dedup pattern as rules 1–5. The alert names the missing
+// field(s) using board-labels.ts's `triadMissingPillText` — the exact
+// vocabulary the Backlog card pill already shows, so the operator-lane
+// message and the board never disagree.
+interface TriadStallTaskRow {
+  id: string;
+  title: string;
+  created_at: string;
+  description: string | null;
+  sop_id: string | null;
+  persona_id: string | null;
+}
+
+function processTriadStallLane(result: BoardHygieneResult): void {
+  let rows: TriadStallTaskRow[];
+  try {
+    rows = queryAll<TriadStallTaskRow>(
+      `SELECT id, title, created_at, description, sop_id, persona_id FROM tasks
+        WHERE status = 'backlog' AND archived_at IS NULL`,
+      [],
+    );
+  } catch (err) {
+    console.warn('[board-hygiene] triad-stall query failed:', (err as Error).message);
+    return;
+  }
+
+  for (const task of rows) {
+    try {
+      const createdMs = parseDbTime(task.created_at);
+      if (Number.isNaN(createdMs)) continue;
+      const ageHours = (Date.now() - createdMs) / (1000 * 60 * 60);
+      if (ageHours < TRIAD_STALL_HOURS) continue;
+
+      const { missing } = checkTriad({
+        description: task.description,
+        sop_id: task.sop_id,
+        persona_id: task.persona_id,
+      });
+      if (missing.length === 0) continue; // Triad-complete — not this rule's concern
+
+      if (hasRecentEvent(task.id, EVT_TRIAD_STALLED, TRIAD_STALL_COOLDOWN_HOURS)) continue;
+
+      const message =
+        `[BOARD-HYGIENE] "${task.title}" has sat in Backlog for ${Math.round(ageHours)}h with an ` +
+        `incomplete Triad — ${triadMissingPillText(missing as TriadMissingKey[])}. Grooming is stalled; ` +
+        `nothing owns this card until it clears the gate.`;
+      notifySystem(message, { agent: 'board-hygiene', action: 'triad_stall' });
+      writeEvent(task.id, EVT_TRIAD_STALLED, message);
+      result.triadStalled++;
+      result.triadStalledIds.push(task.id);
+    } catch (err) {
+      console.warn(`[board-hygiene] triad-stall processing failed for ${task.id}:`, (err as Error).message);
+    }
+  }
+}
+
+// ── Rule 7: Persona-blend silent-regression check (P4-02 step 6) ────────────
 //
 // The D1 bug ("--blend never passed → duality dead in prod") was invisible: a
 // board with zero persona bundles looked identical to a board where nobody made
@@ -653,7 +740,7 @@ function processBlendRegressionCheck(result: BoardHygieneResult): void {
   }
 }
 
-// ── Rule 6 companion: min-2/max-4 invariant BELOW-MIN regression (A-U6) ─────
+// ── Rule 7 companion: min-2/max-4 invariant BELOW-MIN regression (A-U6) ─────
 //
 // ONB's validate_blend_invariant (23-ai-workforce-blueprint/scripts/
 // persona_blend.py, A-U6) counts the directive's ROLE slots (voice/topic/
@@ -665,7 +752,7 @@ function processBlendRegressionCheck(result: BoardHygieneResult): void {
 // reads the ALREADY-COMPUTED reading — it never re-runs the Python matcher
 // and never re-derives the invariant itself.
 //
-// Distinct from Rule 6 above (which fires on ZERO bundles in the window —
+// Distinct from Rule 7 above (which fires on ZERO bundles in the window —
 // the pipeline being silently DEAD): this fires when the pipeline IS
 // producing bundles, has been CONFIRMED by the operator, and is STILL
 // engaging fewer than 2 named personas — a live, ongoing match-quality
@@ -771,6 +858,9 @@ export async function runBoardHygiene(): Promise<BoardHygieneResult> {
   }
   if (!(process.env.DISABLE_BOARD_HYGIENE_STALE === '1')) {
     processStaleBacklogLane(result);
+  }
+  if (!(process.env.DISABLE_BOARD_HYGIENE_TRIAD === '1')) {
+    processTriadStallLane(result);
   }
   if (!(process.env.DISABLE_BOARD_HYGIENE_BLEND_REGRESSION === '1')) {
     processBlendRegressionCheck(result);

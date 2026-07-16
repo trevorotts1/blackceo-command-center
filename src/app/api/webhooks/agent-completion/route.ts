@@ -133,6 +133,9 @@ export async function POST(request: NextRequest) {
       // (Don't overwrite user's approval)
       const movedToReview = task.status !== 'review' && task.status !== 'done';
       if (movedToReview) {
+        // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the
+        // movedToReview check above; audited immediately below via
+        // recordStatusEvent (DISP-10).
         run(
           'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
           ['review', now, task.id]
@@ -251,6 +254,9 @@ export async function POST(request: NextRequest) {
       // (Don't overwrite user's approval)
       const movedToReviewSession = task.status !== 'review' && task.status !== 'done';
       if (movedToReviewSession) {
+        // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the
+        // movedToReviewSession check above; audited immediately below via
+        // recordStatusEvent (DISP-10).
         run(
           'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
           ['review', now, task.id]

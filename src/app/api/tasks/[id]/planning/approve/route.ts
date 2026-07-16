@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import type { PlanningQuestion, PlanningCategory } from '@/lib/types';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -116,11 +117,18 @@ export async function POST(
     `).run(specId, taskId, specMarkdown);
 
     // Update task description with spec and move to backlog
+    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description must land
+    // atomically with the status flip — it carries the locked spec); audited
+    // immediately below via recordStatusEvent (DISP-10).
     getDb().prepare(`
       UPDATE tasks
       SET description = ?, status = 'backlog', updated_at = datetime('now')
       WHERE id = ?
     `).run(specMarkdown, taskId);
+    recordStatusEvent(taskId, task.status, 'backlog', {
+      actor: 'planning-approve',
+      reason: 'planning spec locked',
+    });
 
     // Log activity
     const activityId = crypto.randomUUID();

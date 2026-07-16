@@ -763,6 +763,14 @@ export async function POST(request: NextRequest) {
         // P1-04: the originating client channel so the trust engine reports back.
         requester_channel: requesterChannel ?? null,
         requester_chat_id: requesterChatId ?? null,
+        // U94 (X.2.3) — this ingest call declared itself human-initiated by
+        // supplying requester_chat_id; tag it as the "Telegram/CEO-chat
+        // ingest" enumerated door for the trust-coverage health metric
+        // (checkTrustCoverage()). A producer/backfill call that omits
+        // requester_chat_id entirely is deliberately NOT tagged here — it
+        // correctly stays outside the coverage denominator (operator-digest
+        // fallback, never a client-facing send).
+        humanDoorId: requesterChatId ? 'telegram-ingest' : null,
         // B-U7: producer-supplied persona-bundle identity (voice_persona_id
         // gates the whole group — see parsing above). undefined/absent here
         // is createTaskCore's byte-identical legacy path.
