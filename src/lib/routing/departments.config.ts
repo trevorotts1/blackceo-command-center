@@ -862,6 +862,23 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
   // wrong dept when routing confidence is low. The recurrence detector
   // (general-task-recurrence.ts) watches patterns in tasks that land here and
   // recommends standing up a dedicated dept when >3/month recur.
+  //
+  // D-C2 / D8 — RATIFIED 2026-07-16 by the operator as REJECT (see
+  // ledgers/ratified-decisions-2026-07-16.md in trevorotts1/openclaw-onboarding).
+  // The proposed rename of the catch-all's client-facing display name to
+  // "General Stuff" is REJECTED — it stays "General Task". Reasoning: every
+  // other department on a client's board carries a real name (Marketing,
+  // Sales, Billing & Finance); "Stuff" reads as a junk drawer, an admission
+  // nobody knew what to call it, while "General Task" at least sounds like
+  // work — clients are paying for an AI workforce and the board should read
+  // like one. The slug (below, general-task) was never in question either
+  // way — it is FROZEN — routing (this file), the ingest fallbacks
+  // (ingest/route.ts INGEST-06 + tier-4), migration 059's sort-order pin, and
+  // the recurrence detector above all key on it, never the display name.
+  // Migration 109 defensively normalizes any already-provisioned box whose
+  // `workspaces.name` row drifted from the canonical "General Task" (e.g. a
+  // stray "General Stuff" from local testing of the now-rejected proposal)
+  // back to it — idempotent, slug-keyed UPDATE.
   {
     id: 'general-task',
     name: 'General Task',

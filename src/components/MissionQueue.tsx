@@ -134,7 +134,18 @@ const departmentEmojis: Record<string, string> = {
   'general-task': '🗂️', 'general': '🗂️',
 };
 
-const departmentNames: Record<string, string> = {
+// D-C2 / D8 — RATIFIED 2026-07-16 by the operator as REJECT (see
+// ledgers/ratified-decisions-2026-07-16.md in trevorotts1/openclaw-onboarding):
+// the catch-all's display name stays "General Task". Exported (not just used
+// internally) so this exact board-rendering map is a regression-testable,
+// non-reimplemented surface. The 'general-task' entry is the slug-vs-display-
+// name split D-C2 concerns: departments.config.ts / workspaces.name drive
+// OTHER surfaces (AgentsSidebar.tsx reads `d.name` from the DB), but the
+// board HEADER (:510) and every card's department CHIP (:1055 below) read
+// ONLY this hardcoded map — a DB-only rename without updating this value
+// would produce a split-brain display, which is exactly why this stays a
+// single exported source of truth even though D8 landed as "no rename".
+export const departmentNames: Record<string, string> = {
   'ceo-com': 'CEO / COM',
   'marketing': 'Marketing',
   'sales': 'Sales',
