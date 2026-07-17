@@ -23,7 +23,12 @@ import { insertCeoChatMessage } from '@/lib/ceo-chat/store';
 import { isMyAiCeoBetaEnabled, CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import { forwardToAgent, type ChatChunk } from '@/lib/ceo-chat/gateway';
 import { isForbidden } from '@/lib/model-selector';
-import { toGatewayThinkingLevel, isValidGatewayThinkingLevel, type GatewayThinkingLevel } from '@/lib/ceo-chat/thinking-level';
+import {
+  toGatewayThinkingLevel,
+  isValidGatewayThinkingLevel,
+  isOllamaReasoningFamily,
+  type GatewayThinkingLevel,
+} from '@/lib/ceo-chat/thinking-level';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -46,9 +51,22 @@ function sse(event: string, data: unknown): Uint8Array {
  * it is NEVER threaded through to the transport unresolved. Defense in depth:
  * even if a compromised/buggy client sends the raw string "max" directly
  * (bypassing the UI's own label mapping), this function still refuses it.
+ *
+ * Ollama-scoping (added after U61 closed, root-caused independently): the
+ * {off,low,medium,high} ceiling was verified SPECIFICALLY for Ollama
+ * reasoning models (see thinking-level.ts's isOllamaReasoningFamily() doc for
+ * the root-cause citation). ThinkingSelector already disables client-side for
+ * any other model, but a client is never trusted alone — `resolvedModel` MUST
+ * be a known Ollama-family model id or this function drops the override
+ * regardless of how well-formed the value itself is, so a bypass of the UI
+ * cannot smuggle an unverified reasoning-effort override to a model it was
+ * never proven safe for. `resolvedModel` is `undefined` whenever the request
+ * did not name a model at all — the route cannot verify Ollama-family without
+ * one, so it never assumes; it just drops the override.
  */
-function resolveThinkingLevel(raw: unknown): GatewayThinkingLevel | undefined {
+function resolveThinkingLevel(raw: unknown, resolvedModel: string | undefined): GatewayThinkingLevel | undefined {
   if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  if (!resolvedModel || !isOllamaReasoningFamily(resolvedModel)) return undefined;
   const fromLabel = toGatewayThinkingLevel(raw);
   if (fromLabel) return fromLabel;
   if (isValidGatewayThinkingLevel(raw)) return raw;
@@ -100,7 +118,7 @@ export async function POST(request: NextRequest) {
       { status: 400, headers: { 'content-type': 'application/json' } },
     );
   }
-  const thinkingLevel = resolveThinkingLevel(body.thinkingLevel);
+  const thinkingLevel = resolveThinkingLevel(body.thinkingLevel, model);
   const agentId = typeof body.agentId === 'string' && body.agentId.trim() ? body.agentId.trim() : undefined;
 
   const sessionId =

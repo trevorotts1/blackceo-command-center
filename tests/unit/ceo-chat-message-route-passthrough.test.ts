@@ -27,6 +27,14 @@
  *     a forbidden model quietly through would violate a hard, existing
  *     invariant (M.4 non-goals: "the sovereignty filter is a hard gate in
  *     every model list this section ships").
+ *   - Ollama-scoping (added after U61 closed, root-caused independently): the
+ *     {off,low,medium,high} ceiling was verified SPECIFICALLY for Ollama
+ *     reasoning models — ThinkingSelector already disables client-side for
+ *     any other model (isOllamaReasoningFamily()), but a client is never
+ *     trusted alone: if `model` is present and is NOT Ollama-family, the
+ *     route drops thinkingLevel server-side too (soft-fails open — the
+ *     message still sends), so a bypass of the UI cannot smuggle an
+ *     unverified reasoning-effort override to a non-Ollama model.
  *
  * Isolated temp DB (mirrors ceo-chat-task-endpoint.test.ts); forwardToAgent is
  * replaced via vi.doMock so no live gateway is touched — vitest-only
@@ -144,8 +152,13 @@ describe('POST /api/ceo-chat/message — U62 Phase-B passthrough', () => {
     expect(capturedRequests[0].agentId).toBeUndefined();
   });
 
-  it('a raw gateway-value thinkingLevel ("high") is accepted directly, not just a UI label', async () => {
-    await post({ sessionId: 'sess-passthrough-3', message: 'hi', thinkingLevel: 'high' });
+  it('a raw gateway-value thinkingLevel ("high") is accepted directly, not just a UI label, for an Ollama-family model', async () => {
+    await post({
+      sessionId: 'sess-passthrough-3',
+      message: 'hi',
+      model: 'ollama/deepseek-v4-flash:cloud',
+      thinkingLevel: 'high',
+    });
     expect(capturedRequests[0].thinkingLevel).toBe('high');
   });
 
@@ -223,5 +236,33 @@ describe('POST /api/ceo-chat/message — U62 Phase-B passthrough', () => {
     await post({ sessionId: 'sess-passthrough-8', message: 'hi', model: 42, agentId: { nope: true } });
     expect(capturedRequests[0].model).toBeUndefined();
     expect(capturedRequests[0].agentId).toBeUndefined();
+  });
+
+  it('an Ollama-family model keeps its thinkingLevel — the proven ceiling applies', async () => {
+    const { status } = await post({
+      sessionId: 'sess-ollama-scope-1',
+      message: 'hi',
+      model: 'ollama/deepseek-v4-flash:cloud',
+      thinkingLevel: 'Max',
+    });
+    expect(status).toBe(200);
+    expect(capturedRequests[0].thinkingLevel).toBe('high');
+  });
+
+  it('a NON-Ollama model has thinkingLevel DROPPED server-side, even though the value itself is one of the four proven ones — never trust the client alone', async () => {
+    const { status } = await post({
+      sessionId: 'sess-ollama-scope-2',
+      message: 'hi',
+      model: 'openrouter/deepseek/deepseek-r1',
+      thinkingLevel: 'high',
+    });
+    expect(status).toBe(200);
+    expect(capturedRequests[0].model).toBe('openrouter/deepseek/deepseek-r1'); // model itself still threads through
+    expect(capturedRequests[0].thinkingLevel).toBeUndefined(); // but the unverified override does not
+  });
+
+  it('no model specified at all: thinkingLevel is DROPPED — the route cannot verify Ollama-family without a model, so it never assumes', async () => {
+    await post({ sessionId: 'sess-ollama-scope-3', message: 'hi', thinkingLevel: 'low' });
+    expect(capturedRequests[0].thinkingLevel).toBeUndefined();
   });
 });
