@@ -56,6 +56,7 @@ const departmentNames: Record<string, string> = {
   'billing-finance': 'Billing / Finance',
   'customer-support': 'Customer Support',
   'web-development': 'Web Development',
+  funnels: 'Funnels',
   'app-development': 'App Development',
   graphics: 'Graphics',
   video: 'Video Production',

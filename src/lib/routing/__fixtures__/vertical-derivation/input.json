@@ -1,7 +1,7 @@
 {
   "meta": {
     "note": "Input for scripts/vertical-derivation-golden.py. deptIds is CC's DEFAULT_DEPARTMENTS id list (departments.config.ts) — checked in verbatim so a drift in that array is a visible diff here, not a silent skip.",
-    "deptIdsSource": "src/lib/routing/departments.config.ts DEFAULT_DEPARTMENTS (25 entries)"
+    "deptIdsSource": "src/lib/routing/departments.config.ts DEFAULT_DEPARTMENTS (26 entries)"
   },
   "deptIds": [
     "master-orchestrator",
@@ -15,6 +15,7 @@
     "social-media",
     "paid-advertisement",
     "web-development",
+    "funnels",
     "app-development",
     "graphics",
     "video",
