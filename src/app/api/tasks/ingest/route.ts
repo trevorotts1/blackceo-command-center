@@ -192,7 +192,7 @@ function isWorkforceProvisioned(): { provisioned: boolean; reason: string } {
               ('master-orchestrator', 'ceo', 'dept-ceo',
                'general-task', 'dept-general-task', 'general')
         AND lower(w.name) NOT IN
-              ('ceo', 'master orchestrator', 'general task', 'general', 'general stuff')`,
+              ('ceo', 'master orchestrator', 'general task', 'general')`,
     [],
   );
   const hasMaterializedDepts = (materialized?.n ?? 0) > 0;
@@ -272,7 +272,7 @@ function resolveWorkspaceId(
     const general = queryOne<{ id: string }>(
       `SELECT id FROM workspaces
         WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
-           OR lower(name) IN ('general task', 'general', 'general stuff')
+           OR lower(name) IN ('general task', 'general')
         ORDER BY rowid ASC LIMIT 1`,
       [],
     );
@@ -301,7 +301,7 @@ function resolveWorkspaceId(
   const general = queryOne<{ id: string }>(
     `SELECT id FROM workspaces
       WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
-         OR lower(name) IN ('general task', 'general', 'general stuff')
+         OR lower(name) IN ('general task', 'general')
       ORDER BY rowid ASC LIMIT 1`,
     []
   );

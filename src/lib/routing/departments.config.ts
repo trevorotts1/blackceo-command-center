@@ -863,21 +863,25 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
   // (general-task-recurrence.ts) watches patterns in tasks that land here and
   // recommends standing up a dedicated dept when >3/month recur.
   //
-  // D-C2 (master spec v2) — SLUG vs DISPLAY NAME: the slug (below, general-task)
-  // is FROZEN — routing (this file), the ingest fallbacks
+  // D-C2 / D8 — RATIFIED 2026-07-16 by the operator as REJECT (see
+  // ledgers/ratified-decisions-2026-07-16.md in trevorotts1/openclaw-onboarding).
+  // The proposed rename of the catch-all's client-facing display name to
+  // "General Stuff" is REJECTED — it stays "General Task". Reasoning: every
+  // other department on a client's board carries a real name (Marketing,
+  // Sales, Billing & Finance); "Stuff" reads as a junk drawer, an admission
+  // nobody knew what to call it, while "General Task" at least sounds like
+  // work — clients are paying for an AI workforce and the board should read
+  // like one. The slug (below, general-task) was never in question either
+  // way — it is FROZEN — routing (this file), the ingest fallbacks
   // (ingest/route.ts INGEST-06 + tier-4), migration 059's sort-order pin, and
-  // the recurrence detector above all key on it. ONLY the client-facing `name`
-  // changes ("General Stuff"). This config value is the FRESH-INSTALL seed;
-  // an already-provisioned box's existing `workspaces.name` row is renamed by
-  // migration 106 (idempotent, slug-keyed UPDATE). Never rename via the `name`
-  // field alone without also extending the ingest name-fallback lists
-  // (`ingest/route.ts` — isWorkforceProvisioned's exclusion list, the
-  // INGEST-06 query, and the tier-4 general-task fallback query) — those match
-  // display-name variants case-insensitively so the rename can never make the
-  // box look "materialized" by accident or break the catch-all fallback.
+  // the recurrence detector above all key on it, never the display name.
+  // Migration 109 defensively normalizes any already-provisioned box whose
+  // `workspaces.name` row drifted from the canonical "General Task" (e.g. a
+  // stray "General Stuff" from local testing of the now-rejected proposal)
+  // back to it — idempotent, slug-keyed UPDATE.
   {
     id: 'general-task',
-    name: 'General Stuff',
+    name: 'General Task',
     purpose:
       'Catch-all department for tasks that do not confidently match any dedicated department. Triages, executes one-off work, or re-routes once classified. Monitors recurring patterns and recommends new dedicated departments.',
     keywords: [], // intentionally empty — never wins keyword routing

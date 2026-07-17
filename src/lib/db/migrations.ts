@@ -4751,50 +4751,56 @@ export const migrations: Migration[] = [
     },
   },
 
-  // ── Migration 109 (originally authored/scored as '106') — D-C2: rename the
-  //    catch-all's DISPLAY NAME on already-provisioned boxes ("General Task"
-  //    -> "General Stuff") ────────────────────────────────────────────────
+  // ── Migration 109 — D-C2 / D8: RATIFIED 2026-07-16 as REJECT. The catch-
+  //    all's client-facing display name stays "General Task"; the proposed
+  //    rename to "General Stuff" was explicitly rejected by the operator. ──
   {
     id: '109',
-    name: 'rename_general_task_display_to_general_stuff',
+    name: 'guard_general_task_display_name_stays_general_task',
     up: (db) => {
       // MERGE-WRITER RENUMBER NOTE: this migration was originally authored
-      // and scored as id '106' (skill6-v2/U44 @ 3eb6093). Between authoring
-      // and rebase onto current main, main independently picked up a
-      // DIFFERENT migration 106 (provider-defects-fix, PR #196) and two
-      // sibling branches (U115, U116) already renumbered their own id-106
-      // collisions to 107 and 108. Renumbered to the next free id, '109',
-      // per this file's own DATA-03 fail-fast guard below. Neither this
-      // unit's test file asserts on the numeric id, only on the resulting
-      // `workspaces.name` value, so this renumber does not change test
-      // behavior.
+      // and scored as id '106' (skill6-v2/U44 @ 3eb6093), when it renamed
+      // the catch-all's display name to "General Stuff" per D-C2's
+      // then-unratified recommendation. QC (~/skill6-merge-queue/CC/U44.json,
+      // score 5.0, SEND BACK) caught that D8 was never operator-ratified —
+      // the master spec's own governance text marked it "none is ratified"
+      // on both 2026-07-14 and 2026-07-15. Trevor ratified D8 on 2026-07-16
+      // as REJECT (see ledgers/ratified-decisions-2026-07-16.md in
+      // trevorotts1/openclaw-onboarding): "General Task" stays exactly as
+      // it was; "General Stuff" never ships. Between original authoring and
+      // this fix, main independently landed a DIFFERENT migration 106
+      // (provider-defects-fix, PR #196) and two sibling branches (U115,
+      // U116) already renumbered their own id-106 collisions to 107 and
+      // 108 — so this migration is renumbered again, to the next free id,
+      // '109', per this file's own DATA-03 fail-fast guard below.
       //
-      // Master spec v2 D-C2 / C-13(b): the SLUG stays FROZEN at
-      // 'general-task' (routing, ingest fallbacks, migration 059's sort pin,
-      // and the recurrence detector all key on it — see
-      // departments.config.ts:854-878). ONLY the client-facing `name` column
-      // changes. departments.config.ts's DEFAULT_DEPARTMENTS seed already
-      // covers FRESH installs; this migration is what covers a box that was
-      // already provisioned BEFORE this unit landed — migration 059's own
-      // comment conceded exactly this gap ("Non-fatal — row may not exist
-      // yet on a fresh install", i.e. it may already exist on an upgraded
-      // one). Idempotent: matches on slug OR the pre-rename name variants, so
-      // re-running this migration (or running it against a box that already
-      // has 'General Stuff') is always a safe no-op UPDATE.
-      console.log('[Migration 109] Renaming general-task workspace display name to "General Stuff"...');
+      // Because D8 was rejected, there is no rename left to apply — but
+      // this migration id is kept (rather than deleted outright) as a
+      // DEFENSIVE NORMALIZER: it corrects any workspace row that drifted
+      // away from the canonical "General Task" (a stray "General Stuff"
+      // from local/branch testing of the now-rejected proposal, or a
+      // pre-existing plural "General Tasks" variant) back to the ratified
+      // name. The SLUG stays FROZEN at 'general-task' regardless — routing,
+      // ingest fallbacks, migration 059's sort pin, and the recurrence
+      // detector all key on the slug, never the display name (see
+      // departments.config.ts:854-878). Idempotent: a box whose name is
+      // already the canonical "General Task" is left untouched (0 rows
+      // changed) on every re-run.
+      console.log('[Migration 109] Normalizing general-task workspace display name to "General Task"...');
       try {
         const result = db
           .prepare(
             `UPDATE workspaces
-                SET name = 'General Stuff'
+                SET name = 'General Task'
               WHERE lower(slug) = 'general-task'
-                 OR lower(name) IN ('general task', 'general tasks')`
+                AND name != 'General Task'`
           )
           .run();
-        console.log(`[Migration 109] Renamed ${result.changes} general-task workspace row(s) to "General Stuff"`);
+        console.log(`[Migration 109] Normalized ${result.changes} general-task workspace row(s) to "General Task"`);
       } catch (e) {
         // Non-fatal — mirrors migration 059's own guard: the row may not
-        // exist yet on a fresh install (DEFAULT_DEPARTMENTS seeds it there).
+        // exist yet on a fresh install (DEFAULT_DEPARTMENTS seeds it there
+        // with the canonical name already).
         console.log('[Migration 109] Skipped:', (e as Error).message);
       }
     },

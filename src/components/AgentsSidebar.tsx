@@ -188,12 +188,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
         const isGeneralTaskItem = (d: Department): boolean => {
           const slug = (d.id || '').toLowerCase();
           const name = (d.name || '').toLowerCase();
-          return (
-            slug === 'general-task' ||
-            name === 'general tasks' ||
-            name === 'general task' ||
-            name === 'general stuff'
-          );
+          return slug === 'general-task' || name === 'general tasks' || name === 'general task';
         };
 
         const ceoItem = enriched.find(isCeoItem);

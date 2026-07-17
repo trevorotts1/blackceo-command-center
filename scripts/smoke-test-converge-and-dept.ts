@@ -272,7 +272,7 @@ async function runSmoke() {
         WHERE lower(w.slug) NOT IN
                 ('master-orchestrator','dept-master-orchestrator','ceo','dept-ceo',
                  'general-task','dept-general-task','general')
-          AND lower(w.name) NOT IN ('ceo','master orchestrator','general task','general','general stuff')
+          AND lower(w.name) NOT IN ('ceo','master orchestrator','general task','general')
         GROUP BY w.id
         ORDER BY w.slug ASC
         LIMIT 1`,
