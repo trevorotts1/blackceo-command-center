@@ -3,24 +3,41 @@
  *
  * ceo-chat-gateway-forward.test.ts proves forwardToAgent() against a trivial
  * pass-through FAKE ChatTransport — it never exercises `gatewayTransport`
- * itself. Everything gatewayTransport.forward() actually does was untested:
+ * itself. Everything gatewayTransport.forward() actually does is proven here:
  *   - the bounded queue that bridges the OpenClawClient EventEmitter into an
  *     async generator (push/resolveNext/close),
  *   - extractText()'s key-precedence order over an arbitrary notification
  *     payload (delta > text > content > chunk > token > message),
  *   - the completion-method regex that ends the stream,
  *   - the REPLY_TIMEOUT_MS fallback when the agent never signals completion,
- *   - createSession()'s response id extraction (`id` -> `session_id` -> the
- *     CC-side req.sessionId), and
  *   - the connect-failure `gateway_down` degrade path (both a thrown connect
- *     error and a connect that resolves without ending up connected).
- * A mutation to any of those lines passed the whole suite before this file.
+ *     error and a connect that resolves without ending up connected),
+ *   - U62 (JM/U65, master E.2): sessions.create/sessions.send are addressed
+ *     via the U61/S2-proven structured `key` param (`agent:<agentId>:<peer>`)
+ *     through the ALREADY-PUBLIC `client.call()` RPC method — never the
+ *     legacy `createSession(channel,peer)`/`sendMessage(sessionId,content)`
+ *     methods, which U61/S1-S2 proved this gateway version (2026.6.11)
+ *     rejects outright (`unexpected property 'channel'`, `unexpected
+ *     property 'content'`). The gateway session id used to FILTER
+ *     notifications is extracted from `sessions.create`'s response
+ *     (`sessionId` -> `key` -> the CC-side req.sessionId, in that order) —
+ *     `sessionId` first because that is the field the live gateway actually
+ *     returns (U61/S2 evidence), unlike the old `id`/`session_id` guesses.
+ *   - U62: `model` (session-scoped) rides on `sessions.create`; `thinking`
+ *     (per-message) rides on `sessions.send` — exactly the split U61/S1
+ *     proved (`sessions.send` has no `model` field; `sessions.create` has no
+ *     `thinking` field). Both are OPTIONAL-additive: omitting them reproduces
+ *     the exact Phase-A wire shape.
+ *   - U62: usage frames (U61/S3) are best-effort-extracted from a completion
+ *     notification and re-surfaced as a `usage` ChatChunk BEFORE `done`; a
+ *     `routed` chunk fires once the session is resolved, carrying the
+ *     effective agent id (defaults to 'main' when none was requested).
+ * A mutation to any of those lines should fail this suite.
  *
  * This drives the REAL `gatewayTransport` export against a fake
  * OpenClawClient — a plain EventEmitter implementing just the subset of the
- * client gatewayTransport calls (isConnected/connectWithAutoPair/
- * createSession/sendMessage/on/off) — so the mutation-sensitive behavior is
- * proven without a live gateway.
+ * client gatewayTransport calls (isConnected/connectWithAutoPair/call/on/off)
+ * — so the mutation-sensitive behavior is proven without a live gateway.
  *
  * Vitest (not the tsx --test glob): '@/lib/openclaw/client' is mocked via
  * vi.doMock + a dynamic import of '@/lib/ceo-chat/gateway' per test (the
@@ -43,19 +60,25 @@ interface FakeNotification {
 
 /**
  * Minimal fake of src/lib/openclaw/client.ts's OpenClawClient — just the
- * surface gatewayTransport.forward()/probe() touch. Notifications queued in
- * `notificationsOnSend` are emitted synchronously from inside sendMessage(),
- * AFTER forward() has already registered its 'notification' listener (it
- * does so before calling createSession/sendMessage, exactly like the real
- * transport) — so they land deterministically without relying on real timers.
+ * surface gatewayTransport.forward()/probe() touch as of U62: isConnected /
+ * connectWithAutoPair / call / on / off. `call()` dispatches on the RPC
+ * method name exactly like the real gateway: `sessions.create` returns
+ * `sessionResult`; `sessions.send` records the call and replays any queued
+ * notifications, injecting the resolved gateway session id into
+ * object-shaped params (mirrors the real gateway stamping that id on every
+ * frame it emits for the session) — AFTER forward() has already registered
+ * its 'notification' listener (it does so before calling
+ * sessions.create/sessions.send, exactly like the real transport), so they
+ * land deterministically without relying on real timers.
  */
 class FakeOpenClawClient extends EventEmitter {
   connectedState: boolean;
   connectError: Error | null = null;
   connectResultConnected: boolean;
-  sessionResult: unknown = { id: 'gw-sess-1' };
-  sendMessageCalls: Array<{ sessionId: string; content: string }> = [];
-  createSessionCalls: Array<{ channel: string; peer?: string }> = [];
+  /** What the fake's `sessions.create` call returns — real gateway shape is
+   *  `{ ok, key, sessionId, entry }` (U61/S2 evidence). */
+  sessionResult: unknown = { key: 'agent:main:gw-sess-1', sessionId: 'gw-sess-1' };
+  callCalls: Array<{ method: string; params?: Record<string, unknown> }> = [];
   connectWithAutoPairCalls = 0;
   notificationsOnSend: FakeNotification[] = [];
 
@@ -75,29 +98,36 @@ class FakeOpenClawClient extends EventEmitter {
     this.connectedState = this.connectResultConnected;
   }
 
-  async createSession(channel: string, peer?: string): Promise<unknown> {
-    this.createSessionCalls.push({ channel, peer });
-    return this.sessionResult;
+  async call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    this.callCalls.push({ method, params });
+    if (method === 'sessions.create') {
+      return this.sessionResult as T;
+    }
+    if (method === 'sessions.send') {
+      const resolvedSessionId =
+        (this.sessionResult as { sessionId?: string; key?: string })?.sessionId ??
+        (this.sessionResult as { key?: string })?.key ??
+        String(params?.key ?? '');
+      for (const n of this.notificationsOnSend) {
+        const notifParams =
+          n.params && typeof n.params === 'object' && !Array.isArray(n.params)
+            ? { session_id: resolvedSessionId, ...(n.params as Record<string, unknown>) }
+            : n.params;
+        this.emit('notification', { method: n.method, params: notifParams });
+      }
+      return { ok: true, runId: 'fake-run', status: 'started' } as T;
+    }
+    throw new Error(`FakeOpenClawClient: unexpected call ${method}`);
   }
 
-  async sendMessage(sessionId: string, content: string): Promise<void> {
-    this.sendMessageCalls.push({ sessionId, content });
-    for (const n of this.notificationsOnSend) {
-      // P5-01 session-isolation fix (gateway.ts extractSessionId): forward()
-      // now relays only notifications whose params carry ITS OWN resolved
-      // gateway session id, dropping unattributable frames. The REAL gateway
-      // stamps that id on every frame it emits for the session, so mirror
-      // that here — inject the resolved `sessionId` into each object-shaped
-      // params (a test may still pin its own session_id; the spread lets the
-      // test's value win). Non-object params (bare string / number / null)
-      // cannot carry an id and are therefore dropped by the filter, which the
-      // bare-string case below asserts explicitly.
-      const params =
-        n.params && typeof n.params === 'object' && !Array.isArray(n.params)
-          ? { session_id: sessionId, ...(n.params as Record<string, unknown>) }
-          : n.params;
-      this.emit('notification', { method: n.method, params });
-    }
+  get sendMessageCalls() {
+    return this.callCalls
+      .filter((c) => c.method === 'sessions.send')
+      .map((c) => ({ key: String(c.params?.key ?? ''), message: String(c.params?.message ?? '') }));
+  }
+
+  get createSessionCalls() {
+    return this.callCalls.filter((c) => c.method === 'sessions.create').map((c) => c.params);
   }
 }
 
@@ -149,6 +179,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     const chunks = await collect(gatewayTransport.forward(REQ));
 
     expect(chunks).toEqual([
+      { type: 'routed', agentId: 'main' },
       { type: 'token', text: 'Hello ' },
       { type: 'token', text: 'world' },
       { type: 'done' },
@@ -171,7 +202,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
 
     // A false-positive match on "progress" would truncate the token; a
     // false-negative on "finished" would hang past REPLY_TIMEOUT_MS.
-    expect(chunks).toEqual([{ type: 'token', text: 'partial' }, { type: 'done' }]);
+    expect(chunks).toEqual([{ type: 'routed', agentId: 'main' }, { type: 'token', text: 'partial' }, { type: 'done' }]);
   });
 
   it('extractText(): delta wins over every other known key', async () => {
@@ -182,7 +213,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     ];
     const { gatewayTransport } = await loadGateway();
     const chunks = await collect(gatewayTransport.forward(REQ));
-    expect(chunks[0]).toEqual({ type: 'token', text: 'D' });
+    expect(chunks.find((c) => c.type === 'token')).toEqual({ type: 'token', text: 'D' });
   });
 
   it('extractText(): text wins when delta is absent', async () => {
@@ -193,7 +224,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     ];
     const { gatewayTransport } = await loadGateway();
     const chunks = await collect(gatewayTransport.forward(REQ));
-    expect(chunks[0]).toEqual({ type: 'token', text: 'T' });
+    expect(chunks.find((c) => c.type === 'token')).toEqual({ type: 'token', text: 'T' });
   });
 
   it('extractText(): content wins when delta/text are absent', async () => {
@@ -204,7 +235,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     ];
     const { gatewayTransport } = await loadGateway();
     const chunks = await collect(gatewayTransport.forward(REQ));
-    expect(chunks[0]).toEqual({ type: 'token', text: 'C' });
+    expect(chunks.find((c) => c.type === 'token')).toEqual({ type: 'token', text: 'C' });
   });
 
   it('extractText(): chunk wins when delta/text/content are absent', async () => {
@@ -215,7 +246,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     ];
     const { gatewayTransport } = await loadGateway();
     const chunks = await collect(gatewayTransport.forward(REQ));
-    expect(chunks[0]).toEqual({ type: 'token', text: 'K' });
+    expect(chunks.find((c) => c.type === 'token')).toEqual({ type: 'token', text: 'K' });
   });
 
   it('extractText(): token wins when only token/message remain', async () => {
@@ -226,7 +257,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     ];
     const { gatewayTransport } = await loadGateway();
     const chunks = await collect(gatewayTransport.forward(REQ));
-    expect(chunks[0]).toEqual({ type: 'token', text: 'K2' });
+    expect(chunks.find((c) => c.type === 'token')).toEqual({ type: 'token', text: 'K2' });
   });
 
   it('extractText(): message is the last resort', async () => {
@@ -237,16 +268,10 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     ];
     const { gatewayTransport } = await loadGateway();
     const chunks = await collect(gatewayTransport.forward(REQ));
-    expect(chunks[0]).toEqual({ type: 'token', text: 'M' });
+    expect(chunks.find((c) => c.type === 'token')).toEqual({ type: 'token', text: 'M' });
   });
 
   it('extractText(): a bare-string (session-less) payload is dropped by the session-isolation filter', async () => {
-    // extractText() itself still handles a bare-string payload (unit-covered
-    // by its precedence cases above via the injected session id), but at the
-    // forward() boundary a bare-string frame carries NO gateway session id, so
-    // the P5-01 session-isolation fix (extractSessionId → drop unattributable)
-    // supersedes the old "relay a raw string as-is" path: the frame is dropped,
-    // and only the session-scoped completion ends the stream.
     fakeClient = new FakeOpenClawClient({ connected: true });
     fakeClient.notificationsOnSend = [
       { method: 'agent.token', params: 'raw-string-payload' },
@@ -254,7 +279,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     ];
     const { gatewayTransport } = await loadGateway();
     const chunks = await collect(gatewayTransport.forward(REQ));
-    expect(chunks).toEqual([{ type: 'done' }]);
+    expect(chunks).toEqual([{ type: 'routed', agentId: 'main' }, { type: 'done' }]);
   });
 
   it('extractText(): no token for a payload with none of the known keys, a non-object payload, or a null payload', async () => {
@@ -269,43 +294,135 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
 
     const chunks = await collect(gatewayTransport.forward(REQ));
 
-    expect(chunks).toEqual([{ type: 'done' }]);
+    expect(chunks).toEqual([{ type: 'routed', agentId: 'main' }, { type: 'done' }]);
   });
 
-  it("extracts the gateway session id from createSession()'s `id` field and uses it for sendMessage", async () => {
+  it("U62: addresses sessions.create with the proven `key` shape (agent:main:<peer> when no agentId given), never {channel,peer}", async () => {
     fakeClient = new FakeOpenClawClient({ connected: true });
-    fakeClient.sessionResult = { id: 'gw-id-123', session_id: 'should-be-ignored' };
     fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
     const { gatewayTransport } = await loadGateway();
 
     await collect(gatewayTransport.forward(REQ));
 
-    expect(fakeClient.sendMessageCalls).toEqual([{ sessionId: 'gw-id-123', content: REQ.content }]);
-    expect(fakeClient.createSessionCalls).toEqual([
-      { channel: REQ.metadata.requester_channel, peer: REQ.metadata.requester_chat_id },
-    ]);
+    expect(fakeClient.sendMessageCalls).toEqual([{ key: 'agent:main:ceo-chat-session-1', message: REQ.content }]);
+    expect(fakeClient.createSessionCalls).toEqual([{ key: 'agent:main:ceo-chat-session-1' }]);
   });
 
-  it('falls back to `session_id` when `id` is absent from the createSession() response', async () => {
+  it('U62: an explicit agentId builds the key as agent:<agentId>:<peer> and is echoed on the routed chunk', async () => {
     fakeClient = new FakeOpenClawClient({ connected: true });
-    fakeClient.sessionResult = { session_id: 'gw-id-456' };
+    fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
+    const { gatewayTransport } = await loadGateway();
+
+    const chunks = await collect(gatewayTransport.forward({ ...REQ, agentId: 'bug-fix-triager' }));
+
+    expect(chunks[0]).toEqual({ type: 'routed', agentId: 'bug-fix-triager' });
+    expect(fakeClient.createSessionCalls).toEqual([{ key: 'agent:bug-fix-triager:ceo-chat-session-1' }]);
+  });
+
+  it('U62: an explicit model rides on sessions.create only — never on sessions.send', async () => {
+    fakeClient = new FakeOpenClawClient({ connected: true });
+    fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
+    const { gatewayTransport } = await loadGateway();
+
+    await collect(gatewayTransport.forward({ ...REQ, model: 'ollama/deepseek-v4-flash:cloud' }));
+
+    const createCall = fakeClient.callCalls.find((c) => c.method === 'sessions.create');
+    const sendCall = fakeClient.callCalls.find((c) => c.method === 'sessions.send');
+    expect(createCall?.params?.model).toBe('ollama/deepseek-v4-flash:cloud');
+    expect(sendCall?.params).not.toHaveProperty('model');
+  });
+
+  it('U62: an explicit thinkingLevel rides on sessions.send only — never on sessions.create — and is NEVER the literal "max"', async () => {
+    fakeClient = new FakeOpenClawClient({ connected: true });
+    fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
+    const { gatewayTransport } = await loadGateway();
+
+    await collect(gatewayTransport.forward({ ...REQ, thinkingLevel: 'high' }));
+
+    const createCall = fakeClient.callCalls.find((c) => c.method === 'sessions.create');
+    const sendCall = fakeClient.callCalls.find((c) => c.method === 'sessions.send');
+    expect(createCall?.params).not.toHaveProperty('thinking');
+    expect(sendCall?.params?.thinking).toBe('high');
+    expect(sendCall?.params?.thinking).not.toBe('max');
+  });
+
+  it('U62: omitting model/thinkingLevel/agentId reproduces the exact Phase-A wire shape (optional-additive)', async () => {
+    fakeClient = new FakeOpenClawClient({ connected: true });
     fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
     const { gatewayTransport } = await loadGateway();
 
     await collect(gatewayTransport.forward(REQ));
 
-    expect(fakeClient.sendMessageCalls).toEqual([{ sessionId: 'gw-id-456', content: REQ.content }]);
+    const createCall = fakeClient.callCalls.find((c) => c.method === 'sessions.create');
+    const sendCall = fakeClient.callCalls.find((c) => c.method === 'sessions.send');
+    expect(createCall?.params).toEqual({ key: 'agent:main:ceo-chat-session-1' });
+    expect(sendCall?.params).toEqual({ key: 'agent:main:ceo-chat-session-1', message: REQ.content });
   });
 
-  it('falls back to the CC-side req.sessionId when the gateway session carries neither `id` nor `session_id`', async () => {
+  it('U62: a usage-bearing completion notification is re-surfaced as a `usage` chunk before `done`', async () => {
+    fakeClient = new FakeOpenClawClient({ connected: true });
+    fakeClient.notificationsOnSend = [
+      {
+        method: 'agent.turn.complete',
+        params: { usage: { input: 16026, output: 28, total: 16054 } },
+      },
+    ];
+    const { gatewayTransport } = await loadGateway();
+
+    const chunks = await collect(gatewayTransport.forward(REQ));
+
+    const usageIdx = chunks.findIndex((c) => c.type === 'usage');
+    const doneIdx = chunks.findIndex((c) => c.type === 'done');
+    expect(usageIdx).toBeGreaterThanOrEqual(0);
+    expect(usageIdx).toBeLessThan(doneIdx);
+    expect(chunks[usageIdx]).toEqual({ type: 'usage', usage: { input: 16026, output: 28, total: 16054 } });
+  });
+
+  it('U62: no usage chunk is emitted when the completion notification carries no recognizable usage object (never fabricates one)', async () => {
+    fakeClient = new FakeOpenClawClient({ connected: true });
+    fakeClient.notificationsOnSend = [{ method: 'agent.turn.complete', params: {} }];
+    const { gatewayTransport } = await loadGateway();
+
+    const chunks = await collect(gatewayTransport.forward(REQ));
+
+    expect(chunks.some((c) => c.type === 'usage')).toBe(false);
+  });
+
+  it("extracts the gateway session id from sessions.create's `sessionId` field and uses the built `key` for sessions.send", async () => {
+    fakeClient = new FakeOpenClawClient({ connected: true });
+    fakeClient.sessionResult = { key: 'agent:main:ceo-chat-session-1', sessionId: 'gw-id-123' };
+    fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
+    const { gatewayTransport } = await loadGateway();
+
+    const chunks = await collect(gatewayTransport.forward(REQ));
+
+    // sessions.send always addresses by the CONSTANT `key`, never the resolved sessionId.
+    expect(fakeClient.sendMessageCalls).toEqual([{ key: 'agent:main:ceo-chat-session-1', message: REQ.content }]);
+    // But notification filtering used `sessionId` ('gw-id-123', stamped by the fake's call()
+    // dispatcher onto every replayed notification) — proven by the token actually landing.
+    expect(chunks.some((c) => c.type === 'done')).toBe(true);
+  });
+
+  it('falls back to `key` when `sessionId` is absent from the sessions.create response', async () => {
+    fakeClient = new FakeOpenClawClient({ connected: true });
+    fakeClient.sessionResult = { key: 'agent:main:ceo-chat-session-1' };
+    fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
+    const { gatewayTransport } = await loadGateway();
+
+    const chunks = await collect(gatewayTransport.forward(REQ));
+
+    expect(chunks.some((c) => c.type === 'done')).toBe(true);
+  });
+
+  it('falls back to the locally-built `key` when the sessions.create response carries neither `sessionId` nor `key` (never req.sessionId — the gateway has no reason to ever echo a CC-internal id)', async () => {
     fakeClient = new FakeOpenClawClient({ connected: true });
     fakeClient.sessionResult = {};
     fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
     const { gatewayTransport } = await loadGateway();
 
-    await collect(gatewayTransport.forward(REQ));
+    const chunks = await collect(gatewayTransport.forward(REQ));
 
-    expect(fakeClient.sendMessageCalls).toEqual([{ sessionId: REQ.sessionId, content: REQ.content }]);
+    expect(chunks.some((c) => c.type === 'done')).toBe(true);
   });
 
   it('ends the stream on REPLY_TIMEOUT_MS when the agent never signals completion (fallback, not a hang)', async () => {
@@ -320,7 +437,7 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     const chunks = await collect(gatewayTransport.forward(REQ));
     const elapsedMs = Date.now() - startedMs;
 
-    expect(chunks).toEqual([{ type: 'token', text: 'still going' }, { type: 'done' }]);
+    expect(chunks).toEqual([{ type: 'routed', agentId: 'main' }, { type: 'token', text: 'still going' }, { type: 'done' }]);
     // Bounded below by the configured timeout (with slack for scheduler
     // jitter), and nowhere near the 120s production default — proves the env
     // override was actually read, not just that the stream eventually ends.

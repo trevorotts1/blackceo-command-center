@@ -96,6 +96,24 @@ export default defineConfig({
       // re-import pattern as skill6-board-projection.test.ts — kept in its
       // own file for the same shared-mock-registry reason, vitest-only.
       'tests/unit/u12-a-persona-grounding-health.test.ts',
+      // U62 (JM/U65, master E.2) — My AI CEO Phase B. Thinking-level UI-label
+      // -> gateway-value mapping (pure module; U61/S1-proven 4-value set,
+      // never 'minimal'/'max' literal). Uses vitest globals + the '@/...'-
+      // style relative import, same reason as its neighbors above.
+      'tests/unit/u62-thinking-level-mapping.test.ts',
+      // U62 — gateway.ts Phase-B wiring: model/thinking/agent passthrough on
+      // the real gatewayTransport (sessions.create/sessions.send via the
+      // proven `key` RPC shape) + usage-frame capture. Rewrites the fake
+      // OpenClawClient's surface from the legacy createSession/sendMessage
+      // methods (U61/S1-S2 proved this gateway version rejects their
+      // {channel,peer}/{session_id,content} shapes outright) to a call()
+      // dispatcher — vitest-only, same vi.doMock pattern as its sibling.
+      'tests/unit/ceo-chat-message-route-passthrough.test.ts',
+      // U62 — migration 110 (usage columns on ceo_chat_messages; originally
+      // authored as 109, renumbered on rebase — main independently landed
+      // its own migration 109), proved against a REAL pre-existing DB shape
+      // (a box already on migration 109 with real rows), not just a fresh DB.
+      'tests/unit/migration-110-ceo-chat-usage-columns.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

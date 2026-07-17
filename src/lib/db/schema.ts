@@ -249,6 +249,12 @@ CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_scope_task ON task_persona_bu
 -- trust-engine report-back events (requester_channel='ceo-chat') that the sweep
 -- writes back into this channel. Only an upload's PATH is stored here — the file
 -- itself lands under <workspace>/inbox/ceo-chat/<date>/.
+-- usage_input/usage_output/usage_total (migration 110 / U62): the gateway's
+-- exact per-turn token accounting (U61/S3), populated on an assistant row
+-- only when a real usage frame was captured mid-stream — NULL otherwise
+-- (never a fabricated estimate). Lets GET /api/ceo-chat/history echo the
+-- last known exact usage so the ContextMeter can resume exact mode after a
+-- page reload without waiting on a new turn.
 CREATE TABLE IF NOT EXISTS ceo_chat_messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -260,6 +266,9 @@ CREATE TABLE IF NOT EXISTS ceo_chat_messages (
   attachment_name TEXT,
   attachment_type TEXT,
   attachment_size INTEGER,
+  usage_input INTEGER,
+  usage_output INTEGER,
+  usage_total INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_ceo_chat_session ON ceo_chat_messages(session_id, created_at);

@@ -1,5 +1,5 @@
 /**
- * Migration 110 (U118, 2026-07-16, operator ruling) — "funnels" department
+ * Migration 111 (U118, 2026-07-16, operator ruling) — "funnels" department
  * workspace backfill.
  *
  * Operator ruling, verbatim: "THEN USE THE STANDALONE WORKSPACE IF IT
@@ -25,7 +25,7 @@
  *
  * Real production code exercised (never reimplemented): the actual
  * runMigrations() (src/lib/db/migrations.ts), including the full chain
- * 001..110, against a hand-seeded pre-existing DB — never a fresh
+ * 001..111, against a hand-seeded pre-existing DB — never a fresh
  * getDb()-initialized one.
  */
 // C8 — DB isolation. This file opens its OWN raw better-sqlite3 handles
@@ -46,7 +46,7 @@ import { schema } from '../../src/lib/db/schema';
 import { runMigrations } from '../../src/lib/db/migrations';
 
 function freshDbPath(tag: string): string {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), `bc-migration-110-${tag}-`)), 'mission-control.test.db');
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), `bc-migration-111-${tag}-`)), 'mission-control.test.db');
 }
 
 // ── Filesystem isolation ──────────────────────────────────────────────────
@@ -61,7 +61,7 @@ function freshDbPath(tag: string): string {
 // through to "no config found" — the same shape a clean CI box would see —
 // regardless of what is actually on this machine's real ~/clawd.
 function withIsolatedHome<T>(fn: () => T): T {
-  const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-migration-110-isolated-home-'));
+  const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-migration-111-isolated-home-'));
   const savedHome = process.env.HOME;
   const savedMasterFiles = process.env.MASTER_FILES_DIR;
   const savedZhcDir = process.env.ZERO_HUMAN_COMPANY_DIR;
@@ -84,7 +84,7 @@ function withIsolatedHome<T>(fn: () => T): T {
 /**
  * Seed a REAL pre-existing DB shape: schema + one company + several
  * already-provisioned workspace rows (mirrors a box that onboarded BEFORE
- * migration 110 ever existed) — never a fresh/empty workspaces table.
+ * migration 111 ever existed) — never a fresh/empty workspaces table.
  */
 function seedPreExistingBox(dbPath: string): Database.Database {
   const db = new Database(dbPath);
@@ -112,17 +112,17 @@ function seedPreExistingBox(dbPath: string): Database.Database {
   return db;
 }
 
-test('migration 110: exactly ONE new workspace row on a real pre-existing DB shape (never a fresh DB)', () => {
+test('migration 111: exactly ONE new workspace row on a real pre-existing DB shape (never a fresh DB)', () => {
   const dbPath = freshDbPath('backfill');
   const db = seedPreExistingBox(dbPath);
   try {
     const before = db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number };
     assert.equal(before.n, 5, 'sanity: the pre-existing box carries exactly the 5 hand-seeded rows before migrating');
 
-    withIsolatedHome(() => runMigrations(db)); // the FULL chain 001..HEAD, including migration 110, against the pre-seeded rows.
+    withIsolatedHome(() => runMigrations(db)); // the FULL chain 001..HEAD, including migration 111, against the pre-seeded rows.
 
     const after = db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number };
-    assert.equal(after.n, before.n + 1, 'migration 110 must insert EXACTLY ONE new workspace row — no more, no fewer');
+    assert.equal(after.n, before.n + 1, 'migration 111 must insert EXACTLY ONE new workspace row — no more, no fewer');
 
     const funnelsRow = db
       .prepare(`SELECT id, name, slug, company_id FROM workspaces WHERE lower(slug) = 'funnels'`)
@@ -147,7 +147,7 @@ test('migration 110: exactly ONE new workspace row on a real pre-existing DB sha
   }
 });
 
-test('migration 110: idempotent — re-running the full chain (simulated reboot) inserts ZERO further rows', () => {
+test('migration 111: idempotent — re-running the full chain (simulated reboot) inserts ZERO further rows', () => {
   const dbPath = freshDbPath('idempotent');
   const db = seedPreExistingBox(dbPath);
   try {
@@ -168,7 +168,7 @@ test('migration 110: idempotent — re-running the full chain (simulated reboot)
   }
 });
 
-test('migration 110: a box that ALREADY carries an ad hoc "funnels" workspace (the operator ruling\'s named case) is left completely untouched', () => {
+test('migration 111: a box that ALREADY carries an ad hoc "funnels" workspace (the operator ruling\'s named case) is left completely untouched', () => {
   const dbPath = freshDbPath('adhoc-existing');
   const db = seedPreExistingBox(dbPath);
   try {
@@ -186,7 +186,7 @@ test('migration 110: a box that ALREADY carries an ad hoc "funnels" workspace (t
     withIsolatedHome(() => runMigrations(db));
 
     const after = db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number };
-    assert.equal(after.n, before.n, 'migration 110 must be a TRUE no-op when a funnels workspace already exists — "IF IT ALREADY EXISTS"');
+    assert.equal(after.n, before.n, 'migration 111 must be a TRUE no-op when a funnels workspace already exists — "IF IT ALREADY EXISTS"');
 
     const row = db
       .prepare(`SELECT id, name, icon FROM workspaces WHERE lower(slug) = 'funnels'`)
@@ -200,7 +200,7 @@ test('migration 110: a box that ALREADY carries an ad hoc "funnels" workspace (t
   }
 });
 
-test('migration 110: matched-by-id (not just slug) also counts as "already exists" — no duplicate', () => {
+test('migration 111: matched-by-id (not just slug) also counts as "already exists" — no duplicate', () => {
   const dbPath = freshDbPath('id-match');
   const db = seedPreExistingBox(dbPath);
   try {

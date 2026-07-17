@@ -11,7 +11,7 @@
  * U118 (2026-07-16, operator ruling — "THEN USE THE STANDALONE WORKSPACE IF
  * IT ALREADY EXISTS") SUPERSEDES acceptance (b): 'funnels' is now a real,
  * registered mandatory department (departments.config.ts's DEFAULT_DEPARTMENTS
- * + migration 110's workspace backfill). The fixture below ("(b) — the
+ * + migration 111's workspace backfill). The fixture below ("(b) — the
  * funnels-ingest fixture") is UPDATED to prove the NEW, correct behavior — a
  * `department_slug:'funnels'` ingest now resolves via tier-1's exact-slug
  * match to the real funnels workspace, NOT to general-task — using the exact
@@ -249,7 +249,7 @@ test('migration 109 defensively normalizes a DRIFTED general-task workspace row 
 // exact ingest fell to INGEST-06's unrecognized-slug->general tag. U118
 // registered it (operator ruling: "THEN USE THE STANDALONE WORKSPACE IF IT
 // ALREADY EXISTS" — departments.config.ts's DEFAULT_DEPARTMENTS + migration
-// 110's workspace backfill), so this same call now resolves via tier-1's
+// 111's workspace backfill), so this same call now resolves via tier-1's
 // exact-slug match to the real funnels workspace — driven through the SAME
 // real migration chain (via getDb()) and the SAME real POST handler as every
 // other fixture in this file, never reimplemented.
@@ -281,7 +281,7 @@ test('signed ingest with department_slug:"funnels" resolves to the real funnels 
   assert.ok(task, 'created task row must be retrievable');
   assert.equal(task!.workspace_id, body.workspace_id, 'task.workspace_id must match the resolved funnels workspace');
 
-  // The real workspace row migration 110 backfilled.
+  // The real workspace row migration 111 backfilled.
   const ws = queryOne<{ name: string; slug: string }>('SELECT name, slug FROM workspaces WHERE id = ?', [task!.workspace_id]);
   assert.ok(ws, 'the resolved workspace row must exist');
   assert.equal(ws!.slug, 'funnels', 'the resolved workspace must be the real funnels department, not a fallback');

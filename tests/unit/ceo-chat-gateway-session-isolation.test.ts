@@ -1,27 +1,44 @@
 /**
- * P5-01 FIX — gatewayTransport.forward() must session-filter the shared
- * gateway 'notification' relay.
+ * P5-01 FIX (session-scoped relay) + U62 (JM/U65, master E.2) Phase-B
+ * addressing — gatewayTransport.forward() must session-filter the shared
+ * gateway 'notification' relay, AND (U62) must address sessions via the
+ * U61/S2-proven structured `key` RPC param, never the legacy {channel,peer}
+ * shape this gateway version (2026.6.11) rejects outright
+ * (`unexpected property 'channel'` — see
+ * `~/Downloads/skill6-u61-spike-S2-agent-addressing-2026-07-16.md`).
  *
- * THE BUG THIS EXISTS TO PREVENT
+ * THE BUG THIS EXISTS TO PREVENT (original P5-01 fix)
  * -------------------------------
  * `getOpenClawClient()` caches ONE client instance per target (client.ts:832)
  * — every concurrent ceo-chat request against the same box (two tabs, two
  * chats) shares the '__self__' singleton and therefore its single
- * 'notification' event stream. Before this fix, `gatewayTransport.forward()`
+ * 'notification' event stream. Before that fix, `gatewayTransport.forward()`
  * registered an unfiltered 'notification' listener that relayed
  * `extractText()` from EVERY notification on that shared client, and closed
- * its own stream on ANY completion-shaped event (`/complete|done|idle
- * |finished|end/`), regardless of which gateway session emitted it. Two
- * concurrent chats therefore (a) interleaved each other's tokens and (b) a
- * foreign chat's completion event could close the wrong stream before it
- * ever received its own reply.
+ * its own stream on ANY completion-shaped event, regardless of which gateway
+ * session emitted it.
+ *
+ * WHAT U62 CHANGES HERE
+ * ----------------------
+ * `gatewayTransport.forward()` no longer calls the legacy
+ * `client.createSession(channel, peer)` / `client.sendMessage(sessionId,
+ * content)` methods (U61/S1-S2 proved this gateway version rejects their
+ * params shapes outright: `sessions.create` rejects a bare `channel` field;
+ * `sessions.send` rejects `content` and requires `message`). It now calls the
+ * ALREADY-PUBLIC `client.call(method, params)` RPC method directly with the
+ * proven `key` addressing (`agent:<agentId>:<peer>`) — so this suite's fake
+ * now implements `call()` instead of the two legacy methods. `key` is what
+ * PINS a (agent, cc-session) pair to the SAME gateway session across turns
+ * (continuity) and is WHY switching agent for one cc-session yields a
+ * DIFFERENT key (non-interleaved per-agent threads — U65 acceptance).
  *
  * This suite drives the REAL `gatewayTransport` (not the fake ChatTransport
  * seam covered by ceo-chat-gateway-forward.test.ts) against a fake
  * '@/lib/openclaw/client' that behaves exactly like the real shared
  * EventEmitter-based singleton: one instance, `sessions.create` mints a
- * distinct gateway session id per call, and 'notification' is a single
- * shared event stream carrying frames for BOTH sessions.
+ * distinct gateway session id per NEW key (and reuses it for a repeated
+ * key), and 'notification' is a single shared event stream carrying frames
+ * for every session in flight.
  *
  * Vitest (not the tsx --test glob): uses vi.doMock + dynamic import of an
  * '@/...'-aliased dep tree — mirrors tests/unit/provider-key-auth-store.test.ts.
@@ -31,10 +48,17 @@ import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import type { ChatChunk } from '@/lib/ceo-chat/gateway';
 
-/** Matches the subset of OpenClawClient that gatewayTransport.forward() calls. */
+/** Matches the subset of OpenClawClient that gatewayTransport.forward() calls
+ *  as of U62: isConnected/connectWithAutoPair/call/on/off. `call()` mirrors
+ *  the real gateway's RPC dispatch — `sessions.create` mints (or reuses) a
+ *  session id keyed by the `key` param; `sessions.send` looks that id up and
+ *  replays any queued notifications for it, exactly like the real gateway
+ *  pushing 'notification' frames on the shared client. */
 class FakeGatewayClient extends EventEmitter {
   private sessionCounter = 0;
-  public sentMessages: { sessionId: string; content: string }[] = [];
+  private keyToSessionId = new Map<string, string>();
+  public callCalls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  public sentMessages: { sessionId: string; content: string; key: string }[] = [];
   private waiters: { count: number; resolve: () => void }[] = [];
 
   isConnected(): boolean {
@@ -45,26 +69,37 @@ class FakeGatewayClient extends EventEmitter {
     // Already connected — never exercised in this suite.
   }
 
-  /** Mirrors OpenClawClient.createSession: mints a NEW gateway session id
-   *  per call, even though every call shares this ONE client instance. */
-  async createSession(channel: string, peer?: string): Promise<{ id: string; channel: string; peer?: string; status: string }> {
-    this.sessionCounter += 1;
-    return { id: `gw-sess-${this.sessionCounter}`, channel, peer, status: 'active' };
-  }
-
-  async sendMessage(sessionId: string, content: string): Promise<void> {
-    this.sentMessages.push({ sessionId, content });
-    this.waiters = this.waiters.filter((w) => {
-      if (this.sentMessages.length >= w.count) {
-        w.resolve();
-        return false;
+  async call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    this.callCalls.push({ method, params });
+    if (method === 'sessions.create') {
+      const key = String(params?.key ?? '');
+      let sessionId = this.keyToSessionId.get(key);
+      if (!sessionId) {
+        this.sessionCounter += 1;
+        sessionId = `gw-sess-${this.sessionCounter}`;
+        this.keyToSessionId.set(key, sessionId);
       }
-      return true;
-    });
+      return { ok: true, key, sessionId } as T;
+    }
+    if (method === 'sessions.send') {
+      const key = String(params?.key ?? '');
+      const content = String(params?.message ?? '');
+      const sessionId = this.keyToSessionId.get(key) ?? key;
+      this.sentMessages.push({ sessionId, content, key });
+      this.waiters = this.waiters.filter((w) => {
+        if (this.sentMessages.length >= w.count) {
+          w.resolve();
+          return false;
+        }
+        return true;
+      });
+      return { ok: true, runId: `run-${this.sentMessages.length}`, status: 'started' } as T;
+    }
+    throw new Error(`FakeGatewayClient: unexpected call ${method}`);
   }
 
   /** Test hook: resolves once `count` forward() calls have reached
-   *  sendMessage() — i.e. their 'notification' listener is registered and
+   *  sessions.send — i.e. their 'notification' listener is registered and
    *  the generator is parked awaiting its next queued chunk. */
   waitForSentCount(count: number): Promise<void> {
     if (this.sentMessages.length >= count) return Promise.resolve();
@@ -101,6 +136,7 @@ describe('gatewayTransport.forward() — session-scoped notification relay', () 
 
   afterEach(() => {
     vi.restoreAllMocks();
+    delete process.env.CEO_CHAT_REPLY_TIMEOUT_MS;
   });
 
   test('two concurrent chats on the shared client each receive ONLY their own tokens and completion (fails pre-fix)', async () => {
@@ -135,7 +171,7 @@ describe('gatewayTransport.forward() — session-scoped notification relay', () 
     const gwB = fakeClient.sentMessages.find((m) => m.content === 'hi from B')?.sessionId;
     expect(gwA).toBeTruthy();
     expect(gwB).toBeTruthy();
-    expect(gwA).not.toBe(gwB); // sessions.create minted two DISTINCT gateway ids
+    expect(gwA).not.toBe(gwB); // distinct cc-session peers -> distinct keys -> distinct gateway ids
 
     // B's token, then B's OWN completion event — fires on the shared stream.
     fakeClient.emit('notification', { method: 'chat.token', params: { session_id: gwB, text: 'B1' } });
@@ -179,7 +215,7 @@ describe('gatewayTransport.forward() — session-scoped notification relay', () 
     const genA = gatewayTransport.forward(reqA);
     const collectedA = collect(genA);
 
-    // Wait for the single sendMessage call to land.
+    // Wait for the single sessions.send call to land.
     await new Promise<void>((resolve) => {
       const check = () => (fakeClient.sentMessages.length >= 1 ? resolve() : setTimeout(check, 0));
       check();
@@ -196,5 +232,59 @@ describe('gatewayTransport.forward() — session-scoped notification relay', () 
 
     expect(textA).toBe(''); // the unscoped frame was dropped, not relayed
     expect(chunksA.some((c) => c.type === 'done')).toBe(true);
+  });
+
+  test('U62: sessions.create is addressed with the proven `key` shape, never the legacy {channel,peer}', async () => {
+    // This fake's sessions.send does not auto-emit a completion (the two
+    // tests above rely on manually-timed emits to prove interleaving) — give
+    // forward() a short REPLY_TIMEOUT_MS so it ends via the fallback timer
+    // instead of hanging on the 120s production default.
+    process.env.CEO_CHAT_REPLY_TIMEOUT_MS = '30';
+    const { gatewayTransport } = await loadGatewayModule();
+    fakeClient.callCalls = [];
+    await collect(
+      gatewayTransport.forward({
+        sessionId: 'cc-session-key-shape',
+        content: 'probe',
+        metadata: { requester_channel: 'ceo-chat', requester_chat_id: 'cc-session-key-shape' },
+      }),
+    );
+
+    const createCall = fakeClient.callCalls.find((c) => c.method === 'sessions.create');
+    expect(createCall).toBeTruthy();
+    expect(createCall!.params).not.toHaveProperty('channel');
+    expect(createCall!.params).not.toHaveProperty('peer');
+    expect(typeof createCall!.params?.key).toBe('string');
+    expect(createCall!.params?.key).toMatch(/^agent:main:cc-session-key-shape$/);
+
+    const sendCall = fakeClient.callCalls.find((c) => c.method === 'sessions.send');
+    expect(sendCall).toBeTruthy();
+    expect(sendCall!.params).not.toHaveProperty('content');
+    expect(sendCall!.params).not.toHaveProperty('session_id');
+    expect(sendCall!.params?.message).toBe('probe');
+    expect(sendCall!.params?.key).toBe(createCall!.params?.key);
+  });
+
+  test('U62: switching agentId for the SAME cc-session yields a DIFFERENT key — non-interleaved per-agent threads', async () => {
+    process.env.CEO_CHAT_REPLY_TIMEOUT_MS = '30';
+    const { gatewayTransport } = await loadGatewayModule();
+
+    const base = {
+      sessionId: 'cc-session-multi-agent',
+      metadata: { requester_channel: 'ceo-chat', requester_chat_id: 'cc-session-multi-agent' },
+    };
+
+    await collect(gatewayTransport.forward({ ...base, content: 'to agent A', agentId: 'agent-a' }));
+    await collect(gatewayTransport.forward({ ...base, content: 'to agent B', agentId: 'agent-b' }));
+    // A second turn to the SAME agent reuses the SAME key (continuity).
+    await collect(gatewayTransport.forward({ ...base, content: 'to agent A again', agentId: 'agent-a' }));
+
+    const sends = fakeClient.callCalls.filter((c) => c.method === 'sessions.send');
+    const keyFor = (content: string) => sends.find((s) => s.params?.message === content)?.params?.key;
+
+    expect(keyFor('to agent A')).toBe('agent:agent-a:cc-session-multi-agent');
+    expect(keyFor('to agent B')).toBe('agent:agent-b:cc-session-multi-agent');
+    expect(keyFor('to agent A again')).toBe(keyFor('to agent A')); // same (agent, session) -> same key -> continuity
+    expect(keyFor('to agent B')).not.toBe(keyFor('to agent A')); // different agent -> different key -> non-interleaved
   });
 });

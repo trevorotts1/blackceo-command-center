@@ -30,6 +30,13 @@ export interface CeoChatMessage {
   attachment_name: string | null;
   attachment_type: string | null;
   attachment_size: number | null;
+  /** U62 (JM/U65, master E.2) / migration 110 — the gateway's real per-turn
+   *  token accounting (U61/S3), NULL unless a usage frame was actually
+   *  captured for this turn (never a fabricated estimate — the ContextMeter
+   *  stays in `≈` mode when these are null). */
+  usage_input: number | null;
+  usage_output: number | null;
+  usage_total: number | null;
   created_at: string;
 }
 
@@ -43,6 +50,10 @@ export interface InsertCeoChatMessage {
   attachmentName?: string | null;
   attachmentType?: string | null;
   attachmentSize?: number | null;
+  /** U62 — real gateway usage for this turn (see CeoChatMessage above). */
+  usageInput?: number | null;
+  usageOutput?: number | null;
+  usageTotal?: number | null;
 }
 
 /**
@@ -55,8 +66,9 @@ export function insertCeoChatMessage(input: InsertCeoChatMessage): CeoChatMessag
   run(
     `INSERT INTO ceo_chat_messages
        (id, session_id, role, content, kind, task_id,
-        attachment_path, attachment_name, attachment_type, attachment_size, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        attachment_path, attachment_name, attachment_type, attachment_size,
+        usage_input, usage_output, usage_total, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.sessionId,
@@ -68,6 +80,9 @@ export function insertCeoChatMessage(input: InsertCeoChatMessage): CeoChatMessag
       input.attachmentName ?? null,
       input.attachmentType ?? null,
       input.attachmentSize ?? null,
+      input.usageInput ?? null,
+      input.usageOutput ?? null,
+      input.usageTotal ?? null,
       createdAt,
     ],
   );
@@ -82,6 +97,9 @@ export function insertCeoChatMessage(input: InsertCeoChatMessage): CeoChatMessag
     attachment_name: input.attachmentName ?? null,
     attachment_type: input.attachmentType ?? null,
     attachment_size: input.attachmentSize ?? null,
+    usage_input: input.usageInput ?? null,
+    usage_output: input.usageOutput ?? null,
+    usage_total: input.usageTotal ?? null,
     created_at: createdAt,
   };
 }
@@ -121,7 +139,8 @@ export function getCeoChatHistory(sessionId: string, limit = 200): CeoChatMessag
   // columns so _rid never leaks into the returned row shape.
   const rows = queryAll<CeoChatMessage>(
     `SELECT id, session_id, role, content, kind, task_id,
-            attachment_path, attachment_name, attachment_type, attachment_size, created_at
+            attachment_path, attachment_name, attachment_type, attachment_size,
+            usage_input, usage_output, usage_total, created_at
        FROM (
          SELECT *, rowid AS _rid FROM ceo_chat_messages
           WHERE session_id = ?

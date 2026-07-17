@@ -911,17 +911,26 @@ export const migrations: Migration[] = [
       const has = (c: string) => cols.includes(c);
       const isCanonical = has('task_id');
 
-      // Status vocabularies in play, all three real:
-      //   canonical (migration 020 CHECK): open | accepted | dismissed | overridden
-      //   legacy    (route.ts TS type)   : open | responded | escalated
-      //   PRD (D15 (ii), the target)     : pending | approved | rejected | escalated
-      // NOTE for the record: D15's own text framed sub-part (ii) as "the
-      // code's open/responded/escalated" vs the PRD's four. That premise was
-      // incomplete — open/responded/escalated is the TypeScript interface in
-      // route.ts, never a DB constraint. The actual migrated CHECK is
-      // open/accepted/dismissed/overridden, a THIRD vocabulary the decision
-      // text never mentions. Both are mapped below so neither box class
-      // loses a row.
+      // THREE distinct status vocabularies, declared across FOUR sites:
+      //   1. PRD (D15 (ii), the target)      : pending | approved | rejected | escalated
+      //   2. open | responded | escalated    — declared TWICE:
+      //        - legacy schema.ts CHECK, a REAL constraint (last carried at 5bd9ba3)
+      //        - route.ts's TypeScript interface (mirrors it)
+      //   3. canonical migration-020 CHECK   : open | accepted | dismissed | overridden
+      //
+      // NOTE for the record: D15's own text framed sub-part (ii) as "the code's
+      // open/responded/escalated (route line 13)" vs the PRD's four, and so
+      // missed vocabulary 3 entirely — the constraint actually enforced on
+      // every canonically migrated box. Its mapping (open->pending,
+      // responded->approved) only ever covered vocabulary 2.
+      //
+      // Correcting an earlier note in this branch's own history, which claimed
+      // open/responded/escalated was "the TypeScript interface, never a DB
+      // constraint": that was WRONG. It IS a real CHECK on a legacy box —
+      // verified in schema.ts at 5bd9ba3. The accurate count is three distinct
+      // vocabularies across four declaration sites, not four vocabularies:
+      // sites 2a and 2b declare the identical set. Both real constraints are
+      // mapped below so neither box class loses a row.
       const statusExpr = isCanonical
         ? `CASE status
              WHEN 'open' THEN 'pending'
@@ -4805,11 +4814,83 @@ export const migrations: Migration[] = [
       }
     },
   },
-
-  // ── Migration 110 — U118 (2026-07-16, operator ruling): backfill the
-  //    "funnels" department workspace on every PRE-EXISTING box. ─────────────
   {
     id: '110',
+    name: 'add_ceo_chat_usage_columns',
+    up: (db) => {
+      // U62 (JM/U65, master E.2) — "My AI CEO" Phase B, exact usage metering.
+      // BINARY acceptance: "usage frames ... re-emitted as a new SSE `usage`
+      // event and echoed by history for reload continuity — the meter drops
+      // `≈` on the first real frame." A page reload wipes client state, so
+      // the ContextMeter can only resume exact mode after reload if the LAST
+      // assistant turn's usage was actually persisted, not just held in
+      // memory — hence these three columns.
+      //
+      // Three additive, nullable INTEGER columns on the EXISTING
+      // ceo_chat_messages table (migration 101) — same column-existence-
+      // guarded ALTER TABLE pattern as migration 107/108/109 above, so this
+      // is a safe no-op on a box where schema.ts already created these
+      // columns on a fresh DB (schema.ts's ceo_chat_messages CREATE TABLE is
+      // kept in sync with the post-110 shape).
+      //   usage_input   the gateway's real prompt-token count for this turn.
+      //   usage_output  the gateway's real completion-token count.
+      //   usage_total   the gateway's real total (may differ from
+      //                 input+output on providers with cache read/write).
+      // Populated ONLY on an assistant row where a real usage frame was
+      // captured mid-stream (src/lib/ceo-chat/gateway.ts extractUsage()) —
+      // NULL on every user/system/trust row and on any assistant row where
+      // no usage frame arrived, so the app never fabricates a false-precise
+      // number.
+      //
+      // MERGE-WRITER RENUMBER NOTE: originally authored and scored as id
+      // '109' (the next free id at authoring time, verified directly against
+      // this file — highest existing id was '108'). While this branch was in
+      // flight, main independently landed migration 109
+      // (guard_general_task_display_name_stays_general_task, D-C2/D8 REJECT)
+      // — a real, unforeseeable id collision (disjoint tables:
+      // ceo_chat_messages vs workspaces, no semantic conflict), same pattern
+      // as migrations 107/108's own renumber notes above. Renumbered to the
+      // next free id, '110', on rebase, per this file's own DATA-03
+      // fail-fast guard below. Neither this migration's own tests nor
+      // ceo-chat-store.test.ts assert on the numeric id, only on column
+      // existence, so this renumber does not change test behavior.
+      console.log('[Migration 110] Adding usage_input/usage_output/usage_total to ceo_chat_messages...');
+
+      const chatInfo = db.prepare('PRAGMA table_info(ceo_chat_messages)').all() as { name: string }[];
+      const columnNames = chatInfo.map((c) => c.name);
+      const adds: Record<string, string> = {
+        usage_input: 'INTEGER',
+        usage_output: 'INTEGER',
+        usage_total: 'INTEGER',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.includes(col)) {
+          db.prepare(`ALTER TABLE ceo_chat_messages ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+
+      console.log('[Migration 110] ceo_chat_messages usage columns ready');
+    },
+  },
+
+  // MERGE-WRITER RENUMBER NOTE: originally authored and scored as id '110'
+  // (the next free id at authoring time, verified directly against this file
+  // — highest existing id was '109'). While this branch was in flight, main
+  // independently landed its OWN migration '110' (add_ceo_chat_usage_columns,
+  // U62/Phase B exact usage metering) — a real, unforeseeable id collision
+  // (disjoint tables: ceo_chat_messages vs workspaces, no semantic conflict),
+  // same pattern as this file's own 095/107/108/109/110 renumber notes.
+  // Renumbered to the next free id, '111', on merge integration into main.
+  // tests/unit/migration-110-funnels-seed.test.ts renamed to
+  // migration-111-funnels-seed.test.ts to match; neither it nor any other
+  // test asserts on the numeric id, only on the resulting workspace row, so
+  // this renumber does not change test behavior. The DATA-03 duplicate-id
+  // fail-fast below is exactly what would have rejected the clash at module
+  // load had this not been renumbered.
+  // ── Migration 111 — U118 (2026-07-16, operator ruling): backfill the
+  //    "funnels" department workspace on every PRE-EXISTING box. ─────────────
+  {
+    id: '111',
     name: 'seed_funnels_department_workspace',
     up: (db) => {
       // Operator ruling, verbatim: "THEN USE THE STANDALONE WORKSPACE IF IT
@@ -4842,13 +4923,13 @@ export const migrations: Migration[] = [
       // box seeds first) rather than re-deriving it via branding-seed.ts's
       // seedCompanyGuarded — a migration must never risk creating/mutating a
       // company row as a side effect of backfilling one department workspace.
-      console.log('[Migration 110] Backfilling the "funnels" department workspace...');
+      console.log('[Migration 111] Backfilling the "funnels" department workspace...');
 
       const existing = db
         .prepare(`SELECT id FROM workspaces WHERE lower(slug) = 'funnels' OR lower(id) = 'funnels' LIMIT 1`)
         .get() as { id: string } | undefined;
       if (existing) {
-        console.log(`[Migration 110] "funnels" workspace already present (id=${existing.id}) — no-op`);
+        console.log(`[Migration 111] "funnels" workspace already present (id=${existing.id}) — no-op`);
         return;
       }
 
@@ -4870,7 +4951,7 @@ export const migrations: Migration[] = [
         // autoSeedFromDepartmentsJson) creates "funnels" along with every
         // other floor department once the box actually seeds; this backfill
         // is only for a box that already has OTHER workspace rows.
-        console.log('[Migration 110] No existing workspace to anchor company_id — skipping (fresh install seeds "funnels" normally)');
+        console.log('[Migration 111] No existing workspace to anchor company_id — skipping (fresh install seeds "funnels" normally)');
         return;
       }
 
@@ -4885,7 +4966,7 @@ export const migrations: Migration[] = [
         now,
         now,
       );
-      console.log('[Migration 110] Inserted the "funnels" department workspace');
+      console.log('[Migration 111] Inserted the "funnels" department workspace');
     },
   },
 ];

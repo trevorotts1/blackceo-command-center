@@ -1,13 +1,24 @@
 'use client';
 
 /**
- * ContextMeter (U60 / JM-U63e)
+ * ContextMeter (U60 / JM-U63e; exact-usage mode LIVE as of U62 / JM-U65)
  *
- * Header chip with a CSS-only micro-ring. Estimate mode (Phase A — U65 gates
- * exact usage): numerator = the whole transcript's character count ÷ 4
- * (the standard token-estimate heuristic), denominator = the active model's
- * `context_window` from the registry. Always renders a leading `≈` and an
+ * Header chip with a CSS-only micro-ring. Estimate mode (Phase A default):
+ * numerator = the whole transcript's character count ÷ 4 (the standard
+ * token-estimate heuristic), denominator = the active model's
+ * `context_window` from the registry. Renders a leading `≈` and an
  * "estimated" tooltip in this mode so it never claims false precision.
+ *
+ * U62/U65 (U61/S3-proven exact usage): when the caller passes `exactTokens`
+ * (the gateway's real per-turn total from the last completed message — see
+ * gateway.ts's `usage` ChatChunk), the meter switches to EXACT mode: the
+ * numerator becomes the real token count, the `≈` disappears, and the
+ * tooltip reads "exact" instead of "estimated" — "the estimate->exact
+ * switchover happens on the first usage frame with no layout shift" (same
+ * chip, same ring, same testid; only the numerator source and copy change).
+ * `exactTokens` is expected to be reset to null by the caller on a fresh
+ * session (new thread has no usage yet) so the meter correctly reverts to
+ * estimate mode for the new thread.
  *
  * Thresholds: amber at 70%, red at 90%. A one-time banner appears the first
  * render that crosses 80% and offers "Start fresh session" (new session id;
@@ -19,11 +30,17 @@
 import { useEffect, useRef, useState } from 'react';
 
 interface ContextMeterProps {
-  /** Total transcript character count this render represents. */
+  /** Total transcript character count this render represents (estimate mode
+   *  numerator source). */
   charCount: number;
   /** Active model's context_window (tokens), or null while unknown. */
   contextWindow: number | null;
   onStartFresh: () => void;
+  /** U62 — the gateway's real total token count for the last completed
+   *  turn. When set (non-null), the meter switches to EXACT mode: this
+   *  value becomes the numerator and the `≈` prefix disappears. Null (the
+   *  default) keeps Phase-A estimate-mode behavior unchanged. */
+  exactTokens?: number | null;
 }
 
 const CHARS_PER_TOKEN = 4;
@@ -42,9 +59,11 @@ const RING_COLOR: Record<'ok' | 'warn' | 'danger', string> = {
   danger: 'text-semantic-danger',
 };
 
-export default function ContextMeter({ charCount, contextWindow, onStartFresh }: ContextMeterProps) {
+export default function ContextMeter({ charCount, contextWindow, onStartFresh, exactTokens = null }: ContextMeterProps) {
   const estimatedTokens = Math.ceil(charCount / CHARS_PER_TOKEN);
-  const ratio = contextWindow && contextWindow > 0 ? Math.min(1, estimatedTokens / contextWindow) : 0;
+  const isExact = exactTokens != null;
+  const tokens = isExact ? exactTokens : estimatedTokens;
+  const ratio = contextWindow && contextWindow > 0 ? Math.min(1, tokens / contextWindow) : 0;
   const tier = tierFor(ratio);
   const [bannerShown, setBannerShown] = useState(false);
   const wasAbove80 = useRef(false);
@@ -73,8 +92,12 @@ export default function ContextMeter({ charCount, contextWindow, onStartFresh }:
         className="flex items-center gap-1.5 h-9 px-2.5 rounded-xl border border-bcc-border bg-bcc-white"
         title={
           contextWindow
-            ? `≈${estimatedTokens.toLocaleString()} of ${contextWindow.toLocaleString()} tokens (estimated — characters ÷ ${CHARS_PER_TOKEN})`
-            : 'Context usage — estimated'
+            ? isExact
+              ? `${tokens.toLocaleString()} of ${contextWindow.toLocaleString()} tokens (exact — the gateway's real usage for this turn)`
+              : `≈${estimatedTokens.toLocaleString()} of ${contextWindow.toLocaleString()} tokens (estimated — characters ÷ ${CHARS_PER_TOKEN})`
+            : isExact
+              ? 'Context usage — exact'
+              : 'Context usage — estimated'
         }
         data-testid="context-meter"
       >
@@ -93,7 +116,10 @@ export default function ContextMeter({ charCount, contextWindow, onStartFresh }:
             transform="rotate(-90 10 10)"
           />
         </svg>
-        <span className="text-caption font-mono text-bcc-text-secondary tabular-nums">≈{pct}%</span>
+        <span className="text-caption font-mono text-bcc-text-secondary tabular-nums">
+          {isExact ? '' : '≈'}
+          {pct}%
+        </span>
       </div>
 
       {bannerShown && (
@@ -103,7 +129,8 @@ export default function ContextMeter({ charCount, contextWindow, onStartFresh }:
           data-testid="context-meter-banner"
         >
           <p className="text-label text-amber-800">
-            This conversation is using ≈{pct}% of the model&apos;s context window.
+            This conversation is using {isExact ? '' : '≈'}
+            {pct}% of the model&apos;s context window.
           </p>
           <div className="mt-2 flex items-center gap-2">
             <button
