@@ -1,3 +1,33 @@
+## [v6.0.58] — 2026-07-16 — U44 CC leg (C-13(b)/D-C2): D8 RATIFIED REJECT, catch-all stays "General Task"
+
+v6.0.58 — Single unit, single serial merge-writer. Lands `skill6-v2/U44` @ `eb30a3b`
+(PR #204, score 9.0/gate 8.5, round-2 independent Sonnet zero-trust re-QC, after round 1's
+5.0 SEND BACK).
+
+- **What lands:** round 1 (score 5.0) caught this branch silently executing unratified
+  decision D8 (C/D-C2) — renaming the catch-all department's client-facing display name from
+  "General Task" to "General Stuff" — without disclosing that the master spec's own
+  governance text explicitly marked D8 as un-ratified. Trevor has since ratified D8 as
+  **REJECT** on 2026-07-16 (`ledgers/ratified-decisions-2026-07-16.md`,
+  `trevorotts1/openclaw-onboarding`): the display name stays exactly "General Task"; "General
+  Stuff" never ships. This round reverts the rename everywhere it was previously applied —
+  `departments.config.ts` seed, `MissionQueue.tsx` chip map, 5 ingest/mirror alias sites — and
+  the migration is renumbered and repurposed as a **defensive normalizer**: `UPDATE
+  workspaces SET name = 'General Task' WHERE lower(slug) = 'general-task' AND name !=
+  'General Task'`, idempotent, 0 rows changed on an already-correct box, correcting any row
+  that drifted during earlier local/branch testing of the now-rejected rename.
+- **Migration renumbered 106 → 109:** the original authoring used id 106, which has since
+  collided three times on this train — main's own 106 (provider-defects-fix, PR #196), and
+  the U115/U116 106→107/108 renumbering. Verified post-merge: 107 migration entries, 107
+  distinct ids, zero duplicates.
+- **History left honest, not rewritten:** the rejected proposal's original commit (rebased,
+  not squashed) still shows the "General Stuff" rename verbatim in the log; only the final,
+  disclosed commit flips the semantics back to "General Task".
+- D9 (C/D-C3, dedicated funnels department) remains unbuilt and unratified — correctly out of
+  scope for this leg. CI 22/22 (paginated check-runs API + `gh pr checks`, both green).
+  Merge-clean against current main. Full suite 1733/1738 (5 pre-existing, unrelated
+  `interview-detection.test.ts` failures, reproduced identically on a fresh main clone).
+
 ## [v6.0.57] — 2026-07-16 — U15 (B/B-U1) CC leg: GET /api/tasks/[id]/persona-bundle
 
 v6.0.57 — Single unit, single serial merge-writer. Lands `skill6-v2/U15-cc` @ `f273e5a`
