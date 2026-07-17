@@ -4,7 +4,8 @@
  *
  * THE DEFECT THIS CLOSES: loadDepartments() (src/lib/routing/departments.config.ts)
  * step 3 fired `return DEFAULT_DEPARTMENTS;` whenever the workspaces table was
- * empty or the DB query threw — handing a client all 25 seed departments,
+ * empty or the DB query threw — handing a client all seed departments (26 as
+ * of U118's 'funnels' addition, 2026-07-16),
  * including three vertical-pack departments (client-coaches, course-creator
  * personal-pro-dev; community-management content-creator) that the interview
  * may never have declared. That is a vertical force-added onto a client who is
@@ -257,7 +258,7 @@ test('VERTICAL_DERIVATION_GUARD_ENABLED=false restores the pre-U107 unfiltered f
     assert.equal(isVerticalDerivationGuardEnabled(), false);
     const floor = getDefaultFloorDepartments([]);
     assert.equal(floor.length, DEFAULT_DEPARTMENTS.length);
-    assert.ok(floor.some((d) => d.id === 'client-coaches'), 'flag off must restore ALL 25, including the 3 gated ids');
+    assert.ok(floor.some((d) => d.id === 'client-coaches'), 'flag off must restore ALL departments, including the 3 gated ids');
   } finally {
     restoreEnv();
   }

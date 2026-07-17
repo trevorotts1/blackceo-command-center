@@ -492,6 +492,54 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     ],
     priority: 7,
   },
+  // U118 (2026-07-16, operator ruling — "THEN USE THE STANDALONE WORKSPACE
+  // IF IT ALREADY EXISTS"): registers the department Skill 6's
+  // 06-ghl-install-pages/tools/cc_board.py has ALWAYS unconditionally stamped
+  // department_slug='funnels' for (job_type defaults to 'funnel'), which was
+  // NEVER a registered department here — every funnel card on a standard-floor
+  // box silently misrouted to general-task via INGEST-06's unrecognized-slug
+  // tier (src/app/api/tasks/ingest/route.ts's resolveWorkspaceId). Deliberately
+  // NOT added to VERTICAL_PACK_DEPARTMENTS below — the stamp is unconditional
+  // for every funnel job regardless of a client's declared vertical, so this
+  // must be universal/mandatory (falls through checkAddDepartmentSync's
+  // unconditional-allow path), exactly like general-task. Mirrors the ONB
+  // repo's department-naming-map.json mandatory.funnels entry (23 mandatory
+  // depts there now). Overlaps 'marketing' (id 'marketing', keyword 'funnel'
+  // above) and 'web-development' by DESIGN — both already carry their own
+  // funnel-adjacent roles (Marketing's Funnel Strategist / Signature Funnel
+  // Specialist; Web Development's Funnel Builder Specialist / its own
+  // Signature Funnel Specialist + Sales Page Assets Specialist doors) and
+  // neither is touched here. See funnels-suggested-roles.md (ONB repo) for the
+  // full, deliberate overlap documentation. This is department #26 —
+  // DEFAULT_DEPARTMENTS' "exactly 25" QC gate is updated to 26 alongside this.
+  {
+    id: 'funnels',
+    name: 'Funnels',
+    purpose:
+      'Owns the automated GHL sales-funnel build queue Skill 6 creates: the cut/import/verify/provision execution chain, build QA, and conversion-tracking verification for job_type=\'funnel\' cards. Distinct from Marketing\'s funnel strategy/copy and Web Development\'s broader funnel-building tooling.',
+    keywords: [
+      'funnel',
+      'funnels',
+      'sales funnel',
+      'opt-in page',
+      'optin',
+      'checkout flow',
+      'order bump',
+      'upsell',
+      'downsell',
+      'tripwire',
+      'signature funnel',
+      'sales page assets',
+      'ghl funnel',
+      'funnel build',
+    ],
+    agentRoles: [
+      'Director of Funnels',
+      'GHL Funnel Build Specialist',
+      'Funnel QA & Conversion Verification Specialist',
+    ],
+    priority: 7,
+  },
   {
     id: 'app-development',
     name: 'App Development',

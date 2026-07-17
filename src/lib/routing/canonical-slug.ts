@@ -51,6 +51,9 @@ export const CANONICAL_SLUGS = new Set([
   'general-task',
   // Engineering — promoted to CORE/FLOOR dept (UNIT ENG — 2026-06-28).
   'engineering',
+  // Funnels — registered mandatory dept (U118, 2026-07-16, operator ruling).
+  // See departments.config.ts's 'funnels' entry for the full rationale.
+  'funnels',
 ]);
 
 /**

@@ -4805,6 +4805,89 @@ export const migrations: Migration[] = [
       }
     },
   },
+
+  // ── Migration 110 — U118 (2026-07-16, operator ruling): backfill the
+  //    "funnels" department workspace on every PRE-EXISTING box. ─────────────
+  {
+    id: '110',
+    name: 'seed_funnels_department_workspace',
+    up: (db) => {
+      // Operator ruling, verbatim: "THEN USE THE STANDALONE WORKSPACE IF IT
+      // ALREADY EXISTS." Skill 6's 06-ghl-install-pages/tools/cc_board.py has
+      // ALWAYS unconditionally stamped department_slug='funnels' for every
+      // job_type='funnel' card (job_type itself defaults to 'funnel') — that
+      // stamp was never vertical-gated, so on a standard-floor box with no ad
+      // hoc 'funnels' workspace already seeded (unlike the operator's own
+      // box), INGEST-06's unrecognized-slug tier (src/app/api/tasks/ingest/
+      // route.ts's resolveWorkspaceId) silently rerouted every funnel card to
+      // the general-task catch-all. departments.config.ts's DEFAULT_DEPARTMENTS
+      // now carries a real 'funnels' entry (id 'funnels', mandatory/universal —
+      // NOT in VERTICAL_PACK_DEPARTMENTS), and canonical-slug.ts's
+      // CANONICAL_SLUGS now includes it. That fixes every FRESH install (the
+      // normal DEFAULT_DEPARTMENTS / departments.json seed path creates the
+      // workspace like any other floor department) and — via
+      // reseedWorkspacesFromConfig's manifest-GROWTH path — any client whose
+      // ONB-side departments.json is regenerated to include the new mandatory
+      // dept. This migration is the one-time BACKFILL for every OTHER
+      // pre-existing box: it inserts exactly one 'funnels' workspace row if
+      // (and only if) none already exists, so a box that already carries an ad
+      // hoc 'funnels' workspace (seeded outside the floor, by hand — the
+      // operator's own box) is left untouched (0 rows changed, per the
+      // ruling's own "IF IT ALREADY EXISTS" instruction).
+      //
+      // Idempotent + additive: never deletes, never updates an existing row
+      // (matches migration 059/109's own additive-only pattern for this
+      // table). company_id is anchored to an EXISTING workspace row's
+      // company_id (preferring the CEO/master-orchestrator row, the one every
+      // box seeds first) rather than re-deriving it via branding-seed.ts's
+      // seedCompanyGuarded — a migration must never risk creating/mutating a
+      // company row as a side effect of backfilling one department workspace.
+      console.log('[Migration 110] Backfilling the "funnels" department workspace...');
+
+      const existing = db
+        .prepare(`SELECT id FROM workspaces WHERE lower(slug) = 'funnels' OR lower(id) = 'funnels' LIMIT 1`)
+        .get() as { id: string } | undefined;
+      if (existing) {
+        console.log(`[Migration 110] "funnels" workspace already present (id=${existing.id}) — no-op`);
+        return;
+      }
+
+      let companyRow = db
+        .prepare(
+          `SELECT company_id FROM workspaces
+            WHERE lower(slug) IN ('master-orchestrator', 'ceo', 'dept-ceo')
+            ORDER BY sort_order ASC LIMIT 1`
+        )
+        .get() as { company_id: string } | undefined;
+      if (!companyRow) {
+        companyRow = db
+          .prepare(`SELECT company_id FROM workspaces ORDER BY rowid ASC LIMIT 1`)
+          .get() as { company_id: string } | undefined;
+      }
+      if (!companyRow) {
+        // Genuinely empty install (no workspaces at all yet) — nothing to
+        // anchor to. The normal fresh-install seed path (DEFAULT_DEPARTMENTS /
+        // autoSeedFromDepartmentsJson) creates "funnels" along with every
+        // other floor department once the box actually seeds; this backfill
+        // is only for a box that already has OTHER workspace rows.
+        console.log('[Migration 110] No existing workspace to anchor company_id — skipping (fresh install seeds "funnels" normally)');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order, created_at, updated_at)
+         VALUES ('funnels', 'Funnels', 'funnels', ?, ?, ?, 1000, ?, ?)`
+      ).run(
+        "Owns the automated GHL sales-funnel build queue Skill 6 creates: cut/import/verify/provision execution, build QA, and conversion-tracking verification.",
+        '🔻',
+        companyRow.company_id,
+        now,
+        now,
+      );
+      console.log('[Migration 110] Inserted the "funnels" department workspace');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
