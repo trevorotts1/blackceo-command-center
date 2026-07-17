@@ -911,17 +911,26 @@ export const migrations: Migration[] = [
       const has = (c: string) => cols.includes(c);
       const isCanonical = has('task_id');
 
-      // Status vocabularies in play, all three real:
-      //   canonical (migration 020 CHECK): open | accepted | dismissed | overridden
-      //   legacy    (route.ts TS type)   : open | responded | escalated
-      //   PRD (D15 (ii), the target)     : pending | approved | rejected | escalated
-      // NOTE for the record: D15's own text framed sub-part (ii) as "the
-      // code's open/responded/escalated" vs the PRD's four. That premise was
-      // incomplete — open/responded/escalated is the TypeScript interface in
-      // route.ts, never a DB constraint. The actual migrated CHECK is
-      // open/accepted/dismissed/overridden, a THIRD vocabulary the decision
-      // text never mentions. Both are mapped below so neither box class
-      // loses a row.
+      // THREE distinct status vocabularies, declared across FOUR sites:
+      //   1. PRD (D15 (ii), the target)      : pending | approved | rejected | escalated
+      //   2. open | responded | escalated    — declared TWICE:
+      //        - legacy schema.ts CHECK, a REAL constraint (last carried at 5bd9ba3)
+      //        - route.ts's TypeScript interface (mirrors it)
+      //   3. canonical migration-020 CHECK   : open | accepted | dismissed | overridden
+      //
+      // NOTE for the record: D15's own text framed sub-part (ii) as "the code's
+      // open/responded/escalated (route line 13)" vs the PRD's four, and so
+      // missed vocabulary 3 entirely — the constraint actually enforced on
+      // every canonically migrated box. Its mapping (open->pending,
+      // responded->approved) only ever covered vocabulary 2.
+      //
+      // Correcting an earlier note in this branch's own history, which claimed
+      // open/responded/escalated was "the TypeScript interface, never a DB
+      // constraint": that was WRONG. It IS a real CHECK on a legacy box —
+      // verified in schema.ts at 5bd9ba3. The accurate count is three distinct
+      // vocabularies across four declaration sites, not four vocabularies:
+      // sites 2a and 2b declare the identical set. Both real constraints are
+      // mapped below so neither box class loses a row.
       const statusExpr = isCanonical
         ? `CASE status
              WHEN 'open' THEN 'pending'
