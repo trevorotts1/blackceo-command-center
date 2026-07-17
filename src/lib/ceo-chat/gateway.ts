@@ -29,15 +29,56 @@
  * frame is dropped, never relayed. Without this, two concurrent chats would
  * interleave each other's tokens and a foreign completion event could close
  * the wrong stream.
+ *
+ * U62 (JM/U65, master E.2) -- Phase B: model / thinking-level / agent-switch
+ * passthrough + exact usage metering, HARD-gated per the U61 gateway spikes
+ * (~/Downloads/skill6-u61-spike-S1/S2/S3-*-2026-07-16.md), all three PASS:
+ *   - S1: the accepted-AND-LANDING reasoning-effort set for the default model
+ *     is EXACTLY {off, low, medium, high} (see ./thinking-level.ts) --
+ *     'minimal' hard-rejects; 'max' validates but silently downgrades to
+ *     'high' (a trap this file never reproduces: req.thinkingLevel is typed
+ *     to the proven set only, and the caller -- the API route -- maps the
+ *     UI's "Max" label to 'high' before this module ever sees it).
+ *   - S2: the sanctioned addressing mechanism is a structured sessions.create
+ *     `key` param, `agent:<agentId>:<peer>` -- NOT a bare {channel,peer}
+ *     pair. client.createSession(channel, peer) / client.sendMessage(id,
+ *     content) send exactly the shapes this gateway version (2026.6.11)
+ *     REJECTS OUTRIGHT (unexpected property 'channel', unexpected property
+ *     'content') -- proven live, not inferred. This file therefore calls the
+ *     OpenClawClient's already-public call(method, params) RPC method
+ *     directly with the proven shapes, rather than fixing (or replacing)
+ *     those two legacy methods -- which FIVE OTHER, unrelated routes still
+ *     call today (/api/openclaw/sessions*, /api/interview/turn,
+ *     /api/operator/bridge/send, operator/goals.ts). Changing their shared
+ *     behavior is out of this unit's scope and not something one "My AI CEO"
+ *     chat unit should decide for five unrelated live surfaces -- this fix is
+ *     scoped to ceo-chat's own transport only.
+ *   - S3: the gateway attaches a structured usage object to a completed
+ *     turn; this file best-effort-extracts it from the 'notification' stream
+ *     (see extractUsage() -- INFERRED field names, not a literal WS-frame
+ *     byte capture per U61/S3's own honesty note) and re-surfaces it as a new
+ *     `usage` ChatChunk before `done`, never fabricating a value when none is
+ *     recognizable.
+ * All three passthrough fields on ForwardRequest (model, thinkingLevel,
+ * agentId) are OPTIONAL -- omitting them reproduces the exact Phase-A wire
+ * shape ({key: 'agent:main:<peer>'} / {key, message}), so this is a pure
+ * extension of the seam, never a replacement.
  */
 import type { OpenClawClientTarget } from '@/lib/openclaw/client';
+import type { GatewayThinkingLevel } from './thinking-level';
 
-/** One streamed piece of an agent reply. */
+/** One streamed piece of an agent reply. U62 extends the vocabulary with
+ *  `usage` (S3 — exact per-turn token/cost accounting) and `routed` (S2 —
+ *  confirms which agent the session actually addressed) — both additive;
+ *  every Phase-A consumer that only switches on `token`/`done`/
+ *  `gateway_down`/`error` is unaffected. */
 export type ChatChunk =
   | { type: 'token'; text: string }
   | { type: 'done'; text?: string }
   | { type: 'gateway_down'; message: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'usage'; usage: { input: number; output: number; total: number } }
+  | { type: 'routed'; agentId: string };
 
 export interface ForwardMetadata {
   /**
@@ -53,6 +94,26 @@ export interface ForwardRequest {
   sessionId: string;
   content: string;
   metadata: ForwardMetadata;
+  /**
+   * U62 (JM/U65) Phase-B passthrough — all optional, all additive. Omitting
+   * every field reproduces the exact Phase-A wire shape byte-for-byte (see
+   * the "optional-additive" tests in ceo-chat-gateway-transport.test.ts).
+   */
+  /** Session-scoped model override (U61/S2: rides on `sessions.create`
+   *  only — `sessions.send` has no `model` field on this gateway version). */
+  model?: string;
+  /** Per-message reasoning-effort override (U61/S1: rides on
+   *  `sessions.send` only). MUST already be one of the four proven gateway
+   *  values (`off|low|medium|high`) — never the UI label, never the literal
+   *  broken string `"max"`. The API route owns that translation
+   *  (`toGatewayThinkingLevel()` in ./thinking-level.ts) before this field is
+   *  ever populated. */
+  thinkingLevel?: GatewayThinkingLevel;
+  /** Target agent id (U61/S2: threads into the `sessions.create` `key`,
+   *  `agent:<agentId>:<peer>`). Defaults to the gateway's own default agent
+   *  name (`'main'`) when omitted — preserves Phase-A's single-agent,
+   *  '__self__'-loopback behavior. */
+  agentId?: string;
 }
 
 /**
@@ -106,6 +167,56 @@ function extractSessionId(payload: unknown): string | null {
   for (const key of ['session_id', 'sessionId', 'session', 'id']) {
     const v = p[key];
     if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
+}
+
+/**
+ * U62 (JM/U65) / U61-S2-proven addressing: a structured `key` of the form
+ * `agent:<agentId>:<peer>` — NOT a bare `{channel,peer}` pair (this gateway
+ * version rejects that outright: "unexpected property 'channel'"). `agentId`
+ * defaults to `'main'` (the gateway's own default-agent name, confirmed by
+ * S2's empty-params round trip) so an unset agent preserves Phase-A's
+ * existing single-agent behavior. `peer` is the CC-side chat session id, so
+ * the SAME (agent, session) pair always resolves to the SAME gateway session
+ * (multi-turn continuity via idempotent `sessions.create`), while switching
+ * agent for one CC session yields a DIFFERENT key — a genuinely separate,
+ * non-interleaved gateway-side thread (spec M.3/U65 acceptance).
+ */
+function buildSessionKey(agentId: string | undefined, peer: string): string {
+  const agent = agentId && agentId.trim() ? agentId.trim() : 'main';
+  return `agent:${agent}:${peer}`;
+}
+
+/**
+ * Best-effort usage extraction from a notification payload. INFERRED, not a
+ * literal WS-frame byte-for-byte proof (U61/S3 observed usage on the
+ * session's persisted trajectory record and the CLI's synchronous JSON
+ * response — two DIFFERENT read paths than the raw 'notification' event this
+ * relay actually consumes; the live WS field name was not hand-captured).
+ * Checks the trajectory-file field name (`usage`) and the CLI response's
+ * alternate name (`lastCallUsage`), both at the payload root or nested under
+ * a `message` wrapper (the trajectory record's own shape) — mirroring
+ * extractText()'s defensive multi-key philosophy. Returns null (never a
+ * fabricated zero) when nothing recognizable is present, so the meter simply
+ * stays in estimate mode for that turn rather than lying about precision.
+ */
+function extractUsage(payload: unknown): { input: number; output: number; total: number } | null {
+  if (payload == null || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  const nestedMessage =
+    p.message && typeof p.message === 'object' ? (p.message as Record<string, unknown>) : null;
+  const candidates: unknown[] = [p.usage, p.lastCallUsage, nestedMessage?.usage];
+  for (const c of candidates) {
+    if (c && typeof c === 'object') {
+      const u = c as Record<string, unknown>;
+      const input = Number(u.input);
+      const output = Number(u.output);
+      const total = Number(u.total ?? u.totalTokens);
+      if (Number.isFinite(input) && Number.isFinite(output) && Number.isFinite(total)) {
+        return { input, output, total };
+      }
+    }
   }
   return null;
 }
@@ -178,16 +289,32 @@ export const gatewayTransport: ChatTransport = {
     }, REPLY_TIMEOUT_MS);
 
     try {
-      // One gateway session per chat, tagged with the ceo-chat channel + the chat
-      // session id as peer, so the agent's own ingest can stamp requester_channel
-      // / requester_chat_id from the session context (P5-01 step 2). The metadata
-      // is also embedded in the forwarded content envelope as a belt-and-suspenders
-      // for agents that read it from the message rather than the session.
-      const session = await client.createSession(req.metadata.requester_channel, req.metadata.requester_chat_id);
-      const gatewaySessionId =
-        (session as { id?: string; session_id?: string })?.id ||
-        (session as { session_id?: string })?.session_id ||
-        req.sessionId;
+      // U62/U61-S2: address the session with the proven structured `key`
+      // (`agent:<agentId>:<peer>`), never the legacy {channel,peer} shape
+      // this gateway version rejects outright. The peer is the CC-side chat
+      // session id, so the agent's own ingest can still stamp
+      // requester_channel/requester_chat_id from the session context (P5-01
+      // step 2); the metadata is also embedded in the forwarded content
+      // envelope as a belt-and-suspenders for agents that read it from the
+      // message rather than the session. `sessions.create` is idempotent per
+      // key (round-trip-proven), so repeat turns to the SAME (agent,
+      // session) reuse the SAME gateway session — multi-turn continuity.
+      const key = buildSessionKey(req.agentId, req.metadata.requester_chat_id);
+      const resolvedAgentId = req.agentId && req.agentId.trim() ? req.agentId.trim() : 'main';
+      const session = await client.call<{ key?: string; sessionId?: string }>('sessions.create', {
+        key,
+        ...(req.model ? { model: req.model } : {}),
+      });
+      // Filtering id: prefer the gateway's own returned `sessionId` (the
+      // field the live gateway actually returns — U61/S2 evidence), then the
+      // echoed `key` (S2: sessions.create always echoes the `key` it was
+      // sent), then — only if the response carried neither — the locally
+      // built `key` itself as the final defensive fallback: we KNOW we sent
+      // it, unlike req.sessionId, which is a CC-internal id the gateway has
+      // no reason to ever echo back on a notification frame.
+      const gatewaySessionId = session?.sessionId || session?.key || key;
+
+      yield { type: 'routed', agentId: resolvedAgentId };
 
       // The gateway emits 'notification' frames on the SHARED client for every
       // session in flight (concurrent chats/tabs interleave on the same
@@ -202,14 +329,26 @@ export const gatewayTransport: ChatTransport = {
         const method = String(msg.method || '');
         const text = extractText(msg.params);
         if (text) push({ type: 'token', text });
-        if (/complete|done|idle|finished|end/i.test(method)) {
+        const isCompletion = /complete|done|idle|finished|end/i.test(method);
+        if (isCompletion) {
+          // U62/U61-S3: best-effort usage capture, surfaced BEFORE `done` so
+          // the meter can drop its estimate `≈` the instant the turn closes.
+          const usage = extractUsage(msg.params);
+          if (usage) push({ type: 'usage', usage });
           push({ type: 'done' });
           close();
         }
       };
       client.on('notification', onNotification);
 
-      await client.sendMessage(gatewaySessionId, req.content);
+      // U62/U61-S1: `message` (not `content`) is the required field;
+      // `thinking` is a proven per-message param — model is NOT valid here
+      // (it rides on sessions.create above only).
+      await client.call('sessions.send', {
+        key,
+        message: req.content,
+        ...(req.thinkingLevel ? { thinking: req.thinkingLevel } : {}),
+      });
 
       // Drain the bridge until closed or timed out.
       while (!closed || queue.length > 0) {

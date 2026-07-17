@@ -42,9 +42,16 @@ export interface DepartmentOption {
   name: string;
 }
 
-/** Gateway-spike-gated (U64) thinking levels — rendered read-only until U65. */
-export const THINKING_LEVELS = ['Quick', 'Balanced', 'Deep', 'Max'] as const;
-export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+/**
+ * Thinking-level UI labels. U62 (JM/U65): the U61/S1 gateway spike proved the
+ * accepted-and-landing set for the default model is exactly
+ * {off, low, medium, high} — these four labels are now LIVE (ThinkingSelector
+ * is no longer read-only) and map 1:1 onto those proven values. The mapping
+ * itself (and the GatewayThinkingLevel type gateway.ts/the API route use) now
+ * lives in `@/lib/ceo-chat/thinking-level` — re-exported here so this file
+ * stays the single import site every ceo-chat component already uses.
+ */
+export { THINKING_LEVELS, type ThinkingLevel } from '@/lib/ceo-chat/thinking-level';
 
 /** Mobile `Conversation | What's happening (n)` tab ids (spec (g)). */
 export type MobileTab = 'conversation' | 'happening';

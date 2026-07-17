@@ -57,6 +57,22 @@ export default defineConfig({
       // U116 (E6-2) CC leg, BINARY acceptance (e) — CommsAudienceChip
       // standard-vs-specific board-card render proof.
       'tests/unit/u116-comms-audience-chip-render.test.tsx',
+      // U62 (JM/U65, master E.2) — ThinkingSelector goes live (U61/S1
+      // 4-value proven set), real render proof: enabled segments, onChange,
+      // and the disabled+tooltip degrade state.
+      'tests/unit/u62-thinking-selector-render.test.tsx',
+      // U62 — ModelPicker/AgentPicker interactive switching (U61/S2 proof),
+      // real render proof: dropdown open/select, onResolved (mount) vs
+      // onChange (user switch) distinction, disabled-while-streaming.
+      'tests/unit/u62-model-agent-picker-render.test.tsx',
+      // U62 — ContextMeter exact-usage mode (U61/S3 proof): drops the
+      // estimate prefix on the first real usage frame, real render proof.
+      'tests/unit/u62-context-meter-exact-usage-render.test.tsx',
+      // U62 — useCeoChatSession wiring proof: the inert-unit check. Proves
+      // the pickers' onUserChange callbacks and the thinkingLevel control
+      // actually reach send()'s POST body and the transcript's system
+      // chips, not just render in isolation.
+      'tests/unit/u62-use-ceo-chat-session-passthrough.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
