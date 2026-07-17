@@ -149,7 +149,7 @@ const ALIAS_MAP: Record<string, string> = {
  *     <id>-dept suffixed folder... very old installs" comment, and the 5
  *     fabricated recommendation-seed ids migration 103 purges by exact
  *     fingerprint: marketing-dept, sales-dept, operations-dept,
- *     creative-dept, support-dept). RECOGNITION-GATED, never blind: only
+ *     finance-dept, product-dept). RECOGNITION-GATED, never blind: only
  *     strips when the stripped form is ALREADY a known alias or canonical
  *     slug, so an arbitrary custom id that merely ends in "-dept" (a
  *     client's own "my-custom-dept" workspace, or a deliberately

@@ -9,7 +9,7 @@
  *    raw+gray... routed as an owed leg for whoever touches this next."
  * The five ids are the DEMO_RECOMMENDATIONS fingerprints migration 103
  * purges by exact (department_id, title) match: `marketing-dept`,
- * `sales-dept`, `operations-dept`, `creative-dept`, `support-dept`
+ * `sales-dept`, `operations-dept`, `finance-dept`, `product-dept`
  * (src/lib/db/migrations.ts, migration 103). Migration 024 also proves a
  * legacy `da_challenges` import PRESERVES a raw `department_id` like
  * `sales-dept` without ever canonicalizing it
