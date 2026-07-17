@@ -204,23 +204,33 @@ test('[U59] migration 024 carries CANONICAL rows over and maps the old status vo
 });
 
 test('[U59] migration 024 rescues a LEGACY table that migration 020 no-ops on forever', () => {
-  // The shape 020 explicitly defers to 024 — the box class that has been
-  // stuck since PR #11 never landed.
+  // The shape 020 explicitly defers to 024 — the box class that has been stuck
+  // since PR #11 never landed.
+  //
+  // This DDL is the REAL legacy shape, copied verbatim from the last schema.ts
+  // revision that carried it (commit 5bd9ba3) — NOT a paraphrase. That matters:
+  // the legacy table's `status` is a genuine CHECK constraint
+  // (open|responded|escalated), plus department_id and challenge_text are NOT
+  // NULL. An earlier version of this fixture used a bare `status TEXT` with no
+  // constraint and nullable columns, which would have let a mapping bug pass
+  // here and still fail on a real legacy box.
   const tmp = `${process.env.DATABASE_PATH}.legacy-fixture.db`;
   const db = new Database(tmp);
   db.exec(`
-    CREATE TABLE da_challenges (
+    CREATE TABLE IF NOT EXISTS da_challenges (
       id TEXT PRIMARY KEY,
-      department_id TEXT,
-      challenge_text TEXT,
+      department_id TEXT NOT NULL,
+      challenge_text TEXT NOT NULL,
       response_text TEXT,
-      status TEXT,
-      created_at TEXT,
+      status TEXT DEFAULT 'open' CHECK (status IN ('open', 'responded', 'escalated')),
+      created_at TEXT DEFAULT (datetime('now')),
       response_deadline TEXT,
       resolved_at TEXT
     );
     INSERT INTO da_challenges (id, department_id, challenge_text, response_text, status, created_at)
-      VALUES ('L1','sales-dept','Legacy challenge text','A human reply','responded','2026-01-01T00:00:00Z');
+      VALUES ('L1','sales-dept','Legacy challenge text','A human reply','responded','2026-01-01T00:00:00Z'),
+             ('L2','ops-dept','An open legacy challenge',NULL,'open','2026-01-02T00:00:00Z'),
+             ('L3','sales-dept','An escalated legacy challenge',NULL,'escalated','2026-01-03T00:00:00Z');
   `);
   apply024(db);
 
@@ -239,5 +249,26 @@ test('[U59] migration 024 rescues a LEGACY table that migration 020 no-ops on fo
   assert.equal(row.status, 'approved', 'legacy responded -> approved');
   assert.equal(row.department_id, 'sales-dept', 'department_id carries over');
   assert.equal(row.trigger_type, 'legacy_import', 'NOT NULL trigger_type gets an honest marker');
+
+  // Every member of the legacy CHECK's vocabulary must map, not just the one.
+  const all = db
+    .prepare('SELECT id, status FROM da_challenges ORDER BY id')
+    .all() as { id: string; status: string }[];
+  assert.equal(all.length, 3, 'no legacy row may be lost in the rebuild');
+  assert.deepEqual(
+    all.map((r) => `${r.id}:${r.status}`),
+    ['L1:approved', 'L2:pending', 'L3:escalated'],
+    'legacy responded->approved, open->pending, escalated->escalated',
+  );
+
+  // The reconciled table must carry the PRD CHECK, not the legacy one — i.e.
+  // the constraint really was replaced, not merely the column values rewritten.
+  const newDdl = (
+    db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='da_challenges'`).get() as
+      | { sql: string }
+      | undefined
+  )?.sql;
+  assert.ok(newDdl?.includes("'pending'"), 'reconciled table must carry the PRD CHECK');
+  assert.ok(!newDdl?.includes("'responded'"), 'the legacy CHECK must be gone');
   db.close();
 });
