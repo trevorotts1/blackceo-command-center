@@ -1,3 +1,27 @@
+## [v6.0.57] — 2026-07-16 — U15 (B/B-U1) CC leg: GET /api/tasks/[id]/persona-bundle
+
+v6.0.57 — Single unit, single serial merge-writer. Lands `skill6-v2/U15-cc` @ `f273e5a`
+(PR #209, score 9.2/gate 8.5, independent Sonnet zero-trust review).
+
+- **What lands:** a new, previously-nonexistent read route,
+  `GET /api/tasks/[id]/persona-bundle`, completing rung 2 (CC fetch) of the
+  bundle-acquisition ladder that `v2_dispatcher.py` already calls unconditionally in its
+  main dispatch path. Before this PR the route 404'd on every request, so every
+  CC-dispatched build silently fell through to the local `--blend` rung or absent — this
+  closes that gap.
+- **Auth is deliberately Bearer-only, not HMAC+Bearer:** `cc_board.py` is a mixed module —
+  `fetch_persona_bundle`/`post_activity` are Bearer-only by design (verified via their own
+  docstrings and headers), while `ingest_task`/`move_task` are HMAC+Bearer. Mandating HMAC
+  on this route would 401 its only real caller on any secured box. `safeEqual()` reuses
+  `/status/route.ts`'s implementation byte-for-byte; the route correctly sits outside
+  `middleware.ts`'s `WEBHOOK_SECRET_ROUTES`.
+- **Not fully complete:** rung 1 (CC-side threaded machine-readable bundle,
+  `persona-dispatch.ts:~198`) is still owed — today only the prose blend directive threads
+  into the dispatch prompt. Live end-to-end proof is deferred to U22 per the per-repo/offline
+  acceptance doctrine.
+- Exactly 2 new files, 373 insertions, 0 deletions. CI 22/22 (paginated check-runs API +
+  `gh pr checks`, both green). Merge-clean against current main (`abbd5a3`, v6.0.56).
+
 ## [v6.0.56] — 2026-07-16 — U117 (E6-3/G9) CC leg: comms-artifact QC conformance gate
 
 v6.0.56 — Single unit, single serial merge-writer. Lands `skill6-v2/U117-cc` @ `518792c`
