@@ -53,6 +53,20 @@ check "1.1" "version file exists" \
 check "1.2" "package.json version matches /version" \
   'V_PKG=$(node -p "require(\"./package.json\").version" 2>/dev/null); V_FILE=$(head -1 version | tr -d "v[:space:]"); [ "$V_PKG" = "$V_FILE" ]' \
   "edit package.json or /version so they agree"
+# 1.3/1.4/1.5: CI's version-consistency.yml enforces 5 locations agreeing
+# (Verify all 5 CC version locations agree); this local gate previously only
+# covered 2 of them (1.1, 1.2), which let package-lock.json drift reach main
+# with a false-green local run (see commit 010ad0ecbf and the v6.0.56
+# release repeat). These three checks close that gap so qc-cc.sh matches CI.
+check "1.3" "package-lock.json root version matches /version" \
+  'V_LOCK=$(node -p "require(\"./package-lock.json\").version" 2>/dev/null); V_FILE=$(head -1 version | tr -d "v[:space:]"); [ "$V_LOCK" = "$V_FILE" ]' \
+  "run ./scripts/bump-version.sh vX.Y.Z to rewrite all locations, or hand-edit package-lock.json root version to match /version"
+check "1.4" "package-lock.json packages[''].version matches /version" \
+  'V_LOCK_PKG=$(node -p "require(\"./package-lock.json\").packages[\"\"].version" 2>/dev/null); V_FILE=$(head -1 version | tr -d "v[:space:]"); [ "$V_LOCK_PKG" = "$V_FILE" ]' \
+  "run ./scripts/bump-version.sh vX.Y.Z to rewrite all locations, or hand-edit package-lock.json packages[''].version to match /version"
+check "1.5" "CHANGELOG.md top entry matches /version" \
+  'V_CL=$(grep -oE "## \[v[0-9]+\.[0-9]+\.[0-9]+\]" CHANGELOG.md | head -1 | sed -E "s/## \[v([0-9]+\.[0-9]+\.[0-9]+)\]/\1/"); V_FILE=$(head -1 version | tr -d "v[:space:]"); [ "$V_CL" = "$V_FILE" ]' \
+  "add a new '## [vX.Y.Z] — YYYY-MM-DD — title' entry at the top of CHANGELOG.md matching /version"
 
 blue ""
 blue "── 2. Department canonical set (N18) ──"
