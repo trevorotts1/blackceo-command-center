@@ -80,11 +80,13 @@ function makeCustomDept(
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: DEFAULT_DEPARTMENTS has exactly 25 entries (QC gate 2.5)
+// Test 1: DEFAULT_DEPARTMENTS has exactly 26 entries (QC gate 2.5)
 // +1 for general-task (mandatory catch-all, feat/general-task-routing)
+// +1 for funnels (U118, 2026-07-16, operator ruling — mandatory dept
+//    registration closing the Skill-6 job_type='funnel' misroute)
 // ---------------------------------------------------------------------------
-test('DEFAULT_DEPARTMENTS has exactly 25 canonical departments', () => {
-  assert.equal(DEFAULT_DEPARTMENTS.length, 25);
+test('DEFAULT_DEPARTMENTS has exactly 26 canonical departments', () => {
+  assert.equal(DEFAULT_DEPARTMENTS.length, 26);
 });
 
 // ---------------------------------------------------------------------------

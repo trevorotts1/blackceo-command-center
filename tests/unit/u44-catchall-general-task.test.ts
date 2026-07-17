@@ -1,11 +1,24 @@
 /**
  * U44 (master spec v2 C-13 / D-C2) — catch-all conformance fixture proof.
  *
- * BINARY acceptance (spec section C+I.2, C-13, line 1190):
+ * BINARY acceptance (spec section C+I.2, C-13, line 1190), AS ORIGINALLY
+ * SCORED (2026-07-16, before U118's department registration landed):
  *   (b) a signed ingest carrying `department_slug:'funnels'` (no funnels
  *       department exists) lands in the catch-all tagged
  *       `resolvedBy: 'unrecognized-slug->general'`, and renders under the
  *       catch-all on the board.
+ *
+ * U118 (2026-07-16, operator ruling — "THEN USE THE STANDALONE WORKSPACE IF
+ * IT ALREADY EXISTS") SUPERSEDES acceptance (b): 'funnels' is now a real,
+ * registered mandatory department (departments.config.ts's DEFAULT_DEPARTMENTS
+ * + migration 111's workspace backfill). The fixture below ("(b) — the
+ * funnels-ingest fixture") is UPDATED to prove the NEW, correct behavior — a
+ * `department_slug:'funnels'` ingest now resolves via tier-1's exact-slug
+ * match to the real funnels workspace, NOT to general-task — using the exact
+ * same real-migration-chain + real-POST-handler method the rest of this file
+ * already established. This is a deliberate, operator-ruled change to a
+ * previously-scored acceptance criterion, not a regression in this test's
+ * rigor.
  *
  * D8 / D-C2 — RATIFIED 2026-07-16 by the operator as REJECT (see
  * ledgers/ratified-decisions-2026-07-16.md in trevorotts1/openclaw-onboarding).
@@ -231,8 +244,16 @@ test('migration 109 defensively normalizes a DRIFTED general-task workspace row 
   }
 });
 
-// ── (b) — the funnels-ingest fixture: resolvedBy + board rendering ────────────
-test('signed ingest with department_slug:"funnels" (no funnels dept) resolves unrecognized-slug->general and renders under General Task', async () => {
+// ── (b) SUPERSEDED by U118 — the funnels-ingest fixture now proves the FIX ───
+// Before U118 (2026-07-16), 'funnels' was not a registered department, so this
+// exact ingest fell to INGEST-06's unrecognized-slug->general tag. U118
+// registered it (operator ruling: "THEN USE THE STANDALONE WORKSPACE IF IT
+// ALREADY EXISTS" — departments.config.ts's DEFAULT_DEPARTMENTS + migration
+// 111's workspace backfill), so this same call now resolves via tier-1's
+// exact-slug match to the real funnels workspace — driven through the SAME
+// real migration chain (via getDb()) and the SAME real POST handler as every
+// other fixture in this file, never reimplemented.
+test('signed ingest with department_slug:"funnels" resolves to the real funnels department (U118 registration fix)', async () => {
   const res = await callIngest({
     title: `Funnel build task [${RUN_ID}]`,
     department_slug: 'funnels',
@@ -245,26 +266,26 @@ test('signed ingest with department_slug:"funnels" (no funnels dept) resolves un
 
   assert.equal(
     body.resolved_by,
-    'unrecognized-slug->general',
-    'INGEST-06: an explicit-but-unrecognized department_slug must resolve to the honest catch-all tag',
+    'department_slug:funnels',
+    'INGEST tier-1: an explicit, NOW-registered department_slug must resolve by exact slug match, not fall to the catch-all',
   );
-  assert.equal(body.workspace_id, GENERAL_WS_ID, 'the card must land in the general-task workspace');
+  assert.notEqual(body.workspace_id, GENERAL_WS_ID, 'the card must NOT land in the general-task workspace anymore');
 
-  // "Renders under the catch-all on the board": the persisted task row is
-  // what MissionQueue.tsx reads for both the department chip
-  // (`departmentNames[task.department.toLowerCase()]`) and workspace
+  // "Renders under the real department on the board": the persisted task row
+  // is what MissionQueue.tsx reads for both the department chip and workspace
   // scoping.
   const task = queryOne<{ department: string | null; workspace_id: string }>(
     'SELECT department, workspace_id FROM tasks WHERE id = ?',
     [body.task_id],
   );
   assert.ok(task, 'created task row must be retrievable');
-  assert.equal(task!.department, 'general-task', 'task.department must be the catch-all slug');
-  assert.equal(task!.workspace_id, GENERAL_WS_ID, 'task.workspace_id must be the general-task workspace');
+  assert.equal(task!.workspace_id, body.workspace_id, 'task.workspace_id must match the resolved funnels workspace');
 
-  // The DISPLAY NAME the client actually sees for that workspace.
-  const ws = queryOne<{ name: string }>('SELECT name FROM workspaces WHERE id = ?', [task!.workspace_id]);
-  assert.equal(ws!.name, 'General Task', 'the board-visible workspace name must be "General Task" — D8 REJECTED the rename');
+  // The real workspace row migration 111 backfilled.
+  const ws = queryOne<{ name: string; slug: string }>('SELECT name, slug FROM workspaces WHERE id = ?', [task!.workspace_id]);
+  assert.ok(ws, 'the resolved workspace row must exist');
+  assert.equal(ws!.slug, 'funnels', 'the resolved workspace must be the real funnels department, not a fallback');
+  assert.equal(ws!.name, 'Funnels', 'the board-visible workspace name must be "Funnels" — U118 registered it as a real department');
 });
 
 // ── INGEST-06 name-only fallback (pre-existing mechanism, unrelated to D8):

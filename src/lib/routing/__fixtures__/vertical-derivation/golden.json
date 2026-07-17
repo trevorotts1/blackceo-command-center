@@ -61,6 +61,11 @@
         },
         {
           "allowed": true,
+          "deptId": "funnels",
+          "error": null
+        },
+        {
+          "allowed": true,
           "deptId": "app-development",
           "error": null
         },
@@ -194,6 +199,11 @@
         },
         {
           "allowed": true,
+          "deptId": "funnels",
+          "error": null
+        },
+        {
+          "allowed": true,
           "deptId": "app-development",
           "error": null
         },
@@ -323,6 +333,11 @@
         {
           "allowed": true,
           "deptId": "web-development",
+          "error": null
+        },
+        {
+          "allowed": true,
+          "deptId": "funnels",
           "error": null
         },
         {
@@ -461,6 +476,11 @@
         },
         {
           "allowed": true,
+          "deptId": "funnels",
+          "error": null
+        },
+        {
+          "allowed": true,
           "deptId": "app-development",
           "error": null
         },
@@ -594,6 +614,11 @@
         },
         {
           "allowed": true,
+          "deptId": "funnels",
+          "error": null
+        },
+        {
+          "allowed": true,
           "deptId": "app-development",
           "error": null
         },
@@ -667,7 +692,7 @@
   ],
   "meta": {
     "generatedBy": "scripts/vertical-derivation-golden.py",
-    "namingMapVersion": "2.6.1",
+    "namingMapVersion": "2.6.2",
     "note": "Regenerate ONLY via scripts/regen-vertical-derivation-golden.sh. Do not hand-edit.",
     "pythonVersion": "3.14.5"
   },
@@ -690,6 +715,7 @@
     },
     "crm": null,
     "customer-support": null,
+    "funnels": null,
     "general-task": null,
     "graphics": null,
     "legal": null,

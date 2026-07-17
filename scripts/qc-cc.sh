@@ -89,6 +89,13 @@ blue "── 2. Department canonical set (N18) ──"
 # mandatory catch-all department on every client (design section B). It is
 # priority-1 / empty-keywords so it never wins routing on merit; it is reached
 # only via the MIN_ROUTING_CONFIDENCE floor in comDispatch().
+# Count updated to 26: U118 (2026-07-16, operator ruling) registered 'funnels'
+# as a mandatory department — Skill 6's cc_board.py has always unconditionally
+# stamped department_slug='funnels' for job_type='funnel' cards, and it was
+# never a registered department here, so every funnel card on a standard-floor
+# box silently misrouted to general-task via INGEST-06. Not vertical-gated
+# (not in VERTICAL_PACK_DEPARTMENTS) because the stamp is unconditional
+# regardless of a client's declared vertical.
 check "2.1" "config/departments.json is a valid JSON array (empty template or client-regenerated)" \
   '[ "$(jq -r "type" config/departments.json)" = "array" ]' \
   "must be [] (shipped template) or a populated array; run scripts/sync-departments-from-build-state.py"
@@ -99,8 +106,8 @@ check "2.3" "departments.config.ts includes Social Media (canonical source of tr
   "grep -q \"id: 'social-media'\" src/lib/routing/departments.config.ts"
 check "2.4" "departments.config.ts includes Paid Advertisement" \
   "grep -q \"id: 'paid-advertisement'\" src/lib/routing/departments.config.ts"
-check "2.5" "departments.config.ts defines exactly 25 canonical departments" \
-  "[ \"\$(grep -cE \"id: '[a-z-]+'\" src/lib/routing/departments.config.ts)\" = \"25\" ]"
+check "2.5" "departments.config.ts defines exactly 26 canonical departments" \
+  "[ \"\$(grep -cE \"id: '[a-z-]+'\" src/lib/routing/departments.config.ts)\" = \"26\" ]"
 check "2.6" "departments.config.ts has CRM and OpenClaw Maintenance" \
   "grep -q \"id: 'crm'\" src/lib/routing/departments.config.ts && grep -q \"id: 'openclaw-maintenance'\" src/lib/routing/departments.config.ts"
 check "2.7" "departments.config.ts does NOT include Operations / Creative / HR / IT" \
