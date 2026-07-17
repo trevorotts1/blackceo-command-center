@@ -59,7 +59,7 @@ import { getBestSOPForTask, checkTriad } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
-import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import type { SOP, SOPStep } from '@/lib/sops';
@@ -292,27 +292,48 @@ export function resolveSpecialistSessionKey(
           console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → bare runtime found → key ${key}`);
           return key;
         }
-        // Attempt 1b — legacy/aliased slug → CANONICAL runtime. A workspace slug
-        // like `ceo` or `app-development` has its runtime dir under the canonical
-        // name (`master-orchestrator`, `engineering`). Probe the canonical slug
-        // before giving up so an aliased department DISPATCHES instead of falsely
-        // reporting no_specialist_runtime and looping in the W8 backoff.
+        // Attempt 1b — ALIAS-AWARE runtime resolution, BOTH directions.
+        //
+        // Two sub-cases, both closed by probing every RAW spelling that
+        // canonicalizes to the same department (expandDeptSlugAliases — the
+        // documented inverse of canonicalDeptSlug):
+        //   (a) legacy/aliased slug → CANONICAL runtime. A workspace slug
+        //       like `ceo` or `webdev` has its runtime dir under the
+        //       canonical name (`master-orchestrator`, `web-development`).
+        //   (b) an ALREADY-canonical slug → a LEGACY-ALIAS runtime still on
+        //       disk. A workspace slug that IS the canonical name (e.g.
+        //       `billing-finance`) can have its runtime dir provisioned
+        //       under a shorter legacy alias (`dept-billing`) instead of the
+        //       canonical dir.
+        // BUG (fixed here): the old guard (`canonicalSlug !== candidateSlug`)
+        // skipped this WHOLE block whenever the slug was already canonical —
+        // exactly sub-case (b) — so a canonical-slug workspace could NEVER
+        // find an alias-named runtime dir even when one existed on disk (a
+        // box with workspace `billing-finance` and runtime dir `dept-billing`
+        // could never dispatch, despite the runtime existing — resolution
+        // only ever ran alias → canonical, never canonical → alias). Probing
+        // every alias closes both directions with the same code path.
         const canonicalSlug = canonicalDeptSlug(candidateSlug);
-        if (canonicalSlug && canonicalSlug !== candidateSlug) {
-          const canonDeptDir = path.join(AGENTS_ROOT, `dept-${canonicalSlug}`);
-          const canonBareDir = path.join(AGENTS_ROOT, canonicalSlug);
-          if (fs.existsSync(canonDeptDir)) {
-            const key = `agent:dept-${canonicalSlug}:${openclawSessionId}`;
-            console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → dept-prefixed runtime → key ${key}`);
-            return key;
-          }
-          if (fs.existsSync(canonBareDir)) {
-            const key = `agent:${canonicalSlug}:${openclawSessionId}`;
-            console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" → canonical "${canonicalSlug}" → bare runtime → key ${key}`);
-            return key;
+        if (canonicalSlug) {
+          const aliasSlugs = expandDeptSlugAliases(candidateSlug).filter(
+            (s) => !s.startsWith('dept-') && s !== candidateSlug,
+          );
+          for (const alias of aliasSlugs) {
+            const aliasDeptDir = path.join(AGENTS_ROOT, `dept-${alias}`);
+            const aliasBareDir = path.join(AGENTS_ROOT, alias);
+            if (fs.existsSync(aliasDeptDir)) {
+              const key = `agent:dept-${alias}:${openclawSessionId}`;
+              console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" (canonical "${canonicalSlug}") → alias "${alias}" → dept-prefixed runtime → key ${key}`);
+              return key;
+            }
+            if (fs.existsSync(aliasBareDir)) {
+              const key = `agent:${alias}:${openclawSessionId}`;
+              console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" (canonical "${canonicalSlug}") → alias "${alias}" → bare runtime → key ${key}`);
+              return key;
+            }
           }
         }
-        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalDeptSlug(candidateSlug)}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug`);
+        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalSlug}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug`);
       }
     } catch (err) {
       console.warn(`[${context}] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
