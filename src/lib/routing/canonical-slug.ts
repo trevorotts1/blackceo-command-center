@@ -144,8 +144,20 @@ const ALIAS_MAP: Record<string, string> = {
  *  2. Strip leading "dept-" prefix (workspace auto-seed format)
  *  3. Look up in ALIAS_MAP for explicit remapping
  *  4. If the result is already canonical, return as-is
- *  5. Otherwise return the normalized-but-unknown slug (lowercase, no "dept-")
- *     so callers never crash — they just get a gracefully-degraded value.
+ *  5. Trailing "-dept" suffix (legacy folder / fabricated-demo-seed shape —
+ *     see src/app/api/departments/[id]/personas/route.ts's own "legacy
+ *     <id>-dept suffixed folder... very old installs" comment, and the 5
+ *     fabricated recommendation-seed ids migration 103 purges by exact
+ *     fingerprint: marketing-dept, sales-dept, operations-dept,
+ *     finance-dept, product-dept). RECOGNITION-GATED, never blind: only
+ *     strips when the stripped form is ALREADY a known alias or canonical
+ *     slug, so an arbitrary custom id that merely ends in "-dept" (a
+ *     client's own "my-custom-dept" workspace, or a deliberately
+ *     dept-suffixed real department name) is never mutated into a
+ *     different, shorter, unrecognized value.
+ *  6. Otherwise return the normalized-but-unknown slug (lowercase, no
+ *     "dept-") so callers never crash — they just get a gracefully-
+ *     degraded value.
  *
  * @example
  *   canonicalDeptSlug('dept-webdev')      → 'web-development'
@@ -155,6 +167,9 @@ const ALIAS_MAP: Record<string, string> = {
  *   canonicalDeptSlug('DEPT-MARKETING')   → 'marketing'
  *   canonicalDeptSlug('dept-ceo')         → 'master-orchestrator'
  *   canonicalDeptSlug('video-production') → 'video'
+ *   canonicalDeptSlug('sales-dept')       → 'sales'
+ *   canonicalDeptSlug('dept-crm-dept')    → 'crm'
+ *   canonicalDeptSlug('my-custom-dept')   → 'my-custom-dept' (unresolved, unchanged)
  */
 export function canonicalDeptSlug(slug: string | null | undefined): string {
   if (!slug) return '';
@@ -177,7 +192,18 @@ export function canonicalDeptSlug(slug: string | null | undefined): string {
     return s;
   }
 
-  // Step 5: return normalized-but-unknown slug (graceful fallback)
+  // Step 5: trailing "-dept" suffix, recognition-gated (see doc comment above).
+  if (s.length > 5 && s.endsWith('-dept')) {
+    const stripped = s.slice(0, -5);
+    if (Object.prototype.hasOwnProperty.call(ALIAS_MAP, stripped)) {
+      return ALIAS_MAP[stripped];
+    }
+    if (CANONICAL_SLUGS.has(stripped)) {
+      return stripped;
+    }
+  }
+
+  // Step 6: return normalized-but-unknown slug (graceful fallback)
   return s;
 }
 
