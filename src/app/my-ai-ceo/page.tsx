@@ -37,8 +37,7 @@ import MobileTabs from '@/components/ceo-chat/MobileTabs';
 import OperationsRail from '@/components/ceo-chat/OperationsRail';
 import { useCeoChatSession } from '@/components/ceo-chat/useCeoChatSession';
 import type { MobileTab } from '@/components/ceo-chat/types';
-
-const STREAMING_LOCK_REASON = 'Locked while your AI CEO is replying.';
+import { computeThinkingDisabledState, STREAMING_LOCK_REASON } from '@/lib/ceo-chat/thinking-level';
 
 export default function MyAiCeoPage() {
   const router = useRouter();
@@ -75,16 +74,14 @@ export default function MyAiCeoPage() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // U62 — the ThinkingSelector additionally disables when the active model
-  // does not declare the `reasoning` capability tag in the registry (BINARY
-  // acceptance: "disables with an explanatory tooltip when the active model
-  // lacks the reasoning capability tag").
-  const modelSupportsReasoning = model ? (model.capabilities ?? []).includes('reasoning') : true;
-  const thinkingDisabled = streaming || !modelSupportsReasoning;
-  const thinkingDisabledReason = streaming
-    ? STREAMING_LOCK_REASON
-    : !modelSupportsReasoning
-      ? 'This model does not support adjustable reasoning effort.'
-      : undefined;
+  // does not declare the `reasoning` capability tag, OR when it does but is
+  // not from the Ollama family the {off,low,medium,high} ceiling was
+  // actually verified for (computeThinkingDisabledState — see
+  // thinking-level.ts for the full precedence + the root-cause citation).
+  const { disabled: thinkingDisabled, reason: thinkingDisabledReason } = computeThinkingDisabledState(
+    model,
+    streaming,
+  );
 
   // If the flag is off, leave the surface (BETA: never a broken card) — preserved verbatim.
   useEffect(() => {
