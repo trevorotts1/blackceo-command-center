@@ -17,9 +17,12 @@ interface CeoChatHeaderProps {
   charCount: number;
   contextWindow: number | null;
   onStartFresh: () => void;
+  /** U62 (JM/U65) — the gateway's real total token count for the last
+   *  completed turn; passed straight through to ContextMeter's exact mode. */
+  exactTokens?: number | null;
 }
 
-export default function CeoChatHeader({ gatewayUp, charCount, contextWindow, onStartFresh }: CeoChatHeaderProps) {
+export default function CeoChatHeader({ gatewayUp, charCount, contextWindow, onStartFresh, exactTokens = null }: CeoChatHeaderProps) {
   return (
     <header className="h-14 bg-bcc-white border-b border-bcc-border px-4 sm:px-6 flex items-center justify-between gap-3 shrink-0">
       <div className="flex items-center gap-3 min-w-0">
@@ -36,7 +39,7 @@ export default function CeoChatHeader({ gatewayUp, charCount, contextWindow, onS
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
-        <ContextMeter charCount={charCount} contextWindow={contextWindow} onStartFresh={onStartFresh} />
+        <ContextMeter charCount={charCount} contextWindow={contextWindow} onStartFresh={onStartFresh} exactTokens={exactTokens} />
         <div
           className={`flex items-center gap-2 px-2.5 py-1 rounded-lg text-caption font-medium ${
             gatewayUp === null

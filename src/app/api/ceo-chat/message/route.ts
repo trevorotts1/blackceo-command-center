@@ -22,6 +22,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { insertCeoChatMessage } from '@/lib/ceo-chat/store';
 import { isMyAiCeoBetaEnabled, CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import { forwardToAgent, type ChatChunk } from '@/lib/ceo-chat/gateway';
+import { isForbidden } from '@/lib/model-selector';
+import { toGatewayThinkingLevel, isValidGatewayThinkingLevel, type GatewayThinkingLevel } from '@/lib/ceo-chat/thinking-level';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -33,6 +35,26 @@ function sse(event: string, data: unknown): Uint8Array {
   return new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+/**
+ * U62 (JM/U65, master E.2) — resolve an incoming `thinkingLevel` body field to
+ * one of the U61/S1-proven gateway values, or `undefined` if it cannot be
+ * trusted. Accepts EITHER a ThinkingSelector UI label ("Quick".."Max",
+ * translated via toGatewayThinkingLevel()) OR an already-valid gateway value
+ * sent directly ("off"|"low"|"medium"|"high"). This is a SOFT enhancement —
+ * an unrecognized value (including the literal broken strings "max"/
+ * "minimal") is silently dropped rather than failing the whole request, but
+ * it is NEVER threaded through to the transport unresolved. Defense in depth:
+ * even if a compromised/buggy client sends the raw string "max" directly
+ * (bypassing the UI's own label mapping), this function still refuses it.
+ */
+function resolveThinkingLevel(raw: unknown): GatewayThinkingLevel | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const fromLabel = toGatewayThinkingLevel(raw);
+  if (fromLabel) return fromLabel;
+  if (isValidGatewayThinkingLevel(raw)) return raw;
+  return undefined;
+}
+
 export async function POST(request: NextRequest) {
   if (!isMyAiCeoBetaEnabled()) {
     return new Response(JSON.stringify({ error: 'My AI CEO (BETA) is disabled on this box.' }), {
@@ -41,7 +63,7 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  let body: { sessionId?: unknown; message?: unknown };
+  let body: { sessionId?: unknown; message?: unknown; model?: unknown; thinkingLevel?: unknown; agentId?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -64,6 +86,22 @@ export async function POST(request: NextRequest) {
       headers: { 'content-type': 'application/json' },
     });
   }
+
+  // U62 (JM/U65) Phase-B passthrough — all three optional.
+  const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
+  // Sovereignty filter (M.4 non-goals: "a hard gate in every model list this
+  // section ships"). ModelPicker already never lists a forbidden model, but
+  // this is the API boundary — never trust the client alone. A forbidden
+  // model is REJECTED loudly (400), never silently dropped or substituted,
+  // because silently proceeding would violate a hard existing invariant.
+  if (model && isForbidden(model)) {
+    return new Response(
+      JSON.stringify({ error: `model "${model}" is forbidden — the sovereignty filter never permits an Anthropic-family route` }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    );
+  }
+  const thinkingLevel = resolveThinkingLevel(body.thinkingLevel);
+  const agentId = typeof body.agentId === 'string' && body.agentId.trim() ? body.agentId.trim() : undefined;
 
   const sessionId =
     typeof body.sessionId === 'string' && body.sessionId.trim() ? body.sessionId.trim() : uuidv4();
@@ -96,12 +134,20 @@ export async function POST(request: NextRequest) {
 
       let assistantText = '';
       let gatewayDown = false;
+      // U62 (JM/U65) — the last real usage frame captured this turn (S3),
+      // persisted onto the assistant row below so history can echo it after
+      // a reload (migration 110). Stays null when no usage frame arrives —
+      // the meter is never told a fabricated number.
+      let capturedUsage: { input: number; output: number; total: number } | null = null;
 
       try {
         for await (const chunk of forwardToAgent({
           sessionId,
           content: message,
           metadata: { requester_channel: CEO_CHAT_CHANNEL, requester_chat_id: sessionId },
+          ...(model ? { model } : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+          ...(agentId ? { agentId } : {}),
         })) {
           const c = chunk as ChatChunk;
           if (c.type === 'token') {
@@ -112,6 +158,11 @@ export async function POST(request: NextRequest) {
             safeEnqueue(sse('gateway_down', { message: c.message }));
           } else if (c.type === 'error') {
             safeEnqueue(sse('error', { message: c.message }));
+          } else if (c.type === 'usage') {
+            capturedUsage = c.usage;
+            safeEnqueue(sse('usage', { usage: c.usage }));
+          } else if (c.type === 'routed') {
+            safeEnqueue(sse('routed', { agentId: c.agentId }));
           } else if (c.type === 'done') {
             break;
           }
@@ -123,7 +174,15 @@ export async function POST(request: NextRequest) {
       // Persist the outcome so a reconnect / history reload shows the same thread.
       try {
         if (assistantText.trim()) {
-          insertCeoChatMessage({ sessionId, role: 'assistant', content: assistantText, kind: 'message' });
+          insertCeoChatMessage({
+            sessionId,
+            role: 'assistant',
+            content: assistantText,
+            kind: 'message',
+            usageInput: capturedUsage?.input ?? null,
+            usageOutput: capturedUsage?.output ?? null,
+            usageTotal: capturedUsage?.total ?? null,
+          });
         } else if (gatewayDown) {
           insertCeoChatMessage({
             sessionId,

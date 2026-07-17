@@ -72,4 +72,36 @@ describe('ceo-chat store', () => {
     expect(row.attachment_name).toBe('deck.pdf');
     expect(row.attachment_size).toBe(12345);
   });
+
+  // U62 (JM/U65, master E.2) — migration 110 usage columns. BINARY
+  // acceptance: usage "echoed by history for reload continuity" — the store
+  // must round-trip real per-turn usage so a page reload can resume exact
+  // metering without a new turn.
+  it('U62: an assistant row can carry real usage (input/output/total) and getCeoChatHistory echoes it back', () => {
+    const sid = `usage-${Date.now()}`;
+    insertCeoChatMessage({ sessionId: sid, role: 'user', content: 'How are we doing?' });
+    insertCeoChatMessage({
+      sessionId: sid,
+      role: 'assistant',
+      content: 'Revenue is up.',
+      usageInput: 16026,
+      usageOutput: 28,
+      usageTotal: 16054,
+    });
+
+    const history = getCeoChatHistory(sid);
+    const assistantRow = history.find((m) => m.role === 'assistant');
+    expect(assistantRow?.usage_input).toBe(16026);
+    expect(assistantRow?.usage_output).toBe(28);
+    expect(assistantRow?.usage_total).toBe(16054);
+  });
+
+  it('U62: a row with no usage supplied stores NULL (never a fabricated zero)', () => {
+    const sid = `no-usage-${Date.now()}`;
+    insertCeoChatMessage({ sessionId: sid, role: 'assistant', content: 'estimate-mode reply' });
+    const [row] = getCeoChatHistory(sid);
+    expect(row.usage_input).toBeNull();
+    expect(row.usage_output).toBeNull();
+    expect(row.usage_total).toBeNull();
+  });
 });

@@ -11,8 +11,17 @@
  * (spec (f)), the full mobile/tablet/desktop tab system (spec (g)), and
  * preserves every existing behavior verbatim (spec (h)/(i)): beta gating,
  * gateway degrade banner, persist-before-forward, the 200MB upload pipeline,
- * and session restore. Zero gateway-contract changes — Phase B (U62/U65) is
- * gated on the U64 gateway spikes and does not block this unit.
+ * and session restore.
+ *
+ * U62 (JM/U65) Phase B: model / thinking-level / agent-switch passthrough +
+ * exact usage metering, hard-gated per U61's gateway spikes (all three
+ * PASSed). `agent`/`model`/`thinkingLevel`/`exactUsageTokens` now live in
+ * `useCeoChatSession` (not local page state) so the mount-vs-user-change
+ * chip logic sits next to `setMessages`; this page only computes the THREE
+ * controls' disabled/reason pairs (streaming lock, spec M.3: "all controls
+ * disable from first streamed token until done/gateway_down"; the
+ * ThinkingSelector additionally disables when the active model lacks the
+ * `reasoning` capability tag) and wires them into ControlStrip/CeoChatHeader.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -27,7 +36,9 @@ import MessageBubble from '@/components/ceo-chat/MessageBubble';
 import MobileTabs from '@/components/ceo-chat/MobileTabs';
 import OperationsRail from '@/components/ceo-chat/OperationsRail';
 import { useCeoChatSession } from '@/components/ceo-chat/useCeoChatSession';
-import type { AgentOption, MobileTab, ModelOption } from '@/components/ceo-chat/types';
+import type { MobileTab } from '@/components/ceo-chat/types';
+
+const STREAMING_LOCK_REASON = 'Locked while your AI CEO is replying.';
 
 export default function MyAiCeoPage() {
   const router = useRouter();
@@ -46,15 +57,34 @@ export default function MyAiCeoPage() {
     uploadFile,
     loadHistory,
     startFreshSession,
+    agent,
+    model,
+    thinkingLevel,
+    setThinkingLevel,
+    onModelResolved,
+    onModelUserChange,
+    onAgentResolved,
+    onAgentUserChange,
+    exactUsageTokens,
   } = useCeoChatSession();
 
   const [dragOver, setDragOver] = useState(false);
   const [delegateOpen, setDelegateOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<MobileTab>('conversation');
-  const [agent, setAgent] = useState<AgentOption | null>(null);
-  const [model, setModel] = useState<ModelOption | null>(null);
   const [resolvedByMap, setResolvedByMap] = useState<Record<string, string>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // U62 — the ThinkingSelector additionally disables when the active model
+  // does not declare the `reasoning` capability tag in the registry (BINARY
+  // acceptance: "disables with an explanatory tooltip when the active model
+  // lacks the reasoning capability tag").
+  const modelSupportsReasoning = model ? (model.capabilities ?? []).includes('reasoning') : true;
+  const thinkingDisabled = streaming || !modelSupportsReasoning;
+  const thinkingDisabledReason = streaming
+    ? STREAMING_LOCK_REASON
+    : !modelSupportsReasoning
+      ? 'This model does not support adjustable reasoning effort.'
+      : undefined;
 
   // If the flag is off, leave the surface (BETA: never a broken card) — preserved verbatim.
   useEffect(() => {
@@ -97,11 +127,22 @@ export default function MyAiCeoPage() {
         charCount={charCount}
         contextWindow={model?.context_window ?? null}
         onStartFresh={startFreshSession}
+        exactTokens={exactUsageTokens}
       />
 
       <ControlStrip
-        onAgentResolved={setAgent}
-        onModelResolved={setModel}
+        onAgentResolved={onAgentResolved}
+        onAgentUserChange={onAgentUserChange}
+        agentDisabled={streaming}
+        agentDisabledReason={streaming ? STREAMING_LOCK_REASON : undefined}
+        onModelResolved={onModelResolved}
+        onModelUserChange={onModelUserChange}
+        modelDisabled={streaming}
+        modelDisabledReason={streaming ? STREAMING_LOCK_REASON : undefined}
+        thinkingLevel={thinkingLevel}
+        onThinkingLevelChange={setThinkingLevel}
+        thinkingDisabled={thinkingDisabled}
+        thinkingDisabledReason={thinkingDisabledReason}
         onOpenDelegate={() => setDelegateOpen(true)}
       />
 

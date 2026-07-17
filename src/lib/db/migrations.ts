@@ -4805,6 +4805,64 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '110',
+    name: 'add_ceo_chat_usage_columns',
+    up: (db) => {
+      // U62 (JM/U65, master E.2) — "My AI CEO" Phase B, exact usage metering.
+      // BINARY acceptance: "usage frames ... re-emitted as a new SSE `usage`
+      // event and echoed by history for reload continuity — the meter drops
+      // `≈` on the first real frame." A page reload wipes client state, so
+      // the ContextMeter can only resume exact mode after reload if the LAST
+      // assistant turn's usage was actually persisted, not just held in
+      // memory — hence these three columns.
+      //
+      // Three additive, nullable INTEGER columns on the EXISTING
+      // ceo_chat_messages table (migration 101) — same column-existence-
+      // guarded ALTER TABLE pattern as migration 107/108/109 above, so this
+      // is a safe no-op on a box where schema.ts already created these
+      // columns on a fresh DB (schema.ts's ceo_chat_messages CREATE TABLE is
+      // kept in sync with the post-110 shape).
+      //   usage_input   the gateway's real prompt-token count for this turn.
+      //   usage_output  the gateway's real completion-token count.
+      //   usage_total   the gateway's real total (may differ from
+      //                 input+output on providers with cache read/write).
+      // Populated ONLY on an assistant row where a real usage frame was
+      // captured mid-stream (src/lib/ceo-chat/gateway.ts extractUsage()) —
+      // NULL on every user/system/trust row and on any assistant row where
+      // no usage frame arrived, so the app never fabricates a false-precise
+      // number.
+      //
+      // MERGE-WRITER RENUMBER NOTE: originally authored and scored as id
+      // '109' (the next free id at authoring time, verified directly against
+      // this file — highest existing id was '108'). While this branch was in
+      // flight, main independently landed migration 109
+      // (guard_general_task_display_name_stays_general_task, D-C2/D8 REJECT)
+      // — a real, unforeseeable id collision (disjoint tables:
+      // ceo_chat_messages vs workspaces, no semantic conflict), same pattern
+      // as migrations 107/108's own renumber notes above. Renumbered to the
+      // next free id, '110', on rebase, per this file's own DATA-03
+      // fail-fast guard below. Neither this migration's own tests nor
+      // ceo-chat-store.test.ts assert on the numeric id, only on column
+      // existence, so this renumber does not change test behavior.
+      console.log('[Migration 110] Adding usage_input/usage_output/usage_total to ceo_chat_messages...');
+
+      const chatInfo = db.prepare('PRAGMA table_info(ceo_chat_messages)').all() as { name: string }[];
+      const columnNames = chatInfo.map((c) => c.name);
+      const adds: Record<string, string> = {
+        usage_input: 'INTEGER',
+        usage_output: 'INTEGER',
+        usage_total: 'INTEGER',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.includes(col)) {
+          db.prepare(`ALTER TABLE ceo_chat_messages ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+
+      console.log('[Migration 110] ceo_chat_messages usage columns ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
