@@ -2,7 +2,9 @@
 # cc-health-check.sh — B.1 single definition of "green". App checks in /api/health/deep.
 # Handles: (a) pm2 topology  (b) outside-in asset probe  (c) CF public-URL probe (rows 25-27+new).
 # EXIT: 0=green  1=red  3=UNKNOWN (transient—never rollback on 3)  2=usage error
-# CF-REDIRECT GUARD: --max-redirs 0 catches CF login-redirect as non-200.
+# CF-REDIRECT GUARD: --max-redirs 0 catches CF login-redirect as non-200; a
+# genuine Cloudflare Access login-challenge redirect (team.cloudflareaccess.com
+# /cdn-cgi/access/login/...) is then recognized as PASS, not FAIL (U51 fix).
 
 set -uo pipefail
 PORT="${CC_PORT:-4000}"; CANONICAL_DIR="${CC_CANONICAL_DIR:-}"; SKIP_PM2=0; JSON_ONLY=0
@@ -50,6 +52,32 @@ is_interview_gate_redirect() {
   [[ -n "$target" ]] || return 1
   [[ "$(url_host "$target")" == "$(url_host "$base")" ]] || return 1
   printf '%s' "$(url_path "$target")" | grep -qE '^/(interview|onboarding)(/|$)'
+}
+# U51 regression fix: True iff $1 (a 3xx redirect target, absolute URL) is
+# Cloudflare Access's OWN login-challenge redirect — the documented flow CF
+# Access uses to gate an unauthenticated request at the edge, BEFORE it ever
+# reaches the origin: https://<team>.cloudflareaccess.com/cdn-cgi/access/login/<app-host>?...
+# Reproduced live against this box after Access was newly enabled (was
+# previously untested against this code path): a 302 to exactly this
+# shape is a REAL, correct security control firing — the tunnel/DNS resolved,
+# Cloudflare routed the request, and Access intercepted it pre-origin. That
+# is "reachable and correctly protected," not "broken/unreachable," and must
+# not be scored the same as a dead origin, wrong DNS, or a captive-portal /
+# expired-domain redirect.
+#
+# Deliberately narrow: only CF's own reserved cloudflareaccess.com host PLUS
+# its fixed /cdn-cgi/access/login/ path qualify — not "any off-origin 3xx"
+# (scripts/cloudflare/probe-access-login.sh answers that broader, narrower-
+# purpose "is Access gating this hostname at all" question elsewhere in this
+# repo; cc-health-check.sh's public_probe is the fleet-wide green/red gate
+# and stays conservative so a genuinely misdirected redirect — bad DNS, an
+# ISP captive portal, an expired-domain parking page — still falls through
+# to FAIL below instead of going green).
+is_cloudflare_access_login_redirect() {
+  local target="$1"
+  [[ -n "$target" ]] || return 1
+  [[ "$(url_host "$target")" == *.cloudflareaccess.com ]] || return 1
+  printf '%s' "$(url_path "$target")" | grep -qE '^/cdn-cgi/access/login/'
 }
 # ── (a) /api/health/deep ──────────────────────────────────────────────────────
 DEEP_RAW=$(curl -s --max-time 15 --max-redirs 0 \
@@ -213,8 +241,14 @@ fi
 
 # ── (c) CF public-URL probe (truth-table rows 25-27 + CF-Access-policy row) ──
 # CC_PUBLIC_URL unset → row 27 UNKNOWN (never FAIL; tunnel may be off).
-# 3xx → row 26 FAIL, UNLESS it is the in-app interview-lock gate (see below).
+# 3xx → row 26 FAIL, UNLESS it is the in-app interview-lock gate OR a genuine
+# Cloudflare Access login-challenge redirect (both see below).
 # 000 → row 27 UNKNOWN.  200+CF-challenge → new row UNKNOWN.
+# U51 regression fix: Cloudflare Access newly enabled on a box now correctly
+# 302s every unauthenticated request to its own off-origin login page BEFORE
+# this script's own interview-lock check could ever see it — the old code
+# scored that as row-26 FAIL (indistinguishable from a dead origin). Reachable
+# + correctly gated by Access is a real security improvement, not an outage.
 CF_PASS="skip"; CF_INDET=false; CF_DETAIL="public URL not configured (row 27: UNKNOWN)"
 if [[ -n "$PUBLIC_URL" ]]; then
   _CF=$(mktemp /tmp/cf_probe_XXXXXX.html)
@@ -233,6 +267,11 @@ if [[ -n "$PUBLIC_URL" ]]; then
     # host, or an unexpected path) stays row-26 FAIL.
     if is_interview_gate_redirect "$CF_LOC" "$PUBLIC_URL"; then
       CF_PASS="pass"; CF_DETAIL="CF public URL → HTTP ${CF_HTTP} to $(url_path "$CF_LOC") (in-app interview-lock gate; app up: PASS)"
+    elif is_cloudflare_access_login_redirect "$CF_LOC"; then
+      # U51 fix: genuine off-origin Cloudflare Access login-challenge redirect.
+      # The origin answered, Cloudflare routed the request, and Access
+      # correctly intercepted it pre-origin — reachable + protected: PASS.
+      CF_PASS="pass"; CF_DETAIL="CF public URL → HTTP ${CF_HTTP} to Cloudflare Access login (${CF_LOC}) — reachable, correctly gated by CF Access: PASS"
     else
       CF_PASS="fail"; CF_DETAIL="CF redirected HTTP ${CF_HTTP} → ${CF_LOC:-<no location>} (row 26: FAIL)"
     fi
