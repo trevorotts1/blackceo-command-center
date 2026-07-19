@@ -896,8 +896,23 @@ export async function getInterviewGateSnapshot(
   };
 }
 
-/** Derived progress percent — q/30 denominator, capped at 100 (schema stores none). */
-export function derivedPercent(lastQuestionNumber: number | null | undefined): number {
+/**
+ * Derived progress percent — capped at 100 (schema stores none). Denominator is
+ * the interview's OWN planned question count (interviewProgress.questionCountPlanned,
+ * e.g. a tailored 9-question founder track), falling back to 30 only when that
+ * count is unknown. Callers whose interview is already complete should report
+ * 100% directly rather than pass a possibly-mismatched count through here — a
+ * tailored short track that finished all its questions must never be stuck
+ * showing a fraction of a generic 30-question denominator.
+ */
+export function derivedPercent(
+  lastQuestionNumber: number | null | undefined,
+  questionCountPlanned?: number | null,
+): number {
   const q = typeof lastQuestionNumber === 'number' && lastQuestionNumber > 0 ? lastQuestionNumber : 0;
-  return Math.min(100, Math.round((q / 30) * 100));
+  const total =
+    typeof questionCountPlanned === 'number' && questionCountPlanned > 0
+      ? questionCountPlanned
+      : 30;
+  return Math.min(100, Math.round((q / total) * 100));
 }

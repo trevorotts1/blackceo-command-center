@@ -330,6 +330,15 @@ export default function InterviewClient() {
 
       if (!data) return;
 
+      // A COMPLETED interview never shows the resume nag, regardless of answer
+      // counts — the owner is done; route straight to the dashboard (already
+      // unlocked by the gate cookie once interviewComplete is true). Checked
+      // FIRST, ahead of the answeredCount branch below.
+      if (data.interviewComplete === true) {
+        router.replace('/');
+        return;
+      }
+
       // Restore the gateway conversation session for this interview.
       try {
         const stored = localStorage.getItem(
@@ -352,7 +361,7 @@ export default function InterviewClient() {
     return () => {
       cancelled = true;
     };
-  }, [loadState]);
+  }, [loadState, router]);
 
   /* ---- pending-reply recovery (a slow interviewer is not a dead-end) ---- */
 

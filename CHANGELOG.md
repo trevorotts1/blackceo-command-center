@@ -1,3 +1,35 @@
+## [v6.0.59] — 2026-07-19 — `/interview` completed-owner hotfix: no more stuck "30% / resume"
+
+v6.0.59 — Direct Trevor-authorized hotfix (not a skill6-v2 unit), single serial merge-writer.
+
+- **What lands:** three defects in the `/interview` presentation surface were stranding a
+  COMPLETED interview (`interviewComplete:true`, tailored 9-question founder track, QC
+  pass) behind a stale "30% done, resume where you left off" screen every time the owner
+  landed on `/interview`:
+  1. `InterviewClient.tsx`'s mount effect routed to `WelcomeBack` (the resume screen)
+     whenever ANY answers existed, without ever checking `interviewComplete`. Now checked
+     FIRST: a completed interview routes straight to the dashboard (`router.replace('/')`),
+     regardless of answer counts.
+  2. `seam.ts`'s `derivedPercent()` hardcoded a `/30` denominator, so a tailored 9-question
+     track (9/9 done) reported 30% instead of 100%. Now takes the interview's own
+     `interviewProgress.questionCountPlanned` as the denominator (falling back to 30 only
+     when unknown); `/api/interview/state/route.ts` short-circuits to 100% outright when
+     `interviewComplete` is true, so a finished short track is never a stale fraction of a
+     generic 30-question floor.
+  3. `readKnownContext()`'s `company_name` prefill only read the DB `clients.name` row
+     (a fresh-box placeholder) and never `config/company-config.json`'s own `companyName`
+     (e.g. "BlackCEO"). Now falls back to the config file's `companyName` (placeholder
+     values "Your Company" / "Command Center" filtered the same way the client-record
+     placeholder check already is).
+- Dashboard gate logic (`src/lib/interview/seam.ts` gate-flag math, `gate-cookie.ts`) is
+  UNCHANGED — this is presentation + percent + prefill only, per scope.
+- `derivedPercent()`'s new second parameter is optional and additive; its one other caller
+  (`mirror.ts`'s non-authoritative session-mirror write) is unchanged and out of scope for
+  this hotfix.
+- Full suite 1752/1757 (5 pre-existing, unrelated `interview-detection.test.ts` failures —
+  reproduced identically against a stash of this same fix, i.e. present on main before this
+  change). `next build` run in full (not skipped); `next lint` clean on all 3 touched files.
+
 ## [v6.0.58] — 2026-07-16 — U44 CC leg (C-13(b)/D-C2): D8 RATIFIED REJECT, catch-all stays "General Task"
 
 v6.0.58 — Single unit, single serial merge-writer. Lands `skill6-v2/U44` @ `eb30a3b`
