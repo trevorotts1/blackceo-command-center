@@ -21,8 +21,10 @@
  * pure read. All gate math (coverage, provenance, the live canonical floor) lives
  * in the seam so the UI gate can never drift from the build-side enforcer.
  *
- * The percent is DERIVED (schema stores none): min(100, round(q/30*100)) — the
- * same q/30 denominator the client uses, computed once here so both agree.
+ * The percent is DERIVED (schema stores none): min(100, round(q/planned*100)),
+ * where "planned" is the interview's OWN questionCountPlanned (falls back to 30
+ * when unknown), and a completed interview is always 100% regardless of counts —
+ * computed once here so the rail and the client agree.
  *
  * Fail-closed: if anything unexpected throws, the flags come back all-false so
  * the Build button stays disabled rather than green-lighting an unverifiable
@@ -81,6 +83,18 @@ function readKnownContext(): Record<string, { value: string; source: string }> {
   }
   try {
     const cfg = loadCompanyConfig();
+    // Second known-fact source for company_name: config/company-config.json's own
+    // companyName (e.g. "BlackCEO"), used only when the client record above didn't
+    // already resolve one. Template/default values are filtered the same way the
+    // client-record placeholder check above is, so a fresh/unbranded box is never
+    // "confirmed" against a placeholder.
+    if (!known.company_name) {
+      const cfgName = (cfg.companyName ?? '').trim();
+      const placeholderCfgName = /^(your company|command center)$/i.test(cfgName);
+      if (cfgName && !placeholderCfgName) {
+        known.company_name = { value: cfgName, source: 'company-settings' };
+      }
+    }
     const industry = (cfg.industry ?? '').trim();
     if (industry && !/^(unknown|general|template)$/i.test(industry)) {
       known.industry = { value: industry, source: 'company-settings' };
@@ -137,7 +151,20 @@ export async function GET(request: NextRequest) {
         ? snap.progress.lastQuestionNumber
         : null) ?? snap.handoff.lastQuestionNumber;
 
-    const percent = derivedPercent(lastQuestionNumber);
+    // The interview's OWN planned question count (e.g. a tailored 9-question
+    // founder track) — NOT a generic 30. Falls back to 30 inside derivedPercent
+    // when unknown. A completed interview is always 100%, regardless of count —
+    // checked here rather than inside derivedPercent so a tailored short track
+    // (e.g. 9/9 questions) never reports a stale fraction of a 30-question floor.
+    const questionCountPlanned =
+      typeof snap.progress.questionCountPlanned === 'number' &&
+      snap.progress.questionCountPlanned > 0
+        ? snap.progress.questionCountPlanned
+        : null;
+
+    const percent = snap.interviewComplete
+      ? 100
+      : derivedPercent(lastQuestionNumber, questionCountPlanned);
 
     // ── Structured resume position (continuity) ──────────────────────────
     // Which structured questions already carry a transcript answer, and the
