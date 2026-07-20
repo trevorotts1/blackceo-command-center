@@ -107,6 +107,20 @@ _banner() { printf '\n%s═══ %s ═══%s\n' "${BOLD}" "$*" "${RESET}" >&
 # Resolve the script's own directory so we can call cc-health-check.sh portably
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Backup retention + disk pre-check (OPENCLAW-BACKUP-RETENTION-V1). Always
+# ships beside this script. If a checkout somehow lacks it, define no-ops so a
+# deploy is never blocked by a missing helper — but say so loudly, because a
+# run without pruning is exactly how backups accumulated in the first place.
+if [[ -f "${SCRIPT_DIR}/lib/backup-retention.sh" ]]; then
+  # shellcheck source=lib/backup-retention.sh
+  source "${SCRIPT_DIR}/lib/backup-retention.sh"
+else
+  _warn "lib/backup-retention.sh not found beside atomic-deploy.sh — backups will NOT be pruned this run."
+  oc_backup_size_kb() { echo 0; }
+  oc_backup_precheck_disk() { return 0; }
+  oc_backup_prune() { return 0; }
+fi
+
 # CC_HEALTH_CHECK_PATH env var allows fixture harnesses to inject a stub
 # without needing to copy files into SCRIPT_DIR.
 if [[ -n "$HEALTH_CHECK_PATH_OVERRIDE" ]]; then
@@ -146,17 +160,15 @@ _disk_cleanup() {
   local dir="$1"
   _log "Running disk cleanup in ${dir} ..."
 
-  # Old DB backups (mission-control.db.backup.YYYY-MM-DD pattern)
-  find "$dir" -maxdepth 1 -name "mission-control.db.backup.*" -type f -delete 2>/dev/null || true
-  # Keep the most-recent plain .backup for emergency recovery; clean dated ones only
-  # Actually: the rollback artifact is .next.rollback; DB backup for this deploy is
-  # written to a timestamped path. Clean up backups older than 3 days.
-  find "$dir" -maxdepth 1 -name "*.db.backup" -not -newer "$dir" -type f 2>/dev/null |
-    while IFS= read -r f; do
-      local age_days
-      age_days=$(( ( $(date +%s) - $(stat -c%Y "$f" 2>/dev/null || stat -f%m "$f" 2>/dev/null || echo 0) ) / 86400 ))
-      [[ "$age_days" -ge 3 ]] && rm -f "$f" && _log "  Removed old DB backup: $(basename "$f")"
-    done || true
+  # Old DB backups (mission-control.db.backup.<timestamp>).
+  #
+  # This used to be an unconditional `-delete` of EVERY mission-control.db.backup.*
+  # — and it runs in phase 1a, BEFORE phase 1b writes this deploy's backup. So a
+  # disk-pressured deploy destroyed the entire DB backup history, including the
+  # last known-good one, and then took its own. That is the exact failure the
+  # retention policy exists to prevent. Now it keeps the newest N (default 3,
+  # OPENCLAW_BACKUP_KEEP) and prints every decision.
+  oc_backup_prune "$dir" "mission-control.db.backup." ""
 
   # npm cache
   npm cache clean --force 2>/dev/null || true
@@ -376,8 +388,18 @@ try:
 finally:
     conn.close()
 PYWAL
+  # Pre-check disk BEFORE the copy. The phase-1a gate above checks the deploy
+  # as a whole; this checks that THIS copy specifically fits, so a truncated
+  # .backup file can never be produced and then trusted as a rollback source.
+  if ! oc_backup_precheck_disk "$DB_BACKUP" "$(oc_backup_size_kb "$DB_FILE")" "DB backup of ${DB_FILE}"; then
+    _preflight_abort_receipt "Cannot back up the database at ${DB_FILE} — insufficient free disk (details above). Old build untouched."
+    exit 2
+  fi
   cp "$DB_FILE" "$DB_BACKUP"
   _ok "  DB backed up: ${DB_BACKUP}"
+  # RETENTION: only now that this deploy's backup exists. Never prunes the
+  # backup this run just wrote.
+  oc_backup_prune "$(dirname "$DB_BACKUP")" "$(basename "$DB_FILE").backup." "$DB_BACKUP"
 fi
 
 # ── 1c. Snapshot current .next as rollback artifact ───────────────────────────
