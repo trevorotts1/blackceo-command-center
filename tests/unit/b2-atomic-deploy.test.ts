@@ -260,7 +260,11 @@ fi
  * atomic-deploy.sh uses our stub instead of SCRIPT_DIR/cc-health-check.sh.
  * sleep is stubbed with a no-op in binDir so tests don't wait real seconds.
  */
-function runDeploy(fixture: Fixture, extraEnv: Record<string, string> = {}): {
+function runDeploy(
+  fixture: Fixture,
+  extraEnv: Record<string, string> = {},
+  opts: { pm2App?: string } = {},
+): {
   exitCode: number; stdout: string; stderr: string;
 } {
   const result = spawnSync(
@@ -269,7 +273,7 @@ function runDeploy(fixture: Fixture, extraEnv: Record<string, string> = {}): {
     })(),
     [fixture.deployScript,
       '--app-dir', fixture.appDir,
-      '--pm2-app', 'mission-control',
+      '--pm2-app', opts.pm2App ?? 'mission-control',
       '--port', '4000',
       '--disk-min-gb', '5',
       '--health-retries', '2',
@@ -1010,6 +1014,240 @@ test('P1 integration (a): broken build + APP_DIR under /data-like path → exit 
       !stderr.includes('ATOMIC DEPLOY SUCCESS'),
       `ATOMIC DEPLOY SUCCESS must not appear when build failed (APP_DIR under /data-like path)`
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Phase 1d port-aware zombie selection (scripts/lib/pm2-port-zombies.py) ──
+//
+// Regression guards for the port-blind kill defect: the old Phase 1d matched
+// NAME KEYWORDS ('mission-control'/'command-center'/'blackceo') and deleted
+// two RUNNING demo apps (blackceo-cc-demo-* on :4600/:4601) while leaving the
+// actual :4000 holder (cc-prod — no keyword) alive, after which Phase 4
+// started a duplicate that fought it for the port.
+//
+// The selector is exercised two ways:
+//   1. Directly (real python3, fixture jlist JSON on stdin) — precise unit
+//      coverage of the selection rule.
+//   2. Through atomic-deploy.sh end-to-end with a pm2 stub that logs every
+//      call — proves the deploy never issues `pm2 delete`/`pm2 stop` for an
+//      app on another port.
+
+const ZOMBIE_SELECTOR = path.join(process.cwd(), 'scripts', 'lib', 'pm2-port-zombies.py');
+// Resolve the REAL python3 before any fixture binDir is prepended to PATH.
+// spawnSync with an argument array — no shell interpolation.
+const REAL_PYTHON3 = (() => {
+  const probe = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+  const p = (probe.stdout ?? '').trim();
+  return p || 'python3';
+})();
+
+/** Mirror of the live operator box that surfaced the defect:
+ *  cc-prod serving :4000, two demo apps serving :4600/:4601. */
+function liveBoxJlist(): object[] {
+  return [
+    {
+      name: 'cc-prod', pid: 99990001,
+      pm2_env: { name: 'cc-prod', status: 'online', args: ['scripts/cc-start.sh', '--port', '4000'], env: { CC_PORT: '4000' } },
+    },
+    {
+      name: 'blackceo-cc-demo-interview', pid: 99990002,
+      pm2_env: { name: 'blackceo-cc-demo-interview', status: 'online', args: ['scripts/cc-start.sh', '--port', '4600'], env: { CC_PORT: '4600' } },
+    },
+    {
+      name: 'blackceo-cc-demo-dashboard', pid: 99990003,
+      pm2_env: { name: 'blackceo-cc-demo-dashboard', status: 'online', args: ['scripts/cc-start.sh', '--port', '4601'], env: { CC_PORT: '4601' } },
+    },
+  ];
+}
+
+function runSelector(
+  jlist: unknown,
+  argv: string[],
+  env: Record<string, string> = {},
+): string[] {
+  const res = spawnSync(REAL_PYTHON3, ['-s', ZOMBIE_SELECTOR, ...argv], {
+    input: typeof jlist === 'string' ? jlist : JSON.stringify(jlist),
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  assert.strictEqual(res.status, 0,
+    `selector must exit 0, got ${res.status}.\nstderr:\n${res.stderr}`);
+  return (res.stdout ?? '').split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
+test('1d selector: demo apps on other ports are NEVER selected (canonical=cc-prod, port 4000)', () => {
+  const selected = runSelector(liveBoxJlist(), ['cc-prod', '4000'], { CC_ZOMBIE_PS_TABLE: '' });
+  assert.deepStrictEqual(selected, [],
+    'No app fights for :4000 besides the canonical — selection must be empty. ' +
+    'The old keyword match selected both blackceo-cc-demo-* apps here (production-breaking).');
+});
+
+test('1d selector: with a wrong canonical name, the actual :4000 holder is selected — and the demos still are NOT', () => {
+  const selected = runSelector(liveBoxJlist(), ['blackceo-command-center', '4000'], { CC_ZOMBIE_PS_TABLE: '' });
+  assert.deepStrictEqual(selected, ['cc-prod'],
+    'cc-prod declares :4000 and is not canonical → selected (it would fight the canonical for the port). ' +
+    'The demo apps declare :4600/:4601 and must never be selected. ' +
+    'The old keyword match produced the exact inverse: demos killed, cc-prod left to fight.');
+});
+
+test('1d selector: start args beat a stale pm2 env CC_PORT (env-bleed cannot mark an app a port-fighter)', () => {
+  const jlist = [{
+    name: 'blackceo-cc-demo-interview', pid: 99990002,
+    // Started with --port 4600, but a stale CC_PORT=4000 leaked into its pm2 env snapshot.
+    pm2_env: { name: 'blackceo-cc-demo-interview', status: 'online', args: ['scripts/cc-start.sh', '--port', '4600'], env: { CC_PORT: '4000' } },
+  }];
+  const selected = runSelector(jlist, ['cc-prod', '4000'], { CC_ZOMBIE_PS_TABLE: '' });
+  assert.deepStrictEqual(selected, [],
+    'args --port 4600 is authoritative; the stale env CC_PORT=4000 must not get the app killed');
+});
+
+test('1d selector: a stopped zombie DECLARED on the canonical port is selected (it would grab the port on autorestart)', () => {
+  const jlist = [
+    ...liveBoxJlist(),
+    { name: 'mission-control', pid: 0, pm2_env: { name: 'mission-control', status: 'stopped', args: ['scripts/cc-start.sh', '--port', '4000'], env: {} } },
+  ];
+  const selected = runSelector(jlist, ['cc-prod', '4000'], { CC_ZOMBIE_PS_TABLE: '' });
+  assert.deepStrictEqual(selected, ['mission-control']);
+});
+
+test('1d selector: an app whose PID is LISTENing on the port is selected even with no declared port', () => {
+  const jlist = [{ name: 'rogue-cc', pid: 99990042, pm2_env: { name: 'rogue-cc', status: 'online', args: [], env: {} } }];
+  const selected = runSelector(jlist, ['cc-prod', '4000', '99990042'], { CC_ZOMBIE_PS_TABLE: '' });
+  assert.deepStrictEqual(selected, ['rogue-cc'],
+    'listener PID equals the pm2 pid → the app holds the port and must be selected');
+});
+
+test('1d selector: a listener PID that is a DESCENDANT of the pm2 pid marks the app a port-holder', () => {
+  const jlist = [{ name: 'rogue-cc', pid: 99990050, pm2_env: { name: 'rogue-cc', status: 'online', args: [], env: {} } }];
+  // ps table: listener 99990052 ← 99990051 ← pm2 app pid 99990050
+  const psTable = '99990052 99990051\n99990051 99990050\n99990050 1\n';
+  const selected = runSelector(jlist, ['cc-prod', '4000', '99990052'], { CC_ZOMBIE_PS_TABLE: psTable });
+  assert.deepStrictEqual(selected, ['rogue-cc']);
+});
+
+test('1d selector: the canonical app is never selected, even when it holds the port', () => {
+  const selected = runSelector(liveBoxJlist(), ['cc-prod', '4000', '99990001'], { CC_ZOMBIE_PS_TABLE: '' });
+  assert.deepStrictEqual(selected, [],
+    'canonical holding its own port is the healthy state — never a kill target');
+});
+
+test('1d selector: unparseable pm2 jlist selects NOTHING (fail-safe, exit 0)', () => {
+  const selected = runSelector('this is not json', ['cc-prod', '4000'], { CC_ZOMBIE_PS_TABLE: '' });
+  assert.deepStrictEqual(selected, [], 'garbage input must never cause a blind kill');
+});
+
+test('--resolve-name: returns the live app declaring the port (update.sh live-derive path)', () => {
+  const resolved = runSelector(liveBoxJlist(), ['--resolve-name', '4000', 'blackceo-command-center']);
+  assert.deepStrictEqual(resolved, ['cc-prod'],
+    'update.sh must target the app the box ACTUALLY runs on :4000, not the assumed fleet name');
+});
+
+test('--resolve-name: falls back to the default when no app declares the port', () => {
+  const resolved = runSelector(liveBoxJlist(), ['--resolve-name', '4700', 'blackceo-command-center']);
+  assert.deepStrictEqual(resolved, ['blackceo-command-center']);
+});
+
+test('--resolve-name: an online app wins over a stopped app declaring the same port', () => {
+  const jlist = [
+    { name: 'cc-old', pid: 0, pm2_env: { name: 'cc-old', status: 'stopped', args: ['scripts/cc-start.sh', '--port', '4000'], env: {} } },
+    { name: 'cc-prod', pid: 99990001, pm2_env: { name: 'cc-prod', status: 'online', args: ['scripts/cc-start.sh', '--port', '4000'], env: {} } },
+  ];
+  const resolved = runSelector(jlist, ['--resolve-name', '4000', 'fallback']);
+  assert.deepStrictEqual(resolved, ['cc-prod']);
+});
+
+// ─── Phase 1d end-to-end: deploy must never kill apps on other ports ────────
+
+/**
+ * Fixture variant for port-fight scenarios: pm2 stub serves a fixture jlist,
+ * logs every pm2 invocation, and python3 execs the REAL interpreter (the
+ * selector needs it; the base fixture's drain-stub would neuter Phase 1d).
+ * lsof is stubbed to report no listeners so selection is driven purely by the
+ * declared ports in the fixture jlist (hermetic — no real sockets involved).
+ */
+function buildPortFightFixture(jlist: object[]): Fixture & { pm2CallsLog: string } {
+  const base = buildFixture({ buildExitCode: 0, healthExitCode: 0 });
+  const jlistPath = path.join(base.baseDir, 'pm2-jlist.json');
+  writeFileSync(jlistPath, JSON.stringify(jlist));
+  const listPath = path.join(base.baseDir, 'pm2-list.txt');
+  writeFileSync(listPath,
+    jlist.map((a) => (a as { name?: string }).name ?? '').filter(Boolean).join('\n') + '\n');
+  const pm2CallsLog = path.join(base.baseDir, 'pm2-calls.log');
+  const pm2Stub = `#!/usr/bin/env bash
+# Stub pm2 for Phase 1d port-fight fixtures — serves fixture jlist, logs calls
+echo "$@" >> "${pm2CallsLog}"
+case "$1" in
+  jlist) cat "${jlistPath}" ;;
+  list)  cat "${listPath}" ;;
+  *) exit 0 ;;
+esac
+`;
+  writeFileSync(path.join(base.binDir, 'pm2'), pm2Stub, { mode: 0o755 });
+  // Real python3 via ABSOLUTE path (never `env python3`, which would re-resolve
+  // to this stub through binDir-first PATH → infinite recursion, see the base
+  // fixture's drain-stub comment).
+  writeFileSync(path.join(base.binDir, 'python3'),
+    `#!/usr/bin/env bash\nexec "${REAL_PYTHON3}" "$@"\n`, { mode: 0o755 });
+  // Hermetic lsof: no listeners → only declared ports drive selection.
+  writeFileSync(path.join(base.binDir, 'lsof'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  return { ...base, pm2CallsLog };
+}
+
+function pm2Calls(logPath: string): string[] {
+  return existsSync(logPath)
+    ? readFileSync(logPath, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
+    : [];
+}
+
+test('1d e2e REGRESSION GUARD: deploy on the live-box roster (canonical cc-prod) must not delete/stop ANY app', async () => {
+  const fixture = buildPortFightFixture(liveBoxJlist());
+  try {
+    const { exitCode, stderr } = runDeploy(fixture, {}, { pm2App: 'cc-prod' });
+    assert.strictEqual(exitCode, 0,
+      `Expected green deploy, got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    const calls = pm2Calls(fixture.pm2CallsLog);
+    const kills = calls.filter((c) => /^(delete|stop)\b/.test(c));
+    assert.deepStrictEqual(kills, [],
+      'The port-blind bug deleted blackceo-cc-demo-interview and blackceo-cc-demo-dashboard here. ' +
+      `No delete/stop may be issued when nothing fights for the canonical port. Got: ${JSON.stringify(kills)}`);
+
+    assert.ok(calls.some((c) => c === 'restart cc-prod'),
+      `Phase 4 must restart the canonical app. pm2 calls: ${JSON.stringify(calls)}`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('1d e2e: a zombie declared on the canonical port IS deleted; apps on other ports are untouched', async () => {
+  const fixture = buildPortFightFixture([
+    {
+      name: 'blackceo-command-center', pid: 99990010,
+      pm2_env: { name: 'blackceo-command-center', status: 'online', args: ['scripts/cc-start.sh', '--port', '4000'], env: { CC_PORT: '4000' } },
+    },
+    {
+      name: 'mission-control', pid: 0,
+      pm2_env: { name: 'mission-control', status: 'stopped', args: ['scripts/cc-start.sh', '--port', '4000'], env: {} },
+    },
+    {
+      name: 'blackceo-cc-demo-dashboard', pid: 99990003,
+      pm2_env: { name: 'blackceo-cc-demo-dashboard', status: 'online', args: ['scripts/cc-start.sh', '--port', '4601'], env: { CC_PORT: '4601' } },
+    },
+  ]);
+  try {
+    const { exitCode, stderr } = runDeploy(fixture, {}, { pm2App: 'blackceo-command-center' });
+    assert.strictEqual(exitCode, 0,
+      `Expected green deploy, got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    const calls = pm2Calls(fixture.pm2CallsLog);
+    assert.ok(calls.includes('delete mission-control'),
+      `The :4000-declared zombie must be deleted. pm2 calls: ${JSON.stringify(calls)}`);
+    const demoKills = calls.filter((c) => /^(delete|stop)\b.*demo/.test(c));
+    assert.deepStrictEqual(demoKills, [],
+      `The demo app on :4601 must never be touched. Got: ${JSON.stringify(demoKills)}`);
   } finally {
     fixture.cleanup();
   }

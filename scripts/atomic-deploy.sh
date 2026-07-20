@@ -41,6 +41,9 @@
 #           (no sqlite3 CLI: the pre-backup WAL checkpoint uses python3's stdlib
 #            sqlite3 module — the Linux/VPS container ships python3 but NOT the
 #            sqlite3 command-line binary.)
+#           lsof is OPTIONAL: Phase 1d uses it to find who is bound to the
+#           canonical port; without it, declared-port matching (pm2 jlist
+#           args/env) still works.
 
 set -uo pipefail
 
@@ -381,44 +384,47 @@ else
   ROLLBACK_EXISTS=0
 fi
 
-# ── 1d. Kill non-canonical pm2 apps for this product ─────────────────────────
-_log "[1d] Killing non-canonical pm2 apps for this product"
-# Find all pm2 apps whose name contains a CC keyword but is NOT the canonical name.
-# These are zombies that could fight for the port.
-NON_CANONICAL=$(pm2 jlist 2>/dev/null | python3 -s -c "
-import sys, json
-try:
-  apps = json.load(sys.stdin) or []
-  canonical = sys.argv[1]
-  port_str = sys.argv[2]
-  keywords = ('mission-control', 'command-center', 'blackceo')
-  for app in apps:
-    env = app.get('pm2_env') or {}
-    name = (env.get('name') or app.get('name') or '').strip()
-    name_lc = name.lower()
-    # Is it a CC app?
-    is_cc = any(kw in name_lc for kw in keywords)
-    if not is_cc:
-      continue
-    # Is it canonical?
-    if name == canonical:
-      continue
-    # Non-canonical CC app — print its name
-    print(name)
-except Exception as e:
-  import sys as _sys
-  print(f'ERROR:{e}', file=_sys.stderr)
-" "$PM2_APP_NAME" "$PORT" 2>/dev/null || true)
+# ── 1d. Kill non-canonical pm2 apps fighting for the canonical port ──────────
+_log "[1d] Killing non-canonical pm2 apps fighting for port ${PORT}"
+# PORT-AWARE selection (scripts/lib/pm2-port-zombies.py). The old logic here
+# matched NAME KEYWORDS only ('mission-control'/'command-center'/'blackceo')
+# and was port-blind. That had two production-breaking failure modes, both
+# reachable on a live box running cc-prod (:4000) + blackceo-cc-demo-interview
+# (:4600) + blackceo-cc-demo-dashboard (:4601):
+#   1. It DELETED both RUNNING demo apps — keyword hit, ports unrelated.
+#   2. It left the actual :4000 holder alive when that app's name carried no
+#      keyword (cc-prod), so Phase 4 started a duplicate that fought it for
+#      the port.
+# An app is now selected ONLY if its name differs from the canonical AND it
+# is bound to (lsof listener PID or a pm2 descendant of one) or declared on
+# (pm2 args/env, args win) the canonical port. An app serving any other port
+# can NEVER be selected. Fail-safe: a missing selector or unparseable jlist
+# selects NOTHING — nothing is ever killed blind.
+ZOMBIE_SELECTOR="${SCRIPT_DIR}/lib/pm2-port-zombies.py"
+LISTENER_PIDS=""
+if command -v lsof >/dev/null 2>&1; then
+  # PIDs currently LISTENing on the canonical port. lsof is optional (absent
+  # on some VPS containers); declared-port matching works without it.
+  LISTENER_PIDS=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | tr '\n' ' ' || true)
+fi
+NON_CANONICAL=""
+if [[ -f "$ZOMBIE_SELECTOR" ]]; then
+  # LISTENER_PIDS is intentionally unquoted: one argv entry per PID.
+  NON_CANONICAL=$(pm2 jlist 2>/dev/null \
+    | python3 -s "$ZOMBIE_SELECTOR" "$PM2_APP_NAME" "$PORT" $LISTENER_PIDS 2>/dev/null || true)
+else
+  _warn "  Selector not found at ${ZOMBIE_SELECTOR} — skipping pm2 dedup (nothing is killed blind)."
+fi
 
 if [[ -n "$NON_CANONICAL" ]]; then
   while IFS= read -r zombie_name; do
     [[ -z "$zombie_name" ]] && continue
-    _warn "  Killing non-canonical pm2 app: '${zombie_name}'"
+    _warn "  Killing non-canonical pm2 app fighting for port ${PORT}: '${zombie_name}'"
     pm2 delete "$zombie_name" 2>/dev/null || pm2 stop "$zombie_name" 2>/dev/null || true
   done <<< "$NON_CANONICAL"
-  _ok "  Non-canonical pm2 apps removed."
+  _ok "  Non-canonical port-fighters removed."
 else
-  _ok "  No non-canonical pm2 apps found."
+  _ok "  No non-canonical pm2 app is bound to or declared on port ${PORT}."
 fi
 
 _ok "Phase 1 pre-flight passed."

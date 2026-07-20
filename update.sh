@@ -6,7 +6,7 @@
 # ============================================================
 
 set -euo pipefail
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 REPO_URL="https://github.com/trevorotts1/blackceo-command-center.git"
 LOG_FILE="/tmp/blackceo-cc-update-$(date +%Y%m%d-%H%M%S).log"
 exec 1> >(tee -a "$LOG_FILE") 2>&1
@@ -157,7 +157,34 @@ fi
 # does a non-atomic `rm -rf .next` before building, opening a window where the
 # server has no build to serve).
 step "Step 5: Build + restart (atomic deploy)"
-CC_PM2_NAME="blackceo-command-center"
+# LIVE-DERIVED pm2 app name (was hardcoded to "blackceo-command-center").
+# On a box whose live CC runs under a different pm2 name (e.g. an operator box
+# running "cc-prod" on :4000), the hardcoded name matched NOTHING: the atomic
+# deploy then restarted/started a SECOND app under the assumed name, which
+# fought the live one for the port. Resolution order — LIVE state wins over
+# any assumed name:
+#   1. CC_PM2_APP_NAME env — the same override scripts/deploy.sh and
+#      scripts/atomic-deploy.sh already honor.
+#   2. The pm2 app actually declaring this box's CC port (pm2 jlist, parsed by
+#      scripts/lib/pm2-port-zombies.py --resolve-name; online apps win).
+#   3. Fleet-canonical "blackceo-command-center" (ecosystem.config.cjs) — only
+#      for boxes with no CC under pm2 at all (fresh install).
+CC_PM2_FALLBACK_NAME="blackceo-command-center"
+PM2_NAME_LIB="$INSTALL_DIR/scripts/lib/pm2-port-zombies.py"
+CC_PM2_NAME=""
+if [ -n "${CC_PM2_APP_NAME:-}" ]; then
+  CC_PM2_NAME="$CC_PM2_APP_NAME"
+  success "pm2 app name (CC_PM2_APP_NAME override): $CC_PM2_NAME"
+elif command -v pm2 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$PM2_NAME_LIB" ]; then
+  CC_PM2_NAME=$(pm2 jlist 2>/dev/null \
+    | python3 -s "$PM2_NAME_LIB" --resolve-name "${CC_PORT:-4000}" "" 2>/dev/null \
+    | head -1 || true)
+  [ -n "$CC_PM2_NAME" ] && success "pm2 app name (live, declares port ${CC_PORT:-4000}): $CC_PM2_NAME"
+fi
+if [ -z "$CC_PM2_NAME" ]; then
+  CC_PM2_NAME="$CC_PM2_FALLBACK_NAME"
+  warn "No live pm2 app declares port ${CC_PORT:-4000} — using fleet-canonical name: $CC_PM2_NAME"
+fi
 ATOMIC_DEPLOY="$INSTALL_DIR/scripts/atomic-deploy.sh"
 
 # atomic-deploy.sh requires bash 4+ (macOS system bash is 3.2). Resolve one.
@@ -204,7 +231,13 @@ if [ "$DEPLOY_OK" -ne 1 ]; then
   success "Rebuild complete (.next/BUILD_ID present)"
 
   if command -v pm2 >/dev/null 2>&1; then
-    if pm2 list 2>/dev/null | grep -q "command-center\|blackceo"; then
+    # Target the LIVE app name first — reloading ecosystem.config.cjs on a box
+    # whose CC runs under a non-fleet name would START a second app that fights
+    # the live one for the port (same defect class as the old hardcoded name).
+    if pm2 list 2>/dev/null | grep -q "$CC_PM2_NAME"; then
+      pm2 reload "$CC_PM2_NAME" 2>&1 || pm2 restart "$CC_PM2_NAME" 2>&1 || warn "PM2 reload failed — restart manually with: pm2 restart $CC_PM2_NAME"
+      success "PM2 reloaded '$CC_PM2_NAME' onto fresh build"
+    elif pm2 list 2>/dev/null | grep -q "command-center\|blackceo"; then
       pm2 reload ecosystem.config.cjs 2>&1 || pm2 restart all 2>&1 || warn "PM2 reload failed — restart manually with pm2 restart all"
       success "PM2 reloaded onto fresh build"
     else
