@@ -1,0 +1,7 @@
+{
+  "_comment": "B-U8/U22 fixture — the EXACT field vocabulary 06-ghl-install-pages/tools/cc_board.py::ingest_task() emits on the wire when it carries producer personas (proven on the ONB side by tests/test_cc_rail_contract.py::TestB_U7IngestPersonaParity). This fixture is the CC-side's own copy of that same contract, so this repo's offline test never depends on a live ONB emit.",
+  "voice_persona_id": "hormozi-100m-offers",
+  "topic_persona_id": "miller-building-storybrand",
+  "task_persona_ids": ["hormozi-100m-offers", "wiebe-copy-hackers"],
+  "bundle_sha": "b8f0e6c1a2d34567"
+}
