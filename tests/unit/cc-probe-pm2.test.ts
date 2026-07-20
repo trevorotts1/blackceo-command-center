@@ -261,3 +261,107 @@ describe('pm2 topology — Trap 4: co-resident CC instances on other ports', () 
     expect(result.other_cc_count).toBe(2);
   });
 });
+
+/**
+ * Trap-4 follow-up: CC_PORT is a port DECLARATION.
+ *
+ * update.sh Step 5 resolves the --pm2-app name via scripts/lib/pm2-port-zombies.py,
+ * which reads args → CC_PORT → PORT.  pm2-analyze-cc.py read PORT → args only, so
+ * the two libraries disagreed about which apps declare a port.  Every app started
+ * by run-full-install.sh:204 (`pm2 start npm --name X -- start`, CC_PORT in env)
+ * has args ["start"] and no PORT — it declared its port ONLY via CC_PORT, and this
+ * gate could not see it.
+ *
+ * Both failure directions are covered below: a false RED that rolls back a good
+ * deploy, and a false GREEN that lets a real same-port duplicate through.
+ */
+describe('pm2-analyze-cc: CC_PORT is a port declaration (target identification)', () => {
+  it('FALSE RED: npm-started app is the target by PORT even when the name does not match', () => {
+    // Reachable via a bare `scripts/atomic-deploy.sh` run, where PM2_APP_NAME
+    // defaults to 'mission-control' (atomic-deploy.sh:63) while the app on the
+    // box is named 'blackceo-command-center'.
+    // BEFORE: declared_port='' + name mismatch → app_count=0
+    //         → cc-health-check.sh:221 FAIL → rollback of a healthy deploy.
+    const result = analyseFixture('fixture-ccport-npm-start.json', {
+      port: '4000',
+      appName: 'mission-control',
+      canonicalDir: '/home/user/projects/command-center',
+    });
+    expect(result.app_count).toBe(1);
+    expect(result.other_cc_count).toBe(0);
+    expect(result.cwd_ok).toBe(true);
+    expect(result.db_path_set).toBe(true);
+  });
+
+  it('name-matched target still resolves identically (no behaviour change on the happy path)', () => {
+    const result = analyseFixture('fixture-ccport-npm-start.json', {
+      port: '4000',
+      appName: 'blackceo-command-center',
+      canonicalDir: '/home/user/projects/command-center',
+    });
+    expect(result.app_count).toBe(1);
+    expect(result.other_cc_count).toBe(0);
+  });
+
+  it('FALSE GREEN — NOT WEAKENED: two apps claiming the target port via CC_PORT still FAIL', () => {
+    // BEFORE: neither app declared a port this gate could see, so only the
+    //         name-matching one was the target and the second was demoted to a
+    //         WARN-only other_cc_app → app_count=1 → PASS on a real duplicate.
+    const result = analyseFixture('fixture-ccport-duplicate.json', {
+      port: '4000',
+      appName: 'blackceo-command-center',
+      canonicalDir: '/home/user/projects/command-center',
+    });
+    expect(result.app_count).toBe(2); // → cc-health-check.sh:222 maps >1 to FAIL
+    expect(result.other_cc_count).toBe(0);
+  });
+
+  it('a CC_PORT on a DIFFERENT port is still an "other" app, never the target', () => {
+    // Guards against over-broadening: reading CC_PORT must not sweep demo
+    // instances into the target set.
+    const result = analyseFixture('fixture-ccport-duplicate.json', {
+      port: '4600',
+      appName: 'blackceo-command-center',
+      canonicalDir: '/home/user/projects/command-center',
+    });
+    expect(result.app_count).toBe(0);
+    expect(result.other_cc_count).toBe(2);
+    expect(result.other_cc_apps.every((o) => o.port === '4000')).toBe(true);
+  });
+
+  it('args win over a stale CC_PORT/PORT in the environment', () => {
+    // Same precedence as pm2-port-zombies.py:56-62 — a CC_PORT inherited from
+    // the operator's shell must not override the actual start command.
+    const onTarget = analyseFixture('fixture-ccport-stale-env.json', {
+      port: '4000',
+      appName: 'blackceo-command-center',
+    });
+    expect(onTarget.app_count).toBe(1);
+
+    const offTarget = analyseFixture('fixture-ccport-stale-env.json', {
+      port: '4600',
+      appName: 'some-other-app',
+    });
+    expect(offTarget.app_count).toBe(0);
+    expect(offTarget.other_cc_apps[0]?.port).toBe('4000');
+  });
+
+  it('REAL BOX SHAPE: operator-box topology passes under every name it is deployed with', () => {
+    // Mirrors live `pm2 jlist` on the operator Mac: cc-prod on :4000 plus two
+    // demo instances on :4600/:4601, all three carrying --port in args AND
+    // CC_PORT in env. Target identification must come from the port, so the
+    // pm2 name is irrelevant — this is the regression guard for the claim that
+    // a name-based gate would break the real boxes.
+    for (const appName of ['cc-prod', 'mission-control', 'blackceo-command-center']) {
+      const result = analyseFixture('fixture-operator-cc-prod.json', {
+        port: '4000',
+        appName,
+        canonicalDir: '/home/user/command-center/app',
+      });
+      expect(result.app_count, `app_count for --app-name ${appName}`).toBe(1);
+      expect(result.crash_loopers).toHaveLength(0);
+      expect(result.cwd_ok).toBe(true);
+      expect(result.other_cc_count, `other_cc_count for --app-name ${appName}`).toBe(2);
+    }
+  });
+});

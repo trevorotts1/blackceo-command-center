@@ -1,0 +1,15 @@
+[
+  {
+    "name": "blackceo-command-center",
+    "pm2_env": {
+      "name": "blackceo-command-center",
+      "status": "online",
+      "pm_cwd": "/home/user/projects/command-center",
+      "args": ["start"],
+      "env": {
+        "CC_PORT": "4000",
+        "DATABASE_PATH": "/home/user/projects/command-center/mission-control.db"
+      }
+    }
+  }
+]

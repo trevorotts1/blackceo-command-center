@@ -1,0 +1,39 @@
+[
+  {
+    "name": "cc-prod",
+    "pm2_env": {
+      "name": "cc-prod",
+      "status": "online",
+      "pm_cwd": "/home/user/command-center/app",
+      "args": ["scripts/cc-start.sh", "--port", "4000"],
+      "env": {
+        "CC_PORT": "4000",
+        "DATABASE_PATH": "/home/user/command-center/app/mission-control.db"
+      }
+    }
+  },
+  {
+    "name": "blackceo-cc-demo-interview",
+    "pm2_env": {
+      "name": "blackceo-cc-demo-interview",
+      "status": "online",
+      "pm_cwd": "/home/user/command-center/app",
+      "args": ["scripts/cc-start.sh", "--port", "4600"],
+      "env": {
+        "CC_PORT": "4600"
+      }
+    }
+  },
+  {
+    "name": "blackceo-cc-demo-dashboard",
+    "pm2_env": {
+      "name": "blackceo-cc-demo-dashboard",
+      "status": "online",
+      "pm_cwd": "/home/user/command-center/app",
+      "args": ["scripts/cc-start.sh", "--port", "4601"],
+      "env": {
+        "CC_PORT": "4601"
+      }
+    }
+  }
+]

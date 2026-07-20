@@ -15,7 +15,8 @@ TARGET SCOPING (Trap-4 fix):
   ports.  The deploy gate must verify THE TARGET APP (identified by its pm2 name
   and the port being deployed), not assert that it is the only CC-ish process on
   the machine.  An app is TARGET only when:
-      (a) it declares the target port (PORT env or --port/-p in args), OR
+      (a) it declares the target port (--port/-p in args, else CC_PORT or PORT
+          in the pm2 env — see declared_port), OR
       (b) its pm2 name equals --app-name AND it declares no port at all.
   Every other CC-ish app is reported under other_cc_apps for a WARN — it never
   contributes to app_count, crash_loopers, cwd_ok, or null_cwd_count, and so can
@@ -70,23 +71,41 @@ def ev(env: dict, key: str) -> str:
 def declared_port(app: dict) -> str:
     """Return the port this app DECLARES, or '' when it declares none.
 
-    Two declaration sites, in precedence order:
-      1. PORT in the pm2 env layers (env_data / env / flat)
-      2. `--port N` / `-p N` in the pm2 args
-    '' means "this app did not declare a port anywhere pm2 can see" — which is
-    NOT the same as "this app is on the target port".  Treating those two as
-    equivalent is the Trap-4 bug: a demo instance whose PORT comes from a .env
-    file (invisible in `pm2 jlist`) was counted as a duplicate of production.
+    Declaration sites, in precedence order — DELIBERATELY IDENTICAL to
+    scripts/lib/pm2-port-zombies.py:56-80.  The two libraries must agree: that
+    one resolves the pm2 app name update.sh Step 5 passes down as --pm2-app,
+    and THIS one decides which app that name is allowed to scope to.  When they
+    disagreed, update.sh resolved a name by CC_PORT that this gate could not
+    then see a port for.
+      1. `--port N` / `--port=N` / `-p N` in the pm2 args — the actual start
+         command, which cannot be stale.
+      2. CC_PORT, then PORT, in the pm2 env layers (env_data / env / flat).
+         Consulted ONLY when the args carry no port: a CC_PORT inherited from
+         the operator's shell can contradict the args, and the args win.
+
+    CC_PORT is how run-full-install.sh:204 (`pm2 start npm --name X -- start`
+    with CC_PORT in the environment) declares the port — that shape has args
+    ["start"] and no PORT, so before this change it read as "declares no port".
+
+    '' still means "this app did not declare a port anywhere pm2 can see" —
+    which is NOT the same as "this app is on the target port".  Treating those
+    two as equivalent is the Trap-4 bug: a demo instance whose PORT comes from a
+    .env file (invisible in `pm2 jlist`) was counted as a duplicate of
+    production.  A .env-sourced PORT stays invisible here; only CC_PORT, which
+    pm2 does record, is newly consulted.
     """
     env = app.get('pm2_env') or {}
-    pe = ev(env, 'PORT')
-    if pe:
-        return pe
     args = env.get('args') or ''
     if isinstance(args, list):
         args = ' '.join(str(x) for x in args)
-    m = re.search(r'(?:--port|-p)\s+(\d+)', str(args))
-    return m.group(1) if m else ''
+    m = re.search(r'(?:--port|-p)(?:\s+|=)(\d+)', str(args))
+    if m:
+        return m.group(1)
+    for key in ('CC_PORT', 'PORT'):
+        v = ev(env, key)
+        if v:
+            return v
+    return ''
 
 
 def app_name_of(app: dict) -> str:
