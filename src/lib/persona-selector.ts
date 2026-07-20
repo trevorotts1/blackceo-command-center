@@ -33,6 +33,7 @@ import path from "path";
 import os from "os";
 import { v4 as uuidv4 } from "uuid";
 import { getDbPath, queryAll, queryOne, run } from "@/lib/db";
+import { ensureRuntimeConfigFile } from "@/lib/runtime-config";
 import { broadcast } from "@/lib/events";
 import { ensureBlendGuardrail } from "@/lib/persona-dispatch";
 import type { PersonaSlot } from "@/lib/sops";
@@ -132,7 +133,7 @@ export function resolveCompanyConfigHint(): string | undefined {
   const explicit = process.env.OPENCLAW_COMPANY_CONFIG;
   if (explicit && isValidJsonFile(explicit)) return explicit;
   try {
-    const appConfig = path.join(process.cwd(), "config", "company-config.json");
+    const appConfig = ensureRuntimeConfigFile('company-config.json');
     if (isValidJsonFile(appConfig)) return appConfig;
   } catch {
     /* non-fatal — fall through to undefined */

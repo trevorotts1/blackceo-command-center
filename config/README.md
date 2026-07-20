@@ -1,6 +1,17 @@
 # Config Directory
 
-departments.json is EMPTY by default. Skill 23 (AI Workforce Blueprint) generates this file based on the client's interview answers. If this file is empty, run Skill 23 first.
+`company-config.json`, `departments.json`, and `board-slas.json` are per-box
+runtime data. They are intentionally gitignored so an application write can
+never conflict with an upstream update. On first use the application copies the
+matching tracked `*.example.json` template. `update.sh` performs the same
+migration for existing installs and preserves customized files byte-for-byte.
+
+Never commit the runtime files. Change an `*.example.json` file only when the
+fresh-install default or schema itself needs to change.
+
+`departments.json` is EMPTY by default. Skill 23 (AI Workforce Blueprint)
+generates this file based on the client's interview answers. If this file is
+empty, run Skill 23 first.
 
 Do NOT use hardcoded department data. The departments come from the client's choices.
 

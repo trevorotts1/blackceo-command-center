@@ -34,6 +34,7 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import {
@@ -207,7 +208,7 @@ export function readCompanyConfigPersonaDefaults(): {
     const configPath =
       explicit && fs.existsSync(explicit)
         ? explicit
-        : path.join(process.cwd(), 'config', 'company-config.json');
+        : ensureRuntimeConfigFile('company-config.json');
     if (!fs.existsSync(configPath)) return empty;
     const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
       default_persona_id?: unknown;

@@ -12,11 +12,10 @@
 #   back (proven live on the operator box, 2026-07-19), so every branded box
 #   was permanently unable to take updates.
 #
-#   The fix snapshots each per-box file the box customized (staged, unstaged,
-#   or untracked), lets the hard reset land upstream code, then restores the
-#   box's copy byte-for-byte with verification. Uncustomized files are NOT
-#   snapshotted, so upstream template changes still land on uncustomized
-#   boxes.
+#   The fix snapshots each per-box file the box customized (committed, staged,
+#   unstaged, or untracked), merges upstream without discarding local commits,
+#   then restores the box's copy byte-for-byte as ignored runtime state.
+#   Uncustomized files are generated from tracked *.example.json templates.
 #
 # This test drives the REAL update.sh end-to-end against a throwaway git
 # origin + install clone, with npm faked and pm2 hidden from PATH (no
@@ -58,7 +57,7 @@ ORIGIN="$WORK/origin"
 git init -q -b main "$ORIGIN"
 git -C "$ORIGIN" config user.email "fixture@test.invalid"
 git -C "$ORIGIN" config user.name "Fixture"
-mkdir -p "$ORIGIN/config" "$ORIGIN/scripts"
+mkdir -p "$ORIGIN/config" "$ORIGIN/public" "$ORIGIN/scripts"
 printf '{"name":"fixture-cc","version":"1.0.0"}\n' > "$ORIGIN/package.json"
 printf '6.0.0\n' > "$ORIGIN/version"
 cat > "$ORIGIN/config/company-config.json" <<'TPL'
@@ -72,6 +71,7 @@ cat > "$ORIGIN/config/company-config.json" <<'TPL'
 TPL
 printf '[]\n' > "$ORIGIN/config/departments.json"
 printf '{}\n' > "$ORIGIN/config/board-slas.json"
+printf '{"logoUrl":"https://example.invalid/default-logo.png"}\n' > "$ORIGIN/public/logo-config.json"
 # Fake atomic-deploy: exits 0 and records the companyName it can see — the
 # same file the real company_branding gate reads at deploy time.
 cat > "$ORIGIN/scripts/atomic-deploy.sh" <<'FAKEDEPLOY'
@@ -140,7 +140,7 @@ grep -q '"slug": *"ops"\|"slug":"ops"' "$INST/config/departments.json" \
   && ok "Skill-23 departments.json survives the update" \
   || bad "departments.json was reverted to the empty template"
 [ -f "$INST/newfeature.txt" ] \
-  && ok "upstream code change landed (reset --hard still ran)" \
+  && ok "upstream code change landed alongside per-box runtime state" \
   || bad "upstream code change did NOT land"
 [ "$(cat "$WORK/receipt-s1.txt" 2>/dev/null)" = "Fixture Test Co" ] \
   && ok "deploy-time view (company_branding gate input) sees the client name" \
@@ -230,6 +230,119 @@ fi
 grep -q "per-box client data" "$WORK/out-s4.txt" \
   && ok "updater reports that the template change was superseded by per-box data" \
   || bad "updater did not report the template-vs-per-box conflict"
+
+# ── Scenario 5: the FOURTH per-box file (logo-config.json) survives ───────────
+echo "Scenario 5: customized public/logo-config.json"
+INST="$WORK/install-s5"
+new_install "$INST"
+printf '{"logoUrl":"https://example.invalid/box-logo.png"}\n' > "$INST/public/logo-config.json"
+
+printf 'logo scenario upstream code\n' > "$ORIGIN/logo-feature.txt"
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: logo scenario code"
+
+if run_updater "$INST" "$WORK/out-s5.txt" "$WORK/receipt-s5.txt"; then
+  ok "updater exits 0 with a customized logo config"
+else
+  bad "updater exits non-zero with a customized logo config (see $WORK/out-s5.txt)"
+fi
+[ "$(json_get "$INST/public/logo-config.json" logoUrl)" = "https://example.invalid/box-logo.png" ] \
+  && ok "public/logo-config.json survives the update" \
+  || bad "public/logo-config.json was reverted to the tracked default"
+
+# ── Scenario 6: locally committed work remains in history and on disk ────────
+echo "Scenario 6: locally committed customization"
+INST="$WORK/install-s6"
+new_install "$INST"
+python3 - "$INST/config/company-config.json" <<'PYBRAND'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["companyName"] = "Committed Brand Co"
+json.dump(d, open(p, "w"), indent=2)
+PYBRAND
+printf 'box-local extension\n' > "$INST/box-local-extension.txt"
+git -C "$INST" add config/company-config.json box-local-extension.txt
+git -C "$INST" commit -qm "box: committed customization"
+LOCAL_COMMIT=$(git -C "$INST" rev-parse HEAD)
+
+printf 'committed scenario upstream code\n' > "$ORIGIN/committed-feature.txt"
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: committed scenario code"
+
+if run_updater "$INST" "$WORK/out-s6.txt" "$WORK/receipt-s6.txt"; then
+  ok "updater exits 0 with locally committed work"
+else
+  bad "updater exits non-zero with locally committed work (see $WORK/out-s6.txt)"
+fi
+git -C "$INST" merge-base --is-ancestor "$LOCAL_COMMIT" HEAD \
+  && ok "locally committed work remains in updated branch history" \
+  || bad "locally committed work was discarded from updated branch history"
+[ -f "$INST/box-local-extension.txt" ] \
+  && ok "locally committed code remains in the working tree" \
+  || bad "locally committed code was deleted by the update"
+[ "$(json_get "$INST/config/company-config.json" companyName)" = "Committed Brand Co" ] \
+  && ok "locally committed branding survives the update" \
+  || bad "locally committed branding was reverted"
+[ -f "$INST/committed-feature.txt" ] \
+  && ok "upstream code lands alongside the local commit" \
+  || bad "upstream code did not land alongside the local commit"
+
+# ── Scenario 7: existing boxes migrate from tracked files to ignored runtime ─
+echo "Scenario 7: tracked-to-runtime migration"
+INST="$WORK/install-s7"
+new_install "$INST"
+python3 - "$INST/config/company-config.json" <<'PYBRAND'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["companyName"] = "Migrated Brand Co"
+json.dump(d, open(p, "w"), indent=2)
+PYBRAND
+printf '[{"slug":"migrated-ops","name":"Migrated Ops"}]\n' > "$INST/config/departments.json"
+printf '{"migrated-ops":{"staleReviewHours":7}}\n' > "$INST/config/board-slas.json"
+printf '{"logoUrl":"https://example.invalid/migrated-logo.png"}\n' > "$INST/public/logo-config.json"
+
+cp "$ORIGIN/config/company-config.json" "$ORIGIN/config/company-config.example.json"
+cp "$ORIGIN/config/departments.json" "$ORIGIN/config/departments.example.json"
+cp "$ORIGIN/config/board-slas.json" "$ORIGIN/config/board-slas.example.json"
+cp "$ORIGIN/public/logo-config.json" "$ORIGIN/public/logo-config.example.json"
+cat >> "$ORIGIN/.gitignore" <<'IGNORE'
+/config/company-config.json
+/config/departments.json
+/config/board-slas.json
+/public/logo-config.json
+IGNORE
+git -C "$ORIGIN" rm -q config/company-config.json config/departments.json config/board-slas.json public/logo-config.json
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: move per-box config to ignored runtime files"
+
+if run_updater "$INST" "$WORK/out-s7.txt" "$WORK/receipt-s7.txt"; then
+  ok "updater exits 0 while migrating an existing customized box"
+else
+  bad "updater exits non-zero during tracked-to-runtime migration (see $WORK/out-s7.txt)"
+fi
+[ "$(json_get "$INST/config/company-config.json" companyName)" = "Migrated Brand Co" ] \
+  && ok "company config survives tracked-to-runtime migration" \
+  || bad "company config was lost during tracked-to-runtime migration"
+grep -q 'migrated-ops' "$INST/config/departments.json" \
+  && ok "departments config survives tracked-to-runtime migration" \
+  || bad "departments config was lost during tracked-to-runtime migration"
+grep -q 'staleReviewHours' "$INST/config/board-slas.json" \
+  && ok "board SLA config survives tracked-to-runtime migration" \
+  || bad "board SLA config was lost during tracked-to-runtime migration"
+[ "$(json_get "$INST/public/logo-config.json" logoUrl)" = "https://example.invalid/migrated-logo.png" ] \
+  && ok "logo config survives tracked-to-runtime migration" \
+  || bad "logo config was lost during tracked-to-runtime migration"
+if git -C "$INST" ls-files --error-unmatch \
+  config/company-config.json config/departments.json config/board-slas.json public/logo-config.json \
+  >/dev/null 2>&1; then
+  bad "runtime config files are still git-tracked after migration"
+else
+  ok "all four runtime config files are untracked after migration"
+fi
+for template in \
+  config/company-config.example.json config/departments.example.json \
+  config/board-slas.example.json public/logo-config.example.json; do
+  [ -f "$INST/$template" ] || bad "tracked template missing after migration: $template"
+done
 
 # ── summary ─────────────────────────────────────────────────────────────────
 echo ""

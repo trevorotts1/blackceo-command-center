@@ -17,14 +17,15 @@
  *   • Writes are atomic (temp + rename) and MERGE into the existing file,
  *     preserving KPIs / departments / weights — byte-parity with the
  *     POST /api/company/config route's editable-subset write.
- *   • The repo copy of config/company-config.json must remain template (the
- *     config-guard CI enforces that); this module only ever runs at runtime on
- *     a provisioned box.
+ *   • The tracked company-config.example.json remains the template (the
+ *     config-guard CI enforces that); this module writes only the ignored
+ *     runtime company-config.json on a provisioned box.
  */
 
 import fs from 'fs';
 import path from 'path';
 import { invalidateCompanyConfigCache } from '@/lib/company-config';
+import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 
 /** The interview-writable subset (mirrors the /api/company/config allow-list). */
 export interface CompanyMirrorPatch {
@@ -34,7 +35,7 @@ export interface CompanyMirrorPatch {
 }
 
 function configPath(): string {
-  return path.join(process.cwd(), 'config', 'company-config.json');
+  return ensureRuntimeConfigFile('company-config.json');
 }
 
 /**

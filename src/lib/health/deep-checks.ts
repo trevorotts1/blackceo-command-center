@@ -34,6 +34,7 @@ import { promisify } from 'util';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
 import { getNotificationFailuresLogStats } from '@/lib/notify';
+import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 
 const execFileAsync = promisify(execFile);
 
@@ -231,7 +232,7 @@ export interface CompanyBrandingResult extends CheckResult {
 
 export function checkCompanyBranding(): CompanyBrandingResult {
   // 1. Read config file
-  const configPath = path.join(process.cwd(), 'config', 'company-config.json');
+  const configPath = ensureRuntimeConfigFile('company-config.json');
   const configExists = fs.existsSync(configPath);
   let configName: string | null = null;
 

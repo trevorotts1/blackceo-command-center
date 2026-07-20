@@ -70,14 +70,14 @@ check "1.5" "CHANGELOG.md top entry matches /version" \
 
 blue ""
 blue "── 2. Department canonical set (N18) ──"
-# As of v4.0.3 (commit bc99e90) config/departments.json ships EMPTY ([]) on
-# purpose: the stale 17-row hardcoded template was winning the seed race, and
+# The tracked config/departments.example.json ships EMPTY ([]) on purpose: the
+# stale 17-row hardcoded template was winning the seed race, and
 # autoSeedFromDepartmentsJson() (src/lib/db/migrations.ts) returns early on an
 # empty array. The file is regenerated PER CLIENT by
 # scripts/sync-departments-from-build-state.py from the client's real Zero
 # Human Company build state. So the canonical-set contract now lives in the
 # TypeScript source of truth (src/lib/routing/departments.config.ts), and
-# departments.json is validated only for SHAPE: it must be a valid JSON array
+# the tracked template is validated only for SHAPE: it must be a valid JSON array
 # (empty = unseeded template, populated = a client's regenerated set), and any
 # entries it does contain must carry the required schema fields.
 # Count updated to 24: the routing fix (fix/command-center-routing-sop-persona)
@@ -96,12 +96,12 @@ blue "── 2. Department canonical set (N18) ──"
 # box silently misrouted to general-task via INGEST-06. Not vertical-gated
 # (not in VERTICAL_PACK_DEPARTMENTS) because the stamp is unconditional
 # regardless of a client's declared vertical.
-check "2.1" "config/departments.json is a valid JSON array (empty template or client-regenerated)" \
-  '[ "$(jq -r "type" config/departments.json)" = "array" ]' \
-  "must be [] (shipped template) or a populated array; run scripts/sync-departments-from-build-state.py"
-check "2.2" "config/departments.json entries (if any) all have id+name (schema valid)" \
-  '[ "$(jq -r "all(.[]; has(\"id\") and has(\"name\"))" config/departments.json)" = "true" ]' \
-  "every department object needs id and name fields"
+check "2.1" "config/departments.example.json is a valid empty JSON template" \
+  '[ "$(jq -r "type" config/departments.example.json)" = "array" ]' \
+  "the tracked fresh-install template must be []"
+check "2.2" "config/departments.example.json entries (if any) all have id+name (schema valid)" \
+  '[ "$(jq -r "all(.[]; has(\"id\") and has(\"name\"))" config/departments.example.json)" = "true" ]' \
+  "every template department object needs id and name fields"
 check "2.3" "departments.config.ts includes Social Media (canonical source of truth)" \
   "grep -q \"id: 'social-media'\" src/lib/routing/departments.config.ts"
 check "2.4" "departments.config.ts includes Paid Advertisement" \

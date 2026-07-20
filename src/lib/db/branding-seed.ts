@@ -26,6 +26,7 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import { ensureRuntimeConfigFile } from '../runtime-config';
 
 export interface BrandingSeedResult {
   /** Whether a company row was actually written this call. */
@@ -45,7 +46,7 @@ export interface BrandingSeedResult {
 /**
  * Unpopulated-template sentinels for companyName.
  *
- * The repo ships config/company-config.json at "template state" — companyName
+ * The repo ships config/company-config.example.json at "template state" — companyName
  * "Your Company", empty industry, departments:[] — and `.github/workflows/
  * config-guard.yml` ENFORCES that exact value on main. That template is NOT a
  * real client: a box still carrying it has never had Skill-23 closeout write the
@@ -88,7 +89,7 @@ export interface CompanyBrandingConfig {
  */
 export function findCompanyConfigPaths(cwd?: string): string[] {
   const base = cwd ?? process.cwd();
-  const cwdCandidate = path.join(base, 'config', 'company-config.json');
+  const cwdCandidate = ensureRuntimeConfigFile('company-config.json', base);
 
   // If an explicit cwd was supplied, search only that location.
   if (cwd !== undefined) {

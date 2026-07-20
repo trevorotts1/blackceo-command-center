@@ -12,10 +12,10 @@
  */
 
 import fs from 'fs';
-import path from 'path';
 import type { GradeWeights } from './grade-calculator';
 import { DEFAULT_GRADE_WEIGHTS } from './grade-calculator';
 import { DEFAULT_INPUT_WEIGHTS, type GradeInputKey } from './grading';
+import { ensureRuntimeConfigFile } from './runtime-config';
 
 export interface CompanyKpi {
   id: string;
@@ -80,7 +80,7 @@ let cachedConfig: CompanyConfig | null = null;
 export function loadCompanyConfig(): CompanyConfig {
   if (cachedConfig) return cachedConfig;
 
-  const configPath = path.join(process.cwd(), 'config', 'company-config.json');
+  const configPath = ensureRuntimeConfigFile('company-config.json');
 
   let raw: Partial<CompanyConfig> & {
     /** Legacy nested branding shape — see brandPrimaryColor doc above. */
