@@ -179,6 +179,18 @@ _disk_cleanup() {
 _health_check_args() {
   local -a args=()
   args+=(--port "$PORT")
+  # Trap-4: tell the health check WHICH app it is gating. Without this the pm2
+  # topology check falls back to its default target name and can mistake a
+  # co-resident demo/staging CC instance for a duplicate of this one — which
+  # failed the gate and auto-rolled back a good deploy on a box that legitimately
+  # runs several CC apps on different ports.
+  # Version-skew guard: a cc-health-check.sh predating --app-name exits 2 on an
+  # unknown flag, and exit 2 is treated as a definitive fail (→ rollback) at the
+  # verdict loop below. Only pass the flag when the resolved health check
+  # advertises it; otherwise fall back to the old, unscoped behaviour.
+  if grep -q -- '--app-name' "$HEALTH_CHECK" 2>/dev/null; then
+    args+=(--app-name "$PM2_APP_NAME")
+  fi
   args+=(--disk-min-gb 0.5)   # runtime threshold; B.4 build gate uses 5 GB (handled by us)
   args+=(--json-only)
   [[ -n "$DB_PATH_OVERRIDE" ]]    && args+=(--db-path "$DB_PATH_OVERRIDE")

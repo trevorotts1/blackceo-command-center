@@ -53,13 +53,26 @@ chmod +x "$WORK/bin/npm"
 FIXTURE_PATH="$WORK/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # ── fixture "upstream" repo ─────────────────────────────────────────────────
-ORIGIN="$WORK/origin"
+# TRAP-2: update.sh no longer accepts a CC_APP_DIR pin on the strength of
+# "it is a directory containing a package.json" — a decoy passed that. The
+# pin must now be a git worktree ROOT whose `origin` remote resolves to this
+# repo's slug, holding the app structure the updater drives. This fixture
+# therefore has to LOOK like a real checkout: the fixture remote is named
+# `blackceo-command-center` so a clone's origin slug matches, the package
+# name is the app's real name, and the marker files exist. Keep in sync with
+# CC_REQUIRED_MARKERS / CC_PKG_NAME in update.sh.
+ORIGIN="$WORK/blackceo-command-center"
 git init -q -b main "$ORIGIN"
 git -C "$ORIGIN" config user.email "fixture@test.invalid"
 git -C "$ORIGIN" config user.name "Fixture"
-mkdir -p "$ORIGIN/config" "$ORIGIN/public" "$ORIGIN/scripts"
-printf '{"name":"fixture-cc","version":"1.0.0"}\n' > "$ORIGIN/package.json"
+mkdir -p "$ORIGIN/config" "$ORIGIN/public" "$ORIGIN/scripts" "$ORIGIN/src"
+printf '{"name":"mission-control","version":"1.0.0"}\n' > "$ORIGIN/package.json"
 printf '6.0.0\n' > "$ORIGIN/version"
+: > "$ORIGIN/next.config.mjs"
+: > "$ORIGIN/ecosystem.config.cjs"
+# git does not track empty directories — src/ must contain something to survive
+# the clone, or the install dir fails the app-structure check.
+printf '// fixture\n' > "$ORIGIN/src/.gitkeep"
 cat > "$ORIGIN/config/company-config.json" <<'TPL'
 {
   "companyName": "Your Company",

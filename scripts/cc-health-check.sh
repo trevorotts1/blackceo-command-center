@@ -9,6 +9,10 @@
 set -uo pipefail
 PORT="${CC_PORT:-4000}"; CANONICAL_DIR="${CC_CANONICAL_DIR:-}"; SKIP_PM2=0; JSON_ONLY=0
 PUBLIC_URL="${CC_PUBLIC_URL:-}"
+# Trap-4: the pm2 gate scopes to THE TARGET APP (this name + this port), not to
+# "every CC-ish process on the box". Boxes legitimately run demo/staging CC
+# instances on other ports; those WARN, they never fail a production deploy.
+PM2_APP_NAME="${CC_PM2_APP_NAME:-mission-control}"
 # U51 build item: cc_port fact + override_ack_set fact, read-only, snapshotted
 # at invocation time — reported in every JSON shape this script emits so a
 # sweep can ledger "did this box report canonical port 4000 with no override
@@ -21,6 +25,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --port)          PORT="$2";          shift 2 ;;
     --canonical-dir) CANONICAL_DIR="$2"; shift 2 ;;
+    --app-name)      PM2_APP_NAME="$2";  shift 2 ;;
     --public-url)    PUBLIC_URL="$2";    shift 2 ;;
     --disk-min-gb)                       shift 2 ;;
     --skip-pm2)      SKIP_PM2=1;         shift   ;;
@@ -172,7 +177,7 @@ fi
 # ── (b1) pm2 topology — CC-scoped ────────────────────────────────────────────
 # FIX: write PM2_RAW and Python to temp files — heredoc binds stdin, pipe data
 # is discarded; Python sys.stdin.read() returns '' when heredoc is present.
-PM2_PASS="skip"; PM2_JSON='{"app_count":0,"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"null_cwd_count":0}'
+PM2_PASS="skip"; PM2_JSON='{"app_count":0,"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"null_cwd_count":0,"other_cc_apps":[],"other_cc_count":0}'
 if [[ "$SKIP_PM2" -eq 1 ]]; then
   log "pm2 topology: skipped"
 elif ! command -v pm2 &>/dev/null || ! command -v python3 &>/dev/null; then
@@ -188,8 +193,9 @@ else
   pm2 jlist 2>/dev/null > "$_J" || echo "[]" > "$_J"
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   PM2_JSON=$(python3 -s "$SCRIPT_DIR/pm2-analyze-cc.py" \
-    --port "$PORT" ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>/dev/null \
-    || echo '{"error":"pm2-analyze-cc.py failed","app_count":0,"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"null_cwd_count":0}')
+    --port "$PORT" --app-name "$PM2_APP_NAME" \
+    ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>/dev/null \
+    || echo '{"error":"pm2-analyze-cc.py failed","app_count":0,"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"null_cwd_count":0,"other_cc_apps":[],"other_cc_count":0}')
   rm -f "$_J"
 
   PM2_COUNT=$(printf '%s' "$PM2_JSON" | py "d.get('app_count',0)" 0)
@@ -200,9 +206,20 @@ else
   # set) requires its own FAIL branch.  Without this, cwd_ok=false is
   # computed but never acted on → wrong-cwd exits 0 GREEN.
   CWD_OK=$(printf '%s'     "$PM2_JSON" | py "'true' if d.get('cwd_ok') else 'false'" "false")
+  # Trap-4: OTHER CC-ish apps (demo/staging on other ports) are reported, never gated on.
+  # Modelled on the embedding_health WARN below: operational information that the
+  # operator must see, but which does NOT change the green/red verdict or EXIT_CODE.
+  OTHER_CC=$(printf '%s'   "$PM2_JSON" | py "d.get('other_cc_count',0)" 0)
+  OTHER_LINE=$(printf '%s' "$PM2_JSON" | py "', '.join('%s(port=%s,%s)' % (o.get('name'),o.get('port'),o.get('status')) for o in d.get('other_cc_apps',[])) or 'none'" "unparseable")
+  if [[ "$OTHER_CC" -gt 0 ]]; then
+    log "WARN: ${OTHER_CC} other CC app(s) present on this box — ${OTHER_LINE} (not the deploy target ${PM2_APP_NAME}:${PORT}; non-gating)"
+  fi
 
-  if   [[ "$PM2_COUNT" -eq 0 ]];     then log "FAIL: no pm2 CC app"; PM2_PASS="fail"
-  elif [[ "$PM2_COUNT" -gt 1 ]];     then log "FAIL: ${PM2_COUNT} CC apps (zombie)"; PM2_PASS="fail"
+  # ZOMBIE means: two or more apps claim THE TARGET (same port, or the target
+  # name with no port pm2 can see) — a real duplicate that must still FAIL.
+  # It does NOT mean "more than one CC app exists on the machine".
+  if   [[ "$PM2_COUNT" -eq 0 ]];     then log "FAIL: no pm2 app for target ${PM2_APP_NAME}:${PORT} (other CC apps seen: ${OTHER_LINE})"; PM2_PASS="fail"
+  elif [[ "$PM2_COUNT" -gt 1 ]];     then log "FAIL: ${PM2_COUNT} pm2 apps claim target ${PM2_APP_NAME}:${PORT} (duplicate/zombie)"; PM2_PASS="fail"
   elif [[ "$PM2_CRASH" != "[]" ]];   then log "FAIL: crash-looping CC app"; PM2_PASS="fail"
   elif [[ "$NULL_CWD"  -gt 0 ]];     then log "FAIL: CC app null cwd (drift)"; PM2_PASS="fail"
   elif [[ "$CWD_OK"    != "true" ]]; then log "FAIL: CC app cwd mismatch (wrong dir)"; PM2_PASS="fail"

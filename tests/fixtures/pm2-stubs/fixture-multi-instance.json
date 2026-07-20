@@ -1,0 +1,29 @@
+[
+  {
+    "name": "mission-control",
+    "pm2_env": {
+      "name": "mission-control",
+      "status": "online",
+      "pm_cwd": "/home/user/mission-control",
+      "PORT": "4000",
+      "DATABASE_PATH": "/home/user/mission-control/mission-control.db"
+    }
+  },
+  {
+    "name": "mission-control-demo-a",
+    "pm2_env": {
+      "name": "mission-control-demo-a",
+      "status": "online",
+      "pm_cwd": "/home/user/demo-a",
+      "PORT": "4600"
+    }
+  },
+  {
+    "name": "mission-control-demo-b",
+    "pm2_env": {
+      "name": "mission-control-demo-b",
+      "status": "stopped",
+      "pm_cwd": "/home/user/demo-b"
+    }
+  }
+]
