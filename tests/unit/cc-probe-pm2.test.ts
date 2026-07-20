@@ -35,6 +35,12 @@ interface Pm2Analysis {
   db_path_set: boolean;
   cwd_ok: boolean;
   null_cwd_count: number;
+  // Trap-4: CC-ish apps that are NOT the deploy target (other ports / other
+  // names). WARN-only — they never contribute to the gating fields above.
+  other_cc_apps: Array<{ name: string; port: string; status: string; reason: string }>;
+  other_cc_count: number;
+  target_app: string;
+  target_port: string;
   error?: string;
 }
 
@@ -45,7 +51,7 @@ interface Pm2Analysis {
  */
 function analyseFixture(
   fixtureName: string,
-  opts: { port?: string; canonicalDir?: string } = {}
+  opts: { port?: string; canonicalDir?: string; appName?: string } = {}
 ): Pm2Analysis {
   const fixturePath = path.join(FIXTURES, fixtureName);
   if (!fs.existsSync(fixturePath)) {
@@ -55,6 +61,9 @@ function analyseFixture(
   const args: string[] = [SCRIPT, '--port', opts.port ?? '4000'];
   if (opts.canonicalDir) {
     args.push('--canonical-dir', opts.canonicalDir);
+  }
+  if (opts.appName) {
+    args.push('--app-name', opts.appName);
   }
 
   const fixtureData = fs.readFileSync(fixturePath, 'utf8');
@@ -173,5 +182,82 @@ describe('pm2 topology — Row 19: non-CC app crash-looping', () => {
     // No CC app is errored — the non-CC crash-looper must NOT appear in crash_loopers
     expect(result.crash_loopers).toHaveLength(0);
     expect(result.cwd_ok).toBe(true);
+  });
+});
+
+// ── Trap 4: multiple CC instances on DIFFERENT ports ─────────────────────────
+// A box may legitimately run production plus demo/staging CC apps on other
+// ports. The gate must verify THE TARGET (pm2 name + port), not assert that the
+// target is the only CC-ish process on the machine. Live canary regression: an
+// operator box running production plus two demo instances failed the deploy
+// gate with "3 CC apps (zombie)" and auto-rolled back a good build; re-running
+// the identical check against the rolled-back server reproduced the failure,
+// proving the state was pre-existing and the gate — not the deploy — was wrong.
+
+describe('pm2 topology — Trap 4: co-resident CC instances on other ports', () => {
+  it('production on target port + demo on 4600 + demo with undeclared port → app_count=1, others WARN-only', () => {
+    const result = analyseFixture('fixture-multi-instance.json', {
+      port: '4000',
+      appName: 'mission-control',
+      canonicalDir: '/home/user/mission-control',
+    });
+    // Only the target counts — this is the whole fix
+    expect(result.app_count).toBe(1);
+    // A STOPPED demo instance must not be reported as a crash-looper of the target
+    expect(result.crash_loopers).toHaveLength(0);
+    // A demo running from another directory must not fail the target's cwd check
+    expect(result.cwd_ok).toBe(true);
+    // ...but the operator must still SEE them
+    expect(result.other_cc_count).toBe(2);
+    expect(result.other_cc_apps.map((o) => o.name).sort()).toEqual([
+      'mission-control-demo-a',
+      'mission-control-demo-b',
+    ]);
+    expect(result.target_app).toBe('mission-control');
+    expect(result.target_port).toBe('4000');
+  });
+
+  it('a demo instance whose port pm2 cannot see is classified other, not target', () => {
+    const result = analyseFixture('fixture-multi-instance.json', {
+      port: '4000',
+      appName: 'mission-control',
+    });
+    const undeclared = result.other_cc_apps.find(
+      (o) => o.name === 'mission-control-demo-b'
+    );
+    expect(undeclared).toBeDefined();
+    expect(undeclared?.port).toBe('undeclared');
+  });
+
+  it('NOT WEAKENED: a genuine duplicate on the SAME target port still fails, demos present or not', () => {
+    // fixture-duplicate-cc: two apps both declaring PORT=4000
+    const result = analyseFixture('fixture-duplicate-cc.json', {
+      port: '4000',
+      appName: 'mission-control',
+      canonicalDir: '/home/user/mission-control',
+    });
+    expect(result.app_count).toBe(2); // → cc-health-check.sh maps >1 to FAIL
+  });
+
+  it('target absent entirely → app_count=0 (FAIL), with the other CC apps listed for diagnosis', () => {
+    const result = analyseFixture('fixture-multi-instance.json', {
+      port: '9999',
+      appName: 'nonexistent-app',
+    });
+    expect(result.app_count).toBe(0);
+    expect(result.other_cc_count).toBe(3);
+  });
+
+  it('target is still discoverable by --app-name when its own port is undeclared', () => {
+    // demo-b declares no port anywhere pm2 can see (its PORT comes from a .env
+    // file). Deploying THAT app: the name is the only evidence available, and
+    // it must be enough to identify the target.
+    const result = analyseFixture('fixture-multi-instance.json', {
+      port: '4700',
+      appName: 'mission-control-demo-b',
+    });
+    expect(result.app_count).toBe(1);
+    // the 4000 and 4600 instances are now the "others"
+    expect(result.other_cc_count).toBe(2);
   });
 });

@@ -40,17 +40,45 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync, execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const CHECK_UPDATES_SH = path.join(REPO_ROOT, 'check-updates.sh');
 const UPDATE_SH = path.join(REPO_ROOT, 'update.sh');
+const CC_ORIGIN = 'https://github.com/trevorotts1/blackceo-command-center.git';
 
 function makeTmpDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'u53-self-updater-'));
+}
+
+/**
+ * TRAP-2: check-updates.sh mirrors update.sh's install-dir validation, so its
+ * fixtures must be REAL checkouts — a bare package.json is no longer a
+ * Command Center install. Keep in sync with makeCheckout() in
+ * tests/unit/p1-07-update-sh-install-dir.test.ts and with check-updates.sh's
+ * CC_REQUIRED_MARKERS.
+ */
+function makeCheckout(dir: string, opts: { origin?: string; pkgName?: string; markers?: boolean } = {}): string {
+  const origin = opts.origin ?? CC_ORIGIN;
+  const pkgName = opts.pkgName ?? 'mission-control';
+  const markers = opts.markers ?? true;
+  mkdirSync(dir, { recursive: true });
+  const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
+  git('init', '-q');
+  git('remote', 'add', 'origin', origin);
+  writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: pkgName, version: '0.0.0' }, null, 2));
+  if (markers) {
+    writeFileSync(path.join(dir, 'next.config.mjs'), '');
+    writeFileSync(path.join(dir, 'ecosystem.config.cjs'), '');
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    writeFileSync(path.join(dir, 'scripts', 'atomic-deploy.sh'), '');
+    writeFileSync(path.join(dir, 'version'), '0.0.0\n');
+  }
+  return dir;
 }
 
 function readFile(p: string): string {
@@ -75,7 +103,19 @@ function extractCheckUpdatesDetectionScript(contents: string): string {
   assert.ok(startIdx >= 0, 'extraction anchor "# Detect install location" not found in check-updates.sh — anchors drifted');
   assert.ok(endIdx >= 0, 'extraction anchor "# Detect platform" not found in check-updates.sh — anchors drifted');
   const block = contents.slice(startIdx, endIdx);
-  return ['#!/usr/bin/env bash', 'set -uo pipefail', block, 'echo "RESOLVED:$INSTALL_DIR"'].join('\n');
+  // The block compares the candidate's origin remote against REPO_NAME, which
+  // is assigned ABOVE the extraction anchor. Carry the REAL line over rather
+  // than hardcoding it.
+  const repoNameLine = contents.split('\n').find((l) => /^REPO_NAME=/.test(l));
+  assert.ok(repoNameLine, 'REPO_NAME= assignment not found in check-updates.sh — anchors drifted');
+  return [
+    '#!/usr/bin/env bash',
+    'set -uo pipefail',
+    repoNameLine,
+    block,
+    'echo "RESOLVED:$INSTALL_DIR"',
+    'echo "STATUS:$INSTALL_DIR_STATUS"',
+  ].join('\n');
 }
 
 function runScript(script: string, env: NodeJS.ProcessEnv): { stdout: string; status: number | null } {
@@ -90,12 +130,15 @@ function runScript(script: string, env: NodeJS.ProcessEnv): { stdout: string; st
 test('U53(a): check-updates.sh CC_APP_DIR env override is honored, skipping autodetection', () => {
   const home = makeTmpDir();
   const override = makeTmpDir();
-  writeFileSync(path.join(override, 'package.json'), '{}');
+  makeCheckout(override);
+  // A checkout the pin must BEAT: autodetection would find this one.
+  makeCheckout(path.join(home, 'projects', 'command-center'));
   try {
     const script = extractCheckUpdatesDetectionScript(readFile(CHECK_UPDATES_SH));
     const { stdout, status } = runScript(script, { HOME: home, CC_APP_DIR: override });
     assert.equal(status, 0, `expected success, got: ${stdout}`);
-    assert.match(stdout, new RegExp(`RESOLVED:${override}$`, 'm'));
+    assert.match(stdout, new RegExp(`RESOLVED:${realpathSync(override)}$`, 'm'));
+    assert.match(stdout, /^STATUS:pinned$/m);
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(override, { recursive: true, force: true });
@@ -105,13 +148,13 @@ test('U53(a): check-updates.sh CC_APP_DIR env override is honored, skipping auto
 test('U53(a): check-updates.sh fallback autodetection finds the canonical ~/projects/command-center layout (the fix)', () => {
   const home = makeTmpDir();
   const canonical = path.join(home, 'projects', 'command-center');
-  mkdirSync(canonical, { recursive: true });
-  writeFileSync(path.join(canonical, 'package.json'), '{}');
+  makeCheckout(canonical);
   try {
     const script = extractCheckUpdatesDetectionScript(readFile(CHECK_UPDATES_SH));
     const { stdout, status } = runScript(script, { HOME: home });
     assert.equal(status, 0, `expected success, got: ${stdout}`);
-    assert.match(stdout, new RegExp(`RESOLVED:${canonical}$`, 'm'));
+    assert.match(stdout, new RegExp(`RESOLVED:${realpathSync(canonical)}$`, 'm'));
+    assert.match(stdout, /^STATUS:autodetected$/m);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -120,13 +163,84 @@ test('U53(a): check-updates.sh fallback autodetection finds the canonical ~/proj
 test('U53(a): check-updates.sh still finds the legacy last-resort layout when nothing canonical exists (no regression)', () => {
   const home = makeTmpDir();
   const legacy = path.join(home, 'blackceo-command-center');
-  mkdirSync(legacy, { recursive: true });
-  writeFileSync(path.join(legacy, 'package.json'), '{}');
+  makeCheckout(legacy);
   try {
     const script = extractCheckUpdatesDetectionScript(readFile(CHECK_UPDATES_SH));
     const { stdout, status } = runScript(script, { HOME: home });
     assert.equal(status, 0, `expected success, got: ${stdout}`);
-    assert.match(stdout, new RegExp(`RESOLVED:${legacy}$`, 'm'));
+    assert.match(stdout, new RegExp(`RESOLVED:${realpathSync(legacy)}$`, 'm'));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('TRAP-2: check-updates.sh never reports against a non-git decoy', () => {
+  // Same operator-Mac-mini shape as the update.sh test: the FIRST candidate
+  // path exists but is a data directory, not a checkout.
+  const home = makeTmpDir();
+  const decoy = path.join(home, 'projects', 'command-center');
+  mkdirSync(path.join(decoy, 'config'), { recursive: true });
+  writeFileSync(path.join(decoy, 'package.json'), JSON.stringify({ name: 'mission-control' }));
+  const real = makeCheckout(path.join(home, 'blackceo-command-center'));
+  try {
+    const script = extractCheckUpdatesDetectionScript(readFile(CHECK_UPDATES_SH));
+    const { stdout, status } = runScript(script, { HOME: home });
+    assert.equal(status, 0, `expected success, got: ${stdout}`);
+    assert.match(stdout, new RegExp(`RESOLVED:${realpathSync(real)}$`, 'm'));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('TRAP-2: check-updates.sh reports ambiguity instead of picking one — read-only, so status not exit code', () => {
+  // check-updates.sh is READ-ONLY and its JSON feeds the Sunday cron agent, so
+  // it cannot abort the way update.sh does. It must instead refuse to resolve
+  // and say why, rather than silently reporting the wrong checkout's version.
+  const home = makeTmpDir();
+  makeCheckout(path.join(home, 'projects', 'command-center'));
+  makeCheckout(path.join(home, 'blackceo-command-center'));
+  try {
+    const script = extractCheckUpdatesDetectionScript(readFile(CHECK_UPDATES_SH));
+    const { stdout, status } = runScript(script, { HOME: home });
+    assert.equal(status, 0, `expected the read-only script to still exit 0, got: ${stdout}`);
+    assert.match(stdout, /^RESOLVED:$/m, `resolved a directory despite ambiguity: ${stdout}`);
+    assert.match(stdout, /^STATUS:ambiguous$/m);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('TRAP-2: check-updates.sh flags an invalid CC_APP_DIR pin instead of falling through', () => {
+  const home = makeTmpDir();
+  const decoy = makeTmpDir();
+  writeFileSync(path.join(decoy, 'package.json'), '{}');
+  makeCheckout(path.join(home, 'projects', 'command-center'));
+  try {
+    const script = extractCheckUpdatesDetectionScript(readFile(CHECK_UPDATES_SH));
+    const { stdout, status } = runScript(script, { HOME: home, CC_APP_DIR: decoy });
+    assert.equal(status, 0, `expected the read-only script to still exit 0, got: ${stdout}`);
+    assert.match(stdout, /^RESOLVED:$/m, `fell through to autodetection: ${stdout}`);
+    assert.match(stdout, /^STATUS:pin_invalid$/m);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(decoy, { recursive: true, force: true });
+  }
+});
+
+test('TRAP-2: check-updates.sh emits parseable JSON carrying the install_dir status', () => {
+  // The two new fields must survive into the JSON the cron agent parses.
+  const home = makeTmpDir();
+  makeCheckout(path.join(home, 'projects', 'command-center'));
+  makeCheckout(path.join(home, 'blackceo-command-center'));
+  const result = spawnSync('bash', [CHECK_UPDATES_SH], {
+    env: { PATH: process.env.PATH, HOME: home },
+    encoding: 'utf8',
+  });
+  try {
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.install_dir, '');
+    assert.equal(parsed.install_dir_status, 'ambiguous');
+    assert.match(parsed.install_dir_detail, /pin CC_APP_DIR/);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

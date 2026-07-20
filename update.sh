@@ -3,6 +3,20 @@
 #  BlackCEO Command Center — Updater
 #  Pulls latest from GitHub, installs deps, runs migrations.
 #  DESTRUCTIVE: replaces app code in-place. Backs up first.
+#
+#  ENV OVERRIDES — an explicit pin ALWAYS wins over autodetection. Each of
+#  these is used verbatim when set, and the corresponding autodetection is
+#  skipped entirely:
+#    CC_APP_DIR        Command Center checkout to update. Skips the candidate
+#                      scan below. Still validated (see "Resolve install
+#                      location") — a pin that is NOT a Command Center checkout
+#                      is a hard error, never a silent fall-back to a guess.
+#    CC_PM2_APP_NAME   pm2 process name to restart (Step 5). Wins over the
+#                      live pm2-port lookup and the fleet-canonical fallback.
+#    CC_PORT           Port the live app serves on (Step 5). Wins over the
+#                      built-in 4000 default and is passed to atomic-deploy.
+#  Pinning all three is the supported way to update a box whose layout does
+#  not match a documented fleet layout.
 # ============================================================
 
 set -euo pipefail
@@ -24,12 +38,133 @@ fatal() { echo "  ✗ ERROR: $1"; exit 1; }
 # the install dir directly instead of relying on autodetection — same
 # CC_APP_DIR convention scripts/atomic-deploy.sh and scripts/deploy.sh
 # already use, so this script honors it too rather than inventing a new name.
+#
+# TRAP-2 (canary, operator Mac mini): detection used to accept ANY directory
+# that merely CONTAINED a package.json, and took the first candidate that hit.
+# `~/projects/command-center` is first in the list and DOES exist on the
+# operator box — as a non-git DATA directory (mission-control.db plus db
+# backups), not a checkout. Any decoy that happens to hold a package.json
+# therefore shadows the real checkout, and the update runs against the wrong
+# directory. Two separate weaknesses, both fixed here:
+#   (a) "has a package.json" proves nothing about repo identity, and
+#   (b) first-match-wins silently picks between multiple real checkouts.
+#
+# A directory now qualifies ONLY when ALL of these hold:
+#   * it is the TOP LEVEL of a git worktree — not merely a path inside one.
+#     (`~/clawd/projects/blackceo-command-center` is a subdirectory of the
+#     `~/clawd` repo, whose origin IS this repo; a bare "is it git + does
+#     origin match" test would wrongly accept it.)
+#   * that worktree's `origin` remote resolves to this repo, compared by
+#     normalized repo slug so https / ssh / with- or without-.git all match.
+#   * the app structure this updater actually drives is present: package.json
+#     naming the app, next.config.mjs, ecosystem.config.cjs, src/, and
+#     scripts/atomic-deploy.sh (Step 5 invokes that script from INSTALL_DIR).
+# node_modules/ and .next/ are deliberately NOT required — Step 3 installs
+# deps and Step 5 builds, so a pruned or freshly cloned checkout is valid.
+#
+# ZERO matches or MORE THAN ONE match is a hard failure. Guessing between two
+# real checkouts is exactly how a box updates the copy nobody is serving.
+CC_PKG_NAME="mission-control"
+CC_REQUIRED_MARKERS=(
+  "package.json"
+  "next.config.mjs"
+  "ecosystem.config.cjs"
+  "src"
+  "scripts/atomic-deploy.sh"
+)
+
+# Normalize a git remote URL to its bare repo name: handles
+# https://host/owner/repo.git, git@host:owner/repo.git, and trailing slashes.
+_cc_repo_slug() {
+  local u="${1%/}"
+  u="${u%.git}"
+  u="${u##*/}"
+  u="${u##*:}"
+  printf '%s' "$u"
+}
+
+# Never echo a remote URL raw — an https remote can carry embedded
+# credentials (https://user:token@host/...). Print the host onward only.
+_cc_redact_url() {
+  printf '%s' "$1" | sed -E 's#(://)[^/@]*@#\1***@#'
+}
+
+CC_EXPECTED_SLUG="$(_cc_repo_slug "$REPO_URL")"
+
+# Validate one candidate. Sets CC_CANDIDATE_PATH (physical path) on success,
+# CC_CANDIDATE_REASON (why it was rejected) on failure. Returns 0/1.
+# These are globals on purpose: a command substitution would run the function
+# in a subshell and the rejection reason would be lost.
+CC_CANDIDATE_PATH=""
+CC_CANDIDATE_REASON=""
+_cc_validate_checkout() {
+  local cand="$1"
+  local phys top top_phys origin_url slug marker
+  CC_CANDIDATE_PATH=""
+  CC_CANDIDATE_REASON=""
+
+  if [ ! -d "$cand" ]; then
+    CC_CANDIDATE_REASON="no such directory"
+    return 1
+  fi
+  phys=$(cd "$cand" 2>/dev/null && pwd -P) || phys=""
+  if [ -z "$phys" ]; then
+    CC_CANDIDATE_REASON="directory exists but is not readable"
+    return 1
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    CC_CANDIDATE_REASON="git is not installed on this box — cannot verify any checkout"
+    return 1
+  fi
+  top=$(git -C "$phys" rev-parse --show-toplevel 2>/dev/null) || top=""
+  if [ -z "$top" ]; then
+    CC_CANDIDATE_REASON="not a git repository (plain directory or decoy)"
+    return 1
+  fi
+  top_phys=$(cd "$top" 2>/dev/null && pwd -P) || top_phys="$top"
+  if [ "$top_phys" != "$phys" ]; then
+    CC_CANDIDATE_REASON="not a checkout root — it is a subdirectory of the git repo at $top_phys"
+    return 1
+  fi
+  origin_url=$(git -C "$phys" config --get remote.origin.url 2>/dev/null) || origin_url=""
+  if [ -z "$origin_url" ]; then
+    CC_CANDIDATE_REASON="git repo has no 'origin' remote"
+    return 1
+  fi
+  slug="$(_cc_repo_slug "$origin_url")"
+  if [ "$slug" != "$CC_EXPECTED_SLUG" ]; then
+    CC_CANDIDATE_REASON="origin remote is a different repo (got '$slug', expected '$CC_EXPECTED_SLUG')"
+    return 1
+  fi
+  for marker in "${CC_REQUIRED_MARKERS[@]}"; do
+    if [ ! -e "$phys/$marker" ]; then
+      CC_CANDIDATE_REASON="Command Center repo, but the app structure is incomplete — missing $marker"
+      return 1
+    fi
+  done
+  if ! grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${CC_PKG_NAME}\"" "$phys/package.json" 2>/dev/null; then
+    CC_CANDIDATE_REASON="package.json is not the Command Center app (expected \"name\": \"${CC_PKG_NAME}\")"
+    return 1
+  fi
+  CC_CANDIDATE_PATH="$phys"
+  return 0
+}
+
 INSTALL_DIR=""
-if [ -n "${CC_APP_DIR:-}" ] && [ -d "$CC_APP_DIR" ] && [ -f "$CC_APP_DIR/package.json" ]; then
-  INSTALL_DIR="$CC_APP_DIR"
+INSTALL_DIR_SOURCE=""
+
+# 1. Explicit pin. Validated, and a bad pin is FATAL: silently falling through
+#    to autodetection would hide the operator's mistake behind a guess.
+if [ -n "${CC_APP_DIR:-}" ]; then
+  if _cc_validate_checkout "$CC_APP_DIR"; then
+    INSTALL_DIR="$CC_CANDIDATE_PATH"
+    INSTALL_DIR_SOURCE="CC_APP_DIR pin"
+  else
+    fatal "CC_APP_DIR is set to '$CC_APP_DIR' but that is not a Command Center checkout: ${CC_CANDIDATE_REASON}. Refusing to update an unvalidated directory. Fix the pin or unset CC_APP_DIR to autodetect."
+  fi
 fi
 
-# Fallback autodetection. The canonical layout used fleet-wide by every other
+# 2. Autodetection. The canonical layout used fleet-wide by every other
 # install/runtime script in this repo (scripts/atomic-deploy.sh's DB-resolve
 # list, scripts/watchdog-cc.sh, scripts/seed-workspaces.py,
 # scripts/install/mac-mini-bootstrap.sh, scripts/install/vps-docker-bootstrap.sh,
@@ -38,7 +173,9 @@ fi
 # FIRST. The older paths below never matched any documented install layout in
 # this repo; they are kept only as a last-resort fallback for a box that was
 # hand-installed off the documented path, so this autodetect can never regress
-# a box that happened to depend on the old list.
+# a box that happened to depend on the old list. Order no longer decides the
+# winner — every candidate is validated and exactly one must survive — but it
+# is preserved so the "checked" list reads in the documented priority.
 if [ -z "$INSTALL_DIR" ]; then
   CANDIDATES=(
     "$HOME/projects/command-center"
@@ -48,18 +185,67 @@ if [ -z "$INSTALL_DIR" ]; then
     "$HOME/blackceo-command-center"
     "/data/blackceo-command-center"
   )
+  CC_VALIDATED=()
+  CC_REJECTED=()
   for c in "${CANDIDATES[@]}"; do
-    if [ -d "$c" ] && [ -f "$c/package.json" ]; then
-      INSTALL_DIR="$c"
-      break
+    if _cc_validate_checkout "$c"; then
+      # Dedupe on the PHYSICAL path: two candidates that are symlinked
+      # aliases of one checkout are one install, not an ambiguity.
+      cc_dup=0
+      if [ "${#CC_VALIDATED[@]}" -gt 0 ]; then
+        for v in "${CC_VALIDATED[@]}"; do
+          if [ "$v" = "$CC_CANDIDATE_PATH" ]; then cc_dup=1; break; fi
+        done
+      fi
+      if [ "$cc_dup" -eq 0 ]; then
+        CC_VALIDATED+=("$CC_CANDIDATE_PATH")
+      fi
+    elif [ -e "$c" ]; then
+      # Only report paths that actually exist — a list of absent paths is noise.
+      CC_REJECTED+=("$c — $CC_CANDIDATE_REASON")
     fi
   done
+
+  if [ "${#CC_VALIDATED[@]}" -eq 0 ]; then
+    echo "  Candidate paths checked, in order:"
+    for c in "${CANDIDATES[@]}"; do echo "    - $c"; done
+    if [ "${#CC_REJECTED[@]}" -gt 0 ]; then
+      echo "  Paths that exist but were REJECTED:"
+      for r in "${CC_REJECTED[@]}"; do echo "    - $r"; done
+    else
+      echo "  None of the candidate paths exist on this box."
+    fi
+    fatal "No validated Command Center checkout found. Nothing was changed. Re-run with the install pinned explicitly, e.g. CC_APP_DIR=/path/to/checkout CC_PM2_APP_NAME=<pm2 name> CC_PORT=<port> bash update.sh"
+  fi
+
+  if [ "${#CC_VALIDATED[@]}" -gt 1 ]; then
+    echo "  Validated Command Center checkouts found:"
+    for v in "${CC_VALIDATED[@]}"; do
+      cc_head=$(git -C "$v" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+      cc_ver="unknown"
+      if [ -f "$v/version" ]; then
+        cc_ver=$(tr -d '[:space:]' < "$v/version" 2>/dev/null || echo "unknown")
+      fi
+      echo "    - $v  (HEAD $cc_head, version ${cc_ver:-unknown})"
+    done
+    fatal "Ambiguous install location: ${#CC_VALIDATED[@]} directories validate as Command Center checkouts. Refusing to guess which one this box serves — updating the wrong copy is silent and hard to undo. Nothing was changed. Re-run with the live one pinned: CC_APP_DIR=<path from the list above> CC_PM2_APP_NAME=<pm2 name> CC_PORT=<port> bash update.sh"
+  fi
+
+  INSTALL_DIR="${CC_VALIDATED[0]}"
+  INSTALL_DIR_SOURCE="autodetect (exactly one candidate validated)"
 fi
 
+# Belt-and-braces: neither branch above may fall through empty. If one ever
+# does, stop here rather than cd'ing to the current working directory.
 if [ -z "$INSTALL_DIR" ]; then
-  fatal "Command Center not found at any expected install path (checked \$CC_APP_DIR and the known candidate layouts). Cannot update."
+  fatal "Command Center install location did not resolve. Cannot update."
 fi
 success "Found install at: $INSTALL_DIR"
+echo "    source: $INSTALL_DIR_SOURCE"
+echo "    origin: $(_cc_redact_url "$(git -C "$INSTALL_DIR" config --get remote.origin.url 2>/dev/null || echo unknown)")"
+if [ -z "${CC_APP_DIR:-}" ]; then
+  echo "    (autodetected — set CC_APP_DIR to pin this box explicitly)"
+fi
 
 cd "$INSTALL_DIR"
 
@@ -340,6 +526,13 @@ step "Step 5: Build + restart (atomic deploy)"
 #   3. Fleet-canonical "blackceo-command-center" (ecosystem.config.cjs) — only
 #      for boxes with no CC under pm2 at all (fresh install).
 CC_PM2_FALLBACK_NAME="blackceo-command-center"
+# CC_PORT is an override on the same footing as CC_APP_DIR / CC_PM2_APP_NAME:
+# when set it is used verbatim (for the pm2-port lookup below and passed
+# through to atomic-deploy) instead of the built-in 4000 default. Echo it so
+# the receipt shows which port this run actually targeted.
+if [ -n "${CC_PORT:-}" ]; then
+  success "CC port (CC_PORT override): $CC_PORT"
+fi
 PM2_NAME_LIB="$INSTALL_DIR/scripts/lib/pm2-port-zombies.py"
 CC_PM2_NAME=""
 if [ -n "${CC_PM2_APP_NAME:-}" ]; then
