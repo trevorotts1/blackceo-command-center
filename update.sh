@@ -99,71 +99,136 @@ success "Current version: ${OLD_VERSION:-unknown}"
 # ----------------------------------------------------------
 step "Step 2: Pull latest from GitHub"
 
-# BRAND-01: per-box config that must SURVIVE the update.
-# These files are git-tracked so a fresh clone boots with a working default,
-# but on a live box the APP rewrites them in place with per-box client data:
-#   - config/company-config.json  — company branding/profile (settings form
-#                                   POST /api/company/config, interview flow)
-#   - config/departments.json     — generated per client by Skill 23
-#                                   (AI Workforce Blueprint), see config/README.md
-#   - config/board-slas.json      — per-department SLA overrides set on this box
-# The old sequence (`git stash push` — never popped — then `git reset --hard
-# origin/main`) reverted all three to the repo's placeholder template on every
-# update of a customized box: branding was wiped, the company_branding deploy
-# gate correctly FAILED, and atomic-deploy rolled the whole update back
-# (proven live on the operator box, 2026-07-19; exit 1, zero service loss).
-# Fix: snapshot each per-box file the box has actually customized (differs
-# from pre-update HEAD — staged or unstaged — or is present but untracked),
-# let the hard reset land upstream code, then restore the box's copy
-# byte-for-byte and VERIFY the restore. A file the box never customized is
-# NOT snapshotted, so legitimate upstream template changes still land on
-# uncustomized boxes. When both the box and upstream changed a file, the
-# box's per-box data wins — the tracked copy is a fresh-install template,
-# never client truth. The company_branding gate is NOT touched by this fix:
-# it passes because branding genuinely survives.
+# BRAND-01/02: per-box runtime config must SURVIVE the update and must not be
+# Git state. The four mutable files are now ignored; tracked *.example.json
+# files are fresh-install templates. This updater is also the migration for
+# boxes created before that architecture landed.
+#
+# Before syncing, snapshot every customized runtime file byte-for-byte. A file
+# is customized when it is untracked, differs from the worktree's HEAD (staged
+# or unstaged), OR was changed by a local commit since the local/upstream merge
+# base. That third case is critical: comparing only with HEAD cannot see a
+# locally committed brand, and the old reset discarded that commit and its data.
+#
+# Sync with `git merge origin/main`, never `git reset --hard`. A merge retains
+# local commits. The one expected migration conflict is "locally modified
+# runtime file vs upstream deletion"; resolve only those four paths to the
+# upstream deletion, then restore the snapshotted data as ignored runtime state.
+# Any other merge conflict aborts the update without deploying. Uncommitted
+# non-runtime work is stashed temporarily and APPLIED BACK before deployment.
 PER_BOX_CONFIG_FILES=(
   "config/company-config.json"
   "config/departments.json"
   "config/board-slas.json"
+  "public/logo-config.json"
+)
+PER_BOX_TEMPLATE_FILES=(
+  "config/company-config.example.json"
+  "config/departments.example.json"
+  "config/board-slas.example.json"
+  "public/logo-config.example.json"
 )
 PRESERVE_DIR="$BACKUP_DIR/per-box-config-preserve"
 PRESERVED=()
 if [ -d ".git" ]; then
   git fetch origin main 2>&1 || fatal "git fetch failed"
   OLD_HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || true)
+  MERGE_BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || true)
 
   for f in "${PER_BOX_CONFIG_FILES[@]}"; do
-    # Preserve only files that exist locally AND are customized: untracked,
-    # or differing from pre-update HEAD. `git diff --quiet HEAD -- <f>` is
-    # non-zero for BOTH staged and unstaged edits (a plain worktree
-    # `git diff` misses staged-only edits).
+    customized=0
     if [ -f "$f" ]; then
       if ! git ls-files --error-unmatch "$f" >/dev/null 2>&1 || \
-         ! git diff --quiet HEAD -- "$f" 2>/dev/null; then
+         ! git diff --quiet HEAD -- "$f" 2>/dev/null || \
+         { [ -n "$MERGE_BASE_SHA" ] && ! git diff --quiet "$MERGE_BASE_SHA" HEAD -- "$f" 2>/dev/null; }; then
+        customized=1
         mkdir -p "$PRESERVE_DIR/$(dirname "$f")"
         cp "$f" "$PRESERVE_DIR/$f" 2>/dev/null \
-          || fatal "Could not snapshot per-box config $f — refusing to reset (its per-box data would be lost)"
+          || fatal "Could not snapshot per-box config $f — refusing to sync (its per-box data would be lost)"
         cmp -s "$f" "$PRESERVE_DIR/$f" \
-          || fatal "Snapshot verification of $f failed — refusing to reset (its per-box data would be lost)"
+          || fatal "Snapshot verification of $f failed — refusing to sync (its per-box data would be lost)"
         PRESERVED+=("$f")
         success "Per-box config snapshotted (customized on this box): $f"
+      fi
+
+      # Remove runtime edits from Git's merge surface after the verified
+      # snapshot. Tracked paths return to HEAD; untracked paths move out of the
+      # way until restoration. This prevents a worktree edit from blocking the
+      # architecture-migration merge.
+      if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+        git checkout HEAD -- "$f" 2>/dev/null \
+          || fatal "Could not prepare tracked runtime config $f for sync"
+      elif [ "$customized" -eq 1 ]; then
+        rm -f -- "$f"
       fi
     fi
   done
 
-  # Archive ALL local changes to the stash as a recovery net before the hard
-  # reset. Diff against HEAD (not just the worktree) so staged-only edits are
-  # archived too — the old bare `git diff --quiet` missed those.
-  if ! git diff --quiet HEAD 2>/dev/null; then
-    warn "Local changes detected — stashing before update"
-    git stash push -m "auto-stash before update-$(date +%s)" 2>&1 || true
+  STASH_SHA=""
+  STASH_REF=""
+  if [ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+    warn "Local uncommitted work detected — stashing temporarily before update"
+    git stash push --include-untracked -m "auto-stash before update-$(date +%s)" 2>&1 \
+      || fatal "Could not stash local work — refusing to sync"
+    STASH_SHA=$(git rev-parse --verify refs/stash 2>/dev/null || true)
+    [ -n "$STASH_SHA" ] || fatal "Local-work stash could not be verified — refusing to sync"
+    STASH_REF="stash@{0}"
   fi
-  git reset --hard origin/main 2>&1 || fatal "git reset failed"
-  success "Pulled latest from origin/main"
 
-  # Restore the box's per-box config over the freshly-reset tree, verified.
-  if [ "${#PRESERVED[@]}" -gt 0 ]; then
-    for f in "${PRESERVED[@]}"; do
+  set +e
+  git -c user.name="BlackCEO Command Center Updater" \
+      -c user.email="updater@localhost" merge --no-edit origin/main 2>&1
+  MERGE_RC=$?
+  set -e
+  if [ "$MERGE_RC" -ne 0 ]; then
+    MERGE_CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
+    ONLY_RUNTIME_CONFLICTS=1
+    [ -n "$MERGE_CONFLICTS" ] || ONLY_RUNTIME_CONFLICTS=0
+    while IFS= read -r conflict; do
+      [ -n "$conflict" ] || continue
+      known=0
+      for f in "${PER_BOX_CONFIG_FILES[@]}"; do
+        [ "$conflict" = "$f" ] && known=1
+      done
+      [ "$known" -eq 1 ] || ONLY_RUNTIME_CONFLICTS=0
+    done <<< "$MERGE_CONFLICTS"
+
+    if [ "$ONLY_RUNTIME_CONFLICTS" -eq 1 ] && git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+      warn "Resolving expected one-time runtime-config migration conflicts"
+      while IFS= read -r conflict; do
+        [ -n "$conflict" ] && git rm -f -- "$conflict" >/dev/null
+      done <<< "$MERGE_CONFLICTS"
+      git -c user.name="BlackCEO Command Center Updater" \
+          -c user.email="updater@localhost" commit --no-edit 2>&1 \
+        || fatal "Could not record runtime-config migration merge"
+    else
+      git merge --abort >/dev/null 2>&1 || true
+      if [ "${#PRESERVED[@]}" -gt 0 ]; then
+        for f in "${PRESERVED[@]}"; do
+          mkdir -p "$(dirname "$f")"
+          cp "$PRESERVE_DIR/$f" "$f" 2>/dev/null || true
+        done
+      fi
+      if [ -n "$STASH_SHA" ]; then
+        git stash apply "$STASH_SHA" >/dev/null 2>&1 || true
+      fi
+      fatal "Upstream conflicts with locally committed code outside runtime config. Update aborted; local commits and stash were retained for manual merge."
+    fi
+  fi
+  success "Merged latest origin/main without discarding local commits"
+
+  # Restore customized files. For an uncustomized pre-migration box, generate
+  # the ignored runtime file from the newly tracked template instead.
+  for i in "${!PER_BOX_CONFIG_FILES[@]}"; do
+    f="${PER_BOX_CONFIG_FILES[$i]}"
+    template="${PER_BOX_TEMPLATE_FILES[$i]}"
+    was_preserved=0
+    if [ "${#PRESERVED[@]}" -gt 0 ]; then
+      for kept in "${PRESERVED[@]}"; do
+        [ "$kept" = "$f" ] && was_preserved=1
+      done
+    fi
+    if [ "$was_preserved" -eq 1 ]; then
       mkdir -p "$(dirname "$f")"
       cp "$PRESERVE_DIR/$f" "$f" 2>/dev/null \
         || fatal "RESTORE of per-box config $f FAILED — do NOT deploy; snapshot preserved at $PRESERVE_DIR/$f"
@@ -171,8 +236,45 @@ if [ -d ".git" ]; then
         || fatal "Restore verification of $f FAILED (content mismatch) — do NOT deploy; snapshot preserved at $PRESERVE_DIR/$f"
       success "Per-box config restored (survives update): $f"
       if [ -n "$OLD_HEAD_SHA" ] && ! git diff --quiet "$OLD_HEAD_SHA" origin/main -- "$f" 2>/dev/null; then
-        warn "Upstream changed the tracked default for $f in this update — this box's per-box copy was kept (the template never overrides per-box client data)."
+        warn "Upstream changed the prior tracked default for $f — this box's per-box client data was kept in ignored runtime state."
       fi
+    elif [ ! -f "$f" ] && [ -f "$template" ]; then
+      mkdir -p "$(dirname "$f")"
+      cp "$template" "$f" 2>/dev/null \
+        || fatal "Could not generate runtime config $f from $template"
+      cmp -s "$template" "$f" \
+        || fatal "Generated runtime config $f failed verification"
+      success "Per-box runtime config generated from template: $f"
+    fi
+  done
+
+  # Put ALL non-runtime uncommitted work back. Apply first, drop only after a
+  # clean apply; on conflict the recovery stash remains reachable and deploy is
+  # refused rather than silently losing or shipping half-applied work.
+  if [ -n "$STASH_SHA" ]; then
+    if git stash apply "$STASH_SHA" 2>&1; then
+      git stash drop "$STASH_REF" >/dev/null 2>&1 || true
+      success "Local uncommitted work restored after update"
+    else
+      fatal "Updated code conflicts with stashed local work. Deploy refused; recovery stash retained at $STASH_SHA."
+    fi
+  fi
+
+  # Verify the architecture invariant after migration: runtime config must not
+  # be tracked. A future regression here would recreate the branding-wipe class.
+  for f in "${PER_BOX_CONFIG_FILES[@]}"; do
+    template=""
+    for i in "${!PER_BOX_CONFIG_FILES[@]}"; do
+      [ "${PER_BOX_CONFIG_FILES[$i]}" = "$f" ] && template="${PER_BOX_TEMPLATE_FILES[$i]}"
+    done
+    if [ -n "$template" ] && [ -f "$template" ] && git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+      fatal "Runtime config $f is still git-tracked after update — refusing to deploy"
+    fi
+  done
+
+  if [ "${#PRESERVED[@]}" -gt 0 ]; then
+    for f in "${PRESERVED[@]}"; do
+      success "Verified machine-local runtime config is outside Git: $f"
     done
   fi
 else

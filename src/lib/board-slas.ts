@@ -34,6 +34,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { ensureRuntimeConfigFile } from './runtime-config';
 
 /** The full set of lane thresholds this table can override, one key per
  *  board-hygiene.ts / stale-task-sweep.ts tunable. Keys mirror the env var
@@ -163,7 +164,7 @@ let cached: BoardSlaLoadResult | null = null;
 function configPath(): string {
   return process.env.BOARD_SLAS_CONFIG_PATH
     ? path.resolve(process.env.BOARD_SLAS_CONFIG_PATH)
-    : path.join(process.cwd(), 'config', 'board-slas.json');
+    : ensureRuntimeConfigFile('board-slas.json');
 }
 
 /** Load + cache the SLA table. Fail-closed per the module-header contract —

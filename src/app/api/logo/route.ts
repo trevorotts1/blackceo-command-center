@@ -1,16 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile } from 'fs/promises';
-import { join } from 'path';
+import { readFile, writeFile } from 'fs/promises';
 import { validateLogoUrl } from '@/lib/validation';
 import { getClientContext, updateClient } from '@/lib/clients';
 import { uploadLogoToGhlMediaLibrary } from '@/lib/branding';
+import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 
 // Node runtime — uses fs + fetch/FormData for the GHL upload.
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const maxDuration = 120;
 
-const LOGO_CONFIG_PATH = join(process.cwd(), 'public', 'logo-config.json');
+const LOGO_CONFIG_PATH = ensureRuntimeConfigFile('logo-config.json');
+
+/** Serve the machine-local baseline instead of requiring a Git-tracked public file. */
+export async function GET() {
+  try {
+    const raw = await readFile(LOGO_CONFIG_PATH, 'utf-8');
+    return NextResponse.json(JSON.parse(raw) as { logoUrl?: string });
+  } catch {
+    return NextResponse.json({ logoUrl: '' });
+  }
+}
 
 /**
  * POST /api/logo  (D3)

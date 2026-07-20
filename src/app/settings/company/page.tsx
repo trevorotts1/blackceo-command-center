@@ -1,8 +1,8 @@
 import fs from 'fs';
-import path from 'path';
 import CompanySettingsForm, { type CompanySettingsInitial } from '@/components/CompanySettingsForm';
 import { getClientContext } from '@/lib/clients';
 import { loadCompanyConfig, invalidateCompanyConfigCache } from '@/lib/company-config';
+import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -26,7 +26,7 @@ export const revalidate = 0;
  * pre-filled behavior for that field).
  */
 export default function CompanySettingsPage() {
-  const configPath = path.join(process.cwd(), 'config', 'company-config.json');
+  const configPath = ensureRuntimeConfigFile('company-config.json');
 
   let raw: Record<string, unknown> = {};
   try {

@@ -84,3 +84,12 @@ __pycache__/
 # the scripts/client-roster.example.txt template (fake placeholders) is tracked.
 .openclaw-client-roster.txt
 client-roster.txt
+
+# Per-box runtime configuration. The application generates these from the
+# tracked *.example.json templates and then mutates only the ignored copies.
+# Existing installs are migrated by update.sh.
+/config/company-config.json
+/config/departments.json
+/config/board-slas.json
+/public/logo-config.json
+/.last-update-check

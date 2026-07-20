@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { loadCompanyConfig, invalidateCompanyConfigCache } from '@/lib/company-config';
+import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -46,7 +47,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const configPath = path.join(process.cwd(), 'config', 'company-config.json');
+    const configPath = ensureRuntimeConfigFile('company-config.json');
     let existing: Record<string, unknown> = {};
     try {
       if (fs.existsSync(configPath)) {

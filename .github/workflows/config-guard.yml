@@ -7,10 +7,8 @@ on:
     branches: [main]
 
 # Prevents the v4.0.3 regression where demo department data and a real company
-# name were shipped inside config/departments.json and config/company-config.json.
-# Both files must remain at their empty/template state in the repository.
-# Client-specific data is always generated at runtime (Skill 23) and must never
-# be committed to the repo.
+# name were shipped inside runtime config. Only the *.example.json templates may
+# be tracked; client-specific runtime files must stay ignored and untracked.
 
 jobs:
   check-config-template-state:
@@ -19,11 +17,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check config/departments.json is empty array
+      - name: Check runtime config is untracked and ignored
         shell: bash
         run: |
           set -euo pipefail
-          FILE="config/departments.json"
+          for FILE in config/company-config.json config/departments.json config/board-slas.json public/logo-config.json; do
+            if git ls-files --error-unmatch "$FILE" >/dev/null 2>&1; then
+              echo "FAIL: runtime config is git-tracked: $FILE"
+              exit 1
+            fi
+            if ! git check-ignore -q "$FILE"; then
+              echo "FAIL: runtime config is not ignored: $FILE"
+              exit 1
+            fi
+          done
+
+      - name: Check config/departments.example.json is empty array
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="config/departments.example.json"
 
           if [ ! -f "$FILE" ]; then
             echo "ERROR: $FILE is missing from the repository."
@@ -45,7 +58,7 @@ jobs:
 
           if [ "$ENTRY_COUNT" != "0" ]; then
             echo ""
-            echo "FAIL: config/departments.json contains $ENTRY_COUNT department(s)."
+            echo "FAIL: config/departments.example.json contains $ENTRY_COUNT department(s)."
             echo "      This file must be an empty array ([]) in the repository."
             echo "      Client-specific department data is generated at runtime by Skill 23"
             echo "      and must NEVER be committed to the repo."
@@ -53,17 +66,17 @@ jobs:
             echo "      This guard exists to prevent the v4.0.3 demo-departments regression,"
             echo "      where demo department data was accidentally shipped in the repo."
             echo ""
-            echo "FIX:  echo '[]' > config/departments.json && git add config/departments.json"
+            echo "FIX: reset config/departments.example.json to []"
             exit 1
           fi
 
-          echo "OK: config/departments.json is empty array."
+          echo "OK: config/departments.example.json is empty array."
 
-      - name: Check config/company-config.json is template (companyName = 'Your Company')
+      - name: Check config/company-config.example.json is template (companyName = 'Your Company')
         shell: bash
         run: |
           set -euo pipefail
-          FILE="config/company-config.json"
+          FILE="config/company-config.example.json"
 
           if [ ! -f "$FILE" ]; then
             echo "ERROR: $FILE is missing from the repository."
@@ -83,7 +96,7 @@ jobs:
 
           if [ "$COMPANY_NAME" != "$TEMPLATE_NAME" ]; then
             echo ""
-            echo "FAIL: config/company-config.json has companyName='$COMPANY_NAME'."
+            echo "FAIL: config/company-config.example.json has companyName='$COMPANY_NAME'."
             echo "      The repository template value must be 'Your Company'."
             echo "      Real client/company names must NEVER be committed to this repo."
             echo ""
@@ -92,12 +105,12 @@ jobs:
             echo ""
             echo "FIX:  Reset companyName to 'Your Company' and clear industry/commandCenterName:"
             echo "        python3 -c \""
-            echo "          import json; f='config/company-config.json'"
+            echo "          import json; f='config/company-config.example.json'"
             echo "          d=json.load(open(f)); d['companyName']='Your Company'"
             echo "          d['industry']=''; d['commandCenterName']='Command Center'"
             echo "          d['departments']=[]; json.dump(d,open(f,'w'),indent=2)"
             echo "        \""
-            echo "      Then: git add config/company-config.json"
+            echo "      Then: git add config/company-config.example.json"
             exit 1
           fi
 
@@ -112,7 +125,7 @@ jobs:
 
           if [ -n "$INDUSTRY" ]; then
             echo ""
-            echo "FAIL: config/company-config.json has a non-empty industry='$INDUSTRY'."
+            echo "FAIL: config/company-config.example.json has a non-empty industry='$INDUSTRY'."
             echo "      The repository template must have industry='' (empty string)."
             echo "      Reset: set industry to '' and commit the cleaned file."
             exit 1
@@ -128,18 +141,19 @@ jobs:
 
           if [ "$DEPT_COUNT" != "0" ]; then
             echo ""
-            echo "FAIL: config/company-config.json has $DEPT_COUNT department reference(s) in its"
+            echo "FAIL: config/company-config.example.json has $DEPT_COUNT department reference(s) in its"
             echo "      departments[] array. This must be empty ([]) in the repo template."
             echo "      Reset: set departments to [] and commit the cleaned file."
             exit 1
           fi
 
-          echo "OK: config/company-config.json is at template state."
+          echo "OK: config/company-config.example.json is at template state."
 
       - name: Summary
         if: success()
         run: |
           echo ""
           echo "All config guard checks passed:"
-          echo "  config/departments.json   — empty array (no client departments committed)"
-          echo "  config/company-config.json — template state (companyName='Your Company')"
+          echo "  runtime config paths — ignored and untracked"
+          echo "  config/departments.example.json — empty array template"
+          echo "  config/company-config.example.json — template state (companyName='Your Company')"

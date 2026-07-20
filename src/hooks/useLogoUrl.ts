@@ -7,7 +7,7 @@ import { getLogoUrl } from '@/lib/logo';
  * useLogoUrl
  *
  * Returns the best available logo URL with this priority:
- * 1. URL saved in public/logo-config.json (set via /api/logo)
+ * 1. URL saved in the machine-local logo config (served by /api/logo)
  * 2. NEXT_PUBLIC_LOGO_URL environment variable
  * 3. Generic "BLACKCEO COMMAND CENTER" text placeholder
  *
@@ -18,7 +18,7 @@ export function useLogoUrl(): string {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/logo-config.json', { cache: 'no-store' })
+    fetch('/api/logo', { cache: 'no-store' })
       .then((res) => {
         if (!res.ok) return null;
         return res.json() as Promise<{ logoUrl?: string }>;

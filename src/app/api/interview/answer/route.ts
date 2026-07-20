@@ -350,7 +350,7 @@ export async function POST(req: NextRequest) {
     storeOn === 'company.industry' ||
     storeOn === 'company.commandCenterName'
   ) {
-    // Company-config mirror (atomic merge write; template repo copy untouched).
+    // Company-config mirror (atomic runtime write; tracked template untouched).
     const key = storeOn === 'company.industry' ? 'industry' : 'commandCenterName';
     try {
       const ok = mirrorCompanyAnswer({ [key]: answer });

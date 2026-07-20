@@ -21,6 +21,7 @@ import {
   safeStatSync,
 } from '../fs/safe-fs';
 import { seedCompanyGuarded } from './branding-seed';
+import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import {
   dedupeCanonicalWorkspaces,
@@ -6115,9 +6116,10 @@ function newestZhcChild(rel: string): string | null {
  *   2. BLACKCEO_COMMAND_CENTER_ROOT env — explicit CC root.
  *   3. Newest ZHC company build discovered on disk — a real client's
  *      departments.json written by the build process; preferred over the
- *      repo-committed template so a freshly-built client never seeds the
+ *      generated runtime template so a freshly-built client never seeds the
  *      17-demo generic defaults.
- *   4. process.cwd()/config (or /data) — the repo-committed template; only
+ *   4. process.cwd()/config (or /data) — ignored runtime config (generated
+ *      from the tracked template when absent); only
  *      wins when no real company build exists on disk.
  *   5. Legacy hard-coded install locations (preserved verbatim).
  */
@@ -6150,13 +6152,14 @@ export function resolveDepartmentsConfigPath(): string | null {
     }
   }
   // 3. Discovered real ZHC company build — probed only now (LAZY), and BEFORE
-  //    the repo-committed template so the newest client departments.json takes
+  //    the generated runtime template so the newest client departments.json takes
   //    precedence over the demo config/departments.json checked into the repo.
   //    newestZhcChild() reads every ZHC root through the never-blocking safe-fs
   //    helpers, so even this scan cannot freeze boot.
   const zhcBuild = newestZhcChild(DEPARTMENTS_JSON);
   if (zhcBuild && isExistingFile(zhcBuild)) return zhcBuild;
   // 4. The running Command Center itself (process.cwd() === CC root in prod).
+  ensureRuntimeConfigFile('departments.json');
   for (const p of [
     path.join(process.cwd(), 'config', DEPARTMENTS_JSON),
     path.join(process.cwd(), 'data', DEPARTMENTS_JSON),

@@ -1,17 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readFile, writeFile } from 'fs/promises';
-import { join } from 'path';
 import { execFileSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { getDb } from '@/lib/db';
 import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 import { getSession } from '@/lib/interview/store';
+import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const DEPARTMENTS_CONFIG_PATH = join(process.cwd(), 'config', 'departments.json');
+const DEPARTMENTS_CONFIG_PATH = ensureRuntimeConfigFile('departments.json');
 
 interface DepartmentEntry {
   id: string;
