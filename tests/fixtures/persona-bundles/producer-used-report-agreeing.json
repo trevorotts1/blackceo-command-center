@@ -1,0 +1,10 @@
+{
+  "_comment": "B-U8/U22 fixture — the B-U6 producer-report contract reporting the SAME voice as the fixture's declared bundle (onb-emit-ingest-payload.json declares hormozi-100m-offers) — agreement, zero mismatch events.",
+  "kind": "persona_used",
+  "page": "optin",
+  "voice_persona_id": "hormozi-100m-offers",
+  "topic_persona_id": "miller-building-storybrand",
+  "task_persona_id": "hormozi-100m-offers",
+  "blend_directive_sha": "b8f0e6c1a2d34567",
+  "goal": "capture email"
+}

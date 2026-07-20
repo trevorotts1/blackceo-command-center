@@ -1,3 +1,25 @@
+## [v6.0.60] — 2026-07-19 — U22/B-U8 CC-side offline fixture-funnel leg lands on main
+
+v6.0.60 — Skill-6 v2 unit U22/B-U8, receipt-branch merge (single serial merge-writer).
+
+- **What lands:** `skill6-v2/U22-offline` — the CC half of U22's offline fixture-funnel
+  proof: `tests/unit/b-u8-fixture-funnel-offline.test.ts` (5/5 — composes the B-U6
+  declared-vs-used comparator + the B-U7 producer-pin ingest skip-branch from fixture
+  payload files, offline), three fixture payloads under
+  `tests/fixtures/persona-bundles/`, and six qc-cc.sh drift sentinels (landed as
+  section 16 — main's U54 responsive-audit block already owns section 15; ids
+  renumbered, content unchanged).
+- **Proof on the merged tree:** new test 5/5 PASS; `npx tsc --noEmit` clean;
+  `bash scripts/qc-cc.sh` 151 checks green; full `npm run test:unit` 1762 tests,
+  5 failures byte-identical to the unmerged-main pre-existing set
+  (`interview-detection.test.ts` getInterviewState filesystem-signal cases) — zero
+  new failures.
+- **Live-tier companion (same date, ONB side):** the U22 LIVE-PROOF operator-box run
+  re-proved the producer→CC ingest handshake against THIS repo's current main
+  (fe736ee7) on an isolated scratch `DATABASE_PATH` dev server: producer-pinned task
+  pinned verbatim (mirror columns + `task_persona_bundle` row, `producer_pinned_ingest`,
+  zero `resolvePersonaAndPin` lines), control task fired the selector as today.
+
 ## [v6.0.59] — 2026-07-19 — `/interview` completed-owner hotfix: no more stuck "30% / resume"
 
 v6.0.59 — Direct Trevor-authorized hotfix (not a skill6-v2 unit), single serial merge-writer.

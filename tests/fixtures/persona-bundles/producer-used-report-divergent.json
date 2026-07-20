@@ -1,0 +1,10 @@
+{
+  "_comment": "B-U8/U22 fixture — the B-U6 producer-report contract (task_activities.metadata shape) reporting a DIFFERENT voice than the fixture's declared bundle (onb-emit-ingest-payload.json declares hormozi-100m-offers) — must raise exactly one persona_mismatch event.",
+  "kind": "persona_used",
+  "page": "sales",
+  "voice_persona_id": "wiebe-copy-hackers",
+  "topic_persona_id": "miller-building-storybrand",
+  "task_persona_id": "wiebe-copy-hackers",
+  "blend_directive_sha": "b8f0e6c1a2d34567",
+  "goal": "convert visitor to booked call"
+}

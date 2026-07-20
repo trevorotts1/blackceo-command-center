@@ -776,6 +776,58 @@ else
 fi
 
 blue ""
+blue "── 16. B-U6/B-U7/B-U8 — declared-vs-used comparator + ingest parity + offline fixture funnel (Skill 6 unification) ──"
+#
+# CONTRACT (B-U6/B-U7/B-U8): a bundle-carrying task's declared voice
+# (migration 090 mirror column) must never be silently ignored — the
+# producer reports what it actually used (B-U6), a comparator renders
+# declared-vs-used and writes exactly one persona_mismatch event on
+# divergence, never on agreement; ingest can carry the producer's own
+# already-resolved personas and SKIP the async selector re-match entirely
+# (B-U7). B-U8/U22 composes both, offline, from fixture payload files, as
+# the CODE-MERGE tier's own guard for "the whole unification block". These
+# are static drift sentinels; the AUTHORITATIVE behavioral proof is
+# tests/unit/u20-b-u6-persona-mismatch-contract.test.ts +
+# tests/unit/b-u7-ingest-persona-parity.test.ts +
+# tests/unit/a-u7-b-declared-vs-used-seed.test.ts +
+# tests/unit/b-u8-fixture-funnel-offline.test.ts, run by `npm run test:unit`.
+
+# 16.1: persona-mismatch.ts exports the B-U6 comparator's full public surface.
+check "16.1" "persona-mismatch.ts exports recordPersonaUsedAndCompare + getOpenPersonaMismatch + PERSONA_MISMATCH_EVENT_TYPE" \
+  "grep -q 'export function recordPersonaUsedAndCompare' src/lib/persona-mismatch.ts && grep -q 'export function getOpenPersonaMismatch' src/lib/persona-mismatch.ts && grep -q \"export const PERSONA_MISMATCH_EVENT_TYPE\" src/lib/persona-mismatch.ts" \
+  "keep the B-U6 declared-vs-used comparator's exported surface intact"
+
+# 16.2: the comparator dedupes on the (task, declared, used) triple — never
+#       re-fires the SAME divergence, never fabricates a mismatch on a NULL
+#       declared/used side.
+check "16.2" "recordPersonaUsedAndCompare dedupes on (task, declared, used) and fail-softs on a missing declared/used voice" \
+  "awk '/export function recordPersonaUsedAndCompare/,/^}/' src/lib/persona-mismatch.ts | grep -q 'if (!declared || !used) return null' && awk '/export function recordPersonaUsedAndCompare/,/^}/' src/lib/persona-mismatch.ts | grep -q 'SELECT id FROM events'" \
+  "keep the fail-soft NULL-guard + the existing-event dedupe query"
+
+# 16.3: tasks.ts exports the B-U7 producer-pin helper + the voice-gates-the-group contract.
+check "16.3" "tasks.ts exports pinProducerPersonaBundle; voice_persona_id gates the whole producer-pin group" \
+  "grep -q 'export function pinProducerPersonaBundle' src/lib/tasks.ts && grep -q 'producerVoicePersonaId = (input.voice_persona_id' src/lib/tasks.ts" \
+  "keep the B-U7 ingest-parity producer-pin skip-branch wired in createTaskCore"
+
+# 16.4: the skip-branch actually SKIPS — no resolvePersonaAndPin/resolvePersonaPlanAndPin
+#       call sits inside the producerVoicePersonaId truthy branch.
+check "16.4" "the producer-pin branch never calls resolvePersonaAndPin/resolvePersonaPlanAndPin (real skip, not a re-match in disguise)" \
+  "! awk '/if \\(producerVoicePersonaId\\) \\{/,/^  \\} else \\{/' src/lib/tasks.ts | grep -qE 'resolvePersonaAndPin\\(|resolvePersonaPlanAndPin\\('" \
+  "the producerVoicePersonaId branch must pin directly via pinProducerPersonaBundle, never fall through to a selector call"
+
+# 16.5: each unit's own dedicated test file is present (so test:unit runs it).
+check "16.5" "B-U6/B-U7/B-U8 dedicated test files present" \
+  "[ -f tests/unit/u20-b-u6-persona-mismatch-contract.test.ts ] && [ -f tests/unit/b-u7-ingest-persona-parity.test.ts ] && [ -f tests/unit/a-u7-b-declared-vs-used-seed.test.ts ] && [ -f tests/unit/b-u8-fixture-funnel-offline.test.ts ]" \
+  "keep every B-U6/B-U7/B-U8 behavioral test file wired into tests/unit"
+
+# 16.6: the B-U8/U22 offline fixture-funnel payload files exist (the fixtures
+#       the funnel test above is fed from — a deleted fixture would silently
+#       degrade that test to trivially vacuous, not fail loudly).
+check "16.6" "B-U8/U22 fixture-funnel payload files present under tests/fixtures/persona-bundles/" \
+  "[ -f tests/fixtures/persona-bundles/onb-emit-ingest-payload.json ] && [ -f tests/fixtures/persona-bundles/producer-used-report-divergent.json ] && [ -f tests/fixtures/persona-bundles/producer-used-report-agreeing.json ]" \
+  "keep the B-U8 offline fixture-funnel payload files in tests/fixtures/persona-bundles/"
+
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"
