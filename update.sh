@@ -250,6 +250,32 @@ fi
 cd "$INSTALL_DIR"
 
 # ----------------------------------------------------------
+# Backup retention + disk pre-check (OPENCLAW-BACKUP-RETENTION-V1)
+# ----------------------------------------------------------
+# Sourced from the checkout we are about to update — resolved AFTER
+# INSTALL_DIR so this still works when update.sh itself was curl-piped and
+# ${BASH_SOURCE[0]} is not a real path. If the library is genuinely absent
+# (pre-retention checkout being updated for the first time) we do NOT fail the
+# update — we fall back to defining no-ops so the old, unbounded-but-working
+# behaviour is preserved for exactly one run; the update then installs the
+# library and every run after this one prunes.
+_CC_RETENTION_LIB=""
+for _c in "$INSTALL_DIR/scripts/lib/backup-retention.sh" \
+          "$(dirname "${BASH_SOURCE[0]}")/scripts/lib/backup-retention.sh"; do
+  if [ -f "$_c" ]; then _CC_RETENTION_LIB="$_c"; break; fi
+done
+if [ -n "$_CC_RETENTION_LIB" ]; then
+  # shellcheck source=scripts/lib/backup-retention.sh
+  source "$_CC_RETENTION_LIB"
+  success "Backup retention library: $_CC_RETENTION_LIB"
+else
+  warn "scripts/lib/backup-retention.sh not found in this checkout — backups will NOT be pruned this run (the update installs it; the next run prunes)."
+  oc_backup_size_kb() { echo 0; }
+  oc_backup_precheck_disk() { return 0; }
+  oc_backup_prune() { return 0; }
+fi
+
+# ----------------------------------------------------------
 # Backup
 # ----------------------------------------------------------
 step "Step 1: Backup"
@@ -259,6 +285,18 @@ else
   BACKUP_BASE="$HOME/Downloads/blackceo-cc-backups"
 fi
 BACKUP_DIR="$BACKUP_BASE/cc-backup-$(date +%Y%m%d-%H%M%S)"
+
+# Pre-check disk BEFORE copying a byte. src/ + config/ is the bulk; measure it
+# rather than guessing. A half-copied cc-backup-<ts> is worse than a refusal,
+# and a loud early failure beats a confusing late one.
+_CC_BACKUP_KB=0
+for _p in src config version package.json package-lock.json CHANGELOG.md ecosystem.config.cjs; do
+  [ -e "$_p" ] || continue
+  _CC_BACKUP_KB=$(( _CC_BACKUP_KB + $(oc_backup_size_kb "$_p") ))
+done
+oc_backup_precheck_disk "$BACKUP_DIR" "$_CC_BACKUP_KB" "Command Center pre-update backup" \
+  || fatal "Not enough free disk for the pre-update backup (details above). Nothing was changed."
+
 mkdir -p "$BACKUP_DIR"
 
 # Backup the critical files (not node_modules — too big)
@@ -272,6 +310,11 @@ if [ -d "config" ]; then
   cp -r config "$BACKUP_DIR/" 2>/dev/null || true
 fi
 success "Backup: $BACKUP_DIR"
+
+# RETENTION: $BACKUP_BASE used to grow one cc-backup-<ts> tree per update
+# forever. Prune to the newest N now that THIS run's backup is on disk — never
+# before it, and never this run's own directory.
+oc_backup_prune "$BACKUP_BASE" "cc-backup-" "$BACKUP_DIR"
 
 # ----------------------------------------------------------
 # Capture current version
