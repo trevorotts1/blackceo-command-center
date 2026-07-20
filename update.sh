@@ -6,7 +6,7 @@
 # ============================================================
 
 set -euo pipefail
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 REPO_URL="https://github.com/trevorotts1/blackceo-command-center.git"
 LOG_FILE="/tmp/blackceo-cc-update-$(date +%Y%m%d-%H%M%S).log"
 exec 1> >(tee -a "$LOG_FILE") 2>&1
@@ -98,15 +98,83 @@ success "Current version: ${OLD_VERSION:-unknown}"
 # Pull latest
 # ----------------------------------------------------------
 step "Step 2: Pull latest from GitHub"
+
+# BRAND-01: per-box config that must SURVIVE the update.
+# These files are git-tracked so a fresh clone boots with a working default,
+# but on a live box the APP rewrites them in place with per-box client data:
+#   - config/company-config.json  — company branding/profile (settings form
+#                                   POST /api/company/config, interview flow)
+#   - config/departments.json     — generated per client by Skill 23
+#                                   (AI Workforce Blueprint), see config/README.md
+#   - config/board-slas.json      — per-department SLA overrides set on this box
+# The old sequence (`git stash push` — never popped — then `git reset --hard
+# origin/main`) reverted all three to the repo's placeholder template on every
+# update of a customized box: branding was wiped, the company_branding deploy
+# gate correctly FAILED, and atomic-deploy rolled the whole update back
+# (proven live on the operator box, 2026-07-19; exit 1, zero service loss).
+# Fix: snapshot each per-box file the box has actually customized (differs
+# from pre-update HEAD — staged or unstaged — or is present but untracked),
+# let the hard reset land upstream code, then restore the box's copy
+# byte-for-byte and VERIFY the restore. A file the box never customized is
+# NOT snapshotted, so legitimate upstream template changes still land on
+# uncustomized boxes. When both the box and upstream changed a file, the
+# box's per-box data wins — the tracked copy is a fresh-install template,
+# never client truth. The company_branding gate is NOT touched by this fix:
+# it passes because branding genuinely survives.
+PER_BOX_CONFIG_FILES=(
+  "config/company-config.json"
+  "config/departments.json"
+  "config/board-slas.json"
+)
+PRESERVE_DIR="$BACKUP_DIR/per-box-config-preserve"
+PRESERVED=()
 if [ -d ".git" ]; then
   git fetch origin main 2>&1 || fatal "git fetch failed"
-  # Stash any local changes to avoid conflicts
-  if ! git diff --quiet 2>/dev/null; then
+  OLD_HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || true)
+
+  for f in "${PER_BOX_CONFIG_FILES[@]}"; do
+    # Preserve only files that exist locally AND are customized: untracked,
+    # or differing from pre-update HEAD. `git diff --quiet HEAD -- <f>` is
+    # non-zero for BOTH staged and unstaged edits (a plain worktree
+    # `git diff` misses staged-only edits).
+    if [ -f "$f" ]; then
+      if ! git ls-files --error-unmatch "$f" >/dev/null 2>&1 || \
+         ! git diff --quiet HEAD -- "$f" 2>/dev/null; then
+        mkdir -p "$PRESERVE_DIR/$(dirname "$f")"
+        cp "$f" "$PRESERVE_DIR/$f" 2>/dev/null \
+          || fatal "Could not snapshot per-box config $f — refusing to reset (its per-box data would be lost)"
+        cmp -s "$f" "$PRESERVE_DIR/$f" \
+          || fatal "Snapshot verification of $f failed — refusing to reset (its per-box data would be lost)"
+        PRESERVED+=("$f")
+        success "Per-box config snapshotted (customized on this box): $f"
+      fi
+    fi
+  done
+
+  # Archive ALL local changes to the stash as a recovery net before the hard
+  # reset. Diff against HEAD (not just the worktree) so staged-only edits are
+  # archived too — the old bare `git diff --quiet` missed those.
+  if ! git diff --quiet HEAD 2>/dev/null; then
     warn "Local changes detected — stashing before update"
     git stash push -m "auto-stash before update-$(date +%s)" 2>&1 || true
   fi
   git reset --hard origin/main 2>&1 || fatal "git reset failed"
   success "Pulled latest from origin/main"
+
+  # Restore the box's per-box config over the freshly-reset tree, verified.
+  if [ "${#PRESERVED[@]}" -gt 0 ]; then
+    for f in "${PRESERVED[@]}"; do
+      mkdir -p "$(dirname "$f")"
+      cp "$PRESERVE_DIR/$f" "$f" 2>/dev/null \
+        || fatal "RESTORE of per-box config $f FAILED — do NOT deploy; snapshot preserved at $PRESERVE_DIR/$f"
+      cmp -s "$PRESERVE_DIR/$f" "$f" \
+        || fatal "Restore verification of $f FAILED (content mismatch) — do NOT deploy; snapshot preserved at $PRESERVE_DIR/$f"
+      success "Per-box config restored (survives update): $f"
+      if [ -n "$OLD_HEAD_SHA" ] && ! git diff --quiet "$OLD_HEAD_SHA" origin/main -- "$f" 2>/dev/null; then
+        warn "Upstream changed the tracked default for $f in this update — this box's per-box copy was kept (the template never overrides per-box client data)."
+      fi
+    done
+  fi
 else
   fatal "Install dir is not a git repo. Manual recovery required: clone $REPO_URL fresh."
 fi
