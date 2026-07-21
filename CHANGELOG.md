@@ -1,3 +1,74 @@
+## [v6.0.69] — 2026-07-21 — T0-01 follow-through: the SOP-authoring sub-task now completes under the completion-evidence gate, not around it
+
+v6.0.69 — Contract fix. Closes the raw `done` writer that PR #228 (a9e333e, v6.0.63)
+named and deliberately left open, and reports one further path it does not cover.
+
+- **`src/lib/sop-authoring.ts` wrote `status='done'` with no completion evidence.**
+  #228 installed the completion-evidence precondition (`src/lib/completion-evidence.ts`)
+  in `transition()` and in the PATCH route, and disclosed this raw write rather than
+  bundling it: it completes the pipeline's own synthetic *"Author SOP"* sub-task, whose
+  deliverable is the SOP file the same function just wrote. It was scoped out because
+  that deliverable was never REGISTERED — so the gate had nothing to check — **not**
+  because the write was safe.
+
+- **Fixed by registering the deliverable, not by exempting the caller.** The on-disk
+  `<workspace>/departments/<dept>/<role>/how-to.md` is now registered against the
+  sub-task via `registerDeliverable()`, hashed from the exact bytes written (no re-read,
+  so the sha is provably the content that landed). The completion decision is then made
+  by the SAME `collectCompletionEvidence()` that `transition()` calls — same module, same
+  predicate, no second definition of "done is earned" that can drift. **No exemption was
+  added to the gate**; an exemption is a private door, and this defect was a private door.
+
+- **When the SOP file does not land, the sub-task is HELD, not completed.** Disk write
+  disabled (`SOP_AUTHORING_WRITE_DISK=0`) or failed (unwritable `WORKSPACE_BASE`) → no
+  reachable deliverable → the card stays in its current status with a loud
+  `sop_authoring_completion_evidence_missing` event naming the exact remedy, instead of a
+  durable `done` + `task_completed` for a file nobody can open. This is fail-closed in the
+  strict sense: a `task_deliverables` read error also yields no evidence. **Holding the
+  card does not block authoring** — the `sops` row is filed, the `sop_id` is attached to
+  the original task, and dispatch still re-fires; only the completion record is withheld.
+
+- **`transition()` is still not used here, and that is unchanged and correct.**
+  `in_progress → done` is not an edge in `LEGAL_TRANSITIONS` and this write also sets
+  `completed_at`, so it remains a compare-and-swap raw write audited via
+  `recordStatusEvent`. What changed is that it is no longer UNGATED. Widening
+  `LEGAL_TRANSITIONS` to route it through `transition()` was rejected: it would loosen the
+  state machine for every caller to fix one, which is the wrong direction for a gate.
+
+- **`AuthorResult.sub_task_completed`** (optional, additive, no existing reader) — with
+  the gate in place, `status: 'authored'` and "the sub-task card closed" are no longer the
+  same fact, so the outcome is now visible to the caller.
+
+**Fail-before / pass-after, measured on this branch, not asserted:** new
+`tests/unit/t0-sop-authoring-completion-evidence.test.ts` → **0/3 pass, 3/3 fail** against
+unfixed `origin/main` (022e7a2); **3/3 pass** after. The invariant test names the offending
+rows on unfixed code: two `Author SOP: …` tasks reading `done` with zero reachable
+deliverables. Each assertion was falsified against the unfixed code before being trusted —
+an assertion that passes against both the broken and the fixed build proves nothing.
+
+**Blast radius, measured both ways:** full unit suite on a pristine `origin/main` worktree
+→ **1823/1828 pass, 5 fail**; with this change → **1826/1831 pass, 5 fail** — the SAME 5
+pre-existing `getInterviewState` filesystem-signal failures, **0 newly failing tests**.
+`npm run build` exit 0, `npm run lint` exit 0 (pre-existing warnings only), `npx tsc
+--noEmit` exit 0, `scripts/qc-cc.sh` **PASS — 151 checks green** (its §9 assertions on
+`sop-authoring.ts` all still hold). PR #228's own suite
+(`t0-completion-evidence-gate.test.ts`) plus `prd-2.12-fast-loop-qc-gate` and both
+sop-authoring idempotency suites → **29/29 pass**. On a correctly-wired box the disk write
+lands, so behaviour is byte-identical to today; the held-card path only engages where the
+workspace is already misconfigured and the write was ALREADY failing — a box that today
+records a false completion, not a healthy box newly failing.
+
+**Still open, and NOT fixed here (different lane, reported rather than touched):** a task
+can be CREATED directly in `done`. `CreateTaskSchema.status` (`src/lib/validation.ts:80`)
+accepts the full `TaskStatus` union including `'done'`; `POST /api/tasks`
+(`src/app/api/tasks/route.ts:237`) explicitly rejects `'blocked'` but not `'done'`; and
+`createTaskCore` (`src/lib/tasks.ts:2372`, insert at `:2435`) persists it verbatim.
+Reproduced against `origin/main`: schema accepts, row persists as `done`,
+`collectCompletionEvidence` → `hasEvidence: false`, 0 deliverable rows. The gate covers
+TRANSITIONS into `done`; it does not cover CREATION in `done`. Fixing it belongs to the
+owner of the create path — it is a one-line rejection alongside the existing `'blocked'`
+guard, but it is that lane's call whether any legitimate importer relies on it.
+
 ## [v6.0.65] — 2026-07-21 — A44/A46: the instruction closest to the agent contradicted the platform's impersonation guardrail
 
 v6.0.65 — Safety and contract fix. Four findings from the nine-cluster skill review, all
