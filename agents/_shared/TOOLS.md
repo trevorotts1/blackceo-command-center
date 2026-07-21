@@ -18,6 +18,12 @@ usage rules live in each agent's `how-to.md`.
 - **Source control:** GitHub (`trevorotts1/openclaw-onboarding`, `openclaw-onboarding-vps`, `blackceo-command-center`)
 - **Storage:** Google Workspace (Drive / Docs / Sheets)
 - **Voice/audio:** Fish Audio API
+- **Podcast hosting & distribution:** Podbean — episode upload, episode
+  metadata (title, show notes, publish time), and distribution to the podcast
+  feed. Credential: `PODBEAN_CLIENT_ID` + `PODBEAN_CLIENT_SECRET` (names only —
+  values live at the canonical secrets path below). Boundary: the Podcast Agent
+  may create and update DRAFT episodes; publishing to a live feed requires owner
+  approval and is never triggered from a heartbeat.
 - **Search/research:** Tavily, Perplexity (via OpenRouter)
 - **Media:** Replicate, ImgBB (image hosting)
 

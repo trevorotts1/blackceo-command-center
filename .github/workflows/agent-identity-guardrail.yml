@@ -1,0 +1,39 @@
+name: Agent identity guardrail (T1-09 / A44)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  identity-guardrail:
+    name: No agent identity may direct persona assumption
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The check itself must be proven in BOTH directions before its verdict is
+      # trusted: a clean tree passes, a reintroduced directive fails, a generator
+      # template stripped of the guardrail fails, and a missing dispatch-layer
+      # anchor reports CANNOT-RUN rather than passing.
+      - name: Self-test the checker (fails on a real defect, in both directions)
+        run: python3 scripts/check-agent-identity-guardrail.py --self-test
+
+      - name: Every agent identity file carries the style-inspired guardrail
+        run: python3 scripts/check-agent-identity-guardrail.py
+
+  n8n-workflow-validator:
+    name: n8n workflow validator rejects fenced and malformed output (T2-39 / A46)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Self-test the validator (accepts a valid workflow, rejects every defect class)
+        run: python3 agents/n8n-workflow-builder/validate-workflow-json.py --self-test
