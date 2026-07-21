@@ -163,6 +163,19 @@ test('[Point6.1b] recovery: provider returns → runQCOnReview re-scores → tas
   const id = nextId('recover-direct');
   insertReviewTask(id);
 
+  // The completion-evidence gate (src/lib/completion-evidence.ts) now refuses
+  // `done` — and clamps an otherwise-passing score to fail — unless the task
+  // has at least one registered, reachable deliverable. This test is proving
+  // provider-recovery re-scoring, not the evidence gate, so give the fixture a
+  // real file-backed deliverable to satisfy that separate invariant.
+  const deliverablePath = path.join(TMP_DIR, `${id}.txt`);
+  fs.writeFileSync(deliverablePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [nextId('deliv'), id, `deliverable for ${id}`, deliverablePath, new Date().toISOString()],
+  );
+
   // Defer it first (provider down) — client Ollama Cloud judge configured.
   process.env.QC_JUDGE_MODEL = 'ollama-cloud/qwen2.5:32b';
   process.env.OLLAMA_CLOUD_API_KEY = 'fake-ollama-key';
@@ -194,6 +207,17 @@ test('[Point6.1b] recovery: provider returns → runQCOnReview re-scores → tas
 test('[Point6.1c] sweep: re-scores a deferred task after the retry window (recovery → done)', async () => {
   const id = nextId('sweep-recover');
   insertReviewTask(id);
+
+  // Same completion-evidence requirement as Point6.1b: the sweep's recovery
+  // path can only land the task on `done` if a reachable deliverable is
+  // registered, so the fixture needs one before it can prove sweep recovery.
+  const deliverablePath = path.join(TMP_DIR, `${id}.txt`);
+  fs.writeFileSync(deliverablePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [nextId('deliv'), id, `deliverable for ${id}`, deliverablePath, new Date().toISOString()],
+  );
 
   // Simulate a deferral written 15 minutes ago (older than the 5-min retry window).
   run(

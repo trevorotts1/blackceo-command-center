@@ -172,7 +172,27 @@ test('[U26-e] flag OFF: producer scorecard present but QC_PRODUCER_SCORECARD_ENA
 
 // ─── (a) agreement / confirmation path — no fresh description-rubric re-score ─
 
-test('[U26-a] flag ON + producer scorecard (no manifest) → producer verdict used directly, [producer-confirmed] marker on the qc event, no fresh no-criteria re-score', async () => {
+/**
+ * TIGHTENED (T0-01) — this test previously asserted the opposite, and in doing
+ * so pinned a third route to false completion.
+ *
+ * As written before, it seeded a BARE task (`insertBareTask` — no deliverable of
+ * any kind), posted `{qc_gate, qc_score: 9.0, qc_passed: true}` as metadata on a
+ * `completed` task_activities row, and asserted `task.status === 'done'`.
+ *
+ * That metadata row is written by the PRODUCING side. So the contract it locked
+ * in was: an agent may post its own passing grade and be recorded complete with
+ * no deliverable in existence. It is the same self-certification as the
+ * description-only judge, one layer out — the producer's claim about the work
+ * standing in for the work.
+ *
+ * What B-U12 legitimately buys is preserved and still proven by the sibling
+ * tests below: when a deliverable DOES exist, the producer's verdict is read
+ * rather than re-derived ([U26-c]), disagreement between producer and judge
+ * HOLDS the card ([U26-b]), and the both-gates rule blocks promotion ([U26-d]).
+ * Only the zero-evidence case changed, and only in one direction.
+ */
+test('[U26-a] flag ON + producer scorecard on a task with NO deliverable → verdict cannot promote', async () => {
   process.env.QC_PRODUCER_SCORECARD_ENABLED = '1';
   const id = nextId('confirmed');
   insertBareTask(id);
@@ -180,23 +200,21 @@ test('[U26-a] flag ON + producer scorecard (no manifest) → producer verdict us
 
   const result = await runQCOnReview(id);
   assert.ok(result !== null, 'must return a result');
-  assert.equal(result.scoringPath, 'llm', 'producer-confirmation path must report scoringPath=llm, not no-criteria');
-  assert.ok(result.pass, 'producer PASS verdict must be honored');
-  assert.equal(result.score, 9.0, 'producer score must be used directly');
+  assert.equal(
+    result.pass,
+    false,
+    'a producer-posted PASS must not carry a task with no registered deliverable',
+  );
 
   const task = queryOne<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [id]);
   assert.ok(task, 'task must exist');
-  assert.equal(task.status, 'done', 'PASS producer verdict must promote review → done');
+  assert.notEqual(task.status, 'done', 'task reached done on a self-issued verdict with nothing delivered');
 
-  const evt = queryOne<{ message: string }>(
-    `SELECT message FROM events WHERE task_id = ? AND type = 'qc_review' ORDER BY created_at DESC LIMIT 1`,
+  const completed = queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND type = 'task_completed'`,
     [id],
   );
-  assert.ok(evt, 'a qc_review event must be written');
-  assert.ok(
-    evt.message.includes('producer-confirmed'),
-    `qc event must carry the producer-confirmed path marker, got: ${evt.message}`,
-  );
+  assert.equal(completed?.c ?? 0, 0, 'no durable completion event may be written with no deliverable');
 });
 
 // ─── (b) disagreement > 1.0 → HELD + exactly one qc_disagreement event ──────

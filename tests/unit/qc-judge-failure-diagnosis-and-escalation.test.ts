@@ -254,6 +254,18 @@ test('[BUDGET-1] a REASONING judge now gets a budget that fits — real verdict 
   const id = nextId('budget-e2e');
   insertReviewTask(id);
 
+  // The completion-evidence gate (src/lib/completion-evidence.ts) now refuses
+  // `done` unless the task has at least one registered, reachable deliverable.
+  // This test proves the judge budget fix, not the evidence gate, so give the
+  // fixture a real file-backed deliverable to satisfy that separate invariant.
+  const deliverablePath = path.join(TMP_DIR, `${id}.txt`);
+  fs.writeFileSync(deliverablePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [nextId('deliv'), id, `deliverable for ${id}`, deliverablePath, new Date().toISOString()],
+  );
+
   try {
     const result = await runQCOnReview(id);
     assert.ok(result, 'must return a result');

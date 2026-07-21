@@ -363,6 +363,22 @@ test('S4a stuck-not-Done (a): POST /api/tasks/[id]/status status=done -> 403, no
     [id, 'S4 fixture: file the signed vendor agreement', hoursAgo(1), hoursAgo(1)],
   );
 
+  // The completion-evidence gate (src/lib/task-lifecycle.ts checkPreconditions,
+  // code PRECONDITION_EVIDENCE) refuses review -> done for ANY task with no
+  // registered, REACHABLE deliverable, and qc-scorer.ts's own self-
+  // certification guard clamps a description-only verdict to FAIL when no
+  // deliverable is registered (Mode B). S4b below drives this SAME card
+  // through a genuine QC PASS -> done promote, so it needs a real file on
+  // disk registered here — otherwise it proves the self-certification clamp
+  // (or the evidence gate), not the S4b promote path it is meant to prove.
+  const s4DeliverablePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-maria-s4-deliverable-')), 'signed-agreement.txt');
+  fs.writeFileSync(s4DeliverablePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [uuidv4(), id, 'Signed vendor agreement (S4 fixture)', s4DeliverablePath, hoursAgo(1)],
+  );
+
   // MC_API_TOKEN / WEBHOOK_SECRET are explicitly unset in this suite (top of
   // file) -> both auth layers are skipped (the route's own documented
   // dev/same-origin path), and FORBIDDEN_STATUSES is checked BEFORE auth,

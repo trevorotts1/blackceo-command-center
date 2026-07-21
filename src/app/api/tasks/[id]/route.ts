@@ -20,6 +20,7 @@ import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
 import { getQcHeuristicPark } from '@/lib/qc-promote';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
@@ -149,6 +150,34 @@ export async function PATCH(
     // omits updated_by_agent_id; a genuine operator authenticated through CF
     // Access carries Cf-Access-Authenticated-User-Email and passes — its value
     // is recorded as the approver in the audit trail below.
+    // ── COMPLETION-EVIDENCE GATE (T0-01) ─────────────────────────────────────
+    // FIRST, and deliberately NOT conditioned on `existing.status === 'review'`.
+    //
+    // Every other done-gate in this route carries that condition, which made
+    // them all no-ops for any other source status: a bare
+    // `PATCH {"status":"done"}` on an in_progress / backlog / blocked card
+    // skipped the authority check, the self-grade check and the QC check alike,
+    // and fell straight through to this route's own raw status write further
+    // below. This route does not route through transition(), so it does not
+    // inherit that helper's completion-evidence precondition either — the check
+    // has to be made here, and it has to cover every source status.
+    //
+    // Existence only. Whether the deliverable is GOOD is QC's judgement; whether
+    // one exists at all is not a judgement, and it is the fact a durable
+    // completion record asserts.
+    if (validatedData.status === 'done' && existing.status !== 'done') {
+      const completion = collectCompletionEvidence(id);
+      if (!completion.hasEvidence) {
+        return NextResponse.json(
+          {
+            error: 'Forbidden: cannot mark a task done with no completion evidence.',
+            hint: noEvidenceMessage(id, completion),
+          },
+          { status: 403 },
+        );
+      }
+    }
+
     if (
       validatedData.status === 'done' &&
       existing.status === 'review' &&
@@ -169,7 +198,13 @@ export async function PATCH(
       );
     }
 
-    if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
+    // ── AGENT-PROMOTION GATE (T0-42) ─────────────────────────────────────────
+    // Widened from `existing.status === 'review'` to every non-done source
+    // status. An agent that PATCHed backlog→done or in_progress→done previously
+    // met NONE of the checks below — not the authority check, not the
+    // self-grade check. Requiring `review` as the source was itself the bypass:
+    // it let an agent skip the gate by skipping the state the gate watched.
+    if (validatedData.status === 'done' && existing.status !== 'done' && validatedData.updated_by_agent_id) {
       const updatingAgent = queryOne<Agent & { role_type?: string }>(
         'SELECT id, is_master, role_type, workspace_id FROM agents WHERE id = ?',
         [validatedData.updated_by_agent_id]
@@ -251,6 +286,45 @@ export async function PATCH(
               : 'No QC agent seeded yet for this department. Run migration 060 or seed a role_type=qc agent.'
           },
           { status: 403 }
+        );
+      }
+
+      // ── SCORE-ON-RECORD GATE (T0-42) ───────────────────────────────────────
+      // Being the right agent is authorisation, not evaluation. Every check
+      // above answers "may this caller approve?" and none answered "was this
+      // work ever actually judged?" — so a master agent could promote a task to
+      // done, and write a durable task_completed event, with no score in
+      // existence anywhere. Authority was standing in for assessment.
+      //
+      // `task_qc_results` is the right source of truth: in production code only
+      // runQCOnReview writes it (src/lib/qc-scorer.ts), so a row here is the
+      // INDEPENDENT judge's verdict and can never be a builder's self-report —
+      // the PATCH schema accepts no qc_score field, by design.
+      //
+      // scoring_path='llm' is required because 'heuristic' and 'no-criteria'
+      // are the scorer's two ways of saying "I could not really judge this"
+      // (no judge key; no SOP criteria). Accepting them here would re-admit
+      // exactly the default-pass this fix exists to remove. A card parked that
+      // way is not stuck: it goes to a human through POST /api/tasks/[id]/promote,
+      // which is the purpose-built lane for it.
+      const qcVerdict = queryOne<{ score: number; passed: number }>(
+        `SELECT score, passed FROM task_qc_results
+         WHERE task_id = ? AND scoring_path = 'llm'
+         ORDER BY scored_at DESC LIMIT 1`,
+        [id],
+      );
+      if (!qcVerdict || qcVerdict.passed !== 1) {
+        return NextResponse.json(
+          {
+            error: 'Forbidden: cannot approve a task that has no passing independent QC score on record.',
+            hint: qcVerdict
+              ? `The most recent independent QC score for this task is ${qcVerdict.score.toFixed(1)}/10 (FAIL). ` +
+                'An approving agent may not override a failing judgement — return the task for rework.'
+              : 'No independent QC score exists for this task. Move it to `review` so the QC auto-scorer ' +
+                '(runQCOnReview) judges the deliverable, or use POST /api/tasks/[id]/promote if QC parked ' +
+                'the card for a human because no judge is configured.',
+          },
+          { status: 403 },
         );
       }
     }
