@@ -20,7 +20,7 @@
 # ============================================================
 
 set -euo pipefail
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 REPO_URL="https://github.com/trevorotts1/blackceo-command-center.git"
 LOG_FILE="/tmp/blackceo-cc-update-$(date +%Y%m%d-%H%M%S).log"
 exec 1> >(tee -a "$LOG_FILE") 2>&1
@@ -444,8 +444,6 @@ if [ -d ".git" ]; then
       fatal "Upstream conflicts with locally committed code outside runtime config. Update aborted; local commits and stash were retained for manual merge."
     fi
   fi
-  success "Merged latest origin/main without discarding local commits"
-
   # Restore customized files. For an uncustomized pre-migration box, generate
   # the ignored runtime file from the newly tracked template instead.
   for i in "${!PER_BOX_CONFIG_FILES[@]}"; do
@@ -506,6 +504,32 @@ if [ -d ".git" ]; then
       success "Verified machine-local runtime config is outside Git: $f"
     done
   fi
+
+  # A merge while checked out on a feature branch leaves the box ON that
+  # feature branch forever. Converge only after all machine-local files and any
+  # stash have been restored, so even a rare branch-operation refusal leaves
+  # the box's runtime state intact. Existing feature branches remain untouched.
+  # If a divergent local main has unique commits, preserve its old tip under a
+  # timestamped safety branch before repointing main; no commit is discarded.
+  ACTIVE_BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ "$ACTIVE_BRANCH" != "main" ]; then
+    if git show-ref --verify --quiet refs/heads/main \
+       && ! git merge-base --is-ancestor refs/heads/main HEAD; then
+      MAIN_SAFETY_BRANCH="pre-update-main-$(date +%Y%m%d-%H%M%S)"
+      git branch "$MAIN_SAFETY_BRANCH" refs/heads/main 2>&1 \
+        || fatal "Could not preserve divergent local main before branch convergence"
+      warn "Divergent old local main preserved at $MAIN_SAFETY_BRANCH"
+    fi
+    git branch -f main HEAD 2>&1 \
+      || fatal "Could not point local main at the safely merged update tip"
+    git checkout main 2>&1 \
+      || fatal "Latest code was merged, but checkout could not attach to main"
+  fi
+  [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "main" ] \
+    || fatal "Post-sync branch assertion failed: checkout is not on main"
+  git merge-base --is-ancestor origin/main HEAD \
+    || fatal "Post-sync ancestry assertion failed: checkout does not contain latest origin/main"
+  success "Checkout converged to main with latest origin/main; local commits retained"
 else
   fatal "Install dir is not a git repo. Manual recovery required: clone $REPO_URL fresh."
 fi
