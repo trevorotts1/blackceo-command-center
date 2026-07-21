@@ -11,6 +11,16 @@
  *      workspace layer (`<OPENCLAW_WORKSPACE_PATH>/departments/<dept>/<role>/how-to.md`).
  *   6. Attaches the new sop_id back to the original task and re-fires dispatch.
  *
+ * Completion-evidence contract (T0-01, PR #228):
+ *   The authoring sub-task this module creates is completed by a RAW status
+ *   write (in_progress→done is not a legal transition() edge). That write is
+ *   NOT exempt from the completion-evidence gate: the on-disk how-to.md is
+ *   registered as the sub-task's deliverable and the same
+ *   `collectCompletionEvidence()` transition() calls decides whether `done` may
+ *   be written. If the file never landed, the sub-task is HELD open with a loud
+ *   `sop_authoring_completion_evidence_missing` event — the SOP row, the sop_id
+ *   attachment and the dispatch resume all still happen. See §2 below.
+ *
  * QC gate contract (AF6):
  *   - dept-QC >= 8.5 (LLM-scored) → auto-file ('auto-authored-filed') with NO
  *     operator-approval step; original task is not blocked on a human.
@@ -40,6 +50,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { CANONICAL_SLUGS, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 // ROLE_LIBRARY_SOURCE is the sentinel value for on-disk role-library SOPs.
@@ -63,7 +74,8 @@ import {
 } from '@/lib/sop-auto-replace';
 import { scoreTaskForQC, resolveTrioAgents, QC_PASS_THRESHOLD } from '@/lib/qc-scorer';
 import type { QCScorerInput } from '@/lib/qc-scorer';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { recordStatusEvent, registerDeliverable } from '@/lib/task-lifecycle';
+import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 
 // ---------------------------------------------------------------------------
@@ -94,6 +106,17 @@ export interface AuthorResult {
   qc_score?: number;
   proposal_id?: string;
   reason?: string;
+  /**
+   * True when the synthetic "Author SOP" sub-task was recorded `done`.
+   *
+   * Additive and optional — no existing caller reads it. It exists because the
+   * sub-task now completes only if it has registered completion evidence
+   * (T0-01), so `status: 'authored'` and "the sub-task card closed" are no
+   * longer the same fact: the SOP can be filed while the card is HELD open
+   * because the SOP file never landed on disk. This field lets a caller see
+   * that outcome without re-reading the tasks table.
+   */
+  sub_task_completed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +972,13 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     } catch { /* audit trail is non-fatal */ }
 
     // §5b: Write to on-disk SOP library (custom dept folder).
+    //
+    // The file this block writes is the authoring sub-task's DELIVERABLE — the
+    // one thing a human can go look at afterwards. §2 below registers it and
+    // gates the sub-task's completion on it, so what landed (and its exact size
+    // and hash) is captured here rather than re-derived from disk later: the
+    // bytes we hashed are provably the bytes we wrote.
+    let sopFile: { path: string; bytes: number; sha256: string } | null = null;
     if (process.env.SOP_AUTHORING_WRITE_DISK !== '0') {
       const roleSlug = input.agentRoleSlug ?? finalSlug;
       const diskPath = path.join(
@@ -967,7 +997,13 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
         sources: sources3,
       });
       const diskWrite = safeDiskWrite(diskPath, howTo);
-      if (!diskWrite.ok) {
+      if (diskWrite.ok) {
+        sopFile = {
+          path: diskPath,
+          bytes: Buffer.byteLength(howTo, 'utf8'),
+          sha256: crypto.createHash('sha256').update(howTo, 'utf8').digest('hex'),
+        };
+      } else {
         // Loud warning but DB row already filed — the agent can still use the DB SOP.
         const warnMsg = `[sop-authoring] Disk write failed for ${diskPath}: ${diskWrite.error}`;
         console.warn(warnMsg);
@@ -983,46 +1019,108 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       );
     } catch { /* non-fatal */ }
 
-    // §2: Mark the authoring sub-task as done.
-    // DISP-10: this synthetic "Author SOP" sub-task completes from `in_progress`
-    // — an edge the lifecycle state machine does NOT model (in_progress→done is
-    // not a legal transition, and this write sets `completed_at`), so routing it
-    // through transition() would throw ILLEGAL_TRANSITION. We instead use the
-    // spec-sanctioned raw-write alternative: a compare-and-swap on the current
-    // status, the structured `task_events` audit row (so the audit sink is
-    // COMPLETE), and the owner DONE report.
+    // §2: Mark the authoring sub-task as done — UNDER the completion-evidence gate.
+    //
+    // ── T0-01 FOLLOW-THROUGH (closes the third door PR #228 left named) ───────
+    // #228 installed the completion-evidence precondition (src/lib/completion-
+    // evidence.ts) in transition() and in the PATCH route, and disclosed THIS raw
+    // write as the one remaining `done` writer that did not pass through it. The
+    // reason it was scoped out was not that it is safe: it is the pipeline's own
+    // synthetic "Author SOP" sub-task, and its deliverable — the SOP file this
+    // function just wrote — was never REGISTERED, so the gate had nothing to see.
+    // That is what is fixed here: the deliverable is registered, and then the
+    // SAME rule as every other task decides whether `done` may be written.
+    //
+    // NO EXEMPTION IS ADDED TO THE GATE. An exemption is how a gate erodes — it
+    // becomes a private door that the next caller argues its way through. This
+    // sub-task now satisfies the ordinary rule on the ordinary evidence: a file
+    // deliverable at <workspace>/departments/<dept>/<role>/how-to.md, checked by
+    // the same collectCompletionEvidence() that transition() calls. Same module,
+    // same predicate, no second definition of "done is earned" to drift.
+    //
+    // WHEN THE FILE DID NOT LAND — disk write disabled (SOP_AUTHORING_WRITE_DISK=0)
+    // or failed (unwritable WORKSPACE_BASE) — there is no reachable deliverable,
+    // so the sub-task is NOT completed. It is HELD in its current status with a
+    // loud event naming the exact remedy, rather than stamped with a durable
+    // `done` + `task_completed` for a SOP file nobody can open. Holding is
+    // recoverable; a false completion is not. Note this is fail-closed in the
+    // strict sense: a task_deliverables read error also yields no evidence, and
+    // "we could not check" must never read as "it is fine".
+    //
+    // HOLDING THE CARD DOES NOT BLOCK AUTHORING. The `sops` row is already filed
+    // above, the sop_id is already attached to the original task, and §6 below
+    // still re-fires dispatch. The only thing withheld is the completion record.
+    //
+    // DISP-10 (unchanged): this write still cannot route through transition() —
+    // in_progress→done is not an edge in LEGAL_TRANSITIONS and this UPDATE also
+    // sets completed_at — so it remains a compare-and-swap raw write audited via
+    // recordStatusEvent. What changed is that it is no longer UNGATED.
+    let subTaskCompleted = false;
     if (subTaskId) {
       try {
-        const subFrom =
-          queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [subTaskId])?.status ??
-          'in_progress';
-        // U99-RAW-STATUS-WRITER: in_progress→done is not a legal transition()
-        // edge (see the DISP-10 note just above) and this write also sets
-        // completed_at atomically; audited immediately below via
-        // recordStatusEvent.
-        const res = run(
-          `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ? AND status NOT IN ('done')`,
-          [fileNow, fileNow, subTaskId],
-        );
-        if (res.changes > 0) {
-          recordStatusEvent(subTaskId, subFrom, 'done', {
-            actor: 'sop-authoring',
-            reason: `SOP "${finalName}" authored and filed (QC ${finalQcResult.score.toFixed(1)}/10 PASS)`,
-          });
-          run(
-            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-            [
-              uuidv4(),
-              'task_completed',
-              subTaskId,
-              `[sop-authoring] SOP "${finalName}" authored and filed. QC: ${finalQcResult.score.toFixed(1)}/10 PASS.`,
-              fileNow,
-            ],
-          );
-          // DONE owner report (5-field). Best-effort; gateway-routed; never throws.
+        // (a) Register the SOP file as this sub-task's deliverable. Idempotent on
+        //     (task_id, path), so a re-entered run against a reused card does not
+        //     duplicate the row.
+        if (sopFile) {
           try {
-            notifyOwnerDone(subTaskId);
-          } catch { /* non-fatal */ }
+            registerDeliverable(subTaskId, {
+              path: sopFile.path,
+              mime: 'text/markdown',
+              bytes: sopFile.bytes,
+              sha256: sopFile.sha256,
+              title: `SOP: ${finalName} (how-to.md)`,
+            });
+          } catch (regErr) {
+            const regMsg =
+              `[sop-authoring] Failed to register the SOP deliverable for sub-task ${subTaskId} ` +
+              `(${sopFile.path}): ${(regErr as Error).message}`;
+            console.warn(regMsg);
+            emitEvent('sop_authoring_deliverable_register_failed', regMsg, subTaskId);
+          }
+        }
+
+        // (b) THE GATE — the same call transition() makes, from the same module.
+        const completion = collectCompletionEvidence(subTaskId);
+        if (!completion.hasEvidence) {
+          const holdMsg =
+            `[sop-authoring] Authoring sub-task ${subTaskId} HELD (not recorded done) for SOP ` +
+            `"${finalName}". The SOP row is filed and dispatch still resumes; only the completion ` +
+            `record is withheld. ${noEvidenceMessage(subTaskId, completion)}`;
+          console.warn(holdMsg);
+          emitEvent('sop_authoring_completion_evidence_missing', holdMsg, subTaskId);
+        } else {
+          const subFrom =
+            queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [subTaskId])?.status ??
+            'in_progress';
+          // U99-RAW-STATUS-WRITER: in_progress→done is not a legal transition()
+          // edge (see the DISP-10 note just above) and this write also sets
+          // completed_at atomically; audited immediately below via
+          // recordStatusEvent.
+          const res = run(
+            `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ? AND status NOT IN ('done')`,
+            [fileNow, fileNow, subTaskId],
+          );
+          if (res.changes > 0) {
+            subTaskCompleted = true;
+            recordStatusEvent(subTaskId, subFrom, 'done', {
+              actor: 'sop-authoring',
+              reason: `SOP "${finalName}" authored and filed (QC ${finalQcResult.score.toFixed(1)}/10 PASS)`,
+            });
+            run(
+              `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+              [
+                uuidv4(),
+                'task_completed',
+                subTaskId,
+                `[sop-authoring] SOP "${finalName}" authored and filed. QC: ${finalQcResult.score.toFixed(1)}/10 PASS.`,
+                fileNow,
+              ],
+            );
+            // DONE owner report (5-field). Best-effort; gateway-routed; never throws.
+            try {
+              notifyOwnerDone(subTaskId);
+            } catch { /* non-fatal */ }
+          }
         }
       } catch { /* non-fatal */ }
     }
@@ -1044,6 +1142,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       sub_task_id: subTaskId,
       qc_score: finalQcResult.score,
       proposal_id: proposalId,
+      sub_task_completed: subTaskCompleted,
     };
   } catch (err) {
     // Fire-and-forget contract: NEVER throw.
