@@ -24,6 +24,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 
 import { vaultRoot } from '@/lib/platform';
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { listModels, bulkUpsertModels } from '@/lib/model-registry';
 import type { ModelCapability } from '@/lib/model-registry';
 import {
@@ -374,19 +375,49 @@ async function runJob(job: StudioJob, options: Record<string, unknown>): Promise
 
   const provider = (job.provider || '').toLowerCase();
 
-  // Fixture path for offline tests. Drop a binary at this path and the job
-  // copies it verbatim, marking succeeded. Keeps CI deterministic.
+  // Fixture path for offline tests. Set STUDIO_FIXTURE_<KIND>_PATH to a local
+  // media file and the job short-circuits the provider call.
+  //
+  // CC-fixture-002 — THIS PATH NO LONGER COPIES INTO THE VAULT.
+  //
+  // It used to `fs.copyFile()` the canned binary to
+  // `<vault>/studio/<kind>/YYYY/MM/<slug>.<ext>` and mark the job succeeded.
+  // That produced the sharpest possible fabricated artifact: a media file with
+  // no citation to inspect and no provenance to check, sitting in the tree that
+  // `walkVaultSubdir('studio')` (src/lib/workspaces/buckets.ts) enumerates BY
+  // PATH into the "All Images" / "All Videos" buckets — presented to the
+  // operator as "Every image rendered across agents, studio, and research".
+  // The `provider_used: 'fixture'` label below lives in the job ledger at
+  // `<vault>/studio/.jobs/<id>.json`; the bucket walk reads the FILES, not the
+  // ledger, so no label on the job could ever save the asset. Same path-glob
+  // reasoning as CC-resear-001, same remedy: refuse the durable write.
+  //
+  // Fixture mode stays fully usable offline — the job still runs the real
+  // lifecycle (queued -> running -> succeeded) and `result_path` points at the
+  // operator's OWN fixture file, in place. Nothing new is created anywhere, so
+  // there is no artifact for later work to mistake for produced output.
   const fixtureEnv = `STUDIO_FIXTURE_${job.kind.toUpperCase()}_PATH`;
   const fixturePath = process.env[fixtureEnv];
   if (fixturePath && existsSync(fixturePath)) {
-    const ext = path.extname(fixturePath).slice(1) || EXTENSION_FOR_KIND[job.kind];
-    const outPath = vaultOutputPath(job.kind, job.prompt, ext);
-    await fs.mkdir(path.dirname(outPath), { recursive: true });
-    await fs.copyFile(fixturePath, outPath);
+    // Never honor a media fixture on a live box.
+    assertNoFixtureEnvInProduction();
+    console.warn(
+      `[CC-fixture-002] Studio ${job.kind} job ${job.id} served from ${fixtureEnv} — ` +
+        `NOT generated. Refusing the vault write: no file copied into ` +
+        `<vault>/studio/${job.kind}/, so this canned asset cannot enter the ` +
+        `All Images / All Videos buckets as produced work.`,
+    );
     await markSucceeded(job.id, {
-      result_path: outPath,
-      result_url: `/api/media/file?path=${encodeURIComponent(outPath)}`,
-      metadata: { provider_used: 'fixture' },
+      // The operator's own fixture file, referenced in place — NOT a vault copy.
+      result_path: fixturePath,
+      result_url: `/api/media/file?path=${encodeURIComponent(fixturePath)}`,
+      metadata: {
+        provider_used: 'fixture',
+        fixture: true,
+        fixture_env_var: fixtureEnv,
+        persisted: false,
+        vault_write_refused: true,
+      },
     });
     return;
   }

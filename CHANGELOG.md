@@ -1,3 +1,88 @@
+## [v6.0.62] — 2026-07-21 — CC-fixture-002: canned media, browsing, persona and SOP content can no longer become durable artifacts
+
+v6.0.62 — Security/integrity fix. Follow-on sweep to CC-resear-001 (v6.0.61): the research
+fix closed one instance, but `docs/archive/BUILD-NOTES.md` documented the durable fixture
+write as an intended pattern, so the whole fixture surface was swept for others. Four more
+mechanisms were confirmed writing fixture-derived content into a durable store.
+
+- **The lead.** `BUILD-NOTES.md:271` described the research behaviour as a feature — *"The
+  route still writes a row and a vault file so end-to-end UI flows can exercise the full path
+  offline"* — and `:372` prescribed the same shape for `STUDIO_FIXTURE_<KIND>_PATH`, *"the
+  image job copies that file verbatim into the vault and reports `succeeded`"*. This was a
+  documented pattern, not a one-off slip.
+
+- **Ranked findings (worst first), all measured against pristine `origin/main` @ 4c937ec:**
+  1. **`WEB_AGENT_FIXTURE_PATH`** — an exact CC-resear-001 replica, and unguarded. A canned
+     Anthropic response became a durable `web_agent_sessions.result_markdown` row **and** a
+     `<vault>/web-agent/YYYY/MM/*.md` mirror, which Memory's vault walk ingests by path
+     (`web-agent/` is not in `readLocalDir`'s skip list). Neither artifact carried any marker,
+     nothing checked `NODE_ENV`, and `runner.ts:277` explicitly waved a session through when
+     no `ANTHROPIC_API_KEY` was set. `writeClientFile('vault-root', ...)` can resolve to a
+     **client's** pinned workspace root, so canned findings could be filed into a client vault.
+  2. **`GEMINI_FIXTURE_JSON_PATH` / `TAVILY_FIXTURE_JSON_PATH` → SOPs** — canned research reached
+     the canonical `sops` table via `sop-authoring.ts` (auto-authored, **no operator approval**,
+     filed with `source = NULL` so it looks organically produced, then live tasks re-pointed at
+     it) and `sop_proposals` via `sop-auto-replace.ts`. Guarded in production, but
+     `assertNoFixtureEnvInProduction()` is a no-op below production and a `next dev` server
+     writes to the SAME `mission-control.db`.
+  3. **`STUDIO_FIXTURE_{IMAGE,VIDEO,AUDIO}_PATH`** — the sharpest case. The job `fs.copyFile()`d
+     a canned binary into `<vault>/studio/<kind>/YYYY/MM/` and marked itself `succeeded`. Media
+     has **no citation to inspect and no obvious tell**; `walkVaultSubdir('studio')` enumerates
+     that tree **by path** into the "All Images" / "All Videos" buckets — "Every image rendered
+     across agents, studio, and research". The `provider_used: 'fixture'` label lived in the job
+     ledger, and the bucket walk reads the **files**, not the ledger, so no label could save it.
+     Measured before: `PROBE_VAULT_MEDIA_FILE_COUNT=1`. After: `0`.
+  4. **`PERSONA_FIXTURE_JSON` / `PERSONA_PLAN_FIXTURE_JSON`** — a canned persona was pinned onto
+     `tasks.persona_id / persona_name / persona_mode / persona_score / persona_reason`,
+     unlabelled. The source comment said *"Never set this in production"*; nothing enforced it.
+
+- **The detection half (all four):** none of the six env vars were in `FIXTURE_ENV_VARS`, so
+  `activeFixtureEnvVars()` returned `[]` and `GET /api/health/deep` reported a box **clean**
+  while it served canned media, canned browsing results and canned persona pins.
+
+- **The fix — reuses `src/lib/fixture-guard.ts`, never a second guard:**
+  - `FIXTURE_ENV_VARS` now names all six (9 vars → **15**), grouped as `MEDIA_FIXTURE_ENV_VARS`
+    and `PERSONA_FIXTURE_ENV_VARS`. The deep-health advisory calls the media vars out separately,
+    because a canned asset has no tell an operator could otherwise spot.
+  - `assertNoFixtureEnvInProduction()` is now wired into `studio/generators.ts`,
+    `web-agent/runner.ts` and `persona-selector.ts` (the latter placed OUTSIDE the
+    malformed-fixture `catch` so the guard's own error cannot be swallowed).
+  - **Durable writes are REFUSED, not labelled** — same path-glob reasoning as CC-resear-001:
+    an index that globs by path cannot honour a label. The studio job now copies **nothing**;
+    `result_path` references the operator's own fixture file in place. The web-agent vault
+    mirror is skipped entirely and the session markdown carries an unmissable banner.
+  - New `assertNoFixtureDerivedServerWrite()` refuses fixture-derived `sops` / `sop_proposals`
+    writes inside the live server process at **every** `NODE_ENV`, keyed on the
+    `__CC_SERVER_ENTRYPOINT__` marker that the C8 DB guard already relies on precisely because
+    no env var or inherited shell export can forge it.
+  - **Fixture mode stays usable offline.** The studio job still runs the real
+    `queued → running → succeeded` lifecycle; the SOP smoke scripts run outside the server
+    process against their own throwaway `DATABASE_PATH` and are explicitly unaffected
+    (locked down by test C3).
+
+- **Tests:** `tests/unit/cc-fixture-002-media-persona-sop-fixture-guard.test.ts` — 12 assertions
+  across detection, production prevention, every-`NODE_ENV` prevention, no-regression, and
+  offline-testing-still-works. **FAIL-before 12/12 against pristine `origin/main`, PASS-after
+  12/12.** Full suite: 1795 pass / 5 fail before → **1807 pass / 5 fail after** (+12 tests, the
+  same 5 pre-existing `getInterviewState` failures, zero regressions).
+
+- **Docs — the thing that produced this class.** `BUILD-NOTES.md` is archived, so the defective
+  passages were **annotated as superseded rather than rewritten**: erasing them would destroy the
+  record of how the defect was designed in, while leaving them unmarked would teach the next
+  person to rebuild it. All four sites (`:271`, `:372`, `:491`, the `v4.0 Test Fixtures` summary)
+  now carry an explicit ⛔ correction and the general rule: *a fixture may substitute an in-memory
+  response; it must NEVER produce a durable artifact.* `.env.example` claimed the guard
+  "hard-fails EVERY var below" — false at the time for the studio and web-agent vars, true now —
+  and was missing the two persona vars entirely; both corrected. The block remains deliberately
+  non-pastable (no `=` signs).
+
+- **Contamination sweep (read-only, nothing deleted — operator decision):** `research_searches`
+  **0** rows; `<vault>/studio/` and `<vault>/web-agent/` **absent** (0 media assets, 0 job
+  records). One fabricated artifact remains: `~/clawd/research/2026/07/2026-07-21-cc-resear-001-durable-write-probe-*.md`,
+  a leftover FAIL-before probe from the v6.0.61 verification containing *"Fabricated answer that
+  was never researched"* and two `example.invalid` source URLs. It is unlabelled and sits in the
+  Memory-indexed path. Left in place for the operator to remove.
+
 ## [v6.0.61] — 2026-07-21 — CC-resear-001: fabricated research can no longer become durable cited evidence
 
 v6.0.61 — Security/integrity fix. Finding CC-resear-001, the most dangerous item in a
