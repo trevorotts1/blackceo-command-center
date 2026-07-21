@@ -72,7 +72,7 @@ import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
-import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
+import { assertNoFixtureEnvInProduction, assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
 import {
@@ -3734,6 +3734,32 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     console.log('[QCScorer] DISABLE_QC_AUTO_SCORER is set, skipping auto-QC');
     return null;
   }
+
+  // CC-fixture-003 — the second of the two residuals left open by v6.0.62.
+  //
+  // runQCOnReview is a DURABLE path end to end. It writes the `task_qc_results`
+  // row the grading module reads back as qcPassRate evidence, writes `events`
+  // rows the board renders as QC history, and flips `tasks.status` (review →
+  // done / backlog / blocked). With QC_FIXTURE_JSON_PATH set, scoreTaskForQC
+  // returns whatever score the canned file names on the `llm` scoring path —
+  // the exact path the grading module filters FOR — and QC_SIMULATE_PROVIDER_DOWN
+  // forges an outage that persists as genuine judge history. Neither leaves a
+  // mark on the row, so a canned verdict is indistinguishable from a real one.
+  //
+  // scoreTaskForQC already calls assertNoFixtureEnvInProduction(), but that is a
+  // deliberate no-op outside NODE_ENV=production and therefore not containment:
+  // a `next dev` box writes to the SAME mission-control.db as a live one. The
+  // marker-keyed guard refuses at every NODE_ENV inside the real server process,
+  // while leaving fixture mode fully usable for offline tests and smoke scripts
+  // (which never set __CC_SERVER_ENTRYPOINT__) — that is exactly why
+  // tests/unit/prd-2.10-qc-results-persistence.test.ts keeps passing unmodified.
+  //
+  // Placed here DELIBERATELY, before the try below and before the first `events`
+  // write, for two reasons: that catch swallows everything into a console.error
+  // and returns null, which would hide the refusal; and the earliest durable
+  // write in this function is an `events` INSERT well above the task_qc_results
+  // INSERT, so guarding at the task_qc_results site alone would be too late.
+  assertNoFixtureDerivedServerWrite('a task_qc_results row and its QC events');
 
   try {
     const task = queryOne<TaskRowForQC>(
