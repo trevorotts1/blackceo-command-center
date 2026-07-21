@@ -1,0 +1,40 @@
+name: Update main convergence guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "update.sh"
+      - "scripts/update-preserve-per-box-config.test.sh"
+      - ".github/workflows/update-main-convergence-guard.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "update.sh"
+      - "scripts/update-preserve-per-box-config.test.sh"
+      - ".github/workflows/update-main-convergence-guard.yml"
+
+jobs:
+  update-main-convergence:
+    name: Update preserves runtime state and converges to main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Syntax-check updater and test fixture payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n update.sh
+          bash -n scripts/update-preserve-per-box-config.test.sh
+          awk '/<<'"'"'FAKENPM'"'"'/{inside=1; next} inside && /^FAKENPM$/{inside=0; exit} inside{print}' \
+            scripts/update-preserve-per-box-config.test.sh > /tmp/update-fixture-npm.sh
+          awk '/<<'"'"'FAKEDEPLOY'"'"'/{inside=1; next} inside && /^FAKEDEPLOY$/{inside=0; exit} inside{print}' \
+            scripts/update-preserve-per-box-config.test.sh > /tmp/update-fixture-deploy.sh
+          bash -n /tmp/update-fixture-npm.sh
+          bash -n /tmp/update-fixture-deploy.sh
+
+      - name: Run updater end to end against isolated repositories
+        shell: bash
+        run: bash scripts/update-preserve-per-box-config.test.sh

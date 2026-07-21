@@ -28,7 +28,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UPDATE_SH="$SCRIPT_DIR/../update.sh"
+UPDATE_SH="${UPDATE_SH_UNDER_TEST:-$SCRIPT_DIR/../update.sh}"
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf '  ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL - %s\n' "$1"; }
@@ -356,6 +356,39 @@ for template in \
   config/board-slas.example.json public/logo-config.example.json; do
   [ -f "$INST/$template" ] || bad "tracked template missing after migration: $template"
 done
+
+# ── Scenario 8: a box left on a feature branch converges to main ────────────
+echo "Scenario 8: feature-branch checkout converges to latest main"
+INST="$WORK/install-s8"
+new_install "$INST"
+git -C "$INST" checkout -qb box-feature
+printf 'box-local feature commit\n' > "$INST/box-feature.txt"
+git -C "$INST" add box-feature.txt
+git -C "$INST" commit -qm "box: local feature"
+FEATURE_COMMIT="$(git -C "$INST" rev-parse HEAD)"
+
+printf 'latest upstream main\n' > "$ORIGIN/latest-main.txt"
+git -C "$ORIGIN" add latest-main.txt
+git -C "$ORIGIN" commit -qm "fixture: latest main"
+
+if run_updater "$INST" "$WORK/out-s8.txt" "$WORK/receipt-s8.txt"; then
+  ok "updater exits 0 from a feature-branch checkout"
+else
+  bad "updater exits non-zero from a feature branch (see $WORK/out-s8.txt)"
+fi
+[ "$(git -C "$INST" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "main" ] \
+  && ok "active checkout is main after update" \
+  || bad "active checkout was left on a feature branch"
+git -C "$INST" merge-base --is-ancestor origin/main HEAD \
+  && ok "updated main contains latest origin/main" \
+  || bad "updated checkout does not contain latest origin/main"
+git -C "$INST" merge-base --is-ancestor "$FEATURE_COMMIT" HEAD \
+  && ok "local feature commit remains in active history" \
+  || bad "local feature commit was discarded"
+git -C "$INST" show-ref --verify --quiet refs/heads/box-feature \
+  && ok "original feature branch reference is retained" \
+  || bad "original feature branch reference was deleted"
+[ -f "$INST/latest-main.txt" ] && ok "latest upstream file landed" || bad "latest upstream file missing"
 
 # ── summary ─────────────────────────────────────────────────────────────────
 echo ""
