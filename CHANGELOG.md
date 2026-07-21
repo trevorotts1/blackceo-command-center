@@ -1,3 +1,62 @@
+## [v6.0.65] — 2026-07-21 — A44/A46: the instruction closest to the agent contradicted the platform's impersonation guardrail
+
+v6.0.65 — Safety and contract fix. Four findings from the nine-cluster skill review, all
+verified against pristine `origin/main` before anything was changed.
+
+- **T1-09 (A44) — 22 agent identity files directed literal persona assumption.**
+  `src/lib/persona-dispatch.ts:54-59` injects `STYLE_INSPIRED_GUARDRAIL` into every
+  voice-blend directive and `ensureBlendGuardrail` re-injects it so it cannot be stripped:
+  a persona is a CRAFT LENS, never an identity to assume. Every agent `IDENTITY.md` said
+  the opposite at line 28-29 — *"Act AS IF you ARE the persona for the duration of the
+  task"* — and `scripts/migrate-agents-to-zhc.py:36-37` reproduced it for every new agent.
+  The identity file is always loaded and the guardrail is injected at dispatch, so the
+  agent held two mutually exclusive instructions on whether client-facing copy may claim
+  to be a real named person. Substituted in all 23 identity files (including the CEO-mode
+  *"embody it for the task"*) and in both generator templates, using the dispatch layer's
+  own wording rather than a paraphrase.
+
+- **New gate: `scripts/check-agent-identity-guardrail.py`** (CI:
+  `.github/workflows/agent-identity-guardrail.yml`). Fails on any assumption directive AND
+  on any identity file that does not positively carry the guardrail — absence of the bad
+  phrase is not treated as compliance. Anchored to the dispatch layer: if
+  `STYLE_INSPIRED_GUARDRAIL` is renamed or gutted the check exits 2 (CANNOT RUN), never a
+  pass. `--self-test` proves five directions and CI runs it *before* the check, so a
+  checker that has stopped detecting anything cannot report green. Measured: exit 1 with
+  23 files + 2 generator templates flagged at `origin/main`; exit 0 after.
+
+- **T2-39 (A46) — the n8n builder's importability promise had no validator.**
+  `agents/n8n-workflow-builder/IDENTITY.md:7` promised valid, importable JSON with nothing
+  in the directory parsing it. Added `agents/n8n-workflow-builder/validate-workflow-json.py`
+  — rejects fenced output and trailing prose, parses, and validates the supported schema
+  (nodes/connections shape, per-node fields, unique node names, every connection endpoint
+  resolving to a real node). 11 self-test cases: 1 accept, 10 rejects, one per defect class.
+  It reports *static validation only* and never claims a live import it did not attempt.
+
+- **T2-40 (A46) — the operations agent's heartbeat scheduled none of its four duties.**
+  `IDENTITY.md:7` assigns calendar conflicts, urgent emails, overdue tasks and pending
+  items; `HEARTBEAT.md` read "(Empty …)". Populated with all four, each naming its source,
+  window, detection rule and escalation path, and each recording an explicit negative
+  result so an unreachable source reports NOT RUN instead of looking like a clean check.
+
+- **T2-41 (A46) — the content-to-delivery seam had no payload, approval or receipt.**
+  Added `agents/_shared/CONTENT-DELIVERY-HANDOFF.md` (`content-delivery-handoff/v1` +
+  `content-delivery-receipt/v1`), referenced from both agents. Send only on
+  `approval.state == approved` **with** `approved_by` and `approved_at`; an approval with
+  no approver is refused as malformed; an author may not approve their own copy;
+  `delivered` requires a provider-issued message id that is never synthesised; recipient
+  references stay opaque.
+
+- **T3-02 (A46) — the podcast agent's core integration was absent from the shared registry.**
+  Registered podcast hosting in `agents/_shared/TOOLS.md` with capability and credential
+  NAMES only (never a value), and gave the agent an operating contract: drafts without
+  approval, publishing requires the owner, a publish claim carries the platform-issued
+  episode id or it is reported failed, and connectivity checks never run against a client
+  feed.
+
+**Blast radius:** documentation and contracts plus two new static checks. No runtime code
+path changed. Both new checks are self-tested in both directions and neither can pass by
+skipping.
+
 ## [v6.0.63] — 2026-07-21 — T0-01 / T0-42: a task with no deliverable can no longer be recorded `done`
 
 v6.0.63 — Security/integrity fix. Findings T0-01 and T0-42, ranked first and second in a
