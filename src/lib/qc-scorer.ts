@@ -73,6 +73,7 @@ import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
+import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
 import {
   chatCompletion as ollamaCloudChat,
@@ -1608,7 +1609,7 @@ export interface AcceptanceCriterion {
    *     ~2800-line transcript that warranted ~30-62 slides was compressed into
    *     12. Fail-closed: an unreadable/missing run dir or absent target blocks.
    */
-  type: 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'spelling_fidelity' | 'pipeline_complete' | 'coverage' | 'custom';
+  type: 'deliverable_registered' | 'existence' | 'valid_image' | 'min_resolution' | 'vision_match' | 'language_match' | 'numeric_fidelity' | 'spelling_fidelity' | 'pipeline_complete' | 'coverage' | 'custom';
   /** Extra params: resolution threshold, vision prompt, expected language, etc. */
   params?: Record<string, unknown>;
 }
@@ -1638,12 +1639,51 @@ export function deriveAcceptanceCriteria(
     /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
   const isDeckTask = describesDeckDeliverable(title, description ?? null);
 
+  // ── BASELINE CRITERION — applies to EVERY task, no exceptions (T0-01) ──────
+  // This function used to `return []` here for anything that was not an image
+  // or a deck. That empty array was the defect. Its caller computes
+  // `isArtifactTask = deriveAcceptanceCriteria(...).length > 0`, so empty
+  // criteria meant "not an artifact task", which skipped the no-artifact
+  // invariant, which dropped scoring into description-only mode — where the
+  // judge read the prose the executing agent had itself written and could score
+  // it ≥8.5. Document, book, manuscript, report, operations, VIDEO and
+  // content-writer tasks all landed there, because none of them match the
+  // image or deck regex. The exemption was never a decision about those task
+  // types; it was the default that applied to everything nobody had enumerated.
+  //
+  // FAIL-CLOSED, and specifically NOT "derive semantic criteria per task type".
+  // A derived per-type criterion has to be inferred from the same task text the
+  // agent wrote, by the same class of model, which reintroduces the failure one
+  // level up: a mis-derived criterion is an exemption wearing better clothes.
+  // The baseline instead asserts something a model cannot argue with and did
+  // not author — whether a deliverable was registered and is reachable. It also
+  // needs no taxonomy, so it cannot be escaped by a task type nobody thought of,
+  // which is precisely how video and content-writer tasks got out.
+  //
+  // This is not a new demand on agents: renderWriteBackInstructions()
+  // (src/lib/mc-auth.ts) already tells every dispatched task, of every type,
+  // "you MUST ... Register deliverable: POST /api/tasks/<id>/deliverables".
+  // The instruction was always given. Only the enforcement was missing.
+  const criteria: AcceptanceCriterion[] = [
+    {
+      id: 'deliverable_registered',
+      description:
+        'At least one deliverable is registered against this task and is reachable ' +
+        '(a file that exists and is non-empty, or a valid http(s) URL for work that ' +
+        'lives in another system)',
+      type: 'deliverable_registered',
+    },
+  ];
+
   if (!isImageTask && !isDeckTask) {
-    // Non-image / non-deck (document/work) task — no artifact criteria
-    return [];
+    // Non-image / non-deck (document / report / operations / video / content)
+    // task: the baseline evidence criterion is the whole checklist. Rendered-
+    // pixel gates (vision/language/spelling/numeric) are meaningless for a
+    // document and are deliberately not fabricated for it.
+    return criteria;
   }
 
-  const criteria: AcceptanceCriterion[] = [
+  criteria.push(
     {
       id: 'existence',
       description: 'Artifact file exists and is non-empty',
@@ -1654,7 +1694,7 @@ export function deriveAcceptanceCriteria(
       description: 'File is a valid image (correct magic bytes, non-zero size)',
       type: 'valid_image',
     },
-  ];
+  );
 
   // High-quality / large mentions → min resolution
   if (/\b(high.?quality|large|high.?res|hd|4k|1080|resolution)\b/.test(text)) {
@@ -2561,6 +2601,26 @@ export async function evaluateCriteria(
 
   for (const c of criteria) {
     switch (c.type) {
+      case 'deliverable_registered': {
+        // The universal baseline (T0-01). Reaching evaluateCriteria at all means
+        // the manifest was non-empty, and the manifest is built only from
+        // registered, evidence-bearing deliverable rows — so this asserts that
+        // at least one of them actually resolved to something reachable
+        // (an existing non-empty file, or a well-formed URL).
+        const anyReachable = manifest.some((m) => m.valid);
+        results.push({
+          id: c.id,
+          description: c.description,
+          pass: anyReachable,
+          reason: anyReachable
+            ? `Registered deliverable is reachable (${manifest.filter((m) => m.valid).length}/${manifest.length} usable)`
+            : `No registered deliverable is reachable: ${manifest
+                .map((m) => m.invalidReason ?? `unusable: ${m.path}`)
+                .join('; ')}`,
+        });
+        break;
+      }
+
       case 'existence': {
         const anyValid = manifest.some((m) => m.valid && (m.sizeBytes ?? 0) > 0);
         results.push({
@@ -3756,7 +3816,22 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     let deliverableManifest: DeliverableManifestItem[] | null = null;
     // Detect artifact intent BEFORE manifest build so we can enforce invariant A.
     const artifactCriteriaForTitle = deriveAcceptanceCriteria(task.title, task.description);
-    const isArtifactTask = artifactCriteriaForTitle.length > 0;
+    // ── Scope of the invariant-A HANDBACK, deliberately unchanged (T0-01) ─────
+    // Every task now derives at least the baseline `deliverable_registered`
+    // criterion, so `criteria.length > 0` no longer distinguishes an
+    // artifact-PRODUCING task (image/deck) from any other. Invariant A below is
+    // a specific REMEDY — bounce the card to backlog with a "register your
+    // output" handback — and it must keep its original scope: firing it for
+    // every task type would pre-empt the judge-availability machinery
+    // (no-key parking, provider-down deferral, the bounded escalation hatch)
+    // that a task with no deliverable still has to pass through on a keyless
+    // box. Widening the CRITERIA is the fix; widening this handback would just
+    // move the disruption somewhere it was never designed for.
+    //
+    // The universal stop is not here — it is the completion-evidence gate on
+    // `done` itself (transition() + the PATCH route), which no scoring lane can
+    // route around. This decides only WHICH lane a no-deliverable task takes.
+    const isArtifactTask = artifactCriteriaForTitle.some((c) => c.type !== 'deliverable_registered');
 
     try {
       const delivRows = queryAll<DeliverableRow>(
@@ -3769,8 +3844,15 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // on 'file' alone dropped them — the manifest came back empty and QC fell
       // back to the heuristic (capped at 8.0, never clears the 8.5 gate), parking
       // every image/file task in `review` forever. 'image' is included defensively.
-      const FILE_BACKED_DELIVERABLE_TYPES = new Set(['file', 'artifact', 'image']);
-      const fileRows = delivRows.filter((d) => FILE_BACKED_DELIVERABLE_TYPES.has(d.deliverable_type) && d.path);
+      // T0-01: `url` joins the set. It was previously excluded, which meant an
+      // agent that did the RIGHT thing for artifact-free work — registering a
+      // link to where the decision/record/resource landed — still presented an
+      // empty manifest and fell through to description-only scoring. Excluding
+      // the one deliverable type that fits non-file work is what made "there is
+      // no file" and "there is no evidence" look like the same thing.
+      // EVIDENCE_DELIVERABLE_TYPES is the shared definition (completion-evidence.ts)
+      // so this manifest and the lifecycle gate can never drift apart on what counts.
+      const fileRows = delivRows.filter((d) => EVIDENCE_DELIVERABLE_TYPES.has(d.deliverable_type) && d.path);
 
       // ── Invariant A: artifact task with zero registered deliverables ─────────
       // Return-to-orchestrator: the agent completed execution without registering
@@ -3778,7 +3860,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // structural handback so the orchestrator can re-assign or request
       // artifact registration from the worker.
       if (isArtifactTask && fileRows.length === 0) {
-        const noArtifactReason = 'No artifact registered: task reached review without any file deliverable in task_deliverables. The executing agent must register the output file before submitting for QC.';
+        const noArtifactReason = 'No artifact registered: task reached review with no reachable deliverable in task_deliverables. The executing agent must register its output before submitting for QC — a file/artifact/image deliverable for produced work, or a url deliverable pointing at where the work landed (a decision, a review, a record changed in another system).';
         console.warn(`[QCScorer] Task "${task.title}" (${taskId}): artifact task with zero registered deliverables — return-to-orchestrator (NOT blocked)`);
 
         const now = new Date().toISOString();
@@ -3910,6 +3992,23 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
       if (fileRows.length > 0) {
         deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
+          // URL deliverables carry a link in `path`, not a filesystem path — they
+          // must be validated as URLs, never stat()ed (a stat would always fail
+          // and report a genuine deliverable as "file not found").
+          if (d.deliverable_type === 'url') {
+            const href = d.path!.trim();
+            const ok = isUsableUrl(href);
+            return {
+              title: d.title,
+              path: href,
+              type: 'url',
+              sizeBytes: null,
+              dimensions: null,
+              valid: ok,
+              invalidReason: ok ? undefined : `Not a valid http(s) URL: ${href}`,
+            };
+          }
+
           const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
           const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
           const isImage = IMAGE_EXTENSIONS.has(ext);
@@ -4119,11 +4218,54 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       }
     }
 
+    // ── T0-01: a producer verdict is a CLAIM ABOUT a deliverable, not one ────
+    // The producer-confirmation path takes the build side's posted verdict as
+    // read and skips independent re-scoring. That is defensible when something
+    // was actually built — but the verdict is metadata on a task_activities row
+    // that the producing agent wrote itself, so with no deliverable behind it,
+    // `{"qc_gate":"...","qc_passed":true}` is a self-issued pass certificate,
+    // and honouring it promoted a task to done with nothing delivered.
+    //
+    // Normal flow no longer reaches here without evidence (invariant A returns
+    // first), but the manifest build has a catch that nulls the manifest, so a
+    // transient DB error could still land here. Re-check evidence directly
+    // rather than inferring it from a variable an error path can reset:
+    // "we failed to look" must not read as "there was nothing to find".
+    if (useProducerConfirmation) {
+      const producerEvidence = collectCompletionEvidence(taskId);
+      if (!producerEvidence.hasEvidence) {
+        console.warn(
+          `[QCScorer] Task "${task.title}" (${taskId}): producer scorecard present but NO ` +
+          'reachable deliverable is registered — the verdict cannot confirm work that ' +
+          'has no evidence. Falling through to the no-evidence floor.',
+        );
+        useProducerConfirmation = false;
+      }
+    }
+
     if (deliverableManifest && deliverableManifest.length > 0) {
       // Artifact mode: use the pre-computed criteria (derived above for invariant A).
       const criteria = artifactCriteriaForTitle;
 
-      if (criteria.length > 0) {
+      // ── Which checklist can actually JUDGE this deliverable? (T0-01) ────────
+      // Branch on the RENDER gates, not on `criteria.length`. Every task now
+      // derives the baseline `deliverable_registered` criterion, so a length
+      // test would send document/report/ops tasks down the checklist path —
+      // where the only criterion is "a reachable file exists" and any non-empty
+      // file scores 10/10. That would have replaced content review with an
+      // existence check: a one-byte file passing QC. Fixing a
+      // self-certification hole by installing a rubber stamp is not a fix.
+      //
+      // So: image/deck deliverables (which carry real render gates —
+      // valid_image / vision_match / language / numeric / spelling / pipeline /
+      // coverage) go to the checklist. Everything else keeps the SOP-rubric
+      // judgement it always had, with the manifest attached so the judge is
+      // looking at the DELIVERABLE (Mode A) and not at the description (Mode B).
+      // Evidence is already guaranteed here: the all-invalid instant-fail above
+      // returns before this point.
+      const hasRenderGates = criteria.some((c) => c.type !== 'deliverable_registered');
+
+      if (hasRenderGates) {
         // Evaluate criteria checklist
         const criteriaResult = await evaluateCriteria(criteria, deliverableManifest);
 
@@ -4146,8 +4288,12 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
         console.log(`[QCScorer] Task "${task.title}" (${taskId}): artifact-mode criteria score ${criteriaResult.score.toFixed(1)}/10 (${criteriaResult.pass ? 'PASS' : 'FAIL'})`);
       } else {
-        // Manifest present but no image criteria derived (non-image artifact)
-        // → score against SOP rubric with the manifest for context (Mode A prompt)
+        // Non-image/deck artifact (document, report, operations, video, content):
+        // score against the SOP rubric with the manifest attached — the Mode A
+        // "artifact-fulfillment" prompt, which judges the DELIVERABLE. This is
+        // the path that keeps real content review in place for these task types;
+        // the baseline evidence criterion has already been satisfied by the
+        // manifest reaching here with at least one reachable item.
         const input: QCScorerInput = {
           taskId: task.id,
           taskTitle: task.title,
@@ -4190,10 +4336,23 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         `${producerScorecard.qcGate ?? 'unknown'}) — score ${result.score.toFixed(1)}/10 (${result.pass ? 'PASS' : 'FAIL'})`,
       );
     } else {
-      // ── Mode B: document/work task (confirmed non-artifact) ───────────────────
-      // Only reached when isArtifactTask=false (deriveAcceptanceCriteria returned
-      // empty).  Artifact tasks with zero deliverables were already handled above
-      // by invariant A (return-to-orchestrator) and never reach this branch.
+      // ── Mode B: NO EVIDENCE — cannot pass, by construction (T0-01) ───────────
+      // Mode B used to score the task DESCRIPTION against the SOP rubric with no
+      // deliverable attached (buildQCPrompt's "brief-completeness" branch). That
+      // is self-certification: the executing agent writes the description, and
+      // the judge then grades that prose as though it were the delivered work.
+      // A well-written brief scored ≥8.5 and promoted a task whose deliverable
+      // did not exist. Nothing in that loop ever touched an artifact.
+      //
+      // With the baseline criterion in place this branch is now unreachable in
+      // normal flow: every task derives at least one criterion, so a task with
+      // no reachable deliverable is caught by invariant A above and handed back.
+      // The branch is kept as a fail-closed floor rather than deleted, because
+      // "unreachable" is a claim about today's call graph, and the whole defect
+      // was an unreachable-by-assumption path that turned out to be the default.
+      // If control ever arrives here, the honest verdict is that there was
+      // nothing to judge — so it returns a NON-PASSING result and the task stays
+      // in review for a human, instead of being graded on its own description.
       const input: QCScorerInput = {
         taskId: task.id,
         taskTitle: task.title,
@@ -4209,6 +4368,33 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         deliverableManifest: null,
       };
       result = await scoreTaskForQC(input);
+
+      // ── The clamp: description-only scoring may DIAGNOSE, never APPROVE ─────
+      // scoreTaskForQC is still called because its NON-verdict output is load-
+      // bearing: scoringPath and heuristicReason drive the no-key park, the
+      // provider-down deferral and the bounded escalation hatch, and a task with
+      // no deliverable still has to be routed correctly on a keyless or
+      // judge-down box. What must not survive is the VERDICT. In this branch
+      // the only thing the judge saw was the task description — prose the
+      // executing agent wrote — so a PASS here is the agent certifying itself,
+      // which is the whole of T0-01. Diagnosis is kept; approval is removed.
+      if (result.pass) {
+        console.warn(
+          `[QCScorer] Task "${task.title}" (${taskId}): description-only score ` +
+          `${result.score.toFixed(1)}/10 would have PASSED with no deliverable registered — ` +
+          'clamped to FAIL (self-certification guard).',
+        );
+        result = {
+          ...result,
+          pass: false,
+          reason:
+            `${result.reason} — WITHHELD: this score was derived from the task description ` +
+            'alone, with no deliverable registered against the task. A task cannot be ' +
+            'approved on its own account of itself. Register the output (file/artifact/image), ' +
+            'or a url deliverable pointing at where the work landed, then resubmit for QC.',
+          gaps: [...result.gaps, 'no deliverable registered — nothing to judge but the description'],
+        };
+      }
     }
 
     // ── B-U12 / U26: producer/judge agreement check + both-gates rule ─────────

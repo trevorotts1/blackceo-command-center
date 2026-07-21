@@ -116,6 +116,21 @@ function insertReviewCard(id: string, qcReroteAttemptsSeed: number) {
       now,
     ],
   );
+
+  // The completion-evidence gate (src/lib/task-lifecycle.ts checkPreconditions,
+  // code PRECONDITION_EVIDENCE) now refuses review -> done for ANY task with
+  // no registered, REACHABLE deliverable. The [U39-c-08 CHAIN] test below
+  // drives this same fixture card all the way to a genuine QC PASS -> done
+  // promote, so it needs real evidence on disk to prove that promote path
+  // rather than accidentally re-asserting the deliverable-free-completion
+  // defect the gate exists to close.
+  const deliverablePath = path.join(path.dirname(TMP_DB), `${id}-deliverable.txt`);
+  fs.writeFileSync(deliverablePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [`deliverable-${id}`, id, `Fixture deliverable for ${id}`, deliverablePath, now],
+  );
 }
 
 function currentStatus(id: string): string | undefined {

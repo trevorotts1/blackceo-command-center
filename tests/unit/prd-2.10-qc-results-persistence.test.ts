@@ -56,6 +56,23 @@ function withQcFixture(data: { score: number; pass: boolean; reason: string; gap
 }
 
 /** Seed a minimal task in the DB for QC. Returns the task id. */
+/**
+ * Register a real, reachable file deliverable against a fixture task.
+ *
+ * T0-01: the completion-evidence gate refuses `done` for a task with no
+ * registered, reachable deliverable, so any fixture asserting a successful
+ * promotion must supply one.
+ */
+function seedDeliverable(taskId: string, label: string): void {
+  const filePath = path.join(TMP_DIR, `${label}-${taskId}.txt`);
+  fs.writeFileSync(filePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [uuidv4(), taskId, `${label} deliverable`, filePath, new Date().toISOString()],
+  );
+}
+
 function seedTask(workspaceId: string, sopId?: string): string {
   const tid = uuidv4();
   run(
@@ -128,6 +145,13 @@ test('migration 068: task_qc_results table exists with correct columns (PRAGMA t
 test('LLM pass fixture: persists score=9.2, passed=1, scoring_path=llm', async () => {
   const cleanup = withQcFixture({ score: 9.2, pass: true, reason: 'Excellent work', gaps: [] });
   const taskId = seedTask('marketing');
+  // T0-01: a task may only reach `done` when a registered, reachable deliverable
+  // exists. This test asserts the full PASS path through to `done`, so the
+  // fixture must carry the deliverable a genuinely-passing task would have
+  // produced. Assertions below are unchanged — this supplies missing fixture
+  // data, it does not relax the gate. (The FAIL and heuristic tests below
+  // deliberately keep their bare fixtures: neither reaches `done`.)
+  seedDeliverable(taskId, 'llm-pass');
 
   try {
     const result = await runQCOnReview(taskId);
