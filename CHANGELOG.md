@@ -1,3 +1,66 @@
+## [v6.0.63] — 2026-07-21 — CC-fixture-003: the last two fixture residuals (persona pins, QC results) are closed
+
+v6.0.63 — Security/integrity fix. Completes the arc started by CC-resear-001 (v6.0.61) and
+CC-fixture-002 (v6.0.62). Those two closed six mechanisms but deliberately left **two**
+residuals open, because both are the input seam for a REAL test and closing them naively
+would have meant weakening one — correctly out of bounds. This lands the guard instead.
+
+- **The two residuals (reproduced against pristine `origin/main` @ `b029a43`):**
+  1. `PERSONA_FIXTURE_JSON` / `PERSONA_PLAN_FIXTURE_JSON` — a canned persona was pinned
+     durably onto `tasks.persona_id / persona_name / persona_mode / persona_score /
+     persona_version / persona_selected_at` and `tasks.persona_reason` (plus a possible
+     `task_persona_bundle` row), with **no column marking it fixture-derived**. The persona
+     decides whose voice and governance every downstream artifact carries.
+  2. `QC_FIXTURE_JSON_PATH` / `QC_SIMULATE_PROVIDER_DOWN` — a canned verdict was persisted
+     as a `task_qc_results` row on the `llm` scoring path (the exact path the grading module
+     filters FOR when computing qcPassRate), plus `events` rows the board renders as QC
+     history, plus a `tasks.status` flip.
+  Both were guarded only by `assertNoFixtureEnvInProduction()`, a deliberate no-op outside
+  `NODE_ENV=production`. **That is not containment**: a `next dev` box writes to the SAME
+  `mission-control.db` as a live one, which is the whole reason CC-fixture-002 introduced a
+  marker-keyed guard in the first place.
+- **What lands — the ALREADY-MERGED guard, extended; never a second guard.**
+  `assertNoFixtureDerivedServerWrite()` from `src/lib/fixture-guard.ts` is wired into both
+  write paths. It is keyed on `globalThis.__CC_SERVER_ENTRYPOINT__`, set only by
+  `src/instrumentation.ts`, so it refuses fixture-derived durable writes from the real
+  server process at **every** `NODE_ENV` while leaving offline tests and smoke scripts —
+  which never set the marker — fully working.
+  - `src/lib/tasks.ts` `resolvePersonaAndPin()` — guarded **outside** the retry loop.
+    Placement is load-bearing: that loop catches every attempt into a `console.error` and
+    continues, and on exhaustion the fallback pins a department-default persona anyway, so
+    a guard inside the loop would be swallowed AND still end in a durable write.
+  - `src/lib/tasks.ts` `resolvePersonaPlanAndPin()` — guarded at entry, before
+    `enforceRequiredSlots()` can write and before it can delegate to the single-persona path.
+  - `src/lib/qc-scorer.ts` `runQCOnReview()` — guarded **before** the function's outer
+    `try`, which swallows everything into a `console.error` and returns `null`. Also before
+    the first `events` INSERT, which sits well above the `task_qc_results` INSERT — guarding
+    at the `task_qc_results` site alone would have been too late.
+- **Both named tests still pass, completely unmodified** — that was the hard requirement.
+  `p2-02-persona-reason-persistence` (1/1) and `prd-2.10-qc-results-persistence` (5/5) both
+  set their fixture var and a throwaway `DATABASE_PATH` but never set the server marker, so
+  the guard is invisible to them. Verified by reading both files and by running them; the
+  diff touches no test file other than the new one.
+- **Proof:** new `tests/unit/cc-fixture-003-persona-qc-durable-write-guard.test.ts` —
+  **5 of 9 FAIL against pristine `origin/main` @ `b029a43`, 9/9 PASS after**. The 4 that
+  pass both ways are the deliberate controls: fixture mode still works with no marker (both
+  the persona and QC paths), the live path is unchanged when no fixture var is set, and the
+  diagnostic sweep already names all four vars. `npx tsc --noEmit` clean. Full
+  `npm run test:unit`: 1821 tests, 1816 pass, **5 failures byte-identical to the
+  pre-existing `interview-detection.test.ts` `getInterviewState` set** — verified by running
+  that file against pristine `origin/main` (5/8 fail there too). Zero new failures.
+- **Detection was already complete** — `FIXTURE_ENV_VARS` has named all four of these vars
+  since v6.0.62, so `/api/health/deep` `advisory.fixture_env` already reports them by name.
+  No change was needed there; a test now locks it.
+- **Existing contamination:** one artifact found and removed — a `durable-write-probe`
+  markdown file left in the Memory-indexed research path by the v6.0.61 verification itself,
+  containing a fabricated answer and two `example.invalid` source URLs, unlabelled. Read and
+  positively identified as our own probe debris before being moved to a timestamped
+  quarantine outside the indexed path (moved, not unlinked, so it stays recoverable).
+  Confirmed by direct SQL against every Memory store — `memory/main.sqlite`,
+  `memory/dept-research.sqlite`, `agents/main/agent/openclaw-agent.sqlite` — that it had
+  **never been ingested** (0 rows by path, by content phrase, and by research id), so no
+  reindex or cache purge was required; and by query that `research_searches` holds 0 rows.
+
 ## [v6.0.62] — 2026-07-21 — CC-fixture-002: canned media, browsing, persona and SOP content can no longer become durable artifacts
 
 v6.0.62 — Security/integrity fix. Follow-on sweep to CC-resear-001 (v6.0.61): the research
