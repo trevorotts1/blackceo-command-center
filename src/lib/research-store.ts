@@ -57,7 +57,37 @@ export interface CreateResearchSearchInput {
   search_metadata?: Record<string, unknown>;
 }
 
+/**
+ * CC-resear-001 tripwire — refuse to persist a fixture-derived result.
+ *
+ * The search route already refuses the write at the call site. This is the
+ * INDEPENDENT second line: any present or future caller that hands us metadata
+ * marked `fixture: true` is trying to file canned `source_urls` /
+ * `citation_count` as genuine research, and `research_searches` is exactly the
+ * durable store the Memory full-text index and the All Searches bucket read
+ * back as cited evidence. Throwing here means the contamination cannot be
+ * reintroduced by a caller that simply forgets the check.
+ *
+ * Deliberately NOT gated on NODE_ENV: a `next dev` box writes to the same
+ * mission-control.db as a production one, so "it's only dev" is not a reason
+ * to let fabricated citations land.
+ */
+function assertNotFixtureDerived(metadata: Record<string, unknown> | undefined): void {
+  if (!metadata) return;
+  if (metadata.fixture === true || metadata.isFixtureDerived === true) {
+    const envVar = typeof metadata.fixture_env_var === 'string' ? metadata.fixture_env_var : 'unknown';
+    throw new Error(
+      `[CC-resear-001] Refusing to write a fixture-derived research row. The result ` +
+        `was served from ${envVar} and its source_urls/citation_count are canned, not ` +
+        `researched. Fabricated citations must never enter research_searches — the ` +
+        `Memory index reads this table back as genuine cited evidence. Unset the ` +
+        `fixture env var to record real research.`,
+    );
+  }
+}
+
 export function createResearchSearch(input: CreateResearchSearchInput): ResearchSearch {
+  assertNotFixtureDerived(input.search_metadata);
   const id = randomUUID();
   const metadataJson = JSON.stringify(input.search_metadata || {});
   const created_at = new Date().toISOString();

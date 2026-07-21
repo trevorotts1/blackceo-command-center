@@ -33,6 +33,11 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
+import {
+  FIXTURE_ENV_VARS,
+  activeFixtureEnvVars,
+  activeResearchFixtureEnvVars,
+} from '@/lib/fixture-guard';
 import { getNotificationFailuresLogStats } from '@/lib/notify';
 import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 
@@ -2159,6 +2164,78 @@ export async function checkPersonaGrounding(): Promise<PersonaGroundingCheckResu
       pass: true,
       indeterminate: true,
       detail: `persona_match: advisory probe unavailable — ${
+        err instanceof Error ? err.message : String(err)
+      } (UNKNOWN; non-gating)`,
+    };
+  }
+}
+
+// ── check: fixture / simulate bypass env vars ────────────────────────────────
+// CC-resear-001. Detection half of the fabricated-research defect.
+//
+// The `*_FIXTURE_JSON_PATH` vars replace a live provider call with a local
+// JSON file. For the Operator Research adapters that file supplies the
+// `answer`, the `source_urls` and the `citation_count` — i.e. it fabricates
+// cited evidence. Before this check nothing in the app ever ASKED whether any
+// of them were set, so a box could serve canned citations while every
+// diagnostic reported it clean. `activeFixtureEnvVars()` now enumerates the
+// research vars too (src/lib/fixture-guard.ts), and this surfaces the answer.
+//
+// ADVISORY, not gating, on purpose. Gating checks feed the verdict that
+// atomic-deploy.sh auto-rollback and standup-heartbeat.sh act on — and a
+// rollback cannot unset an operator's env var, so gating on this would loop a
+// box through rollbacks without ever clearing the condition. The correct
+// response is a loud, visible report that a human acts on. It reports
+// `pass: false` (not merely a note) so it reads red wherever advisories are
+// rendered, while never flipping the box's own green/red verdict.
+
+export interface FixtureEnvCheckResult extends CheckResult {
+  active_fixture_env_vars: string[];
+  active_research_fixture_env_vars: string[];
+  node_env: string;
+}
+
+export function checkFixtureEnvVars(): FixtureEnvCheckResult {
+  const nodeEnv = process.env.NODE_ENV || 'undefined';
+  try {
+    const active = activeFixtureEnvVars();
+    const research = activeResearchFixtureEnvVars();
+
+    if (active.length === 0) {
+      return {
+        pass: true,
+        active_fixture_env_vars: [],
+        active_research_fixture_env_vars: [],
+        node_env: nodeEnv,
+        detail: `fixture_env: OK — none of the ${FIXTURE_ENV_VARS.length} fixture/simulate bypass env vars are set (NODE_ENV=${nodeEnv})`,
+      };
+    }
+
+    // Names only — never the values. A fixture path can point anywhere on the
+    // box and the path itself is not the operator's business to have echoed.
+    const researchNote =
+      research.length > 0
+        ? ` ${research.length} of these (${research.join(', ')}) fabricate Operator Research source_urls/citation_count; results from them are refused a durable write.`
+        : '';
+
+    return {
+      pass: false,
+      active_fixture_env_vars: active,
+      active_research_fixture_env_vars: research,
+      node_env: nodeEnv,
+      detail:
+        `fixture_env: ${active.length} fixture/simulate bypass env var(s) ACTIVE — ${active.join(', ')} ` +
+        `(NODE_ENV=${nodeEnv}). These serve canned QC verdicts / SOP drafts / search results instead of ` +
+        `live provider calls and MUST be unset on a live box.${researchNote} (advisory only, non-gating)`,
+    };
+  } catch (err) {
+    return {
+      pass: true,
+      indeterminate: true,
+      active_fixture_env_vars: [],
+      active_research_fixture_env_vars: [],
+      node_env: nodeEnv,
+      detail: `fixture_env: advisory probe unavailable — ${
         err instanceof Error ? err.message : String(err)
       } (UNKNOWN; non-gating)`,
     };

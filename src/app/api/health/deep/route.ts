@@ -45,7 +45,11 @@
  *     "sweep_liveness":             { "pass": bool, "detail": string, ... },
  *     "notification_failures_log":  { "pass": bool, "detail": string, ... }, // U102 / C12.3 item 10b
  *     "trust_coverage":             { "pass": bool, "detail": string, ... }, // U94 / X.2.3
- *     "persona_match":              { "pass": bool, "detail": string, "persona_match"?: {...}, "grounding"?: {...} } // A-U12
+ *     "persona_match":              { "pass": bool, "detail": string, "persona_match"?: {...}, "grounding"?: {...} }, // A-U12
+ *     "fixture_env":                { "pass": bool, "detail": string,        // CC-resear-001
+ *       "active_fixture_env_vars": string[],           // NAMES only, never values
+ *       "active_research_fixture_env_vars": string[],  // the subset that fabricates citations
+ *       "node_env": string }
  *   }
  * }
  *
@@ -107,6 +111,7 @@ import {
   checkNotificationFailuresLog,
   checkTrustCoverage,
   checkPersonaGrounding,
+  checkFixtureEnvVars,
 } from '@/lib/health/deep-checks';
 import { checkSweepLiveness } from '@/lib/jobs/sweep-liveness';
 
@@ -282,6 +287,25 @@ export async function GET() {
         pass: true,
         indeterminate: true,
         detail: `persona_match: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    // CC-resear-001 — fixture/simulate bypass env vars. Same isolation posture
+    // as every advisory block above: a throw here must NEVER reach the outer
+    // catch. Non-gating for a reason specific to this check: an auto-rollback
+    // cannot unset an operator's env var, so gating on it would loop a box
+    // through rollbacks without ever clearing the condition. It reports
+    // pass:false when fixtures are live so the state is impossible to miss,
+    // but the box's own green/red verdict is untouched.
+    try {
+      advisory.fixture_env = checkFixtureEnvVars();
+    } catch (advErr) {
+      advisory.fixture_env = {
+        pass: true,
+        indeterminate: true,
+        detail: `fixture_env: advisory probe unavailable — ${
           advErr instanceof Error ? advErr.message : String(advErr)
         } (UNKNOWN; non-gating)`,
       };
