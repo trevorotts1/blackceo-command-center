@@ -20,6 +20,29 @@
  * active row; otherwise the provider's documented default is used. Results are
  * mirrored to the operator vault at `<vault>/research/YYYY/MM/...md` so the
  * Memory full-text index and the All Searches bucket pick them up.
+ *
+ * ---------------------------------------------------------------------------
+ * CC-resear-001 — FIXTURE-DERIVED RESULTS ARE NEVER PERSISTED
+ * ---------------------------------------------------------------------------
+ * Because that vault mirror is ingested by the Memory full-text index as
+ * genuine cited research, a canned `*_FIXTURE_JSON_PATH` response reaching
+ * this route used to manufacture fabricated `source_urls` + `citation_count`
+ * and file them as real evidence. This route now REFUSES the durable write
+ * whenever `result.isFixtureDerived` is set: no `research_searches` row, no
+ * vault file, at EVERY NODE_ENV.
+ *
+ * Why refuse rather than label: the Memory index ingests the vault by path
+ * glob and has no way to honor a label, and a labelled DB row is one
+ * unfiltered SELECT away from being read as genuine. Refusing means there is
+ * no artifact to mislabel — the only shape with no residual failure mode.
+ *
+ * Legitimate offline testing is preserved: the route still returns the full
+ * markdown, so the UI renders the complete result end-to-end with no key and
+ * no network. Only the durable side effect is withheld, and the response says
+ * so explicitly via `fixture: true` / `persisted: false`. A test that genuinely
+ * needs a persisted row calls `createResearchSearch()` directly against a
+ * throwaway DATABASE_PATH — the seam tests/unit/maria-pattern-harness.test.ts
+ * already enforces.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -169,6 +192,42 @@ export async function POST(req: NextRequest) {
     citation_count: result.citations.length,
     source_urls: result.citations.map((c) => c.url).filter(Boolean),
   };
+
+  // CC-resear-001 — HARD STOP before any durable write. `citation_count` and
+  // `source_urls` above are CANNED when the result is fixture-derived. They
+  // must not reach `research_searches` (which the All Searches bucket reads)
+  // or `<vault>/research/**` (which the Memory full-text index ingests as
+  // genuine cited evidence). Return the rendered result so the offline UI
+  // flow still works, and say plainly that nothing was stored.
+  if (result.isFixtureDerived) {
+    const envVar = result.fixtureEnvVar || 'a *_FIXTURE_JSON_PATH env var';
+    console.warn(
+      `[CC-resear-001] Refusing durable write for query "${parsed.query.slice(0, 120)}": ` +
+        `result came from ${envVar}, not from provider "${slug}". No research_searches ` +
+        `row and no vault file were created.`,
+    );
+    return NextResponse.json({
+      search_id: null,
+      fixture: true,
+      persisted: false,
+      fixture_env_var: envVar,
+      markdown_result:
+        `> **FIXTURE RESULT — NOT RESEARCH.** Served from \`${envVar}\`, not from a live ` +
+        `${selected.entry.displayName} call. The sources below are canned test data. This ` +
+        `result was NOT saved to history and NOT mirrored to the vault.\n\n` +
+        markdown,
+      model,
+      provider: slug,
+      created_at: new Date().toISOString(),
+      search_metadata: {
+        ...metadata,
+        fixture: true,
+        persisted: false,
+        fixture_env_var: envVar,
+        vault_path: null,
+      },
+    });
+  }
 
   const row = createResearchSearch({
     query: parsed.query,

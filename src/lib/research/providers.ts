@@ -11,6 +11,22 @@
  *   - NEVER fabricates results: a provider error propagates so the route can
  *     surface it honestly.
  *
+ * CC-resear-001 — FIXTURE MODE IS QUARANTINED, NOT SILENT.
+ * A fixture env var supplies the `answer` AND the `citations` that become
+ * `source_urls` / `citation_count` downstream. Left unguarded that is a
+ * machine for manufacturing fabricated research and filing it as genuine
+ * cited evidence. Fixture mode is still supported for offline UI/CI work,
+ * but it is now:
+ *   1. BLOCKED in production — `readFixture()` calls the shared
+ *      `assertNoFixtureEnvInProduction()` (src/lib/fixture-guard.ts) before
+ *      honoring the var, exactly as gemini.ts / qc-scorer.ts / tavily.ts do.
+ *   2. LOUD — every honored fixture logs a warning naming the env var.
+ *   3. LABELLED — the result carries `isFixtureDerived: true` +
+ *      `fixtureEnvVar`, so the truth travels with the payload.
+ *   4. NON-DURABLE — the search route REFUSES to write a fixture-derived
+ *      result to `research_searches` or the vault, at EVERY NODE_ENV, and
+ *      research-store.ts carries an independent tripwire.
+ *
  * Server-only (uses `fetch` + `fs` for fixtures).
  *
  * ---------------------------------------------------------------------------
@@ -42,6 +58,7 @@
 
 import fs from 'fs/promises';
 
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { resolveOllamaCloudBaseUrl } from '@/lib/model-providers/ollama-cloud-base-url';
 import type { ResearchProviderSlug } from './provider-discovery';
 
@@ -56,6 +73,26 @@ export interface ResearchProviderResult {
   upstreamId?: string;
   upstreamModel?: string;
   usage?: Record<string, unknown> | null;
+  /**
+   * CC-resear-001 — TRUE when this result came from a `*_FIXTURE_JSON_PATH`
+   * file instead of a live provider call. Its `answer`, `citations` (and
+   * therefore any derived `source_urls` / `citation_count`) are CANNED, not
+   * researched. Callers MUST NOT persist a result carrying this flag: see
+   * the refusal in src/app/api/operator/research/search/route.ts and the
+   * tripwire in src/lib/research-store.ts.
+   *
+   * The flag travels WITH the payload rather than being re-derived from
+   * process.env by each caller, so a future caller cannot forget to check.
+   */
+  isFixtureDerived?: boolean;
+  /** Name of the fixture env var that produced this result, when fixture-derived. */
+  fixtureEnvVar?: string;
+}
+
+/** The fixture env var that produced the most recent fixture read, if any. */
+interface FixtureRead<T> {
+  data: T;
+  envVar: string;
 }
 
 export interface RunSearchParams {
@@ -75,11 +112,55 @@ function breadth(depth: 'shallow' | 'deep') {
   return { isDeep, maxResults: isDeep ? 20 : 8, timeoutMs: isDeep ? 90_000 : 30_000 };
 }
 
-async function readFixture<T>(envVar: string): Promise<T | null> {
+/**
+ * Read a canned provider response from `process.env[envVar]`, or null when
+ * that var is unset.
+ *
+ * CC-resear-001 — two things happen here that did not before:
+ *
+ *  1. `assertNoFixtureEnvInProduction()` runs BEFORE the env var is honored,
+ *     matching how src/lib/gemini.ts, src/lib/qc-scorer.ts and
+ *     src/lib/tavily.ts already wire the shared guard. On a production box a
+ *     fixture path now throws instead of serving fabricated citations.
+ *  2. The read is LOUD. A fixture serving `source_urls` and `citation_count`
+ *     that look researched but are not is the single most dangerous silent
+ *     state this app can be in, so every honored fixture emits a warning
+ *     naming the var. Silence was half the defect.
+ *
+ * The returned envelope is tagged with the var name so the caller can stamp
+ * `isFixtureDerived` onto the result and the durable-write refusal can name
+ * the exact var an operator has to unset.
+ */
+async function readFixture<T>(envVar: string): Promise<FixtureRead<T> | null> {
   const fixturePath = process.env[envVar];
-  if (!fixturePath) return null;
+  if (!fixturePath || fixturePath.trim() === '') return null;
+
+  // QC-11 / CC-resear-001: never honor a research fixture on a production box.
+  // A fixture here fabricates the `source_urls` + `citation_count` that the
+  // Memory full-text index later ingests as genuine cited evidence.
+  assertNoFixtureEnvInProduction();
+
+  console.warn(
+    `[CC-resear-001] ${envVar} is set — Operator Research is serving a CANNED ` +
+      `answer and CANNED citations from "${fixturePath}" instead of calling the ` +
+      `live provider. This result is NOT research and will NOT be persisted to ` +
+      `research_searches or mirrored to the vault.`,
+  );
+
   const raw = await fs.readFile(fixturePath, 'utf8');
-  return JSON.parse(raw) as T;
+  return { data: JSON.parse(raw) as T, envVar };
+}
+
+/**
+ * Stamp the fixture provenance onto a provider result so it travels with the
+ * payload. Returns the result unchanged when the call was live.
+ */
+function tagFixture(
+  result: ResearchProviderResult,
+  fixture: FixtureRead<ChatEnvelope> | null,
+): ResearchProviderResult {
+  if (!fixture) return result;
+  return { ...result, isFixtureDerived: true, fixtureEnvVar: fixture.envVar };
 }
 
 async function postJson(url: string, apiKey: string, body: unknown, timeoutMs: number): Promise<unknown> {
@@ -179,14 +260,17 @@ async function runPerplexity(p: RunSearchParams): Promise<ResearchProviderResult
     return_citations: true,
     temperature: 0.2,
   };
-  const env = (fixture ?? (await postJson('https://api.perplexity.ai/chat/completions', p.apiKey, body, timeoutMs))) as ChatEnvelope;
-  return {
-    answer: answerOf(env),
-    citations: citationsFromArray(env),
-    upstreamId: env.id,
-    upstreamModel: env.model,
-    usage: env.usage || null,
-  };
+  const env = (fixture?.data ?? (await postJson('https://api.perplexity.ai/chat/completions', p.apiKey, body, timeoutMs))) as ChatEnvelope;
+  return tagFixture(
+    {
+      answer: answerOf(env),
+      citations: citationsFromArray(env),
+      upstreamId: env.id,
+      upstreamModel: env.model,
+      usage: env.usage || null,
+    },
+    fixture,
+  );
 }
 
 async function runOpenAI(p: RunSearchParams): Promise<ResearchProviderResult> {
@@ -203,18 +287,21 @@ async function runOpenAI(p: RunSearchParams): Promise<ResearchProviderResult> {
     web_search_options: { search_context_size: isDeep ? 'high' : 'medium' },
     max_completion_tokens: maxResults * 256,
   };
-  const env = (fixture ?? (await postJson('https://api.openai.com/v1/chat/completions', p.apiKey, body, timeoutMs))) as ChatEnvelope;
+  const env = (fixture?.data ?? (await postJson('https://api.openai.com/v1/chat/completions', p.apiKey, body, timeoutMs))) as ChatEnvelope;
   // OpenAI returns sources in annotations; some compatible deployments also
   // populate `citations` — merge both, preferring annotations.
   const ann = citationsFromAnnotations(env);
   const citations = ann.length > 0 ? ann : citationsFromArray(env);
-  return {
-    answer: answerOf(env),
-    citations,
-    upstreamId: env.id,
-    upstreamModel: env.model,
-    usage: env.usage || null,
-  };
+  return tagFixture(
+    {
+      answer: answerOf(env),
+      citations,
+      upstreamId: env.id,
+      upstreamModel: env.model,
+      usage: env.usage || null,
+    },
+    fixture,
+  );
 }
 
 async function runOllama(p: RunSearchParams): Promise<ResearchProviderResult> {
@@ -237,15 +324,18 @@ async function runOllama(p: RunSearchParams): Promise<ResearchProviderResult> {
     tool_choice: 'auto',
     stream: false,
   };
-  const env = (fixture ?? (await postJson(`${baseUrl}/v1/chat/completions`, p.apiKey, body, timeoutMs))) as ChatEnvelope;
+  const env = (fixture?.data ?? (await postJson(`${baseUrl}/v1/chat/completions`, p.apiKey, body, timeoutMs))) as ChatEnvelope;
   // Ollama surfaces sources in `citations` when the web_search tool ran.
-  return {
-    answer: answerOf(env),
-    citations: citationsFromArray(env),
-    upstreamId: env.id,
-    upstreamModel: env.model,
-    usage: env.usage || null,
-  };
+  return tagFixture(
+    {
+      answer: answerOf(env),
+      citations: citationsFromArray(env),
+      upstreamId: env.id,
+      upstreamModel: env.model,
+      usage: env.usage || null,
+    },
+    fixture,
+  );
 }
 
 async function runXai(p: RunSearchParams): Promise<ResearchProviderResult> {
@@ -264,14 +354,17 @@ async function runXai(p: RunSearchParams): Promise<ResearchProviderResult> {
     temperature: 0.2,
     ...(isDeep ? {} : {}),
   };
-  const env = (fixture ?? (await postJson('https://api.x.ai/v1/chat/completions', p.apiKey, body, timeoutMs))) as ChatEnvelope;
-  return {
-    answer: answerOf(env),
-    citations: citationsFromArray(env),
-    upstreamId: env.id,
-    upstreamModel: env.model,
-    usage: env.usage || null,
-  };
+  const env = (fixture?.data ?? (await postJson('https://api.x.ai/v1/chat/completions', p.apiKey, body, timeoutMs))) as ChatEnvelope;
+  return tagFixture(
+    {
+      answer: answerOf(env),
+      citations: citationsFromArray(env),
+      upstreamId: env.id,
+      upstreamModel: env.model,
+      usage: env.usage || null,
+    },
+    fixture,
+  );
 }
 
 const ADAPTERS: Record<ResearchProviderSlug, (p: RunSearchParams) => Promise<ResearchProviderResult>> = {
