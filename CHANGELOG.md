@@ -61,6 +61,105 @@ would have meant weakening one — correctly out of bounds. This lands the guard
   **never been ingested** (0 rows by path, by content phrase, and by research id), so no
   reindex or cache purge was required; and by query that `research_searches` holds 0 rows.
 
+## [v6.0.63] — 2026-07-21 — T0-01 / T0-42: a task with no deliverable can no longer be recorded `done`
+
+v6.0.63 — Security/integrity fix. Findings T0-01 and T0-42, ranked first and second in a
+121-finding review, shipped together because closing either one alone leaves the hole open.
+
+- **The defect (T0-01, reproduced against pristine `origin/main` @ 4c937ec):**
+  `deriveAcceptanceCriteria()` (`src/lib/qc-scorer.ts:1641`) returned `[]` for every task
+  that was not an image or a deck — verbatim: `// Non-image / non-deck (document/work)
+  task — no artifact criteria` / `return [];`. Its caller derives
+  `isArtifactTask = artifactCriteriaForTitle.length > 0`, so empty criteria meant "not an
+  artifact task", which skipped the `no artifact registered` invariant, which dropped
+  scoring into Mode B — `buildQCPrompt`'s brief-completeness branch, which grades the task
+  DESCRIPTION. The description is written by the executing agent, so the judge was scoring
+  the same agent's account of its own work. A score ≥8.5 then called
+  `transition(taskId, 'done')` and wrote a durable `task_completed` event. Document, book,
+  manuscript, report, operations, **video** and **content-writer** tasks all took that
+  route; none of them match the image/deck regex. The exemption was never a decision about
+  those task types — it was the default that applied to everything nobody enumerated.
+  Confirmed live on an operator board: `[QC-AUTO] Score: 7.5/10 ... [model-stated] Task
+  description lacks a defined trigger mechanism` — the judge reasoning about description
+  text, with no artifact in the loop, on a box where 14/14 tasks carry an SOP.
+- **The second entrance (T0-42):** every `review → done` gate in
+  `src/app/api/tasks/[id]/route.ts` asked WHO was promoting (dept QC specialist / master
+  agent / verified CF-Access operator) and none asked whether the work had ever been
+  JUDGED. A master-role caller could PATCH a task to `done` with no score in existence and
+  write a durable `task_completed`. Authority was standing in for assessment.
+- **A third entrance, found while fixing these:** with `QC_PRODUCER_SCORECARD_ENABLED` set,
+  a producer could post `{qc_gate, qc_passed: true}` as metadata on its own `completed`
+  `task_activities` row and be promoted to `done` with no deliverable — the build side's
+  claim about the work standing in for the work. Off by default; closed anyway.
+- **A fourth:** the gates above were all conditioned on `existing.status === 'review'`, so
+  a bare `PATCH {"status":"done"}` from `in_progress` / `backlog` / `blocked` met none of
+  them. Requiring `review` as the source status was itself the bypass — it let a caller
+  skip the gate by skipping the state the gate watched.
+- **A fifth:** `transition()` — the one shared lifecycle helper every promote path funnels
+  through — applied NO precondition to `done` at all (`case 'done': { break; }`), and
+  `operatorOverride: true` skipped preconditions wholesale.
+- **What lands — one invariant, enforced at the chokepoint:**
+  - New `src/lib/completion-evidence.ts`: the single definition of "this task produced
+    something". A task may reach `done` only with at least one registered, REACHABLE
+    deliverable — `file`/`artifact`/`image` whose path exists and is non-empty, or `url`
+    that is a valid http(s) link. Existence only; quality stays QC's judgement.
+  - `transition()` enforces it for every caller, and — uniquely among the preconditions —
+    `operatorOverride` cannot waive it. An override may re-decide routing; it cannot make
+    an unregistered deliverable exist.
+  - The PATCH route enforces it independently (that route writes status raw and does not
+    funnel through `transition()`), for **every** source status, not just `review`.
+  - Agent promotion additionally requires a passing independent score on record
+    (`task_qc_results`, `scoring_path='llm'` — a table only `runQCOnReview` writes).
+  - `deriveAcceptanceCriteria()` never returns `[]`: every task derives a baseline
+    `deliverable_registered` criterion. Fail-closed rather than derive-per-type — a
+    criterion inferred from the same text the agent wrote, by the same class of model,
+    reintroduces the failure one level up.
+  - Mode B may DIAGNOSE but never APPROVE: `scoreTaskForQC` is still called so
+    `scoringPath`/`heuristicReason` keep driving the no-key park, the provider-down
+    deferral and the bounded escalation hatch, but a passing verdict derived from the
+    description alone is clamped to FAIL.
+  - `url` deliverables now count as evidence fleet-wide. They previously did not, so an
+    agent that correctly recorded a link for artifact-free work still presented an empty
+    manifest and got scored on its description anyway.
+- **The artifact-free task is judged, not exempted.** Work that genuinely produces no file
+  — a decision, a review, a change made in another system — registers a `url` deliverable
+  saying where it landed. That is a real criterion, and it is not a new demand:
+  `renderWriteBackInstructions()` (`src/lib/mc-auth.ts`) already tells every dispatched
+  task, of every type, "you MUST ... Register deliverable: POST
+  /api/tasks/<id>/deliverables". The instruction was always given; only the enforcement
+  was missing.
+- **Non-image tasks keep real content review.** The artifact branch keys on render gates,
+  not on criteria count, so document/report/ops deliverables continue through the SOP
+  rubric with the manifest attached rather than passing on a file-exists check. Fixing a
+  self-certification hole by installing a rubber stamp is not a fix.
+- **Proof:** new `tests/unit/t0-completion-evidence-gate.test.ts` — **12 of 16 FAIL against
+  pristine origin/main, 16/16 PASS after**, same file both columns (the 4 that pass both
+  ways are the deliberate no-regression controls). Covers document, book, report,
+  operations, video and content-writer with a judge forced to return 9.5/10 — the gate must
+  not depend on the judge being harsh. `npx tsc --noEmit` clean;
+  `scripts/guard-raw-status-writers.ts` PASS; full `npm run test:unit` 1817 tests with
+  **5 failures byte-identical to the pre-existing `interview-detection.test.ts` set on
+  unmerged main** (measured by running the same suite against pristine origin/main) — zero
+  new failures.
+- **Nine test files encoded the defect as the contract and were TIGHTENED, never weakened.**
+  `duck-s3-s4-lifecycle.test.ts` asserted `criteria.length === 0` for a non-image task —
+  the root cause, pinned as correct; it now asserts the baseline criterion is present AND
+  that image-only render gates are still absent. `[U26-a]` asserted that a producer's own
+  passing verdict promotes a deliverable-free task to `done` — it now asserts the refusal.
+  The other seven (`u38-c-07`, `u39-c-08`, `maria-pattern-harness`, `point6`,
+  `qc-judge-failure-diagnosis`, `p1-05-clear`, `prd-2.10`, `ad-campaigns`) seeded fixture
+  cards with no deliverable and drove them to `done`; each was given the real deliverable
+  its fixture always implied. No assertion was deleted, skipped or inverted to make CI
+  pass.
+- **Blast radius, measured before shipping.** The tightening changes behaviour only for a
+  task with no reachable deliverable, and the remedy is one API call named in the refusal
+  message. On the operator board 5 of 7 `done` tasks carry no deliverable — all synthetic
+  test cards; a live board's in-flight `review` cards will take one handback round-trip
+  asking for registration. The first cut of this fix ALSO routed every deliverable-free
+  task into the invariant-A handback, which pre-empted the judge-availability machinery and
+  broke 46 tests; that over-reach was withdrawn — the handback keeps its original
+  image/deck scope and the universal stop lives on `done` itself, where no scoring lane can
+  route around it.
 ## [v6.0.62] — 2026-07-21 — CC-fixture-002: canned media, browsing, persona and SOP content can no longer become durable artifacts
 
 v6.0.62 — Security/integrity fix. Follow-on sweep to CC-resear-001 (v6.0.61): the research

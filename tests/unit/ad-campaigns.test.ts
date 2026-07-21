@@ -22,8 +22,11 @@ import './_isolated-db';
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
-import { queryAll, queryOne } from '../../src/lib/db';
+import { queryAll, queryOne, run } from '../../src/lib/db';
 import {
   createAdCampaign,
   moveAdStage,
@@ -32,8 +35,36 @@ import {
   TransitionError,
 } from '../../src/lib/ad-campaigns';
 
+/** Temp dir holding the fixture deliverable files (see registerStageDeliverable). */
+const AD_DELIVERABLE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-adcampaign-deliv-'));
+
 function newJobId(): string {
   return `test-fbad-${uuidv4()}`;
+}
+
+/**
+ * Register a real, reachable deliverable against an ad-campaign stage card.
+ *
+ * T0-01: `transition()` now refuses a move to `done` for any task with no
+ * registered, reachable deliverable — a completion record must correspond to
+ * something that exists. `moveAdStage` promotes through that same helper, so a
+ * fixture that drives a card to `done` has to supply the evidence a real
+ * campaign stage would have produced. This is the missing fixture data, not a
+ * relaxation: the assertions below are unchanged.
+ */
+function registerStageDeliverable(jobId: string, stageSlug: string): void {
+  const card = queryOne<{ id: string }>(
+    'SELECT id FROM tasks WHERE campaign_id = ? AND stage_slug = ?',
+    [jobId, stageSlug],
+  );
+  assert.ok(card, `fixture card for stage ${stageSlug} must exist`);
+  const filePath = path.join(AD_DELIVERABLE_DIR, `${jobId}-${stageSlug}.txt`);
+  fs.writeFileSync(filePath, 'ad campaign stage deliverable\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [uuidv4(), card.id, `${stageSlug} deliverable`, filePath, new Date().toISOString()],
+  );
 }
 
 test('createAdCampaign creates 8 backlog cards and is idempotent on job_id', () => {
@@ -135,6 +166,7 @@ test('review -> done sets completed_at via DB trigger; epic done completes campa
 
   await moveAdStage(jobId, { stage_slug: 's7-deliver', status: 'in_progress' });
   await moveAdStage(jobId, { stage_slug: 's7-deliver', status: 'review' });
+  registerStageDeliverable(jobId, 's7-deliver');
   const done = await moveAdStage(jobId, { stage_slug: 's7-deliver', status: 'done' });
   assert.equal(done.status, 'done');
   const doneRow = queryOne<{ completed_at: string | null }>(
@@ -146,6 +178,7 @@ test('review -> done sets completed_at via DB trigger; epic done completes campa
   // Drive the epic to done and confirm the campaign row flips to complete.
   await moveAdStage(jobId, { stage_slug: 'epic', status: 'in_progress' });
   await moveAdStage(jobId, { stage_slug: 'epic', status: 'review' });
+  registerStageDeliverable(jobId, 'epic');
   await moveAdStage(jobId, { stage_slug: 'epic', status: 'done' });
   const { campaign } = getAdCampaign(jobId);
   assert.equal((campaign as { status: string }).status, 'complete');
