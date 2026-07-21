@@ -229,10 +229,33 @@ test('§3/§4 duck lifecycle + criteria tests', async (t) => {
   });
 
   // ── 7. Criteria derivation: non-image task ───────────────────────────────
-  await t.test('7. deriveAcceptanceCriteria() non-image task → empty criteria', async () => {
+  // TIGHTENED (T0-01). This test previously asserted `criteria.length === 0`
+  // for a non-image task — it encoded the defect as the contract. That empty
+  // array is precisely what made `isArtifactTask` false, skipped the
+  // no-artifact invariant, and dropped every document/report/video/content
+  // task into description-only scoring where the judge graded the executing
+  // agent's own prose.
+  //
+  // What the test was really protecting is still asserted below, and is the
+  // part that was always correct: a non-image task must NOT be given the
+  // image-render gates (valid_image / vision_match / min_resolution), because
+  // those are meaningless for a sales email. It must, however, still be held to
+  // the baseline evidence criterion — "something was delivered".
+  await t.test('7. deriveAcceptanceCriteria() non-image task → baseline evidence criterion, no image gates', async () => {
     const { deriveAcceptanceCriteria } = await import('../../src/lib/qc-scorer') as typeof import('../../src/lib/qc-scorer');
     const criteria = deriveAcceptanceCriteria('Write a sales email draft', 'Draft a cold outreach email for prospects.');
-    assert.equal(criteria.length, 0, `Expected 0 criteria for non-image task; got ${criteria.length}`);
+    const types = criteria.map((c) => c.type);
+
+    assert.ok(
+      types.includes('deliverable_registered'),
+      `Non-image task must still carry the baseline evidence criterion; got: ${types.join(', ')}`,
+    );
+    for (const imageOnly of ['valid_image', 'vision_match', 'min_resolution'] as const) {
+      assert.ok(
+        !types.includes(imageOnly),
+        `Non-image task must NOT be given the ${imageOnly} render gate; got: ${types.join(', ')}`,
+      );
+    }
   });
 
   // ── 8. Criteria derivation: high-quality → min_resolution ────────────────

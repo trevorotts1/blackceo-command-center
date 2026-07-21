@@ -89,6 +89,19 @@ function insertReviewTask(id: string) {
      VALUES (?, ?, ?, 'review', 'medium', NULL, NULL, ?, ?, ?)`,
     [id, `P1-05 clear-fixture task ${id}`, 'A completed deliverable ready for QC inspection.', SOP_ID, now, now],
   );
+  // T0-01: the fixture's own description says "a completed deliverable ready
+  // for QC inspection" — but no deliverable was ever registered, so the
+  // completion-evidence gate now (correctly) refuses to promote it. Register
+  // the deliverable the fixture always claimed to have. This file's subject is
+  // the [QC-HEURISTIC-FINAL] escalate/clear/re-score cycle, not the evidence
+  // gate; every assertion is unchanged.
+  const deliverablePath = path.join(path.dirname(TMP_DB), `${id}.txt`);
+  fs.writeFileSync(deliverablePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [`${id}-deliv`, id, `deliverable for ${id}`, deliverablePath, now],
+  );
 }
 
 function stubFetch(impl: (url: string, init?: RequestInit) => Promise<Response>): () => void {

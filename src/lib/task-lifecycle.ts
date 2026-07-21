@@ -57,8 +57,14 @@
  *   assigned    : task.assigned_agent_id (specialist_type soft-required, warn only)
  *   in_progress : task.assigned_agent_id (model may be resolved at dispatch time)
  *   review      : no blocking precondition here — QC layer does artifact gating
- *   done        : no blocking precondition here — the PATCH route enforces the
- *                 QC gate; agent-initiated 'done' is blocked there, not here
+ *   done        : REQUIRES completion evidence — at least one registered,
+ *                 reachable deliverable (see src/lib/completion-evidence.ts).
+ *                 This precondition runs BEFORE the operatorOverride bail-out
+ *                 and is the one precondition an override cannot waive: an
+ *                 override may re-decide routing, but it cannot make an
+ *                 unregistered deliverable exist. Quality (as opposed to
+ *                 existence) is still the QC scorer's call, and agent-initiated
+ *                 'done' is additionally gated at the PATCH route.
  *   blocked / backlog / inbox / planning / pending_dispatch / testing : always
  *                 allowed (no precondition)
  *
@@ -76,6 +82,7 @@ import { broadcast } from '@/lib/events';
 import { getProjectsPath } from '@/lib/config';
 import type { Task } from '@/lib/types';
 import { notifyOwnerDone } from '@/lib/owner-reports';
+import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 
 // ---------------------------------------------------------------------------
 // State machine definition
@@ -234,6 +241,28 @@ function checkPreconditions(
   to: LifecycleState,
   evidence: TransitionEvidence,
 ): void {
+  // ── COMPLETION-EVIDENCE INVARIANT (T0-01 / T0-42) ────────────────────────
+  // Deliberately placed ABOVE the operatorOverride bail-out, and it is the one
+  // precondition an override cannot skip.
+  //
+  // `operatorOverride` exists to waive the ASSIGNMENT preconditions — "who is
+  // this routed to", "does it have a model" — which are routing questions a
+  // human is entitled to answer differently. "Does the delivered work exist"
+  // is not a routing question. It is a fact about the world, and no authority
+  // level makes an unregistered deliverable exist. Letting an override skip it
+  // is what gives a gate a private door, and this defect was two private doors.
+  //
+  // The remedy is one API call, and the refusal names it (noEvidenceMessage),
+  // so a legitimately artifact-free task — a decision, a review — clears the
+  // gate by registering a `url` deliverable pointing at where the work landed.
+  // It is not blocked, it is asked to say where it went.
+  if (to === 'done') {
+    const completion = collectCompletionEvidence(task.id);
+    if (!completion.hasEvidence) {
+      throw new TransitionError('PRECONDITION_EVIDENCE', noEvidenceMessage(task.id, completion));
+    }
+  }
+
   if (evidence.operatorOverride) return;
 
   switch (to) {

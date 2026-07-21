@@ -71,6 +71,22 @@ function insertTask(id: string, status: string) {
      VALUES (?, ?, ?, 'medium', NULL, NULL, ?, ?)`,
     [id, `Fixture task ${id}`, status, now, now],
   );
+
+  // The completion-evidence gate (src/lib/task-lifecycle.ts checkPreconditions,
+  // code PRECONDITION_EVIDENCE) now refuses to let ANY task reach 'done'
+  // without at least one registered, REACHABLE deliverable in
+  // task_deliverables. Every fixture task created here gets a real
+  // non-empty file registered as its deliverable, so the promote-success
+  // and CAS assertions below prove what they actually intend (the operator
+  // promote lane / the CAS guard) without incidentally re-asserting the
+  // deliverable-free-completion defect that gate was built to close.
+  const deliverablePath = path.join(TMP_DIR, `${id}-deliverable.txt`);
+  fs.writeFileSync(deliverablePath, 'delivered\n');
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES (?, ?, 'file', ?, ?, ?)`,
+    [`deliverable-${id}`, id, `Fixture deliverable for ${id}`, deliverablePath, now],
+  );
 }
 
 function insertQcReviewEvent(taskId: string, message: string, createdAt: string) {
