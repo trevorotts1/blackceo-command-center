@@ -1,3 +1,66 @@
+## [v6.0.66] — 2026-07-21 — CC-SHARED-001: one agent's save rewrote the company's rules for all 23 agents, and the owner profile was never written at all
+
+v6.0.66 — Integrity fix. Two findings on the same write path in the per-agent
+editor, both reporting a successful save for something other than what happened.
+
+- **T1-04 (BLOCKER) — an agent-scoped save rewrote every agent.** Every agent
+  directory's `AGENTS.md`, `TOOLS.md` and `USER.md` are symbolic links into
+  `agents/_shared/` (mode `120000`, the same blob hash across all 23 agent
+  directories). `src/lib/agent-files.ts` wrote straight through them:
+
+      fs.writeFileSync(path.join(dir, filename), content, 'utf-8');
+
+  No `lstat`, no link check, no ownership test. The interface presents a
+  per-agent editor, so an operator changing one agent's rules replaced the
+  operating rules — including the safety rules — for every agent in the company,
+  and the response returned the single updated agent record as if one agent had
+  changed. Nothing in the write path, the response or the interface said
+  otherwise. `agents/_shared/AGENTS.md` itself lists *"Editing this file (it's
+  shared — edit `agents/_shared/AGENTS.md` instead)"* among prohibited actions;
+  the writer performed exactly that.
+
+- **T0-43 — the owner profile reported success and wrote nothing.** `user_md`
+  was accepted into the database by the update route but was absent from the
+  file-sync map entirely, so `USER.md` on disk never changed. Every agent's
+  startup procedure reads that file ("Read `USER.md` (owner profile)"), so the
+  agents kept running on the previous owner context indefinitely while the
+  interface kept showing the new text — it reads the database. The divergence
+  was invisible from both ends.
+
+**What changed**
+
+- `src/lib/agent-files.ts` — the writer `lstat`s the destination and refuses a
+  symbolic link with a typed `SharedFileError` carrying the column, the filename
+  and the link target. `user_md` is now in the file map, so the field is governed
+  rather than silently dropped. `sharedFileTarget()` and `inheritedFields()`
+  expose the same fact to callers. `writeSharedFile()` is the ONE authorised
+  company-wide write: it targets `agents/_shared/<FILE>` directly, never through
+  an agent's link, so a company-wide change is always an explicit act. The agents
+  root is resolved per call and overridable with `CC_AGENTS_DIR` (the same
+  first-class override pattern `DATABASE_PATH` uses) so tests can point the
+  writer at a throwaway tree; unset on every box, the default is unchanged.
+- `src/app/api/agents/[id]/route.ts` — the shared fields are preflighted BEFORE
+  the database update and answered with an explicit `409` naming the inherited
+  field and its shared target, so the record and the disk can never disagree
+  about whether a save happened. `GET` and `PATCH` both report
+  `inherited_fields`.
+- `src/components/AgentModal.tsx` — inherited editors render read-only with an
+  explanation, inherited fields are stripped from the request body, and a failed
+  save now surfaces its reason instead of closing silently.
+
+**Tests** — `tests/unit/agent-shared-file-write-guard.test.ts` (7 tests) on a
+real temporary tree with real symlinks in the shipped shape: the write is
+refused, the shared file is byte-unchanged, no other agent's file changes, the
+route returns 409 without touching the database, a per-agent field still saves,
+the authorised shared write reaches the shared file, and a repository check
+asserts the checked-in `agents/` tree really does use `_shared` symlinks (rule
+E5 — the fixture corresponds to production). The mutation proof performs the
+pre-fix write verbatim and requires all three agents' files to change.
+
+**Operator note.** A previously "successful" interface action now returns a
+conflict. That action was silently destroying 22 agents' rules, so the conflict
+is the fix, not a regression — but communicate it before it lands.
+
 ## [v6.0.65] — 2026-07-21 — A44/A46: the instruction closest to the agent contradicted the platform's impersonation guardrail
 
 v6.0.65 — Safety and contract fix. Four findings from the nine-cluster skill review, all

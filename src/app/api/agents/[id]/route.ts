@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run } from '@/lib/db';
-import { writeAgentFile, deleteAgentFolder } from '@/lib/agent-files';
+import {
+  writeAgentFile,
+  deleteAgentFolder,
+  sharedFileTarget,
+  inheritedFields,
+  SharedFileError,
+} from '@/lib/agent-files';
 import type { Agent, UpdateAgentRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -20,7 +26,10 @@ export async function GET(
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     }
 
-    return NextResponse.json(agent);
+    // CC-SHARED-001: name the fields whose file is inherited (a symlink into
+    // agents/_shared). The editor renders those read-only rather than offering
+    // a save that the update route will refuse.
+    return NextResponse.json({ ...agent, inherited_fields: inheritedFields(agent.name) });
   } catch (error) {
     console.error('Failed to fetch agent:', error);
     return NextResponse.json({ error: 'Failed to fetch agent' }, { status: 500 });
@@ -39,6 +48,33 @@ export async function PATCH(
     const existing = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
     if (!existing) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
+    }
+
+    // CC-SHARED-001 (T1-04 / T0-43): PREFLIGHT the shared fields BEFORE the
+    // database write. Previously the database was updated first and the disk
+    // sync ran afterwards, so a refusal here would have left the database and
+    // the disk disagreeing. Every column the interface exposes is checked, so a
+    // save either changes both the record and the file or changes neither.
+    const MD_FIELDS = ['soul_md', 'user_md', 'agents_md', 'tools_md', 'memory_md'] as const;
+    const inherited = MD_FIELDS.filter(
+      (field) => body[field] !== undefined && sharedFileTarget(existing.name, field) !== null
+    );
+    if (inherited.length > 0) {
+      const first = inherited[0];
+      return NextResponse.json(
+        {
+          error:
+            `${first} is inherited: every agent shares this file, so an agent-scoped save cannot change it. ` +
+            `Editing it here would rewrite the same file for every agent in the company. ` +
+            `Change it once, deliberately, as a shared file.`,
+          code: 'SHARED_FILE',
+          fields: inherited,
+          shared_targets: Object.fromEntries(
+            inherited.map((field) => [field, sharedFileTarget(existing.name, field)])
+          ),
+        },
+        { status: 409 }
+      );
     }
 
     const updates: string[] = [];
@@ -115,17 +151,31 @@ export async function PATCH(
 
     run(`UPDATE agents SET ${updates.join(', ')} WHERE id = ?`, values);
 
-    // Sync .md files to disk
-    const mdFields = ['soul_md', 'agents_md', 'tools_md', 'memory_md'] as const;
-    for (const field of mdFields) {
+    // Sync .md files to disk. The preflight above already refused every
+    // inherited field, so a SharedFileError here means the filesystem changed
+    // under the request — surface it rather than reporting a save that the disk
+    // did not take.
+    for (const field of MD_FIELDS) {
       if (body[field] !== undefined) {
         writeAgentFile(existing.name, field, body[field] || '');
       }
     }
 
     const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
-    return NextResponse.json(agent);
+    return NextResponse.json({ ...agent, inherited_fields: inheritedFields(existing.name) });
   } catch (error) {
+    if (error instanceof SharedFileError) {
+      console.error('Refused an agent-scoped write through a shared file:', error.message);
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: 'SHARED_FILE',
+          fields: [error.column],
+          shared_targets: { [error.column]: error.sharedTarget },
+        },
+        { status: 409 }
+      );
+    }
     console.error('Failed to update agent:', error);
     return NextResponse.json({ error: 'Failed to update agent' }, { status: 500 });
   }
