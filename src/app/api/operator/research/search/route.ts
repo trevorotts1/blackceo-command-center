@@ -58,6 +58,7 @@ import {
   type ResearchProviderSlug,
 } from '@/lib/research/provider-discovery';
 import { runResearch, type ResearchCitation } from '@/lib/research/providers';
+import { bareModelId, isSearchCapableModel } from '@/lib/research/search-capable-models';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -67,24 +68,63 @@ const requestSchema = z.object({
   depth: z.enum(['shallow', 'deep']).optional(),
 });
 
+/** Where the answering model came from, recorded on every result. */
+type ModelSource = 'registry-exact' | 'registry-search-capable' | 'provider-default';
+
+interface ResolvedModel {
+  model: string;
+  source: ModelSource;
+  /**
+   * Registry model ids that were active for this provider but are NOT
+   * documented as searching the live web, and were therefore NOT substituted.
+   * Empty on a healthy box; non-empty is the T0-56 condition, made visible.
+   */
+  rejected: string[];
+}
+
 /**
- * Resolve the model for the selected provider: prefer an active registry row
- * for that provider, else the provider's documented default. The registry is
- * often empty on fresh installs, so the default keeps the module live.
+ * Resolve the model for the selected provider.
+ *
+ * T0-56 — THE SUBSTITUTION IS NOW CAPABILITY-CHECKED. This used to be "prefer
+ * an active registry row for that provider, else the documented default", and
+ * when no row matched the default by id it fell through to `active[0]` — the
+ * first active row for the provider, whatever it happened to be. Live web
+ * search is a property of PARTICULAR MODELS, not of a provider, so a row
+ * promoted to active for an unrelated reason silently became the research
+ * model while the route kept presenting its output as grounded research.
+ *
+ * A candidate is now only substituted when `isSearchCapableModel()` recognises
+ * it against the families documented in src/lib/research/providers.ts. Anything
+ * else falls back to the provider's DOCUMENTED DEFAULT — which is search-capable
+ * by construction — and the rejected ids are recorded on the result. Nothing
+ * that worked before stops working; only the silent substitution stops.
  */
-function resolveModel(slug: ResearchProviderSlug, fallback: string): string {
+function resolveModel(slug: ResearchProviderSlug, fallback: string): ResolvedModel {
+  const rejected: string[] = [];
   try {
     const active = listModels({ provider: slug, status: 'active' });
     const exact = active.find((m) => m.model_id === fallback || m.model_id.endsWith(`/${fallback}`));
-    if (exact) return exact.model_id.includes('/') ? exact.model_id.split('/').slice(1).join('/') : exact.model_id;
-    if (active.length > 0) {
-      const id = active[0].model_id;
-      return id.includes('/') ? id.split('/').slice(1).join('/') : id;
+    if (exact) return { model: bareModelId(exact.model_id), source: 'registry-exact', rejected };
+
+    for (const row of active) {
+      const bare = bareModelId(row.model_id);
+      if (isSearchCapableModel(slug, bare)) {
+        return { model: bare, source: 'registry-search-capable', rejected };
+      }
+      rejected.push(row.model_id);
+    }
+
+    if (rejected.length > 0) {
+      console.warn(
+        `[CC-resear-T0-56] ${rejected.length} active ${slug} registry model(s) are not documented ` +
+          `as searching the live web (${rejected.join(', ')}). Using the provider default ` +
+          `"${fallback}" instead of substituting one of them for a grounded research query.`,
+      );
     }
   } catch {
     // registry may be empty on fresh installs; fall through to the default.
   }
-  return fallback;
+  return { model: fallback, source: 'provider-default', rejected };
 }
 
 function formatMarkdown(query: string, answer: string, citations: ResearchCitation[]): string {
@@ -107,6 +147,17 @@ function formatMarkdown(query: string, answer: string, citations: ResearchCitati
     for (const c of citations) {
       if (c.url) lines.push(`- [${c.title || c.url}](${c.url})`);
     }
+  } else {
+    // T0-57: a zero-citation answer is still stored, but it must not read as
+    // cited research once the vault mirror is ingested by the Memory index.
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    lines.push(
+      '> **UNGROUNDED — no sources returned.** The provider answered without citing any ' +
+        'source, so nothing here is traceable to a retrieved document. Treat it as the ' +
+        "model's own output, not as researched evidence.",
+    );
   }
   return lines.join('\n');
 }
@@ -158,7 +209,8 @@ export async function POST(req: NextRequest) {
 
   const depth = parsed.depth || 'shallow';
   const slug = selected.entry.slug;
-  const model = resolveModel(slug, selected.entry.defaultModel);
+  const resolved = resolveModel(slug, selected.entry.defaultModel);
+  const model = resolved.model;
   const apiKey = process.env[selected.apiKeyEnv] as string;
   const started = Date.now();
 
@@ -177,6 +229,35 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // T0-57 — AN EMPTY ANSWER IS AN UPSTREAM FAILURE, NOT A COMPLETED SEARCH.
+  // The catch above only sees a THROWN error. A 200 response whose answer is
+  // empty is not an error to `fetch`, so it used to flow onward, be persisted
+  // through createResearchSearch() and mirrored to the vault, where it reads
+  // forever after as completed research on that question. The only signal was
+  // the string "(no answer returned)" rendered inside the markdown body —
+  // invisible to anything that counts completed searches or reuses stored
+  // research. Nothing is persisted and nothing is mirrored on this path.
+  if (!result.answer || result.answer.trim() === '') {
+    console.warn(
+      `[CC-resear-T0-57] ${selected.entry.displayName} returned a response with no answer for ` +
+        `"${parsed.query.slice(0, 120)}" (model ${model}, ${result.citations.length} citation(s)). ` +
+        `Refusing to store an empty research search.`,
+    );
+    return NextResponse.json(
+      {
+        error: 'provider_empty_answer',
+        detail:
+          'The provider returned a successful response with an empty answer. Nothing was stored ' +
+          'or mirrored — an empty result is an upstream failure, not a completed search.',
+        provider: slug,
+        model,
+        citation_count: result.citations.length,
+        persisted: false,
+      },
+      { status: 502 },
+    );
+  }
+
   const markdown = formatMarkdown(parsed.query, result.answer, result.citations);
 
   const metadata: Record<string, unknown> = {
@@ -191,6 +272,15 @@ export async function POST(req: NextRequest) {
     usage: result.usage || null,
     citation_count: result.citations.length,
     source_urls: result.citations.map((c) => c.url).filter(Boolean),
+    // T0-56 — record WHICH model answered and where it came from, so a reader of
+    // a stored search can tell a documented search model from a substitution.
+    answering_model: model,
+    model_source: resolved.source,
+    model_search_capable: isSearchCapableModel(slug, model),
+    non_search_models_rejected: resolved.rejected,
+    // T0-57 — a non-empty answer with zero citations is still stored, but it is
+    // stamped UNGROUNDED rather than reading as cited research.
+    grounded: result.citations.length > 0,
   };
 
   // CC-resear-001 — HARD STOP before any durable write. `citation_count` and

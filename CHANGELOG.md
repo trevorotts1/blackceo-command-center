@@ -1,3 +1,78 @@
+## [v6.0.67] — 2026-07-21 — A NON-SEARCH MODEL ANSWERING A GROUNDED RESEARCH QUERY, AND AN EMPTY ANSWER STORED AS A COMPLETED SEARCH
+
+Section A item **A43** of the skill-review fix programme. Findings **T0-56** and
+**T0-57**, both in `POST /api/operator/research/search`.
+
+### T0-56 — the model substitution was not capability-checked
+
+`resolveModel()` preferred an active `model_registry` row for the selected
+provider, and when no row matched the documented default by id it fell through
+to `active[0]` — **the first active row for that provider, whatever it was**.
+
+Live web search is a property of *particular models*, not of a provider:
+`sonar-pro` searches the live web every call; a plain chat model under the same
+Perplexity key does not. A registry row promoted to active for an unrelated
+reason therefore silently became the research model, while the route continued
+to present its output as grounded research. The substitution was invisible —
+identical response shape, minus the grounding.
+
+Measured on the pre-fix route with one active row
+`perplexity/mistral-7b-instruct`:
+
+    PROBE model chosen = "mistral-7b-instruct"      # before
+    PROBE model chosen = "sonar-pro"                # after
+
+A candidate is now substituted only when `isSearchCapableModel()` recognises it
+against the families documented in `src/lib/research/providers.ts`. Anything
+else falls back to the provider's **documented default**, which is
+search-capable by construction, so nothing that worked before stops working —
+only the silent substitution stops. The response and the stored
+`search_metadata` now record `answering_model`, `model_source`,
+`model_search_capable` and `non_search_models_rejected`, so a reader of a stored
+search can tell a documented search model from a substitution.
+
+**Why an allowlist and not a capability column.** A `search_capable` column
+would be a schema addition that no box in the fleet currently has, so every real
+row would read false and *every* substitution would be filtered — a check whose
+fixture corresponds to nothing in production. The new
+`src/lib/research/search-capable-models.ts` derives its recognisers from the
+provider contracts already documented in `providers.ts`, which is the same
+source the adapters are written against.
+
+### T0-57 — an empty answer became a durable completed search
+
+The route's `try/catch` only sees a **thrown** error. A 200 response whose
+answer is empty is not an error, so it flowed onward, was persisted through
+`createResearchSearch()` and mirrored to `<vault>/research/**`, where the Memory
+full-text index ingests it as genuine research on that question. The only signal
+was the string `(no answer returned)` rendered inside the markdown body —
+invisible to anything that counts completed searches or reuses stored research.
+
+Measured on the pre-fix route with a provider returning `content: ""`:
+
+    status = 200 | search_id = "d583b279-…" | research_searches rows 1 -> 2   # before
+    status = 502 | search_id = undefined    | research_searches rows 1 -> 1   # after
+
+An empty (or whitespace-only) answer now returns `502 provider_empty_answer`
+with `persisted: false`, and **nothing** is written or mirrored.
+
+A non-empty answer with **zero citations is still stored** — that is a real
+result, not a failure — but it is now stamped `grounded: false` in the metadata
+and carries an explicit **UNGROUNDED — no sources returned** block in the
+markdown, because the vault mirror is what the Memory index ingests.
+
+### Tests
+
+`tests/unit/cc-resear-t0-56-57-search-capability-and-empty-answer.test.ts` — 10
+tests, every predicate proven in **both** directions, driving the **live** route
+path with `globalThis.fetch` stubbed (not fixture mode) against an isolated
+database. Anti-false-fail controls: a search-capable registry row is still
+substituted; an empty registry still resolves to the documented default; a
+normal cited answer is completely unaffected. Every seeded row uses the real
+`model_registry` columns from migration 031 — no column is invented.
+
+Against the pre-fix route 7 of the 10 fail; all 10 pass after.
+
 ## [v6.0.65] — 2026-07-21 — A44/A46: the instruction closest to the agent contradicted the platform's impersonation guardrail
 
 v6.0.65 — Safety and contract fix. Four findings from the nine-cluster skill review, all
@@ -56,7 +131,6 @@ verified against pristine `origin/main` before anything was changed.
 **Blast radius:** documentation and contracts plus two new static checks. No runtime code
 path changed. Both new checks are self-tested in both directions and neither can pass by
 skipping.
-
 ## [v6.0.63] — 2026-07-21 — T0-01 / T0-42: a task with no deliverable can no longer be recorded `done`
 
 v6.0.63 — Security/integrity fix. Findings T0-01 and T0-42, ranked first and second in a
