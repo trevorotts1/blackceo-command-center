@@ -24,6 +24,7 @@ import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import { parseAndValidateSteps, type SOP, type SOPStep } from '@/lib/sops';
 import { tavilySearch, type TavilyResult } from '@/lib/tavily';
 import { geminiGenerate } from '@/lib/gemini';
+import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 
 export interface AutoReplaceProposalRow {
   id: string;
@@ -474,6 +475,14 @@ export async function enqueueAutoReplace(
   ]
     .filter(Boolean)
     .join('\n');
+
+  // CC-fixture-002 — the `evidenceSummary` and `research_sources` above come
+  // from tavilySearch() + geminiGenerate(). If a TAVILY_/GEMINI_FIXTURE_JSON_PATH
+  // is active in the live server process, those "sources" are canned and this
+  // proposal would be filed as `auto-generated-pending-review` — the operator's
+  // approval then promotes it into the canonical `sops` table. Refuse at the
+  // write, so a fabricated proposal never exists to be approved.
+  assertNoFixtureDerivedServerWrite('a sop_proposals row');
 
   run(
     `INSERT INTO sop_proposals

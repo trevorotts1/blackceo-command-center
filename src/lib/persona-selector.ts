@@ -33,6 +33,7 @@ import path from "path";
 import os from "os";
 import { v4 as uuidv4 } from "uuid";
 import { getDbPath, queryAll, queryOne, run } from "@/lib/db";
+import { assertNoFixtureEnvInProduction } from "@/lib/fixture-guard";
 import { ensureRuntimeConfigFile } from "@/lib/runtime-config";
 import { broadcast } from "@/lib/events";
 import { ensureBlendGuardrail } from "@/lib/persona-dispatch";
@@ -958,8 +959,17 @@ export async function selectPersonaForTask(
   // Test/CI escape hatch: PERSONA_FIXTURE_JSON env var returns a fixture
   // instead of spawning Python.  This allows unit tests to exercise the
   // sentinel warning path (PRD 3.4) without needing real Python scripts.
-  // Never set this in production.
+  //
+  // CC-fixture-002: "Never set this in production" is now ENFORCED, not just
+  // asked for. The selection returned here is pinned durably onto
+  // `tasks.persona_id / persona_name / persona_mode / persona_score /
+  // persona_reason` (src/lib/tasks.ts resolvePersonaAndPin, and
+  // src/app/api/persona-assignment/route.ts), with no column marking it
+  // fixture-derived — a canned pin is indistinguishable from a real scored one.
+  // The assert is placed OUTSIDE the try below so the guard's own error can
+  // never be swallowed by the malformed-fixture catch.
   if (process.env.PERSONA_FIXTURE_JSON) {
+    assertNoFixtureEnvInProduction();
     try {
       const fixture = JSON.parse(process.env.PERSONA_FIXTURE_JSON) as Partial<PersonaSelectionResult>;
       return {
@@ -1140,8 +1150,12 @@ export async function selectPersonaPlanForTask(
   departmentId: string | null,
   opts?: { slots?: PersonaSlot[] },
 ): Promise<PersonaPlanResult | null> {
-  // Test/CI escape hatch — mirrors PERSONA_FIXTURE_JSON. Never set in production.
+  // Test/CI escape hatch — mirrors PERSONA_FIXTURE_JSON. Never set in
+  // production; CC-fixture-002 enforces that rather than trusting the comment.
+  // The plan's primary row is pinned durably onto `tasks.persona_*` via
+  // resolvePersonaPlanAndPin (src/lib/tasks.ts), unlabelled.
   if (process.env.PERSONA_PLAN_FIXTURE_JSON) {
+    assertNoFixtureEnvInProduction();
     try {
       const fixture = JSON.parse(process.env.PERSONA_PLAN_FIXTURE_JSON) as Partial<PersonaPlanResult>;
       const rows = Array.isArray(fixture.subtask_personas) ? fixture.subtask_personas : [];

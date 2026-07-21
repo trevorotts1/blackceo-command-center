@@ -35,6 +35,7 @@ import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
 import {
   FIXTURE_ENV_VARS,
+  MEDIA_FIXTURE_ENV_VARS,
   activeFixtureEnvVars,
   activeResearchFixtureEnvVars,
 } from '@/lib/fixture-guard';
@@ -2218,6 +2219,18 @@ export function checkFixtureEnvVars(): FixtureEnvCheckResult {
         ? ` ${research.length} of these (${research.join(', ')}) fabricate Operator Research source_urls/citation_count; results from them are refused a durable write.`
         : '';
 
+    // CC-fixture-002 — call the media vars out separately. A canned image or
+    // audio file has no citation to inspect and no obvious tell, so an operator
+    // reading this advisory needs to be told explicitly that any asset produced
+    // while these are set is not produced work.
+    const media = active.filter((name) =>
+      (MEDIA_FIXTURE_ENV_VARS as readonly string[]).includes(name),
+    );
+    const mediaNote =
+      media.length > 0
+        ? ` ${media.length} of these (${media.join(', ')}) substitute CANNED MEDIA / canned browsing results; those are refused a durable vault write.`
+        : '';
+
     return {
       pass: false,
       active_fixture_env_vars: active,
@@ -2225,8 +2238,9 @@ export function checkFixtureEnvVars(): FixtureEnvCheckResult {
       node_env: nodeEnv,
       detail:
         `fixture_env: ${active.length} fixture/simulate bypass env var(s) ACTIVE — ${active.join(', ')} ` +
-        `(NODE_ENV=${nodeEnv}). These serve canned QC verdicts / SOP drafts / search results instead of ` +
-        `live provider calls and MUST be unset on a live box.${researchNote} (advisory only, non-gating)`,
+        `(NODE_ENV=${nodeEnv}). These serve canned QC verdicts / SOP drafts / search results / MEDIA ` +
+        `ASSETS / persona pins instead of live provider calls and MUST be unset on a live box.` +
+        `${researchNote}${mediaNote} (advisory only, non-gating)`,
     };
   } catch (err) {
     return {

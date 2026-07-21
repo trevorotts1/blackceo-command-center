@@ -63,6 +63,45 @@ export const RESEARCH_FIXTURE_ENV_VARS = [
   'X_AI_FIXTURE_JSON_PATH',
 ] as const;
 
+/**
+ * CC-fixture-002 — MEDIA / AGENT fixture env vars.
+ *
+ * Broken out for the same reason as the research list, but the failure mode is
+ * SHARPER. A canned answer at least carries `source_urls` a reader can inspect
+ * and find wanting. A canned PNG/MP4/MP3 copied into `<vault>/studio/<kind>/`
+ * carries NOTHING — no citation, no provenance, no tell. It is simply a media
+ * file sitting in the vault, and `walkVaultSubdir('studio')` in
+ * src/lib/workspaces/buckets.ts enumerates that tree BY PATH into the
+ * "All Images" / "All Videos" buckets, described to the operator as "Every
+ * image rendered across agents, studio, and research". The job record's
+ * `provider_used: 'fixture'` label lives in `<vault>/studio/.jobs/<id>.json`,
+ * NOT in the media file — and the bucket walk reads the FILES, not the job
+ * ledger. So a label on the job cannot save the asset, exactly as a label on a
+ * research row could not save it from the path-glob Memory index.
+ *
+ * Hence the same remedy: REFUSE the durable write. The studio fixture path no
+ * longer copies anything into the vault (it references the operator's own
+ * fixture file in place), so fixture mode stays usable offline while being
+ * structurally unable to contaminate the media buckets.
+ */
+export const MEDIA_FIXTURE_ENV_VARS = [
+  'STUDIO_FIXTURE_IMAGE_PATH',
+  'STUDIO_FIXTURE_VIDEO_PATH',
+  'STUDIO_FIXTURE_AUDIO_PATH',
+  'WEB_AGENT_FIXTURE_PATH',
+] as const;
+
+/**
+ * Persona selection fixtures. These carry their JSON INLINE in the env var
+ * value (not a path), and they steer which persona — and therefore whose
+ * voice and governance — is recorded against downstream work. Listed so a
+ * diagnostic sweep can never call a box "clean" while they are set.
+ */
+export const PERSONA_FIXTURE_ENV_VARS = [
+  'PERSONA_FIXTURE_JSON',
+  'PERSONA_PLAN_FIXTURE_JSON',
+] as const;
+
 /** Fixture / simulate env vars that must be unset on a production box. */
 export const FIXTURE_ENV_VARS = [
   'QC_FIXTURE_JSON_PATH',
@@ -70,6 +109,8 @@ export const FIXTURE_ENV_VARS = [
   'GEMINI_FIXTURE_JSON_PATH',
   'TAVILY_FIXTURE_JSON_PATH',
   ...RESEARCH_FIXTURE_ENV_VARS,
+  ...MEDIA_FIXTURE_ENV_VARS,
+  ...PERSONA_FIXTURE_ENV_VARS,
 ] as const;
 
 /** True when `name` holds a non-empty value in the current environment. */
@@ -90,6 +131,53 @@ export function activeFixtureEnvVars(): string[] {
  */
 export function activeResearchFixtureEnvVars(): string[] {
   return RESEARCH_FIXTURE_ENV_VARS.filter(isSet);
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __CC_SERVER_ENTRYPOINT__: boolean | undefined;
+}
+
+/**
+ * CC-fixture-002 — refuse a fixture-derived DURABLE write inside the real
+ * Command Center server process, at ANY NODE_ENV.
+ *
+ * Why NODE_ENV alone is not enough: `assertNoFixtureEnvInProduction()` is a
+ * deliberate no-op outside production, but a `next dev` server writes to the
+ * SAME mission-control.db and the SAME vault as a production one. So a dev box
+ * with GEMINI_FIXTURE_JSON_PATH / TAVILY_FIXTURE_JSON_PATH set will happily
+ * author a SOP from canned "research" straight into the canonical `sops`
+ * table — and `src/lib/sop-authoring.ts` files it with `source = NULL`,
+ * explicitly shaped to look organically produced, then re-points live tasks at
+ * it. That is the CC-resear-001 failure with a higher-trust artifact: a SOP is
+ * an instruction the whole system executes.
+ *
+ * Why the server marker rather than NODE_ENV: `globalThis.__CC_SERVER_ENTRYPOINT__`
+ * is set ONLY by src/instrumentation.ts, i.e. only inside the real server
+ * process (see the C8 hard-isolation guard in src/lib/db/index.ts, which relies
+ * on the same marker precisely because no env var, ecosystem file, or inherited
+ * shell export can forge it). Legitimate offline tooling —
+ * scripts/smoke-test-sop-authoring.ts, scripts/smoke-test-sop-auto-replace.ts,
+ * scripts/sop-auto-replace-job.ts — runs OUTSIDE that process against its own
+ * throwaway DATABASE_PATH, so it is unaffected and fixture mode stays fully
+ * usable. The rule is simply: the live server never authors durable content
+ * from a fixture.
+ *
+ * @param artifact Human-readable name of the durable artifact being refused,
+ *                 used in the error so the operator knows what was blocked.
+ */
+export function assertNoFixtureDerivedServerWrite(artifact: string): void {
+  const active = activeFixtureEnvVars();
+  if (active.length === 0) return;
+  if (globalThis.__CC_SERVER_ENTRYPOINT__ !== true) return;
+  throw new Error(
+    `[CC-fixture-002] Refusing to write ${artifact} from a fixture-derived source. ` +
+      `Fixture/simulate env var(s) active in this server process: ${active.join(', ')}. ` +
+      `The content was served from a canned local file, not researched or generated, ` +
+      `and ${artifact} is a durable store that later work reads back as genuine. ` +
+      `Unset the fixture env var(s) and restart the server to record real output, or ` +
+      `run the offline smoke scripts (which use their own throwaway DATABASE_PATH).`,
+  );
 }
 
 /**

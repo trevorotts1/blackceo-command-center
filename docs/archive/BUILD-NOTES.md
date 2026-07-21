@@ -268,7 +268,15 @@ SCOPE-ADDITION Section 5. Pre-wave: migration 042 was committed alone first to u
 
 6. **Shallow SLA = 30 seconds.** Per the dispatch brief, the shallow path enforces a 30s upstream timeout via `AbortController`; deep is allowed up to 90s. The route returns HTTP 502 on upstream failure so the System Status Panel can flag xAI as degraded if these fire repeatedly.
 
-7. **`X_AI_FIXTURE_JSON_PATH` for tests.** Mirrors the Tavily pattern in `src/lib/tavily.ts`. If set, the route reads a JSON fixture instead of hitting xAI (no live cost during CI or local dev). The route still writes a row and a vault file so end-to-end UI flows can exercise the full path offline.
+7. **`X_AI_FIXTURE_JSON_PATH` for tests.** Mirrors the Tavily pattern in `src/lib/tavily.ts`. If set, the route reads a JSON fixture instead of hitting xAI (no live cost during CI or local dev). ~~The route still writes a row and a vault file so end-to-end UI flows can exercise the full path offline.~~
+
+   > ⛔ **SUPERSEDED BY CC-resear-001 (v6.0.61). THE STRUCK SENTENCE ABOVE DESCRIBES A DEFECT, NOT A FEATURE — DO NOT REBUILD IT.**
+   >
+   > "Still writes a row and a vault file" is exactly the bug. The canned JSON supplies the answer AND `source_urls` AND `citation_count`; persisting that produced a durable `research_searches` row and a `<vault>/research/YYYY/MM/*.md` mirror which the Memory full-text index ingests **by path glob** as genuine cited evidence. Fabricated citations then became the ground truth later work built on. Labelling the row was considered and REJECTED: the index globs by path and cannot honour a label, and a labelled row is one unfiltered `SELECT` from being read as real.
+   >
+   > Current behaviour: a fixture-derived research result is **REFUSED a durable write at every `NODE_ENV`** — no row, no vault file — and the response says so via `fixture: true` / `persisted: false`. Offline UI flows still work; only the durable side effect is withheld. See `src/lib/research-store.ts` (`assertNotFixtureDerived`), `src/app/api/operator/research/search/route.ts`, and `src/lib/fixture-guard.ts`.
+   >
+   > **The general rule this cost us:** a fixture may substitute an in-memory response; it must NEVER produce a durable artifact. If offline testing seems to need one, it does not — reference the operator's own fixture file instead of copying it into a store.
 
 8. **Page-level `dynamic = 'force-dynamic'` on the detail route.** The saved row is mutable (deleted, re-searched, etc.) so the detail page must not statically prerender. Next.js's default for parametric server pages is dynamic rendering, but the explicit export makes the intent obvious for reviewers.
 
@@ -369,7 +377,13 @@ PRD Section 4.5 + Section 16.4 ownership list.
 
 6. **ElevenLabs returns audio bytes inline, not a URL.** Other connectors return a remote URL that the orchestrator then downloads to the vault. ElevenLabs streams `audio/mpeg` in the response body. Rather than special-casing the orchestrator, the ElevenLabs connector writes the file itself and returns the local path with `metadata.skip_download: true`. The orchestrator honors that flag and skips its download step. Same convention is available to any future "response is the bytes" connector.
 
-7. **`STUDIO_FIXTURE_<KIND>_PATH` env vars short-circuit provider calls.** Set `STUDIO_FIXTURE_IMAGE_PATH=/tmp/test.png` and the image job copies that file verbatim into the vault and reports `succeeded`. Mirrors the `X_AI_FIXTURE_JSON_PATH` pattern Track B7 used so CI / offline development can exercise the full UI flow without a network round trip.
+7. **`STUDIO_FIXTURE_<KIND>_PATH` env vars short-circuit provider calls.** Set `STUDIO_FIXTURE_IMAGE_PATH=/tmp/test.png` and the image job short-circuits the provider call. ~~and the image job copies that file verbatim into the vault and reports `succeeded`. Mirrors the `X_AI_FIXTURE_JSON_PATH` pattern Track B7 used~~ so CI / offline development can exercise the full UI flow without a network round trip.
+
+   > ⛔ **SUPERSEDED BY CC-fixture-002. THE STRUCK TEXT DESCRIBES A DEFECT — DO NOT REBUILD IT.**
+   >
+   > "Copies that file verbatim into the vault" was the **sharpest** instance of the CC-resear-001 class, and it was built deliberately because this note told the next person to mirror that pattern. Media is the worst case: a canned image, video or audio file has **no citation to inspect and no obvious tell**. It is simply an asset in the vault, and `walkVaultSubdir('studio')` in `src/lib/workspaces/buckets.ts` enumerates that tree **by path** into the "All Images" / "All Videos" buckets — presented to the operator as "Every image rendered across agents, studio, and research". The `provider_used: 'fixture'` label lived in the job ledger at `<vault>/studio/.jobs/<id>.json`, and the bucket walk reads the **files**, not the ledger — so no label could ever have saved the asset.
+   >
+   > Current behaviour: the studio fixture path **copies nothing**. `result_path` references the operator's own fixture file in place, the job still runs the real `queued → running → succeeded` lifecycle so offline UI flows work unchanged, a `console.warn` names the active env var, and the job metadata carries `fixture: true` / `vault_write_refused: true`. `STUDIO_FIXTURE_{IMAGE,VIDEO,AUDIO}_PATH` are now in `FIXTURE_ENV_VARS`, so `assertNoFixtureEnvInProduction()` hard-fails them on a live box and the deep-health sweep can no longer report such a box "clean". See `src/lib/studio/generators.ts` and `src/lib/fixture-guard.ts`.
 
 8. **No SSE / WebSocket , UI polls every 1.5s.** PRD 4.5 mentions "polls or subscribes via SSE". SSE adds a runtime dependency on a long-lived connection that we do not have a framework helper for yet (the OpenClaw client uses websockets but that is a different transport). Polling at 1.5s gives sub-2s UX for typical 8-30s generations with negligible server load (one row read per tick). When a global SSE substrate lands, swap `setInterval` in `StudioCanvas` for an `EventSource`.
 
@@ -489,6 +503,12 @@ Pending npm dependency (deferred, not blocking B9):
 Recommended for the integration step or a Wave 2 follow-up. Once installed, replace the raw `fetch` block in `runner.ts` with `new Anthropic({ apiKey }).messages.create(...)`. The request shape is identical and the response types become first-class. Until then the runner remains fully functional via the public REST API.
 
 Test escape hatch: setting `WEB_AGENT_FIXTURE_PATH` to a JSON file containing a canned Anthropic Messages response makes the runner skip the network call entirely. This lets CI exercise the Playwright + SSE plumbing without an API key or live Anthropic access.
+
+> ⛔ **AMENDED BY CC-fixture-002 — the escape hatch stays, its durable side effect does not.**
+>
+> As originally built, a canned response flowed into a durable `web_agent_sessions.result_markdown` row **and** was mirrored to `<vault>/web-agent/YYYY/MM/*.md`, which Memory's vault walk (`src/lib/operator/memory-search.ts` → `readLocalDir` in `src/lib/operator/client-fs.ts`) ingests by path — `web-agent/` is not in its skip list. Neither artifact carried any marker, nothing checked `NODE_ENV`, and `runner.ts:277` explicitly waved the session through when no `ANTHROPIC_API_KEY` was present. Worse, `writeClientFile('vault-root', ...)` can resolve to a **client's** pinned workspace root, so canned "findings" could be filed into a client's vault.
+>
+> Current behaviour: the vault mirror is **REFUSED** whenever the session is fixture-derived, the session row's markdown is prefixed with an unmissable `FIXTURE RESULT — NOT A REAL BROWSING SESSION` banner, the action log records `vault mirror REFUSED`, and `WEB_AGENT_FIXTURE_PATH` is in `FIXTURE_ENV_VARS` so the guard hard-fails it in production and diagnostics report it. The SSE/Playwright plumbing this hatch exists to test is untouched.
 
 ## Depth 2 Wave 1, Track B3 (Operator Console Workspace + Buckets)
 
@@ -812,6 +832,15 @@ the source tree for keys.
    `X_AI_FIXTURE_JSON_PATH`, `GEMINI_FIXTURE_JSON_PATH`,
    `WEB_AGENT_FIXTURE_PATH`, `STUDIO_FIXTURE_{IMAGE,VIDEO,AUDIO}_PATH`.
    Lets CI / offline dev exercise the full code path without API keys.
+   > ⛔ **These are TEST BYPASSES, not settings.** Every one is now named in
+   > `FIXTURE_ENV_VARS` (`src/lib/fixture-guard.ts`), hard-fails on a box
+   > running `NODE_ENV=production`, and is reported by name in
+   > `GET /api/health/deep` → `advisory.fixture_env`. A fixture may substitute
+   > an in-memory response; it must NEVER produce a durable artifact — see the
+   > CC-resear-001 and CC-fixture-002 notes above. The canonical list also
+   > includes `QC_FIXTURE_JSON_PATH`, `QC_SIMULATE_PROVIDER_DOWN`, the five
+   > Operator Research vars, and `PERSONA_FIXTURE_JSON` /
+   > `PERSONA_PLAN_FIXTURE_JSON`.
 8. **v4.0 Misc** : `NEXT_PUBLIC_APP_URL`, `TELEGRAM_BOT_TOKEN`,
    `SOP_AUTO_REPLACE_TELEGRAM_DISABLED`, `DEMO_MODE` (legacy compat).
 

@@ -51,6 +51,7 @@ import type { SOP } from '@/lib/sops';
 import type { Task } from '@/lib/types';
 import { tavilySearch } from '@/lib/tavily';
 import { geminiGenerate } from '@/lib/gemini';
+import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import {
   buildSynthesisPrompt,
   parseDraftedSOP,
@@ -882,6 +883,17 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       `Top sources:`,
       ...sources3.map((s, i) => `  [${i + 1}] ${s.title} (${s.url})`),
     ].join('\n');
+
+    // CC-fixture-002 — this is the highest-trust durable artifact in the system:
+    // a row in the canonical `sops` table, filed with source=NULL so it looks
+    // organically produced, auto-authored with NO operator approval, after which
+    // live tasks are re-pointed at it. Its steps and `evidenceSummary` come from
+    // geminiGenerate() + tavilySearch(); with a fixture env var active in the
+    // live server process those are canned. Refuse the write.
+    //
+    // Deliberately OUTSIDE the try below — that catch swallows insert errors
+    // into a log line and continues, which would silently defeat the guard.
+    assertNoFixtureDerivedServerWrite('a sops row (auto-authored SOP)');
 
     // §5a: Insert into `sops` table with source=NULL (critical — not 'role-library').
     try {

@@ -36,6 +36,7 @@ import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { queryAll, queryOne, run } from '@/lib/db';
+import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { operatorScratchRoot } from '@/lib/platform';
 import { writeClientFile, isRemoteError } from '@/lib/operator/client-fs';
 import { PlaywrightDriver, type ComputerAction, type ActionResult } from './playwright-driver';
@@ -476,7 +477,21 @@ export async function runSession(sessionId: string, opts: RunOptions = {}): Prom
     });
   }
 
-  const finalMarkdown = ensureMarkdown(finalText, session.task);
+  // CC-fixture-002 — was this session's "reasoning" served from a canned file?
+  // WEB_AGENT_FIXTURE_PATH makes callAnthropic() return a fixture instead of
+  // calling the model, so `finalText` below is whatever that file says. It was
+  // never browsed, never observed, never reasoned.
+  const webAgentFixture = process.env.WEB_AGENT_FIXTURE_PATH;
+  const isFixtureDerived = typeof webAgentFixture === 'string' && webAgentFixture.trim() !== '';
+
+  const bodyMarkdown = ensureMarkdown(finalText, session.task);
+  const finalMarkdown = isFixtureDerived
+    ? `> **FIXTURE RESULT — NOT A REAL BROWSING SESSION.** Served from ` +
+      `\`WEB_AGENT_FIXTURE_PATH\`, not from a live model call. The findings below ` +
+      `are canned: no page was read and no conclusion was reached. Not mirrored ` +
+      `to the vault and not indexed by Memory.\n\n${bodyMarkdown}`
+    : bodyMarkdown;
+
   const endedAt = new Date().toISOString();
   updateSession(sessionId, {
     status,
@@ -486,14 +501,42 @@ export async function runSession(sessionId: string, opts: RunOptions = {}): Prom
   });
 
   // Mirror to vault so Memory and All Searches buckets pick it up.
-  const vaultFile = await mirrorToVault({
-    id: sessionId,
-    task: session.task,
-    markdown: finalMarkdown,
-  });
-  if (vaultFile) {
-    appendLog(log, sessionId, 'system', `vault mirror: ${vaultFile}`);
+  //
+  // CC-fixture-002 — REFUSED when the session was fixture-derived. This mirror
+  // writes `<vault>/web-agent/YYYY/MM/<slug>.md`, and Memory's vault walk
+  // (src/lib/operator/memory-search.ts -> readLocalDir in
+  // src/lib/operator/client-fs.ts) recurses that tree by PATH, skipping only
+  // node_modules/.git/dotdirs. `web-agent/` is not skipped, so a canned file
+  // landing there is read back as genuine recalled evidence — the exact
+  // path-glob failure CC-resear-001 closed for research. A label cannot help:
+  // the index globs files, it does not consult a flag. So the file is simply
+  // never written. Note `writeClientFile('vault-root', ...)` can resolve to a
+  // CLIENT's pinned workspace root, so this also stops canned findings being
+  // filed into a client's vault.
+  let vaultFile: string | null = null;
+  if (isFixtureDerived) {
+    console.warn(
+      `[CC-fixture-002] Web-agent session ${sessionId} was served from ` +
+        `WEB_AGENT_FIXTURE_PATH — refusing the vault mirror. No file written to ` +
+        `<vault>/web-agent/, so canned findings cannot be indexed by Memory as real.`,
+    );
+    appendLog(
+      log,
+      sessionId,
+      'system',
+      'vault mirror REFUSED — session served from WEB_AGENT_FIXTURE_PATH (canned, not researched)',
+    );
     updateSession(sessionId, { action_log: log });
+  } else {
+    vaultFile = await mirrorToVault({
+      id: sessionId,
+      task: session.task,
+      markdown: finalMarkdown,
+    });
+    if (vaultFile) {
+      appendLog(log, sessionId, 'system', `vault mirror: ${vaultFile}`);
+      updateSession(sessionId, { action_log: log });
+    }
   }
 
   bus.publish(sessionId, 'result', { markdown: finalMarkdown, vault_path: vaultFile });
@@ -515,6 +558,8 @@ async function callAnthropic(args: CallAnthropicArgs): Promise<AnthropicResponse
   // to exercise the runner without a real API key.
   const fixturePath = process.env.WEB_AGENT_FIXTURE_PATH;
   if (fixturePath) {
+    // CC-fixture-002: never honor a canned browsing "result" on a live box.
+    assertNoFixtureEnvInProduction();
     const raw = await fs.readFile(fixturePath, 'utf8');
     return JSON.parse(raw) as AnthropicResponse;
   }
