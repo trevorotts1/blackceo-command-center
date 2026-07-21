@@ -1,6 +1,6 @@
-## [v6.0.63] — 2026-07-21 — CC-fixture-003: the last two fixture residuals (persona pins, QC results) are closed
+## [v6.0.64] — 2026-07-21 — CC-fixture-003: the last two fixture residuals (persona pins, QC results) are closed
 
-v6.0.63 — Security/integrity fix. Completes the arc started by CC-resear-001 (v6.0.61) and
+v6.0.64 — Security/integrity fix. Completes the arc started by CC-resear-001 (v6.0.61) and
 CC-fixture-002 (v6.0.62). Those two closed six mechanisms but deliberately left **two**
 residuals open, because both are the input seam for a REAL test and closing them naively
 would have meant weakening one — correctly out of bounds. This lands the guard instead.
