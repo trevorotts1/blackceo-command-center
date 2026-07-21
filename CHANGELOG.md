@@ -1,3 +1,58 @@
+## [v6.0.61] — 2026-07-21 — CC-resear-001: fabricated research can no longer become durable cited evidence
+
+v6.0.61 — Security/integrity fix. Finding CC-resear-001, the most dangerous item in a
+155-finding review.
+
+- **The defect (reproduced against pristine `origin/main` @ 3331fa7, both NODE_ENVs):**
+  `src/lib/research/providers.ts` `readFixture()` honored five `*_FIXTURE_JSON_PATH` env
+  vars and served a local JSON file in place of the live provider call — without ever
+  calling this repo's own `assertNoFixtureEnvInProduction()` guard, which `gemini.ts`,
+  `qc-scorer.ts` and `tavily.ts` all wire in for exactly this reason. The canned answer,
+  **including fabricated `source_urls` and `citation_count`**, was written to a durable
+  `research_searches` row AND mirrored to `<vault>/research/YYYY/MM/*.md`, where the
+  Memory full-text index ingests it as genuine cited research. Measured before the fix:
+  `DURABLE_ROW_WRITTEN=YES`, `VAULT_FILE_WRITTEN=YES`, row metadata `UNLABELLED`, and the
+  row filed `citation_count: 2` with two invented source URLs — at `NODE_ENV=production`
+  as well as `development`.
+- **The detection half:** `FIXTURE_ENV_VARS` did not name the research vars, so
+  `activeFixtureEnvVars()` returned `[]` while fixtures were live — a diagnostic sweep
+  reported the box **clean** while it fabricated. Measured before the fix:
+  `SWEEP_REPORTS_FIXTURE=NO`.
+- **What lands:**
+  - The **existing** `fixture-guard.ts` is wired into the live research adapters (reused,
+    not duplicated) — `readFixture()` now calls `assertNoFixtureEnvInProduction()` before
+    honoring any var, matching the gemini/qc-scorer/tavily pattern exactly.
+  - All five research vars added to `FIXTURE_ENV_VARS`, plus a `RESEARCH_FIXTURE_ENV_VARS`
+    subset and `activeResearchFixtureEnvVars()`.
+  - A fixture-derived result is **labelled at the source** (`isFixtureDerived` +
+    `fixtureEnvVar` on `ResearchProviderResult`) so provenance travels with the payload
+    instead of being re-derived by each caller.
+  - The search route **refuses the durable write** for a fixture-derived result at every
+    `NODE_ENV` — no `research_searches` row, no vault file. NODE_ENV alone is not a
+    defence: a `next dev` box writes to the same DB and the same vault as a live one.
+  - An independent tripwire in `research-store.ts` `createResearchSearch()` rejects any
+    metadata marked fixture-derived, so a future caller cannot reintroduce the hole.
+  - New non-gating `advisory.fixture_env` check on `GET /api/health/deep` reporting the
+    **names** (never the values) of every active fixture var. Non-gating on purpose: an
+    auto-rollback cannot unset an operator's env var, so gating would loop a box through
+    rollbacks without clearing the condition.
+  - `.env.example` fixture block rewritten as a stark warning in a **deliberately
+    non-pastable shape** (no `VAR=` lines), so copying the file cannot enable fabrication.
+- **Fixture mode remains possible** for offline CI/UI work — it is now loud (a warning per
+  honored fixture), labelled (a `FIXTURE RESULT — NOT RESEARCH` banner on the returned
+  markdown, `fixture: true` / `persisted: false` in the response), and unable to
+  contaminate a durable store.
+- **Proof:** new `tests/unit/cc-resear-001-research-fixture-guard.test.ts` — **10 of 12
+  FAIL against pristine origin/main, 12/12 PASS after** (the 2 that pass both ways are the
+  deliberate no-regression controls). Both probe columns flip: durable write
+  `YES → NO`, sweep detection `clean → reports the var`. `npx tsc --noEmit` clean;
+  `deep-health` vitest 91/91; full `npm run test:unit` 1800 tests, 5 failures
+  byte-identical to the pre-existing `interview-detection.test.ts` set on unmerged main
+  (verified by running that file against pristine origin/main) — zero new failures.
+- **Existing contamination:** a read-only sweep of every local `mission-control.db` and
+  every vault `research/` directory found **0** fixture-derived rows and **0** fixture-derived
+  vault files. Nothing was deleted.
+
 ## [v6.0.60] — 2026-07-19 — U22/B-U8 CC-side offline fixture-funnel leg lands on main
 
 v6.0.60 — Skill-6 v2 unit U22/B-U8, receipt-branch merge (single serial merge-writer).
