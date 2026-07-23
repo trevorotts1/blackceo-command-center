@@ -10,7 +10,7 @@ import {
   logUnauthorized401,
   sanitizeHeaderValue,
 } from '@/lib/probes/unauthorized-401-contract';
-import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gate-cookie';
+import { INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gate-cookie';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).

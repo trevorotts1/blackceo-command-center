@@ -32,9 +32,26 @@ export const INTERVIEW_COOKIE_NAME = 'mc_interview_complete';
  * final), so a "complete" token gets a long TTL and rarely needs re-minting.
  * An "incomplete" token gets a short TTL so the shell unlocks quickly (within a
  * page load or a minute) the moment update-interview-state.sh --complete lands.
+ *
+ * U010: COMPLETE_TTL extended to 30 days so the signed cookie survives restarts
+ * and tunnel reconnects. A persistent latch cookie (LATCH_COOKIE_NAME) with a
+ * 60-day TTL provides a fallback when the main cookie is absent/expired. Both
+ * are signed with the same stable HMAC key derived from MC_INTERVIEW_COOKIE_SECRET
+ * (env-backed, not regenerated per restart).
  */
-export const COMPLETE_TTL_SECONDS = 60 * 60 * 24; // 24h
+export const COMPLETE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days (U010)
 export const INCOMPLETE_TTL_SECONDS = 60; // 1 min
+
+/**
+ * Persistent gate-latch cookie (U010). When the main mc_interview_complete
+ * cookie is absent or expired, the middleware checks this latch as a fallback
+ * before redirecting to /interview. The latch is signed with the same HMAC key
+ * and has a longer TTL (60 days) so it survives restarts, tunnel reconnects, and
+ * cookie-store expiry. Set once when the interview is confirmed complete and
+ * refreshed on every page load by InterviewGateSync.
+ */
+export const LATCH_COOKIE_NAME = 'mc_interview_gate_latch';
+export const LATCH_TTL_SECONDS = 60 * 60 * 24 * 60; // 60 days
 
 interface GatePayload {
   /** true only when the interview is genuinely complete / build finished. */
@@ -200,4 +217,57 @@ export async function verifyInterviewToken(
   const now = Math.floor(Date.now() / 1000);
   const expired = typeof payload.exp !== 'number' || payload.exp < now;
   return { valid: !expired, complete, expired };
+}
+
+/**
+ * Shared cookie options for both the main interview-complete cookie and the
+ * persistent latch cookie (U010). HttpOnly prevents JS access, Secure is set
+ * in production (TLS), SameSite=Lax allows the cookie on top-level navigations
+ * from the same site, and path=/ covers every route. Callers pass `maxAge`
+ * from the signed token's TTL.
+ *
+ * Note: these options are for the setter (server action) only. The middleware
+ * reads cookies via `request.cookies.get()` and does not set them.
+ */
+export function getInterviewCookieOptions(maxAge: number): {
+  httpOnly: boolean;
+  sameSite: 'lax';
+  path: string;
+  maxAge: number;
+  secure: boolean;
+} {
+  return {
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+    maxAge,
+    secure: process.env.NODE_ENV === 'production',
+  };
+}
+
+/**
+ * Mint a persistent latch cookie value (U010). The latch is a long-lived
+ * (60-day) signed cookie set ONCE when the interview is confirmed complete
+ * and refreshed on every page load alongside the main cookie. The middleware
+ * checks it as a fallback when the main `mc_interview_complete` cookie is
+ * absent or expired — preventing a completed operator from being bounced to
+ * /interview after a restart or tunnel reconnect.
+ *
+ * Only mints when `complete === true`; an incomplete latch is never set
+ * (completion is terminal and never reverts). Uses the same HMAC key as
+ * signInterviewToken so the middleware can verify both with the same secret.
+ */
+export async function signLatchToken(): Promise<{ value: string; maxAge: number }> {
+  if (devSecretInProduction()) {
+    throw new Error(
+      'DATA-13: interview cookie secret resolves to the public dev fallback in ' +
+        'production. Set MC_INTERVIEW_COOKIE_SECRET (or MC_API_TOKEN / ' +
+        'WEBHOOK_SECRET). Refusing to sign a forgeable latch token.',
+    );
+  }
+  const exp = Math.floor(Date.now() / 1000) + LATCH_TTL_SECONDS;
+  const payload: GatePayload = { complete: true, exp };
+  const payloadB64 = strToB64url(JSON.stringify(payload));
+  const sig = await hmacB64url(payloadB64);
+  return { value: `${payloadB64}.${sig}`, maxAge: LATCH_TTL_SECONDS };
 }
