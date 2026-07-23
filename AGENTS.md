@@ -120,11 +120,23 @@ and the persona. The doing belongs to the department — never to the CEO.
 - Read workspace files
 - Restart the gateway (orchestrator-only authority, N7)
 - Manage agent/department config
+- Dispatch ONE sub-agent for a direct non-Kanban operator ops/diagnostic command (see the
+  Direct-operator-command escape hatch, R8 in SOUL.md)
 
 ### Sub-agent bypass clause
 Spawning a sub-agent and instructing it to execute production work IS THE SAME VIOLATION as
 self-executing. If a sub-agent is spawned, it MUST read its own role files and operate via
 the task board — it is NOT a production tool for the orchestrator.
+
+### Direct-operator-command escape hatch (closes the route-vs-execute loop; = SOUL.md R8)
+A direct operator command that is operational/infra/diagnostic (fleet health checks, smoke tests,
+SSH/box connectivity, gateway/config state) and has no client and no Kanban-worthy deliverable is
+OUTSIDE the sub-agent bypass clause above — that clause targets using a sub-agent to dodge
+DEPARTMENT assignment for CLIENT-facing production work; a direct ops command has no client and
+nothing to bypass. Resolution: DISPATCH ONE sub-agent via `sessions_spawn`, hand it the command
+verbatim, and report its result — do not loop, do not send the same "routing vs. executing"
+message twice. Catching myself about to repeat that message IS the signal to dispatch, not to
+re-deliberate.
 
 ### Owner-permission exception
 Before the CEO would EVER do a task itself, it must FIRST seek AND RECEIVE explicit permission
@@ -199,59 +211,59 @@ Every box Trevor operates, one place to look. **36 total** = 10 Hostinger VPS + 
 
 **Hostinger VPS (10)**
 
-| Box slug | Client |
-|---|---|
-| `openclaw-hy5t` | Corey Sams |
-| `openclaw-qxqt` | Maria Anderson (VPS) |
-| `openclaw-0ht9` | Beverly Sanders |
-| `openclaw-c54p` | Evelyn Bethune |
-| `openclaw-prji` | Angela Tennison |
-| `openclaw-lydh` | Angeleen |
-| `openclaw-jdbv` | Monique Tucker |
-| `openclaw-4pkz` | Lyric Hawkins (VPS) |
-| `openclaw-h7rp` | Dr. Tola |
-| `openclaw-a3go` | Dr. Stephanie Brown |
+| Box slug | Client | Telegram |
+|---|---|---|
+| `openclaw-hy5t` | Corey Sams | `1588955874` |
+| `openclaw-qxqt` | Maria Anderson (VPS) | `8981578265` |
+| `openclaw-0ht9` | Beverly Sanders | `8572668595` |
+| `openclaw-c54p` | Evelyn Bethune | `8279177438` |
+| `openclaw-prji` | Angela Tennison | `8297086672` |
+| `openclaw-lydh` | Angeleen | `7782200821` |
+| `openclaw-jdbv` | Monique Tucker | `8529148487` |
+| `openclaw-4pkz` | Lyric Hawkins (VPS) | `7029068588` |
+| `openclaw-h7rp` | Dr. Tola | `8399116757` |
+| `openclaw-a3go` | Dr. Stephanie Brown | `8485505891` |
 
 **Contabo (2)**
 
-| Box slug | Client |
-|---|---|
-| `oc-trevor` | Trevor (BlackCEO Staff Clawspace / test — Contabo) |
-| `oc-beverly-grandison` | Beverly Grandison (Premier Health & Wellness — Contabo) |
+| Box slug | Client | Telegram |
+|---|---|---|
+| `oc-trevor` | Trevor (BlackCEO Staff Clawspace / test — Contabo) | `5252140759` |
+| `oc-beverly-grandison` | Beverly Grandison (Premier Health & Wellness — Contabo) | `6886280792` |
 
 **Mac via CF tunnel (23)**
 
-| Box slug | Client |
-|---|---|
-| `teresa-pelham` | Teresa Pelham |
-| `rescue-kofi-bryant` | Kofi Bryant |
-| `rescue-cassandra-henriquez` | Cassandra Henriquez |
-| `rescue-karen-vaughn` | Karen Vaughn |
-| `rescue-jill-bulluck` | Jill Bulluck |
-| `rescue-sheila-reynolds` | Sheila Reynolds |
-| `rescue-aurelia-gardner` | Aurelia Gardner (Mac mini) |
-| `rescue-aurelia-gardner-macbookpro` | Aurelia Gardner (MacBook Pro) |
-| `rescue-lyric-hawkins` | Lyric Hawkins (Mac mini) |
-| `rescue-leanne-dolce` | LeAnne Dolce |
-| `rescue-sonatta-camara` | Sonatta Camara |
-| `rescue-talaya-kelley` | Talaya Kelley |
-| `rescue-stephanie-wall` | Stephanie Wall |
-| `rescue-jocelyn-mcclure` | Jocelyn McClure |
-| `rescue-barret-matthews` | Barret Matthews (MacBook Air) |
-| `rescue-barrett-matthews-mini-2026` | Barret Matthews (Mac Mini 2026) |
-| `rescue-maria-anderson` | Maria Anderson (Mac) |
-| `rescue-christy-staples` | Christy Staples |
-| `rescue-erin-garrett` | Erin Garrett |
-| `rescue-star-bobatoon` | Star Bobatoon |
-| `rescue-jennifer-allen` | Jennifer Allen |
-| `rescue-er-spaulding` | E.R. Spaulding — 🛟 RESCUE, added 2026-07-07 (accounts.md §31) |
-| `rescue-eddie-otts` | Eddie Otts — 🛟 RESCUE, added 2026-07-15 (accounts.md §32), SSH user `eddoeotts` (verified, not a typo) |
+| Box slug | Client | Telegram |
+|---|---|---|
+| `teresa-pelham` | Teresa Pelham | `770524308` |
+| `rescue-kofi-bryant` | Kofi Bryant | `8384606872` |
+| `rescue-cassandra-henriquez` | Cassandra Henriquez | `6949338820` |
+| `rescue-karen-vaughn` | Karen Vaughn | `8959124298` |
+| `rescue-jill-bulluck` | Jill Bulluck | unreachable |
+| `rescue-sheila-reynolds` | Sheila Reynolds | `8505558285` |
+| `rescue-aurelia-gardner` | Aurelia Gardner (Mac mini) | `8566720334` |
+| `rescue-aurelia-gardner-macbookpro` | Aurelia Gardner (MacBook Pro) | `8566720334` |
+| `rescue-lyric-hawkins` | Lyric Hawkins (Mac mini) | `7029068588` |
+| `rescue-leanne-dolce` | LeAnne Dolce | `6663821679` |
+| `rescue-sonatta-camara` | Sonatta Camara | `1378554051` |
+| `rescue-talaya-kelley` | Talaya Kelley | `7221271168` |
+| `rescue-stephanie-wall` | Stephanie Wall | `8598776741` |
+| `rescue-jocelyn-mcclure` | Jocelyn McClure | `8511991595` |
+| `rescue-barret-matthews` | Barret Matthews (MacBook Air) | no bot |
+| `rescue-barrett-matthews-mini-2026` | Barret Matthews (Mac Mini 2026) | `871463120` |
+| `rescue-maria-anderson` | Maria Anderson (Mac) | `8981578265` |
+| `rescue-christy-staples` | Christy Staples | unreachable |
+| `rescue-erin-garrett` | Erin Garrett | `7520805460` |
+| `rescue-star-bobatoon` | Star Bobatoon | `8516777716` |
+| `rescue-jennifer-allen` | Jennifer Allen | `8606145708` |
+| `rescue-er-spaulding` | E.R. Spaulding — 🛟 RESCUE, added 2026-07-07 (accounts.md §31) | `6771245262` |
+| `rescue-eddie-otts` | Eddie Otts — 🛟 RESCUE, added 2026-07-15 (accounts.md §32), SSH user `eddoeotts` (verified, not a typo) | `6799719362` |
 
 **Operator (1)**
 
-| Box slug | Client |
-|---|---|
-| `blackceomacmini` | Operator (Trevor — Stefanie) |
+| Box slug | Client | Telegram |
+|---|---|---|
+| `blackceomacmini` | Operator (Trevor — Stefanie) | `5252140759` |
 
 ### Contabo VPS — multi-client OpenClaw host (you manage this)
 Box `203382836` @ `109.205.179.254` (16 vCPU/64 GB, Ubuntu 24.04), one isolated Docker container per client. LIVE: `oc-trevor`→18802, `oc-beverly-grandison`→18803 (next free port **18804**). SSH `ssh contabo-host` (key `~/.ssh/contabo_host_ed25519`). Layout `/opt/clients/<slug>/`, container `oc-<slug>`, image PINNED `ghcr.io/openclaw/openclaw:2026.6.8`, tunnel `contabo-agents-host` (id `8c4c8006-c29d-43c8-a36f-f1cf40200cdf`) → `<slug>.agents.zerohumanworkforce.com`. Contabo API = OAuth2 password grant (`CONTABO_*` in secrets `.env`); every request needs an `x-request-id` UUID header. **Iron rule: NEVER share a volume or `.env` between clients — each runs on its OWN funded key.** Gym caps: `mem_limit 16g` + `mem_reservation 1g`, 100 GB/client quota, `cpu_shares 1024`, `pids_limit 1024`. Full guide: TOOLS.md "Contabo VPS" + RUNBOOK §0.
@@ -430,3 +442,9 @@ For each such skill folder under `~/.openclaw/skills/`:
 - Add to MEMORY.md under "## System Updates":
   "v20.0.75 update applied on 2026-07-20. Verification gate PASSED. Skills activated: none."
 
+
+## 🔴 DOCUMENT CREATION RULE — ALL DOCS GO TO DOWNLOADS (July 22, 2026)
+
+Every document I create for Trevor goes to `/Users/blackceomacmini/Downloads/`. Never to `~/clawd/reports/`. Never to `~/clawd/tmp/`. Never to any workspace subfolder. Downloads only.
+
+Format: `/Users/blackceomacmini/Downloads/<descriptive-filename>.md`
