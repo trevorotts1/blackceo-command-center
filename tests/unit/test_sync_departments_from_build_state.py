@@ -472,3 +472,197 @@ def test_reseed_prune_no_tasks_table_does_not_crash(_clean_env):
     # No tasks table -> treated as zero tasks -> stale row pruned, no crash.
     mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO), prune=True)
     assert "legacy-dept" not in _workspaces(db_path)
+
+
+# ---------------------------------------------------------------------------
+# U133 -- merge_config  (merge-additive departments.json write)
+# ---------------------------------------------------------------------------
+
+_ZHC_DEPTS = [
+    {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"},
+    {"id": "dept-sales",     "name": "Sales",     "emoji": "\U0001f4bc"},
+    {"id": "dept-support",   "name": "Support",   "emoji": "\U0001f6e0",
+     "headTitle": "Support Lead"},
+]
+
+
+def test_merge_config_adds_all_when_no_local_file(_clean_env):
+    """merge_config creates a fresh file with all source departments."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    mod.merge_config(config_path, _ZHC_DEPTS)
+
+    with open(config_path) as f:
+        result = json.load(f)
+
+    assert len(result) == 3
+    ids = {d["id"] for d in result}
+    assert ids == {"dept-marketing", "dept-sales", "dept-support"}
+
+
+def test_merge_config_updates_existing_in_place(_clean_env):
+    """Existing departments are updated (name/emoji/headTitle), ids preserved."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    local = [
+        {"id": "dept-marketing", "name": "Old Marketing", "emoji": "\U0001f4e2"},
+        {"id": "dept-sales",     "name": "Old Sales",     "emoji": "\U0001f4bc"},
+    ]
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(local, f)
+
+    mod.merge_config(config_path, _ZHC_DEPTS)
+    with open(config_path) as f:
+        result = json.load(f)
+
+    assert len(result) == 3
+    by_id = {d["id"]: d for d in result}
+    assert by_id["dept-marketing"]["name"] == "Marketing"
+    assert by_id["dept-sales"]["name"] == "Sales"
+    assert by_id["dept-support"]["name"] == "Support"
+    assert by_id["dept-support"]["headTitle"] == "Support Lead"
+
+
+def test_merge_config_preserves_custom_departments(_clean_env):
+    """Custom (operator-added) departments in the local file survive the merge."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    local = [
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"},
+        {"id": "dept-custom",   "name": "R&D Lab",    "emoji": "\U0001f52c"},
+    ]
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(local, f)
+
+    mod.merge_config(config_path, _ZHC_DEPTS)
+    with open(config_path) as f:
+        result = json.load(f)
+
+    by_id = {d["id"]: d for d in result}
+    assert "dept-marketing" in by_id
+    assert "dept-sales" in by_id
+    assert "dept-support" in by_id
+    assert "dept-custom" in by_id
+    assert by_id["dept-custom"]["name"] == "R&D Lab"
+    assert by_id["dept-custom"]["emoji"] == "\U0001f52c"
+    assert len(result) == 4
+
+
+def test_merge_config_empty_source_noop(_clean_env):
+    """merge_config with an empty source list leaves the local file untouched."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    local = [
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"},
+    ]
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(local, f)
+
+    mod.merge_config(config_path, [])
+    with open(config_path) as f:
+        result = json.load(f)
+
+    assert result == local
+
+
+def test_merge_config_creates_parent_dirs(_clean_env):
+    """merge_config creates parent directories when they don't exist."""
+    config_path = str(
+        _clean_env / "deeply" / "nested" / "config" / "departments.json"
+    )
+    mod.merge_config(config_path, _ZHC_DEPTS)
+    with open(config_path) as f:
+        result = json.load(f)
+    assert len(result) == 3
+
+
+def test_merge_config_idempotent(_clean_env):
+    """Running merge_config twice produces the same result."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    local = [
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"},
+    ]
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(local, f)
+
+    mod.merge_config(config_path, _ZHC_DEPTS)
+    with open(config_path) as f:
+        first = json.load(f)
+
+    mod.merge_config(config_path, _ZHC_DEPTS)
+    with open(config_path) as f:
+        second = json.load(f)
+
+    assert first == second
+
+
+def test_merge_config_malformed_local_file_handled(_clean_env):
+    """merge_config handles a malformed local file by treating it as empty."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        f.write("this is not valid json {{{")
+
+    mod.merge_config(config_path, _ZHC_DEPTS)
+    with open(config_path) as f:
+        result = json.load(f)
+
+    assert len(result) == 3
+
+
+def test_merge_config_non_list_local_handled(_clean_env):
+    """merge_config handles a local file that is JSON but not a list."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump({"not": "a list"}, f)
+
+    mod.merge_config(config_path, _ZHC_DEPTS)
+    with open(config_path) as f:
+        result = json.load(f)
+
+    assert isinstance(result, list)
+    assert len(result) == 3
+
+
+def test_merge_config_updates_head_title_when_provided(_clean_env):
+    """When the source provides headTitle, it's set on the existing entry."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    local = [
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"},
+    ]
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(local, f)
+
+    source = [
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2",
+         "headTitle": "CMO"},
+    ]
+    mod.merge_config(config_path, source)
+    with open(config_path) as f:
+        result = json.load(f)
+
+    assert result[0]["headTitle"] == "CMO"
+
+
+def test_merge_config_head_title_not_removed_when_source_lacks_it(_clean_env):
+    """When the source has no headTitle for an existing entry, the local
+    headTitle is left in place."""
+    config_path = str(_clean_env / "config" / "departments.json")
+    local = [
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2",
+         "headTitle": "CMO"},
+    ]
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(local, f)
+
+    source = [
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"},
+    ]
+    mod.merge_config(config_path, source)
+    with open(config_path) as f:
+        result = json.load(f)
+
+    assert result[0]["headTitle"] == "CMO"

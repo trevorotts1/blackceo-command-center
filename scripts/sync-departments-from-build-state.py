@@ -32,8 +32,9 @@ SOURCE OF TRUTH (priority order):
 USAGE:
   python3 sync-departments-from-build-state.py
   python3 sync-departments-from-build-state.py --company-slug acme-corp
-  python3 sync-departments-from-build-state.py --db /path/to/mission-control.db \
+  python3 sync-departments-from-build-state.py --db /path/to/mission-control.db \\
       --config /path/to/config/departments.json
+  python3 sync-departments-from-build-state.py --merge  (update-flow safe mode)
 
 Idempotent: re-running refreshes config/departments.json and upserts workspaces
 (never duplicates). Safe to call from run-full-install.sh on every install/resume.
@@ -189,9 +190,6 @@ def _read_json(path):
 def find_db(explicit=None):
     if explicit:
         return explicit
-    # DATA-08: honor the app's DB path FIRST — DASHBOARD_DB_PATH (forwarded by the
-    # CC app to subprocesses) then DATABASE_PATH (src/lib/db/index.ts) — so this
-    # re-seed can never write to a decoy DB the dashboard never reads.
     for _ev in ("DASHBOARD_DB_PATH", "DATABASE_PATH"):
         _v = os.environ.get(_ev)
         if _v:
@@ -203,10 +201,6 @@ def find_db(explicit=None):
     candidates = [
         Path.cwd() / "mission-control.db",
         Path.home() / "projects" / "command-center" / "mission-control.db",
-        # VPS canonical: vps-docker-bootstrap.sh pins DATABASE_PATH here and
-        # watchdog-cc.sh / atomic-deploy.sh resolve the /data install dir. Placed
-        # right after the Mac ~/projects/command-center path (mirrors watchdog-cc.sh
-        # which checks $HOME/projects/command-center then /data/projects/command-center).
         Path("/data/projects/command-center") / "mission-control.db",
         Path.home() / "projects" / "mission-control" / "mission-control.db",
         Path("/opt/mission-control/mission-control.db"),
@@ -248,7 +242,6 @@ def find_company_info(departments_path):
             pass
 
     if not info["slug"]:
-        # Derive from the ZHC folder name (== company slug)
         info["slug"] = Path(departments_path).parent.name
 
     if not info["name"]:
@@ -268,11 +261,73 @@ def write_config(config_path, departments):
     print(f"  [sync] wrote {len(departments)} departments to {config_path}")
 
 
-# Reserved system/infrastructure workspaces that are NOT department-build rows
-# and must NEVER be pruned even when absent from the client's departments.json.
-# Mirrors the reserved ids seeded by the dashboard itself (migrations.ts): the
-# inbox/general-task/bugs/default infra columns and every CEO/master-orchestrator
-# alias. Compared case-insensitively.
+def merge_config(config_path, departments):
+    """
+    Merge-additive write to config/departments.json (U133).
+
+    For each department in ``departments`` (the source-of-truth build):
+      - If the ``id`` already exists in the LOCAL file, update its fields in place
+        (name, emoji, headTitle).
+      - If the ``id`` is new, APPEND it.
+    Departments that exist ONLY in the local file (custom departments the box
+    owner added manually or through the dashboard) are PRESERVED -- never deleted.
+
+    This is the safe update-flow path invoked from update.sh. It is deliberately
+    additive; removal of an upstream-deprecated department is a manual operator
+    action, never a surprise side-effect of an automated update.
+    """
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    existing = []
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                existing = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            existing = []
+    if not isinstance(existing, list):
+        existing = []
+
+    # Index existing departments by id for O(1) lookup.
+    existing_by_id = {}
+    for entry in existing:
+        if isinstance(entry, dict) and "id" in entry:
+            existing_by_id[entry["id"]] = entry
+
+    added, updated = 0, 0
+    for dept in departments:
+        if not isinstance(dept, dict):
+            continue
+        dept_id = dept.get("id", "")
+        if not dept_id:
+            continue
+        if dept_id in existing_by_id:
+            target = existing_by_id[dept_id]
+            target["name"] = dept.get("name", target.get("name", ""))
+            target["emoji"] = dept.get("emoji", target.get("emoji", ""))
+            if "headTitle" in dept:
+                target["headTitle"] = dept["headTitle"]
+            updated += 1
+        else:
+            entry = {
+                "id": dept_id,
+                "name": dept.get("name", ""),
+                "emoji": dept.get("emoji", ""),
+            }
+            if "headTitle" in dept:
+                entry["headTitle"] = dept["headTitle"]
+            existing.append(entry)
+            existing_by_id[dept_id] = entry
+            added += 1
+
+    with open(config_path, "w") as f:
+        json.dump(existing, f, indent=2)
+        f.write("\n")
+    kept = len(existing) - added
+    print(f"  [sync-merge] departments.json: added={added} updated={updated} "
+          f"kept={kept} total={len(existing)} -> {config_path}")
+
+
+# Reserved system/infrastructure workspaces
 RESERVED_WORKSPACE_IDS = frozenset({
     "default", "general-task", "bugs", "inbox",
     "master-orchestrator", "ceo", "dept-ceo", "ceo-com",
@@ -308,11 +363,6 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
         "accent": company_info["brand_accent"],
         "text": company_info["brand_text"],
     }})
-    # Issue #13: companies.slug is UNIQUE. A plain INSERT ... ON CONFLICT(id) crashes
-    # with a UNIQUE(slug) violation when an earlier seed created this company under a
-    # DIFFERENT id (e.g. a uuid) with the same slug. Pre-query by slug and branch
-    # UPDATE/INSERT so the upsert is safe on every SQLite version (no dependency on
-    # multi-target ON CONFLICT, which needs SQLite >= 3.35).
     existing_company = cur.execute(
         "SELECT id FROM companies WHERE slug=?", (slug,)).fetchone()
     if existing_company:
@@ -325,10 +375,6 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
             "VALUES (?, ?, ?, ?, ?)",
             (slug, company_info["name"], slug, company_info["industry"], company_config))
 
-    # Issue #11: widen the existing-set to ALL workspaces (any company_id), not just
-    # rows already under this slug. Rows seeded under a stale company_id (e.g. the
-    # pre-064 'default') are then ADOPTED (re-homed to the real slug + refreshed)
-    # instead of being duplicated or crashing on the PRIMARY KEY(id) INSERT.
     existing = {row[0]: row[1] for row in cur.execute(
         "SELECT id, company_id FROM workspaces").fetchall()}
     build_ids = set()
@@ -360,11 +406,6 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
             inserted += 1
             print(f"  [sync] inserted workspace: {dept_id} ({name})")
 
-    # Issue #11 prune (default OFF): remove stale workspaces that are no longer in
-    # the build. NEVER delete a valid client row -- reserved system workspaces and
-    # any workspace that still holds tasks are kept, the latter logged for operator
-    # review. Only invoked with --prune (run-full-install Phase 6c) so ad-hoc syncs
-    # can never over-delete.
     pruned = kept_nonempty = 0
     if prune:
         has_tasks = _table_exists(cur, "tasks")
@@ -407,6 +448,10 @@ def main():
                          "(skips reserved system workspaces and any workspace "
                          "that still holds tasks). Default OFF; enable from "
                          "run-full-install Phase 6c.")
+    ap.add_argument("--merge", action="store_true", default=False,
+                    help="Merge-additive departments.json write: add new, update "
+                         "existing, never delete custom departments. Safe for "
+                         "update-flow use (unlike the default overwrite).")
     args = ap.parse_args()
 
     departments, source = find_departments(args.company_slug)
@@ -418,7 +463,10 @@ def main():
     print(f"[sync] Source of truth: {source} ({len(departments)} departments)")
 
     config_path = args.config or str(Path(__file__).resolve().parent.parent / "config" / "departments.json")
-    write_config(config_path, departments)
+    if args.merge:
+        merge_config(config_path, departments)
+    else:
+        write_config(config_path, departments)
 
     db_path = find_db(args.db)
     if not db_path:

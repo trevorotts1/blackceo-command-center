@@ -539,9 +539,35 @@ NEW_VERSION=""
 success "New version: ${NEW_VERSION:-unknown}"
 
 # ----------------------------------------------------------
+# Sync departments file (U133 -- merge-additive, update-flow)
+# ----------------------------------------------------------
+# The onboarding flow populates departments.json once during initial setup, but
+# a CC update that ships new department definitions (or upstream changes to
+# existing departments) leaves the old per-box file untouched until the next
+# full onboarding reconcile -- which may never happen on an already-provisioned
+# box. Run sync-departments-from-build-state.py with --merge so new departments
+# are added and existing ones updated in place, while any custom departments the
+# box owner has added manually are preserved. This is a best-effort sync: the
+# script exits 0 when no ZHC build-state is available (a fresh box that hasn't
+# run Skill 23 yet), so the update never fails because departments aren't found.
+step "Step 3: Sync departments from build-state (merge-additive)"
+_SYNC_DEPTS_SCRIPT="$INSTALL_DIR/scripts/sync-departments-from-build-state.py"
+if [ -f "$_SYNC_DEPTS_SCRIPT" ] && command -v python3 >/dev/null 2>&1; then
+  if python3 "$_SYNC_DEPTS_SCRIPT" --merge; then
+    success "Departments synced from build-state (merge-additive)"
+  else
+    warn "Departments sync exited non-zero -- dashboard will use the pre-update departments file."
+  fi
+elif [ ! -f "$_SYNC_DEPTS_SCRIPT" ]; then
+  warn "sync-departments-from-build-state.py not found in the updated checkout -- departments file was NOT synced."
+else
+  warn "python3 not found -- cannot run departments sync; departments file was NOT synced."
+fi
+
+# ----------------------------------------------------------
 # Install dependencies
 # ----------------------------------------------------------
-step "Step 3: Install npm dependencies"
+step "Step 4: Install npm dependencies"
 if [ -f "package-lock.json" ]; then
   npm ci --no-audit --no-fund 2>&1 || npm install --no-audit --no-fund 2>&1 || fatal "npm install failed"
 else
@@ -552,7 +578,7 @@ success "Dependencies installed"
 # ----------------------------------------------------------
 # Run any database migrations (if seed files changed)
 # ----------------------------------------------------------
-step "Step 4: Database migrations (if applicable)"
+step "Step 5: Database migrations (if applicable)"
 # Schema/data migrations are applied automatically and idempotently by the
 # TypeScript migration runner (src/lib/db/migrate.ts -> runMigrations) on start;
 # there is nothing to apply here. The legacy seed-departments*.sql files are
@@ -579,7 +605,7 @@ fi
 # `npm run build` here (that path — used by the deprecated scripts/deploy.sh —
 # does a non-atomic `rm -rf .next` before building, opening a window where the
 # server has no build to serve).
-step "Step 5: Build + restart (atomic deploy)"
+step "Step 6: Build + restart (atomic deploy)"
 # LIVE-DERIVED pm2 app name (was hardcoded to "blackceo-command-center").
 # On a box whose live CC runs under a different pm2 name (e.g. an operator box
 # running "cc-prod" on :4000), the hardcoded name matched NOTHING: the atomic
@@ -685,7 +711,7 @@ fi
 # changed state. Report — after the swap — what the app will actually resolve
 # on its next boot, and from where. This is a REPORT, never a mutation: the
 # updater does not set, clear, or migrate a flag.
-step "Step 6: Operator kill-flag receipt"
+step "Step 7: Operator kill-flag receipt"
 CC_OVERRIDES_FILE="${CC_OPERATOR_OVERRIDES_FILE:-}"
 if [ -z "$CC_OVERRIDES_FILE" ]; then
   for _cand in "$HOME/.blackceo/command-center/operator-overrides.env" \
@@ -719,7 +745,7 @@ fi
 # ----------------------------------------------------------
 # Write UPDATE PENDING flag for agent
 # ----------------------------------------------------------
-step "Step 7: Notify agent via AGENTS.md flag"
+step "Step 8: Notify agent via AGENTS.md flag"
 if [ -d "/data/clawd" ]; then
   WORKSPACE="/data/clawd"
 else
