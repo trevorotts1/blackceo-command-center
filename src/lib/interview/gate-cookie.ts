@@ -33,7 +33,7 @@ export const INTERVIEW_COOKIE_NAME = 'mc_interview_complete';
  * An "incomplete" token gets a short TTL so the shell unlocks quickly (within a
  * page load or a minute) the moment update-interview-state.sh --complete lands.
  */
-export const COMPLETE_TTL_SECONDS = 60 * 60 * 24; // 24h
+export const COMPLETE_TTL_SECONDS = 30 * 24 * 60 * 60; // 24h
 export const INCOMPLETE_TTL_SECONDS = 60; // 1 min
 
 interface GatePayload {
