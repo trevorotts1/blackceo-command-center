@@ -123,6 +123,7 @@ export default defineConfig({
       // verifyInterviewToken, same vi.resetModules re-import pattern as
       // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
       'tests/integration/redirect-loop.test.ts',
+      'tests/unit/u088-symlink-guard.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
