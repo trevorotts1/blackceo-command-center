@@ -4970,6 +4970,74 @@ export const migrations: Migration[] = [
       console.log('[Migration 111] Inserted the "funnels" department workspace');
     },
   },
+  {
+    id: '112',
+    name: 'heal_command_center_company_id_bug',
+    up: (db) => {
+      // Fable-5 root cause: reseedWorkspacesFromConfig's UPSERT unconditionally
+      // overwrote company_id on every boot/converge, and seedCompanyGuarded's
+      // "first non-Default row by rowid" resolver returned a stale `command-center`
+      // placeholder (rowid 1) instead of the real client company (e.g. `marico`,
+      // rowid 2). The board filtered by resolveActiveCompanyId (placeholder-aware
+      // → `marico`), so the 41 reseeded workspaces (pinned to `command-center`)
+      // vanished from the board — only the 3 workspaces NOT in departments.json
+      // (never touched by reseed, still `marico`) remained visible.
+      //
+      // The resolver fix (resolveSeedingCompanyId) prevents recurrence and fixes
+      // NEW workspaces, but does NOT heal existing broken boxes: the UPSERT fix
+      // (5b13ef5) means reseed no longer re-points the already-misattributed
+      // `command-center` workspaces. This migration is the one-time self-heal that
+      // runs on deploy and fixes every existing box in the fleet.
+      //
+      // Idempotent + guarded: only runs if workspaces with company_id='command-center'
+      // exist AND a non-placeholder company exists to re-point them to. Never
+      // deletes, never touches workspaces already at the correct company_id.
+      console.log('[Migration 112] Healing command-center company_id bug (Fable-5)...');
+
+      const broken = db
+        .prepare(`SELECT COUNT(*) AS c FROM workspaces WHERE company_id = 'command-center'`)
+        .get() as { c: number };
+
+      if (broken.c === 0) {
+        console.log('[Migration 112] No workspaces with company_id=command-center — no-op');
+        return;
+      }
+
+      // Find the correct company_id: the first non-placeholder company (same logic
+      // as resolveSeedingCompanyId, but inline to avoid import cycle).
+      const companies = db
+        .prepare(`SELECT id, name, slug FROM companies ORDER BY rowid ASC`)
+        .all() as Array<{ id: string; name: string; slug: string }>;
+
+      const isPlaceholder = (c: { name: string; slug: string }) => {
+        const slug = (c.slug || '').toLowerCase();
+        return (
+          slug === 'default' ||
+          slug === 'command-center' ||
+          slug.startsWith('acme-') ||
+          c.name === 'Command Center' ||
+          c.name === 'Default'
+        );
+      };
+
+      const real = companies.find((c) => !isPlaceholder(c));
+
+      if (!real) {
+        console.warn(
+          '[Migration 112] Found workspaces with company_id=command-center but no non-placeholder company to re-point them to — skipping (box may be unconfigured)'
+        );
+        return;
+      }
+
+      const result = db
+        .prepare(`UPDATE workspaces SET company_id = ? WHERE company_id = 'command-center'`)
+        .run(real.id);
+
+      console.log(
+        `[Migration 112] Re-pointed ${result.changes} workspace(s) from company_id=command-center to company_id=${real.id}`
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
