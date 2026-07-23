@@ -250,6 +250,20 @@ fi
 cd "$INSTALL_DIR"
 
 # ----------------------------------------------------------
+# U026: Remove 0-byte mission-control.db decoy at project root
+# ----------------------------------------------------------
+# Some older checkouts have a 0-byte mission-control.db at the
+# command-center root (not the real DB at data/mission-control.db).
+# Any script that walks the legacy candidate list could hit this
+# decoy. Remove it before doing anything else -- it is idempotent
+# and safe (only deletes 0-byte files, never a non-zero DB).
+if [ -x "$INSTALL_DIR/scripts/remove-decoy-mission-control-db.sh" ]; then
+  bash "$INSTALL_DIR/scripts/remove-decoy-mission-control-db.sh" "$INSTALL_DIR" || true
+else
+  warn "scripts/remove-decoy-mission-control-db.sh not found -- skip decoy cleanup (the update installs it; the next run cleans)."
+fi
+
+# ----------------------------------------------------------
 # Backup retention + disk pre-check (OPENCLAW-BACKUP-RETENTION-V1)
 # ----------------------------------------------------------
 # Sourced from the checkout we are about to update — resolved AFTER
