@@ -29,6 +29,7 @@
 import { execFile } from 'child_process';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
+import path from 'path';
 import { promisify } from 'util';
 import {
   answersFilePath,
@@ -44,6 +45,13 @@ import {
 const execFileAsync = promisify(execFile);
 
 const SCRIPT_TIMEOUT_MS = 30_000;
+
+/** U049: Single canonical current schema version for .workforce-build-state.json.
+ *  Version 1 = every file that exists today with no `schemaVersion` field.
+ *  Version 2 = adds `schemaVersion`, normalizes `interviewComplete` to strict
+ *  boolean, and ensures core structure keys exist with safe defaults. */
+export const WORKFORCE_BUILD_STATE_SCHEMA_VERSION = 2;
+
 
 /** Header build_from_config() stamps on a SYNTHETIC (non-interactive) transcript.
  *  Its presence means the file is fabricated and does NOT count as a genuine
@@ -102,6 +110,8 @@ export interface VerticalPacksRecord {
 }
 
 export interface BuildState {
+  /** U049: Schema version for .workforce-build-state.json. Defaults to 1 when absent. */
+  schemaVersion?: number;
   interviewComplete?: boolean;
   interviewCompletedAt?: string;
   interviewSessionId?: string;
@@ -213,15 +223,135 @@ export class InterviewScriptMissingError extends Error {
 
 /* ───────────────────────────── Read / parse ────────────────────────────────── */
 
-/** Read + parse .workforce-build-state.json. Returns null on absence / bad JSON. */
+/**
+ * U049: Versioned read + parse of .workforce-build-state.json.
+ *
+ * Behaviour:
+ *   - Missing file -> null (caller treats as empty).
+ *   - Unparseable / corrupted JSON -> quarantines the file to
+ *     .workforce-build-state.json.corrupt-<unixTs> and returns null.
+ *   - Missing `schemaVersion` -> treated as version 1 and migrated to current.
+ *   - `schemaVersion` > current -> returns null (refuses to parse a newer file
+ *     with an older reader; prints the mismatch to stderr).
+ *   - `schemaVersion` < current -> runs the migration transform to current,
+ *     then proceeds. The migrated state is re-stamped on the NEXT write
+ *     (the read path never auto-writes).
+ */
 export function readBuildState(): BuildState | null {
   const p = buildStatePath();
+  let raw: string;
   try {
     if (!fs.existsSync(p)) return null;
-    return JSON.parse(fs.readFileSync(p, 'utf-8')) as BuildState;
+    raw = fs.readFileSync(p, 'utf-8');
   } catch {
     return null;
   }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    // U049: Corrupted/unparseable JSON -> quarantine, never treat as empty.
+    try {
+      const corruptPath = `${p}.corrupt-${Math.floor(Date.now() / 1000)}`;
+      fs.renameSync(p, corruptPath);
+      console.error(
+        `[build-state] CORRUPT JSON detected - quarantined ${p} -> ${corruptPath}. ` +
+          `Emit a fresh build-state from Skill-23 scripts or restore from backup.`,
+      );
+    } catch {
+      // Best-effort quarantine; if rename fails we still refuse to return data.
+    }
+    return null;
+  }
+
+  // Version detection: absent -> v1. Greater than current -> refuse.
+  const fileVersion =
+    typeof parsed.schemaVersion === 'number'
+      ? parsed.schemaVersion
+      : 1;
+
+  if (fileVersion > WORKFORCE_BUILD_STATE_SCHEMA_VERSION) {
+    console.error(
+      `[build-state] REFUSING to parse ${p}: file schemaVersion=${fileVersion} > ` +
+        `reader current=${WORKFORCE_BUILD_STATE_SCHEMA_VERSION}. ` +
+        `Upgrade your reader or downgrade the file.`,
+    );
+    return null;
+  }
+
+  // Migrate from older versions to current.
+  let state = parsed as unknown as BuildState;
+  if (fileVersion < WORKFORCE_BUILD_STATE_SCHEMA_VERSION) {
+    state = migrateBuildState(state, fileVersion, WORKFORCE_BUILD_STATE_SCHEMA_VERSION);
+  }
+
+  return state;
+}
+
+/**
+ * U049: Migrate build-state from `fromVersion` to `toVersion`.
+ *
+ * v1 -> v2 transform (additive/normalizing):
+ *   1. Stamp `schemaVersion: 2`.
+ *   2. Normalize `interviewComplete` to strict boolean (truthy -> true,
+ *      falsy/missing -> false). Pre-v2 files sometimes carried a string "true".
+ *   3. Ensure `interviewProgress` exists (falls back to {}).
+ *   4. Ensure `canonicalReconciliation` exists with a `decisions` map
+ *      (falls back to { decisions: {} }).
+ *   5. Ensure `interviewSessionId` is a string when present (coerce to
+ *      String; drop null/undefined).
+ */
+export function migrateBuildState(
+  state: BuildState,
+  fromVersion: number,
+  toVersion: number,
+): BuildState {
+  let s = { ...state };
+  for (let v = fromVersion; v < toVersion; v++) {
+    switch (v) {
+      case 1:
+        s = migrateV1toV2(s);
+        break;
+    }
+  }
+  s.schemaVersion = toVersion;
+  return s;
+}
+
+/** v1 -> v2 migration steps. See `migrateBuildState` for field documentation. */
+function migrateV1toV2(s: BuildState): BuildState {
+  const out: BuildState = { ...s };
+
+  // 1. Normalize interviewComplete to strict boolean.
+  out.interviewComplete = s.interviewComplete === true || s.interviewComplete === ('true' as unknown)
+    ? true
+    : false;
+
+  // 2. Ensure interviewProgress exists with safe defaults.
+  if (!out.interviewProgress || typeof out.interviewProgress !== 'object') {
+    out.interviewProgress = {};
+  }
+
+  // 3. Ensure canonicalReconciliation block exists.
+  if (!out.canonicalReconciliation || typeof out.canonicalReconciliation !== 'object') {
+    out.canonicalReconciliation = { decisions: {} };
+  }
+  if (!out.canonicalReconciliation.decisions || typeof out.canonicalReconciliation.decisions !== 'object') {
+    out.canonicalReconciliation = { ...out.canonicalReconciliation, decisions: {} };
+  }
+
+  // 4. Coerce interviewSessionId to string or drop it.
+  const sid = (out as Record<string, unknown>).interviewSessionId;
+  if (sid !== undefined && sid !== null) {
+    (out as Record<string, unknown>).interviewSessionId = String(sid);
+  }
+
+  // 5. Stamp version.
+  out.schemaVersion = 2;
+
+  return out;
+}
 }
 
 /** Convenience: interviewProgress (or empty object) from the live build-state. */
@@ -500,6 +630,8 @@ export function getOrCreateInterviewSessionId(): string {
       return String(raw.interviewSessionId); // set by a concurrent writer
     }
     raw.interviewSessionId = sessionId;
+    // U049: Stamp the current schema version on every write.
+    raw.schemaVersion = WORKFORCE_BUILD_STATE_SCHEMA_VERSION;
     const tmp = `${p}.ts.tmp.${process.pid}.${Date.now()}`;
     fs.writeFileSync(tmp, `${JSON.stringify(raw, null, 2)}\n`, 'utf-8');
     fs.renameSync(tmp, p);

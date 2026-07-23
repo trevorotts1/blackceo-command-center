@@ -44,7 +44,15 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from pathlib import Path
+
+# U049: Single canonical current schema version for .workforce-build-state.json.
+# Version 1 = every file that exists today with no `schemaVersion` field.
+# Version 2 = adds `schemaVersion`, normalizes `interviewComplete` to strict
+# boolean, and ensures core structure keys exist with safe defaults.
+_WORKFORCE_BUILD_STATE_SCHEMA_VERSION = 2
+
 
 # DATA-08: single shared DB resolver (shared-utils/resolve_db.py) so this script
 # and the Command Center app always resolve the SAME mission-control.db.
@@ -69,13 +77,108 @@ def _build_state_path():
 
 
 def _load_build_state():
+    """U049: Version-aware load of .workforce-build-state.json.
+
+    Returns a dict or an empty dict when the file is absent / quarantined /
+    version-refused. Never throws.
+    """
     p = _build_state_path()
     try:
         with open(p) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+            raw = f.read()
+    except OSError:
         return {}
 
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # U049: Corrupted/unparseable JSON -> quarantine, never treat as empty.
+        try:
+            ts = int(time.time())
+            corrupt_path = str(p) + f".corrupt-{ts}"
+            os.rename(str(p), corrupt_path)
+            print(
+                f"[build-state] CORRUPT JSON detected - quarantined {p} -> "
+                f"{corrupt_path}. Emit a fresh build-state from Skill-23 "
+                f"scripts or restore from backup.",
+                file=sys.stderr,
+            )
+        except OSError:
+            pass
+        return {}
+
+    # Version detection: absent -> v1. Greater than current -> refuse.
+    file_version = parsed.get("schemaVersion", 1)
+    if not isinstance(file_version, (int, float)):
+        file_version = 1
+
+    file_version = int(file_version)
+
+    if file_version > _WORKFORCE_BUILD_STATE_SCHEMA_VERSION:
+        print(
+            f"[build-state] REFUSING to parse {p}: file "
+            f"schemaVersion={file_version} > reader "
+            f"current={_WORKFORCE_BUILD_STATE_SCHEMA_VERSION}. "
+            f"Upgrade your reader or downgrade the file.",
+            file=sys.stderr,
+        )
+        return {}
+
+    if file_version < _WORKFORCE_BUILD_STATE_SCHEMA_VERSION:
+        parsed = _migrate_build_state(
+            parsed, file_version, _WORKFORCE_BUILD_STATE_SCHEMA_VERSION
+        )
+
+    return parsed
+
+
+def _migrate_build_state(state, from_version, to_version):
+    """U049: Migrate build-state dict from `from_version` to `to_version`.
+
+    v1 -> v2 transform (additive/normalizing):
+      1. Stamp `schemaVersion: 2`.
+      2. Normalize `interviewComplete` to strict bool.
+      3. Ensure `interviewProgress` exists (falls back to {}).
+      4. Ensure `canonicalReconciliation` exists with a `decisions` map.
+      5. Coerce `interviewSessionId` to string (or drop it).
+    """
+    s = dict(state)
+    for v in range(from_version, to_version):
+        if v == 1:
+            s = _migrate_v1_to_v2(s)
+    s["schemaVersion"] = to_version
+    return s
+
+
+def _migrate_v1_to_v2(s):
+    """v1 -> v2 migration steps."""
+    # 1. Normalize interviewComplete to strict boolean.
+    ic = s.get("interviewComplete")
+    s["interviewComplete"] = bool(
+        ic is True or (isinstance(ic, str) and ic.strip().lower() == "true")
+    )
+
+    # 2. Ensure interviewProgress exists with safe defaults.
+    if not isinstance(s.get("interviewProgress"), dict):
+        s["interviewProgress"] = {}
+
+    # 3. Ensure canonicalReconciliation block exists.
+    cr = s.get("canonicalReconciliation")
+    if not isinstance(cr, dict):
+        cr = {}
+        s["canonicalReconciliation"] = cr
+    if not isinstance(cr.get("decisions"), dict):
+        cr["decisions"] = {}
+
+    # 4. Coerce interviewSessionId to string or drop it.
+    sid = s.get("interviewSessionId")
+    if sid is not None:
+        s["interviewSessionId"] = str(sid)
+
+    # 5. Stamp version.
+    s["schemaVersion"] = 2
+
+    return s
 
 def _zhc_roots():
     """Zero-Human-Company roots to scan for <slug>/departments.json, priority order.

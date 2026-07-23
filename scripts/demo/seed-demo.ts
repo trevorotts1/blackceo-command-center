@@ -460,6 +460,7 @@ function writeWorkspaceFiles() {
     }
     const buildState = {
       interviewSessionId: sessionId,
+      schemaVersion: 2,
       interviewComplete: false,
       interviewProgress: {
         lastQuestionNumber: fx.interview.lastQuestionNumber,
@@ -479,6 +480,7 @@ function writeWorkspaceFiles() {
     // dashboard: interview already complete + build complete (nothing reads real state).
     const buildState = {
       interviewSessionId: sessionId,
+      schemaVersion: 2,
       interviewComplete: true,
       interviewCompletedAt: isoTs(20),
       interviewQc: { status: 'pass' },
