@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""validate-workflow-json.py — T2-39 / A46.
+"""validate-workflow-json.py — T2-39 / A46 / U091.
 
 WHY THIS EXISTS
 ---------------
@@ -44,8 +44,11 @@ USAGE
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
+import urllib.error
+import urllib.request
 
 FENCE_MARKERS = ("```", "~~~")
 
@@ -192,6 +195,82 @@ VALID_WORKFLOW = {
 }
 
 
+def check_importable_on_live(doc: dict, n8n_url: str, api_key: str | None = None,
+                              _urlopen=None) -> list[str]:
+    """Non-mutating import check: validate node types against a live n8n instance.
+    Calls GET /rest/node-types (read-only). Never POSTs, PATCHes, or DELETEs."""
+    if _urlopen is None:
+        _urlopen = urllib.request.urlopen
+    problems: list[str] = []
+    base = n8n_url.rstrip("/")
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if api_key:
+        headers["X-N8N-API-KEY"] = api_key
+    probe_url = f"{base}/rest/workflows?limit=1"
+    try:
+        req = urllib.request.Request(probe_url, headers=headers)
+        with _urlopen(req, timeout=15) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        s = ""
+        try:
+            s = exc.read().decode("utf-8", errors="replace")[:200]
+        except OSError:
+            pass
+        problems.append(f"n8n returned HTTP {exc.code} on probe ({probe_url}): {s}")
+        return problems
+    except urllib.error.URLError as exc:
+        problems.append(f"cannot reach n8n ({probe_url}): {exc.reason}")
+        return problems
+    except OSError as exc:
+        problems.append(f"network error contacting n8n ({probe_url}): {exc}")
+        return problems
+    node_types_url = f"{base}/rest/node-types"
+    try:
+        req = urllib.request.Request(node_types_url, headers=headers)
+        with _urlopen(req, timeout=15) as resp:
+            node_types_data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        s = ""
+        try:
+            s = exc.read().decode("utf-8", errors="replace")[:200]
+        except OSError:
+            pass
+        problems.append(f"n8n node-types HTTP {exc.code} ({node_types_url}): {s}")
+        return problems
+    except urllib.error.URLError as exc:
+        problems.append(f"cannot reach node-types ({node_types_url}): {exc.reason}")
+        return problems
+    except OSError as exc:
+        problems.append(f"network error fetching node-types ({node_types_url}): {exc}")
+        return problems
+    installed: set[str] = set()
+    if isinstance(node_types_data, dict) and isinstance(node_types_data.get("data"), list):
+        for nt in node_types_data["data"]:
+            if isinstance(nt, dict) and isinstance(nt.get("name"), str):
+                installed.add(nt["name"])
+    elif isinstance(node_types_data, list):
+        for nt in node_types_data:
+            if isinstance(nt, dict) and isinstance(nt.get("name"), str):
+                installed.add(nt["name"])
+    if not installed:
+        problems.append("n8n returned empty/unrecognized node-types payload")
+        return problems
+    for i, node in enumerate(doc.get("nodes", [])):
+        if not isinstance(node, dict):
+            continue
+        node_type = node.get("type", "")
+        if not isinstance(node_type, str) or not node_type.strip():
+            continue
+        if node_type not in installed:
+            name = node.get("name", f"nodes[{i}]")
+            problems.append(
+                f"nodes[{i}] ({name!r}) type={node_type!r} is NOT installed "
+                f"on {n8n_url}. Known types: {len(installed)} installed."
+            )
+    return problems
+
+
 def self_test() -> int:
     """Prove the validator accepts a valid workflow and rejects every defect class."""
     good = json.dumps(VALID_WORKFLOW, indent=2)
@@ -242,6 +321,9 @@ def self_test() -> int:
             verdict = "accepted" if ok else f"rejected — {problems[0][:78]}"
             print(f"  {'✓'} {label}: {verdict}")
 
+    # Import check tests (mock HTTP)
+    failures.extend(_self_test_import_check())
+
     if failures:
         print("\nSELF-TEST FAILED")
         for f in failures:
@@ -251,36 +333,169 @@ def self_test() -> int:
     return 0
 
 
+def _self_test_import_check() -> list[str]:
+    """Self-test for check_importable_on_live using mock HTTP responses."""
+    from contextlib import contextmanager
+    from io import BytesIO
+    failures: list[str] = []
+    installed_node_types = {
+        "data": [
+            {"name": "n8n-nodes-base.webhook"},
+            {"name": "n8n-nodes-base.set"},
+            {"name": "n8n-nodes-base.httpRequest"},
+        ]
+    }
+
+    @contextmanager
+    def _mock_urlopen(request, timeout=15):
+        url = request.full_url if hasattr(request, "full_url") else request.get_full_url()
+        body = BytesIO()
+        if "/rest/workflows" in url:
+            body.write(b"{}")
+        elif "/rest/node-types" in url:
+            body.write(json.dumps(installed_node_types).encode("utf-8"))
+        body.seek(0)
+        yield body
+
+    problems = check_importable_on_live(VALID_WORKFLOW, "https://localhost:5678", _urlopen=_mock_urlopen)
+    if problems:
+        failures.append("import check (all types installed): expected PASS, got " + str(problems))
+    else:
+        print("  OK import check (all types installed): passed")
+
+    bad_workflow = json.loads(json.dumps(VALID_WORKFLOW))
+    bad_workflow["nodes"].append({"name": "Unknown Node", "type": "n8n-nodes-base.nonexistent", "position": [400, 0], "parameters": {}})
+    problems = check_importable_on_live(bad_workflow, "https://localhost:5678", _urlopen=_mock_urlopen)
+    if not problems:
+        failures.append("import check (unknown node type): expected FAIL, got PASS")
+    elif "NOT installed" not in str(problems[0]):
+        failures.append(f"import check (unknown node type): wrong reason, got {problems}")
+    else:
+        print("  OK import check (unknown node type): rejected correctly")
+
+    @contextmanager
+    def _mock_http_error(request, timeout=15):
+        url = request.full_url if hasattr(request, "full_url") else request.get_full_url()
+        if "/rest/workflows" in url:
+            raise urllib.error.HTTPError(url, 502, "Bad Gateway", {}, BytesIO(b"upstream error"))
+        body = BytesIO()
+        body.seek(0)
+        yield body
+
+    problems = check_importable_on_live(VALID_WORKFLOW, "https://localhost:5678", _urlopen=_mock_http_error)
+    if not problems:
+        failures.append("import check (HTTP error): expected FAIL, got PASS")
+    elif "HTTP 502" not in str(problems[0]):
+        failures.append(f"import check (HTTP error): wrong reason, got {problems}")
+    else:
+        print("  OK import check (HTTP 502 on probe): rejected correctly")
+
+    @contextmanager
+    def _mock_unreachable(request, timeout=15):
+        url = request.full_url if hasattr(request, "full_url") else request.get_full_url()
+        raise urllib.error.URLError("connection refused")
+
+    problems = check_importable_on_live(VALID_WORKFLOW, "https://localhost:9999", _urlopen=_mock_unreachable)
+    if not problems:
+        failures.append("import check (URLError): expected FAIL, got PASS")
+    elif "cannot reach" not in str(problems[0]):
+        failures.append(f"import check (URLError): wrong reason, got {problems}")
+    else:
+        print("  OK import check (unreachable endpoint): rejected correctly")
+
+    api_key_observed: list[str] = []
+
+    @contextmanager
+    def _mock_capture_headers(request, timeout=15):
+        hi = {k.lower(): v for k, v in request.header_items()}
+        api_key_observed.append(hi.get("x-n8n-api-key", ""))
+        body = BytesIO()
+        url = request.full_url if hasattr(request, "full_url") else request.get_full_url()
+        if "/rest/workflows" in url:
+            body.write(b"{}")
+        elif "/rest/node-types" in url:
+            body.write(json.dumps(installed_node_types).encode("utf-8"))
+        body.seek(0)
+        yield body
+
+    check_importable_on_live(VALID_WORKFLOW, "https://localhost:5678", api_key="n8n_api_test123", _urlopen=_mock_capture_headers)
+    if not any("test123" in val for val in api_key_observed):
+        failures.append(f"import check (api key): header not sent, got {api_key_observed}")
+    else:
+        print("  OK import check (api key): header sent correctly")
+
+    return failures
+
+
+def _parse_args(argv: list[str]) -> tuple[str | None, str | None, list[str]]:
+    n8n_url: str | None = None
+    api_key: str | None = os.environ.get("N8N_API_KEY", "").strip() or None
+    positional: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--n8n-url" and i + 1 < len(argv):
+            i += 1
+            n8n_url = argv[i]
+        elif argv[i] == "--n8n-api-key" and i + 1 < len(argv):
+            i += 1
+            api_key = argv[i]
+        elif argv[i] == "--self-test":
+            positional.append(argv[i])
+        elif argv[i].startswith("--"):
+            i += 1
+            continue
+        else:
+            positional.append(argv[i])
+        i += 1
+    if n8n_url is None:
+        env_host = os.environ.get("N8N_HOST", "").strip()
+        if env_host:
+            n8n_url = env_host
+    return n8n_url, api_key, positional
+
+
 def main() -> int:
-    args = [a for a in sys.argv[1:]]
-    if "--self-test" in args:
+    n8n_url, api_key, positional = _parse_args(sys.argv[1:])
+    if "--self-test" in positional:
         return self_test()
-    if not args:
+    if not positional:
         print(
-            "❌ CHECK COULD NOT RUN — no workflow given.\n"
-            "   usage: validate-workflow-json.py <file.json> | - (stdin) | --self-test",
+            "CHECK COULD NOT RUN -- no workflow given.\n"
+            "   usage: validate-workflow-json.py <file.json> | - (stdin)"
+            " | --self-test [--n8n-url URL]",
             file=sys.stderr,
         )
         return 2
-    source = args[0]
+    source = positional[0]
     if source == "-":
         raw = sys.stdin.read()
         label = "<stdin>"
     else:
-        path = pathlib.Path(source)
-        if not path.is_file():
-            print(f"❌ CHECK COULD NOT RUN — no such file: {source}", file=sys.stderr)
+        path_ = pathlib.Path(source)
+        if not path_.is_file():
+            print(f"CHECK COULD NOT RUN -- no such file: {source}", file=sys.stderr)
             return 2
-        raw = path.read_text(encoding="utf-8")
+        raw = path_.read_text(encoding="utf-8")
         label = source
-
     problems = validate(raw)
     if problems:
-        print(f"❌ {label}: NOT importable — {len(problems)} problem(s)")
+        print(f"FAIL {label}: NOT importable -- {len(problems)} problem(s)")
         for problem in problems:
-            print(f"  ✗ {problem}")
+            print(f"  X {problem}")
         return 1
-    print(f"✅ {label}: parses, unfenced, schema-valid (static validation only — no live import attempted)")
+    if n8n_url:
+        print(f"\nRunning non-mutating import check against {n8n_url} ...")
+        doc = json.loads(raw)
+        live_problems = check_importable_on_live(doc, n8n_url, api_key=api_key)
+        if live_problems:
+            print(f"\nWARN {label}: static checks PASSED, but live import check found "
+                  f"{len(live_problems)} issue(s) against {n8n_url}")
+            for problem in live_problems:
+                print(f"  X {problem}")
+            return 1
+        print(f"OK {label}: live import check passed on {n8n_url}")
+    extra = f", live import check passed against {n8n_url}" if n8n_url else " (static validation only)"
+    print(f"OK {label}: parses, unfenced, schema-valid{extra}")
     return 0
 
 
