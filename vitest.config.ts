@@ -123,6 +123,9 @@ export default defineConfig({
       // verifyInterviewToken, same vi.resetModules re-import pattern as
       // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
       'tests/integration/redirect-loop.test.ts',
+      'tests/unit/u088-symlink-guard.test.ts',
+      // U047 — Interview completion cookie TTL extension (30-day TTL + Secure flag).
+      'tests/unit/gate-cookie-ttl.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

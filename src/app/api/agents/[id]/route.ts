@@ -1,150 +1,66 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run } from '@/lib/db';
-import { writeAgentFile, deleteAgentFolder } from '@/lib/agent-files';
+import { writeAgentFile, deleteAgentFolder, checkSharedFileSymlink } from '@/lib/agent-files';
 import type { Agent, UpdateAgentRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-// GET /api/agents/[id] - Get a single agent
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await params;
-    const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
-
-    if (!agent) {
-      return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
-    }
-
-    return NextResponse.json(agent);
-  } catch (error) {
-    console.error('Failed to fetch agent:', error);
-    return NextResponse.json({ error: 'Failed to fetch agent' }, { status: 500 });
-  }
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try { const { id } = await params; const a = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]); if (!a) return NextResponse.json({ error: 'Agent not found' }, { status: 404 }); return NextResponse.json(a); } catch (e) { console.error('GET:', e); return NextResponse.json({ error: 'Failed to fetch agent' }, { status: 500 }); }
 }
 
-// PATCH /api/agents/[id] - Update an agent
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const body: UpdateAgentRequest = await request.json();
+    const body: UpdateAgentRequest = await req.json();
+    const ex = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
+    if (!ex) return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
 
-    const existing = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
-    if (!existing) {
-      return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
-    }
+    const u: string[] = [];
+    const v: unknown[] = [];
+    if (body.name !== undefined) { u.push('name = ?'); v.push(body.name); }
+    if (body.role !== undefined) { u.push('role = ?'); v.push(body.role); }
+    if (body.description !== undefined) { u.push('description = ?'); v.push(body.description); }
+    if (body.avatar_emoji !== undefined) { u.push('avatar_emoji = ?'); v.push(body.avatar_emoji); }
+    if (body.status !== undefined) { u.push('status = ?'); v.push(body.status); run('INSERT INTO events (id, type, agent_id, message, created_at) VALUES (?, ?, ?, ?, ?)', [uuidv4(), 'agent_status_changed', id, `${ex.name} is now ${body.status}`, new Date().toISOString()]); }
+    if (body.is_master !== undefined) { u.push('is_master = ?'); v.push(body.is_master ? 1 : 0); }
+    if (body.soul_md !== undefined) { u.push('soul_md = ?'); v.push(body.soul_md); }
+    if (body.user_md !== undefined) { u.push('user_md = ?'); v.push(body.user_md); }
+    if (body.agents_md !== undefined) { u.push('agents_md = ?'); v.push(body.agents_md); }
+    if (body.tools_md !== undefined) { u.push('tools_md = ?'); v.push(body.tools_md); }
+    if (body.memory_md !== undefined) { u.push('memory_md = ?'); v.push(body.memory_md); }
+    if (body.model !== undefined) { u.push('model = ?'); v.push(body.model); }
+    if ((body as any).specialist_type !== undefined) { u.push('specialist_type = ?'); v.push((body as any).specialist_type); }
 
-    const updates: string[] = [];
-    const values: unknown[] = [];
+    if (u.length === 0) return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
 
-    if (body.name !== undefined) {
-      updates.push('name = ?');
-      values.push(body.name);
-    }
-    if (body.role !== undefined) {
-      updates.push('role = ?');
-      values.push(body.role);
-    }
-    if (body.description !== undefined) {
-      updates.push('description = ?');
-      values.push(body.description);
-    }
-    if (body.avatar_emoji !== undefined) {
-      updates.push('avatar_emoji = ?');
-      values.push(body.avatar_emoji);
-    }
-    if (body.status !== undefined) {
-      updates.push('status = ?');
-      values.push(body.status);
-
-      // Log status change event
-      const now = new Date().toISOString();
-      run(
-        `INSERT INTO events (id, type, agent_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), 'agent_status_changed', id, `${existing.name} is now ${body.status}`, now]
-      );
-    }
-    if (body.is_master !== undefined) {
-      updates.push('is_master = ?');
-      values.push(body.is_master ? 1 : 0);
-    }
-    if (body.soul_md !== undefined) {
-      updates.push('soul_md = ?');
-      values.push(body.soul_md);
-    }
-    if (body.user_md !== undefined) {
-      updates.push('user_md = ?');
-      values.push(body.user_md);
-    }
-    if (body.agents_md !== undefined) {
-      updates.push('agents_md = ?');
-      values.push(body.agents_md);
-    }
-    if (body.tools_md !== undefined) {
-      updates.push('tools_md = ?');
-      values.push(body.tools_md);
-    }
-    if (body.memory_md !== undefined) {
-      updates.push('memory_md = ?');
-      values.push(body.memory_md);
-    }
-    if (body.model !== undefined) {
-      updates.push('model = ?');
-      values.push(body.model);
-    }
-    if ((body as { specialist_type?: string }).specialist_type !== undefined) {
-      updates.push('specialist_type = ?');
-      values.push((body as { specialist_type: string }).specialist_type);
-    }
-
-    if (updates.length === 0) {
-      return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
-    }
-
-    updates.push('updated_at = ?');
-    values.push(new Date().toISOString());
-    values.push(id);
-
-    run(`UPDATE agents SET ${updates.join(', ')} WHERE id = ?`, values);
-
-    // Sync .md files to disk
-    const mdFields = ['soul_md', 'agents_md', 'tools_md', 'memory_md'] as const;
-    for (const field of mdFields) {
-      if (body[field] !== undefined) {
-        writeAgentFile(existing.name, field, body[field] || '');
+    // U088 preflight: reject shared-field symlink writes before DB update
+    for (const f of ['agents_md', 'tools_md'] as const) {
+      if (body[f] !== undefined && checkSharedFileSymlink(ex.name, f)) {
+        const fn = f === 'agents_md' ? 'AGENTS.md' : 'TOOLS.md';
+        return NextResponse.json({ error: 'shared_file_conflict', message: `Cannot write "${fn}" — symlink to shared template. Edit agents/_shared/ directly.`, column: f, filename: fn, agent: ex.name }, { status: 409 });
       }
     }
 
-    const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
-    return NextResponse.json(agent);
-  } catch (error) {
-    console.error('Failed to update agent:', error);
-    return NextResponse.json({ error: 'Failed to update agent' }, { status: 500 });
-  }
-}
+    u.push('updated_at = ?'); v.push(new Date().toISOString()); v.push(id);
+    run(`UPDATE agents SET ${u.join(', ')} WHERE id = ?`, v);
 
-// DELETE /api/agents/[id] - Delete an agent
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await params;
-    const existing = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
+    for (const f of ['soul_md', 'agents_md', 'tools_md', 'memory_md'] as const) {
+      if (body[f] !== undefined) writeAgentFile(ex.name, f, body[f] || '');
     }
 
-    // Delete or nullify related records first (foreign key constraints)
+    const a = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
+    return NextResponse.json(a);
+  } catch (e) { console.error('PATCH:', e); return NextResponse.json({ error: 'Failed to update agent' }, { status: 500 }); }
+}
+
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const ex = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
+    if (!ex) return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     run('DELETE FROM openclaw_sessions WHERE agent_id = ?', [id]);
     run('DELETE FROM events WHERE agent_id = ?', [id]);
     run('DELETE FROM messages WHERE sender_agent_id = ?', [id]);
@@ -152,16 +68,8 @@ export async function DELETE(
     run('UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = ?', [id]);
     run('UPDATE tasks SET created_by_agent_id = NULL WHERE created_by_agent_id = ?', [id]);
     run('UPDATE task_activities SET agent_id = NULL WHERE agent_id = ?', [id]);
-
-    // Now delete the agent
     run('DELETE FROM agents WHERE id = ?', [id]);
-
-    // Remove agent folder from disk
-    deleteAgentFolder(existing.name);
-
+    deleteAgentFolder(ex.name);
     return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error('Failed to delete agent:', error);
-    return NextResponse.json({ error: 'Failed to delete agent' }, { status: 500 });
-  }
+  } catch (e) { console.error('DELETE:', e); return NextResponse.json({ error: 'Failed to delete agent' }, { status: 500 }); }
 }
