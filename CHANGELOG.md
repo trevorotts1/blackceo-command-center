@@ -1,3 +1,9 @@
+## [v6.0.70] — 2026-07-23 — July-23-Fixes Batch 2 (CC)
+
+Units: U017, U019
+- U017 — Podcast/anthology workspace-seeding migration (113)
+- U019 — Exclude engine workspaces from company re-attribution
+
 ## [v6.0.66] — 2026-07-23 — July-23-Fixes Batch 1 (CC)
 
 Units: U013
