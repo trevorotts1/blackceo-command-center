@@ -5041,6 +5041,50 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '113',
+    name: 'seed_podcast_anthology_workspaces',
+    up: (db) => {
+      // U017: Podcast and Anthology cards are gated on `workspaces` rows with
+      // slug='podcast' / slug='anthology'. Those rows were only seeded at initial
+      // onboarding, so any client onboarded BEFORE those engines existed never
+      // gets the rows and the cards never render. This one-time, idempotent
+      // migration seeds them fleet-wide on the next update roll.
+      //
+      // company_id='default' makes the rows visible to ALL clients on the box
+      // (boardWhereClause treats 'default'/NULL/'' as the box's own unattributed
+      // rows — see src/lib/workspaces/board-query.ts). A box that already carries
+      // either workspace — by slug, whether seeded at onboarding or ad hoc by hand
+      // under a different id — is left COMPLETELY untouched: the slug existence
+      // check is a true no-op guard, and INSERT OR IGNORE additionally keys on the
+      // id PRIMARY KEY so re-running never duplicates.
+      console.log('[Migration 113] Seeding podcast/anthology workspaces (U017)...');
+
+      const now = new Date().toISOString();
+      const exists = db.prepare(`SELECT 1 FROM workspaces WHERE lower(slug) = ?`);
+      const insert = db.prepare(
+        `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'default', ?, ?, ?)`,
+      );
+
+      const seed = (
+        id: string, name: string, slug: string, description: string, icon: string, sortOrder: number,
+      ): number => {
+        if (exists.get(slug)) {
+          console.log(`[Migration 113] '${slug}' workspace already present — leaving untouched`);
+          return 0;
+        }
+        return insert.run(id, name, slug, description, icon, sortOrder, now, now).changes;
+      };
+
+      const podcast = seed('podcast', 'Podcast', 'podcast', 'Podcast production engine workspace.', '🎙️', 1100);
+      const anthology = seed('anthology', 'Anthology', 'anthology', 'Anthology production engine workspace.', '📚', 1101);
+
+      console.log(
+        `[Migration 113] Seeded workspaces — podcast=${podcast} anthology=${anthology} (0 = already present)`,
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
