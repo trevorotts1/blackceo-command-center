@@ -217,6 +217,9 @@ export async function runInterviewNudgeSweep(
   }
 
   // ── Reuse the client/session mirror row (owner id + a fallback activity ts) ──
+  // U013: mirror read for the owner id + a last-resort activity timestamp only —
+  // progress/idleness is decided from the canonical FILES above (seam readers).
+  // See docs/interview-state-source-of-truth.md.
   let sessionRow;
   try {
     sessionRow = getSession(sessionId);

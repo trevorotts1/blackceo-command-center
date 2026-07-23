@@ -142,6 +142,8 @@ export async function GET(request: NextRequest) {
     // index FROM the canonical files this GET just read. READ-ONLY on the session
     // id (never mints one on a GET) and best-effort: refreshInterviewMirror never
     // throws and the state response is returned regardless of the mirror outcome.
+    // U013: this route IS the sanctioned read path — it returns file-derived state;
+    // the mirror refresh is a side effect. See docs/interview-state-source-of-truth.md.
     refreshInterviewMirror();
 
     // Rail's "current question": prefer the live progress stamp, fall back to the

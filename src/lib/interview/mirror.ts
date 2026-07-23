@@ -19,6 +19,8 @@
  *     canonicalReconciliation.decisions and it NEVER gates anything. If the
  *     mirror and the files ever disagree, the FILES WIN — this module reconciles
  *     the mirror FROM the files, never the reverse.
+ *   • U013: the canonical source of interview state is the FILES, not the mirror
+ *     tables. See docs/interview-state-source-of-truth.md.
  *   • Every entry point is BEST-EFFORT and NEVER throws: a mirror failure
  *     (DB locked, malformed transcript, missing table) is swallowed and reported
  *     in the return value, so a failure to mirror can never fail the request that
