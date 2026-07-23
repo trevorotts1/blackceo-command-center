@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { getDb } from './db';
+import { resolveSeedingCompanyId } from './db/branding-seed';
 
 /**
  * Get the company name dynamically.
@@ -40,45 +41,10 @@ export function getCompanySlug(): string {
  * fail-open so an un-branded box shows every workspace rather than a blank board.
  */
 export function resolveActiveCompanyId(database?: Database.Database): string | null {
-  let rows: { id: string; name: string; slug: string }[];
-  try {
-    const db = database ?? getDb();
-    rows = db
-      .prepare('SELECT id, name, slug FROM companies ORDER BY rowid ASC')
-      .all() as { id: string; name: string; slug: string }[];
-  } catch {
-    return null;
-  }
-  if (rows.length === 0) return null;
-
-  const envSlug = (process.env.COMPANY_SLUG || '').trim().toLowerCase();
-  if (envSlug) {
-    const exact = rows.find((c) => (c.slug || '').toLowerCase() === envSlug);
-    if (exact) return exact.id;
-  }
-
-  const envName = (process.env.COMPANY_NAME || '').trim().toLowerCase();
-  if (envName) {
-    const byName = rows.find((c) => (c.name || '').toLowerCase() === envName);
-    if (byName) return byName.id;
-    const slugged = envName.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    if (slugged) {
-      const bySlug = rows.find((c) => (c.slug || '').toLowerCase() === slugged);
-      if (bySlug) return bySlug.id;
-    }
-  }
-
-  const isPlaceholder = (c: { name: string; slug: string }) => {
-    const slug = (c.slug || '').toLowerCase();
-    return (
-      slug === 'default' ||
-      slug === 'command-center' ||
-      slug.startsWith('acme-') ||
-      c.name === 'Command Center' ||
-      c.name === 'Default'
-    );
-  };
-
-  const real = rows.find((c) => !isPlaceholder(c));
-  return real ? real.id : null;
+  // Delegate to the ONE canonical resolver in branding-seed.ts so the board filter
+  // and the department seeder (reseedWorkspacesFromConfig) can never disagree about
+  // the active company — the Fable-5 attribution-drift root cause. branding-seed is
+  // a leaf module (imports only better-sqlite3 + runtime-config), so this adds no
+  // import cycle.
+  return resolveSeedingCompanyId(database ?? getDb());
 }

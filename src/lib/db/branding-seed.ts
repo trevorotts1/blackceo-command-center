@@ -150,6 +150,102 @@ export function slugifyCompanyName(name: string): string {
 }
 
 /**
+ * Placeholder / not-a-real-client company predicate — the SINGLE source of truth
+ * shared by BOTH the board filter (src/lib/company.ts resolveActiveCompanyId) and
+ * the department seeder (reseedWorkspacesFromConfig → this module), so the two can
+ * NEVER disagree about which company is "active" on a single-tenant box.
+ *
+ * A placeholder is a row that onboarding / the seed / a stale legacy install may
+ * leave behind that does NOT represent the client's real brand:
+ *   • slug `default` / name `Default`      — the un-branded seed sentinel
+ *   • slug `command-center` / name `Command Center` — the legacy pre-B.3 default
+ *     id. Boxes onboarded before the branding seed wrote a real slug carry a
+ *     `command-center` company row even though the client is someone else. This is
+ *     the exact row that used to hijack department attribution (Fable-5).
+ *   • slug `acme-*`                        — demo / sample company
+ *
+ * NOTE: this set is deliberately IDENTICAL to the predicate the board filter used
+ * before it was consolidated here — do NOT widen it casually, the floor-invariant
+ * test relies on an `acme-inc` row being selectable via an explicit COMPANY_SLUG env
+ * override even though its slug matches the `acme-*` placeholder pattern (the env
+ * override is checked against ALL rows first, see resolveSeedingCompanyId).
+ */
+export function isPlaceholderCompany(c: { name?: string | null; slug?: string | null }): boolean {
+  const slug = (c.slug || '').trim().toLowerCase();
+  const name = (c.name || '').trim();
+  return (
+    slug === 'default' ||
+    slug === 'command-center' ||
+    slug.startsWith('acme-') ||
+    name === 'Command Center' ||
+    name === 'Default'
+  );
+}
+
+/**
+ * Resolve the id of the ACTIVE client company for a single-tenant box — the ONE
+ * resolver used both when SEEDING departments (attribution) and when FILTERING the
+ * Kanban board, so the two always agree (the floor invariant depends on it).
+ *
+ * Resolution order (mirrors the pickCompany() heuristic behind /api/company):
+ *   1. COMPANY_SLUG env — exact slug match against ANY company row. An explicit
+ *      operator override wins even over a placeholder-slug row (deterministic,
+ *      independent of row order).
+ *   2. COMPANY_NAME env — name match against ANY row, then its slugified form.
+ *   3. The first NON-placeholder company row by rowid (skip default /
+ *      command-center / acme-* / "Command Center" / "Default").
+ *
+ * Returns null when ONLY placeholder/default companies exist (a box that has not
+ * been branded yet). Callers treat null as fail-open: the board shows every
+ * workspace rather than going blank, and the seeder falls back to the 'default'
+ * sentinel rather than mis-attributing to a placeholder.
+ *
+ * WHY THIS EXISTS (Fable-5 root cause): historically the board filtered with
+ * src/lib/company.ts resolveActiveCompanyId (placeholder-aware → skipped a stale
+ * `command-center` row) while the department seeder resolved its attribution via
+ * seedCompanyGuarded's "first non-Default row" (NOT placeholder-aware → picked
+ * that same stale `command-center` row). The two disagreed, so every boot/converge
+ * reseed re-pinned all departments to `command-center` while the board filtered on
+ * the real company — the board collapsed to just the handful of rows the reseed
+ * never touches. Routing BOTH paths through this single resolver makes the
+ * disagreement structurally impossible.
+ */
+export function resolveSeedingCompanyId(db: Database.Database): string | null {
+  let rows: { id: string; name: string; slug: string }[];
+  try {
+    rows = db
+      .prepare('SELECT id, name, slug FROM companies ORDER BY rowid ASC')
+      .all() as { id: string; name: string; slug: string }[];
+  } catch {
+    return null; // companies table missing (pre-migration) — caller falls back
+  }
+  if (rows.length === 0) return null;
+
+  // Explicit operator overrides win against ANY row (even a placeholder-slug row),
+  // so a COMPANY_SLUG/COMPANY_NAME pin is deterministic regardless of row order.
+  const envSlug = (process.env.COMPANY_SLUG || '').trim().toLowerCase();
+  if (envSlug) {
+    const exact = rows.find((c) => (c.slug || '').toLowerCase() === envSlug);
+    if (exact) return exact.id;
+  }
+
+  const envName = (process.env.COMPANY_NAME || '').trim().toLowerCase();
+  if (envName) {
+    const byName = rows.find((c) => (c.name || '').toLowerCase() === envName);
+    if (byName) return byName.id;
+    const slugged = envName.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (slugged) {
+      const bySlug = rows.find((c) => (c.slug || '').toLowerCase() === slugged);
+      if (bySlug) return bySlug.id;
+    }
+  }
+
+  // No explicit override — fall back to the first REAL (non-placeholder) company.
+  const real = rows.find((c) => !isPlaceholderCompany(c));
+  return real ? real.id : null;
+}
+
+/**
  * The single authoritative company-seed function.
  *
  * Decision tree (spec from B.3 + B.1):

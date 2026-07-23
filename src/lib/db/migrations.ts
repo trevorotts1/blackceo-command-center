@@ -20,7 +20,7 @@ import {
   safeIsDir,
   safeStatSync,
 } from '../fs/safe-fs';
-import { seedCompanyGuarded } from './branding-seed';
+import { seedCompanyGuarded, resolveSeedingCompanyId } from './branding-seed';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import {
@@ -6281,18 +6281,28 @@ export function reseedWorkspacesFromConfig(
     const depts = JSON.parse(raw);
     if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
 
-    // Ensure company row exists / resolve the ACTIVE company. seedCompanyGuarded
-    // returns partial-config for a blank OR unpopulated-template ("Your Company")
-    // company-config — in which case we FAIL CLOSED: do not seed departments under
-    // a fallback company (that is the attribution-drift bug this guards against).
+    // Ensure a company row exists (seedCompanyGuarded creates the real brand row
+    // from company-config.json, or the 'default' sentinel on an un-branded box —
+    // the FK target the INSERT below needs). It returns partial-config for a blank
+    // OR unpopulated-template ("Your Company") company-config — in which case we
+    // FAIL CLOSED: do not seed departments under a fallback company (that is the
+    // attribution-drift bug this guards against).
     const seedResult = seedCompanyGuarded(db);
     if (seedResult.reason === 'partial-config') {
       console.warn('[reseed] Aborting workspace reseed: partial/template company config (fail-closed, no mis-attribution)');
       return { created, updated };
     }
-    // Pin every seeded dept to the resolved active company id (re-homes rows that
-    // were created under the pre-064 'default' sentinel or a stale company_id).
-    const companyId = seedResult.companyId ?? 'default';
+    // Resolve the ACTIVE company through the ONE canonical, placeholder-aware
+    // resolver — the SAME function the board filter uses (resolveActiveCompanyId),
+    // so a NEW workspace is always attributed to the company the board shows. This
+    // is the Fable-5 root-cause fix: seedCompanyGuarded's companyId is the FIRST
+    // non-Default row by rowid, which on legacy boxes is a stale `command-center`
+    // placeholder even though the client is `marico` — attributing new depts to a
+    // company the board filters OUT. resolveSeedingCompanyId skips placeholders.
+    // When only placeholder companies exist (un-branded box) it returns null and we
+    // fall back to the row seedCompanyGuarded just ensured exists — always a valid
+    // FK target, so the INSERT can never violate workspaces.company_id's FK.
+    const companyId = resolveSeedingCompanyId(db) ?? seedResult.companyId ?? 'default';
 
     // company_id is set ONLY on INSERT (a brand-new workspace on a fresh box).
     // The ON CONFLICT branch deliberately does NOT touch company_id: re-running
