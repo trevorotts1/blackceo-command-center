@@ -114,6 +114,10 @@ export default defineConfig({
       // its own migration 109), proved against a REAL pre-existing DB shape
       // (a box already on migration 109 with real rows), not just a fresh DB.
       'tests/unit/migration-110-ceo-chat-usage-columns.test.ts',
+      // U022 — no-redirect-loop integration test (hardening). Drives the
+      // middleware directly via vitest with real HMAC-signed cookies, proving
+      // the interview-lock never creates a redirect loop under any cookie state.
+      'tests/integration/redirect-loop.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
