@@ -109,6 +109,15 @@ export function answersFilePath(recordedPath?: string | null): string {
 }
 
 /**
+ * U048: the encrypted transcript path — the canonical `.md` path with an
+ * `.enc` suffix. This is the primary write target after the encryption
+ * migration; the plaintext `.md` becomes a derived export only.
+ */
+export function answersEncFilePath(recordedPath?: string | null): string {
+  return `${answersFilePath(recordedPath)}.enc`;
+}
+
+/**
  * Resolve the interview-handoff tracker. Probes company-discovery first, then
  * the workspace root; falls back to the canonical company-discovery path.
  */

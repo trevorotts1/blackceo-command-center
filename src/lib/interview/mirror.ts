@@ -38,7 +38,7 @@
 import fs from 'fs';
 import {
   readBuildState,
-  readAnswers,
+  readTranscriptText,
   readHandoff,
   readInterviewProgress,
   derivedPercent,
@@ -119,15 +119,11 @@ export function parseAnswerBlocks(text: string): ParsedBlock[] {
   return blocks;
 }
 
-/** Read the transcript text at its resolved path, '' on absence / read error. */
+/** Read the transcript text at its resolved path, '' on absence / read error.
+ *  U048: reads through the encrypted store (readTranscriptText). */
 function readAnswersText(buildState: BuildState | null): string {
-  const info = readAnswers(buildState);
-  if (!info.exists) return '';
-  try {
-    return fs.readFileSync(info.path, 'utf-8');
-  } catch {
-    return '';
-  }
+  const { text, exists } = readTranscriptText(buildState);
+  return exists ? text : '';
 }
 
 /**

@@ -127,6 +127,11 @@ export default defineConfig({
       // bypass token signs/verifies correctly, rejects tampered/expired/absent
       // tokens, and has the correct 1-hour TTL.
       'tests/unit/interview-skip-defer.test.ts',
+      // U048 — interview answers encryption at rest. Crypto round-trip, file
+      // encryption (raw bytes never contain plaintext), plaintext migration,
+      // and DB mirror encrypt-on-write / decrypt-on-read. Uses the isolated-DB
+      // helper + the '@' alias, so vitest-only, never the tsx --test glob.
+      'tests/unit/interview-answers-encryption.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

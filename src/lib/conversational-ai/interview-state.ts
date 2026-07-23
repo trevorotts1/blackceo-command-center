@@ -78,7 +78,11 @@ function configSignal(): boolean {
 
 function interviewFileSignal(): boolean {
   // Probe the same locations migrations.ts / seed-workspaces.py use.
-  return resolveLogFile('workforce-interview-answers.md') !== null;
+  // U048: check both the plaintext .md and the encrypted .enc file.
+  return (
+    resolveLogFile('workforce-interview-answers.md') !== null ||
+    resolveLogFile('workforce-interview-answers.md.enc') !== null
+  );
 }
 
 function buildStateSignal(): boolean {

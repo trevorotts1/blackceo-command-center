@@ -32,6 +32,7 @@ import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import {
   answersFilePath,
+  answersEncFilePath,
   buildStatePath,
   handoffFilePath,
   listCanonicalDepartmentsScript,
@@ -40,6 +41,7 @@ import {
   updateInterviewStateScript,
   verticalDerivationGuardScript,
 } from './paths';
+import { readEncryptedFile, writeEncryptedFile, migratePlaintextFile } from './crypto';
 
 const execFileAsync = promisify(execFile);
 
@@ -324,37 +326,94 @@ export function readHandoff(): HandoffInfo {
 }
 
 /**
+ * U048: read the interview transcript text, preferring the encrypted store.
+ * Resolution order:
+ *   1. `.enc` file exists AND plaintext `.md` also exists → the shell script
+ *      (Skill-23) appended to the plaintext after the web layer encrypted.
+ *      Merge: decrypt the `.enc`, append the plaintext tail, re-encrypt the
+ *      merged result, remove the plaintext. Returns the merged text.
+ *   2. `.enc` file exists (no plaintext) → decrypt and return it.
+ *   3. plaintext `.md` exists (no `.enc`) → migrate (encrypt-in-place, remove
+ *      plaintext), then return the text. Migration is best-effort; a failure
+ *      leaves the plaintext in place and it is still returned.
+ *   4. neither → { exists: false }.
+ * Never throws.
+ */
+export function readTranscriptText(
+  state?: BuildState | null,
+): { text: string; path: string; exists: boolean } {
+  const recorded = readInterviewProgress(state).answersFilePath;
+  const encPath = answersEncFilePath(recorded);
+  const plainPath = answersFilePath(recorded);
+
+  const decrypted = readEncryptedFile(encPath);
+
+  // 1+2. Encrypted store exists.
+  if (decrypted != null) {
+    // Check for a plaintext tail the shell script appended after encryption.
+    try {
+      if (fs.existsSync(plainPath)) {
+        const tail = fs.readFileSync(plainPath, 'utf-8');
+        if (tail.trim()) {
+          // Merge: the plaintext tail is new content appended by the script.
+          const merged = decrypted + '\n' + tail;
+          // Re-encrypt the merged transcript and remove the plaintext.
+          try {
+            writeEncryptedFile(encPath, merged);
+            fs.unlinkSync(plainPath);
+          } catch {
+            // Non-fatal: the merge is best-effort. The plaintext stays for
+            // the next read to retry.
+          }
+          return { text: merged, path: encPath, exists: true };
+        }
+      }
+    } catch {
+      // fall through to returning just the decrypted content
+    }
+    return { text: decrypted, path: encPath, exists: true };
+  }
+
+  // 3. Plaintext exists → migrate to encrypted, return the text.
+  try {
+    if (fs.existsSync(plainPath)) {
+      const text = fs.readFileSync(plainPath, 'utf-8');
+      migratePlaintextFile(plainPath, encPath); // best-effort encrypt-in-place
+      return { text, path: plainPath, exists: true };
+    }
+  } catch {
+    // fall through to "nothing"
+  }
+
+  // 4. Nothing.
+  return { text: '', path: plainPath, exists: false };
+}
+
+/**
  * Inspect the answers transcript for the gate-#2 (anti-fabrication) signals.
  * Q-block count = lines whose trimmed form startsWith "**Q:**" — the EXACT
  * predicate build-workforce._genuine_interview_answers_file uses. `genuine`
  * reproduces its full rule (no synthetic header, >=3 blocks, >512 bytes).
+ * U048: reads through the encrypted store (readTranscriptText).
  */
 export function readAnswers(state?: BuildState | null): AnswersInfo {
-  const recorded = readInterviewProgress(state).answersFilePath;
-  const p = answersFilePath(recorded);
+  const { text, path, exists } = readTranscriptText(state);
   const base: AnswersInfo = {
     exists: false,
-    path: p,
+    path,
     sizeBytes: 0,
     qBlockCount: 0,
     hasSyntheticHeader: false,
     genuine: false,
   };
-  let text = '';
-  let size = 0;
-  try {
-    if (!fs.existsSync(p)) return base;
-    size = fs.statSync(p).size;
-    text = fs.readFileSync(p, 'utf-8');
-  } catch {
-    return base;
-  }
+  if (!exists) return base;
+  const size = Buffer.byteLength(text, 'utf-8');
   const hasSyntheticHeader = text.includes(NON_INTERACTIVE_ANSWERS_HEADER);
   const qBlockCount = text
     .split('\n')
     .filter((ln) => ln.trim().startsWith('**Q:**')).length;
   const genuine = !hasSyntheticHeader && qBlockCount >= 3 && size > 512;
-  return { exists: true, path: p, sizeBytes: size, qBlockCount, hasSyntheticHeader, genuine };
+  return { exists: true, path, sizeBytes: size, qBlockCount, hasSyntheticHeader, genuine };
 }
 
 /** One parsed Q/A block from workforce-interview-answers.md, content-level. */
@@ -418,12 +477,13 @@ export function parseAnswerBlocks(text: string): AnswerBlock[] {
  * an empty array on absence / read error (never throws). This is the reader the
  * /api/interview/answers route uses to render the review read-back — it performs
  * no writes and shells to no Skill-23 script.
+ * U048: reads through the encrypted store (readTranscriptText).
  */
 export function readAnswerBlocks(state?: BuildState | null): AnswerBlock[] {
-  const info = readAnswers(state);
-  if (!info.exists) return [];
+  const { text, exists } = readTranscriptText(state);
+  if (!exists) return [];
   try {
-    return parseAnswerBlocks(fs.readFileSync(info.path, 'utf-8'));
+    return parseAnswerBlocks(text);
   } catch {
     return [];
   }

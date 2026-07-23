@@ -51,7 +51,9 @@ import {
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
-import { answersFilePath } from '@/lib/interview/paths';
+import { answersFilePath, answersEncFilePath } from '@/lib/interview/paths';
+import { readTranscriptText } from '@/lib/interview/seam';
+import { writeEncryptedFile } from '@/lib/interview/crypto';
 import { mirrorCompanyAnswer } from '@/lib/interview/company-mirror';
 import {
   answerRequestSchema,
@@ -111,31 +113,43 @@ function isHttpUrl(value: string): boolean {
 }
 
 /**
- * Append a genuine Q/A block to workforce-interview-answers.md, mirroring
- * build-workforce.log_answer() byte-shape. Creates the file with the GENUINE
- * header (never the synthetic one) if it is absent, and ensures the parent
- * company-discovery dir exists. The append uses fs flag 'a' (O_APPEND), so the
- * write of a single block is atomic even if the Telegram agent is appending
- * concurrently to the same transcript.
+ * Append a genuine Q/A block to the interview transcript, mirroring
+ * build-workforce.log_answer() byte-shape. U048: the transcript is stored
+ * ENCRYPTED at rest in the `.enc` file. The plaintext `.md` is never the
+ * primary write target — it is only a derived export artifact.
  *
- * Returns the resolved transcript path (for the response / logging).
+ * Read-modify-write cycle:
+ *   1. Read existing transcript (readTranscriptText handles .enc/plaintext/merge)
+ *   2. Append the new Q/A block
+ *   3. Write the full transcript encrypted to the .enc file
+ *   4. Remove any plaintext .md (it is now stale)
+ *
+ * Returns the resolved encrypted transcript path (for the response / logging).
  */
 function appendAnswerBlock(args: {
   question: string;
   answer: string;
   confirmedFromContext?: string;
 }): string {
-  const p = answersFilePath();
-  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const encPath = answersEncFilePath();
+  const plainPath = answersFilePath();
+  fs.mkdirSync(path.dirname(encPath), { recursive: true });
 
-  if (!fs.existsSync(p)) {
+  // 1. Read existing transcript (handles .enc, plaintext, and merge cases).
+  const { text: existing, exists } = readTranscriptText();
+
+  // 2. Build the new content.
+  let content: string;
+  if (!exists) {
     // Fresh transcript → GENUINE header only. Guard against ever writing the
     // synthetic header (it would poison the genuineness gate).
     const header = `${GENUINE_HEADER}\n\nStarted: ${humanNow()}\n\n---\n\n`;
     if (header.includes(SYNTHETIC_HEADER)) {
       throw new Error('refusing to write synthetic non-interactive header');
     }
-    fs.appendFileSync(p, header, 'utf-8');
+    content = header;
+  } else {
+    content = existing;
   }
 
   let block = `**Q:** ${args.question}\n**A:** ${args.answer}\n`;
@@ -143,8 +157,19 @@ function appendAnswerBlock(args: {
     block += `**Provenance:** confirmed-from-context: ${args.confirmedFromContext.trim()}\n`;
   }
   block += `**Logged:** ${humanNow()}\n\n---\n\n`;
-  fs.appendFileSync(p, block, 'utf-8');
-  return p;
+  content += block;
+
+  // 3. Write encrypted.
+  writeEncryptedFile(encPath, content);
+
+  // 4. Remove stale plaintext (it is now superseded by the encrypted store).
+  try {
+    if (fs.existsSync(plainPath)) fs.unlinkSync(plainPath);
+  } catch {
+    // Non-fatal: the plaintext will be cleaned up on the next read.
+  }
+
+  return encPath;
 }
 
 export async function POST(req: NextRequest) {
