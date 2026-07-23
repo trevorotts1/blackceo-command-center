@@ -16,6 +16,7 @@ const AGENTS_DIR = path.join(process.cwd(), 'agents');
 // Map of database columns to file names
 const FILE_MAP: Record<string, string> = {
   soul_md: 'SOUL.md',
+  user_md: 'USER.md',
   agents_md: 'AGENTS.md',
   tools_md: 'TOOLS.md',
   memory_md: 'MEMORY.md',

@@ -116,7 +116,7 @@ export async function PATCH(
     run(`UPDATE agents SET ${updates.join(', ')} WHERE id = ?`, values);
 
     // Sync .md files to disk
-    const mdFields = ['soul_md', 'agents_md', 'tools_md', 'memory_md'] as const;
+    const mdFields = ['soul_md', 'user_md', 'agents_md', 'tools_md', 'memory_md'] as const;
     for (const field of mdFields) {
       if (body[field] !== undefined) {
         writeAgentFile(existing.name, field, body[field] || '');
