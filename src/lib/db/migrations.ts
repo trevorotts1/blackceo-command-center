@@ -6235,11 +6235,17 @@ export function isDepartmentOptedOut(dept: unknown): boolean {
  *
  * Guarantees:
  *   • Idempotent UPSERT keyed on dept id — re-running never duplicates a lane.
- *   • Additive / NON-DESTRUCTIVE — INSERT missing depts, UPDATE display fields +
- *     company_id; NEVER deletes a workspace or any task/agent data.
- *   • Company attribution — every chosen dept is (re-)homed to the ACTIVE company
- *     resolved by seedCompanyGuarded (mirrors sync-departments-from-build-state.py),
- *     so the active-company board filter never hides a chosen lane.
+ *   • Additive / NON-DESTRUCTIVE — INSERT missing depts, UPDATE display fields
+ *     (name/slug/icon/sort_order); NEVER deletes a workspace or any task/agent
+ *     data, and NEVER overwrites an existing row's company_id.
+ *   • Company attribution — a NEW workspace is stamped with the ACTIVE company
+ *     resolved by seedCompanyGuarded on INSERT (so a fresh box seeds correctly),
+ *     but an EXISTING row's company_id is left untouched on the ON CONFLICT path.
+ *     Re-running the reseed must not re-home a client's workspaces: when the
+ *     source resolves to a placeholder ('command-center'/'default') while the
+ *     board resolves to the real client, overwriting company_id would hide the
+ *     whole board (boardWhereClause drops foreign-company rows). See the upsert
+ *     comment below for the full rationale.
  *   • Fail-closed — a template / partial company-config aborts the reseed rather
  *     than mis-attributing departments to a bogus fallback company.
  *   • Opt-outs honored — an explicitly opted-out dept never gets a lane.
@@ -6288,6 +6294,18 @@ export function reseedWorkspacesFromConfig(
     // were created under the pre-064 'default' sentinel or a stale company_id).
     const companyId = seedResult.companyId ?? 'default';
 
+    // company_id is set ONLY on INSERT (a brand-new workspace on a fresh box).
+    // The ON CONFLICT branch deliberately does NOT touch company_id: re-running
+    // the reseed (every boot + every converge + every page load that opens the
+    // DB) must never OVERWRITE the per-client company_id an existing row already
+    // carries. Doing so is the fleet-wide attribution-wipe bug: when the source
+    // resolves to a placeholder ('command-center' / 'default') while the board's
+    // resolveActiveCompanyId() resolves to the REAL client (e.g. 'marico'), the
+    // old `company_id = excluded.company_id` re-homed every workspace to the
+    // placeholder — and boardWhereClause() hides any row whose company_id is a
+    // real-but-foreign id — so the client's entire board went blank. Existing
+    // rows keep their company_id; only display fields (name/slug/icon/sort_order)
+    // re-sync. New-box seeding is unaffected: the INSERT still stamps company_id.
     const upsertStmt = db.prepare(`
       INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -6295,7 +6313,6 @@ export function reseedWorkspacesFromConfig(
         name = excluded.name,
         slug = excluded.slug,
         icon = excluded.icon,
-        company_id = excluded.company_id,
         sort_order = excluded.sort_order
     `);
 
