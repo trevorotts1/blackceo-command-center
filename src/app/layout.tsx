@@ -6,6 +6,7 @@ import MobileNav from '@/components/MobileNav';
 import AppWalkthrough from '@/components/walkthrough/AppWalkthrough';
 import BrandTheme from '@/components/BrandTheme';
 import InterviewGateSync from '@/components/interview/InterviewGateSync';
+import InterviewBypassBanner from '@/components/interview/InterviewBypassBanner';
 import { loadCompanyConfig } from '@/lib/company-config';
 // DemoBanner removed by Track A1 (Wave 1 cleanup). Top header + breadcrumbs
 // handle navigation; AppShell sidebar import also retired.
@@ -70,6 +71,7 @@ export default function RootLayout({
             the middleware shell lock (WG-9) can gate the dashboard without
             reading fs/DB from the Edge runtime. Renders nothing. */}
         <InterviewGateSync />
+        <InterviewBypassBanner />
         {/* pb-16 md:pb-0: reserves room for the fixed MobileNav bar below
             md so it never overlaps page content; no-op at md+ where
             MobileNav renders nothing. */}

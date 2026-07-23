@@ -77,6 +77,7 @@ import WelcomeBack from '@/components/interview/WelcomeBack';
 
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
+import { skipInterviewForNow } from '@/components/interview/gate-actions';
 
 /* -------------------------------------------------------------------------- */
 /* structured question set (shared base + vendored branding JSON)              */
@@ -567,6 +568,13 @@ export default function InterviewClient() {
     );
   }, [fireMilestone, loadState]);
 
+  /* ---- U057 skip-for-now handler ---- */
+
+  const handleSkipForNow = useCallback(async () => {
+    try { await skipInterviewForNow(); } catch { /* non-fatal */ }
+    router.push('/');
+  }, [router]);
+
   /* ---- consent → begin (never proceed without an explicit choice) ---- */
 
   const beginInterview = useCallback(() => {
@@ -736,6 +744,7 @@ export default function InterviewClient() {
         booting={booting}
         onSelect={setConsent}
         onBegin={beginInterview}
+        onSkip={handleSkipForNow}
       />
     );
   }
@@ -1002,6 +1011,7 @@ function ConsentScreen({
   booting: boolean;
   onSelect: (c: Consent) => void;
   onBegin: () => void;
+  onSkip: () => void;
 }) {
   return (
     <div className={iv.root} style={brandStyle}>
@@ -1136,6 +1146,22 @@ function ConsentScreen({
             Choose an option above to start.
           </p>
         )}
+
+        {/* U057: "Skip for now" — sets a 1-hour bypass cookie for urgent dashboard access. */}
+        <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--iv-line)' }}>
+          <button
+            type="button"
+            onClick={onSkip}
+            className={ivcx(iv.btnSecondary)}
+            style={{ width: '100%', justifyContent: 'center' }}
+            data-walkthrough="interview-skip-button"
+          >
+            Skip for now
+          </button>
+          <p className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.72rem' }}>
+            Go straight to your dashboard. A reminder will stay at the top until you finish the interview.
+          </p>
+        </div>
       </motion.div>
     </div>
   );

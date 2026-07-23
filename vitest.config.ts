@@ -123,6 +123,10 @@ export default defineConfig({
       // verifyInterviewToken, same vi.resetModules re-import pattern as
       // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
       'tests/integration/redirect-loop.test.ts',
+      // U057 — Interview skip/defer bypass option tests. Verifies that the
+      // bypass token signs/verifies correctly, rejects tampered/expired/absent
+      // tokens, and has the correct 1-hour TTL.
+      'tests/unit/interview-skip-defer.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
