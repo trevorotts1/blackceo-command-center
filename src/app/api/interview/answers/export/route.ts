@@ -28,8 +28,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
-import { readAnswers, readBuildState } from '@/lib/interview/seam';
+import { readAnswers, readBuildState, readTranscriptText } from '@/lib/interview/seam';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -65,10 +64,22 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // Byte-faithful read of the canonical file (no re-rendering, no reshaping).
+    // U048: decrypt-on-export — the transcript is stored encrypted at rest.
+    // readTranscriptText handles .enc/plaintext/merge transparently.
     let body: string;
     try {
-      body = fs.readFileSync(info.path, 'utf-8');
+      const result = readTranscriptText(state);
+      if (!result.exists) {
+        return NextResponse.json(
+          {
+            error: 'no_answers_yet',
+            message:
+              'No interview answers have been recorded yet — the document is created with the first answer.',
+          },
+          { status: 404 },
+        );
+      }
+      body = result.text;
     } catch (err) {
       return NextResponse.json(
         {

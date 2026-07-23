@@ -27,6 +27,7 @@
 
 import { randomUUID } from 'crypto';
 import { queryAll, queryOne, run, transaction } from '../db';
+import { encryptAtRest, decryptOrPassthrough } from './crypto';
 
 /* ─────────────────────────────── Row shapes ───────────────────────────────── */
 
@@ -149,6 +150,10 @@ export function listSessions(): InterviewSessionRow[] {
  */
 export function upsertAnswer(input: UpsertAnswerInput): InterviewAnswerRow {
   const id = randomUUID();
+  // U048: encrypt the answer (PII) at rest. The question/provenance are
+  // structural metadata, not secrets — only the answer body is encrypted.
+  const storedAnswer =
+    input.answer != null && input.answer !== '' ? encryptAtRest(input.answer) : null;
   run(
     `
     INSERT INTO interview_answers
@@ -169,7 +174,7 @@ export function upsertAnswer(input: UpsertAnswerInput): InterviewAnswerRow {
       typeof input.questionNumber === 'number' ? input.questionNumber : null,
       input.phase ?? null,
       input.question ?? null,
-      input.answer ?? null,
+      storedAnswer,
       input.provenance ?? null,
       input.askedBy ?? null,
     ],
@@ -183,7 +188,16 @@ export function upsertAnswer(input: UpsertAnswerInput): InterviewAnswerRow {
           [input.sessionId, input.questionNumber],
         )
       : queryOne<InterviewAnswerRow>(`SELECT * FROM interview_answers WHERE id = ?`, [id]);
-  return row as InterviewAnswerRow;
+  return decryptAnswerRow(row as InterviewAnswerRow);
+}
+
+/**
+ * U048: decrypt the `answer` column on a mirror row before handing it to a
+ * caller. Pre-migration rows hold plaintext; decryptOrPassthrough passes those
+ * through unchanged so a mixed table reads correctly during the rollout.
+ */
+function decryptAnswerRow(row: InterviewAnswerRow): InterviewAnswerRow {
+  return { ...row, answer: decryptOrPassthrough(row.answer) };
 }
 
 /**
@@ -211,7 +225,7 @@ export function listAnswers(sessionId: string): InterviewAnswerRow[] {
     ORDER BY (question_number IS NULL), question_number ASC, datetime(created_at) ASC
     `,
     [sessionId],
-  );
+  ).map(decryptAnswerRow);
 }
 
 /**
@@ -243,4 +257,39 @@ export function mirrorSession(
     }
     return row;
   });
+}
+
+/**
+ * U048: one-time migration helper — scan all answer rows for plaintext values
+ * and encrypt them in place. Called lazily on first read after deploy. Idempotent:
+ * already-encrypted rows are skipped (isEncryptedEnvelope check). Never throws.
+ */
+export function migratePlaintextAnswers(): { migrated: number; skipped: number } {
+  try {
+    const rows = queryAll<InterviewAnswerRow>(
+      `SELECT id, answer FROM interview_answers WHERE answer IS NOT NULL`,
+    );
+    let migrated = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      if (row.answer == null || row.answer === '') {
+        skipped++;
+        continue;
+      }
+      // Already encrypted? Skip.
+      if (row.answer.startsWith('enc:v1:')) {
+        skipped++;
+        continue;
+      }
+      // Plaintext → encrypt in place.
+      const encrypted = encryptAtRest(row.answer);
+      run(`UPDATE interview_answers SET answer = ? WHERE id = ?`, [encrypted, row.id]);
+      migrated++;
+    }
+    return { migrated, skipped };
+  } catch {
+    // Non-fatal: migration retries on next read. A failure here never blocks
+    // the read path (decryptOrPassthrough handles mixed plaintext/encrypted).
+    return { migrated: 0, skipped: 0 };
+  }
 }

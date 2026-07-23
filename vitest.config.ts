@@ -114,6 +114,11 @@ export default defineConfig({
       // its own migration 109), proved against a REAL pre-existing DB shape
       // (a box already on migration 109 with real rows), not just a fresh DB.
       'tests/unit/migration-110-ceo-chat-usage-columns.test.ts',
+      // U048 — interview answers encryption at rest. Crypto round-trip, file
+      // encryption (raw bytes never contain plaintext), plaintext migration,
+      // and DB mirror encrypt-on-write / decrypt-on-read. Uses the isolated-DB
+      // helper + the '@' alias, so vitest-only, never the tsx --test glob.
+      'tests/unit/interview-answers-encryption.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
