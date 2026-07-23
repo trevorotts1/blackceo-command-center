@@ -61,9 +61,13 @@ export interface ProducerBoardCandidate {
   slug: string;
 }
 
+/** U018: a record mapping engine slug → whether its database is confirmed
+ *  present on this box. `null` means still loading (not yet resolved). */
+export type EngineDbPresence = Record<string, boolean> | null;
+
 export type ProducerCardSelection =
   | { degraded: true }
-  | { degraded: false; slugs: string[] };
+  | { degraded: false; slugs: string[]; notInstalled: string[] };
 
 /**
  * Decide which producer-board card slot(s) should render, given the current
@@ -76,17 +80,39 @@ export type ProducerCardSelection =
  * - `'loading' | 'ok'` → gate strictly on `presentSlugs`, exactly as before
  *   this fix — a box that genuinely has no producer engines still shows zero
  *   producer cards, which is correct (not every box has Anthology/Podcast).
+ *
+ * U018: when `engineDbPresence` is supplied, a workspace-present slug whose
+ * engine DB is absent is routed to `notInstalled` rather than `slugs` — the
+ * caller must render a "not installed" placeholder, never a live card that
+ * navigates to an empty page. When `engineDbPresence` is null (still loading
+ * / not yet fetched), every workspace slug is treated as live (pessimistic
+ * but avoids a flash of "not installed" during the initial fetch).
  */
 export function selectProducerCardSlugs(
   status: WorkspacesStatus,
   presentSlugs: Set<string>,
   candidates: ProducerBoardCandidate[],
+  engineDbPresence?: EngineDbPresence,
 ): ProducerCardSelection {
   if (status === 'error') {
     return { degraded: true };
   }
-  return {
-    degraded: false,
-    slugs: candidates.filter((c) => presentSlugs.has(c.slug)).map((c) => c.slug),
-  };
+  const workspaceSlugs = candidates
+    .filter((c) => presentSlugs.has(c.slug))
+    .map((c) => c.slug);
+  // U018: split workspace slugs by engine-DB presence. Without the record
+  // (or while it's null → still loading), every slug is treated as live.
+  if (!engineDbPresence) {
+    return { degraded: false, slugs: workspaceSlugs, notInstalled: [] };
+  }
+  const slugs: string[] = [];
+  const notInstalled: string[] = [];
+  for (const s of workspaceSlugs) {
+    if (engineDbPresence[s] === true) {
+      slugs.push(s);
+    } else {
+      notInstalled.push(s);
+    }
+  }
+  return { degraded: false, slugs, notInstalled };
 }

@@ -13,6 +13,7 @@ import {
   parseWorkspaceSlugs,
   buildWorkspacesFetchFailedEvent,
   selectProducerCardSlugs,
+  type EngineDbPresence,
 } from '@/lib/dashboard-workspaces';
 
 const cardVariants = {
@@ -73,6 +74,7 @@ export default function HomePage() {
   // P5-01: the "My AI CEO" BETA surface only appears when the feature flag is on
   // for this box. Null until resolved so the card never flashes then vanishes.
   const [ceoBetaEnabled, setCeoBetaEnabled] = useState<boolean | null>(null);
+  const [engineDbPresence, setEngineDbPresence] = useState<EngineDbPresence>(null);
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
   const cardBackground = hasBrand
@@ -209,6 +211,20 @@ export default function HomePage() {
     loadCeoBeta();
   }, []);
 
+  useEffect(() => {
+    async function loadEngineDbPresence() {
+      try {
+        const res = await fetch('/api/engine-db', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && typeof data === 'object') {
+          setEngineDbPresence(data as Record<string, boolean>);
+        }
+      } catch {}
+    }
+    loadEngineDbPresence();
+  }, []);
+
   // PRD 3.8 + v4.0.1 P0-1: landing layout. Operator Console is the 5th card.
   // F52: Conversational AI analytics is the 7th card (fills the next 3-col slot).
   const cards: EntryCard[] = [
@@ -310,15 +326,13 @@ export default function HomePage() {
     },
   ];
 
-  // P1-03 c.1: when the workspaces fetch has FAILED, we don't know whether
-  // Anthology/Podcast engines are present — render one visible degraded slot
-  // instead of silently showing zero producer cards (the old fail-EMPTY
-  // behavior). While loading (first attempt, not yet settled) or once it
-  // succeeds, behave as before: gate strictly on presentSlugs. The selection
-  // decision itself lives in the pure, unit-tested selectProducerCardSlugs()
-  // (src/lib/dashboard-workspaces.ts) — this just maps its answer onto the
-  // EntryCard shape this component renders.
-  const selection = selectProducerCardSlugs(workspacesStatus, presentSlugs, producerBoardCandidates);
+  // P1-03 c.1 + U018: gate on workspace-row AND engine-DB presence.
+  const selection = selectProducerCardSlugs(
+    workspacesStatus,
+    presentSlugs,
+    producerBoardCandidates,
+    engineDbPresence,
+  );
   const producerCards: EntryCard[] = selection.degraded
     ? [
         {
@@ -332,9 +346,23 @@ export default function HomePage() {
           degraded: true,
         },
       ]
-    : producerBoardCandidates
-        .filter((c) => selection.slugs.includes(c.slug))
-        .map(({ slug: _slug, ...card }) => card);
+    : [
+        ...producerBoardCandidates
+          .filter((c) => selection.slugs.includes(c.slug))
+          .map(({ slug: _slug, ...card }) => card),
+        ...producerBoardCandidates
+          .filter((c) => selection.notInstalled.includes(c.slug))
+          .map((c) => ({
+            title: c.title,
+            description: 'Engine not installed',
+            detail: `The ${c.title} engine is recognised on this box but its database is absent. Install the engine and seed its workspace row; this card will become live once the database file is present.`,
+            icon: c.icon,
+            gradient: 'from-gray-400 via-gray-500 to-gray-600',
+            route: '',
+            cta: 'Not Installed',
+            degraded: true,
+          })),
+      ];
 
   // Slot any present producer cards in right after Conversational AI, preserving
   // the core seven-card order. Falls back to appending if that card ever moves.
