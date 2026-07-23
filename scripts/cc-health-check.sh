@@ -97,6 +97,13 @@ is_cloudflare_access_login_redirect() {
   printf '%s' "$(url_path "$target")" | grep -qE '^/cdn-cgi/access/login/'
 }
 # ── (a) /api/health/deep ──────────────────────────────────────────────────────
+if [[ "$REMOTE_MODE" -eq 1 ]]; then
+  run_remote_health
+  # U014: remote mode skips self-box probe entirely; the operator asked for
+  # fleet-wide health, not local health. Run only the remote path and exit.
+  exit "$EXIT_CODE"
+fi
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "DRY-RUN MODE: would probe ${BASE_URL}/api/health/deep (self-box deep health)"
   log "DRY-RUN: skipping all live probes — printing mock JSON and exiting"
@@ -390,7 +397,7 @@ print(json.dumps(d,indent=2))
 # ── U014: remote client health probe ────────────────────────────────────────
 gateway_to_http_base() {
   local gw="$1"
-  printf '"'"'%s'"'"' "$gw" | sed -E '"'"'s#^ws://#http://#;s#^wss://#https://#'"'"'
+  echo "${gw}" | sed -E 's#^ws://#http://#;s#^wss://#https://#'
 }
 
 probe_remote_client() {
@@ -458,8 +465,13 @@ run_remote_health() {
   local clients_json
   clients_json=$(sqlite3 -json "$DATABASE_PATH"     "SELECT id, name, gateway_url FROM clients WHERE is_self = 0 ORDER BY name ASC" 2>/dev/null || echo "[]")
 
-  local client_count
-  client_count=$(printf '"'"'%s'"'"' "$clients_json" | py "len(d)" 0)
+  local client_count parse_ok
+  parse_ok=0
+  client_count=$(printf '%s' "$clients_json" | py "len(d)" 0) && parse_ok=1
+  if [[ "$parse_ok" -eq 0 ]]; then
+    log "remote: ERROR — failed to parse clients table JSON from ${DATABASE_PATH}; cannot determine client count" >&2
+    return 2
+  fi
 
   if [[ "$client_count" -eq 0 ]]; then
     log "remote: no remote clients registered"
@@ -471,7 +483,7 @@ run_remote_health() {
   local client_ids=() client_names=() client_gws=() idx count cid cname cgw line IFS_OLD
   IFS_OLD="$IFS"
   while IFS= read -r line; do
-    IFS=$'"'"'\t'"'"' read -r cid cname cgw <<< "$line"
+    IFS=$'\t' read -r cid cname cgw <<< "$line"
     client_ids+=("$cid")
     client_names+=("$cname")
     client_gws+=("$cgw")
@@ -488,9 +500,5 @@ for c in clients:
     probe_remote_client "${client_ids[$idx]}" "${client_names[$idx]}" "${client_gws[$idx]}"
   done
 }
-
-if [[ "$REMOTE_MODE" -eq 1 ]]; then
-  run_remote_health
-fi
 
 exit "$EXIT_CODE"
