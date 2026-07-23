@@ -50,7 +50,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { z } from 'zod';
 import { createResearchSearch, slugifyQuery } from '@/lib/research-store';
-import { listModels } from '@/lib/model-registry';
+import { resolveResearchModel } from '@/lib/research/model-resolver';
 import { vaultRoot } from '@/lib/platform';
 import {
   selectResearchProvider,
@@ -68,24 +68,10 @@ const requestSchema = z.object({
 });
 
 /**
- * Resolve the model for the selected provider: prefer an active registry row
- * for that provider, else the provider's documented default. The registry is
- * often empty on fresh installs, so the default keeps the module live.
+ * U086 — see src/lib/research/model-resolver.ts. The resolver is extracted to a
+ * separately testable module so tests can import it without pulling the Next.js
+ * route module resolver.
  */
-function resolveModel(slug: ResearchProviderSlug, fallback: string): string {
-  try {
-    const active = listModels({ provider: slug, status: 'active' });
-    const exact = active.find((m) => m.model_id === fallback || m.model_id.endsWith(`/${fallback}`));
-    if (exact) return exact.model_id.includes('/') ? exact.model_id.split('/').slice(1).join('/') : exact.model_id;
-    if (active.length > 0) {
-      const id = active[0].model_id;
-      return id.includes('/') ? id.split('/').slice(1).join('/') : id;
-    }
-  } catch {
-    // registry may be empty on fresh installs; fall through to the default.
-  }
-  return fallback;
-}
 
 function formatMarkdown(query: string, answer: string, citations: ResearchCitation[]): string {
   const now = new Date().toISOString();
@@ -158,7 +144,7 @@ export async function POST(req: NextRequest) {
 
   const depth = parsed.depth || 'shallow';
   const slug = selected.entry.slug;
-  const model = resolveModel(slug, selected.entry.defaultModel);
+  const model = resolveResearchModel(slug, selected.entry.defaultModel);
   const apiKey = process.env[selected.apiKeyEnv] as string;
   const started = Date.now();
 
@@ -177,7 +163,33 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // CC-resear-002 — an empty answer (provider returned 200 but no content,
+  // or only whitespace) is NOT a completed search.  Before this guard,
+  // an empty answer flowed onward to formatMarkdown (which rendered
+  // "(no answer returned)"), was persisted to research_searches, and
+  // was mirrored to the vault — so anything counting completed searches
+  // treated it as real.  Treat it as a provider failure: return 502
+  // without persisting.
+  if (!result.answer || result.answer.trim() === '') {
+    return NextResponse.json(
+      {
+        error: 'provider_failed',
+        detail: `Provider "${slug}" returned an empty answer. The search was not persisted.`,
+        provider: slug,
+        model,
+      },
+      { status: 502 }
+    );
+  }
+
+
   const markdown = formatMarkdown(parsed.query, result.answer, result.citations);
+
+  // Zero-citation results whose answer is non-empty are genuine provider
+  // responses — stamp them explicitly as ungrounded so the record is honest
+  // about the absence of evidence.
+  const isUngrounded = result.citations.length === 0;
+
 
   const metadata: Record<string, unknown> = {
     query: parsed.query,
@@ -191,6 +203,7 @@ export async function POST(req: NextRequest) {
     usage: result.usage || null,
     citation_count: result.citations.length,
     source_urls: result.citations.map((c) => c.url).filter(Boolean),
+    ...(isUngrounded ? { ungrounded: true } : {}),
   };
 
   // CC-resear-001 — HARD STOP before any durable write. `citation_count` and
