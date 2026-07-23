@@ -160,7 +160,33 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // CC-resear-002 — an empty answer (provider returned 200 but no content,
+  // or only whitespace) is NOT a completed search.  Before this guard,
+  // an empty answer flowed onward to formatMarkdown (which rendered
+  // "(no answer returned)"), was persisted to research_searches, and
+  // was mirrored to the vault — so anything counting completed searches
+  // treated it as real.  Treat it as a provider failure: return 502
+  // without persisting.
+  if (!result.answer || result.answer.trim() === '') {
+    return NextResponse.json(
+      {
+        error: 'provider_failed',
+        detail: `Provider "${slug}" returned an empty answer. The search was not persisted.`,
+        provider: slug,
+        model,
+      },
+      { status: 502 }
+    );
+  }
+
+
   const markdown = formatMarkdown(parsed.query, result.answer, result.citations);
+
+  // Zero-citation results whose answer is non-empty are genuine provider
+  // responses — stamp them explicitly as ungrounded so the record is honest
+  // about the absence of evidence.
+  const isUngrounded = result.citations.length === 0;
+
 
   const metadata: Record<string, unknown> = {
     query: parsed.query,
@@ -174,6 +200,7 @@ export async function POST(req: NextRequest) {
     usage: result.usage || null,
     citation_count: result.citations.length,
     source_urls: result.citations.map((c) => c.url).filter(Boolean),
+    ...(isUngrounded ? { ungrounded: true } : {}),
   };
 
   // CC-resear-001 — HARD STOP before any durable write. `citation_count` and
