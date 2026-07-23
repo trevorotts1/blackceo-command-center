@@ -20,6 +20,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 /** Playwright is always invoked from the repo root (config lives there). */
 const REPO_ROOT = process.cwd();
@@ -40,6 +41,79 @@ export const COOKIE_SECRET = 'interview-lock-e2e-secret-not-for-production';
 /** The Edge-readable gate cookie the middleware verifies (mirrors
  *  INTERVIEW_COOKIE_NAME in src/lib/interview/gate-cookie.ts). */
 export const INTERVIEW_COOKIE_NAME = 'mc_interview_complete';
+/** The latch cookie the middleware checks as fallback (U010). */
+export const LATCH_COOKIE_NAME = 'mc_interview_gate_latch';
+
+/**
+ * U010: forge a token the same way signInterviewToken signs — HMAC-SHA256 over
+ * base64url(payload). This mirrors the gate-cookie signing path using Node
+ * crypto (Buffer + createHmac) so we can produce authentic-looking complete and
+ * forged tokens without importing the WebCrypto-based gate-cookie module.
+ */
+function signForgePayload(complete: boolean, ttlSeconds: number): string {
+  const payload = JSON.stringify({
+    complete,
+    exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+  });
+  const b64 = Buffer.from(payload, 'utf-8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  const sig = crypto
+    .createHmac('sha256', COOKIE_SECRET)
+    .update(b64)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return `${b64}.${sig}`;
+}
+
+/**
+ * Produce a validly-signed "complete" cookie value with a 30-day TTL.
+ * Used by tests that want to prime the browser with a valid, pre-signed cookie
+ * without going through the sanctioned setter (so they can exercise the
+ * middleware's verification path directly).
+ */
+export function forgeCompleteCookie(): string {
+  return signForgePayload(true, 60 * 60 * 24 * 30);
+}
+
+/**
+ * Produce a validly-signed but EXPIRED "complete" cookie value.
+ * The TTL is negative so `exp` is in the past — but `complete:true` is still
+ * signed correctly, so the middleware's monotonic-unlock rule (accept an expired
+ * complete token) admits it.
+ */
+export function forgeExpiredCompleteCookie(): string {
+  return signForgePayload(true, -3600);
+}
+
+/**
+ * Produce a FORGED cookie value — it claims `complete:true` but has the wrong
+ * HMAC (signed with 'wrong-secret' instead of COOKIE_SECRET). The middleware
+ * must reject it and 302 to /interview.
+ */
+export function forgeForgedCookie(): string {
+  const payload = JSON.stringify({
+    complete: true,
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30,
+  });
+  const b64 = Buffer.from(payload, 'utf-8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  const sig = crypto
+    .createHmac('sha256', 'wrong-secret')
+    .update(b64)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return `${b64}.${sig}`;
+}
 
 /** Dedicated port + base URL so this suite never collides with the port-4000
  *  smoke server. Override with INTERVIEW_LOCK_PORT if 4123 is taken in CI. */

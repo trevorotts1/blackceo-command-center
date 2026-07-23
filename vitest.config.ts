@@ -123,6 +123,13 @@ export default defineConfig({
       // verifyInterviewToken, same vi.resetModules re-import pattern as
       // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
       'tests/integration/redirect-loop.test.ts',
+      // U010 — interview shell-lock fallback wiring regression lock. Static
+      // source checks that verify the middleware imports and calls
+      // checkInterviewCompleteViaFallback + signInterviewToken, checks
+      // gate-fallback fail-closed, and verifies gate-cookie exports the latch
+      // API but NOT the dead getInterviewCookieOptions export. Remove the
+      // fallback call from middleware.ts and this suite goes RED.
+      'tests/unit/middleware-shell-lock-fallback.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

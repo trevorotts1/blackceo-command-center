@@ -220,32 +220,6 @@ export async function verifyInterviewToken(
 }
 
 /**
- * Shared cookie options for both the main interview-complete cookie and the
- * persistent latch cookie (U010). HttpOnly prevents JS access, Secure is set
- * in production (TLS), SameSite=Lax allows the cookie on top-level navigations
- * from the same site, and path=/ covers every route. Callers pass `maxAge`
- * from the signed token's TTL.
- *
- * Note: these options are for the setter (server action) only. The middleware
- * reads cookies via `request.cookies.get()` and does not set them.
- */
-export function getInterviewCookieOptions(maxAge: number): {
-  httpOnly: boolean;
-  sameSite: 'lax';
-  path: string;
-  maxAge: number;
-  secure: boolean;
-} {
-  return {
-    httpOnly: true,
-    sameSite: 'lax',
-    path: '/',
-    maxAge,
-    secure: process.env.NODE_ENV === 'production',
-  };
-}
-
-/**
  * Mint a persistent latch cookie value (U010). The latch is a long-lived
  * (60-day) signed cookie set ONCE when the interview is confirmed complete
  * and refreshed on every page load alongside the main cookie. The middleware

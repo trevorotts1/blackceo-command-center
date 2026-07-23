@@ -31,7 +31,7 @@
 
 import { cookies } from 'next/headers';
 import { readBuildState } from '@/lib/interview/seam';
-import { INTERVIEW_COOKIE_NAME, signInterviewToken } from '@/lib/interview/gate-cookie';
+import { INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, signInterviewToken, signLatchToken } from '@/lib/interview/gate-cookie';
 
 /**
  * True only on the doctrine's two terminal signals, read from the canonical
@@ -64,6 +64,18 @@ export async function refreshInterviewGate(): Promise<void> {
       maxAge,
       secure: process.env.NODE_ENV === 'production',
     });
+    // U010: also set the persistent latch cookie as a fallback for the middleware
+    // when the main cookie is absent or expired (restart / tunnel reconnect).
+    if (complete) {
+      const latch = await signLatchToken();
+      cookies().set(LATCH_COOKIE_NAME, latch.value, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: latch.maxAge,
+        secure: process.env.NODE_ENV === 'production',
+      });
+    }
   } catch {
     // Non-fatal: cookies() may be read-only in some contexts; the middleware
     // fail-closed posture covers an unset cookie.

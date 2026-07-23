@@ -10,7 +10,8 @@ import {
   logUnauthorized401,
   sanitizeHeaderValue,
 } from '@/lib/probes/unauthorized-401-contract';
-import { INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gate-cookie';
+import { INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, signInterviewToken } from '@/lib/interview/gate-cookie';
+import { checkInterviewCompleteViaFallback } from '@/lib/interview/gate-fallback';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).
@@ -365,6 +366,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     return NextResponse.next();
   }
 
+  // U010: the middleware's own fallback fetch to /api/interview/gate-status must
+  // bypass every auth layer — it is internal-only, reads only two booleans from
+  // the canonical build-state, and must never be gated by MC_API_TOKEN or CF
+  // Access (the fetch originates from the same-process Edge middleware, which
+  // sets no Origin/Referer, so the same-origin passthrough would miss it).
+  // Matched BEFORE the API auth layer so the fallback always reaches its target.
+  if (matchesRoute(pathname, '/api/interview/gate-status')) {
+    return NextResponse.next();
+  }
+
   // AUD-71: /api/internal/auth-rejected is this middleware's OWN rewrite target
   // — the Node-runtime sink that owns the 401 counter. It is INTERNAL-ONLY. A
   // direct inbound request must never reach the handler, or an outside caller
@@ -553,10 +564,48 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   ) {
     const token = request.cookies.get(INTERVIEW_COOKIE_NAME)?.value;
     const verdict = await verifyInterviewToken(token);
-    if (verdict.complete !== true) {
-      const redirect = NextResponse.redirect(new URL('/interview', request.url), 302);
-      if (cfEmail) redirect.headers.set('x-operator-email', cfEmail);
-      return redirect;
+    if (verdict.complete === true) {
+      // Primary cookie is valid-complete — admit immediately.
+    } else {
+      // U010: fall back to the latch cookie first, then the gate-status endpoint.
+      let admitted = false;
+      let needCookie = false;
+      const latchToken = request.cookies.get(LATCH_COOKIE_NAME)?.value;
+      if (latchToken) {
+        const latchVerdict = await verifyInterviewToken(latchToken);
+        if (latchVerdict.complete === true && latchVerdict.valid) {
+          admitted = true;
+        }
+      }
+      if (!admitted) {
+        const origin = request.nextUrl.origin;
+        const fallbackComplete = await checkInterviewCompleteViaFallback(origin);
+        if (fallbackComplete) {
+          admitted = true;
+          needCookie = true; // mint cookie so next requests skip the fallback
+        }
+      }
+      if (!admitted) {
+        const redirect = NextResponse.redirect(new URL('/interview', request.url), 302);
+        if (cfEmail) redirect.headers.set('x-operator-email', cfEmail);
+        return redirect;
+      }
+      if (needCookie) {
+        // U010: fallback admitted the request — mint a signed complete cookie on
+        // the response so subsequent requests skip the HTTP fallback round-trip.
+        // signInterviewToken is Edge-safe (WebCrypto only, no Node imports).
+        const { value, maxAge } = await signInterviewToken(true);
+        const response = NextResponse.next();
+        response.cookies.set(INTERVIEW_COOKIE_NAME, value, {
+          httpOnly: true,
+          sameSite: 'lax',
+          path: '/',
+          maxAge,
+          secure: process.env.NODE_ENV === 'production',
+        });
+        if (cfEmail) response.headers.set('x-operator-email', cfEmail);
+        return response;
+      }
     }
   }
 
