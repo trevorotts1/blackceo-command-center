@@ -3593,7 +3593,7 @@ export const migrations: Migration[] = [
   },
   {
     id: '087',
-    name: 'add_interview_sessions',
+    name: 'add_interview_sessions', // canonical-source-of-truth: docs/interview-state-source-of-truth.md
     up: (db) => {
       // Wave 5 (AI Workforce Interview APP): a READ-MIRROR / fast-UI index for the
       // /interview surface. The FILES stay the single source of truth — the three

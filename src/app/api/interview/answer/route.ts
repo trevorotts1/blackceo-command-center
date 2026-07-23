@@ -376,7 +376,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 7) READ-MIRROR refresh (P2-2). Re-sync the interview_sessions/interview_answers
+  // canonical-source-of-truth: docs/interview-state-source-of-truth.md -- 7) READ-MIRROR refresh (P2-2). Re-sync the interview_sessions/interview_answers
   //    index FROM the canonical files just written. Best-effort and READ-ONLY on
   //    the files: refreshInterviewMirror never throws and never gates — a mirror
   //    failure NEVER fails this request (the canonical writes already landed).

@@ -2,7 +2,7 @@
  * Interview mirror-on-write sync (P2-2).
  *
  * Reads the canonical interview FILES (via the P0-1 seam's pure fs readers) and
- * upserts their contents into the `interview_sessions` + `interview_answers`
+ * upserts their contents into the `interview_sessions` + `interview_answers` -- canonical-source-of-truth: docs/interview-state-source-of-truth.md
  * READ-MIRROR tables (migration 087, store.ts). This is the ONLY module that
  * turns the on-disk artifacts into mirror rows.
  *

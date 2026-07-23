@@ -1,6 +1,6 @@
 /**
  * Interview mirror store — a READ-MIRROR / fast-UI index over the interview
- * files (P2-1). Backed by the `interview_sessions` + `interview_answers` tables
+ * files (P2-1). Backed by the `interview_sessions` + `interview_answers` tables -- canonical-source-of-truth: docs/interview-state-source-of-truth.md
  * created in migration 087.
  *
  * DOCTRINE (do not violate):
