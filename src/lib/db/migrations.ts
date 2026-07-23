@@ -3610,6 +3610,9 @@ export const migrations: Migration[] = [
       // interview_sessions — one row per interviewSessionId (the stable id the
       // seam persists into build-state). status/phase/percent are UI-facing mirror
       // fields derived from the handoff + build-state; NONE of them is authoritative.
+      // U013: this table is a READ-MIRROR, not the canonical source — the files
+      // (.workforce-build-state.json, workforce-interview-answers.md) are. An empty
+      // table does NOT mean "no interview." See docs/interview-state-source-of-truth.md.
       db.exec(`
         CREATE TABLE IF NOT EXISTS interview_sessions (
           id TEXT PRIMARY KEY,

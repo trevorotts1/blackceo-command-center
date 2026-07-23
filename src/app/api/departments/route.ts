@@ -286,6 +286,9 @@ export async function POST(request: NextRequest) {
     let sessionRequesterChatId: string | null = null;
     if (interviewSessionId) {
       try {
+        // U013: mirror read for the session's owner/channel only — NOT an
+        // interview-existence check. Canonical state lives in the files; see
+        // docs/interview-state-source-of-truth.md.
         const session = getSession(interviewSessionId);
         if (session?.owner_id) {
           sessionRequesterChatId = session.owner_id;

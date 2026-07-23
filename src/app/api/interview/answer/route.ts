@@ -380,6 +380,8 @@ export async function POST(req: NextRequest) {
   //    index FROM the canonical files just written. Best-effort and READ-ONLY on
   //    the files: refreshInterviewMirror never throws and never gates — a mirror
   //    failure NEVER fails this request (the canonical writes already landed).
+  //    U013: the mirror is a derived index, NOT the canonical source — see
+  //    docs/interview-state-source-of-truth.md.
   //    getOrCreateInterviewSessionId gives the sync a stable key (the seam's sole
   //    benign build-state write; it touches no gate field).
   let dbMirror: { ok: boolean; answers?: number; skipped?: string } | null = null;

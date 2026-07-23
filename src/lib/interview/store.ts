@@ -20,6 +20,10 @@
  *     the mirror FROM the files (via the seam), never the files from the mirror.
  *     A mirror write is best-effort: it must never block or override a canonical
  *     file write.
+ *   • U013: the canonical source of interview state is the FILES, not these
+ *     tables. An empty mirror does NOT mean "no interview." Dashboards must call
+ *     /api/interview/state (which reads the files), never query these tables
+ *     directly. See docs/interview-state-source-of-truth.md.
  *
  * The route handlers (mirror-on-write, P2-2) are the only callers of the upsert
  * helpers. Keep the surface small: upsert/get/list for sessions + answers.
