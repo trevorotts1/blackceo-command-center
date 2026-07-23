@@ -1,3 +1,8 @@
+## [v6.0.66] — 2026-07-23 — July-23-Fixes Batch 1 (CC)
+
+Units: U013
+- U013 — Document canonical interview state source-of-truth (files, not DB) with safety annotations on all 7 DB accessors
+
 ## [v6.0.65] — 2026-07-21 — A44/A46: the instruction closest to the agent contradicted the platform's impersonation guardrail
 
 v6.0.65 — Safety and contract fix. Four findings from the nine-cluster skill review, all
