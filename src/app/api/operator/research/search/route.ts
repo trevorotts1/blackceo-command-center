@@ -50,7 +50,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { z } from 'zod';
 import { createResearchSearch, slugifyQuery } from '@/lib/research-store';
-import { listModels } from '@/lib/model-registry';
+import { resolveResearchModel } from '@/lib/research/model-resolver';
 import { vaultRoot } from '@/lib/platform';
 import {
   selectResearchProvider,
@@ -68,25 +68,8 @@ const requestSchema = z.object({
 });
 
 /**
- * Resolve the model for the selected provider: prefer an active registry row
- * for that provider, else the provider's documented default. The registry is
- * often empty on fresh installs, so the default keeps the module live.
+ * U086 -- see src/lib/research/model-resolver.ts.
  */
-function resolveModel(slug: ResearchProviderSlug, fallback: string): string {
-  try {
-    const active = listModels({ provider: slug, status: 'active' });
-    const exact = active.find((m) => m.model_id === fallback || m.model_id.endsWith(`/${fallback}`));
-    if (exact) return exact.model_id.includes('/') ? exact.model_id.split('/').slice(1).join('/') : exact.model_id;
-    if (active.length > 0) {
-      const id = active[0].model_id;
-      return id.includes('/') ? id.split('/').slice(1).join('/') : id;
-    }
-  } catch {
-    // registry may be empty on fresh installs; fall through to the default.
-  }
-  return fallback;
-}
-
 function formatMarkdown(query: string, answer: string, citations: ResearchCitation[]): string {
   const now = new Date().toISOString();
   const lines: string[] = [];
@@ -158,7 +141,7 @@ export async function POST(req: NextRequest) {
 
   const depth = parsed.depth || 'shallow';
   const slug = selected.entry.slug;
-  const model = resolveModel(slug, selected.entry.defaultModel);
+  const model = resolveResearchModel(slug, selected.entry.defaultModel);
   const apiKey = process.env[selected.apiKeyEnv] as string;
   const started = Date.now();
 
