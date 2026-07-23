@@ -114,6 +114,15 @@ export default defineConfig({
       // its own migration 109), proved against a REAL pre-existing DB shape
       // (a box already on migration 109 with real rows), not just a fresh DB.
       'tests/unit/migration-110-ceo-chat-usage-columns.test.ts',
+      // U022 — no-redirect-loop integration test (hardening). Locks the
+      // interview shell-lock redirect invariants: a valid complete cookie never
+      // redirects to /interview; a protected page redirects exactly once and
+      // /interview itself never redirects back (no loop); completion is terminal
+      // (expired-but-signed complete token still unlocks); forged/incomplete
+      // tokens fail closed. Drives the REAL middleware + signInterviewToken /
+      // verifyInterviewToken, same vi.resetModules re-import pattern as
+      // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
+      'tests/integration/redirect-loop.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
