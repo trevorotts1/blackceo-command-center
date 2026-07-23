@@ -23,6 +23,11 @@ WHAT IT ENFORCES
 4. `src/lib/persona-dispatch.ts` still exports `STYLE_INSPIRED_GUARDRAIL` and it
    still carries both markers — if the dispatch-layer guarantee is renamed or
    gutted, this check reports it rather than silently continuing to pass.
+5. U060: no agent `SOUL.md` still carries the unresolved generator-template
+   placeholders ("Define this agent's personality..." / "What this agent should
+   and should not do."). That template text is the agent's active personality
+   and safety boundary, so an agent carrying it has neither and must not be
+   activated.
 
 FAIL-VISIBLY CONTRACT
 ---------------------
@@ -64,6 +69,17 @@ BANNED_DIRECTIVES = (
 # src/lib/persona-dispatch.ts. Kept identical on purpose.
 REQUIRED_MARKERS = ("style-inspired", "impersonation")
 
+# U060: unresolved generator-template placeholders. The agent generator ships
+# SOUL.md whose ## Personality / ## Boundaries sections still hold the literal
+# fill-in prompts below. That template text IS the agent's active personality
+# and safety boundary, so an agent carrying it has NO real personality and NO
+# real guardrails. No agent may be activated while its SOUL.md still matches the
+# template. Matched against the raw file text (the placeholders are exact).
+UNRESOLVED_SOUL_PLACEHOLDERS = (
+    "Define this agent's personality, communication style, and values here.",
+    "What this agent should and should not do.",
+)
+
 DISPATCH_REL = "src/lib/persona-dispatch.ts"
 GENERATOR_REL = "scripts/migrate-agents-to-zhc.py"
 GENERATOR_TEMPLATE_NAMES = ("STANDARD_DEFERRAL", "CEO_DEFERRAL")
@@ -87,6 +103,20 @@ def scan_text(label: str, text: str) -> list[str]:
             f"{label}: missing style-inspired guardrail marker(s) "
             f"{', '.join(repr(m) for m in missing)}"
         )
+    return problems
+
+
+def scan_soul(label: str, text: str) -> list[str]:
+    """U060: return problems for one SOUL.md — any unresolved generator-template
+    placeholder means the agent has no real personality/boundaries and must not
+    be activated."""
+    problems: list[str] = []
+    for placeholder in UNRESOLVED_SOUL_PLACEHOLDERS:
+        if placeholder in text:
+            problems.append(
+                f"{label}: SOUL.md still carries the unresolved generator template "
+                f"{placeholder!r} — agent has no real personality/boundaries"
+            )
     return problems
 
 
@@ -152,6 +182,13 @@ def run_scan(root: pathlib.Path) -> tuple[int, list[str], list[str]]:
     for path in identity_files:
         rel = path.relative_to(root)
         problems.extend(scan_text(str(rel), path.read_text(encoding="utf-8")))
+
+    # U060: no agent may carry an unresolved SOUL.md generator template.
+    soul_files = sorted((root / "agents").glob("*/SOUL.md"))
+    notes.append(f"agent soul files scanned: {len(soul_files)}")
+    for path in soul_files:
+        rel = path.relative_to(root)
+        problems.extend(scan_soul(str(rel), path.read_text(encoding="utf-8")))
 
     templates, gen_blockers = read_generator_templates(root)
     blockers.extend(gen_blockers)
@@ -255,21 +292,39 @@ def self_test() -> int:
         else:
             print("  ✓ direction 4 — missing dispatch anchor reports CANNOT RUN (exit 2)")
 
+        # U060 DIRECTION 5: reintroduce an unresolved SOUL.md template → FAIL.
+        shutil.copy2(REPO_ROOT / DISPATCH_REL, clean / DISPATCH_REL)
+        soul_victim = sorted((clean / "agents").glob("*/SOUL.md"))[0]
+        soul_victim.write_text(
+            "# Agent\n\n## Personality\n"
+            "Define this agent's personality, communication style, and values here.\n\n"
+            "## Boundaries\nWhat this agent should and should not do.\n",
+            encoding="utf-8",
+        )
+        code, problems, _ = run_scan(clean)
+        if code != 1 or not any("unresolved generator template" in p for p in problems):
+            failures.append(
+                f"DIRECTION 5 (unresolved SOUL.md template must FAIL) got exit {code}, "
+                f"problems={problems}"
+            )
+        else:
+            print(f"  ✓ direction 5 — unresolved SOUL.md template fails (exit 1): {problems[0]}")
+
     # The script must also be invocable end-to-end against the real repo.
     proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
     if proc.returncode != 0:
         failures.append(
-            f"DIRECTION 5 (real repo must PASS) exit {proc.returncode}:\n{proc.stdout}{proc.stderr}"
+            f"DIRECTION 6 (real repo must PASS) exit {proc.returncode}:\n{proc.stdout}{proc.stderr}"
         )
     else:
-        print("  ✓ direction 5 — the real repository passes (exit 0)")
+        print("  ✓ direction 6 — the real repository passes (exit 0)")
 
     if failures:
         print("\nSELF-TEST FAILED")
         for f in failures:
             print(f"  ✗ {f}")
         return 1
-    print("\nSELF-TEST PASSED (5 directions)")
+    print("\nSELF-TEST PASSED (6 directions)")
     return 0
 
 
