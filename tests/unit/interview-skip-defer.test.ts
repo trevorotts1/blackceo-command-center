@@ -10,7 +10,7 @@
  *   6. Edge case: bypass token expires after BYPASS_TTL_SECONDS (1 hour).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   signInterviewBypassToken,
   verifyInterviewBypassToken,
@@ -51,18 +51,23 @@ describe('U057 — Interview skip/defer bypass cookie', () => {
   });
 
   it('verifyInterviewBypassToken returns false for an expired token', async () => {
-    // Verify that a token with an already-expired timestamp is rejected.
-    // We can't easily sign an expired token through the public API, but we
-    // can verify that a token with exp in the past is rejected.
-    const expiredPayload = btoa(JSON.stringify({ exp: 1 })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    // We don't know the real HMAC, but even a real HMAC would fail because the
-    // signature won't verify. The test validates the structural check: any token
-    // with a past timestamp + invalid sig is rejected.
-    const ok = await verifyInterviewBypassToken(`${expiredPayload}.aaaaa`);
-    expect(ok).toBe(false);
+    vi.useFakeTimers();
+    try {
+      // Sign a REAL token while fake timers are active
+      const { value } = await signInterviewBypassToken();
 
-    // The main behavior test above already proves a valid token passes.
-    // This test exists to document that expiry is checked.
+      // Token should be valid right now
+      expect(await verifyInterviewBypassToken(value)).toBe(true);
+
+      // Advance time past the TTL
+      vi.advanceTimersByTime((BYPASS_TTL_SECONDS + 1) * 1000);
+
+      // Now the real signed token should be expired
+      const ok = await verifyInterviewBypassToken(value);
+      expect(ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('bypass TTL is exactly 1 hour (3600 seconds)', () => {
