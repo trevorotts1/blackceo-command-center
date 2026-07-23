@@ -10,7 +10,7 @@ import {
   logUnauthorized401,
   sanitizeHeaderValue,
 } from '@/lib/probes/unauthorized-401-contract';
-import { INTERVIEW_COOKIE_NAME, verifyInterviewToken } from '@/lib/interview/gate-cookie';
+import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, verifyInterviewToken, verifyInterviewBypassToken } from '@/lib/interview/gate-cookie';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).
@@ -554,9 +554,13 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     const token = request.cookies.get(INTERVIEW_COOKIE_NAME)?.value;
     const verdict = await verifyInterviewToken(token);
     if (verdict.complete !== true) {
-      const redirect = NextResponse.redirect(new URL('/interview', request.url), 302);
-      if (cfEmail) redirect.headers.set('x-operator-email', cfEmail);
-      return redirect;
+      const bypassToken = request.cookies.get(INTERVIEW_BYPASS_COOKIE_NAME)?.value;
+      const bypassed = await verifyInterviewBypassToken(bypassToken);
+      if (!bypassed) {
+        const redirect = NextResponse.redirect(new URL('/interview', request.url), 302);
+        if (cfEmail) redirect.headers.set('x-operator-email', cfEmail);
+        return redirect;
+      }
     }
   }
 
