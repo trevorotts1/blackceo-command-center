@@ -139,6 +139,7 @@ export default defineConfig({
       // API but NOT the dead getInterviewCookieOptions export. Remove the
       // fallback call from middleware.ts and this suite goes RED.
       'tests/unit/middleware-shell-lock-fallback.test.ts',
+      'tests/unit/content-delivery-handoff.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
