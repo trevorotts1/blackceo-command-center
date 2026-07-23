@@ -109,6 +109,8 @@ Master Orchestrator (CEO) gets the special variant: persona is INPUT, but compan
 
 ### Documentation
 See PRD v2.1 (`onboarding PRD v2.1.md` in user's local Downloads) for the complete specification. Executes in order: v1.1 (foundation) → v2.0 (intelligence) → v2.1 (zero-human-company spec).
+
+**Adding a new engine?** Read `docs/ENGINES.md` first — a new engine must ship a workspace-seeding migration alongside its code + card (the U017 pattern), or its card never renders on already-provisioned boxes.
 <!-- END v2.1 SECTION -->
 
 
