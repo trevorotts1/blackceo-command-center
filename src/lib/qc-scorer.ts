@@ -697,6 +697,123 @@ export function probeImageFile(filePath: string): { valid: true; ext: string; si
 }
 
 // ---------------------------------------------------------------------------
+// Text-artifact content extraction (U082)
+// ---------------------------------------------------------------------------
+
+/**
+ * Plain-text formats the scorer can extract content from for the judge. These
+ * cover the common document deliverables (notes, markdown manuscripts, reports,
+ * data, config). Binary document formats (PDF/DOCX/XLSX) are NOT here — they
+ * need a decoder this module does not depend on; they stay valid on existence +
+ * size but carry a "content not extractable" note so the judge knows it is
+ * scoring metadata, not verified content (see probeTextFile).
+ */
+const TEXT_EXTENSIONS = new Set([
+  '.txt', '.md', '.markdown', '.mdx', '.csv', '.tsv', '.json', '.jsonl',
+  '.html', '.htm', '.xml', '.yaml', '.yml', '.toml', '.ini', '.log',
+  '.rst', '.tex', '.adoc', '.ts', '.tsx', '.js', '.jsx', '.py', '.sh',
+  '.sql', '.css', '.svg',
+]);
+
+/** Bounded read window — never read a whole large file into memory. */
+const CONTENT_EXCERPT_MAX_BYTES = 8192;
+/** Bounded excerpt surfaced to the judge (keeps the prompt small). */
+const CONTENT_EXCERPT_MAX_CHARS = 2000;
+
+export interface TextStructuralChecks {
+  lines: number;
+  words: number;
+  /** Count of non-whitespace characters — a placeholder/empty draft is near 0. */
+  nonEmptyChars: number;
+}
+
+export interface TextProbe {
+  valid: boolean;
+  sizeBytes: number;
+  /** Bounded content excerpt (first CONTENT_EXCERPT_MAX_CHARS chars), else null. */
+  excerpt: string | null;
+  /** Deterministic structural checks, else null when not extracted. */
+  structuralChecks: TextStructuralChecks | null;
+  /** Note for the judge when content could not be extracted (unsupported format). */
+  contentNote?: string;
+  /** Reason for invalidity (only when valid=false). */
+  invalidReason?: string;
+}
+
+/**
+ * Probe a non-image deliverable for the judge (U082).
+ *
+ * The old behaviour validated a non-image deliverable by a positive byte count
+ * ALONE — the manifest handed to the judge carried title, type, path, validity
+ * and byte count, but NO content. Two files with the same name and size received
+ * the same verdict regardless of contents, so a placeholder or truncated draft
+ * scored identically to a finished deliverable.
+ *
+ * This reads a BOUNDED content excerpt and computes deterministic structural
+ * checks (line / word / non-empty-char counts) so the judge scores CONTENT, not
+ * just existence:
+ *   • plain-text format  → excerpt + structural checks, valid on readable+non-empty;
+ *   • unreadable file    → valid=false, named reason (FAIL-CLOSED — a genuine
+ *                          I/O failure is never passed on byte count);
+ *   • empty file         → valid=false;
+ *   • unsupported format → valid on existence+size, but excerpt=null with a
+ *                          "content not extractable" note, so the judge is not
+ *                          misled into thinking content was verified. (We do NOT
+ *                          fail-closed here: binary deliverables like PDF/DOCX/
+ *                          video are legitimate; failing them would regress the
+ *                          image/media pipeline. The note keeps scoring honest.)
+ */
+export function probeTextFile(filePath: string): TextProbe {
+  if (!existsSync(filePath)) {
+    return { valid: false, sizeBytes: 0, excerpt: null, structuralChecks: null, invalidReason: `File not found: ${filePath}` };
+  }
+  let sz = 0;
+  try { sz = statSync(filePath).size; } catch { /* ignore */ }
+  if (sz === 0) {
+    return { valid: false, sizeBytes: 0, excerpt: null, structuralChecks: null, invalidReason: `File is empty (0 bytes): ${filePath}` };
+  }
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  if (!TEXT_EXTENSIONS.has(ext)) {
+    // Readable but not a text format we can extract — keep it valid on
+    // existence+size, but tell the judge content was not verified.
+    return {
+      valid: true,
+      sizeBytes: sz,
+      excerpt: null,
+      structuralChecks: null,
+      contentNote: `content not extractable for format '${ext}' — scored on existence/size only`,
+    };
+  }
+  let content: string;
+  try {
+    const fd = openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(sz, CONTENT_EXCERPT_MAX_BYTES));
+      const bytesRead = readSync(fd, buf, 0, buf.length, 0);
+      content = buf.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch (err) {
+    // FAIL-CLOSED: a deliverable we cannot read is not passed on byte count.
+    return {
+      valid: false,
+      sizeBytes: sz,
+      excerpt: null,
+      structuralChecks: null,
+      invalidReason: `File unreadable: ${filePath} (${err instanceof Error ? err.message : String(err)})`,
+    };
+  }
+  const excerpt = content.slice(0, CONTENT_EXCERPT_MAX_CHARS);
+  const structuralChecks: TextStructuralChecks = {
+    lines: content.split('\n').length,
+    words: content.split(/\s+/).filter(Boolean).length,
+    nonEmptyChars: content.replace(/\s/g, '').length,
+  };
+  return { valid: true, sizeBytes: sz, excerpt, structuralChecks };
+}
+
+// ---------------------------------------------------------------------------
 // Deliverable manifest (passed to the artifact-aware QC prompt)
 // ---------------------------------------------------------------------------
 
@@ -712,6 +829,16 @@ export interface DeliverableManifestItem {
   valid: boolean;
   /** Reason for invalidity (only present when valid=false) */
   invalidReason?: string;
+  /**
+   * U082 — bounded content excerpt for text deliverables, so the judge scores
+   * CONTENT, not just byte count. null for images/URLs and for text formats we
+   * could not extract (see contentNote).
+   */
+  contentExcerpt?: string | null;
+  /** U082 — deterministic structural checks (lines/words/non-empty chars). */
+  structuralChecks?: TextStructuralChecks | null;
+  /** U082 — note when content was not extractable (e.g. binary format). */
+  contentNote?: string;
 }
 
 export interface QCScorerInput {
@@ -961,7 +1088,20 @@ function buildQCPrompt(input: QCScorerInput): string {
       const status = d.valid
         ? `EXISTS — ${d.sizeBytes} bytes${d.dimensions ? `, ${d.dimensions}` : ''}`
         : `MISSING/INVALID — ${d.invalidReason ?? 'unknown reason'}`;
-      return `  ${i + 1}. "${d.title}" [${d.type}] path=${d.path} → ${status}`;
+      let line = `  ${i + 1}. "${d.title}" [${d.type}] path=${d.path} → ${status}`;
+      // U082: surface a bounded content excerpt + deterministic structural
+      // checks so the judge scores CONTENT, not just byte count. A placeholder
+      // or truncated draft has near-zero non-empty chars and reads as such.
+      if (d.structuralChecks) {
+        const sc = d.structuralChecks;
+        line += `\n     structural: ${sc.lines} lines, ${sc.words} words, ${sc.nonEmptyChars} non-empty chars`;
+      }
+      if (d.contentExcerpt) {
+        line += `\n     content excerpt:\n${d.contentExcerpt.split('\n').map((l) => `       | ${l}`).join('\n')}`;
+      } else if (d.contentNote) {
+        line += `\n     note: ${d.contentNote}`;
+      }
+      return line;
     }).join('\n');
 
     const sopSection = input.sopSuccessCriteria
@@ -992,6 +1132,11 @@ ${sopSection}
    - 5–6.9: Artifact present but likely wrong content or degraded quality.
    - 1–4.9: Artifact missing, empty, or clearly wrong type.
 3. A terse request title is NEVER a gap.
+4. When a CONTENT EXCERPT and structural checks are provided, judge the ACTUAL
+   CONTENT, not just the byte count. A deliverable with near-zero non-empty
+   chars, or whose excerpt is a placeholder / template / truncated stub that does
+   not address the request, is NOT a finished deliverable — score it low (≤4.0)
+   and name the gap, even though the file exists and is non-empty.
 
 **Gate:** ≥8.5 = PASS (auto-approve), <8.5 = RETURN (kick back for rework).
 
@@ -4036,28 +4181,23 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             };
           }
 
-          // Non-image file: simple existence + size check.
-          if (!existsSync(rawPath)) {
-            return {
-              title: d.title,
-              path: rawPath,
-              type: 'file',
-              sizeBytes: null,
-              dimensions: null,
-              valid: false,
-              invalidReason: `File not found: ${rawPath}`,
-            };
-          }
-          let sz = 0;
-          try { sz = statSync(rawPath).size; } catch { /* ignore */ }
+          // Non-image file: extract bounded content + structural checks (U082).
+          // The old code validated by byte count alone — a placeholder scored
+          // identically to a finished deliverable. probeTextFile reads a bounded
+          // excerpt and computes line/word/non-empty-char counts so the judge
+          // scores CONTENT, not just existence.
+          const probe = probeTextFile(rawPath);
           return {
             title: d.title,
             path: rawPath,
             type: 'file',
-            sizeBytes: sz,
+            sizeBytes: probe.valid ? probe.sizeBytes : null,
             dimensions: null,
-            valid: sz > 0,
-            invalidReason: sz === 0 ? `File is empty (0 bytes): ${rawPath}` : undefined,
+            valid: probe.valid,
+            invalidReason: probe.invalidReason,
+            contentExcerpt: probe.excerpt,
+            structuralChecks: probe.structuralChecks,
+            contentNote: probe.contentNote,
           };
         });
 
