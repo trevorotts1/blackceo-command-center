@@ -73,6 +73,11 @@ export default defineConfig({
       // actually reach send()'s POST body and the transcript's system
       // chips, not just render in isolation.
       'tests/unit/u62-use-ceo-chat-session-passthrough.test.tsx',
+      // U016 — Fleet dashboard structural template components. Real render
+      // proof (StatusBadge, HealthIndicator, StatCard, EntityCard, CardGrid)
+      // from src/components/fleet with barrel-export verification, tone
+      // color mapping, null-value rendering, and children rendering.
+      'tests/unit/fleet-components.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
