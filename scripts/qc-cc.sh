@@ -235,6 +235,25 @@ check "5.1" "no hardcoded claude-* model id in src/lib (excl. orchestrat(or|ion)
 check "5.2" "no 'anthropic/' provider id in src/lib (excl. FORBIDDEN_PREFIXES guard decl)" \
   "! grep -rE \"'anthropic/\" src/lib/ --include='*.ts' --include='*.tsx' | grep -v 'FORBIDDEN_PREFIXES' | grep -vE \"model-selector\.ts:[[:space:]]*'anthropic/',\" | grep ."
 
+# 5.3 (U084): the model-sovereignty policy (agents/_shared/AGENTS.md rule 6) bans
+# Anthropic models for sub-agent dispatch — Anthropic is reserved for the Master
+# Orchestrator role. The 5.1/5.2 checks above scan src/lib/ ONLY, but the agent
+# model pins live in agents/*/SOUL.md, so a non-master agent pinned to
+# anthropic/claude-* violated the policy while the gate reported PASS. This check
+# closes that gap: it scans EVERY non-master agent SOUL.md for a forbidden
+# anthropic/claude model pin. The master-orchestrator is the ONE sanctioned
+# exception and is excluded.
+check_sovereign_agent_pins() {
+  local results
+  results=$(grep -rn 'anthropic/\|claude-' agents/*/SOUL.md 2>/dev/null \
+    | grep -v 'agents/master-orchestrator/' \
+    | grep -E '\*\*Model:\*\*' \
+    || true)
+  [[ -z "$results" ]]  # exit 0 (pass) when no non-master agent pins a forbidden model
+}
+check "5.3" "no non-master agent SOUL.md pins a forbidden anthropic/claude model (sovereignty; master-orchestrator excepted)" \
+  "check_sovereign_agent_pins"
+
 blue ""
 blue "── 5b. Embedding model hygiene (PRD 1.8c) ──"
 # gemini-embedding-001 is retired 2026-07-14. It must not appear as an active
