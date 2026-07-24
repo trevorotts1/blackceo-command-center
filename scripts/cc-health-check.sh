@@ -96,7 +96,117 @@ is_cloudflare_access_login_redirect() {
   [[ "$(url_host "$target")" == *.cloudflareaccess.com ]] || return 1
   printf '%s' "$(url_path "$target")" | grep -qE '^/cdn-cgi/access/login/'
 }
+# ── U014: remote client health probe ────────────────────────────────────────
+gateway_to_http_base() {
+  local gw="$1"
+  echo "${gw}" | sed -E 's#^ws://#http://#;s#^wss://#https://#'
+}
+
+probe_remote_client() {
+  local client_id="$1" client_name="$2" gateway_url="$3"
+  local http_base probe_url probe_json probe_code probe_pass probe_indet ts
+  http_base="$(gateway_to_http_base "$gateway_url")"
+  probe_url="${http_base}/api/health/deep"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "DRY-RUN: would probe remote client '"'"'${client_name}'"'"' (${client_id}) via ${probe_url}"
+    printf '{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":true,"indeterminate":false,"timestamp":"%s","detail":"dry-run — no probes executed"}\n'       "$client_id" "$client_name" "$gateway_url" "$probe_url" "$ts"
+    return 0
+  fi
+
+  log "remote: probing client '"'"'${client_name}'"'"' (${client_id}) via ${probe_url}"
+
+  probe_json=$(curl -s --max-time 15 --max-redirs 0     --write-out '"'"'{"_http_code":%{http_code}}'"'"'     "${probe_url}" 2>/dev/null || echo '"'"'{"_error":"curl_failed"}'"'"')
+
+  probe_body=$(printf '%s\n' "$probe_json" | awk 'NR>1{print prev} {prev=$0}')
+  probe_code=$(printf '%s\n' "$probe_json" | awk 'END{print}' | py "d.get('"'"'_http_code'"'"',0)" 0)
+
+  if [[ "$probe_code" == "0" ]]; then
+    log "remote: client '"'"'${client_name}'"'"' UNREACHABLE"
+    printf '{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":false,"indeterminate":true,"timestamp":"%s","detail":"unreachable","http_code":0}\n'       "$client_id" "$client_name" "$gateway_url" "$probe_url" "$ts"
+    return 3
+  fi
+
+  if [[ "$probe_code" != "200" ]]; then
+    log "remote: client '"'"'${client_name}'"'"' → HTTP ${probe_code}"
+    probe_pass="false"; probe_indet="false"
+    case "$probe_code" in
+      500|502|503|504) probe_indet="true" ;;
+    esac
+    printf '{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":%s,"indeterminate":%s,"timestamp":"%s","detail":"HTTP %s","http_code":%s}\n'       "$client_id" "$client_name" "$gateway_url" "$probe_url" "$probe_pass" "$probe_indet" "$ts" "$probe_code" "$probe_code"
+    [[ "$probe_indet" == "true" ]] && return 3 || return 1
+  fi
+
+  probe_pass=$(printf '%s' "$probe_body" | py "'"'"'true'"'"' if d.get('"'"'pass'"'"') else '"'"'false'"'"'" "false")
+  probe_indet=$(printf '%s' "$probe_body" | py "'"'"'true'"'"' if d.get('"'"'indeterminate'"'"') else '"'"'false'"'"'" "false")
+  log "remote: client '"'"'${client_name}'"'"' → pass=${probe_pass} indeterminate=${probe_indet}"
+  printf '{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":%s,"indeterminate":%s,"timestamp":"%s","detail":"probed","http_code":200}\n'     "$client_id" "$client_name" "$gateway_url" "$probe_url" "$probe_pass" "$probe_indet" "$ts"
+  [[ "$probe_pass" == "true" ]] && return 0
+  [[ "$probe_indet" == "true" ]] && return 3
+  return 1
+}
+
+run_remote_health() {
+  log "remote: reading registered clients from ${DATABASE_PATH}"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "remote: DRY-RUN — would query clients table in ${DATABASE_PATH}"
+  fi
+
+  if ! command -v sqlite3 &>/dev/null; then
+    log "remote: sqlite3 not found — cannot read clients table"
+    return 0
+  fi
+
+  if [[ ! -f "$DATABASE_PATH" ]]; then
+    log "remote: database not found at ${DATABASE_PATH} — no remote clients to probe"
+    return 0
+  fi
+
+  local clients_json
+  clients_json=$(sqlite3 -json "$DATABASE_PATH"     "SELECT id, name, gateway_url FROM clients WHERE is_self = 0 ORDER BY name ASC" 2>/dev/null || echo "[]")
+
+  local client_count parse_ok
+  parse_ok=0
+  client_count=$(printf '%s' "$clients_json" | py "len(d)" 0) && parse_ok=1
+  if [[ "$parse_ok" -eq 0 ]]; then
+    log "remote: ERROR — failed to parse clients table JSON from ${DATABASE_PATH}; cannot determine client count" >&2
+    return 2
+  fi
+
+  if [[ "$client_count" -eq 0 ]]; then
+    log "remote: no remote clients registered"
+    return 0
+  fi
+
+  log "remote: found ${client_count} remote client(s)"
+
+  local client_ids=() client_names=() client_gws=() idx count cid cname cgw line IFS_OLD
+  IFS_OLD="$IFS"
+  while IFS= read -r line; do
+    IFS=$'\t' read -r cid cname cgw <<< "$line"
+    client_ids+=("$cid")
+    client_names+=("$cname")
+    client_gws+=("$cgw")
+  done < <(python3 -s -c '
+import sys, json
+clients = json.load(sys.stdin)
+for c in clients:
+    print("\t".join([c.get("id",""), c.get("name",""), c.get("gateway_url","")]))
+' <<< "$clients_json" 2>/dev/null)
+  IFS="$IFS_OLD"
+
+  count=${#client_ids[@]}
+  for ((idx=0; idx<count; idx++)); do
+    probe_remote_client "${client_ids[$idx]}" "${client_names[$idx]}" "${client_gws[$idx]}"
+  done
+}
+
 # ── (a) /api/health/deep ──────────────────────────────────────────────────────
+# EXIT_CODE must be defaulted before the remote gate to avoid unbound variable
+# when run_remote_health returns without setting it (e.g. empty client list).
+EXIT_CODE=0
 if [[ "$REMOTE_MODE" -eq 1 ]]; then
   run_remote_health
   # U014: remote mode skips self-box probe entirely; the operator asked for
@@ -393,112 +503,5 @@ d['override_ack_set']=(sys.argv[10]=='true')
 print(json.dumps(d,indent=2))
 " "$FINAL_PASS" "$PM2_JSON" "$ASSET_PASS" "${ASSET_REF:-none}" "$CF_PASS" "$FINAL_INDET" "$CF_DETAIL" "${EMB_JSON:-null}" "$PORT" "$PORT_OVERRIDE_ACK_SET" 2>/dev/null || \
   printf '{"pass":%s,"indeterminate":%s,"timestamp":"%s","cc_port":%s,"override_ack_set":%s}\n' "$FINAL_PASS" "$FINAL_INDET" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
-
-# ── U014: remote client health probe ────────────────────────────────────────
-gateway_to_http_base() {
-  local gw="$1"
-  echo "${gw}" | sed -E 's#^ws://#http://#;s#^wss://#https://#'
-}
-
-probe_remote_client() {
-  local client_id="$1" client_name="$2" gateway_url="$3"
-  local http_base probe_url probe_json probe_code probe_pass probe_indet ts
-  http_base="$(gateway_to_http_base "$gateway_url")"
-  probe_url="${http_base}/api/health/deep"
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "DRY-RUN: would probe remote client '"'"'${client_name}'"'"' (${client_id}) via ${probe_url}"
-    printf '"'"'{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":true,"indeterminate":false,"timestamp":"%s","detail":"dry-run — no probes executed"}\n'"'"'       "$client_id" "$client_name" "$gateway_url" "$probe_url" "$ts"
-    return 0
-  fi
-
-  log "remote: probing client '"'"'${client_name}'"'"' (${client_id}) via ${probe_url}"
-
-  probe_json=$(curl -s --max-time 15 --max-redirs 0     --write-out '"'"'{"_http_code":%{http_code}}'"'"'     "${probe_url}" 2>/dev/null || echo '"'"'{"_error":"curl_failed"}'"'"')
-
-  probe_body=$(printf '"'"'%s\n'"'"' "$probe_json" | awk '"'"'NR>1{print prev} {prev=$0}'"'"')
-  probe_code=$(printf '"'"'%s\n'"'"' "$probe_json" | awk '"'"'END{print}'"'"' | py "d.get('"'"'_http_code'"'"',0)" 0)
-
-  if [[ "$probe_code" == "0" ]]; then
-    log "remote: client '"'"'${client_name}'"'"' UNREACHABLE"
-    printf '"'"'{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":false,"indeterminate":true,"timestamp":"%s","detail":"unreachable","http_code":0}\n'"'"'       "$client_id" "$client_name" "$gateway_url" "$probe_url" "$ts"
-    return 3
-  fi
-
-  if [[ "$probe_code" != "200" ]]; then
-    log "remote: client '"'"'${client_name}'"'"' → HTTP ${probe_code}"
-    probe_pass="false"; probe_indet="false"
-    case "$probe_code" in
-      500|502|503|504) probe_indet="true" ;;
-    esac
-    printf '"'"'{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":%s,"indeterminate":%s,"timestamp":"%s","detail":"HTTP %s","http_code":%s}\n'"'"'       "$client_id" "$client_name" "$gateway_url" "$probe_url" "$probe_pass" "$probe_indet" "$ts" "$probe_code" "$probe_code"
-    [[ "$probe_indet" == "true" ]] && return 3 || return 1
-  fi
-
-  probe_pass=$(printf '"'"'%s'"'"' "$probe_body" | py "'"'"'true'"'"' if d.get('"'"'pass'"'"') else '"'"'false'"'"'" "false")
-  probe_indet=$(printf '"'"'%s'"'"' "$probe_body" | py "'"'"'true'"'"' if d.get('"'"'indeterminate'"'"') else '"'"'false'"'"'" "false")
-  log "remote: client '"'"'${client_name}'"'"' → pass=${probe_pass} indeterminate=${probe_indet}"
-  printf '"'"'{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":%s,"indeterminate":%s,"timestamp":"%s","detail":"probed","http_code":200}\n'"'"'     "$client_id" "$client_name" "$gateway_url" "$probe_url" "$probe_pass" "$probe_indet" "$ts"
-  [[ "$probe_pass" == "true" ]] && return 0
-  [[ "$probe_indet" == "true" ]] && return 3
-  return 1
-}
-
-run_remote_health() {
-  log "remote: reading registered clients from ${DATABASE_PATH}"
-
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "remote: DRY-RUN — would query clients table in ${DATABASE_PATH}"
-  fi
-
-  if ! command -v sqlite3 &>/dev/null; then
-    log "remote: sqlite3 not found — cannot read clients table"
-    return 0
-  fi
-
-  if [[ ! -f "$DATABASE_PATH" ]]; then
-    log "remote: database not found at ${DATABASE_PATH} — no remote clients to probe"
-    return 0
-  fi
-
-  local clients_json
-  clients_json=$(sqlite3 -json "$DATABASE_PATH"     "SELECT id, name, gateway_url FROM clients WHERE is_self = 0 ORDER BY name ASC" 2>/dev/null || echo "[]")
-
-  local client_count parse_ok
-  parse_ok=0
-  client_count=$(printf '%s' "$clients_json" | py "len(d)" 0) && parse_ok=1
-  if [[ "$parse_ok" -eq 0 ]]; then
-    log "remote: ERROR — failed to parse clients table JSON from ${DATABASE_PATH}; cannot determine client count" >&2
-    return 2
-  fi
-
-  if [[ "$client_count" -eq 0 ]]; then
-    log "remote: no remote clients registered"
-    return 0
-  fi
-
-  log "remote: found ${client_count} remote client(s)"
-
-  local client_ids=() client_names=() client_gws=() idx count cid cname cgw line IFS_OLD
-  IFS_OLD="$IFS"
-  while IFS= read -r line; do
-    IFS=$'\t' read -r cid cname cgw <<< "$line"
-    client_ids+=("$cid")
-    client_names+=("$cname")
-    client_gws+=("$cgw")
-  done < <(printf '"'"'%s'"'"' "$clients_json" | python3 -s -c "
-import sys, json
-clients = json.load(sys.stdin)
-for c in clients:
-    print('"'"'\t'"'"'.join([c.get('"'"'id'"'"','"'"''"'"'), c.get('"'"'name'"'"','"'"''"'"'), c.get('"'"'gateway_url'"'"','"'"''"'"')]))
-" 2>/dev/null)
-  IFS="$IFS_OLD"
-
-  count=${#client_ids[@]}
-  for ((idx=0; idx<count; idx++)); do
-    probe_remote_client "${client_ids[$idx]}" "${client_names[$idx]}" "${client_gws[$idx]}"
-  done
-}
 
 exit "$EXIT_CODE"
