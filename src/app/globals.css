@@ -550,6 +550,17 @@ body {
   background: var(--iv-accent-strong);
   transform: translateY(-1px);
 }
+/* Secondary action (U057 "Skip for now") — a filled-but-quiet surface button,
+   visually subordinate to btnPrimary yet more present than the borderless quiet variant. */
+.iv-btn-secondary {
+  background: var(--iv-surface-2);
+  border-color: var(--iv-line-strong);
+  color: var(--iv-ink);
+}
+.iv-btn-secondary:hover:not(:disabled):not(.is-busy) {
+  border-color: var(--iv-accent-ring);
+  transform: translateY(-1px);
+}
 .iv-btn-ghost {
   background: transparent;
   border-color: var(--iv-line-strong);
