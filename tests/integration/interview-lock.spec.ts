@@ -25,7 +25,15 @@
  */
 
 import { test, expect, request, type APIRequestContext } from 'playwright/test';
-import { BASE_URL, INTERVIEW_COOKIE_NAME, writeBuildState } from './interview-lock.fixture';
+import {
+  BASE_URL,
+  INTERVIEW_COOKIE_NAME,
+  LATCH_COOKIE_NAME,
+  writeBuildState,
+  forgeCompleteCookie,
+  forgeExpiredCompleteCookie,
+  forgeForgedCookie,
+} from './interview-lock.fixture';
 
 /** Non-exempt page routes that MUST be locked to /interview while incomplete. */
 const GATED_PAGES = ['/', '/operator', '/tasks/all'];
@@ -191,6 +199,124 @@ test.describe('Interview-mode shell lock (WG-9)', () => {
 
   // Restore the locked default so a rerun (or a shared server via
   // reuseExistingServer) starts from the same incomplete baseline.
+  test.afterEach(() => writeBuildState(false));
+});
+
+test.describe('Interview-mode shell lock — U010 fallback + latch', () => {
+  test.beforeAll(() => writeBuildState(false));
+
+  test('U010-A: absent cookie + complete build-state → admitted (fallback path)', async ({
+    page,
+    context,
+  }) => {
+    // Prime the build-state as complete but clear ALL gate cookies so the
+    // middleware must fall back to /api/interview/gate-status.
+    writeBuildState(true);
+    await context.clearCookies();
+
+    // Navigating to a gated page should resolve 200 (not 302 → /interview)
+    // because the middleware's fallback fetch sees build-state says complete.
+    const resp = await page.request.get('/operator', { maxRedirects: 0 });
+    expect(resp.status(), 'fallback path must admit when build-state is complete').toBe(200);
+  });
+
+  test('U010-B: latch-only cookie → admitted', async ({ page, context }) => {
+    // Place ONLY a valid latch cookie (no main mc_interview_complete cookie).
+    // The middleware checks the main cookie first (absent → fail), then the
+    // latch (valid-complete → admit).
+    writeBuildState(false);
+    await context.clearCookies();
+    await context.addCookies([
+      {
+        name: LATCH_COOKIE_NAME,
+        value: forgeCompleteCookie(),
+        domain: '127.0.0.1',
+        path: '/',
+        httpOnly: true,
+        sameSite: 'Lax',
+      },
+    ]);
+
+    const resp = await page.request.get('/operator', { maxRedirects: 0 });
+    expect(resp.status(), 'latch-only cookie must admit').toBe(200);
+  });
+
+  test('U010-C: forged cookie → 302', async ({ page, context }) => {
+    // A cookie claiming complete=true but signed with the wrong HMAC must be
+    // rejected — the middleware fails CLOSED to /interview.
+    writeBuildState(false);
+    await context.clearCookies();
+    await context.addCookies([
+      {
+        name: INTERVIEW_COOKIE_NAME,
+        value: forgeForgedCookie(),
+        domain: '127.0.0.1',
+        path: '/',
+        httpOnly: true,
+        sameSite: 'Lax',
+      },
+    ]);
+
+    const resp = await page.request.get('/operator', { maxRedirects: 0 });
+    const location = resp.headers()['location'];
+    expect(
+      isRedirectToInterview(resp.status(), location),
+      `forged cookie must 302 to /interview (got ${resp.status()} → ${location ?? 'no Location'})`,
+    ).toBeTruthy();
+  });
+
+  test('U010-D: expired-complete cookie → 200 (monotonic unlock)', async ({ page, context }) => {
+    // An expired-but-signature-valid "complete" cookie must still admit because
+    // completion is terminal — the middleware accepts it and the setter re-mints
+    // a fresh one on the next page load.
+    writeBuildState(false);
+    await context.clearCookies();
+    await context.addCookies([
+      {
+        name: INTERVIEW_COOKIE_NAME,
+        value: forgeExpiredCompleteCookie(),
+        domain: '127.0.0.1',
+        path: '/',
+        httpOnly: true,
+        sameSite: 'Lax',
+      },
+    ]);
+
+    const resp = await page.request.get('/operator', { maxRedirects: 0 });
+    expect(resp.status(), 'expired-complete cookie must still admit (completion is terminal)').toBe(
+      200,
+    );
+  });
+
+  test('U010-E: gate-status returns the two booleans', async ({ page }) => {
+    // The /api/interview/gate-status endpoint (internal fallback target) must
+    // return the two canonical completion signals as JSON booleans.
+    // When locked (incomplete): both should be false.
+    writeBuildState(false);
+    let resp = await page.request.get('/api/interview/gate-status', { maxRedirects: 0 });
+    expect(resp.status(), 'gate-status must return 200').toBe(200);
+    let body = await resp.json();
+    expect(body, 'gate-status must return object').toEqual(
+      expect.objectContaining({
+        interviewComplete: false,
+        buildCompleted: false,
+      }),
+    );
+
+    // When complete: interviewComplete must be true.
+    writeBuildState(true);
+    resp = await page.request.get('/api/interview/gate-status', { maxRedirects: 0 });
+    expect(resp.status()).toBe(200);
+    body = await resp.json();
+    expect(body).toEqual(
+      expect.objectContaining({
+        interviewComplete: true,
+        buildCompleted: false,
+      }),
+    );
+  });
+
+  test.beforeEach(() => writeBuildState(false));
   test.afterEach(() => writeBuildState(false));
 });
 

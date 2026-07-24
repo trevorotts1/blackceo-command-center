@@ -132,6 +132,13 @@ export default defineConfig({
       // and DB mirror encrypt-on-write / decrypt-on-read. Uses the isolated-DB
       // helper + the '@' alias, so vitest-only, never the tsx --test glob.
       'tests/unit/interview-answers-encryption.test.ts',
+      // U010 — interview shell-lock fallback wiring regression lock. Static
+      // source checks that verify the middleware imports and calls
+      // checkInterviewCompleteViaFallback + signInterviewToken, checks
+      // gate-fallback fail-closed, and verifies gate-cookie exports the latch
+      // API but NOT the dead getInterviewCookieOptions export. Remove the
+      // fallback call from middleware.ts and this suite goes RED.
+      'tests/unit/middleware-shell-lock-fallback.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
