@@ -20,6 +20,7 @@ const FILE_MAP: Record<string, string> = {
   agents_md: 'AGENTS.md',
   tools_md: 'TOOLS.md',
   memory_md: 'MEMORY.md',
+  howto_md: 'how-to.md',
 };
 
 /**

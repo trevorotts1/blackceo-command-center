@@ -3,9 +3,9 @@
 This file is shared across all agents (symlinked from `agents/_shared/TOOLS.md`).
 It enumerates the tools any agent in the company can reach. Per-agent tool
 boundaries (which of these tools an agent may use, and how) live in each agent's
-own `IDENTITY.md` (Role) and `SOUL.md` (Boundaries) — both synced per agent.
-There is no separate per-agent `how-to.md`; this registry plus the agent's
-identity files are the complete tool contract.
+own `IDENTITY.md` (Role), `SOUL.md` (Boundaries), and `how-to.md` (Tool Usage
+Guide) — all three synced per agent. This registry plus the agent's identity
+files and how-to guide are the complete tool contract.
 
 ## LLM Infrastructure
 
@@ -39,8 +39,10 @@ Reference them by name only. Each credential file is chmod 600.
 ## Tool Access by Tier
 
 - **Strategic tier (Master Orchestrator):** All tools.
-- **Execution tier (most agents):** the tools in this registry, bounded by each
-  agent's `IDENTITY.md` (Role) and `SOUL.md` (Boundaries). Default: read-only
-  unless explicitly granted.
+- **Execution tier (most agents):** Tools listed under each agent's `how-to.md`
+  Section 4 ("Tools & Integrations"). Each how-to.md lists which tools from
+  this registry the agent may use, which are explicitly denied, and the access
+  level for each. Default: read-only unless explicitly granted.
 - **Research tier (Research / Scraper agents):** Web fetch + research-grade
-  search models. No write access to production systems.
+  search models. No write access to production systems. See each agent's
+  `how-to.md` Section 4 for the specific tool list.
