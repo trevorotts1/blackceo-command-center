@@ -448,3 +448,65 @@ For each such skill folder under `~/.openclaw/skills/`:
 Every document I create for Trevor goes to `/Users/blackceomacmini/Downloads/`. Never to `~/clawd/reports/`. Never to `~/clawd/tmp/`. Never to any workspace subfolder. Downloads only.
 
 Format: `/Users/blackceomacmini/Downloads/<descriptive-filename>.md`
+
+<!-- NO_SUBAGENT_STORM_V1 -->
+## 🔴 No Sub-Agent Storms — One Message, One Response (July 23, 2026)
+
+When Trevor sends a single direct message in Telegram, the main agent responds DIRECTLY. No sub-agents. No parallel sessions. No retries. One message = exactly one main-agent response.
+
+### FORBIDDEN (each is a violation):
+- Spawning a sub-agent to answer a conversational operator message
+- Spawning multiple parallel sessions for the same user message
+- Retrying a response by spawning a new session instead of just answering
+- Using `sessions_spawn` for simple config/diagnostic/conversational replies
+
+### VALID sub-agent triggers (these ONLY):
+- A production task routed to a department (PRIME DIRECTIVE)
+- A direct operator ops/diagnostic command requiring isolation (R8)
+- A long-running background job with explicit owner permission
+
+### Self-Correction Log
+**July 23, 2026:** Spawned 8+ parallel sub-agent sessions to handle Trevor's "bailian" display-name complaint. Each session independently tried to fix the same problem, producing a flood of duplicate messages. The fix was a simple provider rename — one main-agent action. Added this protocol. Permanent behavioral change.
+<!-- END NO_SUBAGENT_STORM_V1 -->
+
+
+<!-- BEGIN skill:63-agnes-image:agents -->
+Add:
+
+```
+## Agnes Image 2.1 Flash
+- Synchronous text-to-image + image-to-image on Agnes AI. Key: AGNES_AI_API_KEY (existing fleet credential).
+- Model: agnes-image-2.1-flash. Endpoint: POST https://apihub.agnes-ai.com/v1/images/generations
+- Required: model, prompt, size (1K/2K/3K/4K). ratio optional (16:9, 9:16, 1:1, 3:4, 4:3, 2:3, 3:2, 21:9).
+- response_format lives in extra_body (NOT top level); image-to-image needs no tags.
+- The IMAGE endpoint is synchronous — the response holds the image (data[0].url or data[0].b64_json). No polling.
+- Full reference: 63-agnes-image/agnes-image-full.md
+```
+
+---
+<!-- END skill:63-agnes-image:agents -->
+
+<!-- skill:63-agnes-image:core-update-applied -->
+
+
+<!-- BEGIN skill:64-agnes-video:agents -->
+Add:
+
+```
+## Agnes Video V2.0 — Video Generation [PRIORITY: HIGH]
+- Model: agnes-video-v2.0 (asynchronous)
+- Auth: Bearer token from AGNES_AI_API_KEY (fleet-provisioned; NEVER print it)
+- Pattern: POST https://apihub.agnes-ai.com/v1/videos to CREATE a task ->
+  capture video_id -> POLL GET https://apihub.agnes-ai.com/agnesapi?video_id=<id>
+  until status=completed -> read metadata.url
+- Modes: text-to-video (prompt), image-to-video (image URL),
+  keyframes (extra_body.image[] + extra_body.mode="keyframes")
+- num_frames <= 441 AND on the 8n+1 grid; frame_rate 1-60; seconds = num_frames/frame_rate
+- Trust returned size/seconds/metadata.size_mapping, NOT the request
+- Full reference: [MASTER_FILES_FOLDER]/64-agnes-video/agnes-video-full.md
+```
+
+---
+<!-- END skill:64-agnes-video:agents -->
+
+<!-- skill:64-agnes-video:core-update-applied -->
