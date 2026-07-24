@@ -80,6 +80,9 @@ export const iv = {
   /** Buttons. `btn` is the base; the variants include it. */
   btn: 'iv-btn',
   btnPrimary: 'iv-btn iv-btn-primary',
+  /** Secondary action (e.g. "Skip for now") — a bordered, non-primary button.
+   *  Reuses the ghost treatment (transparent + border + ink text). */
+  btnSecondary: 'iv-btn iv-btn-ghost',
   btnGhost: 'iv-btn iv-btn-ghost',
   btnQuiet: 'iv-btn iv-btn-quiet',
 
