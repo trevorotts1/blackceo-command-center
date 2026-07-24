@@ -117,10 +117,10 @@ probe_remote_client() {
 
   log "remote: probing client '"'"'${client_name}'"'"' (${client_id}) via ${probe_url}"
 
-  probe_json=$(curl -s --max-time 15 --max-redirs 0     --write-out '"'"'{"_http_code":%{http_code}}'"'"'     "${probe_url}" 2>/dev/null || echo '"'"'{"_error":"curl_failed"}'"'"')
+  probe_json=$(curl -s --max-time 15 --max-redirs 0     --write-out '\n{"_http_code":%{http_code}}'     "${probe_url}" 2>/dev/null || echo '{"_error":"curl_failed"}')
 
   probe_body=$(printf '%s\n' "$probe_json" | awk 'NR>1{print prev} {prev=$0}')
-  probe_code=$(printf '%s\n' "$probe_json" | awk 'END{print}' | py "d.get('"'"'_http_code'"'"',0)" 0)
+  probe_code=$(printf '%s\n' "$probe_json" | awk 'END{print}' | py "d.get('_http_code',0)" 0)
 
   if [[ "$probe_code" == "0" ]]; then
     log "remote: client '"'"'${client_name}'"'"' UNREACHABLE"
@@ -138,8 +138,8 @@ probe_remote_client() {
     [[ "$probe_indet" == "true" ]] && return 3 || return 1
   fi
 
-  probe_pass=$(printf '%s' "$probe_body" | py "'"'"'true'"'"' if d.get('"'"'pass'"'"') else '"'"'false'"'"'" "false")
-  probe_indet=$(printf '%s' "$probe_body" | py "'"'"'true'"'"' if d.get('"'"'indeterminate'"'"') else '"'"'false'"'"'" "false")
+  probe_pass=$(printf '%s' "$probe_body" | py "'true' if d.get('pass') else 'false'" "false")
+  probe_indet=$(printf '%s' "$probe_body" | py "'true' if d.get('indeterminate') else 'false'" "false")
   log "remote: client '"'"'${client_name}'"'"' → pass=${probe_pass} indeterminate=${probe_indet}"
   printf '{"client_id":"%s","client_name":"%s","gateway_url":"%s","probe_url":"%s","pass":%s,"indeterminate":%s,"timestamp":"%s","detail":"probed","http_code":200}\n'     "$client_id" "$client_name" "$gateway_url" "$probe_url" "$probe_pass" "$probe_indet" "$ts"
   [[ "$probe_pass" == "true" ]] && return 0
@@ -208,7 +208,7 @@ for c in clients:
 # when run_remote_health returns without setting it (e.g. empty client list).
 EXIT_CODE=0
 if [[ "$REMOTE_MODE" -eq 1 ]]; then
-  run_remote_health
+  run_remote_health; EXIT_CODE=$?
   # U014: remote mode skips self-box probe entirely; the operator asked for
   # fleet-wide health, not local health. Run only the remote path and exit.
   exit "$EXIT_CODE"
