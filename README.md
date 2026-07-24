@@ -175,7 +175,7 @@ pm2 start ecosystem.config.cjs
 - **Brand colors:** Set primary/secondary hex colors on the company record; palette auto-generates
 - **Intelligence:** Settings > Intelligence for per-department AI model and persona assignment
 
-See deployment documentation for full setup instructions.
+See `docs/DEPLOYMENT.md` for the deployment model, the code-vs-data propagation gap, and the workspace-seeding migration rule.
 
 ## Operator Studio — provider auto-discovery (v4.1.2)
 
