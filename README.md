@@ -117,7 +117,7 @@ See PRD v2.1 (`onboarding PRD v2.1.md` in user's local Downloads) for the comple
 
 AI Agent Management Dashboard - A universal template for any organization.
 
-**Current Version: v6.0.60** — 2026-07-19
+**Current Version: v6.0.74** — 2026-07-24
 
 ## Overview
 

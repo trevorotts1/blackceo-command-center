@@ -1,3 +1,46 @@
+## [v6.0.74] — 2026-07-24 — July-24 Merge Batch (CC)
+
+Consolidated v6.0.71-v6.0.74: 28 units landed across one merge train. No intermediate
+version stamps or tags exist; the /version file moved from v6.0.70 to v6.0.74 in a
+single commit at the end of the pipeline.
+
+### Interview (U010, U047, U048, U050, U051, U057)
+- U010 — Shell-lock cookie fix: 30-day TTL, latch fallback, gate-status API
+- U047 — Completion cookie TTL extension from 24h to 30 days
+- U048 — Interview answers encryption at rest
+- U050 — Configurable question bank with regression guard
+- U051 — Mid-session progress persistence with mutation-proof continuity math
+- U057 — Skip/defer bypass option with hollow-expiry test fix
+
+### Agent Contracts (U064, U084, U085, U088, U091, U094)
+- U064 — Anthology identity anti-impersonation blend guardrail with mutation proof
+- U084 — Agent model-sovereignty gate: unpin Anthropic from 8 non-master agents
+- U085 — Agent editor USER.md sync map fix (FILE_MAP + mdFields)
+- U088 — Symlink-write guard for shared agent rules files with behavioral tests
+- U091 — n8n workflow builder output validator with non-mutating import check
+- U094 — Per-agent tool policy files for 23 agents
+
+### Infrastructure (U011, U012, U014, U020, U022, U023, U025, U026, U133)
+- U009 — Fleet/client-status dashboard page
+- U011 — Remote client registration (32 boxes)
+- U012 — Fleet-heartbeat + mission-control cron delivery fix
+- U014 — Box health probe re-run + remote health: quoting fix, forward-reference crash,
+  EXIT_CODE init, behavioral tests
+- U016 — Fleet dashboard structural template
+- U020 — WebSocket reconnect with exponential backoff + attempt ceiling
+- U022 — No-redirect-loop integration test
+- U023 — Operator box migration roll-forward (110-111)
+- U025 — Onboarding interdependency documentation
+- U026 — Remove 0-byte mission-control.db decoy at root
+- U133 — CC departments file update-flow sync
+
+### Research & QC
+- U018 — Card gating on engine DB workspace classification
+- U021 — update.sh deployment gap documentation
+- U082 — QC artifact content extraction (score on content, not byte count)
+- U086 — Research model resolver: restrict substitution to web-search-capable models
+- U087 — Empty research response treated as failure, stamp ungrounded zero-citation results
+
 ## [v6.0.70] — 2026-07-23 — July-23-Fixes Batch 2 (CC)
 
 Units: U017, U019
