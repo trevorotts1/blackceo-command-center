@@ -8,6 +8,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
+import PhaseStepper from './PhaseStepper';
 import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
 import { AnthologyCardFace } from './anthology/AnthologyCardFace';
 import { isAnthologyTask } from './anthology/anthology-card';
@@ -1195,6 +1196,13 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
               Next step: {task.block_needs}
             </p>
           )}
+        </div>
+      )}
+
+      {/* U060 — live phase progress stepper for presentation-department tasks */}
+      {canonicalDeptSlug(task.department) === 'presentations' && (
+        <div className="mt-2 pt-2 border-t border-gray-50">
+          <PhaseStepper taskId={task.id} />
         </div>
       )}
 

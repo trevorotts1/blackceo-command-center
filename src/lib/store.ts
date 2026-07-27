@@ -65,6 +65,13 @@ interface MissionControlState {
   setAgentOpenClawSession: (agentId: string, session: OpenClawSession | null) => void;
   setOpenclawMessages: (messages: Message[]) => void;
   addOpenclawMessage: (message: Message) => void;
+
+  // U060 — live phase progress via SSE activity_logged event.
+  // Incremented each time an activity_logged event arrives so mounted
+  // PhaseStepper components can react (re-fetch) without a second
+  // real-time channel. Process-local: same store, same SSE hook.
+  activityPulse: number;
+  incrementActivityPulse: () => void;
 }
 
 export const useMissionControl = create<MissionControlState>((set) => ({
@@ -177,4 +184,9 @@ export const useMissionControl = create<MissionControlState>((set) => ({
   setOpenclawMessages: (messages) => set({ openclawMessages: messages }),
   addOpenclawMessage: (message) =>
     set((state) => ({ openclawMessages: [...state.openclawMessages, message] })),
+
+  // U060 — live phase progress pulse
+  activityPulse: 0,
+  incrementActivityPulse: () =>
+    set((state) => ({ activityPulse: state.activityPulse + 1 })),
 }));

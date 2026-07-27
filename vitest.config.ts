@@ -132,6 +132,10 @@ export default defineConfig({
       // and DB mirror encrypt-on-write / decrypt-on-read. Uses the isolated-DB
       // helper + the '@' alias, so vitest-only, never the tsx --test glob.
       'tests/unit/interview-answers-encryption.test.ts',
+      // U060 — presentation-phases table test: exclusivity + totality proof
+      // against the 26 canonical manifest phase ids, plus phaseIdOf and
+      // computePhaseProgress unit tests.
+      'tests/unit/presentation-phases.test.ts',
       // U010 — interview shell-lock fallback wiring regression lock. Static
       // source checks that verify the middleware imports and calls
       // checkInterviewCompleteViaFallback + signInterviewToken, checks

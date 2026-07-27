@@ -5,6 +5,7 @@ import { X, Save, Trash2, Activity, Package, Bot, ClipboardList, Plus } from 'lu
 import { useMissionControl } from '@/lib/store';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import { ActivityLog } from './ActivityLog';
+import PhaseStepper from './PhaseStepper';
 import { DeliverablesList } from './DeliverablesList';
 import { SessionsList } from './SessionsList';
 import { PlanningTab } from './PlanningTab';
@@ -22,6 +23,7 @@ import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
 // a task that actually went through the blend (task.blend_directive present)
 // so a plain non-content task never fires the extra gate-status fetch.
 import { AudienceConfirmPanel } from './AudienceConfirmPanel';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 // P2-02 — the task-detail panels that fill in and actually USE the modal's
 // fields: who's working on this + why, the SOP link, the QC block transparency,
 // and the planning metadata.
@@ -954,6 +956,11 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
                 engineNotice={isAnthologyTask(task) ? engineLabel : null}
               />
             </div>
+          )}
+
+          {/* U060 — live phase progress stepper mounted beside ActivityLog */}
+          {task && canonicalDeptSlug(task.department) === 'presentations' && (
+            <PhaseStepper taskId={task.id} />
           )}
 
           {/* Activity Tab */}

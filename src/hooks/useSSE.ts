@@ -39,6 +39,7 @@ export function useSSE(options?: UseSSEOptions) {
     setIsFeedConnected,
     selectedTask,
     setSelectedTask,
+    incrementActivityPulse,
   } = useMissionControl();
 
   // Update ref when selectedTask changes (outside the SSE effect)
@@ -161,7 +162,9 @@ export function useSSE(options?: UseSSEOptions) {
 
             case 'activity_logged':
               debug.sse('Activity logged', sseEvent.payload);
-              // Activities are fetched when task detail is opened
+              // U060 — store the pulse so mounted PhaseStepper components
+              // can react without a second real-time channel.
+              incrementActivityPulse();
               break;
 
             case 'deliverable_added':
