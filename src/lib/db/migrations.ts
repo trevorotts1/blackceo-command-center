@@ -6436,10 +6436,36 @@ export function isDepartmentOptedOut(dept: unknown): boolean {
  */
 export const ENGINE_WORKSPACE_SLUGS: readonly string[] = ['podcast', 'anthology'];
 
+/**
+ * U041 (audit E11). The `outcome` field exists because {created: 0, updated: 0}
+ * is the CORRECT, HEALTHY result on every well-configured box at steady state —
+ * and was ALSO the result when the manifest resolved to an empty array, which
+ * means "this client has no departments at all." Those two are opposite facts
+ * and were byte-indistinguishable to both callers. `outcome` separates them
+ * WITHOUT throwing, because the two callers need opposite behaviour: the
+ * converge endpoint must fail loud (it is an explicit operator action with a
+ * response body), and the every-boot path must NOT crash startup (see
+ * autoSeedFromDepartmentsJson's own comment). A throw would be caught by that
+ * path's existing handler and logged as '[Auto-seed] Skipped:' — the same line
+ * it already uses for genuine hiccups — putting us back where we started.
+ *
+ * `manifestEntries` is the RAW array length before any opt-out, malformed-entry,
+ * test-residue or duplicate-slug filtering, so a caller can distinguish "the
+ * manifest was empty" from "the manifest had entries and every one was filtered
+ * out" — a different defect with a different fix.
+ */
+export type ReseedOutcome =
+  | 'seeded'          // a manifest with at least one entry was processed
+  | 'no-config'       // resolveDepartmentsConfigPath() found nothing
+  | 'unreadable'      // the file exists but could not be read
+  | 'malformed'       // the file parsed to something that is not an array
+  | 'empty-manifest'  // the file parsed to an array of length 0
+  | 'partial-company-config'; // fail-closed on a template/blank company config
+
 export function reseedWorkspacesFromConfig(
   db: Database.Database,
   opts: { force: boolean } = { force: true }
-): { created: number; updated: number } {
+): { created: number; updated: number; outcome: ReseedOutcome; configPath: string | null; manifestEntries: number } {
   void opts; // reserved; the upsert is always idempotent so `force` is a no-op today
   let created = 0;
   let updated = 0;
@@ -6449,7 +6475,7 @@ export function reseedWorkspacesFromConfig(
 
     if (!configPath) {
       console.warn('[reseed] No departments.json found — skipping workspace reseed');
-      return { created, updated };
+      return { created, updated, outcome: 'no-config', configPath: null, manifestEntries: 0 };
     }
     console.log('[reseed] Using departments.json:', configPath);
 
@@ -6460,10 +6486,42 @@ export function reseedWorkspacesFromConfig(
     const raw = safeReadFileUtf8(configPath);
     if (raw == null) {
       console.warn('[reseed] departments.json unreadable (absent or TCC-blocked) — skipping workspace reseed:', configPath);
-      return { created, updated };
+      return { created, updated, outcome: 'unreadable', configPath, manifestEntries: 0 };
     }
     const depts = JSON.parse(raw);
-    if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
+
+    // U041 (audit E11). This branch used to be the ONLY exit in this function
+    // that returned without logging anything, and it is the exit that means "we
+    // found this client's manifest and it declares no departments." The result
+    // it produced — {created: 0, updated: 0} — is byte-identical to the healthy
+    // steady-state result, so a box whose manifest was an empty array looked
+    // exactly like a box that was already correct, on every boot and every
+    // converge, forever. Both conditions are now named and logged, and the
+    // outcome is returned so the caller can decide: converge fails loud (an
+    // explicit operator action), boot warns and continues (startup must not
+    // crash). See the ReseedOutcome docstring above.
+    if (!Array.isArray(depts)) {
+      console.error(
+        '[reseed] departments.json is NOT a JSON array — refusing to reseed. ' +
+          `Parsed type: ${depts === null ? 'null' : typeof depts}. File: ${configPath}. ` +
+          'Expected an array of {id, slug, name, emoji, workspacePath} objects.',
+      );
+      return { created, updated, outcome: 'malformed', configPath, manifestEntries: 0 };
+    }
+
+    if (depts.length === 0) {
+      console.error(
+        '[reseed] departments.json resolved to an EMPTY ARRAY (0 entries) — no department ' +
+          `will be seeded, so the board will render NO department columns. File: ${configPath}. ` +
+          'This is NOT the same as "already up to date": it means the manifest itself declares ' +
+          'no departments. The manifest is written per box at runtime by the workforce build ' +
+          '(copy_departments_to_command_center); the repo template is deliberately [] and must ' +
+          'stay that way (.github/workflows/config-guard.yml). If this box should have ' +
+          'departments, the build did not write its manifest to a path this resolver reaches — ' +
+          'the resolver logged the exact path it used one line above.',
+      );
+      return { created, updated, outcome: 'empty-manifest', configPath, manifestEntries: 0 };
+    }
 
     // Ensure a company row exists (seedCompanyGuarded creates the real brand row
     // from company-config.json, or the 'default' sentinel on an un-branded box —
@@ -6474,7 +6532,7 @@ export function reseedWorkspacesFromConfig(
     const seedResult = seedCompanyGuarded(db);
     if (seedResult.reason === 'partial-config') {
       console.warn('[reseed] Aborting workspace reseed: partial/template company config (fail-closed, no mis-attribution)');
-      return { created, updated };
+      return { created, updated, outcome: 'partial-company-config', configPath, manifestEntries: depts.length };
     }
     // Resolve the ACTIVE company through the ONE canonical, placeholder-aware
     // resolver — the SAME function the board filter uses (resolveActiveCompanyId),
@@ -6613,7 +6671,7 @@ export function reseedWorkspacesFromConfig(
     throw err; // Re-throw so converge endpoint can FAIL LOUD
   }
 
-  return { created, updated };
+  return { created, updated, outcome: 'seeded', configPath, manifestEntries: depts.length };
 }
 
 /**
@@ -6708,9 +6766,23 @@ export function checkDispatchSchemaHealth(db: Database.Database): DispatchSchema
 // startup, exactly as the previous first-boot seeder did.
 function autoSeedFromDepartmentsJson(db: Database.Database) {
   try {
-    const { created, updated } = reseedWorkspacesFromConfig(db, { force: true });
+    const { created, updated, outcome, manifestEntries } = reseedWorkspacesFromConfig(db, { force: true });
     if (created > 0 || updated > 0) {
       console.log(`[Auto-seed] Departments synced on boot — created=${created} updated=${updated}`);
+    }
+    // U041 (audit E11), Rule 3.5 STAGE 1 — WARN, never fail, on the boot path.
+    // An empty or malformed manifest is a REAL state on a box that has not been
+    // through a workforce build yet, and a boot that hard-failed on it would
+    // brick every such box on day one. So boot reports the count and comes up;
+    // the converge endpoint is where this becomes an error, because converge is
+    // an explicit operator action that can answer with a 500. Flipping boot to
+    // fail-closed is a SEPARATE unit and must not happen in this batch.
+    if (outcome === 'empty-manifest' || outcome === 'malformed') {
+      console.warn(
+        `[Auto-seed] Department manifest problem on boot: ${outcome} (raw entries=${manifestEntries}). ` +
+          'The board will show NO department columns. Details logged by [reseed] above. ' +
+          'Startup continues — this is warn-mode, not a boot failure.',
+      );
     }
   } catch (err) {
     console.log('[Auto-seed] Skipped:', (err as Error).message);
