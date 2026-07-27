@@ -44,7 +44,13 @@
  */
 
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
-import { notifyTelegram, notifySystem, resolveOperatorChatId, resolveOwnerChatId } from '@/lib/notify';
+import {
+  notifyTelegram,
+  notifySystem,
+  recordUndeliverable,
+  resolveOperatorChatId,
+  resolveOwnerChatId,
+} from '@/lib/notify';
 import { v4 as uuidv4 } from 'uuid';
 import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
 import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
@@ -435,6 +441,47 @@ export interface ExecuteResult {
   sent: number;
   claimed: number;
   skipped: number;
+  /** Claims this run wrote and then released because the transport proved the send
+   *  did not happen. A non-zero value is a real alarm, not noise. */
+  released: number;
+}
+
+/**
+ * Release a claim this iteration wrote, when the transport PROVED the send did not
+ * happen. Narrow by construction: the guard column must still hold the exact
+ * timestamp this iteration wrote (`claimedAt`), so a concurrent sweep's fresher
+ * claim is never clobbered. Every column the claim set — the guard plus any
+ * `extraSets` — is reset together, so a released row carries no half-applied
+ * result_summary/result_location.
+ *
+ * Returns the number of stamps actually released (0 when another worker moved on).
+ * Never throws: this runs on a failure path and must not turn a non-send into a crash.
+ */
+function releaseUnsentClaims(stamps: StampOp[], claimedAt: string): number {
+  let released = 0;
+  for (const stamp of stamps) {
+    try {
+      const sets: string[] = [`${stamp.guardColumn} = NULL`, 'updated_at = ?'];
+      const params: (string | null)[] = [claimedAt];
+      for (const col of Object.keys(stamp.extraSets)) {
+        sets.push(`${col} = NULL`);
+      }
+      params.push(stamp.taskId, claimedAt);
+      const res = run(
+        `UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND ${stamp.guardColumn} = ?`,
+        params,
+      );
+      released += res.changes;
+    } catch (err) {
+      console.warn(
+        '[trust-engine] claim release failed for task %s (%s); the stamp stays and the row will not be re-planned:',
+        stamp.taskId,
+        stamp.guardColumn,
+        (err as Error).message,
+      );
+    }
+  }
+  return released;
 }
 
 /**
@@ -455,6 +502,7 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     ((message: string) => notifySystem(message, { agent: 'trust-engine', action: 'escalate' }));
   const nowIso = ctx.now.toISOString();
 
+  let released = 0;
   let sent = 0;
   let claimed = 0;
   let skipped = 0;
@@ -511,13 +559,39 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     // and NO duplicate can be produced. The throw is swallowed so one bad send
     // never aborts the rest of the batch.
     let dispatched = false;
+    let threw = false;
     try {
       dispatched = dispatch(plan);
     } catch (err) {
-      console.warn('[trust-engine] send failed (claim already durable, no duplicate):', (err as Error).message);
+      threw = true;
+      console.warn('[trust-engine] send threw before the transport spawned:', (err as Error).message);
       dispatched = false;
     }
-    if (dispatched) sent += 1;
+    if (dispatched) {
+      sent += 1;
+    } else {
+      // PROVABLE NON-SEND. The transport returns false in exactly two cases, both
+      // of which mean nothing was queued: the suppression short-circuit
+      // (notify.ts:617, before execFile) and a synchronous throw. The ceo-chat
+      // branch's false (notify/appendTrustMessage write failure, trust-engine
+      // defaultTrustSend) is likewise a real non-write. In all of them the claim
+      // this iteration wrote is a lie, so release it and record it.
+      //
+      // NOT COVERED: a gateway that accepts and later fails. `notifyTelegram` is
+      // async execFile and returns true before the child runs, so that outcome is
+      // indistinguishable from success here. See U043 Part B (senior).
+      const releasedCount = releaseUnsentClaims(plan.stamps, nowIso);
+      released += releasedCount;
+      if (releasedCount > 0) {
+        recordUndeliverable(
+          'trust_send_not_dispatched',
+          `trust-engine released ${releasedCount} claim(s) for task(s) ` +
+            `${plan.stamps.map((s) => `${s.taskId}:${s.guardColumn}`).join(', ')} ` +
+            `— the transport reported a provable non-send (${threw ? 'threw' : 'returned false'}); ` +
+            `the row will be re-planned on the next sweep.`,
+        );
+      }
+    }
 
     // ── done-without-deliverable QC smell -> OPERATOR lane ONLY (never the client). ──
     for (const smell of plan.doneWithoutDeliverable) {
@@ -529,7 +603,7 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     }
   }
 
-  return { sent, claimed, skipped };
+  return { sent, claimed, skipped, released };
 }
 
 // ── DB glue: load candidates + deliverable lookup ─────────────────────────────
@@ -612,12 +686,12 @@ export function runTrustEngineSweep(opts?: {
   escalate?: (message: string) => void;
 }): SweepResult {
   if (process.env.DISABLE_TRUST_ENGINE === '1' || process.env.DISABLE_TRUST_ENGINE === 'true') {
-    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, skippedReason: 'DISABLE_TRUST_ENGINE set' };
+    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0, skippedReason: 'DISABLE_TRUST_ENGINE set' };
   }
   const now = opts?.now ?? new Date();
   const tasks = loadCandidateTasks(opts?.taskId);
   if (tasks.length === 0) {
-    return { scanned: 0, sent: 0, claimed: 0, skipped: 0 };
+    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0 };
   }
   const plans = planSends(tasks, {
     now,
