@@ -129,6 +129,44 @@ export const UpdateTaskSchema = z.object({
   // The API route enforces presence; Zod accepts it as optional so other
   // departments are completely unaffected by this field.
   process_certificate_sha: z.string().optional(),
+  // ── U034 (audit E4): the four fields eight board producers have been sending
+  // and Zod has been silently stripping. Declared so they ARRIVE; persisted by
+  // the PATCH route. Deliberately NOT accompanied by .strict() — see the U034
+  // card's "THE STRICT DECISION". Four independent enumerations of the caller
+  // set have produced four different answers; strictness waits for observed
+  // traffic, not another census.
+  //
+  // phase_id — the producer's own pipeline phase label, free text, recorded in
+  // the audit note. NOT a foreign key: producers mint their own phase ids.
+  phase_id: z.string().min(1).max(128).optional(),
+  // note — appended to description as a timestamped audit line, exactly the way
+  // POST /api/tasks/{id}/status does it (status/route.ts:344-353).
+  note: z.string().max(2000).optional(),
+  // deliverable_url — where the produced work landed. Persisted as a `url`
+  // deliverable row. http/https only: this value is rendered in the board UI and
+  // a javascript:/data: URL there is a stored-XSS vector.
+  deliverable_url: z
+    .string()
+    .url()
+    .max(2048)
+    .refine((u: string) => /^https?:\/\//i.test(u), {
+      message: 'deliverable_url must be an http(s) URL',
+    })
+    .optional(),
+  // qc_scores — the producer's own gate summary (cc_board.py collect_qc_summary).
+  // Scalars are persisted to task_qc_results; the per-gate array has no column
+  // and rides in `note` (see the U034 card, CURRENT STATE fact 5). Shaped
+  // loosely on purpose: a producer adding a gate must not start 400-ing.
+  qc_scores: z
+    .object({
+      gates_graded: z.number().int().nonnegative().optional(),
+      overall_pass: z.boolean().optional(),
+      min_average: z.number().nullable().optional(),
+      autofails_total: z.number().int().nonnegative().optional(),
+      gates: z.array(z.record(z.string(), z.unknown())).max(64).optional(),
+    })
+    .passthrough()
+    .optional(),
 })
   // POISON-STATE GATE: `blocked_on_human` set + blank/placeholder `ask` is
   // unanswerable-forever and is rejected here (400). Note this is STRICTER than

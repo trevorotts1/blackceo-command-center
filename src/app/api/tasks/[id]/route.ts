@@ -394,6 +394,30 @@ export async function PATCH(
       updates.push('title = ?');
       values.push(validatedData.title);
     }
+
+    // U034: `note` — a timestamped audit line appended to description, mirroring
+    // POST /api/tasks/{id}/status (status/route.ts:344-353). Capped so an append
+    // loop cannot breach description's own 10,000-char schema limit; the OLDEST
+    // text is what gets trimmed, because the newest line is the one a reviewer needs.
+    const u034Note =
+      typeof (validatedData as unknown as { note?: string }).note === 'string' &&
+      (validatedData as unknown as { note?: string }).note!.trim()
+        ? (validatedData as unknown as { note?: string }).note!.trim()
+        : null;
+    if (u034Note) {
+      const phaseTag = (validatedData as unknown as { phase_id?: string }).phase_id
+        ? ` phase=${(validatedData as unknown as { phase_id?: string }).phase_id}`
+        : '';
+      const noteLine = `[${validatedData.status ?? existing.status} @ ${now}${phaseTag}] ${u034Note}`;
+      const base = validatedData.description !== undefined
+        ? (validatedData.description || '')
+        : (existing.description ?? '');
+      const joined = base ? `${base}\n\n${noteLine}` : noteLine;
+      const MAX_DESCRIPTION = 10000;
+      (validatedData as unknown as Record<string, unknown>).description =
+        joined.length <= MAX_DESCRIPTION ? joined : joined.slice(joined.length - MAX_DESCRIPTION);
+    }
+
     if (validatedData.description !== undefined) {
       updates.push('description = ?');
       values.push(validatedData.description);
@@ -697,7 +721,12 @@ export async function PATCH(
       }
     }
 
-    if (updates.length === 0) {
+    // U034: check for the four producer fields before the empty-updates guard
+    // so a PATCH carrying only these fields still reaches the persistence blocks.
+    const u034Url = (validatedData as unknown as { deliverable_url?: string }).deliverable_url;
+    const u034Qc = (validatedData as unknown as { qc_scores?: Record<string, unknown> }).qc_scores;
+
+    if (updates.length === 0 && !u034Url && !u034Qc) {
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
     }
 
@@ -717,6 +746,50 @@ export async function PATCH(
     values.push(id);
 
     run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
+
+    // U034: `deliverable_url` — register as a `url` deliverable so the produced
+    if (u034Url) {
+      try {
+        const dup = queryOne<{ id: string }>(
+          'SELECT id FROM task_deliverables WHERE task_id = ? AND path = ?',
+          [id, u034Url],
+        );
+        if (!dup) {
+          run(
+            `INSERT INTO task_deliverables
+               (id, task_id, deliverable_type, title, path, created_at)
+             VALUES (?, ?, 'url', ?, ?, ?)`,
+            [uuidv4(), id, (validatedData as unknown as { phase_id?: string }).phase_id || 'deliverable', u034Url, now],
+          );
+        }
+      } catch (err) {
+        console.warn('[tasks PATCH] U034 deliverable_url register skipped:', (err as Error).message);
+      }
+    }
+
+    // U034: `qc_scores` — persist the SCALARS. task_qc_results has no column for
+    // the per-gate array (schema.ts:596-607), and the array already rides in the
+    // producer's own `note` (cc_board.py:591-596). Do NOT add a column here — a
+    // migration is out of scope for this unit.
+    if (u034Qc && typeof u034Qc.min_average === 'number') {
+      try {
+        run(
+          `INSERT INTO task_qc_results
+             (id, task_id, workspace_id, department_slug, score, passed, scoring_path, attempt, scored_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'producer-reported', 1, ?)`,
+          [
+            uuidv4(), id,
+            (existing as Task).workspace_id ?? null,
+            (existing as Task).department ?? null,
+            u034Qc.min_average as number,
+            u034Qc.overall_pass === true ? 1 : 0,
+            now,
+          ],
+        );
+      } catch (err) {
+        console.warn('[tasks PATCH] U034 qc_scores persist skipped:', (err as Error).message);
+      }
+    }
 
     // Fetch updated task with all joined fields
     const task = queryOne<Task>(
