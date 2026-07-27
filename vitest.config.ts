@@ -139,6 +139,11 @@ export default defineConfig({
       // API but NOT the dead getInterviewCookieOptions export. Remove the
       // fallback call from middleware.ts and this suite goes RED.
       'tests/unit/middleware-shell-lock-fallback.test.ts',
+      // U052 — passthrough write scope anti-rot lock. Derivation test walks
+      // src/app/api/**/route.ts and src/** (excluding src/app/api) to assert
+      // BEARER_REQUIRED_WRITE_ROUTES is in sync with the codebase. Uses glob
+      // for file walking + vitest globals, so vitest-only, never the tsx glob.
+      'src/lib/__tests__/passthrough-write-scope.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
