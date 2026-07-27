@@ -1004,6 +1004,7 @@ function ConsentScreen({
   booting,
   onSelect,
   onBegin,
+  onSkip,
 }: {
   logoUrl: string;
   brandStyle?: React.CSSProperties;
