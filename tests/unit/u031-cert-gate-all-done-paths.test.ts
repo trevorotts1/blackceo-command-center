@@ -193,7 +193,7 @@ test('DB: marketing task with no cert transitions successfully', async () => {
 test('DB: presentations sop-authoring sub-task with no cert transitions (exemption)', async () => {
   const id = insertTask({
     department: 'presentations',
-    status: 'in_progress',
+    status: 'review',
     processCertificateSha: null,
     sopAuthoringForTaskId: 'parent-task-id-123',
   });
