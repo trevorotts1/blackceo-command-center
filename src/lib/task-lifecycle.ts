@@ -379,6 +379,150 @@ function writeTaskEvent(
  * The caller still owns its own legacy `events` row and SSE broadcast — this
  * only closes the `task_events` gap. Best-effort; never throws.
  */
+// ---------------------------------------------------------------------------
+// transitionWithDeclaredException — the ONE audited bypass for unmodelled edges
+// ---------------------------------------------------------------------------
+
+/**
+ * U071: every unmodelled edge this codebase is allowed to take, enumerated. Adding a
+ * member is a reviewed change with a stated reason. A string parameter here would be
+ * a bypass with extra steps.
+ */
+export type DeclaredTransitionException =
+  | { kind: 'sop-authoring-subtask-complete' };   // in_progress -> done, DISP-10
+
+/** Maps each declared exception to the (from, to) edge it covers. */
+const EXCEPTION_ALLOWLIST: Record<
+  DeclaredTransitionException['kind'],
+  { from: LifecycleState; to: LifecycleState }
+> = {
+  'sop-authoring-subtask-complete': { from: 'in_progress', to: 'done' },
+};
+
+export interface TransitionResult {
+  task: Task;
+  changed: boolean;
+}
+
+/**
+ * U071: the ONE sanctioned way to complete a transition the state machine does not
+ * model. It exists because three call sites were reaching `status = 'done'` with a
+ * raw SQL UPDATE, which meant checkPreconditions() — and therefore EVERY gate this
+ * codebase places there, including the presentations certificate gate — could not
+ * see them. Auditing a write is not the same as gating it: an audit row answers
+ * "what happened", a precondition answers "may this happen".
+ *
+ * This function does NOT widen LEGAL_TRANSITIONS. It takes an edge the caller
+ * declares as an unmodelled exception, refuses it unless that exact pair is on the
+ * short allowlist below, and then runs the full precondition set before writing.
+ * A caller that wants a new exception adds it HERE, in review, with a reason —
+ * never with a raw UPDATE at the call site.
+ */
+export function transitionWithDeclaredException(args: {
+  taskId: string;
+  to: LifecycleState;
+  exception: DeclaredTransitionException;
+  actor: string;
+  reason: string;
+  extraColumns?: Record<string, string | number | null>;
+}): TransitionResult {
+  const { taskId, to, exception, actor, reason, extraColumns } = args;
+
+  const task = queryOne<TaskRowForLifecycle>(
+    `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.model_id,
+            t.persona_id, t.workspace_id, t.qc_reroute_attempts,
+            a.specialist_type
+     FROM tasks t
+     LEFT JOIN agents a ON t.assigned_agent_id = a.id
+     WHERE t.id = ?`,
+    [taskId],
+  );
+
+  if (!task) {
+    throw new TransitionError('NOT_FOUND', `Task ${taskId} not found`);
+  }
+
+  const from = task.status as LifecycleState;
+
+  // Idempotent: already in target state.
+  if (from === to) {
+    const current = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (!current) throw new TransitionError('NOT_FOUND', `Task ${taskId} not found after idempotent check`);
+    return { task: current, changed: false };
+  }
+
+  // Validate the declared exception covers this specific (from, to) edge.
+  const allowed = EXCEPTION_ALLOWLIST[exception.kind];
+  if (!allowed || allowed.from !== from || allowed.to !== to) {
+    throw new TransitionError(
+      'UNMODELLED_EXCEPTION_DENIED',
+      `Declared exception '${exception.kind}' does not cover ${from} → ${to} for task ${taskId}`,
+    );
+  }
+
+  // Run the full precondition set — this is the entire point of the unit.
+  checkPreconditions(task, to, { actor, reason });
+
+  const now = new Date().toISOString();
+  const legacyType = to === 'done' ? 'task_completed' : 'task_status_changed';
+
+  // Build the extra-column setters safely.
+  const ecKeys = extraColumns ? Object.keys(extraColumns) : [];
+  for (const col of ecKeys) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+      throw new Error(`transitionWithDeclaredException: invalid extra column name "${col}"`);
+    }
+  }
+  const extraSetters = ecKeys.length > 0
+    ? ', ' + ecKeys.map((col) => `${col} = ?`).join(', ')
+    : '';
+  const extraValues: (string | number | null)[] = ecKeys.map((col) => extraColumns![col]);
+
+  // Atomic write inside the same transaction boundary transition() uses.
+  transaction(() => {
+    const res = run(
+      `UPDATE tasks SET status = ?, updated_at = ?${extraSetters} WHERE id = ? AND status NOT IN (?)`,
+      [to, now, ...extraValues, taskId, to],
+    );
+    if (res.changes === 0) {
+      // Already at target (concurrent writer) — not a failure, just a no-op.
+      return;
+    }
+
+    // Structured task_events row (primary audit trail).
+    writeTaskEvent(taskId, from, to, { actor, reason }, now);
+
+    // Legacy events row for backwards-compat.
+    try {
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          legacyType,
+          taskId,
+          `[lifecycle] Task "${task.title}" moved ${from} → ${to} via declared exception '${exception.kind}'${reason ? ': ' + reason : ''}`,
+          now,
+        ],
+      );
+    } catch { /* legacy table unavailable on tests — non-fatal */ }
+  });
+
+  // Fetch updated row (post-commit).
+  const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+  if (!updated) throw new TransitionError('NOT_FOUND', `Task ${taskId} not found after update`);
+
+  // SSE broadcast (post-commit).
+  broadcast({ type: 'task_updated', payload: updated });
+
+  // DONE owner notification — same pattern as transition().
+  if (to === 'done') {
+    try { notifyOwnerDone(taskId); } catch { /* non-fatal */ }
+  }
+
+  return { task: updated, changed: true };
+}
+
 export function recordStatusEvent(
   taskId: string,
   fromStatus: string,

@@ -63,8 +63,7 @@ import {
 } from '@/lib/sop-auto-replace';
 import { scoreTaskForQC, resolveTrioAgents, QC_PASS_THRESHOLD } from '@/lib/qc-scorer';
 import type { QCScorerInput } from '@/lib/qc-scorer';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
-import { notifyOwnerDone } from '@/lib/owner-reports';
+import { transitionWithDeclaredException } from '@/lib/task-lifecycle';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -986,44 +985,24 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     // §2: Mark the authoring sub-task as done.
     // DISP-10: this synthetic "Author SOP" sub-task completes from `in_progress`
     // — an edge the lifecycle state machine does NOT model (in_progress→done is
-    // not a legal transition, and this write sets `completed_at`), so routing it
-    // through transition() would throw ILLEGAL_TRANSITION. We instead use the
-    // spec-sanctioned raw-write alternative: a compare-and-swap on the current
-    // status, the structured `task_events` audit row (so the audit sink is
-    // COMPLETE), and the owner DONE report.
+    // not a legal transition, and this write sets `completed_at`). Routing it
+    // through transition() would throw ILLEGAL_TRANSITION, so we use
+    // transitionWithDeclaredException (U071) — the one audited entry point for
+    // unmodelled edges, which runs the full precondition set before writing.
     if (subTaskId) {
       try {
-        const subFrom =
-          queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [subTaskId])?.status ??
-          'in_progress';
-        // U99-RAW-STATUS-WRITER: in_progress→done is not a legal transition()
-        // edge (see the DISP-10 note just above) and this write also sets
-        // completed_at atomically; audited immediately below via
-        // recordStatusEvent.
-        const res = run(
-          `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ? AND status NOT IN ('done')`,
-          [fileNow, fileNow, subTaskId],
-        );
-        if (res.changes > 0) {
-          recordStatusEvent(subTaskId, subFrom, 'done', {
-            actor: 'sop-authoring',
-            reason: `SOP "${finalName}" authored and filed (QC ${finalQcResult.score.toFixed(1)}/10 PASS)`,
-          });
-          run(
-            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-            [
-              uuidv4(),
-              'task_completed',
-              subTaskId,
-              `[sop-authoring] SOP "${finalName}" authored and filed. QC: ${finalQcResult.score.toFixed(1)}/10 PASS.`,
-              fileNow,
-            ],
-          );
-          // DONE owner report (5-field). Best-effort; gateway-routed; never throws.
-          try {
-            notifyOwnerDone(subTaskId);
-          } catch { /* non-fatal */ }
-        }
+        // U071: was a raw UPDATE that never reached checkPreconditions(), so no gate
+        // placed there could see this path to `done`. Now goes through the one
+        // audited entry point, which runs the full precondition set and still allows
+        // the in_progress→done edge the state machine does not model.
+        transitionWithDeclaredException({
+          taskId: subTaskId,
+          to: 'done',
+          exception: { kind: 'sop-authoring-subtask-complete' },
+          actor: 'sop-authoring',
+          reason: `SOP "${finalName}" authored and filed (QC ${finalQcResult.score.toFixed(1)}/10 PASS)`,
+          extraColumns: { completed_at: fileNow },
+        });
       } catch { /* non-fatal */ }
     }
 

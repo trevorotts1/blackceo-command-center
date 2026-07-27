@@ -139,6 +139,12 @@ export default defineConfig({
       // API but NOT the dead getInterviewCookieOptions export. Remove the
       // fallback call from middleware.ts and this suite goes RED.
       'tests/unit/middleware-shell-lock-fallback.test.ts',
+      // U063 — Presentation deliverables panel + teleprompter viewer (SAFE
+      // subset). Nine-artifact checklist, size honesty, GHL join on
+      // uploaded[].local_path, symlink refusal, secrets rule. DB-backed
+      // vitest suite; the Node built-in `npm run test:unit` glob skips it
+      // (see below) so it only runs here.
+      'tests/unit/presentation-deliverables.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
