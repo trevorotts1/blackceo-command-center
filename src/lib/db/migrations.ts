@@ -78,6 +78,9 @@ const CRITICAL_TASKS_DISPATCH_COLUMNS: { name: string; ddl: string; owner: strin
   { name: 'last_dispatch_attempt_at', ddl: 'ALTER TABLE tasks ADD COLUMN last_dispatch_attempt_at TEXT', owner: '077' },
   { name: 'next_dispatch_eligible_at', ddl: 'ALTER TABLE tasks ADD COLUMN next_dispatch_eligible_at TEXT', owner: '077' },
   { name: 'block_reason', ddl: 'ALTER TABLE tasks ADD COLUMN block_reason TEXT', owner: '078' },
+  { name: 'block_gaps', ddl: 'ALTER TABLE tasks ADD COLUMN block_gaps TEXT', owner: '073' },
+  { name: 'block_needs', ddl: 'ALTER TABLE tasks ADD COLUMN block_needs TEXT', owner: '073' },
+  { name: 'block_audience', ddl: "ALTER TABLE tasks ADD COLUMN block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM'))", owner: '073' },
 ];
 
 const CRITICAL_TASKS_DISPATCH_INDEXES: { name: string; column: string; ddl: string; owner: string }[] = [

@@ -150,6 +150,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   last_dispatch_attempt_at TEXT,              -- migration 077
   next_dispatch_eligible_at TEXT,             -- migration 077 (backoff gate)
   block_reason TEXT,                          -- migration 078
+  block_gaps TEXT,                            -- migration 073 (added to CRITICAL registry by U061 step 4)
+  block_needs TEXT,                           -- migration 073 (added to CRITICAL registry by U061 step 4)
+  block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM')),  -- migration 073 (added to CRITICAL registry by U061 step 4)
   redispatch_count INTEGER DEFAULT 0,         -- migration 084
   persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
   -- P2-02 (migration 099 owns this for existing DBs; this base CREATE covers

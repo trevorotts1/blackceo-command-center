@@ -1117,7 +1117,8 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
 
       {/* Block transparency panel — only rendered when the task is blocked and has block fields */}
       {task.status === 'blocked' && (task.block_reason || task.block_needs || task.block_audience) && (
-        <div className="mb-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs space-y-1">
+        <div className="mb-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs space-y-1"
+          data-testid="card-face-blocked-panel">
           {/* Audience badge */}
           {task.block_audience && (
             <div className="flex items-center gap-1.5">
@@ -1158,6 +1159,12 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
           {task.block_needs && (
             <p className="text-red-600 italic leading-snug line-clamp-2">
               Next step: {task.block_needs}
+            </p>
+          )}
+          {/* U061 — compact heal indicator on the card face only (detail in the modal) */}
+          {typeof task.dispatch_attempts === 'number' && task.dispatch_attempts > 0 && (
+            <p className="text-red-600 font-medium" data-testid="card-face-heal-attempts">
+              retrying — attempt {task.dispatch_attempts}
             </p>
           )}
         </div>
