@@ -208,12 +208,20 @@ test('DONE with ZERO deliverables sends the honest message (NO fabricated locati
 
 // ── PLANNER: quiet hours, digest, operator-audience guard ────────────────────
 
-test('QUIET HOURS: nothing is sent between 22:00 and 07:00 (DONE included, default hold till morning)', () => {
-  const plans = engine.planSends(
-    [mkTask({ id: 't9', status: 'done' }), mkTask({ id: 't10', status: 'in_progress' })],
+test('QUIET HOURS: courtesy messages (ACK, PROGRESS) are held at night; DONE and BLOCKED-on-owner are carved out', () => {
+  // A done task at night: carved out, 1 plan.
+  const donePlans = engine.planSends(
+    [mkTask({ id: 't9', status: 'done' })],
     { now: DAYTIME, isNight: true, deliverableFor: noDeliverable },
   );
-  assert.equal(plans.length, 0, 'quiet hours hold everything');
+  assert.equal(donePlans.length, 1, 'DONE is carved out of quiet hours');
+  assert.equal(donePlans[0].stamps[0].guardColumn, 'completion_sent_at');
+  // An in_progress task at night: still held (courtesy message).
+  const progressPlans = engine.planSends(
+    [mkTask({ id: 't10', status: 'in_progress' })],
+    { now: DAYTIME, isNight: true, deliverableFor: noDeliverable },
+  );
+  assert.equal(progressPlans.length, 0, 'PROGRESS is still held during quiet hours');
 });
 
 test('DIGEST: more than the threshold of sends to ONE chat coalesce into a single digest message', () => {
