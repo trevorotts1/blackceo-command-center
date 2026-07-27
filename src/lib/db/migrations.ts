@@ -6469,9 +6469,11 @@ export function reseedWorkspacesFromConfig(
   void opts; // reserved; the upsert is always idempotent so `force` is a no-op today
   let created = 0;
   let updated = 0;
+  let configPath: string | null = null;
+  let depts: unknown = null;
 
   try {
-    const configPath = resolveDepartmentsConfigPath();
+    configPath = resolveDepartmentsConfigPath();
 
     if (!configPath) {
       console.warn('[reseed] No departments.json found — skipping workspace reseed');
@@ -6488,7 +6490,7 @@ export function reseedWorkspacesFromConfig(
       console.warn('[reseed] departments.json unreadable (absent or TCC-blocked) — skipping workspace reseed:', configPath);
       return { created, updated, outcome: 'unreadable', configPath, manifestEntries: 0 };
     }
-    const depts = JSON.parse(raw);
+    depts = JSON.parse(raw);
 
     // U041 (audit E11). This branch used to be the ONLY exit in this function
     // that returned without logging anything, and it is the exit that means "we

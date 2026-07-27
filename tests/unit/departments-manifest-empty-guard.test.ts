@@ -53,6 +53,17 @@ function withIsolatedEnv<T>(zhcDir: string, fn: () => T): T {
 function withDb(fn: (db: Database.Database) => void): void {
   const dbPath = path.join(tmpDir('db'), 'test.db');
   const db = new Database(dbPath);
+  // Minimal schema needed by reseedWorkspacesFromConfig: companies, workspaces, _migrations.
+  // seedCompanyGuarded returns partial-config when the only company row is a placeholder
+  // (default/command-center) AND company-config.json is the "Your Company" template.
+  // So we seed a non-placeholder company row so seedCompanyGuarded returns
+  // already-exists-non-default and proceeds to the reseed.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT, slug TEXT, config TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT, slug TEXT, description TEXT, icon TEXT, company_id TEXT, sort_order INTEGER, archived_at TEXT, archived_reason TEXT, original_slug TEXT, user_md TEXT, head_agent_id TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, applied_at TEXT);
+    INSERT OR IGNORE INTO companies (id, name, slug, config, created_at, updated_at) VALUES ('synth-test-co', 'Synth Test Co', 'synth-test-co', '{}', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z');
+  `);
   try { fn(db); } finally { db.close(); fs.rmSync(path.dirname(dbPath), { recursive: true, force: true }); }
 }
 
