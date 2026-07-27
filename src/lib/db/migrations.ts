@@ -5085,6 +5085,60 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '115',
+    name: 'add_trust_engine_phase_columns',
+    // Purely ADDITIVE: three nullable TEXT columns on `tasks`. ALTER TABLE only; no
+    // rows read, written, moved or destroyed. Follows the migration-098 pattern
+    // exactly: inspect the LIVE schema (PRAGMA table_info), never the ledger, and
+    // add whatever is genuinely missing.
+    //
+    // U065: four message kinds, five stamps, no sharing. Before this migration the
+    // blocked-on-owner and in-progress branches shared `progress_last_sent_at`, which
+    // caused two defects: (a) a task that blocked before its first progress message
+    // never received one at all, and (b) a task that blocked within 12h of progress
+    // stayed silent about being blocked. These three columns uncouple them.
+    //
+    //   blocked_notice_sent_at       stamp: blocked-on-owner notice was planned and
+    //                                claimed — NOT "delivered" (see U043); the stamp
+    //                                is the idempotency guard, not a delivery receipt
+    //   phase_progress_sent_at       stamp: per-phase progress msg was planned and
+    //                                claimed — NOT "delivered"; same qualification
+    //   last_reported_phase_label    tracks the last phase label sent (extraSets only,
+    //                                never a guardColumn) so a recurring phase is not
+    //                                re-sent on every sweep
+    up: (db) => {
+      console.log('[Migration 115] Adding trust-engine phase-progress columns to tasks...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 115] tasks table absent — nothing to add');
+        return;
+      }
+
+      const presentCols = () =>
+        new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+
+      const wanted: { name: string; ddl: string }[] = [
+        { name: 'blocked_notice_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN blocked_notice_sent_at TEXT' },
+        { name: 'phase_progress_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN phase_progress_sent_at TEXT' },
+        { name: 'last_reported_phase_label', ddl: 'ALTER TABLE tasks ADD COLUMN last_reported_phase_label TEXT' },
+      ];
+
+      const added: string[] = [];
+      for (const { name, ddl } of wanted) {
+        if (!presentCols().has(name)) {
+          db.exec(ddl);
+          added.push(name);
+        }
+      }
+
+      console.log(
+        `[Migration 115] Added columns: ${added.length > 0 ? added.join(', ') : 'none (all already present)'}`,
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
