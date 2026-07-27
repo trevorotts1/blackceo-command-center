@@ -128,7 +128,23 @@ export const UpdateTaskSchema = z.object({
   // Required when transitioning a `presentations` department task to `done`.
   // The API route enforces presence; Zod accepts it as optional so other
   // departments are completely unaffected by this field.
-  process_certificate_sha: z.string().optional(),
+  // Presentations done-gate (v4.56.0 / no-skip proof).
+  // Required when transitioning a `presentations` department task to `done`.
+  // The API route enforces presence; Zod accepts it as optional so other
+  // departments are completely unaffected by this field.
+  // U033 (audit E3): a sha256 hex digest, exactly as prove-deck.py emits it
+  // (hashlib.sha256(...).hexdigest() -> 64 lowercase hex chars). Lowercased and
+  // trimmed before the check so a producer that upper-cases or pads is accepted
+  // rather than silently 400'd; anything that is not a sha256 is refused HERE,
+  // before it can be written into the anti-spoof slot.
+  process_certificate_sha: z
+    .string()
+    .transform((s) => s.trim().toLowerCase())
+    .refine((s) => /^[0-9a-f]{64}$/.test(s), {
+      message:
+        'process_certificate_sha must be a sha256 hex digest (64 hex characters), as written by prove-deck.py into PROCESS-CERTIFICATE.json',
+    })
+    .optional(),
 })
   // POISON-STATE GATE: `blocked_on_human` set + blank/placeholder `ask` is
   // unanswerable-forever and is rejected here (400). Note this is STRICTER than
