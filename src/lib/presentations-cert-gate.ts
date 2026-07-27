@@ -130,3 +130,33 @@ export function evaluatePresentationsDoneGate(
     persistCert: provided && provided !== stored ? provided : null,
   };
 }
+
+
+export interface PresentationsRegistrationInput {
+  department: string | null | undefined;
+  currentStatus: string | null | undefined;
+  targetStatus: string | null | undefined;
+  storedCert: string | null | undefined;
+  sopAuthoringForTaskId?: string | null;
+}
+
+export function requiresRegisteredCertificate(
+  input: PresentationsRegistrationInput,
+): { applies: boolean; ok: boolean; code?: 'process_certificate_required'; error?: string; remediation?: string } {
+  const target = (input.targetStatus ?? '').toString();
+  if (!PRESENTATIONS_TERMINAL_STATUSES.has(target)) return { applies: false, ok: true };
+  if (input.currentStatus === target) return { applies: false, ok: true };
+  const deptCanon = canonicalDeptSlug(input.department || '') || (input.department ?? '');
+  if (deptCanon !== 'presentations') return { applies: false, ok: true };
+  if (input.sopAuthoringForTaskId) return { applies: false, ok: true };
+  const stored = typeof input.storedCert === 'string' ? input.storedCert.trim().toLowerCase() : '';
+  if (stored.length > 0) return { applies: true, ok: true };
+  return {
+    applies: true, ok: false, code: 'process_certificate_required',
+    error: `Forbidden: a presentations task requires a registered process_certificate_sha to be marked ${target}`,
+    remediation:
+      `Generate the deck proof with prove-deck.py (it writes PROCESS-CERTIFICATE.json), then ` +
+      `PATCH this task with {"status":"${target}","process_certificate_sha":"<sha256>"} so the ` +
+      `certificate is registered on the card. Only then can any path mark it ${target}.`,
+  };
+}
