@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Search, Inbox as InboxIcon } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { X } from 'lucide-react';
+import { ErrorState } from './podcast/states';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
@@ -33,6 +34,8 @@ interface MissionQueueProps {
   departmentFilter?: string | null;
   /** Selects the column preset. Defaults to 'task' so all existing workspaces are unaffected. */
   boardKind?: BoardKind;
+  loadError?: string | null;
+  onRetry?: () => void;
 }
 
 // ── Lean Kanban board model (Trevor-approved) ──────────────────────────────
@@ -166,8 +169,8 @@ export const departmentNames: Record<string, string> = {
   'general-task': 'General Task',
 };
 
-export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task' }: MissionQueueProps) {
-  const { tasks, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
+export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task', loadError, onRetry }: MissionQueueProps) {
+  const { tasks, isLoading, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
@@ -229,17 +232,27 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // All bug board code paths are gated behind boardKind === 'bug'.
   const [bugTickets, setBugTickets] = useState<BugTicket[]>([]);
   const [bugLoading, setBugLoading] = useState(false);
+  const [bugError, setBugError] = useState<string | null>(null);
+  const [bugRetryCount, setBugRetryCount] = useState(0);
 
   useEffect(() => {
     if (boardKind !== 'bug') return;
     setBugLoading(true);
+    setBugError(null);
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '?workspace_id=bugs';
     fetch(`/api/bugs${qs}`)
       .then((r) => r.json())
       .then((d) => setBugTickets(d.bugs ?? []))
-      .catch((e) => console.error('[MissionQueue] bug fetch error', e))
+      .catch((e) => {
+        console.error('[MissionQueue] bug fetch error', e);
+        setBugError('Failed to load bug tickets.');
+      })
       .finally(() => setBugLoading(false));
-  }, [boardKind, workspaceId]);
+  }, [boardKind, workspaceId, bugRetryCount]);
+
+  const handleBugRetry = useCallback(() => {
+    setBugRetryCount((c) => c + 1);
+  }, []);
 
   // ── Horizontal scroll affordance state ────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -642,6 +655,16 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         })}
       </div>
 
+      {/* Error banner for both boards */}
+      {(() => {
+        const err = boardKind === 'bug' ? bugError : loadError;
+        const retry = boardKind === 'bug' && bugError ? handleBugRetry : onRetry;
+        if (err && retry) {
+          return <ErrorState onRetry={retry} />;
+        }
+        return null;
+      })()}
+
       {/* Kanban Columns — scroll wrapper with always-visible scrollbar + affordances */}
       {/*
         Layout:
@@ -728,8 +751,29 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                   );
                 })
               )
+            ) : isLoading ? (
+              /* Task Board — loading skeleton */
+              COLUMNS.map((column) => (
+                <div
+                  key={column.id}
+                  data-testid={`column-skeleton-${column.id}`}
+                  className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0"
+                >
+                  <div className="shrink-0">
+                    <div className="inline-flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full shadow-md bg-gray-300 animate-pulse">
+                      <span className="w-6 h-5 rounded-full bg-gray-400/50" />
+                      <span className="h-4 w-16 rounded bg-gray-400/50" />
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-3 lg:gap-4 overflow-y-auto min-h-0 pb-6 pr-0 lg:pr-2">
+                    {[1, 2, 3].map((i) => (
+                      <div key={i} className="h-20 bg-gray-100 rounded-2xl animate-pulse" />
+                    ))}
+                  </div>
+                </div>
+              ))
             ) : (
-              /* Task Board -- original 6 columns, unchanged */
+              /* Task Board — 6 columns, with loading gate above */
               COLUMNS.map((column) => {
                 const columnTasks = getTasksByStatus(column.id);
                 return (
@@ -783,7 +827,22 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                       {columnTasks.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-10 text-gray-300 select-none">
                           <InboxIcon className="w-7 h-7 mb-2" aria-hidden="true" />
-                          <span className="text-xs font-medium text-gray-400">No tasks</span>
+                          <span className="text-xs font-medium text-gray-400">
+                            {searchQuery.trim() !== '' || activeFilter !== 'total'
+                              ? 'No tasks match this filter'
+                              : effectiveDepartment
+                                ? 'No tasks in this department'
+                                : 'No tasks'}
+                          </span>
+                          {(searchQuery.trim() !== '' || activeFilter !== 'total') && (
+                            <button
+                              type="button"
+                              onClick={() => { setSearchQuery(''); setActiveFilter('total'); }}
+                              className="mt-2 text-xs font-medium text-brand-600 underline underline-offset-2 hover:text-brand-800"
+                            >
+                              Clear filter
+                            </button>
+                          )}
                         </div>
                       ) : (
                         columnTasks.map((task) => (
