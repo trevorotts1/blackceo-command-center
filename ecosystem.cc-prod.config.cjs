@@ -34,10 +34,11 @@
  *   the problem.
  */
 
-const INSTALL_DIR = process.env.CC_INSTALL_DIR || '/Users/blackceomacmini/command-center/app';
+const path = require('path');
+const INSTALL_DIR = process.env.CC_INSTALL_DIR || path.join(process.env.HOME, 'command-center/app');
 // Canonical absolute DB path — identical to .env.local and the previously
 // working cc-prod pm2 env, so a restart always opens the same database.
-const DB_PATH = process.env.DATABASE_PATH || '/Users/blackceomacmini/command-center/data/mission-control.db';
+const DB_PATH = process.env.DATABASE_PATH || path.join(process.env.HOME, 'command-center/data/mission-control.db');
 // CC_PORT ONLY — cc-start.sh reads this, strips ambient PORT, then re-exports it.
 const CC_PORT = process.env.CC_PORT || '4000';
 
@@ -110,8 +111,8 @@ module.exports = {
       // ~/.openclaw-testshim can NEVER make production resolve `openclaw` to the
       // test shim that swallows sends. The test shim is deliberately ABSENT here.
       PATH: [
-        '/Users/blackceomacmini/.npm-global/bin', // openclaw, npx
-        '/Users/blackceomacmini/.local/bin',      // openclaw (symlink)
+        path.join(process.env.HOME, '.npm-global/bin'), // openclaw, npx
+        path.join(process.env.HOME, '.local/bin'),      // openclaw (symlink)
         '/usr/local/bin',                         // node
         '/opt/homebrew/bin',
         '/opt/homebrew/sbin',
