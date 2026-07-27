@@ -11,13 +11,18 @@
  *   - renders each of the content blocks when its field is present
  *   - renders NO attempt line when dispatch_attempts is undefined or 0
  *   - renders the malformed-block_gaps fallback
+ *   - renders the Resume button
+ *   - renders artifact count from deliverables API
  */
-import { describe, it, expect, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import { BlockedReasonPanel } from '../../src/components/TaskOverviewPanels';
 import type { Task } from '../../src/lib/types';
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function baseTask(over: Partial<Task> = {}): Task {
   return {
@@ -49,6 +54,13 @@ describe('BlockedReasonPanel — not blocked', () => {
 // ── Empty state ──────────────────────────────────────────────
 
 describe('BlockedReasonPanel — empty state', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('renders the empty-state message when blocked with no block fields', () => {
     render(<BlockedReasonPanel task={baseTask()} />);
     expect(screen.getByTestId('blocked-reason-panel')).toBeTruthy();
@@ -62,6 +74,13 @@ describe('BlockedReasonPanel — empty state', () => {
 // ── Each content block renders when data present ─────────────
 
 describe('BlockedReasonPanel — block_reason', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('renders the failing gate reason', () => {
     render(<BlockedReasonPanel task={baseTask({ block_reason: 'QC score too low' })} />);
     const el = screen.getByTestId('blocked-panel-reason');
@@ -70,6 +89,13 @@ describe('BlockedReasonPanel — block_reason', () => {
 });
 
 describe('BlockedReasonPanel — block_gaps (valid JSON)', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('renders the gaps list when block_gaps is valid JSON array', () => {
     render(
       <BlockedReasonPanel
@@ -84,6 +110,13 @@ describe('BlockedReasonPanel — block_gaps (valid JSON)', () => {
 });
 
 describe('BlockedReasonPanel — block_gaps (malformed JSON)', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('renders the malformed fallback when block_gaps is not valid JSON', () => {
     render(<BlockedReasonPanel task={baseTask({ block_gaps: 'not json' })} />);
     const el = screen.getByTestId('blocked-panel-gaps');
@@ -92,6 +125,13 @@ describe('BlockedReasonPanel — block_gaps (malformed JSON)', () => {
 });
 
 describe('BlockedReasonPanel — block_needs', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('renders the next step when block_needs is present', () => {
     render(
       <BlockedReasonPanel task={baseTask({ block_needs: 'Provide the missing asset link' })} />,
@@ -102,6 +142,13 @@ describe('BlockedReasonPanel — block_needs', () => {
 });
 
 describe('BlockedReasonPanel — heal attempt data', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('renders the attempt line when dispatch_attempts > 0', () => {
     render(
       <BlockedReasonPanel
@@ -124,14 +171,26 @@ describe('BlockedReasonPanel — heal attempt data', () => {
         })}
       />,
     );
-    const countdown = screen.getByTestId('blocked-panel-countdown');
-    expect(countdown.textContent).toMatch(/next retry/);
+    // Countdown may not appear immediately in waitFor timing, but the data-testid should be there
+    // after the useEffect tick fires
+    const countdown = screen.queryByTestId('blocked-panel-countdown');
+    // For the countdown to render, we need the useEffect to fire.
+    // In jsdom, useEffect fires synchronously after render.
+    expect(countdown).toBeTruthy();
+    expect(countdown!.textContent).toMatch(/next retry/);
   });
 });
 
 // ── dispatch_attempts guards ─────────────────────────────────
 
 describe('BlockedReasonPanel — dispatch_attempts absent', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('renders no attempt line when dispatch_attempts is undefined', () => {
     render(<BlockedReasonPanel task={baseTask({ block_reason: 'Some reason' })} />);
     expect(screen.queryByTestId('blocked-panel-heal')).toBeNull();
@@ -156,11 +215,103 @@ describe('BlockedReasonPanel — dispatch_attempts absent', () => {
   });
 });
 
+// ── Artifacts count ──────────────────────────────────────────
+
+describe('BlockedReasonPanel — artifacts count', () => {
+  it('fetches and renders the artifact count from deliverables API', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [{ id: 'd1' }, { id: 'd2' }, { id: 'd3' }],
+    } as Response);
+    render(
+      <BlockedReasonPanel
+        task={baseTask({ dispatch_attempts: 1, next_dispatch_eligible_at: new Date(Date.now() + 5000).toISOString() })}
+      />,
+    );
+    await waitFor(() => {
+      const el = screen.getByTestId('blocked-panel-artifacts');
+      expect(el.textContent).toContain('3 deliverables');
+    });
+  });
+});
+
+// ── Resume button ────────────────────────────────────────────
+
+describe('BlockedReasonPanel — Resume button', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
+  it('renders the Resume button', () => {
+    render(<BlockedReasonPanel task={baseTask()} />);
+    expect(screen.getByTestId('blocked-panel-resume-btn')).toBeTruthy();
+  });
+
+  it('the Resume button has descriptive text', () => {
+    render(<BlockedReasonPanel task={baseTask()} />);
+    const btn = screen.getByTestId('blocked-panel-resume-btn');
+    expect(btn.textContent).toMatch(/Re-enter dispatch queue|re-enter dispatch queue/i);
+  });
+});
+
 // ── Panel root data-testid ───────────────────────────────────
 
 describe('BlockedReasonPanel — data-testid convention', () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    } as Response);
+  });
+
   it('has data-testid on the panel root matching DispatchHoldPanel convention', () => {
     render(<BlockedReasonPanel task={baseTask({ block_reason: 'test' })} />);
     expect(screen.getByTestId('blocked-reason-panel')).toBeTruthy();
+  });
+
+  it('heading, reason, needs, and resume button are all addressable by data-testid', () => {
+    render(
+      <BlockedReasonPanel
+        task={baseTask({
+          block_reason: 'test reason',
+          block_gaps: JSON.stringify(['gap1']),
+          block_needs: 'fix it',
+          dispatch_attempts: 1,
+          next_dispatch_eligible_at: new Date(Date.now() + 5000).toISOString(),
+        })}
+      />,
+    );
+    expect(screen.getByTestId('blocked-reason-panel')).toBeTruthy();
+    expect(screen.getByTestId('blocked-panel-heading')).toBeTruthy();
+    expect(screen.getByTestId('blocked-panel-reason')).toBeTruthy();
+    expect(screen.getByTestId('blocked-panel-gaps')).toBeTruthy();
+    expect(screen.getByTestId('blocked-panel-needs')).toBeTruthy();
+    expect(screen.getByTestId('blocked-panel-heal')).toBeTruthy();
+    expect(screen.getByTestId('blocked-panel-countdown')).toBeTruthy();
+    expect(screen.getByTestId('blocked-panel-resume-btn')).toBeTruthy();
+  });
+
+  it('every state carries a text label — colour alone is never the signal', () => {
+    render(
+      <BlockedReasonPanel
+        task={baseTask({
+          block_reason: 'test reason',
+          dispatch_attempts: 2,
+          next_dispatch_eligible_at: new Date(Date.now() + 5000).toISOString(),
+        })}
+      />,
+    );
+    // The heal section must have text content, not just a coloured icon
+    const heal = screen.getByTestId('blocked-panel-heal');
+    expect(heal.textContent!.trim().length).toBeGreaterThan(0);
+    // The reason must be readable text beyond just the label
+    const reason = screen.getByTestId('blocked-panel-reason');
+    expect(reason.textContent).toContain('test reason');
+    // The heading must be text
+    const heading = screen.getByTestId('blocked-panel-heading');
+    expect(heading.textContent!.trim().length).toBeGreaterThan(0);
   });
 });
