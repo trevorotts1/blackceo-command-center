@@ -17,6 +17,22 @@
  *   it detects a multi-worker runtime so the misconfiguration is visible rather
  *   than silent. Keep the constraint documented HERE (not only in the PM2
  *   template) so it survives independent of the deploy config.
+ *
+ *   BLIND SPOT — what warnIfClustered() CANNOT see (U066):
+ *   The warning reads only THIS process's env. N independent PM2 *fork* apps
+ *   sharing one working directory each see a single-instance env, so NONE of
+ *   them warns — yet each holds its own `clients` Set, so a mutation served by
+ *   one never reaches a browser connected to another. Same stale board as a
+ *   cluster, with no warning at all. No env var distinguishes "I am the only
+ *   Command Center process here" from "I am one of three"; deciding it needs
+ *   evidence from OUTSIDE the process (a lock file, a registry, a port probe),
+ *   and adding filesystem work at import scope to this module is the same
+ *   mistake that broke the Next build once already (see the note below about
+ *   node:cluster). So the detection lives at COMMIT time instead:
+ *   scripts/pm2-single-instance-guard.mjs resolves every PM2 app in the repo at
+ *   once and hard-fails two Command Center apps that share a DATABASE_PATH —
+ *   which is the invariant, not `instances: 1`, that keeps these registries
+ *   from disagreeing. Closing it at RUNTIME is deliberately NOT done here.
  */
 
 import type { SSEEvent } from './types';
@@ -31,9 +47,9 @@ import type { SSEEvent } from './types';
  *     multi-worker. '0' is intentionally NOT flagged so the canonical single
  *     fork instance (which PM2 sets to '0') stays a silent no-op.
  */
-function warnIfClustered(): void {
-  const appInstance = process.env.NODE_APP_INSTANCE;
-  const execMode = process.env.exec_mode || process.env.pm_exec_mode;
+export function warnIfClustered(env: NodeJS.ProcessEnv = process.env): void {
+  const appInstance = env.NODE_APP_INSTANCE;
+  const execMode = env.exec_mode || env.pm_exec_mode;
   const multiInstance =
     typeof appInstance === 'string' && appInstance !== '' && appInstance !== '0';
 
