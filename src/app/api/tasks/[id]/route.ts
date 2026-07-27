@@ -24,6 +24,7 @@ import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-e
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
+import { transition, TransitionError, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -123,6 +124,10 @@ export async function PATCH(
     const updates: string[] = [];
     const values: unknown[] = [];
     const now = new Date().toISOString();
+    let u035StatusTarget: LifecycleState | null = null;
+    let u035WarnFallback = false;
+    let actingAgentId: string | null = null;
+    let actorName: string | null = null;
 
     // Workflow enforcement for agent-initiated approvals (review → done gate).
     //
@@ -611,8 +616,8 @@ export async function PATCH(
       }
       // ── End presentations no-skip proof gate ────────────────────────────────────────────
 
-      updates.push('status = ?');
-      values.push(validatedData.status);
+      // U035 (audit E5): route status through transition() — see unit card.
+      u035StatusTarget = validatedData.status as LifecycleState;
 
       // Auto-dispatch when moving to in_progress with an assigned agent
       if (validatedData.status === 'in_progress' && existing.assigned_agent_id) {
@@ -627,8 +632,8 @@ export async function PATCH(
       // is the shared transition() (task-lifecycle.ts, owned by L3): this route,
       // the status route, and the return-to-orchestrator route should all funnel
       // through it — see integrator note.
-      const actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
-      let actorName: string | null = null;
+      actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
+      actorName = null;
       if (!validatedData.updated_by_agent_id && cfAccessEmail) {
         actorName = cfAccessEmail; // verified human operator (INGEST-11)
       } else if (actingAgentId) {
@@ -638,22 +643,28 @@ export async function PATCH(
       const approverSuffix =
         !validatedData.updated_by_agent_id && cfAccessEmail ? ` (approved by ${cfAccessEmail})` : '';
 
-      // Log status change event (with actor agent_id for a complete audit trail).
-      const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
-      run(
-        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [uuidv4(), eventType, actingAgentId, id, `Task "${existing.title}" moved to ${validatedData.status}${approverSuffix}`, now]
-      );
+      // U035: transition() writes the status-change events row on the normal path;
+      // only emit our own on the warn-mode fallback (transition() threw before writing).
+      if (u035WarnFallback) {
+        const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), eventType, actingAgentId, id, `Task "${existing.title}" moved to ${validatedData.status}${approverSuffix}`, now]
+        );
+      }
 
       // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
-      // W5.4: replaced bare 2-field string with notifyOwnerDone (all 5 fields:
-      // who/role + where + SOP + persona). Best-effort; gateway-routed.
+      // U035: transition() fires notifyOwnerDone for -> done. Double-firing
+      // sends the owner two completion messages. Only emit our own on the
+      // warn-mode fallback path.
       if (validatedData.status === 'done' && existing.status !== 'done') {
-        try {
-          notifyOwnerDone(id);
-        } catch (notifyErr) {
-          console.error('[tasks PATCH] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
+        if (u035WarnFallback) {
+          try {
+            notifyOwnerDone(id);
+          } catch (notifyErr) {
+            console.error('[tasks PATCH] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
+          }
         }
       }
       // ── End OWNER NOTIFICATION (DONE — manual/QC-agent approval) ────────
@@ -697,26 +708,64 @@ export async function PATCH(
       }
     }
 
-    if (updates.length === 0) {
+    // U035: nothing-to-do check accounts for a status-only payload (status lives
+    // in transition(), so it contributes no entry to `updates`).
+    if (updates.length === 0 && u035StatusTarget === null) {
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
     }
 
-    updates.push('updated_at = ?');
-    values.push(now);
-    // Bump last_progress_at on any status change (migration 071 / stale-task-sweep).
-    // This covers: status transitions, assignment changes, and explicit field updates.
-    // The stale sweep reads last_progress_at to determine when a card has gone stale.
-    if (validatedData.status !== undefined || validatedData.assigned_agent_id !== undefined) {
+    // ── STATUS: through the state machine ─────────────────────────────────────
+    if (u035StatusTarget !== null) {
       try {
-        updates.push('last_progress_at = ?');
-        values.push(now);
-      } catch {
-        // Pre-migration-071 DB: column missing -- silently skip rather than crash.
+        await transition(id, u035StatusTarget, {
+          actor: actingAgentId ?? cfAccessEmail ?? 'operator',
+          reason: `[PATCH /api/tasks/{id}] ${existing.status} → ${u035StatusTarget}`,
+          expectedFrom: existing.status as LifecycleState,
+        });
+      } catch (err) {
+        if (err instanceof TransitionError) {
+          if (err.code === 'NOT_FOUND') {
+            return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+          }
+          if (err.code === 'CAS_CONFLICT') {
+            return NextResponse.json(
+              { error: err.message, code: err.code,
+                hint: 'Someone else already moved this task. Reload the card and try again.' },
+              { status: 409 },
+            );
+          }
+          // WARN-MODE: ILLEGAL_TRANSITION logs and falls through to raw write.
+          if (err.code === 'ILLEGAL_TRANSITION') {
+            console.warn(
+              `[U035 WARN] illegal-edge PATCH permitted: ${existing.status} -> ${u035StatusTarget} ` +
+              `task=${id} — stage-2 work item. ${err.message}`,
+            );
+            updates.push('status = ?');
+            values.push(u035StatusTarget);
+            recordStatusEvent(id, existing.status, u035StatusTarget, {
+              actor: actingAgentId ?? 'operator',
+              reason: `[U035 warn-mode] illegal edge permitted: ${existing.status} → ${u035StatusTarget}`,
+            });
+            u035WarnFallback = true;
+          } else {
+            return NextResponse.json({ error: err.message, code: err.code }, { status: 422 });
+          }
+        } else {
+          throw err;
+        }
       }
     }
-    values.push(id);
 
-    run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
+    // ── Supplementary UPDATE: fields transition() does not own ────────────────
+    if (updates.length > 0 || u035StatusTarget !== null) {
+      updates.push('updated_at = ?');
+      values.push(now);
+      if (validatedData.status !== undefined || validatedData.assigned_agent_id !== undefined) {
+        try { updates.push('last_progress_at = ?'); values.push(now); } catch {}
+      }
+      values.push(id);
+      run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
+    }
 
     // Fetch updated task with all joined fields
     const task = queryOne<Task>(
