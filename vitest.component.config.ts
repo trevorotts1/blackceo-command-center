@@ -37,6 +37,11 @@ export default defineConfig({
       // U38 (C-07) — S3 closure human-promote control: "Promote to Done
       // (operator)" (QcPromotePanel, task-detail modal) real render proof.
       'tests/unit/u38-c-07-qc-promote-render.test.tsx',
+      // U038 (audit E8) — board department label render proof: the card chip
+      // (:1066) shows 🖥️ Presentations rather than the 🏢 fallback, the three
+      // alias labels that worked before still work, and the header (:520-521)
+      // resolves both 'presentations' and 'Presentations'.
+      'tests/unit/u038-board-chip-render.test.tsx',
       // U50 (HL/U62) — model-catalog honesty: sticky ModelFilterBar + D14
       // "Show deprecated/stale" toggle + a visible ModelCard badge, real
       // render proof.
