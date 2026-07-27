@@ -23,6 +23,7 @@ const telegramSpy = vi.fn(() => true);
 vi.mock('@/lib/notify', () => ({
   notifyTelegram: (args: { chatId: string; message: string }) => telegramSpy(args),
   notifySystem: () => {},
+  recordUndeliverable: () => {},
   resolveOperatorChatId: () => null,
   resolveOwnerChatId: () => null,
 }));
