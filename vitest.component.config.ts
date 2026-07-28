@@ -78,6 +78,9 @@ export default defineConfig({
       // from src/components/fleet with barrel-export verification, tone
       // color mapping, null-value rendering, and children rendering.
       'tests/unit/fleet-components.test.tsx',
+      // U062 — task-board loading / empty / filtered-empty / failed-load states are
+      // four DIFFERENT renders, and the loading render never says "No tasks".
+      'tests/unit/mission-queue-board-states.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
