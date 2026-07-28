@@ -1,7 +1,7 @@
 /**
  * passthrough-write-scope.test.ts  —  U052 anti-rot lock
  *
- * Proves the BEARER_REQUIRED_WRITE_ROUTES list in src/middleware.ts cannot
+ * Proves the BEARER_REQUIRED_WRITE_ROUTES list in src/lib/bearer-required-routes.ts cannot
  * silently drift out of sync with the codebase.
  *
  * Derived 2026-07-27. Re-derive command (node):
@@ -18,6 +18,7 @@ import { describe, it, expect } from 'vitest';
 import { globSync } from 'glob';
 import { readFileSync } from 'fs';
 import { resolve, relative } from 'path';
+import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '../bearer-required-routes';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -180,63 +181,6 @@ function isWebhookSecretRouteTest(pathname: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 4. BEARER_REQUIRED_WRITE_ROUTES patterns (mirrored from middleware.ts)
-// ---------------------------------------------------------------------------
-
-const BEARER_REQUIRED_PATTERNS: RegExp[] = [
-  /^\/api\/ad-campaigns(\/[^/]+)?$/,
-  /^\/api\/agents$/,
-  /^\/api\/agents\/[^/]+\/memory-logs$/,
-  /^\/api\/agents\/[^/]+\/openclaw$/,
-  /^\/api\/anthology\/gate$/,
-  /^\/api\/bugs(\/[^/]+)?$/,
-  /^\/api\/campaigns\/[^/]+$/,
-  /^\/api\/clients$/,
-  /^\/api\/companies$/,
-  /^\/api\/cron\/sop-learning$/,
-  /^\/api\/da-challenges$/,
-  /^\/api\/execution-queue(\/[^/]+)?$/,
-  /^\/api\/files\/upload$/,
-  /^\/api\/harvest-cards\/[^/]+\/approve$/,
-  /^\/api\/interview\/send-link$/,
-  /^\/api\/logo$/,
-  /^\/api\/openclaw\/sessions$/,
-  /^\/api\/operator\/journal\/[^/]+$/,
-  /^\/api\/operator\/memory\/search$/,
-  /^\/api\/operator\/notebook\/[^/]+$/,
-  /^\/api\/operator\/tts$/,
-  /^\/api\/recommendations$/,
-  /^\/api\/recommendations\/[^/]+\/outcome$/,
-  /^\/api\/sops\/(?!feedback$|proposals$)[^/]+$/,
-  /^\/api\/sops\/import-role-library$/,
-  /^\/api\/tasks\/[^/]+\/activities$/,
-  /^\/api\/tasks\/[^/]+\/deliverables$/,
-  /^\/api\/tasks\/[^/]+\/messages$/,
-  /^\/api\/tasks\/[^/]+\/planning\/approve$/,
-  /^\/api\/tasks\/[^/]+\/rating$/,
-  /^\/api\/tasks\/[^/]+\/return-to-orchestrator$/,
-  /^\/api\/tasks\/[^/]+\/subagent$/,
-  /^\/api\/tasks\/[^/]+\/test$/,
-  /^\/api\/weight-profiles$/,
-  /^\/api\/workspaces\/[^/]+$/,
-];
-
-function bearerPatternMatches(pathname: string): boolean {
-  return BEARER_REQUIRED_PATTERNS.some((r) => r.test(pathname));
-}
-
-// ---------------------------------------------------------------------------
-// 5. requiresBearerForWrite re-implementation
-// ---------------------------------------------------------------------------
-
-const READ_ONLY_METHODS_TEST = new Set(['GET', 'HEAD', 'OPTIONS']);
-
-function requiresBearerForWriteTest(pathname: string, method: string): boolean {
-  if (READ_ONLY_METHODS_TEST.has(method.toUpperCase())) return false;
-  return BEARER_REQUIRED_PATTERNS.some((r) => r.test(pathname));
-}
-
-// ---------------------------------------------------------------------------
 // Pre-loaded data (computed once at module scope)
 // ---------------------------------------------------------------------------
 
@@ -244,10 +188,10 @@ const allMutatingRoutes = scanApiRoutes();
 const interfaceCalls = scanInterfaceMutatingFetches();
 const interfaceRouteSet = new Set(interfaceCalls.map((c) => c.route));
 
-// Build a set of concrete route paths covered by BEARER_REQUIRED_PATTERNS
+// Build a set of concrete route paths covered by BEARER_REQUIRED_WRITE_ROUTES (imported from the shared module)
 const bearerCoveredRoutes = new Set<string>();
 for (const route of allMutatingRoutes) {
-  if (bearerPatternMatches(route.path) && !isWebhookSecretRouteTest(route.path)) {
+  if (requiresBearerForWrite(route.path, 'POST') && !isWebhookSecretRouteTest(route.path)) {
     bearerCoveredRoutes.add(route.path);
   }
 }
@@ -296,24 +240,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   });
 
   it('BEARER_REQUIRED_WRITE_ROUTES.length is 35, not 38 (checksum: 32 + 3×2 = 38)', () => {
-    expect(BEARER_REQUIRED_PATTERNS.length).toBe(35);
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(35);
   });
 
-  it('route-list membership: middleware.ts BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
-    // U052: Reads the middleware.ts source to verify that specific routes are
-    // in the BEARER_REQUIRED_WRITE_ROUTES array. Removing a route from
-    // middleware.ts must redden this test — without this assertion, the test
-    // suite can silently pass even when a protected route is removed.
-    const mwSrc = readFileSync(resolve(ROOT, 'src/middleware.ts'), 'utf-8');
-    // Extract the BEARER_REQUIRED_WRITE_ROUTES array body
-    const arrayMatch = mwSrc.match(
-      /const BEARER_REQUIRED_WRITE_ROUTES: RegExp\[\]\s*=\s*\[([\s\S]*?)\];/
-    );
-    expect(arrayMatch).toBeTruthy();
-    const arrayBody = arrayMatch![1];
-    expect(arrayBody).toContain('weight-profiles');
-    expect(arrayBody).toContain('/bugs');
-    expect(arrayBody).toContain('execution-queue');
+  it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
+    // U052: Tests the imported BEARER_REQUIRED_WRITE_ROUTES (single source of truth
+    // from src/lib/bearer-required-routes.ts) directly — removing a route from the
+    // shared module reddens this test. No hand-copied duplicate.
+    expect(requiresBearerForWrite('/api/weight-profiles', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/bugs', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/execution-queue/abc', 'DELETE')).toBe(true);
   });
 
   // ---- Derivation test: every reachable route is classified ---------------
@@ -323,7 +259,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     const routeByPattern = new Set<string>(); // routes covered by bearer patterns
 
     for (const route of allMutatingRoutes) {
-      if (bearerPatternMatches(route.path)) {
+      if (requiresBearerForWrite(route.path, 'POST')) {
         routeByPattern.add(route.path);
       }
     }
@@ -331,7 +267,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     for (const route of allMutatingRoutes) {
       const p = route.path;
       if (isWebhookSecretRouteTest(p)) continue; // excluded, already gated
-      if (bearerPatternMatches(p)) continue;      // closed by this unit
+      if (requiresBearerForWrite(p, 'POST')) continue;      // closed by this unit
       if (interfaceRouteSet.has(p)) continue;      // interface needs it — kept open
       unclassified.push(p);
     }
@@ -354,7 +290,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // Also check: do any interface-called routes match a bearer pattern?
     // (This catches routes not in the API tree but called from the interface)
     for (const iface of interfaceCalls) {
-      if (bearerPatternMatches(iface.route) && !bearerCoveredRoutes.has(iface.route)) {
+      if (requiresBearerForWrite(iface.route, 'POST') && !bearerCoveredRoutes.has(iface.route)) {
         overlap.push(`${iface.route} (matched by pattern but not in API route tree — may be a false alarm)`);
       }
     }
@@ -364,74 +300,74 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Read methods unaffected -------------------------------------------
 
   it('requiresBearerForWrite returns false for GET/HEAD/OPTIONS on listed routes', () => {
-    expect(requiresBearerForWriteTest('/api/bugs', 'GET')).toBe(false);
-    expect(requiresBearerForWriteTest('/api/weight-profiles', 'GET')).toBe(false);
-    expect(requiresBearerForWriteTest('/api/ad-campaigns', 'HEAD')).toBe(false);
-    expect(requiresBearerForWriteTest('/api/workspaces/abc', 'OPTIONS')).toBe(false);
+    expect(requiresBearerForWrite('/api/bugs', 'GET')).toBe(false);
+    expect(requiresBearerForWrite('/api/weight-profiles', 'GET')).toBe(false);
+    expect(requiresBearerForWrite('/api/ad-campaigns', 'HEAD')).toBe(false);
+    expect(requiresBearerForWrite('/api/workspaces/abc', 'OPTIONS')).toBe(false);
   });
 
   it('requiresBearerForWrite returns true for mutating methods on listed routes', () => {
-    expect(requiresBearerForWriteTest('/api/bugs', 'POST')).toBe(true);
-    expect(requiresBearerForWriteTest('/api/weight-profiles', 'POST')).toBe(true);
-    expect(requiresBearerForWriteTest('/api/ad-campaigns/123', 'PATCH')).toBe(true);
-    expect(requiresBearerForWriteTest('/api/workspaces/abc', 'DELETE')).toBe(true);
-    expect(requiresBearerForWriteTest('/api/sops/abc', 'PUT')).toBe(true);
+    expect(requiresBearerForWrite('/api/bugs', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/weight-profiles', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/ad-campaigns/123', 'PATCH')).toBe(true);
+    expect(requiresBearerForWrite('/api/workspaces/abc', 'DELETE')).toBe(true);
+    expect(requiresBearerForWrite('/api/sops/abc', 'PUT')).toBe(true);
   });
 
   // ---- Boundary cases ----------------------------------------------------
 
   it('/api/sops/proposals/abc → false (interface calls it)', () => {
-    expect(requiresBearerForWriteTest('/api/sops/proposals/abc', 'POST')).toBe(false);
-    expect(bearerPatternMatches('/api/sops/proposals/abc')).toBe(false);
+    expect(requiresBearerForWrite('/api/sops/proposals/abc', 'POST')).toBe(false);
+    expect(requiresBearerForWrite('/api/sops/proposals/abc', 'POST')).toBe(false);
   });
 
   it('/api/sops/abc → true (on the closable list)', () => {
-    expect(requiresBearerForWriteTest('/api/sops/abc', 'PATCH')).toBe(true);
-    expect(bearerPatternMatches('/api/sops/abc')).toBe(true);
+    expect(requiresBearerForWrite('/api/sops/abc', 'PATCH')).toBe(true);
+    expect(requiresBearerForWrite('/api/sops/abc', 'POST')).toBe(true);
   });
 
   it('/api/tasks/abc → false (interface calls it — PATCH/DELETE)', () => {
-    expect(requiresBearerForWriteTest('/api/tasks/abc', 'PATCH')).toBe(false);
-    expect(bearerPatternMatches('/api/tasks/abc')).toBe(false);
+    expect(requiresBearerForWrite('/api/tasks/abc', 'PATCH')).toBe(false);
+    expect(requiresBearerForWrite('/api/tasks/abc', 'POST')).toBe(false);
   });
 
   it('/api/tasks/abc/activities → true (on the closable list)', () => {
-    expect(requiresBearerForWriteTest('/api/tasks/abc/activities', 'POST')).toBe(true);
-    expect(bearerPatternMatches('/api/tasks/abc/activities')).toBe(true);
+    expect(requiresBearerForWrite('/api/tasks/abc/activities', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/tasks/abc/activities', 'POST')).toBe(true);
   });
 
   it('/api/internal/auth-rejected → false (internal 401 sink, unreachable via middleware)', () => {
-    expect(requiresBearerForWriteTest('/api/internal/auth-rejected', 'POST')).toBe(false);
-    expect(bearerPatternMatches('/api/internal/auth-rejected')).toBe(false);
+    expect(requiresBearerForWrite('/api/internal/auth-rejected', 'POST')).toBe(false);
+    expect(requiresBearerForWrite('/api/internal/auth-rejected', 'POST')).toBe(false);
   });
 
   // ---- Collection-or-item patterns cover both forms ----------------------
 
   it('collection-or-item patterns cover collection and item forms', () => {
-    expect(bearerPatternMatches('/api/ad-campaigns')).toBe(true);
-    expect(bearerPatternMatches('/api/ad-campaigns/abc')).toBe(true);
-    expect(bearerPatternMatches('/api/bugs')).toBe(true);
-    expect(bearerPatternMatches('/api/bugs/abc')).toBe(true);
-    expect(bearerPatternMatches('/api/execution-queue')).toBe(true);
-    expect(bearerPatternMatches('/api/execution-queue/abc')).toBe(true);
+    expect(requiresBearerForWrite('/api/ad-campaigns', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/ad-campaigns/abc', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/bugs', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/bugs/abc', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/execution-queue', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/execution-queue/abc', 'POST')).toBe(true);
   });
 
   // ---- sops negative lookahead: feedback/proposals are excluded ---------
 
   it('/api/sops/feedback → false (excluded by negative lookahead)', () => {
-    expect(requiresBearerForWriteTest('/api/sops/feedback', 'POST')).toBe(false);
-    expect(bearerPatternMatches('/api/sops/feedback')).toBe(false);
+    expect(requiresBearerForWrite('/api/sops/feedback', 'POST')).toBe(false);
+    expect(requiresBearerForWrite('/api/sops/feedback', 'POST')).toBe(false);
   });
 
   it('/api/sops/proposals → false (excluded by negative lookahead)', () => {
-    expect(requiresBearerForWriteTest('/api/sops/proposals', 'POST')).toBe(false);
-    expect(bearerPatternMatches('/api/sops/proposals')).toBe(false);
+    expect(requiresBearerForWrite('/api/sops/proposals', 'POST')).toBe(false);
+    expect(requiresBearerForWrite('/api/sops/proposals', 'POST')).toBe(false);
   });
 
   // ---- sops import-role-library is covered -------------------------------
 
   it('/api/sops/import-role-library → true (covered)', () => {
-    expect(requiresBearerForWriteTest('/api/sops/import-role-library', 'POST')).toBe(true);
-    expect(bearerPatternMatches('/api/sops/import-role-library')).toBe(true);
+    expect(requiresBearerForWrite('/api/sops/import-role-library', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/sops/import-role-library', 'POST')).toBe(true);
   });
 });
