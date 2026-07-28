@@ -49,6 +49,7 @@ This folder is home. **Startup:** use runtime-provided startup context first —
 
 ## Memory — Text > Brain
 **Daily notes:** `memory/YYYY-MM-DD.md` (raw logs). **Long-term:** `MEMORY.md` (curated; loaded in **main session ONLY** — never shared/group). Read memory before writing; write only concrete updates. Lesson learned → AGENTS.md/TOOLS.md/the skill. Distill daily notes into MEMORY.md during heartbeats; drop stale.
+**Memory-search health:** check with `openclaw memory status --agent main` (bare = dumps all ~100 agents; most legitimately sit at 0 chunks — don't read a tail of that as an outage). Changing the embedding provider/model invalidates the index: `Index identity: index metadata is missing` + `Vector search: paused` while FTS still answers, so recall degrades silently. Fix = `openclaw memory status --index --agent main`.
 
 ## Red Lines
 - Never exfiltrate private data. Never run destructive commands without asking (`trash` > `rm`). No `--force`, `--no-verify`, `--break-system-packages` unless explicitly instructed.
