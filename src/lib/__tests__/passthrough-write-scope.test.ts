@@ -299,6 +299,23 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(BEARER_REQUIRED_PATTERNS.length).toBe(35);
   });
 
+  it('route-list membership: middleware.ts BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
+    // U052: Reads the middleware.ts source to verify that specific routes are
+    // in the BEARER_REQUIRED_WRITE_ROUTES array. Removing a route from
+    // middleware.ts must redden this test — without this assertion, the test
+    // suite can silently pass even when a protected route is removed.
+    const mwSrc = readFileSync(resolve(ROOT, 'src/middleware.ts'), 'utf-8');
+    // Extract the BEARER_REQUIRED_WRITE_ROUTES array body
+    const arrayMatch = mwSrc.match(
+      /const BEARER_REQUIRED_WRITE_ROUTES: RegExp\[\]\s*=\s*\[([\s\S]*?)\];/
+    );
+    expect(arrayMatch).toBeTruthy();
+    const arrayBody = arrayMatch![1];
+    expect(arrayBody).toContain('weight-profiles');
+    expect(arrayBody).toContain('/bugs');
+    expect(arrayBody).toContain('execution-queue');
+  });
+
   // ---- Derivation test: every reachable route is classified ---------------
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES or called by the interface', () => {
