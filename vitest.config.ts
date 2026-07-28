@@ -148,6 +148,8 @@ export default defineConfig({
       // BEARER_REQUIRED_WRITE_ROUTES is in sync with the codebase. Uses glob
       // for file walking + vitest globals, so vitest-only, never the tsx glob.
       'src/lib/__tests__/passthrough-write-scope.test.ts',
+      // U032 — promote identity gate test
+      'tests/unit/u032-promote-identity-gate.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

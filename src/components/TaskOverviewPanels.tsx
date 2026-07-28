@@ -631,6 +631,10 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
  * expectedFrom:'review'})`. A concurrent status change surfaces the route's
  * 409 CAS_CONFLICT here as an inline error — never a silent overwrite, never
  * a swallowed failure.
+ *
+ * As of U032, the promote now requires a verified operator identity
+ * (Cf-Access-Authenticated-User-Email) and returns
+ * 403 {code:'operator_identity_required'} without it.
  */
 export function QcPromotePanel({ task }: { task: Task }) {
   const [promoting, setPromoting] = useState(false);
