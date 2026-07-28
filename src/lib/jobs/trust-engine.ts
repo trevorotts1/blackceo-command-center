@@ -212,6 +212,30 @@ export function isQuietHour(now: Date): boolean {
   return h >= NIGHT_START_HOUR || h < NIGHT_END_HOUR;
 }
 
+/**
+ * Message types that are NOT held by quiet hours.
+ *
+ * A client waiting on a deck wants "it's ready" and "it's stuck" the moment they are
+ * true; those two are the entire reason the report-back loop exists. ACK and PROGRESS
+ * are courtesy updates and stay held until 07:00, because a 02:00 "it's in progress"
+ * is a notification with no action behind it.
+ *
+ * Keyed off the task STATUS, not the message text, so the rule cannot drift from the
+ * planner's own branches: 'done' -> the DONE message (planSends, the `status === 'done'`
+ * branch); 'blocked' + block_audience 'OWNER' -> the BLOCKED-on-owner ask.
+ *
+ * COST, stated plainly: NIGHT_START_HOUR/NIGHT_END_HOUR are evaluated with
+ * Date#getHours(), which is the BOX-local hour. A client in another timezone can now
+ * receive a DONE or BLOCKED message during THEIR night. That is a deliberate trade:
+ * a nine-hour delay on "your deck is ready" was judged worse than an off-hours ping on
+ * the two messages a client is actually waiting for.
+ */
+export function bypassesQuietHours(task: TrustTaskRow): boolean {
+  if (task.status === 'done') return true;
+  if (task.status === 'blocked' && task.block_audience === 'OWNER') return true;
+  return false;
+}
+
 function ageMs(now: Date, iso: string): number {
   const t = Date.parse(iso);
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : now.getTime() - t;
@@ -224,15 +248,19 @@ function ageMs(now: Date, iso: string): number {
  */
 export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[] {
   const night = ctx.isNight ?? isQuietHour(ctx.now);
-  // Quiet hours: hold EVERYTHING (DONE included by default). Nothing is stamped,
-  // so every held send is re-attempted after 07:00 by the next sweep.
-  if (night) return [];
+  // Quiet hours: hold the COURTESY messages (ACK, PROGRESS) — nothing is stamped for
+  // them, so every held send is re-attempted after 07:00 by the next sweep. DONE and
+  // BLOCKED-on-owner are carved out (bypassesQuietHours) because a client is waiting
+  // on those two and a nine-hour hold on "your deck is ready" is the complaint this
+  // engine exists to answer.
+  const candidates = night ? tasks.filter(bypassesQuietHours) : tasks;
+  if (candidates.length === 0) return [];
 
   // One send per task per sweep (whichever message is due). Grouped by chat at
   // the end so >DIGEST_THRESHOLD sends to one chat coalesce into a digest.
   const perTask: PlannedSend[] = [];
 
-  for (const task of tasks) {
+  for (const task of candidates) {
     const chatId = task.requester_chat_id;
     if (!chatId) continue; // never reported on
     // NEVER target a SYSTEM/operator-internal audience with a client trust message.
