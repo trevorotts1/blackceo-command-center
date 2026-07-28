@@ -80,6 +80,7 @@ export const iv = {
   /** Buttons. `btn` is the base; the variants include it. */
   btn: 'iv-btn',
   btnPrimary: 'iv-btn iv-btn-primary',
+  btnSecondary: 'iv-btn iv-btn-secondary',
   btnGhost: 'iv-btn iv-btn-ghost',
   btnQuiet: 'iv-btn iv-btn-quiet',
 

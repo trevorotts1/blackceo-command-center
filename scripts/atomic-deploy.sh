@@ -60,7 +60,17 @@ fi
 # Defaults
 ###############################################################################
 APP_DIR="${CC_APP_DIR:-${HOME}/projects/mission-control}"
-PM2_APP_NAME="${CC_PM2_APP_NAME:-mission-control}"
+# Derive PM2 app name from the committed ecosystem file if present; fallback to
+# the env override, then to the production cc-prod name (U029: fix for fact 5 —
+# the old default "mission-control" matched neither PM2 app defined on disk, and
+# using it caused the deploy script to silently target the wrong process).
+if [[ -z "${CC_PM2_APP_NAME:-}" && -f "${APP_DIR}/ecosystem.cc-prod.config.cjs" ]]; then
+  PM2_APP_NAME="cc-prod"
+elif [[ -n "${CC_PM2_APP_NAME:-}" ]]; then
+  PM2_APP_NAME="${CC_PM2_APP_NAME}"
+else
+  PM2_APP_NAME="cc-prod"
+fi
 PORT="${CC_PORT:-4000}"
 DB_PATH_OVERRIDE="${CC_DB_PATH:-}"
 DISK_PATH_OVERRIDE="${CC_DISK_PATH:-}"
