@@ -5142,6 +5142,35 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '116',
+    name: 'u064_client_persona_choice',
+    up: (db) => {
+      // U064 — persona-picker: nullable client-choice columns on
+      // task_persona_bundle so the operator can name a specific voice persona
+      // (express client choice, suppressing the blend) without colliding with
+      // the confirm_state gate.  Guarded by PRAGMA table_info — re-running is a
+      // no-op.  The CHECK constraint on client_persona_source is BYTE-IDENTICAL
+      // to the base CREATE TABLE in schema.ts, so a fresh install and a migrated
+      // box enforce the same vocabulary.
+      const columns = (db.prepare('PRAGMA table_info(task_persona_bundle)').all() as {
+        cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number;
+      }[]);
+      const columnNames = new Set(columns.map((c) => c.name));
+
+      const adds: Record<string, string> = {
+        client_persona_id: 'TEXT',
+        client_persona_source: `TEXT CHECK (client_persona_source IS NULL OR client_persona_source IN
+    ('client-choice','client','locked','config-named','express'))`,
+        client_persona_set_at: 'TEXT',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.has(col)) {
+          db.prepare(`ALTER TABLE task_persona_bundle ADD COLUMN ${col} ${type}`).run();
+        }
+      }
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

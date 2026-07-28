@@ -968,7 +968,19 @@ export type PersonaBundleConfirmState =
   | 'not_required'       // no audience blend / non-content task — never gated
   | 'deadline_fallback'; // unconfirmed past the deadline — house-voice governance, kept visible
 
-/** A row of the `task_persona_bundle` table (migration 090). */
+/**
+ * U064 — the five persona_source values shared-utils/persona_for_job.py treats
+ * as an EXPRESS CLIENT CHOICE (CLIENT_FINAL_SOURCES, persona_for_job.py:85-87).
+ * A value outside this set is silently IGNORED by that function and the blend
+ * runs anyway — which would be a fail-open on the client's stated wish, so the
+ * database CHECK in the migration mirrors this list exactly.
+ */
+export const CLIENT_FINAL_PERSONA_SOURCES = [
+  'client-choice', 'client', 'locked', 'config-named', 'express',
+] as const;
+export type ClientFinalPersonaSource = typeof CLIENT_FINAL_PERSONA_SOURCES[number];
+
+/** A row of the `task_persona_bundle` table (migration 090, extended by U064). */
 export interface TaskPersonaBundleRow {
   id: string;
   task_id: string;
@@ -976,4 +988,10 @@ export interface TaskPersonaBundleRow {
   catalog_version: string | null;
   confirm_state: PersonaBundleConfirmState | string;
   created_at: string;
+  /** U064 — express client persona choice (supersedes the blend). */
+  client_persona_id?: string | null;
+  /** U064 — the source vocabulary; only CLIENT_FINAL_PERSONA_SOURCES members are honoured by the seam. */
+  client_persona_source?: ClientFinalPersonaSource | string | null;
+  /** U064 — ISO timestamp of when the client choice was set. */
+  client_persona_set_at?: string | null;
 }
