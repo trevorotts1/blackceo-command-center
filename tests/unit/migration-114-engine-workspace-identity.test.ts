@@ -138,6 +138,23 @@ test('migration 114: renames slug=dept-presentations -> presentations, leaves id
        VALUES ('presentations', 'Presentations', 'dept-presentations', 'Presentations production engine workspace.', '\u{1F5A5}️', 'default', 100, ?, ?)`,
     ).run(now, now);
 
+    // Mark migrations 001–113 as already applied so they do NOT run.
+    // Migration 051 (canonical slug reshape) would canonicalize
+    // dept-presentations -> presentations BEFORE 114 executes, making the
+    // rename test hollow: disabling 114's rename branch still passes because
+    // 051 already did the work. On a real box that has the stale slug, 051
+    // was applied long ago and did not touch the presentations row (which was
+    // created AFTER 051 ran), so only migration 114 should perform the
+    // rename. This mirrors that real-world order.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT)`,
+    );
+    for (let i = 1; i <= 113; i++) {
+      db.prepare(
+        'INSERT OR IGNORE INTO _migrations (id, name) VALUES (?, ?)',
+      ).run(String(i).padStart(3, '0'), `pre-marked-${i}`);
+    }
+
     const beforeCount = (
       db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number }
     ).n;
@@ -147,7 +164,7 @@ test('migration 114: renames slug=dept-presentations -> presentations, leaves id
       'sanity: the pre-existing box carries exactly the 5 hand-seeded rows before migrating',
     );
 
-    withIsolatedHome(() => runMigrations(db)); // full chain 001..114
+    withIsolatedHome(() => runMigrations(db)); // only 114+ runs; 001–113 pre-marked
 
     // The migration chain adds other rows (funnels via 111, podcast+anthology
     // via 113, etc.), so global row count is not a reliable assertion.
