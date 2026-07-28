@@ -9,6 +9,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
+import PhaseStepper from './PhaseStepper';
 import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
 import { AnthologyCardFace } from './anthology/AnthologyCardFace';
 import { isAnthologyTask } from './anthology/anthology-card';
@@ -24,6 +25,7 @@ import {
   triadMissingPillText,
 } from '@/lib/board-labels';
 import { taskToColumnId, columnIdToStatus } from '@/lib/board-projection';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
 // 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
@@ -116,7 +118,12 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
 // without pulling this whole 'use client' component into the test's module
 // graph. Logic and names are unchanged; this is a pure extraction.
 
-const departmentEmojis: Record<string, string> = {
+// U038: EXPORTED for the same reason departmentNames already is — the comment
+// at :136-147 calls this "a regression-testable, non-reimplemented surface."
+// tests/unit/u038-board-department-label-coverage.test.ts asserts against THIS
+// object; a test that re-declares the map proves only that the test is
+// self-consistent.
+export const departmentEmojis: Record<string, string> = {
   'ceo-com': '👔', 'ceo': '👔',
   'marketing': '📢',
   'sales': '💰',
@@ -134,6 +141,16 @@ const departmentEmojis: Record<string, string> = {
   'openclaw-maintenance': '🦾', 'openclaw': '🦾',
   'social-media': '📱', 'social': '📱',
   'paid-advertisement': '🎯', 'paid-ads': '🎯',
+  // U038 (audit E8): the three producer-engine workspaces. Each has a live
+  // `workspaces` row, so each can put a card on this board; none had a label,
+  // so each rendered the '🏢' fallback plus its raw department string (:1066).
+  // Values are NOT invented — they are the live workspaces.icon for each row
+  // (presentations 🖥️, podcast 🎙️, anthology 📚), which is also what
+  // migration 113 seeds. 🎙️ intentionally duplicates audio-production's; the
+  // row says 🎙️ and a duplicate emoji costs nothing.
+  'presentations': '🖥️',
+  'podcast': '🎙️',
+  'anthology': '📚',
   'general-task': '🗂️', 'general': '🗂️',
 };
 
@@ -166,6 +183,19 @@ export const departmentNames: Record<string, string> = {
   'openclaw-maintenance': 'OpenClaw Maintenance',
   'social-media': 'Social Media',
   'paid-advertisement': 'Paid Advertisement',
+  // U038 (audit E8). Display names are the ones already ratified elsewhere:
+  // DEFAULT_DEPARTMENTS (routing/departments.config.ts) declares
+  // presentations='Presentations' and podcast='Podcast';
+  // ceo-board/DevilsAdvocateFeed.tsx:71,74 uses the same two; the live
+  // workspaces.name column agrees on all three. Nothing here is invented.
+  // NOTE: 'anthology' is in NEITHER CANONICAL_SLUGS nor DEFAULT_DEPARTMENTS
+  // (both 26 entries, measured 2026-07-26) yet DOES have a live workspace row.
+  // It is labelled here so its chip renders, and it is deliberately NOT
+  // asserted by the coverage test in step 4 — adding it to the department
+  // registry is a separate decision this unit does not make.
+  'presentations': 'Presentations',
+  'podcast': 'Podcast',
+  'anthology': 'Anthology',
   'general-task': 'General Task',
 };
 
@@ -530,8 +560,14 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
             <>
               <span className="hidden sm:block text-gray-300 mx-1">|</span>
               <div className="flex items-center gap-2 bg-brand-50 text-brand-700 px-2 lg:px-3 py-1 lg:py-1.5 rounded-lg border border-brand-100 ml-auto lg:ml-0">
-                <span className="text-base lg:text-lg leading-none">{departmentEmojis[effectiveDepartment] || '📋'}</span>
-                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[effectiveDepartment] || effectiveDepartment}</span>
+                {/* U038: canonicalize before lookup — the same defence
+                    ceo-board/DevilsAdvocateFeed.tsx:47 already applies, so a raw
+                    variant ('dept-presentations', 'Presentations', 'billing')
+                    resolves instead of degrading to the generic fallback. The
+                    RAW value is still what renders when the lookup misses, so a
+                    genuinely unknown department is visible rather than blank. */}
+                <span className="text-base lg:text-lg leading-none">{departmentEmojis[canonicalDeptSlug(effectiveDepartment)] || departmentEmojis[effectiveDepartment] || '📋'}</span>
+                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[canonicalDeptSlug(effectiveDepartment)] || departmentNames[effectiveDepartment] || effectiveDepartment}</span>
                 <button 
                   onClick={() => setSelectedDepartment(null)}
                   className="ml-1 p-0.5 rounded-md hover:bg-brand-100 text-brand-400 hover:text-brand-900 transition-colors"
@@ -1122,7 +1158,7 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
         {/* Department Pill */}
         {task.department && (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {departmentNames[task.department.toLowerCase()] || task.department}
+            {departmentEmojis[canonicalDeptSlug(task.department)] || departmentEmojis[task.department.toLowerCase()] || '🏢'} {departmentNames[canonicalDeptSlug(task.department)] || departmentNames[task.department.toLowerCase()] || task.department}
           </span>
         )}
 
@@ -1219,6 +1255,13 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
               Next step: {task.block_needs}
             </p>
           )}
+        </div>
+      )}
+
+      {/* U060 — live phase progress stepper for presentation-department tasks */}
+      {canonicalDeptSlug(task.department) === 'presentations' && (
+        <div className="mt-2 pt-2 border-t border-gray-50">
+          <PhaseStepper taskId={task.id} />
         </div>
       )}
 
