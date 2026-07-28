@@ -847,6 +847,51 @@ check "16.6" "B-U8/U22 fixture-funnel payload files present under tests/fixtures
   "keep the B-U8 offline fixture-funnel payload files in tests/fixtures/persona-bundles/"
 
 blue ""
+blue "── 17. Single-instance SSE constraint, guarded at commit time (U066 / audit H-C8) ──"
+#
+# CONTRACT: src/lib/events.ts keeps the SSE client registry in an in-process Set,
+# so exactly ONE Command Center process may serve a given database. The runtime
+# warning (warnIfClustered) catches a PM2 CLUSTER. It CANNOT catch N independent
+# PM2 *fork* apps sharing a working directory. That case is only decidable by
+# comparing app definitions to each other, which is why it is checked HERE.
+
+check "17.1" "scripts/pm2-single-instance-guard.mjs exists and exports its guard surface" \
+  '[ -f scripts/pm2-single-instance-guard.mjs ] && node -e "
+    import(\"./scripts/pm2-single-instance-guard.mjs\").then((m) => {
+      for (const n of [\"describeApp\",\"auditApps\",\"runGuard\",\"loadRequirableConfig\",\"loadShellTemplateConfig\"]) {
+        if (typeof m[n] !== \"function\") process.exit(1);
+      }
+    }).catch(() => process.exit(1))"' \
+  "keep the U066 guard script present with all five exports"
+
+check "17.2" "no PM2 config in this repo declares a multi-worker or shared-database Command Center" \
+  'node scripts/pm2-single-instance-guard.mjs >/dev/null' \
+  "run 'node scripts/pm2-single-instance-guard.mjs' and read hard[] findings"
+
+check "17.3" "planted clustered fixture IS detected by the guard (self-proof)" \
+  '! node scripts/pm2-single-instance-guard.mjs tests/fixtures/pm2-single-instance/clustered-ecosystem.cjs >/dev/null'
+
+check "17.4" "planted shared-DATABASE_PATH fixture IS detected (self-proof for the BLIND SPOT rule)" \
+  '! node scripts/pm2-single-instance-guard.mjs tests/fixtures/pm2-single-instance/shared-db-ecosystem.cjs >/dev/null'
+
+warn_check "17.5" "every PM2 app declares instances explicitly (advisory — 3 open today)" \
+  'node -e "
+    import(\"./scripts/pm2-single-instance-guard.mjs\").then(({ runGuard }) => {
+      const r = runGuard({});
+      process.exit(r.advisory.some((f) => f.code === \"INSTANCES-UNDECLARED\") ? 1 : 0);
+    }).catch(() => process.exit(1))"'
+
+warn_check "17.6" "no working directory hosts more than one Command Center app (advisory — 1 open today)" \
+  'node -e "
+    import(\"./scripts/pm2-single-instance-guard.mjs\").then(({ runGuard }) => {
+      const r = runGuard({});
+      process.exit(r.advisory.some((f) => f.code === \"SHARED-WORKING-DIRECTORY\") ? 1 : 0);
+    }).catch(() => process.exit(1))"'
+
+check "17.7" "src/lib/events.ts still exports warnIfClustered AND still calls it at module scope" \
+  '/usr/bin/grep -aq "export function warnIfClustered" src/lib/events.ts && /usr/bin/grep -aqE "^warnIfClustered\(" src/lib/events.ts' \
+  "the runtime warning is the loud half of the constraint"
+blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then
   green "PASS — $PASS checks green, $WARN warnings"
