@@ -138,6 +138,20 @@ test('migration 114: renames slug=dept-presentations -> presentations, leaves id
        VALUES ('presentations', 'Presentations', 'dept-presentations', 'Presentations production engine workspace.', '\u{1F5A5}️', 'default', 100, ?, ?)`,
     ).run(now, now);
 
+    // Pre-mark all migrations except 114 so 051/091 cannot pre-normalize
+    // dept-presentations -> presentations before 114 executes. On a real box
+    // that has the stale slug, 051 was applied long ago and did not touch the
+    // presentations row (created AFTER 051 ran). Only 114 should rename.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT)`,
+    );
+    for (let i = 1; i <= 120; i++) {
+      if (i === 114) continue;
+      db.prepare(
+        'INSERT OR IGNORE INTO _migrations (id, name) VALUES (?, ?)',
+      ).run(String(i).padStart(3, '0'), `pre-marked-${i}`);
+    }
+
     const beforeCount = (
       db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number }
     ).n;
@@ -147,7 +161,7 @@ test('migration 114: renames slug=dept-presentations -> presentations, leaves id
       'sanity: the pre-existing box carries exactly the 5 hand-seeded rows before migrating',
     );
 
-    withIsolatedHome(() => runMigrations(db)); // full chain 001..114
+    withIsolatedHome(() => runMigrations(db)); // only 114 runs; all others pre-marked
 
     // The migration chain adds other rows (funnels via 111, podcast+anthology
     // via 113, etc.), so global row count is not a reliable assertion.
@@ -281,7 +295,21 @@ test('migration 114: idempotent — re-running chain leaves workspaces byte-iden
        VALUES ('presentations', 'Presentations', 'dept-presentations', 'Presentations production engine workspace.', '\u{1F5A5}️', 'default', 100, ?, ?)`,
     ).run(now, now);
 
-    withIsolatedHome(() => runMigrations(db));
+    // Pre-mark all migrations except 114 so 051/091 cannot pre-normalize
+    // dept-presentations -> presentations before 114 executes. On a real box
+    // that has the stale slug, 051 was applied long ago and did not touch the
+    // presentations row (created AFTER 051 ran). Only 114 should rename.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT)`,
+    );
+    for (let i = 1; i <= 120; i++) {
+      if (i === 114) continue;
+      db.prepare(
+        'INSERT OR IGNORE INTO _migrations (id, name) VALUES (?, ?)',
+      ).run(String(i).padStart(3, '0'), `pre-marked-${i}`);
+    }
+
+    withIsolatedHome(() => runMigrations(db));  // only 114 runs; all others pre-marked
 
     // Snapshot the full workspaces table after the first run.
     const afterFirst = db
@@ -476,7 +504,21 @@ test('migration 114: a task with workspace_id=presentations still resolves after
        VALUES ('task-probe-001', 'presentations', 'Probe task', 'inbox', ?, ?)`,
     ).run(now, now);
 
-    withIsolatedHome(() => runMigrations(db));
+    // Pre-mark all migrations except 114 so 051/091 cannot pre-normalize
+    // dept-presentations -> presentations before 114 executes. On a real box
+    // that has the stale slug, 051 was applied long ago and did not touch the
+    // presentations row (created AFTER 051 ran). Only 114 should rename.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT)`,
+    );
+    for (let i = 1; i <= 120; i++) {
+      if (i === 114) continue;
+      db.prepare(
+        'INSERT OR IGNORE INTO _migrations (id, name) VALUES (?, ?)',
+      ).run(String(i).padStart(3, '0'), `pre-marked-${i}`);
+    }
+
+    withIsolatedHome(() => runMigrations(db));  // only 114 runs; all others pre-marked
 
     // The task must still resolve its workspace.
     const task = db
@@ -518,7 +560,23 @@ test('migration 114: after rename, slug=presentations resolves AND id=presentati
        VALUES ('presentations', 'Presentations', 'dept-presentations', 'Presentations production engine workspace.', '\u{1F5A5}️', 'default', 100, ?, ?)`,
     ).run(now, now);
 
+    // Pre-mark all migrations except 114 so 051/091 cannot pre-normalize
+    // dept-presentations -> presentations before 114 executes. On a real box
+    // that has the stale slug, 051 was applied long ago and did not touch the
+    // presentations row (created AFTER 051 ran). Only 114 should rename.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT)`,
+    );
+    for (let i = 1; i <= 120; i++) {
+      if (i === 114) continue;
+      db.prepare(
+        'INSERT OR IGNORE INTO _migrations (id, name) VALUES (?, ?)',
+      ).run(String(i).padStart(3, '0'), `pre-marked-${i}`);
+    }
+
     withIsolatedHome(() => runMigrations(db));
+
+    // After the rename  // only 114 runs; all others pre-marked
 
     // After the rename: lookup by slug='presentations' (the NEW slug) must work.
     const byNewSlug = db
