@@ -5089,93 +5089,56 @@ export const migrations: Migration[] = [
     },
   },
   {
-    id: '114',
-    name: 'engine_workspace_identity_and_presentations_seed',
+    id: '115',
+    name: 'add_trust_engine_phase_columns',
+    // Purely ADDITIVE: three nullable TEXT columns on `tasks`. ALTER TABLE only; no
+    // rows read, written, moved or destroyed. Follows the migration-098 pattern
+    // exactly: inspect the LIVE schema (PRAGMA table_info), never the ledger, and
+    // add whatever is genuinely missing.
+    //
+    // U065: four message kinds, five stamps, no sharing. Before this migration the
+    // blocked-on-owner and in-progress branches shared `progress_last_sent_at`, which
+    // caused two defects: (a) a task that blocked before its first progress message
+    // never received one at all, and (b) a task that blocked within 12h of progress
+    // stayed silent about being blocked. These three columns uncouple them.
+    //
+    //   blocked_notice_sent_at       stamp: blocked-on-owner notice was planned and
+    //                                claimed — NOT "delivered" (see U043); the stamp
+    //                                is the idempotency guard, not a delivery receipt
+    //   phase_progress_sent_at       stamp: per-phase progress msg was planned and
+    //                                claimed — NOT "delivered"; same qualification
+    //   last_reported_phase_label    tracks the last phase label sent (extraSets only,
+    //                                never a guardColumn) so a recurring phase is not
+    //                                re-sent on every sweep
     up: (db) => {
-      // U037 (audit E7). TWO defects, one row-shape, one migration.
-      //
-      // (a) IDENTITY. The presentations workspace carries id='presentations' but
-      //     slug='dept-presentations'. Measured 2026-07-26 on the live box: of 67
-      //     workspace rows, 65 have id == slug, ONE has slug = 'dept-' || id (this
-      //     one), and one is an interface-created row with a generated id.
-      //     Checksum 65 + 1 + 1 = 67. The `dept-` spelling contradicts the repo's
-      //     own documented invariant — "the workspaces table stores the bare id
-      //     (the sync script strips `dept-`)", api/departments/[id]/personas/
-      //     route.ts:49-51 — and it is why routing survives only on the `id` arm of
-      //     resolveWorkspaceId (ingest/route.ts:244). canonicalDeptSlug() already
-      //     maps BOTH spellings to 'presentations', so nothing downstream regresses;
-      //     every runtime-dir resolver probes `dept-${slug}` FIRST
-      //     (task-dispatcher.ts:282, dispatch/route.ts:82, context-pack.ts:244), so
-      //     after this rename they find ~/.openclaw/agents/dept-presentations via
-      //     the dept-prefixed arm instead of by accident on the bare arm. The agent
-      //     runtime directory name does NOT change and MUST NOT be changed.
-      //
-      // (b) SEEDING. docs/ENGINES.md:11-12 requires a workspace-seeding migration
-      //     per engine. Migration 113 seeds podcast and anthology only. This adds
-      //     presentations on the same proven shape (INSERT OR IGNORE, slug-existence
-      //     no-op guard, company_id='default'), so a box onboarded before the engine
-      //     existed gets the row on the next update roll.
-      //
-      // Idempotent, additive, and it never touches a row it did not create or
-      // rename: the UPDATE is guarded on the exact stale slug, the INSERT on slug
-      // absence. Running this twice changes nothing the second time.
-      console.log('[Migration 114] Engine workspace identity + presentations seed (U037)...');
-
-      const now = new Date().toISOString();
-
-      // (a) Rename the stale slug ONLY when it is exactly the stale value and the
-      //     canonical slug is not already taken by some other row. A box that
-      //     already reads slug='presentations' is untouched; a box that somehow
-      //     carries BOTH is left alone and logged loudly rather than merged — two
-      //     rows for one department is a data question, not a migration's decision.
-      const canonicalTaken = db
-        .prepare("SELECT id FROM workspaces WHERE lower(slug) = 'presentations' LIMIT 1")
-        .get() as { id: string } | undefined;
-      const staleRow = db
-        .prepare("SELECT id FROM workspaces WHERE lower(slug) = 'dept-presentations' LIMIT 1")
-        .get() as { id: string } | undefined;
-
-      let renamed = 0;
-      if (staleRow && canonicalTaken && canonicalTaken.id !== staleRow.id) {
-        console.warn(
-          `[Migration 114] BOTH spellings present (id=${staleRow.id} slug=dept-presentations, ` +
-            `id=${canonicalTaken.id} slug=presentations) — leaving both untouched. ` +
-            'This needs a human: two workspace rows for one department.',
-        );
-      } else if (staleRow) {
-        renamed = db
-          .prepare(
-            `UPDATE workspaces SET slug = 'presentations', updated_at = ?
-              WHERE lower(slug) = 'dept-presentations'`,
-          )
-          .run(now).changes;
+      console.log('[Migration 115] Adding trust-engine phase-progress columns to tasks...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 115] tasks table absent — nothing to add');
+        return;
       }
 
-      // (b) Seed the row when it is absent entirely — same guard shape as 113.
-      const exists = db.prepare(`SELECT 1 FROM workspaces WHERE lower(slug) = ?`);
-      const insert = db.prepare(
-        `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'default', ?, ?, ?)`,
-      );
-      let seeded = 0;
-      if (exists.get('presentations')) {
-        console.log("[Migration 114] 'presentations' workspace already present — leaving untouched");
-      } else {
-        seeded = insert
-          .run(
-            'presentations',
-            'Presentations',
-            'presentations',
-            'Presentations production engine workspace.',
-            '\u{1F5A5}️',
-            100,
-            now,
-            now,
-          ).changes;
+      const presentCols = () =>
+        new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+
+      const wanted: { name: string; ddl: string }[] = [
+        { name: 'blocked_notice_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN blocked_notice_sent_at TEXT' },
+        { name: 'phase_progress_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN phase_progress_sent_at TEXT' },
+        { name: 'last_reported_phase_label', ddl: 'ALTER TABLE tasks ADD COLUMN last_reported_phase_label TEXT' },
+      ];
+
+      const added: string[] = [];
+      for (const { name, ddl } of wanted) {
+        if (!presentCols().has(name)) {
+          db.exec(ddl);
+          added.push(name);
+        }
       }
 
       console.log(
-        `[Migration 114] renamed=${renamed} seeded=${seeded} (0 = already correct / already present)`,
+        `[Migration 115] Added columns: ${added.length > 0 ? added.join(', ') : 'none (all already present)'}`,
       );
     },
   },
