@@ -29,6 +29,7 @@
 import { queryAll, run, queryOne } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { routeTask } from '@/lib/routing/department-router';
+import { resolveDeptSlugForWrite } from '@/lib/routing/resolve-dept-slug-for-write';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { v4 as uuidv4 } from 'uuid';
@@ -178,7 +179,7 @@ export async function runCeoDelegationSweep(): Promise<void> {
       // backlog-redispatch sweep retries it.
       run(
         `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
-        [routing.agentId, routing.department, now, task.id],
+        [routing.agentId, resolveDeptSlugForWrite(routing.department), now, task.id],
       );
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,

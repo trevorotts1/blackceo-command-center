@@ -23,7 +23,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
-import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
+import { evaluatePresentationsDoneGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -629,6 +629,26 @@ export async function PATCH(
           );
         }
         if (certGate.applies && certGate.ok && certGate.persistCert) {
+          // U033 (audit E3): persistCert can now only ever be a value that passed
+          // PROCESS_CERTIFICATE_SHA_RE inside normCert -- an unvalidated string is
+          // normalised to null and never reaches here. The belt-and-braces re-test is
+          // deliberate: this is the ONLY write into the anti-spoof slot (flushed by the
+          // single UPDATE below), and a value written here is trusted forever by every
+          // later comparison. A junk value stored here does not merely spoof one
+          // transition, it makes the card PERMANENTLY unreachable to `done` (stored +
+          // any provided -> 422 mismatch; stored + none -> 422 required).
+          if (!PROCESS_CERTIFICATE_SHA_RE.test(certGate.persistCert)) {
+            console.error(
+              '[tasks PATCH] U033 invariant violated: gate returned a persistCert that is not a sha256 digest -- refusing to write it.',
+            );
+            return NextResponse.json(
+              {
+                error: 'Internal error: refusing to register an unverified process certificate.',
+                code: 'process_certificate_invalid',
+              },
+              { status: 500 },
+            );
+          }
           updates.push('process_certificate_sha = ?');
           values.push(certGate.persistCert);
         }

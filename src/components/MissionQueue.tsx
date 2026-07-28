@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Search, Inbox as InboxIcon } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
+import { ErrorState } from './podcast/states';
 import { X } from 'lucide-react';
 import { ErrorState } from './podcast/states';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
@@ -25,7 +26,7 @@ import {
   triadMissingPillText,
 } from '@/lib/board-labels';
 import { taskToColumnId, columnIdToStatus } from '@/lib/board-projection';
-import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { canonicalDeptFromAnyLabel } from '@/lib/routing/canonical-slug';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
 // 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
@@ -36,7 +37,9 @@ interface MissionQueueProps {
   departmentFilter?: string | null;
   /** Selects the column preset. Defaults to 'task' so all existing workspaces are unaffected. */
   boardKind?: BoardKind;
+  /** Error message from the parent page's data fetch — surfaced above the columns. */
   loadError?: string | null;
+  /** Retry callback wired to the parent page's loadData(). */
   onRetry?: () => void;
 }
 
@@ -337,7 +340,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
   const matchesScope = (task: Task): boolean => {
     if (scopeByWorkspace) return task.workspace_id === workspaceId;
-    if (effectiveDepartment) return task.department === effectiveDepartment;
+    if (effectiveDepartment) { return canonicalDeptFromAnyLabel(task.department) === canonicalDeptFromAnyLabel(effectiveDepartment); }
     return true;
   };
 

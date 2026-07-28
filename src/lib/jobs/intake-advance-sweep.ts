@@ -39,6 +39,7 @@ import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { routeTask } from '@/lib/routing/department-router';
+import { resolveDeptSlugForWrite } from '@/lib/routing/resolve-dept-slug-for-write';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { healPhantomAssignmentsBatch } from '@/lib/jobs/heal-phantom-assignments';
@@ -162,7 +163,7 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
         if (/ceo|com/i.test(routing.department)) continue;
 
         agentId = routing.agentId;
-        department = routing.department || department;
+        department = resolveDeptSlugForWrite(routing.department) || department;
 
         run(
           `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,

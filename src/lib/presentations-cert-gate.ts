@@ -65,10 +65,23 @@ export interface PresentationsGateResult {
   persistCert?: string | null;
 }
 
+/**
+ * The shape prove-deck.py emits: hashlib.sha256(...).hexdigest() -> 64 lowercase
+ * hex characters. Exported so the route, the schema test and the contract test
+ * all measure against ONE definition instead of three copies of a regex.
+ */
+export const PROCESS_CERTIFICATE_SHA_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Normalise AND validate. A value that is not a sha256 digest is treated as
+ * ABSENT, never as a certificate -- so it can neither satisfy the gate nor be
+ * persisted as the certificate of record (U033 / audit E3).
+ */
 function normCert(v: string | null | undefined): string | null {
   if (typeof v !== 'string') return null;
   const t = v.trim().toLowerCase();
-  return t.length ? t : null;
+  if (!t.length) return null;
+  return PROCESS_CERTIFICATE_SHA_RE.test(t) ? t : null;
 }
 
 /**

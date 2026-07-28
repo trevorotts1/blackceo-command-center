@@ -210,6 +210,15 @@ export function canonicalDeptSlug(slug: string | null | undefined): string {
   return s;
 }
 
+export function canonicalDeptFromAnyLabel(label: string | null | undefined): string {
+  if (!label) return '';
+  const slugified = label.trim().toLowerCase()
+    .replace(/[()[\]{}]/g, ' ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return canonicalDeptSlug(slugified);
+}
+
 /**
  * Return true if `slug` (after canonicalization) is the master-orchestrator
  * / CEO department.
