@@ -39,7 +39,7 @@ describe('resolveDeptSlugForWrite', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'u036-test-'));
     dbPath = join(tmpDir, 'test.db');
     const db = new Database(dbPath);
-    db.exec("CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL, company_id TEXT DEFAULT 'default', created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, applied_at TEXT DEFAULT datetime('now'));");
+    db.exec("CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL, company_id TEXT DEFAULT 'default', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
     const now = new Date().toISOString();
     db.prepare("INSERT OR IGNORE INTO workspaces VALUES (?,?,?,?,?,?)").run('presentations', 'Presentations', 'dept-presentations', 'default', now, now);
     db.prepare("INSERT OR IGNORE INTO workspaces VALUES (?,?,?,?,?,?)").run('web-development', 'Web Development', 'web-development', 'default', now, now);
