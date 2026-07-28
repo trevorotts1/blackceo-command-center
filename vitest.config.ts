@@ -143,7 +143,11 @@ export default defineConfig({
       // API but NOT the dead getInterviewCookieOptions export. Remove the
       // fallback call from middleware.ts and this suite goes RED.
       'tests/unit/middleware-shell-lock-fallback.test.ts',
-      'tests/unit/u036-department-canonical.test.ts',
+      // U039 — rescue-sweeps kill-flag sources: banner announces BOTH sweeps in
+      // all four states; env-only resolver truth table; durable file cannot disable
+      // the stuck sweep; report script exits 0 and leaks no values. Uses vitest
+      // globals (describe/it/expect) for test isolation via module re-import.
+      'tests/unit/u039-sweep-killflag-sources.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
