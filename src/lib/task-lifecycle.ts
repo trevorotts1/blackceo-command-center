@@ -393,6 +393,174 @@ export function recordStatusEvent(
 }
 
 // ---------------------------------------------------------------------------
+// DeclaredTransitionException — closed union of unmodelled edges
+// ---------------------------------------------------------------------------
+
+/**
+ * U071: every unmodelled edge this codebase is allowed to take, enumerated. Adding a
+ * member is a reviewed change with a stated reason. A string parameter here would be
+ * a bypass with extra steps.
+ */
+export type DeclaredTransitionException =
+  | { kind: 'sop-authoring-subtask-complete' };   // in_progress -> done, DISP-10
+
+/** Result of a lifecycle transition — the updated task row. */
+export type TransitionResult = Task;
+
+/**
+ * U071: the ONE sanctioned way to complete a transition the state machine does not
+ * model. It exists because call sites were reaching `status = 'done'` with a raw SQL
+ * UPDATE, which meant checkPreconditions() — and therefore EVERY gate this codebase
+ * places there, including the presentations certificate gate — could not see them.
+ * Auditing a write is not the same as gating it: an audit row answers "what happened",
+ * a precondition answers "may this happen".
+ *
+ * This function does NOT widen LEGAL_TRANSITIONS. It takes an edge the caller declares
+ * as an unmodelled exception, refuses it unless that exact pair is on the short
+ * allowlist below, and then runs the full precondition set before writing. A caller
+ * that wants a new exception adds it HERE, in review, with a reason — never with a raw
+ * UPDATE at the call site.
+ */
+export function transitionWithDeclaredException(args: {
+  taskId: string;
+  to: LifecycleState;
+  exception: DeclaredTransitionException;
+  actor: string;
+  reason: string;
+  extraColumns?: Record<string, string | number | null>;
+}): TransitionResult {
+  // ── Validate the exception against the allowlist ───────────────────────────────
+  // Each exception kind implies a specific from→to pair. The TypeScript compiler
+  // guarantees `exception` is a valid union member at build time; this runtime map
+  // enforces the expected source and target for each declared kind.
+  const ALLOWED_EXCEPTION_EDGES: Record<
+    DeclaredTransitionException['kind'],
+    { from: LifecycleState; to: LifecycleState }
+  > = {
+    'sop-authoring-subtask-complete': { from: 'in_progress', to: 'done' },
+  };
+
+  const expected = ALLOWED_EXCEPTION_EDGES[args.exception.kind];
+  if (args.to !== expected.to) {
+    throw new TransitionError(
+      'ILLEGAL_TRANSITION',
+      `Declared exception ${args.exception.kind} expects target ${expected.to}, got ${args.to}`,
+    );
+  }
+
+  // ── Read the task ──────────────────────────────────────────────────────────────
+  // Include fields U031 will add (department, process_certificate_sha,
+  // sop_authoring_for_task_id) so the merge is clean when U031 lands.
+  const task = queryOne<TaskRowForLifecycle>(
+    `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.model_id,
+            t.persona_id, t.workspace_id, t.qc_reroute_attempts,
+            t.department, t.process_certificate_sha, t.sop_authoring_for_task_id,
+            a.specialist_type
+     FROM tasks t
+     LEFT JOIN agents a ON t.assigned_agent_id = a.id
+     WHERE t.id = ?`,
+    [args.taskId],
+  );
+
+  if (!task) {
+    throw new TransitionError('NOT_FOUND', `Task ${args.taskId} not found`);
+  }
+
+  const from = task.status as LifecycleState;
+
+  // ── Idempotent: already at target state ────────────────────────────────────────
+  // Must come BEFORE the exception edge validation — a task already at the target
+  // state is idempotent regardless of what edge it took to get there.
+  if (from === args.to) {
+    const current = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [args.taskId]);
+    if (!current) throw new TransitionError('NOT_FOUND', `Task ${args.taskId} not found after idempotent check`);
+    return current;
+  }
+
+  // ── Validate the from-state matches the exception's expected source ────────────
+  if (from !== expected.from) {
+    throw new TransitionError(
+      'ILLEGAL_TRANSITION',
+      `Declared exception ${args.exception.kind} expects source ${expected.from}, but task ${args.taskId} is ${from}`,
+    );
+  }
+
+  // ── PRECONDITIONS — the entire point of this unit ──────────────────────────────
+  // checkPreconditions runs unconditionally. When U031 lands, its certificate gate
+  // living inside checkPreconditions fires here automatically.
+  const evidence: TransitionEvidence = {
+    actor: args.actor,
+    reason: args.reason,
+  };
+  checkPreconditions(task, args.to, evidence);
+
+  // ── Atomic, compare-and-swap DB write ──────────────────────────────────────────
+  // Same pattern as transition(): status UPDATE, task_events insert, and legacy
+  // events insert commit as ONE db.transaction(). The compare-and-swap
+  // (AND status = <from>) means re-running is a no-op — a concurrent writer that
+  // moved the row first surfaces as CAS_CONFLICT rather than a blind overwrite.
+  const now = new Date().toISOString();
+
+  transaction(() => {
+    // Build the UPDATE with extraColumns (e.g. completed_at) and the mandatory
+    // compare-and-swap guard.
+    const extraCols = args.extraColumns ?? {};
+    const setClauses = ['status = ?'];
+    const params: unknown[] = [args.to];
+
+    for (const [col, val] of Object.entries(extraCols)) {
+      setClauses.push(`${col} = ?`);
+      params.push(val);
+    }
+
+    // Always set updated_at unless the caller provided it explicitly.
+    if (!('updated_at' in extraCols)) {
+      setClauses.push('updated_at = ?');
+      params.push(now);
+    }
+
+    params.push(args.taskId);
+    params.push(from); // compare-and-swap guard
+
+    const sql = `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ? AND status = ?`;
+    const result = run(sql, params);
+
+    if (result.changes === 0) {
+      throw new TransitionError(
+        'CAS_CONFLICT',
+        `Task ${args.taskId} was no longer in '${from}' when applying → ${args.to} (concurrent writer); transition aborted`,
+      );
+    }
+
+    // Structured task_events audit row — same write transition() uses.
+    recordStatusEvent(args.taskId, from, args.to, {
+      actor: args.actor,
+      reason: args.reason,
+    });
+
+    // Legacy events row for backwards-compat.
+    try {
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at)
+         VALUES (?, 'task_completed', ?, ?, ?)`,
+        [
+          uuidv4(),
+          args.taskId,
+          `[lifecycle] Task "${task.title}" moved ${from} → ${args.to} via declared exception (${args.exception.kind})${args.reason ? ': ' + args.reason : ''}`,
+          now,
+        ],
+      );
+    } catch { /* legacy table unavailable on tests — non-fatal */ }
+  });
+
+  // ── Fetch and return updated row (post-commit) ─────────────────────────────────
+  const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [args.taskId]);
+  if (!updated) throw new TransitionError('NOT_FOUND', `Task ${args.taskId} not found after update`);
+
+  return updated;
+}
+
+// ---------------------------------------------------------------------------
 // transition() — the ONE function all status changes go through
 // ---------------------------------------------------------------------------
 
