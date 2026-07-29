@@ -5153,6 +5153,24 @@ export const migrations: Migration[] = [
       // no-op.  The CHECK constraint on client_persona_source is BYTE-IDENTICAL
       // to the base CREATE TABLE in schema.ts, so a fresh install and a migrated
       // box enforce the same vocabulary.
+      //
+      // task_persona_bundle itself was created back at migration 090 — on any
+      // box that has genuinely walked the migration chain it will already
+      // exist here. But `PRAGMA table_info()` on a table that does not exist
+      // returns an empty array, not an error (a documented SQLite footgun),
+      // which is indistinguishable from "table exists, has no columns yet".
+      // Without this explicit sqlite_master existence check, the ALTER TABLE
+      // below throws `no such table: task_persona_bundle` on any fixture or
+      // partial-migration state that skips straight to id 116 without ever
+      // creating the table. Existence check matches the `tableExists` helper
+      // convention already used elsewhere in this file (see detectTestResidue).
+      const tableExists = !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get('task_persona_bundle');
+      if (!tableExists) {
+        return;
+      }
+
       const columns = (db.prepare('PRAGMA table_info(task_persona_bundle)').all() as {
         cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number;
       }[]);
