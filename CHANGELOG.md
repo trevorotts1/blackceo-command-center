@@ -1,3 +1,17 @@
+## [v6.0.80] — 2026-07-29 — U063 merge (deliverables panel and teleprompter viewer)
+
+**Note on pre-existing gap:** the `/version` file, `package-lock.json`, and this file's own top
+entry had drifted behind `package.json` (last real ripple `v6.0.79`, already tagged on remote) —
+tags `v6.0.75` through `v6.0.79` exist and landed real units (U037, U068, U052, U038, U031, U030,
+etc., per `CONTROL/DIGEST.md` and the merge-writer heartbeat history), but this file was not updated
+for any of them. That gap predates this batch and is not backfilled here — it belongs to whichever
+batches actually landed those versions. This entry documents only what THIS batch (bringing all
+four version locations to `v6.0.80`) actually did.
+
+- U063 — Deliverables panel and teleprompter viewer: nine-artifact checklist, size honesty, GHL
+  ledger join, symlink refusal, download-only SAFE-subset teleprompter export. Merge commit
+  `317e2e71ada5129972235b9261497e0c0e08992f`, ancestor of `origin/main` proven 2026-07-29T17:07Z.
+
 ## [v6.0.74] — 2026-07-24 — July-24 Merge Batch (CC)
 
 Consolidated v6.0.71-v6.0.74: 28 units landed across one merge train. No intermediate
