@@ -208,6 +208,10 @@ CREATE TABLE IF NOT EXISTS task_persona_bundle (
   bundle_json TEXT,
   catalog_version TEXT,
   confirm_state TEXT,
+  client_persona_id TEXT,
+  client_persona_source TEXT CHECK (client_persona_source IS NULL OR client_persona_source IN
+    ('client-choice','client','locked','config-named','express')),
+  client_persona_set_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id);

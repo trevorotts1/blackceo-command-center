@@ -110,7 +110,7 @@ export async function GET(
     // from "unknown task id" / "route not shipped on this box").
     if (!row) {
       return NextResponse.json(
-        { task_id: id, bundle: null, confirm_state: null, catalog_version: null },
+        { task_id: id, bundle: null, confirm_state: null, catalog_version: null, client_persona_id: null, client_persona_source: null, client_persona_set_at: null },
         { status: 200 },
       );
     }
@@ -133,6 +133,9 @@ export async function GET(
         bundle,
         confirm_state: row.confirm_state,
         catalog_version: row.catalog_version,
+        client_persona_id: row.client_persona_id ?? null,
+        client_persona_source: row.client_persona_source ?? null,
+        client_persona_set_at: row.client_persona_set_at ?? null,
       },
       { status: 200 },
     );

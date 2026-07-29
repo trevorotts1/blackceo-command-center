@@ -95,6 +95,9 @@ test('migration 107 never touches task_persona_bundle (090) — schema byte-iden
     [],
   );
   assert.ok(sql, 'task_persona_bundle table exists (090 ran)');
+  // Plus the three nullable client-choice columns migration 116 (U064)
+  // additively appended — the only other migration ever authorized to touch
+  // this table.
   const expected =
     `CREATE TABLE task_persona_bundle (\n` +
     `  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),\n` +
@@ -102,9 +105,13 @@ test('migration 107 never touches task_persona_bundle (090) — schema byte-iden
     `  bundle_json TEXT,\n` +
     `  catalog_version TEXT,\n` +
     `  confirm_state TEXT,\n` +
+    `  client_persona_id TEXT,\n` +
+    `  client_persona_source TEXT CHECK (client_persona_source IS NULL OR client_persona_source IN\n` +
+    `    ('client-choice','client','locked','config-named','express')),\n` +
+    `  client_persona_set_at TEXT,\n` +
     `  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\n` +
     `)`;
-  assert.equal(sql!.sql, expected, '090 table schema must be byte-identical pre/post migration 107');
+  assert.equal(sql!.sql, expected, '090 table schema (+ 116\'s additive columns) must be byte-identical pre/post migration 107');
 });
 
 test('NO-WEAKENING: migration 107 never touches task_persona_bundle_scope (105)\'s composite UNIQUE(task_id, scope)', () => {

@@ -25,6 +25,8 @@ import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
 // a task that actually went through the blend (task.blend_directive present)
 // so a plain non-content task never fires the extra gate-status fetch.
 import { AudienceConfirmPanel } from './AudienceConfirmPanel';
+// U064 — persona picker (voice/topic axis), mounted beside AudienceConfirmPanel.
+import { PersonaPickerPanel } from './PersonaPickerPanel';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 // P2-02 — the task-detail panels that fill in and actually USE the modal's
 // fields: who's working on this + why, the SOP link, the QC block transparency,
@@ -542,6 +544,12 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {task && task.blend_directive && (
             <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
           )}
+          {/* U064 — Persona picker panel (voice/topic axis). Self-contained +
+              fail-quiet: GETs /api/tasks/[id]/persona-bundle on mount and renders
+              NOTHING when the bundle is null (mirrors AudienceConfirmPanel's
+              early-return pattern). Mounted beside AudienceConfirmPanel so both
+              axes are visible on the same form. */}
+          {task && <PersonaPickerPanel taskId={task.id} onConfirmed={() => window.location.reload()} />}
           {/* P2-02 — task-detail panels for an existing task (skipped on the
               anthology Assembly card, whose overview is the cockpit only). They
               sit OUTSIDE the form so their buttons/links never submit the edit

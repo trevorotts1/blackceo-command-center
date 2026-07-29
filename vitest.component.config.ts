@@ -89,6 +89,10 @@ export default defineConfig({
       // U062 — task-board loading / empty / filtered-empty / failed-load states are
       // four DIFFERENT renders, and the loading render never says "No tasks".
       'tests/unit/mission-queue-board-states.test.tsx',
+      // U064 — PersonaPickerPanel (voice/topic axis) fail-quiet, rationale
+      // projection, primary-submit safety (action: 'reaim', never 'name-voice'),
+      // data-testid coverage, real render proof.
+      'tests/unit/persona-picker.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
