@@ -14,3 +14,9 @@ Latest: U037 (v6.0.78)
 None standing.
 
 U068 landed (1f134c2, pending push). U052 staging now.
+
+### Ripple v6.0.79
+Batch of 2: U068 (port-integrity probe canonical port), U052 (close password-free write path).
+Latest merge: U052 (8f663c5).
+
+## REFRESHED-CC 2026-07-29T11:28Z — 19 LANDED, 1 blocked-provenance (U030)
