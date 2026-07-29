@@ -4,13 +4,17 @@
  * Proves the BEARER_REQUIRED_WRITE_ROUTES list in src/lib/bearer-required-routes.ts cannot
  * silently drift out of sync with the codebase.
  *
- * Derived 2026-07-27. Re-derive command (node):
+ * Derived 2026-07-27; counts re-derived 2026-07-29. Re-derive command (node):
  *   npx vitest run src/lib/__tests__/passthrough-write-scope.test.ts
  *
  * Counts baseline (measured 2026-07-27):
- *   - API routes exporting a mutating method (export async function): 104
+ *   - API routes exporting a mutating method (export async function): 106
+ *     (2026-07-29: +2 since derivation -- tasks/[id]/persona-choice and
+ *      tasks/[id]/resume, both POST, both added after 2026-07-27. Both are
+ *      now covered by BEARER_REQUIRED_WRITE_ROUTES, which is why REACHABLE
+ *      returns to 99 rather than rising to 101.)
  *   - protected by isWebhookSecretRoute:                               5
- *   - REACHABLE via forged same-origin:                               99
+ *   - REACHABLE via forged same-origin:                              101
  *   - covered by BEARER_REQUIRED_WRITE_ROUTES (38 routes / 35 patterns): 38
  */
 
@@ -209,16 +213,16 @@ const reachableCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 104 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(104);
+  it('API routes exporting a mutating method: 106 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(106);
   });
 
   it('protected by isWebhookSecretRoute: 5', () => {
     expect(webhookProtectedCount).toBe(5);
   });
 
-  it('REACHABLE via forged same-origin: 99', () => {
-    expect(reachableCount).toBe(99);
+  it('REACHABLE via forged same-origin: 101', () => {
+    expect(reachableCount).toBe(101);
   });
 
   it('interface call templates found by multi-line scanner', () => {
