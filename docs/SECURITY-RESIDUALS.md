@@ -7,9 +7,21 @@
 
 **38 routes**, reachable with no credential via a forged same-origin header, are now gated by `BEARER_REQUIRED_WRITE_ROUTES` in `src/middleware.ts`. A caller without a valid `Authorization: Bearer` token receives a 401 on those routes. The exact 38 routes are listed in the `BEARER_REQUIRED_WRITE_ROUTES` array (35 regex patterns; three use the `(\/[^/]+)?` collection-or-item form and each covers two routes).
 
-## What remains open — 61 routes
+## What remains open — 63 routes
 
-**61 mutating `/api/*` routes** remain reachable with no credential via the same-origin passthrough because **the browser interface itself calls them with no credential**. Route-level scoping cannot close them — any list that does would 401 the interface's own writes.
+> **Updated 2026-07-29.** Two mutating routes were added after this document was
+> written and are also interface-called, taking the open set from 61 to 63:
+> `POST /api/tasks/{id}/resume` (called by `src/components/TaskOverviewPanels.tsx:482`)
+> and `POST /api/tasks/{id}/persona-choice` (called by
+> `src/components/PersonaPickerPanel.tsx:101`). Both were briefly considered for
+> `BEARER_REQUIRED_WRITE_ROUTES`; adding them would 401 the interface's own
+> resume button and persona picker, which is precisely the failure mode the
+> "How they stay open" note below describes. They are therefore **accepted
+> residuals on the existing rationale**, not new exemptions — and the anti-rot
+> lock's interface-call assertion is what forced this to be a recorded decision
+> instead of a silent one.
+
+**63 mutating `/api/*` routes** remain reachable with no credential via the same-origin passthrough because **the browser interface itself calls them with no credential**. Route-level scoping cannot close them — any list that does would 401 the interface's own writes.
 
 ### Three worst (by severity)
 
@@ -39,4 +51,4 @@ Two paths exist; neither is a code change in `middleware.ts`:
 
 ### Interface call census
 
-The 61 interface-kept routes were determined by intersecting (a) all 104 `POST`/`PATCH`/`PUT`/`DELETE`-exporting routes under `src/app/api/` with (b) every mutating `fetch()` call in `src/` outside `src/app/api/`. The anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts this intersection — a new route added without classification, or a new interface call site to a listed route, fails the test.
+The 61 interface-kept routes were determined by intersecting (a) all 106 `POST`/`PATCH`/`PUT`/`DELETE`-exporting routes (104 at authoring; 106 as of 2026-07-29) under `src/app/api/` with (b) every mutating `fetch()` call in `src/` outside `src/app/api/`. The anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts this intersection — a new route added without classification, or a new interface call site to a listed route, fails the test.
