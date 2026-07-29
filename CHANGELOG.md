@@ -1,3 +1,18 @@
+## [v6.0.81] — 2026-07-29 — U041 merge (empty-manifest guard)
+
+- U041 — Make the department config hold the departments or refuse loudly: the converge route now
+  fails loud (500) on an empty or malformed `departments.json` manifest instead of silently
+  proceeding; the boot path warns without crashing (Rule 3.5 stage 1). Verdict PASS 8.6 earned
+  pre-fix (Round 4, Kimi 2.6); operator waived the post-fix re-judge on 2026-07-29 — the merge-gate
+  test regression that caused the earlier decline is fixed and re-measured clean at merge time.
+  Merge commit `74e2bad3621e491159adf4c4795ac661fd495aaa`, ancestor of `origin/main` proven
+  2026-07-29T17:23Z.
+- U064 (persona picker) was attempted in the same pass and DECLINED — merging it on top of U041
+  surfaces a genuine batch-interaction defect (U041's boot-path test fixture never creates a
+  `task_persona_bundle` table; U064's migration 116 unconditionally `ALTER TABLE`s that table) that
+  neither unit's own isolated fix-wave caught. Nothing of U064 was pushed. See
+  `QUALITY-CONTROL/tickets/U064.md` for the full root-cause writeup and fix options.
+
 ## [v6.0.80] — 2026-07-29 — U063 merge (deliverables panel and teleprompter viewer)
 
 **Note on pre-existing gap:** the `/version` file, `package-lock.json`, and this file's own top
