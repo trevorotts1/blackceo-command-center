@@ -181,7 +181,7 @@ test('boot path warns and does not crash on empty manifest', () => {
   db.exec(`
     CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT, slug TEXT, config TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT, slug TEXT, description TEXT, icon TEXT, company_id TEXT, sort_order INTEGER, archived_at TEXT, created_at TEXT, updated_at TEXT);
-    CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, applied_at TEXT);
+    CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT, applied_at TEXT);
     CREATE TABLE IF NOT EXISTS sops (id TEXT PRIMARY KEY, title TEXT, department_id TEXT, role TEXT, content TEXT, key_question TEXT, trigger_topic TEXT, deleted_at TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, title TEXT, status TEXT, created_at TEXT, updated_at TEXT, dispatch_attempts INTEGER, department_id TEXT);
     CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, description TEXT, avatar_emoji TEXT DEFAULT '🤖', status TEXT DEFAULT 'standby', is_master INTEGER DEFAULT 0, workspace_id TEXT DEFAULT 'default', soul_md TEXT, user_md TEXT, agents_md TEXT, tools_md TEXT, memory_md TEXT, model TEXT, specialist_type TEXT DEFAULT 'on-call', role_type TEXT, persona TEXT, head_agent INTEGER, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));

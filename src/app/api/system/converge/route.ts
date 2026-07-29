@@ -206,29 +206,46 @@ export async function POST(req: NextRequest): Promise<Response> {
       result.workspaces = { created: counts.created, updated: counts.updated };
 
       // U041 (audit E11). FAIL LOUD on a manifest that resolved but declares no
-      // departments. Before this, converge answered ok:true with
+      // departments — but ONLY when that would actually leave the board with
+      // ZERO department columns. Before this, converge answered ok:true with
       // workspaces:{created:0,updated:0} — the same body a healthy steady-state
-      // converge returns — so an operator could converge a board with zero
-      // department columns and be told it worked. This mirrors the SOP leg of
-      // this same endpoint (see the activeSopCount === 0 check below), which has
-      // failed loud on an empty result all along. The every-boot path
-      // deliberately does NOT do this: it warns and comes up (Rule 3.5 stage 1).
+      // converge returns — so an operator could converge a BLANK board and be
+      // told it worked. This mirrors the SOP leg of this same endpoint (see the
+      // activeSopCount === 0 check below), which has failed loud on an empty
+      // result all along. The every-boot path deliberately does NOT do this: it
+      // warns and comes up (Rule 3.5 stage 1).
+      //
+      // Gated on the CURRENT provisioned count (not just this call's outcome):
+      // an empty/malformed manifest never DELETES existing workspaces (reseed is
+      // additive-only), so a box that already has departments provisioned still
+      // renders them — that is steady state, not the "board with zero department
+      // columns" defect this guards against, and it must stay a warn-and-continue
+      // (matching the boot path) rather than a hard 500. Only a genuinely blank
+      // board (provisioned count 0) reaching this line is the real regression.
       if (counts.outcome === 'empty-manifest' || counts.outcome === 'malformed') {
-        return NextResponse.json(
-          {
-            ok: false,
-            ran_at,
-            scope,
-            error:
-              `converge scope=${scope} resolved a department manifest that declares NO departments ` +
-              `(outcome=${counts.outcome}, raw entries=${counts.manifestEntries}). Zero workspaces were ` +
-              'seeded, so the board would render no department columns. This is NOT "already up to ' +
-              'date". The manifest is written per box at runtime by the workforce build; the repo ' +
-              'template is deliberately an empty array and must stay that way. Check the resolved ' +
-              'path in the [reseed] log line, then re-run converge scope=workspaces.',
-            workspaces: result.workspaces,
-          },
-          { status: 500 },
+        const provisionedCount = listProvisionedWorkspaceIds(db).length;
+        if (provisionedCount === 0) {
+          return NextResponse.json(
+            {
+              ok: false,
+              ran_at,
+              scope,
+              error:
+                `converge scope=${scope} resolved a department manifest that declares NO departments ` +
+                `(outcome=${counts.outcome}, raw entries=${counts.manifestEntries}). Zero workspaces were ` +
+                'seeded, so the board would render no department columns. This is NOT "already up to ' +
+                'date". The manifest is written per box at runtime by the workforce build; the repo ' +
+                'template is deliberately an empty array and must stay that way. Check the resolved ' +
+                'path in the [reseed] log line, then re-run converge scope=workspaces.',
+              workspaces: result.workspaces,
+            },
+            { status: 500 },
+          );
+        }
+        console.warn(
+          `[reseed] manifest outcome=${counts.outcome} (raw entries=${counts.manifestEntries}) but the ` +
+            `board already has ${provisionedCount} provisioned workspace(s) — steady state, not a blank ` +
+            'board. Continuing (warn-only), same as the boot path.',
         );
       }
 
