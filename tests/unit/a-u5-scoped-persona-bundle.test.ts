@@ -247,8 +247,10 @@ test('(d) migration 104 never alters task_persona_bundle (090) — schema byte-i
     [],
   );
   assert.ok(sql, 'task_persona_bundle table exists (090 ran)');
-  // The EXACT CREATE TABLE statement migration 090 shipped — any ALTER/DROP/
-  // recreate by 104 (or anything after) would change this string.
+  // The EXACT CREATE TABLE statement migration 090 shipped, plus the three
+  // nullable client-choice columns migration 116 (U064) additively appended —
+  // the only other migration ever authorized to touch this table. Any
+  // ALTER/DROP/recreate by 104 (or anything else) would change this string.
   const expected =
     `CREATE TABLE task_persona_bundle (\n` +
     `  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),\n` +
@@ -256,9 +258,13 @@ test('(d) migration 104 never alters task_persona_bundle (090) — schema byte-i
     `  bundle_json TEXT,\n` +
     `  catalog_version TEXT,\n` +
     `  confirm_state TEXT,\n` +
+    `  client_persona_id TEXT,\n` +
+    `  client_persona_source TEXT CHECK (client_persona_source IS NULL OR client_persona_source IN\n` +
+    `    ('client-choice','client','locked','config-named','express')),\n` +
+    `  client_persona_set_at TEXT,\n` +
     `  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\n` +
     `)`;
-  assert.equal(sql!.sql, expected, '090 table schema must be byte-identical pre/post migration 104');
+  assert.equal(sql!.sql, expected, '090 table schema (+ 116\'s additive columns) must be byte-identical pre/post migration 104');
 
   // The UNIQUE constraint on task_id (the structural fact that MADE scoped
   // bundles necessary in the first place) is still exactly one bundle/task.
