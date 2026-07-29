@@ -535,6 +535,18 @@ test('migration 114: after rename, slug=presentations resolves AND id=presentati
        VALUES ('presentations', 'Presentations', 'dept-presentations', 'Presentations production engine workspace.', '\u{1F5A5}️', 'default', 100, ?, ?)`,
     ).run(now, now);
 
+    // Mark migrations 001–113 as already applied so only 114 executes.
+    // Same rationale as Test 1: 051/091 would pre-canonicalize the slug
+    // before 114 runs, making the routing test hollow.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT)`,
+    );
+    for (let i = 1; i <= 113; i++) {
+      db.prepare(
+        'INSERT OR IGNORE INTO _migrations (id, name) VALUES (?, ?)',
+      ).run(String(i).padStart(3, '0'), `pre-marked-${i}`);
+    }
+
     withIsolatedHome(() => runMigrations(db));
 
     // After the rename: lookup by slug='presentations' (the NEW slug) must work.
