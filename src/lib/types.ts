@@ -540,6 +540,17 @@ export interface TaskDeliverable {
   path?: string;
   description?: string;
   created_at: string;
+  // U063: already selected by GET /api/tasks/[id]/deliverables (`SELECT *`,
+  // route.ts:29-34) and already columns in BOTH schemas. Declared here so the
+  // panel can read them. Nullable because the POST route has never written
+  // them (route.ts:89-99) — measured: 0 of 24 live rows carry a size.
+  mime_type?: string | null;
+  file_size_bytes?: number | null;
+  sha256?: string | null;
+  // DELIBERATELY NOT DECLARED: `updated_at` (in schema.ts:421, ABSENT from the
+  // live table) and `discarded` (in the live table, ABSENT from schema.ts).
+  // Declaring either would be true of one schema and false of the other.
+  // Reconciling the two is U034's named follow-up unit.
 }
 
 // Planning types

@@ -150,6 +150,12 @@ export default defineConfig({
       'src/lib/__tests__/passthrough-write-scope.test.ts',
       // U032 — promote identity gate test
       'tests/unit/u032-promote-identity-gate.test.ts',
+      // U063 — Presentation deliverables panel + teleprompter viewer (SAFE
+      // subset). Nine-artifact checklist, size honesty, GHL join on
+      // uploaded[].local_path, symlink refusal, secrets rule. DB-backed
+      // vitest suite; the Node built-in `npm run test:unit` glob skips it
+      // (see below) so it only runs here.
+      'tests/unit/presentation-deliverables.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

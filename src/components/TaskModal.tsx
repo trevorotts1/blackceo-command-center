@@ -7,6 +7,8 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import { ActivityLog } from './ActivityLog';
 import PhaseStepper from './PhaseStepper';
 import { DeliverablesList } from './DeliverablesList';
+// U063 — Presentation deliverables checklist (nine rows, always).
+import { PresentationDeliverablesPanel } from './PresentationDeliverablesPanel';
 import { SessionsList } from './SessionsList';
 import { PlanningTab } from './PlanningTab';
 import { AgentModal } from './AgentModal';
@@ -970,7 +972,14 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
           {/* Deliverables Tab */}
           {activeTab === 'deliverables' && task && (
-            <DeliverablesList taskId={task.id} engineLabel={engineLabel} />
+            <>
+              {/* U063: Presentation deliverables checklist — rendered above the
+                  generic list for presentation-department tasks only. */}
+              {task.department === 'presentations' && (
+                <PresentationDeliverablesPanel taskId={task.id} />
+              )}
+              <DeliverablesList taskId={task.id} engineLabel={engineLabel} />
+            </>
           )}
 
           {/* Sessions Tab */}
