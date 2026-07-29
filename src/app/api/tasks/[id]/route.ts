@@ -612,6 +612,9 @@ export async function PATCH(
       // presented cert is persisted as the certificate of record. Presence is still
       // required (no regression vs v1). The decision is the pure, unit-tested
       // evaluatePresentationsDoneGate(); failures keep the v1 422 + requires_* contract.
+      // U031: transition() now enforces REGISTRATION for every opt-in caller
+      // (task-lifecycle.ts checkPreconditions). This block remains the ONLY place a
+      // PRESENTED certificate is matched and persisted — do not delete it as a duplicate.
       {
         const certGate = evaluatePresentationsDoneGate({
           department: (existing as Task).department,

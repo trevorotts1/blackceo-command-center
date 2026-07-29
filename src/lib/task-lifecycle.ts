@@ -83,6 +83,7 @@ import { getProjectsPath } from '@/lib/config';
 import type { Task } from '@/lib/types';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
+import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 
 // ---------------------------------------------------------------------------
 // State machine definition
@@ -200,6 +201,9 @@ interface TaskRowForLifecycle {
   workspace_id: string | null;
   source?: string | null;
   qc_reroute_attempts?: number | null;
+  department?: string | null;
+  process_certificate_sha?: string | null;
+  sop_authoring_for_task_id?: string | null;
 }
 
 interface DeliverableCount { cnt: number }
@@ -260,6 +264,26 @@ function checkPreconditions(
     const completion = collectCompletionEvidence(task.id);
     if (!completion.hasEvidence) {
       throw new TransitionError('PRECONDITION_EVIDENCE', noEvidenceMessage(task.id, completion));
+    }
+  }
+
+
+  // ── PRESENTATIONS NO-SKIP PROOF (U031) ──────────────────────────────────────
+  // Placed ABOVE the operatorOverride bail-out for the same reason the
+  // completion-evidence invariant is: an override re-decides ROUTING, it does
+  // not make a deck's process proof exist. Registration only — the anti-spoof
+  // MATCH stays at the PATCH route, which is the only caller that receives a
+  // presented value (TransitionEvidence has no field for one).
+  {
+    const reg = requiresRegisteredCertificate({
+      department: task.department,
+      currentStatus: task.status,
+      targetStatus: to,
+      storedCert: task.process_certificate_sha,
+      sopAuthoringForTaskId: task.sop_authoring_for_task_id,
+    });
+    if (reg.applies && !reg.ok) {
+      throw new TransitionError('PRECONDITION_PROCESS_CERTIFICATE', reg.error ?? 'process certificate required');
     }
   }
 
@@ -586,6 +610,7 @@ export async function transition(
   const task = queryOne<TaskRowForLifecycle>(
     `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.model_id,
             t.persona_id, t.workspace_id, t.qc_reroute_attempts,
+            t.department, t.process_certificate_sha, t.sop_authoring_for_task_id,
             a.specialist_type
      FROM tasks t
      LEFT JOIN agents a ON t.assigned_agent_id = a.id
