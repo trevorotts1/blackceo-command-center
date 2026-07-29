@@ -755,9 +755,21 @@ export async function PATCH(
       }
     }
 
+    // ── U034 producer fields, RESTORED 2026-07-29 ────────────────────────────
+    // Declared HERE, before the empty-updates guard, so a PATCH carrying only
+    // these fields still reaches the persistence blocks below. Landed in
+    // 8cc525c; dropped when a parallel U035 branch (forked from base-d07, not
+    // from U034's merge) rewrote this same PATCH function. The USAGES survived,
+    // so every PATCH reaching `if (u034Url)` threw
+    // `ReferenceError: u034Url is not defined`, was swallowed by the route's
+    // catch-all, and returned a bare 500.
+    const u034Url = (validatedData as unknown as { deliverable_url?: string }).deliverable_url;
+    const u034Qc = (validatedData as unknown as { qc_scores?: Record<string, unknown> }).qc_scores;
+
     // U035: nothing-to-do check accounts for a status-only payload (status lives
     // in transition(), so it contributes no entry to `updates`).
-    if (updates.length === 0 && u035StatusTarget === null) {
+    // U034: ...and for a payload carrying only the four producer fields.
+    if (updates.length === 0 && u035StatusTarget === null && !u034Url && !u034Qc) {
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
     }
 
