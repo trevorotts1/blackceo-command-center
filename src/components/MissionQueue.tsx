@@ -5,7 +5,6 @@ import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Sear
 import { useMissionControl } from '@/lib/store';
 import { ErrorState } from './podcast/states';
 import { X } from 'lucide-react';
-import { ErrorState } from './podcast/states';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
@@ -26,7 +25,7 @@ import {
   triadMissingPillText,
 } from '@/lib/board-labels';
 import { taskToColumnId, columnIdToStatus } from '@/lib/board-projection';
-import { canonicalDeptFromAnyLabel } from '@/lib/routing/canonical-slug';
+import { canonicalDeptFromAnyLabel, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
 // 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
