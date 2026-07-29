@@ -223,6 +223,12 @@ Every document created for Trevor goes to `/Users/blackceomacmini/Downloads/<des
 A single direct Telegram message from Trevor gets ONE direct main-agent response. FORBIDDEN: spawning a sub-agent for a conversational/config/diagnostic reply, parallel sessions for the same message, or retrying via a new session. VALID sub-agent triggers ONLY: a production task routed to a department, a direct operator ops command requiring isolation (R8), or a long-running background job with explicit owner permission. (Origin: 8+ parallel sessions flooded Trevor with duplicate replies to one display-name complaint that needed a single rename.)
 <!-- END NO_SUBAGENT_STORM_V1 -->
 
+## Agnes as an OpenAI-compatible CHAT provider (Buzz / Goose, 2026-07-28)
+- Chat model = `agnes-2.0-flash`. `agnes-2.5-pro-alpha` returns EMPTY responses — never ship it to a client.
+- Base-URL convention differs per tool, don't copy one into the other: `buzz-agent` → `OPENAI_COMPAT_BASE_URL="https://apihub.agnes-ai.com/v1"` (WITH `/v1`); Goose → `OPENAI_HOST="https://apihub.agnes-ai.com"` (WITHOUT `/v1`).
+- Buzz persona packs are TWO layers: `.persona.md` frontmatter carries Goose format (`model: "openai:agnes-2.0-flash"`) so `buzz pack validate` passes, but runtime is `buzz-agent` driven by `OPENAI_COMPAT_*` env from a wrapper script — pack validation passing ≠ runtime wired. Harness + pack install are GUI-only (Buzz Desktop Settings). Playbook: `~/Downloads/openclaw-to-buzz-agent-migration-playbook.md`.
+- OpenClaw's `@openclaw/buzz` plugin (v0.0.0) ships without `openclaw.extensions` and cannot install — use the wrapper-script path, stop retrying the plugin.
+
 <!-- BEGIN skill:63-agnes-image:agents -->
 ## Agnes Image 2.1 Flash
 - Synchronous text-to-image + image-to-image on Agnes AI. Key `AGNES_AI_API_KEY` (existing fleet credential; never print). Model `agnes-image-2.1-flash`; `POST https://apihub.agnes-ai.com/v1/images/generations`.
