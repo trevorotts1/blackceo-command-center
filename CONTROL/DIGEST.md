@@ -12,3 +12,5 @@ Latest: U037 (v6.0.78)
 
 ### Alarms
 None standing.
+
+U068 landed (1f134c2, pending push). U052 staging now.
