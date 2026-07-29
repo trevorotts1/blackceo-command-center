@@ -31,6 +31,13 @@ export const CANONICAL_CC_PORT = 4000;
 export interface PortIntegrityDeps {
   /** Injectable for tests; defaults to the real notifySystem(). */
   notify?: typeof notifySystem;
+  /**
+   * U068: injectable for tests; defaults to global fetch. The probe performs a
+   * real HTTP request, so the ONLY way to test this job's decision logic is to
+   * substitute the transport. Never mock notifySystem's network and never point
+   * the real fetch at a live box from a test.
+   */
+  fetchImpl?: typeof fetch;
 }
 
 export interface PortIntegrityResult {
@@ -41,6 +48,7 @@ export interface PortIntegrityResult {
   tunnelOk: boolean | null;
   tunnelDetail: string | null;
   alerted: boolean;
+  canonicalPortAnswered: boolean | null;
 }
 
 /**
@@ -64,11 +72,15 @@ function resolveDeclaredPort(): number | null {
  * CF-Access-guarded box correctly rejects an unauthenticated same-origin
  * probe without the app being down).
  */
-async function probeListening(port: number, timeoutMs = 3000): Promise<{ ok: boolean; error: string | null }> {
+async function probeListening(
+  port: number,
+  timeoutMs = 3000,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: boolean; error: string | null }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal });
+    const res = await fetchImpl(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal });
     return { ok: res.ok || res.status === 401, error: null };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -135,6 +147,7 @@ async function checkTunnelIngress(): Promise<{ checked: boolean; ok: boolean | n
  */
 export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promise<PortIntegrityResult> {
   const notify = deps.notify ?? notifySystem;
+  const fetchImpl = deps.fetchImpl ?? fetch;
 
   const listenPort = resolveDeclaredPort();
   let listenPortOk = false;
@@ -143,10 +156,24 @@ export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promi
   if (listenPort === null) {
     listenProbeError = 'CC_PORT/PORT env var not set — cannot determine declared listen port';
   } else {
-    const probe = await probeListening(listenPort);
+    const probe = await probeListening(listenPort, 3000, fetchImpl);
     listenProbeError = probe.error;
     listenPortOk = listenPort === CANONICAL_CC_PORT && probe.ok;
   }
+
+  // U068: probe the CANONICAL port UNCONDITIONALLY, including when this process
+  // declared a different one and including when it declared none at all. Before
+  // this change the set of ports this job could ever look at had exactly one
+  // member — the one this process declared — so a canonical process reported
+  // all-clear while a drifted sibling served from the same working directory,
+  // and with CC_PORT/PORT unset the job never probed 4000 at all. That is the
+  // residual this module's own header (:7-10) says it exists to catch.
+  const canonicalProbe =
+    listenPort === CANONICAL_CC_PORT
+      ? null                                    // already probed above; do not double-probe
+      : await probeListening(CANONICAL_CC_PORT, 3000, fetchImpl);
+  const canonicalPortAnswered: boolean | null =
+    canonicalProbe === null ? listenPortOk || null : canonicalProbe.ok;
 
   const tunnel = await checkTunnelIngress();
 
@@ -166,6 +193,22 @@ export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promi
     problems.push(`tunnel ingress mismatch: ${tunnel.detail}`);
   }
 
+  // U068 stage 1. This is a REPORT, not a new hard failure: the job's contract is
+  // that it never throws and only ever calls notifySystem(). Escalating this to a
+  // different sink, or to a process action, is a SEPARATE unit.
+  if (listenPort !== null && listenPort !== CANONICAL_CC_PORT && canonicalPortAnswered === true) {
+    problems.push(
+      `this process is bound to ${listenPort} while ${CANONICAL_CC_PORT} is ALSO answering — ` +
+        `a second Command Center is serving from this box`,
+    );
+  }
+  if (listenPort === null && canonicalPortAnswered === true) {
+    problems.push(
+      `CC_PORT/PORT unset, but ${CANONICAL_CC_PORT} is answering — this process cannot prove ` +
+        `it is the process serving that port`,
+    );
+  }
+
   let alerted = false;
   if (problems.length > 0) {
     notify(`port-integrity: CC port/ingress drift detected — ${problems.join('; ')}`, {
@@ -183,5 +226,6 @@ export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promi
     tunnelOk: tunnel.ok,
     tunnelDetail: tunnel.detail,
     alerted,
+    canonicalPortAnswered,
   };
 }

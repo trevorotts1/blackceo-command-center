@@ -167,3 +167,171 @@ test('port-integrity: tunnel credentials absent on this box -> tunnel check skip
     restoreFetch();
   }
 });
+
+// ---------------------------------------------------------------------------
+// U068 tests — canonical port probe, fetchImpl injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a fetch stub that maps port numbers to responses.
+ * Returns [fetchImpl, callCountRef] — callCountRef is a { count: number }
+ * object mutated in-place so assertions can read it after the test runs.
+ */
+function stubFetchByPort(
+  responses: Map<number, { ok: boolean; status: number }>,
+): { fetchImpl: typeof fetch; callCount: { count: number } } {
+  const callCount = { count: 0 };
+  const fetchImpl = (async (url: string | URL | Request, _init?: RequestInit) => {
+    callCount.count += 1;
+    const urlStr = String(url);
+    for (const [port, resp] of responses) {
+      if (urlStr.includes(`:${port}/`)) {
+        return {
+          ok: resp.ok,
+          status: resp.status,
+          json: async () => ({}),
+        } as Response;
+      }
+    }
+    throw new Error(`connect ECONNREFUSED 127.0.0.1:UNKNOWN`);
+  }) as typeof fetch;
+  return { fetchImpl, callCount };
+}
+
+test('U068 (a): canonical port + healthy health check -> no alert, canonicalPortAnswered is true', async () => {
+  process.env.CC_PORT = String(CANONICAL_CC_PORT);
+  delete process.env.PORT;
+  clearTunnelEnv();
+
+  const { fetchImpl, callCount } = stubFetchByPort(
+    new Map([[CANONICAL_CC_PORT, { ok: true, status: 200 }]]),
+  );
+  const { notify, calls } = recordingNotify();
+
+  const result = await runPortIntegrityCheck({ notify, fetchImpl });
+  assert.equal(result.listenPort, CANONICAL_CC_PORT);
+  assert.equal(result.listenPortOk, true);
+  assert.equal(result.alerted, false);
+  assert.equal(calls.length, 0);
+  assert.equal(result.canonicalPortAnswered, true);
+  assert.ok(callCount.count > 0, 'fetchImpl must have been called at least once');
+});
+
+test('U068 (b): drifted process + canonical port also answering -> alerted, alert names both 3000 and 4000', async () => {
+  process.env.CC_PORT = '3000';
+  delete process.env.PORT;
+  clearTunnelEnv();
+
+  const responses = new Map<number, { ok: boolean; status: number }>([
+    [3000, { ok: true, status: 200 }],
+    [4000, { ok: true, status: 200 }],
+  ]);
+  const { fetchImpl, callCount } = stubFetchByPort(responses);
+  const { notify, calls } = recordingNotify();
+
+  const result = await runPortIntegrityCheck({ notify, fetchImpl });
+  assert.equal(result.listenPort, 3000);
+  assert.equal(result.listenPortOk, false);
+  assert.equal(result.alerted, true);
+  assert.equal(result.canonicalPortAnswered, true);
+  assert.ok(callCount.count > 0, 'fetchImpl must have been called');
+
+  assert.equal(calls.length, 1, 'exactly one notifySystem call');
+  const [message, meta] = calls[0];
+  assert.match(message, /3000/);
+  assert.match(message, /4000/);
+  assert.match(message, /second Command Center/);
+  assert.equal(meta?.action, 'escalate');
+});
+
+test('U068 (c): CC_PORT/PORT unset, but canonical port answering -> alerted naming 4000', async () => {
+  delete process.env.CC_PORT;
+  delete process.env.PORT;
+  clearTunnelEnv();
+
+  const { fetchImpl, callCount } = stubFetchByPort(
+    new Map([[CANONICAL_CC_PORT, { ok: true, status: 200 }]]),
+  );
+  const { notify, calls } = recordingNotify();
+
+  const result = await runPortIntegrityCheck({ notify, fetchImpl });
+  assert.equal(result.listenPort, null);
+  assert.equal(result.listenPortOk, false);
+  assert.equal(result.alerted, true);
+  assert.equal(result.canonicalPortAnswered, true);
+  assert.ok(callCount.count > 0, 'fetchImpl must have been called');
+
+  assert.equal(calls.length, 1);
+  const [message] = calls[0];
+  assert.match(message, new RegExp(String(CANONICAL_CC_PORT)));
+  assert.match(message, /CC_PORT\/PORT unset/);
+});
+
+test('U068 (d): drifted process, canonical port SILENT -> alerted naming 3000 only, NO second-CC claim', async () => {
+  process.env.CC_PORT = '3000';
+  delete process.env.PORT;
+  clearTunnelEnv();
+
+  // 3000 answers; 4000 refuses connection (no entry in the map)
+  const responses = new Map<number, { ok: boolean; status: number }>([
+    [3000, { ok: true, status: 200 }],
+  ]);
+  const { fetchImpl, callCount } = stubFetchByPort(responses);
+  const { notify, calls } = recordingNotify();
+
+  const result = await runPortIntegrityCheck({ notify, fetchImpl });
+  assert.equal(result.listenPort, 3000);
+  assert.equal(result.listenPortOk, false);
+  assert.equal(result.alerted, true);
+  // canonical port probe failed (connection refused) → canonicalProbe.ok is false
+  assert.equal(result.canonicalPortAnswered, false);
+  assert.ok(callCount.count > 0, 'fetchImpl must have been called');
+
+  assert.equal(calls.length, 1);
+  const [message] = calls[0];
+  assert.match(message, /3000/);
+  // Must NOT contain "second Command Center" — a refused connection is not a second listener
+  assert.doesNotMatch(message, /second Command Center/);
+  assert.doesNotMatch(message, /ALSO answering/);
+  assert.match(message, /listening on port/);
+});
+
+test('U068: canonical port answered field present and correct in result', async () => {
+  process.env.CC_PORT = String(CANONICAL_CC_PORT);
+  delete process.env.PORT;
+  clearTunnelEnv();
+
+  const { fetchImpl } = stubFetchByPort(
+    new Map([[CANONICAL_CC_PORT, { ok: true, status: 200 }]]),
+  );
+  const { notify } = recordingNotify();
+
+  const result = await runPortIntegrityCheck({ notify, fetchImpl });
+  assert.equal(result.canonicalPortAnswered, true);
+  assert.equal(result.alerted, false);
+});
+
+test('U068: real global fetch was never called when fetchImpl is injected', async () => {
+  process.env.CC_PORT = String(CANONICAL_CC_PORT);
+  delete process.env.PORT;
+  clearTunnelEnv();
+
+  let realFetchCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((..._args: unknown[]) => {
+    realFetchCalled = true;
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+  }) as typeof fetch;
+
+  const { fetchImpl } = stubFetchByPort(
+    new Map([[CANONICAL_CC_PORT, { ok: true, status: 200 }]]),
+  );
+  const { notify } = recordingNotify();
+
+  try {
+    await runPortIntegrityCheck({ notify, fetchImpl });
+    assert.equal(realFetchCalled, false, 'globalThis.fetch must not be called when fetchImpl is injected');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
