@@ -156,6 +156,13 @@ export default defineConfig({
       // vitest suite; the Node built-in `npm run test:unit` glob skips it
       // (see below) so it only runs here.
       'tests/unit/presentation-deliverables.test.ts',
+      // U036 / U039 — ADDED 2026-07-29. Both files import vitest globals, so
+      // `node --test` cannot load them; they were ALSO absent from this include
+      // list, which meant neither executed in ANY runner. Two units shipped with
+      // zero tests actually running. Excluded from the test:unit glob in
+      // package.json in the same commit.
+      'tests/unit/u036-department-canonical.test.ts',
+      'tests/unit/u039-sweep-killflag-sources.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
