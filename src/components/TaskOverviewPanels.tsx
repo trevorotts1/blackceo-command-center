@@ -58,6 +58,8 @@ const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
   survey: 'a Skill 6 survey build',
   'web-development': 'a Skill 6 web-development build',
   anthology: 'the Anthology Engine',
+  // U030 (audit E1) — the presentations deck-build producer.
+  build_deck: 'the presentations deck build',
 };
 
 const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
