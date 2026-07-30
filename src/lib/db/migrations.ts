@@ -3069,9 +3069,22 @@ export const migrations: Migration[] = [
         // SQLite does not enforce CHECK on ALTER TABLE ADD COLUMN in all versions,
         // but the app layer validates the value before writing.
         db.exec(`ALTER TABLE tasks ADD COLUMN block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM'))`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_block_audience ON tasks(block_audience) WHERE block_audience IS NOT NULL`);
         console.log('[Migration 073] Added tasks.block_audience');
       }
+      // The index is created UNCONDITIONALLY, outside the column guard above.
+      //
+      // `block_audience` is ALSO part of schema.ts's base CREATE TABLE, so on a
+      // FRESH install the column already exists, the guard above is FALSE, and an
+      // index created inside it would never be reached -- every fresh box then ran
+      // a full table scan on the query this partial index backs.
+      //
+      // It cannot be declared in schema.ts instead: `tests/unit/db-upgrade-migration-ordering.test.ts`
+      // enforces "schema.ts never indexes a column that a migration ALTER-adds
+      // (deadlock class)", because on a database predating 073 schema.ts runs
+      // before the column exists. This unconditional placement is the same pattern
+      // schema.ts's own comment describes for migration 002, which "owns both
+      // indexes and creates them unconditionally".
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_block_audience ON tasks(block_audience) WHERE block_audience IS NOT NULL`);
 
       console.log('[Migration 073] Block transparency columns ready');
     },
