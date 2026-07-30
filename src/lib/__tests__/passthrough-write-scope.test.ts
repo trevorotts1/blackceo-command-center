@@ -11,8 +11,11 @@
  *   - API routes exporting a mutating method (export async function): 106
  *     (2026-07-29: +2 since derivation -- tasks/[id]/persona-choice and
  *      tasks/[id]/resume, both POST, both added after 2026-07-27. Both are
- *      now covered by BEARER_REQUIRED_WRITE_ROUTES, which is why REACHABLE
- *      returns to 99 rather than rising to 101.)
+ *      accepted residuals, NOT bearer-gated -- the browser interface calls
+ *      both with no credential (TaskOverviewPanels.tsx:482 and
+ *      PersonaPickerPanel.tsx:101), so gating them would 401 the operator's
+ *      own resume button and persona picker. REACHABLE therefore RISES to
+ *      101; it does not return to 99. See docs/SECURITY-RESIDUALS.md.)
  *   - protected by isWebhookSecretRoute:                               5
  *   - REACHABLE via forged same-origin:                              101
  *   - covered by BEARER_REQUIRED_WRITE_ROUTES (38 routes / 35 patterns): 38
