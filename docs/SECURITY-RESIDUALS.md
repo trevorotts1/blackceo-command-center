@@ -34,7 +34,7 @@
 ### How they stay open
 
 1. The same-origin passthrough in `middleware.ts` relies on `Origin`/`Referer` headers, which are client-settable.
-2. `requiresBearerForWrite()` deliberately excludes the 61 interface-called routes — gating them would 401 the interface's own writes.
+2. `requiresBearerForWrite()` deliberately excludes the 63 interface-called routes — gating them would 401 the interface's own writes.
 3. The code comment at the passthrough explicitly documents this residual.
 
 ### Closing them
@@ -51,4 +51,4 @@ Two paths exist; neither is a code change in `middleware.ts`:
 
 ### Interface call census
 
-The 61 interface-kept routes were determined by intersecting (a) all 106 `POST`/`PATCH`/`PUT`/`DELETE`-exporting routes (104 at authoring; 106 as of 2026-07-29) under `src/app/api/` with (b) every mutating `fetch()` call in `src/` outside `src/app/api/`. The anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts this intersection — a new route added without classification, or a new interface call site to a listed route, fails the test.
+The interface-kept routes (61 at authoring, 63 as of 2026-07-29) were determined by intersecting (a) all 106 `POST`/`PATCH`/`PUT`/`DELETE`-exporting routes (104 at authoring; 106 as of 2026-07-29) under `src/app/api/` with (b) every mutating `fetch()` call in `src/` outside `src/app/api/`. The anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts this intersection — a new route added without classification, or a new interface call site to a listed route, fails the test.
