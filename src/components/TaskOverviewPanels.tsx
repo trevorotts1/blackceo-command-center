@@ -13,7 +13,7 @@
  * dead control and never a raw NULL (P2-02 step 6).
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users, CheckCircle2, RotateCw, Clock, Package } from 'lucide-react';
 import type { Task } from '@/lib/types';
 // U42 (C-11) — reuse the EXACT card-face chip components for the modal's
@@ -397,7 +397,17 @@ export function DispatchHoldPanel({ task }: { task: Task }) {
  * in the database and was rendered by nothing before this unit.
  */
 export function BlockedReasonPanel({ task }: { task: Task }) {
-  if (task.status !== 'blocked') return null;
+  // NOTE: the early `task.status !== 'blocked'` bail-out is deliberately NOT
+  // here. This component is mounted unconditionally by TaskModal for every
+  // task (see TaskModal.tsx), so an early return above the hooks below would
+  // call useState/useEffect conditionally — a rules-of-hooks violation
+  // (ESLint react-hooks/rules-of-hooks, build-breaking). Every hook below is
+  // therefore called unconditionally on every render; the two effects each
+  // carry their OWN internal `task.status !== 'blocked'` guard so the
+  // fetch/interval side effects still only run for blocked tasks (identical
+  // behavior to before). The actual render bail-out moves to just above the
+  // JSX `return (` below, which is allowed — hooks must be unconditional,
+  // but the JSX a component returns is free to depend on any condition.
 
   const isOwner = task.block_audience === 'OWNER';
   const heading = isOwner ? 'NEEDS YOUR DECISION' : 'Blocked — action needed';
@@ -423,19 +433,26 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
 
   // Countdown to next_dispatch_eligible_at
   const [retryCountdown, setRetryCountdown] = useState<string>('');
+  // Interval handle lives in a ref (not a plain closure `let`) so the retry
+  // countdown's re-entrant clear (inside `tick`, before the interval below is
+  // even created) never touches a not-yet-initialized binding — a `const`
+  // here would put the read inside `tick`'s first synchronous call in the
+  // temporal dead zone whenever `next_dispatch_eligible_at` is already in the
+  // past on mount. `ref.current` has no such hazard and needs no reassignment
+  // exemption from `prefer-const`.
+  const timerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   useEffect(() => {
-    if (!hasHealAttempts || !task.next_dispatch_eligible_at) {
+    if (task.status !== 'blocked' || !hasHealAttempts || !task.next_dispatch_eligible_at) {
       setRetryCountdown('');
       return;
     }
-    let timer: ReturnType<typeof setInterval> | undefined;
     const tick = () => {
       const now = Date.now();
       const target = new Date(task.next_dispatch_eligible_at!).getTime();
       const diff = target - now;
       if (diff <= 0) {
         setRetryCountdown('now');
-        if (timer) clearInterval(timer);
+        if (timerRef.current) clearInterval(timerRef.current);
         return;
       }
       const sec = Math.floor(diff / 1000);
@@ -448,15 +465,15 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
       }
     };
     tick();
-    timer = setInterval(tick, 1000);
-    return () => { if (timer) clearInterval(timer); };
-  }, [hasHealAttempts, task.next_dispatch_eligible_at]);
+    timerRef.current = setInterval(tick, 1000);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [task.status, hasHealAttempts, task.next_dispatch_eligible_at]);
 
   // Artifacts-banked: fetch a count from /api/tasks/{id}/deliverables
   const [artifactCount, setArtifactCount] = useState<number | null>(null);
   const [artifactLoaded, setArtifactLoaded] = useState(false);
   useEffect(() => {
-    if (!task.id) return;
+    if (task.status !== 'blocked' || !task.id) return;
     let cancelled = false;
     fetch(`/api/tasks/${task.id}/deliverables`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
@@ -470,7 +487,7 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
         if (!cancelled) setArtifactCount(null);
       });
     return () => { cancelled = true; };
-  }, [task.id]);
+  }, [task.status, task.id]);
 
   // Resume action state
   const [resuming, setResuming] = useState(false);
@@ -494,6 +511,11 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
       setResuming(false);
     }
   };
+
+  // All hooks above have now been called unconditionally, in the same order,
+  // on every render — THIS is the one place the status gate is allowed to
+  // affect control flow, since it's after every hook call.
+  if (task.status !== 'blocked') return null;
 
   return (
     <div
