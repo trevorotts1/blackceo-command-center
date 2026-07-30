@@ -47,6 +47,7 @@ import path from 'path';
 import {
   updateInterviewState,
   getOrCreateInterviewSessionId,
+  resolveInterviewWriteIdentity,
   InterviewScriptError,
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
@@ -278,16 +279,31 @@ export async function POST(req: NextRequest) {
   //    Same button the Telegram agent presses; the script owns the build-state
   //    write. The transcript is already saved, so a stamp failure is reported but
   //    the answer is NOT lost (appended:true).
-  const askedBy =
-    (body.askedBy && body.askedBy.trim()) ||
-    req.headers.get('Cf-Access-Authenticated-User-Email') ||
-    req.headers.get('x-operator-email') ||
-    'interview-web';
+  //
+  //    P0 FIX (Cassandra Henriquez incident, 2026-07): `askedBy` keeps its EXACT
+  //    prior value/behavior — it still defaults to the 'interview-web' literal
+  //    when there is no real caller identity, and is still recorded verbatim in
+  //    lastQuestionAskedBy. What changes is the RATE-LIMIT bucket key: when
+  //    there is no real identity, the stable per-interview session id is
+  //    resolved and passed as rateLimitSessionId so update-interview-state.sh
+  //    buckets on the real session instead of the shared literal every
+  //    unauthenticated caller used to collapse onto. When a real identity IS
+  //    present, rateLimitSessionId is left undefined, so the script falls back
+  //    to askedBy exactly as before -- the authenticated Cf-Access/operator
+  //    path is unchanged. The decision logic itself is
+  //    seam.resolveInterviewWriteIdentity (pure, unit-tested independent of
+  //    this route) so this exact defaulting behavior is pinned.
+  const { askedBy, rateLimitSessionId } = resolveInterviewWriteIdentity({
+    bodyAskedBy: body.askedBy,
+    cfAccessEmail: req.headers.get('Cf-Access-Authenticated-User-Email'),
+    operatorEmail: req.headers.get('x-operator-email'),
+  });
   try {
     await updateInterviewState({
       phase: body.phase,
       questionNumber: body.questionNumber,
       askedBy,
+      rateLimitSessionId,
     });
   } catch (err) {
     if (err instanceof InterviewScriptMissingError) {
@@ -305,6 +321,29 @@ export async function POST(req: NextRequest) {
       );
     }
     if (err instanceof InterviewScriptError) {
+      // 89 = rate-limited (lib-interview-rate-limit.sh). LOUD and distinct from
+      // any other script failure: a real 429, a plain-language explanation, and
+      // an explicit statement that nothing was lost — the transcript write in
+      // step 4 already landed, and update-interview-state.sh has durably queued
+      // this progress stamp for automatic replay (see .interview-state-deferred.jsonl
+      // in its own doc comment). This is the fix for the incident where a rate-limit
+      // trip was indistinguishable from any other failure and was silently dropped.
+      if (err.exitCode === 89) {
+        return NextResponse.json(
+          {
+            error: 'rate_limited',
+            message:
+              "Your answer was saved. You're submitting faster than this interview " +
+              'session allows right now — your progress update is queued and will be ' +
+              'applied automatically (or retry in a bit); nothing is lost.',
+            appended: true,
+            transcriptPath,
+            exitCode: err.exitCode,
+            detail: err.stderr.trim() || undefined,
+          },
+          { status: 429 },
+        );
+      }
       return NextResponse.json(
         {
           error: 'state_write_failed',
@@ -408,10 +447,12 @@ export async function POST(req: NextRequest) {
   //    U013: the mirror is a derived index, NOT the canonical source — see
   //    docs/interview-state-source-of-truth.md.
   //    getOrCreateInterviewSessionId gives the sync a stable key (the seam's sole
-  //    benign build-state write; it touches no gate field).
+  //    benign build-state write; it touches no gate field). Reuse the id already
+  //    resolved above for the rate-limit key when we have it (identical value —
+  //    the function is idempotent — this just avoids reading build-state twice).
   let dbMirror: { ok: boolean; answers?: number; skipped?: string } | null = null;
   try {
-    const sessionId = getOrCreateInterviewSessionId();
+    const sessionId = rateLimitSessionId ?? getOrCreateInterviewSessionId();
     const res = refreshInterviewMirror({ sessionId, ownerId: askedBy });
     dbMirror = { ok: res.ok, answers: res.answersMirrored, skipped: res.skipped };
   } catch {
