@@ -69,7 +69,11 @@ test('case 2: BLOCKED-on-OWNER task at night is carved out', () => {
     ctx(true) as any,
   );
   assert.equal(plans.length, 1);
-  assert.equal(plans[0].stamps[0].guardColumn, 'progress_last_sent_at');
+  // U065: blocked-with-reason has its OWN stamp. Until 2026-07-26 it shared
+  // progress_last_sent_at, which produced two wrong behaviours. Production
+  // (trust-engine.ts, StampOp.guardColumn) now declares blocked_notice_sent_at
+  // as a distinct guard column; this assertion was never updated when it changed.
+  assert.equal(plans[0].stamps[0].guardColumn, 'blocked_notice_sent_at');
   assert.ok(plans[0].message.includes('paused waiting on you'));
 });
 
@@ -110,7 +114,7 @@ test('case 6: five mixed tasks at night produce exactly two carved-out plans', (
   const plans = engine.planSends(rows, ctx(true) as any);
   assert.equal(plans.length, 2);
   const s = stamps(plans);
-  assert.deepStrictEqual(s, ['b1:progress_last_sent_at', 'd1:completion_sent_at']);
+  assert.deepStrictEqual(s, ['b1:blocked_notice_sent_at', 'd1:completion_sent_at']);
 });
 
 test('case 7: five mixed tasks by day produce all five stamps in one digest', () => {
@@ -127,7 +131,7 @@ test('case 7: five mixed tasks by day produce all five stamps in one digest', ()
   const s = stamps(plans);
   assert.deepStrictEqual(
     s,
-    ['a1:ack_sent_at', 'b1:progress_last_sent_at', 'b2:ack_sent_at', 'd1:completion_sent_at', 'p1:progress_last_sent_at'],
+    ['a1:ack_sent_at', 'b1:blocked_notice_sent_at', 'b2:ack_sent_at', 'd1:completion_sent_at', 'p1:progress_last_sent_at'],
   );
 });
 
