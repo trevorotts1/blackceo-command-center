@@ -206,8 +206,17 @@ test('V5: quiet hours hold the phase message but not blocked/done', () => {
   };
 
   const plans = engine.planSends([phaseRow, doneRow, blockedRow], phaseCtx);
-  // All held: isNight=true returns early
-  assert.equal(plans.length, 0, 'quiet hours hold everything');
+  // This test's own title says quiet hours hold the phase message "but not
+  // blocked/done". The old assertion said 0 ('hold everything'), contradicting
+  // the title. Production is right and the title is right: trust-engine.ts
+  // carves done and blocked-on-OWNER OUT of quiet hours and holds ONLY the phase
+  // report ("Held during quiet hours ... unlike done and blocked, a phase report
+  // is never urgent enough to wake anyone. U044 must NOT carve this out.").
+  // So exactly two plans survive, and the phase task is NOT one of them.
+  assert.equal(plans.length, 2, 'done + blocked-on-OWNER survive quiet hours; the phase report does not');
+  // PlannedSend carries no taskId of its own -- the task id lives on each stamp.
+  const ids = plans.flatMap((pl) => pl.stamps.map((st) => st.taskId)).sort();
+  assert.deepStrictEqual(ids, ['v5-blocked', 'v5-done'], 'the phase task must be the one held');
 });
 
 test('V5-bis: phase message at night with isNight=false (permissive) still respects the !night guard', () => {

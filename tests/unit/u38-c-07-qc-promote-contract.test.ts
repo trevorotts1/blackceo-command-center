@@ -154,7 +154,17 @@ function getSingleTask(taskId: string) {
 }
 
 function callPromote(taskId: string) {
-  const req = new NextRequest(`http://localhost/api/tasks/${taskId}/promote`, { method: 'POST' });
+  // Gate 3 (U032, audit E2b) requires a verified Cf-Access-Authenticated-User-Email
+  // or the route returns 403. Before Gate 3 the identity was read into the audit
+  // `reason` text but never checked, so a forged same-origin POST could promote.
+  // This helper predates the gate and sent no headers at all, which is why both
+  // [U38-b] success cases started returning 403 instead of 200. The gate is
+  // correct and deliberate -- the fixture is what was stale. Synthetic address:
+  // no real person or client is named.
+  const req = new NextRequest(`http://localhost/api/tasks/${taskId}/promote`, {
+    method: 'POST',
+    headers: { 'Cf-Access-Authenticated-User-Email': 'operator@example.com' },
+  });
   return promotePOST(req, { params: Promise.resolve({ id: taskId }) });
 }
 
