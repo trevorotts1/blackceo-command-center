@@ -174,7 +174,13 @@ function hasAnthologyMarker(description: string | null | undefined): boolean {
  * this route. The durable fix is an IMMUTABLE, server-stamped `tasks.source`
  * column set ONLY at creation and never exposed on any update surface.
  */
-const RECOGNIZED_BOARD_SOURCES = new Set(['funnel', 'survey', 'web-development', 'anthology']);
+const RECOGNIZED_BOARD_SOURCES = new Set([
+  'funnel',
+  'survey',
+  'web-development',
+  'anthology',
+  'build_deck',
+]);
 
 /**
  * Resolve the effective, authoritative board-producer source for a card.
@@ -333,8 +339,9 @@ export async function POST(
           hint:
             'This route only transitions cards created by a signed board producer: ' +
             'the Skill-6 board hookup (cc_board.py ingest_task, ' +
-            'source=funnel|survey|web-development) or the Anthology Engine board ' +
-            'client (mc_board.py, source=anthology). Use PATCH /api/tasks/{id} for ' +
+            'source=funnel|survey|web-development), the Anthology Engine board ' +
+            'client (mc_board.py, source=anthology), or the presentations deck-build ' +
+            'producer (cc_board.py, source=build_deck). Use PATCH /api/tasks/{id} for ' +
             'other tasks.',
         },
         { status: 403 },
@@ -490,8 +497,10 @@ export async function GET() {
     scope:
       'Only acts on tasks carrying a signed board-producer source marker ' +
       '("Source: funnel|survey|web-development" for cc_board.py ingest_task() ' +
-      'cards, or "Source: anthology" for the Anthology Engine mc_board.py cards, ' +
-      'in the description, written by /api/tasks/ingest). Other tasks get 403. ' +
+      'cards, "Source: anthology" for the Anthology Engine mc_board.py cards, ' +
+      'or "Source: build_deck" for the presentations deck-build producer ' +
+      'cc_board.py cards, in the description, written by /api/tasks/ingest). Other ' +
+      'tasks get 403. ' +
       "'done' is always rejected with 403 regardless of card scope — it is " +
       'authority-gated on PATCH /api/tasks/{id} (independent QC auto-scorer / ' +
       "master agent only). 'blocked' is allowed ONLY for a marked card (the " +
