@@ -100,6 +100,15 @@ test.before(async () => {
        VALUES (?, ?, ?, '🤖', 'default', ?, ?, ?)`,
       [ws.id, ws.slug, ws.name, order++, now, now],
     );
+    // A migration may already own this slug -- migration 114 (U037) seeds
+    // 'presentations' unconditionally on every fresh DB. INSERT OR IGNORE then
+    // silently no-ops, leaving ws.id pointing at a row that was never written,
+    // and the agents INSERT below dies on `FOREIGN KEY constraint failed`.
+    // Read back the id that actually owns the slug and use THAT as the FK target.
+    const owner = getDb()
+      .prepare('SELECT id FROM workspaces WHERE slug = ?')
+      .get(ws.slug) as { id?: string } | undefined;
+    if (owner?.id) ws.id = owner.id;
   }
 
   // Seed ONE non-offline agent per department workspace (status 'standby' is
