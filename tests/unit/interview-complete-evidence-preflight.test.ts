@@ -1,6 +1,6 @@
 /**
  * interview-complete-evidence-preflight.test.ts — the 2026-07-30 incident
- * (Cassandra Henriquez / rescue-cassandra-henriquez): a 19-question interview
+ * (client incident): a 19-question interview
  * with 5 missing mandatory branding fields (brand_evokes, customer_feeling,
  * brand_descriptors, ideal_customer, unique_differentiator) was marked
  * interviewComplete=true. The client was told she was finished when she was

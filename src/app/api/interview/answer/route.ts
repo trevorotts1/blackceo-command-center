@@ -304,7 +304,7 @@ export async function POST(req: NextRequest) {
     operatorEmail: req.headers.get('x-operator-email'),
   });
 
-  // P0 FIX (2026-07-30, Cassandra Henriquez incident — frozen progress
+  // P0 FIX (2026-07-30, client incident — frozen progress
   // counter): `questionNumber` used to be trusted exactly as the client sent
   // it (optional — the structured-card builder only includes it when its own
   // caller passed a positive number, buildAnswerPayload() in answer-

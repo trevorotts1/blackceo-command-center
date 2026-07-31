@@ -189,7 +189,7 @@ export interface GateFlags {
   decisionCoverageComplete: boolean;
   noUnprovenancedDeclines: boolean;
   /** See computeAnswerCompleteness() — question count (25-35) + mandatory
-   *  branding/structural fields. Added 2026-07-30 (Cassandra Henriquez
+   *  branding/structural fields. Added 2026-07-30 (client
    *  incident): the pre-flight used to only check `genuine` (>=3 Q-blocks,
    *  not synthetic, >512 bytes) — a bar low enough that a 19-question
    *  interview with 5 missing mandatory fields passed it cleanly. */
@@ -985,8 +985,8 @@ function fieldPresent(state: BuildState | null, key: string): boolean {
 /**
  * Defense-in-depth mirror of qc-interview-completion.py's check #1 (question
  * count 25-35) and check #3 (mandatory branding + structural fields) — added
- * after the 2026-07-30 incident (Cassandra Henriquez / rescue-cassandra-
- * henriquez): a 19-question interview with 5 missing mandatory fields was
+ * after the 2026-07-30 incident reported by the client:
+ * a 19-question interview with 5 missing mandatory fields was
  * marked interviewComplete=true because THIS route's own pre-flight only
  * checked `genuine` (readAnswers().genuine — >=3 Q-blocks, not synthetic,
  * >512 bytes: a bar low enough that 19 real questions sailed through), never

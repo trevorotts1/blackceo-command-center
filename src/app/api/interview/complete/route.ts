@@ -120,7 +120,7 @@ function collectMissing(snapshot: InterviewGateSnapshot): MissingItem[] {
     });
   }
 
-  // answer_completeness (2026-07-30 fix, Cassandra Henriquez incident):
+  // answer_completeness (2026-07-30 fix, client incident):
   // `genuineTranscriptReady` above only asserts the transcript isn't FAKE
   // (>=3 Q-blocks) — it never asserted the interview is actually DONE (25-35
   // questions, every mandatory branding/structural field answered). A
