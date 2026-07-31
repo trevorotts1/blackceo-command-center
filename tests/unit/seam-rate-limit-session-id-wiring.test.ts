@@ -1,7 +1,7 @@
 /**
  * seam-rate-limit-session-id-wiring.test.ts
  *
- * The seam-level half of the P0 fix (Cassandra Henriquez incident, 2026-07).
+ * The seam-level half of the P0 fix (client incident, 2026-07).
  * seam.resolveInterviewWriteIdentity (see resolve-interview-write-identity.test.ts)
  * decides WHEN to hand update-interview-state.sh a real session id instead of
  * letting it fall back to the shared 'interview-web' literal. This file pins
