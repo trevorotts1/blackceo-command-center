@@ -1,5 +1,13 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // BUG-1 FIX (atomic-deploy.sh build isolation): honour NEXT_DIST_DIR so a
+  // build can be pointed at a temp directory instead of the live .next. Next.js
+  // resolves this via path.join(<project dir>, distDir), which does NOT
+  // special-case an absolute second argument (it concatenates instead of
+  // replacing) -- so this value must be a path RELATIVE to the project root,
+  // never absolute. scripts/atomic-deploy.sh passes a relative temp-dir name
+  // for exactly this reason. Falls back to the normal '.next' when unset.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   experimental: {
     serverComponentsExternalPackages: ['better-sqlite3'],
     // Required in Next 14.2 to load `src/instrumentation.ts` (this project uses

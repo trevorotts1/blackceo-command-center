@@ -280,7 +280,7 @@ export async function POST(req: NextRequest) {
   //    write. The transcript is already saved, so a stamp failure is reported but
   //    the answer is NOT lost (appended:true).
   //
-  //    P0 FIX (Cassandra Henriquez incident, 2026-07): `askedBy` keeps its EXACT
+  //    P0 FIX (client incident, 2026-07): `askedBy` keeps its EXACT
   //    prior value/behavior — it still defaults to the 'interview-web' literal
   //    when there is no real caller identity, and is still recorded verbatim in
   //    lastQuestionAskedBy. What changes is the RATE-LIMIT bucket key: when

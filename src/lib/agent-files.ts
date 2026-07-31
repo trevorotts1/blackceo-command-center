@@ -1,6 +1,12 @@
 import fs from 'fs'; import path from 'path';
 const AGENTS_DIR = path.join(process.cwd(),'agents');
-const FILE_MAP:Record<string,string>={soul_md:'SOUL.md',agents_md:'AGENTS.md',tools_md:'TOOLS.md',memory_md:'MEMORY.md'};
+const FILE_MAP: Record<string, string> = {
+  soul_md: 'SOUL.md',
+  user_md: 'USER.md',
+  agents_md: 'AGENTS.md',
+  tools_md: 'TOOLS.md',
+  memory_md: 'MEMORY.md',
+};
 export class SharedFileSymlinkError extends Error{public readonly column:string;public readonly filename:string;public readonly agentName:string;constructor(agentName:string,column:string,filename:string){super(`Refusing to write shared file through a symbolic link: agent "${agentName}" column "${column}" -> "${filename}" is a symlink. Shared files (AGENTS.md, TOOLS.md) must be edited in agents/_shared/, not through a single agent's directory.`);this.name='SharedFileSymlinkError';this.column=column;this.filename=filename;this.agentName=agentName}}
 const SHARED_COLUMNS=new Set(['agents_md','tools_md']);
 function isSymlink(fp:string):boolean{try{return fs.lstatSync(fp).isSymbolicLink()}catch{return false}}
@@ -8,7 +14,7 @@ export function checkSharedFileSymlink(name:string,column:string):boolean{if(!SH
 export function agentSlug(n:string):string{return n.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'')}
 export function agentDir(n:string):string{return path.join(AGENTS_DIR,agentSlug(n))}
 export function readAgentFiles(n:string):Record<string,string|null>{const d=agentDir(n);const r:Record<string,string|null>={};for(const[c,fn]of Object.entries(FILE_MAP)){const fp=path.join(d,fn);try{if(fs.existsSync(fp))r[c]=fs.readFileSync(fp,'utf-8');else r[c]=null}catch{r[c]=null}}return r}
-export function writeAgentFile(n:string,c:string,ct:string):void{const d=agentDir(n);const fn=FILE_MAP[c];if(!fn)return;const tp=path.join(d,fn);if(SHARED_COLUMNS.has(c)&&isSymlink(tp))throw new SharedFileSymlinkError(n,c,fn);if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});fs.writeFileSync(tp,ct,'utf-8')}
+export function writeAgentFile(n:string,c:string,ct:string):void{const d=agentDir(n);const filename=FILE_MAP[c];if (!filename) return;const tp=path.join(d,filename);if(SHARED_COLUMNS.has(c)&&isSymlink(tp))throw new SharedFileSymlinkError(n,c,filename);if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});fs.writeFileSync(tp,ct,'utf-8')}
 export function writeAgentDailyLog(n:string,dt:string,ct:string):void{const d=path.join(agentDir(n),'memory');if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});fs.writeFileSync(path.join(d,`${dt}.md`),ct,'utf-8')}
 export function readAgentDailyLog(n:string,dt:string):string|null{const fp=path.join(agentDir(n),'memory',`${dt}.md`);try{if(fs.existsSync(fp))return fs.readFileSync(fp,'utf-8')}catch{}return null}
 export function listAgentDailyLogs(n:string):string[]{const d=path.join(agentDir(n),'memory');try{if(fs.existsSync(d))return fs.readdirSync(d).filter(f=>f.endsWith('.md')).map(f=>f.replace('.md','')).sort().reverse()}catch{}return[]}

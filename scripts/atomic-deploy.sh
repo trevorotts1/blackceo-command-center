@@ -170,7 +170,7 @@ _disk_cleanup() {
   local dir="$1"
   _log "Running disk cleanup in ${dir} ..."
 
-  # Old DB backups (mission-control.db.backup.<timestamp>).
+  # Old DB backups THIS SCRIPT created (mission-control.db.backup.autodeploy.<timestamp>).
   #
   # This used to be an unconditional `-delete` of EVERY mission-control.db.backup.*
   # — and it runs in phase 1a, BEFORE phase 1b writes this deploy's backup. So a
@@ -178,7 +178,15 @@ _disk_cleanup() {
   # last known-good one, and then took its own. That is the exact failure the
   # retention policy exists to prevent. Now it keeps the newest N (default 3,
   # OPENCLAW_BACKUP_KEEP) and prints every decision.
-  oc_backup_prune "$dir" "mission-control.db.backup." ""
+  #
+  # BUG-2 FIX: the prefix is scoped to the ".autodeploy." marker this script's
+  # OWN backup-creation code path stamps into the filename below (Phase 1b). A
+  # bare "mission-control.db.backup." prefix also matches operator/human-made
+  # backups (e.g. mission-control.db.backup.20260730-221422, which carries no
+  # such marker) — this is exactly the defect that deleted three protected
+  # historical backups on this box once. Never widen this back to the bare
+  # pattern; retention must only ever prune what it itself created.
+  oc_backup_prune "$dir" "mission-control.db.backup.autodeploy." ""
 
   # npm cache
   npm cache clean --force 2>/dev/null || true
@@ -382,7 +390,10 @@ if [[ -z "$DB_FILE" || ! -f "$DB_FILE" ]]; then
   _warn "  Supply --db-path if the DB is at a non-standard location."
   DB_BACKUP=""
 else
-  DB_BACKUP="${DB_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
+  # BUG-2 FIX: the ".autodeploy." infix is the marker that scopes retention
+  # pruning (below, and in _disk_cleanup above) to backups THIS SCRIPT created.
+  # Never drop this marker -- see the prune call below for why.
+  DB_BACKUP="${DB_FILE}.backup.autodeploy.$(date +%Y%m%d-%H%M%S)"
   # Best-effort pre-backup WAL flush. The Linux/VPS container ships python3 but
   # NOT the sqlite3 CLI, so use the stdlib sqlite3 module (behaviour-equivalent
   # to `sqlite3 <db> '.timeout 5000' 'PRAGMA wal_checkpoint(TRUNCATE);'`).
@@ -408,8 +419,10 @@ PYWAL
   cp "$DB_FILE" "$DB_BACKUP"
   _ok "  DB backed up: ${DB_BACKUP}"
   # RETENTION: only now that this deploy's backup exists. Never prunes the
-  # backup this run just wrote.
-  oc_backup_prune "$(dirname "$DB_BACKUP")" "$(basename "$DB_FILE").backup." "$DB_BACKUP"
+  # backup this run just wrote. Prefix scoped to the ".autodeploy." marker
+  # (BUG-2 FIX) so this can NEVER match a human/operator-made backup file —
+  # only ones this script's own Phase 1b code path created.
+  oc_backup_prune "$(dirname "$DB_BACKUP")" "$(basename "$DB_FILE").backup.autodeploy." "$DB_BACKUP"
 fi
 
 # ── 1c. Snapshot current .next as rollback artifact ───────────────────────────
@@ -478,7 +491,8 @@ _ok "Phase 1 pre-flight passed."
 ###############################################################################
 _banner "Phase 2 — Build (temp dir)"
 
-BUILD_TMP="${APP_DIR}/.next.tmp.$(date +%Y%m%d-%H%M%S)-$$"
+BUILD_TMP_NAME=".next.tmp.$(date +%Y%m%d-%H%M%S)-$$"
+BUILD_TMP="${APP_DIR}/${BUILD_TMP_NAME}"
 _log "Building into temp dir: ${BUILD_TMP}"
 
 # Record build start time (seconds since epoch) for mtime guard below.
@@ -486,9 +500,17 @@ _log "Building into temp dir: ${BUILD_TMP}"
 # by THIS build invocation, not carried over from the Phase 1c snapshot.
 BUILD_START_TS=$(date +%s 2>/dev/null || echo 0)
 
-# Export NEXT output dir env var so Next.js writes to the temp dir instead of .next
-# Next.js honours the NEXT_DIST_DIR env variable as the output directory.
-export NEXT_DIST_DIR="$BUILD_TMP"
+# Export NEXT output dir env var so Next.js writes to the temp dir instead of .next.
+# next.config.mjs now reads NEXT_DIST_DIR into `distDir` (BUG-1 FIX). Next.js
+# resolves distDir via path.join(<project dir>, distDir) -- NOT path.resolve --
+# so an ABSOLUTE value here would be silently concatenated onto APP_DIR instead
+# of replacing it (verified: path.join('/a/b','/a/b/x') -> '/a/b/a/b/x', not
+# '/a/b/x'), producing a build directory nobody checks and every deploy would
+# spuriously "fail" at the BUILD_ID check below. We build the same absolute
+# BUILD_TMP the rest of this script already uses for its own bookkeeping (mv,
+# rm -rf, existence checks), but export only the RELATIVE name so Next.js's
+# path.join(APP_DIR, NEXT_DIST_DIR) resolves to exactly that same absolute path.
+export NEXT_DIST_DIR="$BUILD_TMP_NAME"
 
 cd "$APP_DIR"
 

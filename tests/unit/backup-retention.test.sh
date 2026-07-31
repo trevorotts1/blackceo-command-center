@@ -131,7 +131,14 @@ done
 head2 "T10 both call sites wired"
 grep -q 'oc_backup_prune "\$BACKUP_BASE" "cc-backup-"' "$UPDATE_SH" && ok "update.sh prunes cc-backup-<ts> trees" || bad "update.sh prunes cc-backup-<ts> trees" "needle missing in $UPDATE_SH"
 grep -q 'oc_backup_precheck_disk "\$BACKUP_DIR"' "$UPDATE_SH" && ok "update.sh disk pre-checks the backup" || bad "update.sh disk pre-checks the backup" "needle missing in $UPDATE_SH"
-grep -q 'oc_backup_prune "\$dir" "mission-control.db.backup."' "$ATOMIC" && ok "atomic-deploy.sh prunes DB backups by retention" || bad "atomic-deploy.sh prunes DB backups by retention" "needle missing in $ATOMIC"
+grep -q 'oc_backup_prune "\$dir" "mission-control.db.backup.autodeploy."' "$ATOMIC" && ok "atomic-deploy.sh prunes DB backups by retention" || bad "atomic-deploy.sh prunes DB backups by retention" "needle missing in $ATOMIC"
+# BUG-2: the prefix must be scoped to the script's own marker, never the bare
+# pattern that also matches human/operator-made backups.
+if grep -q 'oc_backup_prune "\$dir" "mission-control.db.backup." ""' "$ATOMIC"; then
+  bad "atomic-deploy.sh does not use the unscoped bare prefix" "the unscoped 'mission-control.db.backup.' prune call is still present"
+else
+  ok "atomic-deploy.sh does not use the unscoped bare prefix"
+fi
 grep -q 'oc_backup_precheck_disk "\$DB_BACKUP"' "$ATOMIC" && ok "atomic-deploy.sh disk pre-checks the DB backup" || bad "atomic-deploy.sh disk pre-checks the DB backup" "needle missing in $ATOMIC"
 # THE ORIGINAL DEFECT: an unconditional -delete of every DB backup, running in
 # phase 1a BEFORE phase 1b writes this deploy's own. It must be gone.

@@ -71,6 +71,79 @@ jobs:
           V_ROOT=$(head -1 version | tr -d '[:space:]')
           echo "Checking for annotated tag: $V_ROOT"
 
+          # ── Ledger of releases that were NEVER version-stamped ──────────────
+          # Six published tags (v6.0.75-v6.0.79, v6.0.82) point at commits that
+          # carry a DIFFERENT version, because those releases were cut without
+          # running the version bump. No commit in this repo, on any ref, has
+          # ever carried those strings, so no retag can make them truthful, and
+          # moving a published tag is an operator decision, not CI's.
+          #
+          # The assertions below are unchanged and still strict. What this ledger
+          # prevents is a LANDMINE: the tag check runs against whatever /version
+          # currently says, so the next time this repo releases 6.0.82 the
+          # pre-existing wrong v6.0.82 tag would turn main red on a defect no PR
+          # introduced and no PR can fix. A ledgered version reports loudly and
+          # does not block; anything unlisted is gated exactly as before.
+          LEDGER=".github/never-version-stamped-releases.txt"
+          LEDGER_VERSIONS=""
+          if [ -f "$LEDGER" ]; then
+            LEDGER_VERSIONS=$(sed -E 's/#.*//' "$LEDGER" \
+              | tr -d '[:blank:]' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          fi
+
+          # What a tag actually resolves to. Prints "<type> <commit> <version>",
+          # where version is the /version of the commit the tag points at.
+          tag_truth() {
+            local t="$1" c cv ty
+            if ! git rev-parse -q --verify "refs/tags/$t" >/dev/null 2>&1; then
+              echo "missing - -"; return 0
+            fi
+            ty=$(git cat-file -t "refs/tags/$t" 2>/dev/null || echo unknown)
+            c=$(git rev-parse "$t^{commit}" 2>/dev/null || echo "-")
+            cv=$(git show "$c:version" 2>/dev/null | head -1 | tr -d '[:space:]' || true)
+            echo "$ty $c ${cv:--}"
+          }
+
+          # REVERSE DIRECTION — runs on every build, not only when /version
+          # happens to equal a ledgered entry. If a ledgered tag ever does
+          # resolve to a truthfully-stamped commit, the entry is stale and the
+          # build fails, so the ledger is forced to shrink and can never rot
+          # into a blanket exemption that swallows the next real defect.
+          STALE=""
+          for LV in $LEDGER_VERSIONS; do
+            read -r LTY LC LCV <<<"$(tag_truth "$LV")"
+            if [ "$LTY" = "tag" ] && [ "${LCV#v}" = "${LV#v}" ]; then
+              STALE="$STALE $LV"
+            fi
+          done
+          if [ -n "$STALE" ]; then
+            echo "❌ STALE ENTRIES in $LEDGER"
+            echo "   These versions are recorded as impossible to tag truthfully, but their"
+            echo "   tags now DO resolve to commits carrying the matching version:$STALE"
+            echo ""
+            echo "FIX: delete those lines from $LEDGER. It records outstanding,"
+            echo "     unrepairable debt only — a stale entry would silently exempt a real defect."
+            exit 1
+          fi
+
+          if printf '%s\n' "$LEDGER_VERSIONS" | grep -qx "$V_ROOT"; then
+            read -r CTY CC_ CCV <<<"$(tag_truth "$V_ROOT")"
+            echo "⚠️  KNOWN NEVER-VERSION-STAMPED RELEASE: $V_ROOT"
+            echo "   tag $V_ROOT -> $CC_ (type: $CTY), whose own /version reads: $CCV"
+            echo "   No commit in this repository has ever carried the string $V_ROOT, so this"
+            echo "   tag cannot be made truthful by retagging. It is recorded in"
+            echo "   $LEDGER and does NOT block this release."
+            echo ""
+            echo "   Anyone auditing this repo by tag will get $CCV's code for $V_ROOT."
+            echo "   Repairing it means deleting and re-cutting a PUBLISHED tag, which is a"
+            echo "   force operation on shared history and an operator decision."
+            echo ""
+            echo "✅ Tag assertions SCOPED OUT for $V_ROOT (ledgered). Every version not in"
+            echo "   $LEDGER is still gated strictly."
+            exit 0
+          fi
+
           # Check tag exists
           if ! git tag -l "$V_ROOT" | grep -qx "$V_ROOT"; then
             echo "❌ NO TAG for $V_ROOT"
@@ -95,3 +168,37 @@ jobs:
           fi
 
           echo "✅ Annotated tag $V_ROOT exists (type: $TAG_TYPE)"
+
+          # Confirm the tag actually sits on a commit whose OWN /version file carries
+          # this version string. A tag with the right NAME on the wrong commit is worse
+          # than no tag at all: it certifies a false statement while looking green.
+          # (v6.0.81 once pointed at 74e2bad3, whose own /version still read v6.0.80 —
+          # the bump to v6.0.81 landed one commit later, at 0bdac3e. The name-only check
+          # above would have passed the whole time. This step is what would have caught it.)
+          TAG_COMMIT=$(git rev-parse "$V_ROOT^{commit}")
+          if ! TAG_COMMIT_VERSION_RAW=$(git show "$TAG_COMMIT:version" 2>/dev/null); then
+            echo "❌ Tag $V_ROOT resolves to commit $TAG_COMMIT, which has no /version file at all."
+            exit 1
+          fi
+          TAG_COMMIT_VERSION=$(echo "$TAG_COMMIT_VERSION_RAW" | head -1 | tr -d '[:space:]')
+          N_ROOT_FOR_TAG="${V_ROOT#v}"
+          N_TAG_COMMIT_VERSION="${TAG_COMMIT_VERSION#v}"
+          if [ "$N_ROOT_FOR_TAG" != "$N_TAG_COMMIT_VERSION" ]; then
+            echo "❌ TAG $V_ROOT IS ON THE WRONG COMMIT"
+            echo "   Tag $V_ROOT resolves to commit: $TAG_COMMIT"
+            echo "   That commit's own /version file reads: $TAG_COMMIT_VERSION"
+            echo "   Expected it to read: $V_ROOT"
+            echo ""
+            echo "   A tag whose NAME matches the current version but whose COMMIT does"
+            echo "   not is a green check certifying a false statement — anyone checking"
+            echo "   out $V_ROOT would get $TAG_COMMIT_VERSION's code."
+            echo ""
+            echo "FIX: delete this tag and recreate it on the commit where /version"
+            echo "     first became $V_ROOT (search: git log --oneline -- version):"
+            echo "   git tag -d $V_ROOT && git push origin :refs/tags/$V_ROOT"
+            echo "   git tag -a $V_ROOT -m 'Release $V_ROOT' <correct-sha>"
+            echo "   git push origin $V_ROOT"
+            exit 1
+          fi
+
+          echo "✅ Tag $V_ROOT resolves to commit $TAG_COMMIT, whose /version reads $TAG_COMMIT_VERSION — matches"
