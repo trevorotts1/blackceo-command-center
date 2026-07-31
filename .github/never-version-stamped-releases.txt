@@ -1,0 +1,51 @@
+# Releases that were tagged but NEVER version-stamped.
+#
+# Each line is a published annotated tag vX.Y.Z for which NO COMMIT IN THE
+# REPOSITORY — on any ref, ever — carries that string in /version. The release
+# was cut without running the version bump, so the tag was created against
+# whatever commit was at hand.
+#
+# These cannot be repaired. Retagging requires a commit that carries the
+# string, and there is none; moving or deleting a published tag is a force
+# operation on shared history and an OPERATOR decision, not CI's.
+#
+# WHY THIS FILE HAS TO EXIST
+# --------------------------
+# version-consistency.yml asserts that the annotated tag matching the CURRENT
+# /version sits on a commit whose own /version reads the same string. That
+# assertion is correct and it stays. But it is evaluated against whatever
+# /version happens to say, so a wrong tag from the past becomes a LANDMINE: the
+# moment /version is bumped to a version already carrying a bad tag, main goes
+# red on a defect that no commit in the PR caused and that no PR can fix.
+#
+# v6.0.82 is exactly that landmine. Its tag points at 18c50809, whose /version
+# reads v6.0.81. The next time this repo releases 6.0.82, main breaks.
+#
+# So the assertion is scoped by this ledger instead of being weakened: a version
+# listed here reports the defect loudly and does not block the release. Anything
+# NOT listed here is enforced exactly as strictly as before.
+#
+# ENFORCED IN BOTH DIRECTIONS. A version listed here whose tag DOES resolve to a
+# truthfully-stamped commit fails the build too, so the list is forced to shrink
+# if a tag is ever legitimately repaired and can never rot into a blanket
+# exemption that swallows the next real defect.
+#
+# DO NOT ADD A LINE HERE TO MAKE A RED CHECK GO AWAY. The only qualifying
+# condition is "no commit in this repository has ever carried this version
+# string", which is verifiable:
+#
+#   git log --all --format=%H -- version \
+#     | while read -r s; do git show "$s:version" 2>/dev/null | head -1; done \
+#     | grep -cx vX.Y.Z        # must print 0
+#
+# Verified 0 for all six entries below on 2026-07-31 against 243 distinct
+# version strings across all refs.
+#
+# Format: vX.Y.Z  # tag target -> version that commit actually carries
+#
+v6.0.75  # tag -> a0e9739c, whose /version reads v6.0.74
+v6.0.76  # tag -> 2e377760, whose /version reads v6.0.74
+v6.0.77  # tag -> 63831889, whose /version reads v6.0.74
+v6.0.78  # tag -> 5cdeb48c, whose /version reads v6.0.74
+v6.0.79  # tag -> fbad03c7, whose /version reads v6.0.74
+v6.0.82  # tag -> 18c50809, whose /version reads v6.0.81
