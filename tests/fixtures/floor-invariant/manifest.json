@@ -4,6 +4,9 @@
   { "id": "sales", "name": "Sales", "slug": "sales", "emoji": "💰" },
   { "id": "app-development", "name": "App Development", "slug": "app-development", "emoji": "📱" },
   { "id": "engineering", "name": "Engineering", "slug": "engineering", "emoji": "💻" },
-  { "id": "podcast", "name": "Podcast", "slug": "podcast", "emoji": "🎙️", "optOut": true },
+  { "id": "podcast", "name": "Podcast", "slug": "podcast", "emoji": "🎙️" },
+  { "id": "anthology", "name": "Anthology", "slug": "anthology", "emoji": "📚" },
+  { "id": "presentations", "name": "Presentations", "slug": "presentations", "emoji": "🖥️" },
+  { "id": "customer-support", "name": "Customer Support", "slug": "customer-support", "emoji": "🎧", "optOut": true },
   { "id": "general-task", "name": "General Tasks", "slug": "general-task", "emoji": "📥" }
 ]

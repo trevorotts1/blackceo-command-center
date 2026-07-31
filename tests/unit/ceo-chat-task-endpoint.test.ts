@@ -78,6 +78,21 @@ test.before(async () => {
   closeDb = db.closeDb;
   db.getDb(); // runs the full migration chain against the temp DB
 
+  // STALE-FIXTURE FIX (2026-07-31): migrations 113/114 (U017/U037, landed after this
+  // test was authored) unconditionally seed the podcast/anthology/presentations
+  // engine workspaces, and runMigrations() ALWAYS calls autoSeedTrioAgents() +
+  // ensureWorkspaceHeadAgents() at the end of its own boot sequence (not just via
+  // reseedWorkspacesFromConfig) — so those three now-always-present workspaces
+  // pick up real QC/Research/DA + head agents on every getDb() call, regardless of
+  // whether this test asked for any. That silently defeated this test's own
+  // documented precondition ("auto path with ZERO AGENTS seeded falls back to
+  // general-task") — routeTask() found agents.length > 0 and routed for real
+  // instead of taking the fallback path this test exists to prove. Restore the
+  // true zero-agent precondition explicitly rather than accept the incidental
+  // routing as the new expected behavior — the fallback path this test names is
+  // still real, production behavior for a genuinely under-provisioned box.
+  run('DELETE FROM agents');
+
   const now = new Date().toISOString();
   run(
     `INSERT OR IGNORE INTO companies (id, name, slug, config, created_at, updated_at)
