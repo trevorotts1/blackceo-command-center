@@ -1,7 +1,7 @@
 /**
  * resolve-interview-write-identity.test.ts
  *
- * Pins the exact defaulting logic that caused the Cassandra Henriquez P0
+ * Pins the exact defaulting logic that caused a real client P0
  * incident: POST /api/interview/answer used to default `askedBy` to the
  * literal string 'interview-web' whenever no Cf-Access email / operator email
  * / explicit body.askedBy was present -- true for EVERY Telegram-conducted or

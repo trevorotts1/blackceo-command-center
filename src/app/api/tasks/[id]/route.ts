@@ -23,7 +23,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
-import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
+import { evaluatePresentationsDoneGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
 import { transition, TransitionError, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';

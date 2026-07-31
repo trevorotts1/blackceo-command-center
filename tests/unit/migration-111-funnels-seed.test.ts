@@ -49,6 +49,16 @@ function freshDbPath(tag: string): string {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), `bc-migration-111-${tag}-`)), 'mission-control.test.db');
 }
 
+// STALE-FIXTURE NOTE (2026-07-31): migrations 113 ('seed_podcast_anthology_workspaces',
+// U017) and 114 ('engine_workspace_identity_and_presentations_seed', U037) landed AFTER
+// this file was authored. Both are part of the SAME full chain runMigrations() below
+// exercises (001..HEAD) and unconditionally INSERT OR IGNORE the podcast/anthology/
+// presentations workspaces on ANY database that does not already carry them — entirely
+// unrelated to migration 111's funnels backfill, and unaffected by whether a funnels row
+// already exists. Every row-count assertion below must therefore account for these three
+// extra inserts in addition to whatever migration 111 itself does.
+const ENGINE_WORKSPACES_ALWAYS_SEEDED = 3; // podcast, anthology, presentations (migrations 113/114)
+
 // ── Filesystem isolation ──────────────────────────────────────────────────
 // runMigrations() -> reseedWorkspacesFromConfig() resolves a real
 // departments.json via zeroHumanCompanyRoots(), which includes the HARDCODED
@@ -122,7 +132,14 @@ test('migration 111: exactly ONE new workspace row on a real pre-existing DB sha
     withIsolatedHome(() => runMigrations(db)); // the FULL chain 001..HEAD, including migration 111, against the pre-seeded rows.
 
     const after = db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number };
-    assert.equal(after.n, before.n + 1, 'migration 111 must insert EXACTLY ONE new workspace row — no more, no fewer');
+    // +1 is migration 111's own funnels backfill; +ENGINE_WORKSPACES_ALWAYS_SEEDED is
+    // migrations 113/114 in the same chain, unrelated to funnels (see the
+    // STALE-FIXTURE NOTE above).
+    assert.equal(
+      after.n,
+      before.n + 1 + ENGINE_WORKSPACES_ALWAYS_SEEDED,
+      'migration 111 must insert EXACTLY ONE new workspace row — no more, no fewer',
+    );
 
     const funnelsRow = db
       .prepare(`SELECT id, name, slug, company_id FROM workspaces WHERE lower(slug) = 'funnels'`)
@@ -186,7 +203,14 @@ test('migration 111: a box that ALREADY carries an ad hoc "funnels" workspace (t
     withIsolatedHome(() => runMigrations(db));
 
     const after = db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number };
-    assert.equal(after.n, before.n, 'migration 111 must be a TRUE no-op when a funnels workspace already exists — "IF IT ALREADY EXISTS"');
+    // migration 111 itself is a true no-op here (funnels already exists); the
+    // +ENGINE_WORKSPACES_ALWAYS_SEEDED rows come from migrations 113/114 in the same
+    // chain, entirely unrelated to funnels (see the STALE-FIXTURE NOTE above).
+    assert.equal(
+      after.n,
+      before.n + ENGINE_WORKSPACES_ALWAYS_SEEDED,
+      'migration 111 must be a TRUE no-op when a funnels workspace already exists — "IF IT ALREADY EXISTS"',
+    );
 
     const row = db
       .prepare(`SELECT id, name, icon FROM workspaces WHERE lower(slug) = 'funnels'`)
@@ -218,7 +242,15 @@ test('migration 111: matched-by-id (not just slug) also counts as "already exist
     withIsolatedHome(() => runMigrations(db));
     const after = db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number };
 
-    assert.equal(after.n, before.n, 'an id-matched funnels row must also be recognized as already-present — no duplicate insert');
+    // migration 111 itself is a true no-op here (id-matched funnels row already
+    // exists); the +ENGINE_WORKSPACES_ALWAYS_SEEDED rows come from migrations
+    // 113/114 in the same chain, entirely unrelated to funnels (see the
+    // STALE-FIXTURE NOTE above).
+    assert.equal(
+      after.n,
+      before.n + ENGINE_WORKSPACES_ALWAYS_SEEDED,
+      'an id-matched funnels row must also be recognized as already-present — no duplicate insert',
+    );
   } finally {
     db.close();
     fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });

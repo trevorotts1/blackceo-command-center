@@ -1,17 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { writeAgentFile, checkSharedFileSymlink, SharedFileSymlinkError, agentSlug, ensureAgentsDir } from '../../src/lib/agent-files';
 
 const AGENTS = path.join(process.cwd(), 'agents');
 const TEST_AGENT = 'u088-test-agent';
-const SHARED = path.join(AGENTS, '_shared');
 const AGENT_DIR = path.join(AGENTS, agentSlug(TEST_AGENT));
+
+// FIXTURE-ISOLATION FIX (2026-07-31): SHARED used to be agents/_shared/ — the REAL,
+// tracked, production agents/_shared/AGENTS.md + TOOLS.md. setup() below overwrote
+// both with the two-word test stub ('# Shared Rules' / '# Shared Tools') on every
+// run and cleanup() never restored them (it only ever rm -rf'd AGENT_DIR), so
+// `npm run test:unit` permanently clobbered the real shared agent files in whatever
+// checkout it ran in — a filesystem analogue of the C8 DB-isolation bug
+// (tests/unit/c8-db-isolation-guard.test.ts), just for agents/_shared/ instead of
+// mission-control.db. The symlink-detection functions under test
+// (isSymlink()/checkSharedFileSymlink()) only lstat the file AT AGENT_DIR — the
+// symlink's TARGET content is irrelevant to what they assert — so SHARED can be
+// any throwaway location; it never needs to be the real shared directory.
+let SHARED: string;
 
 function setup() {
   ensureAgentsDir();
-  fs.mkdirSync(SHARED, { recursive: true });
+  SHARED = fs.mkdtempSync(path.join(os.tmpdir(), 'u088-shared-'));
   fs.mkdirSync(AGENT_DIR, { recursive: true });
   fs.writeFileSync(path.join(SHARED, 'AGENTS.md'), '# Shared Rules');
   fs.writeFileSync(path.join(SHARED, 'TOOLS.md'), '# Shared Tools');
@@ -27,6 +40,7 @@ function setup() {
 
 function cleanup() {
   try { fs.rmSync(AGENT_DIR, { recursive: true, force: true }); } catch {}
+  try { if (SHARED) fs.rmSync(SHARED, { recursive: true, force: true }); } catch {}
 }
 
 test('T1: writeAgentFile throws on symlinked AGENTS.md', () => {
