@@ -571,7 +571,7 @@ export function getOrCreateInterviewSessionId(): string {
 }
 
 /**
- * P0 FIX (Cassandra Henriquez incident, 2026-07): resolve the caller identity
+ * P0 FIX (client incident, 2026-07): resolve the caller identity
  * for an interview-answer write, and derive the two values
  * updateInterviewState() needs, from the SAME three signals the answer route
  * always checked (explicit body askedBy, Cf-Access email, operator-email
@@ -647,7 +647,7 @@ export interface UpdateInterviewStateArgs {
   /** true → runs `--complete` (marks interviewComplete + seeds gates + auto-QC). */
   complete?: boolean;
   /**
-   * P0 FIX (Cassandra Henriquez incident, 2026-07): the stable interviewSessionId
+   * P0 FIX (client incident, 2026-07): the stable interviewSessionId
    * to use as the RATE-LIMIT bucket key, in place of `askedBy`. Pass this ONLY
    * when the caller has no real identity for `askedBy` (i.e. `askedBy` is about
    * to fall back to the shared 'interview-web' literal) — see the answer route's
