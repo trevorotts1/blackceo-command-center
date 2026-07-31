@@ -582,6 +582,123 @@ def cf_token_map_reconcile(boxes, cf_token_map_path):
     return problems, warnings
 
 
+RUNBOOK_PATH = os.path.expanduser("~/.claude/skills/fleet-roll/SKILL.md")
+
+# Facts the fleet-roll runbook RESTATES but does not OWN. Each entry is a
+# derived fact whose authority lives elsewhere in this repo or in the updater.
+# Adding a new one is a single tuple:
+#   (code, regex over the runbook text, callable(boxes, text) -> problem-str|None)
+def runbook_drift_reconcile(boxes, runbook_path=RUNBOOK_PATH):
+    """Fourth leg: the RUNBOOK itself.
+
+    The other three legs reconcile roster <-> box-registry <-> probe-fleet.
+    Nothing reconciled the human-facing runbook, so it hardcoded DERIVED facts
+    and silently rotted. Two live instances on 2026-07-31, both of which caused
+    real damage:
+
+      * "ALL 36 boxes" while the canonical roster held 38 (its Mac manifest was
+        short two real clients). Every count restated downstream was wrong.
+      * The post-roll stamp documented as `workspace/VERSION.txt` -- a file
+        `update-skills.sh` has NEVER written. Verifiers checked it, found
+        nothing, declared a successful roll FAILED, and a re-roll was run for
+        nothing.
+
+    A doc that restates a derived fact WILL drift. This leg makes that drift
+    fail loudly in machinery the operator already runs, instead of surfacing as
+    a wrong answer weeks later. Cheap, local, no network, no creds.
+
+    Returns (problems, warnings).
+    """
+    problems, warnings = [], []
+
+    if not os.path.isfile(runbook_path):
+        warnings.append(("RUNBOOK_ABSENT", runbook_path,
+                         "fleet-roll SKILL.md not found on this machine -- doc-drift leg abstains"))
+        return problems, warnings
+
+    try:
+        with open(runbook_path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        warnings.append(("RUNBOOK_UNREADABLE", runbook_path, str(e)[:120]))
+        return problems, warnings
+
+    canonical_n = len(boxes)
+
+    # (1) Every TOTAL-flavoured "N boxes" claim must equal the canonical count.
+    #     Deliberately narrow. Per-provider subtotals ("Mac (25 boxes)") and wave
+    #     sizes ("waves of 5-8") are legitimately not the total; matching those
+    #     made this leg false-FAIL on a correct doc during development, and a
+    #     gate that cries wolf gets switched off. Only phrasings that mean
+    #     "the whole fleet" are checked.
+    total_patterns = (
+        r"\bALL\s+(\d{1,3})\s+(?:OpenClaw\s+)?[Bb]oxes\b",
+        r"Fleet Roster\s*[—\-]+\s*(\d{1,3})\s+Boxes",
+        r"Total Boxes:\s*(\d{1,3})",
+        r"\(all\s+(\d{1,3})\s+boxes\)",
+        r"across\s+\*{0,2}ALL\s+(\d{1,3})\b",
+    )
+    claimed = set()
+    for pat in total_patterns:
+        for m in re.finditer(pat, text):
+            claimed.add(int(m.group(1)))
+    for n in sorted(claimed):
+        if n != canonical_n:
+            problems.append(("RUNBOOK_BOX_COUNT_DRIFT", runbook_path,
+                             f"runbook states a fleet TOTAL of '{n}' but the canonical roster "
+                             f"holds {canonical_n} -- correct the doc (this is exactly how "
+                             f"'36' survived after the fleet reached 38)"))
+
+    # (1b) Per-provider subtotals, when the doc states them, must sum to the
+    #      canonical total. The 2026-07-31 drift was NOT a typo -- the Mac
+    #      manifest was genuinely short two clients, so the subtotals summed to
+    #      36 and the prose faithfully reported a wrong number.
+    sub = [int(m.group(1)) for m in
+           re.finditer(r"^\|\s*(?:VPS|Hostinger|Contabo|Mac|Local)[^|]*\|\s*(\d{1,3})\s*\|",
+                       text, re.MULTILINE | re.IGNORECASE)]
+    if sub and sum(sub) != canonical_n:
+        problems.append(("RUNBOOK_SUBTOTAL_DRIFT", runbook_path,
+                         f"runbook per-provider subtotals sum to {sum(sub)} ({'+'.join(map(str, sub))}) "
+                         f"but the canonical roster holds {canonical_n} -- a subtotal being short "
+                         f"means real client boxes are missing from the doc's roster table"))
+
+    # (1c) The strongest signal: count the numbered rows in the doc's own roster
+    #      manifest. This is what actually went wrong -- the Mac manifest listed
+    #      23 rows for 25 real Macs, so every subtotal and the prose total were
+    #      faithfully derived from an incomplete table. Row count is harder to
+    #      fudge than prose.
+    rows = len(re.findall(r"^\|\s*\d{1,3}\s*\|\s*`?[a-z0-9][a-z0-9._-]*`?\s*\|",
+                          text, re.MULTILINE | re.IGNORECASE))
+    if rows and rows != canonical_n:
+        problems.append(("RUNBOOK_ROSTER_ROWS_DRIFT", runbook_path,
+                         f"runbook roster manifest lists {rows} numbered box rows but the "
+                         f"canonical roster holds {canonical_n} -- the doc's table is missing "
+                         f"real client boxes (or lists retired ones)"))
+
+    # (2) The post-roll stamp path. `workspace/VERSION.txt` does not exist and
+    #     never has; the real stamp is skills/.onboarding-version.
+    if re.search(r"workspace/VERSION\.txt", text) and "DOES NOT EXIST" not in text:
+        problems.append(("RUNBOOK_STAMP_PATH_WRONG", runbook_path,
+                         "runbook points verification at workspace/VERSION.txt, which "
+                         "update-skills.sh never writes -- the real stamp is "
+                         "~/.openclaw/skills/.onboarding-version. This exact drift caused "
+                         "a false FAILED verdict and a wasted re-roll on 2026-07-31"))
+    if ".onboarding-version" not in text:
+        problems.append(("RUNBOOK_STAMP_PATH_MISSING", runbook_path,
+                         "runbook never names the real stamp path "
+                         "(~/.openclaw/skills/.onboarding-version)"))
+
+    # (3) Liveness must not be sold as currency. A box serving a 97-commit-stale
+    #     Command Center passes `pm2 list shows CC running`.
+    if "command-center-state" not in text:
+        warnings.append(("RUNBOOK_CC_CHECK_WEAK", runbook_path,
+                         "runbook does not verify CC currency via the "
+                         ".command-center-state marker -- 'CC is running' passes on a box "
+                         "serving a badly stale build"))
+
+    return problems, warnings
+
+
 def reconcile(boxes, check_contabo, check_cloudflare=False, check_ghl=False,
               ghl_advisory=False, cf_token_map=DEFAULT_CF_TOKEN_MAP):
     problems = []
@@ -640,6 +757,15 @@ def reconcile(boxes, check_contabo, check_cloudflare=False, check_ghl=False,
     #     but absent from the (formerly hand-maintained, formerly duplicated)
     #     token switch. Always runs — cheap, local, no network/creds needed.
     p, w = cf_token_map_reconcile(boxes, cf_token_map)
+    problems += p
+    warnings += w
+
+    # 2c) RUNBOOK drift (fleet-roll SKILL.md) — the fourth leg. The doc restates
+    #     derived facts (box count, stamp path, CC check) that it does not own,
+    #     and nothing reconciled it until 2026-07-31, when a stale "36 boxes" and
+    #     a stamp path that never existed both produced wrong answers. Always
+    #     runs — cheap, local, no network/creds needed.
+    p, w = runbook_drift_reconcile(boxes)
     problems += p
     warnings += w
 
