@@ -512,6 +512,23 @@ jobs:
   # (scripts/qc-assert-no-client-names.sh) which walks EVERY tracked file on
   # disk — the authoritative scan. A planted-fixture self-test proves the gate
   # actually bites before the real scan runs.
+  #
+  # AGW item 25 FIX: this job used to run the gate with no roster of any kind
+  # reachable (this bare ubuntu-latest runner never has $OPENCLAW_CLIENT_ROSTER,
+  # ~/.openclaw/client-roster.txt, or ~/clawd/accounts/accounts.md — no
+  # operator-local files exist here, and client PII is intentionally never put
+  # in CI secrets) and reported a silent, misleadingly-worded "STRUCTURAL PASS"
+  # — the job NAMED "authoritative scan" never actually scanned for a single
+  # real client name. The gate now ports openclaw-onboarding's accounts.md-
+  # derived roster fallback (so the real per-name check genuinely runs on
+  # operator boxes / pre-commit where accounts.md exists) and, for the
+  # genuinely-unverifiable bare-CI case specifically, reports CANNOT VERIFY
+  # with a loud `::warning::` annotation instead of a bare/misleading PASS —
+  # see scripts/qc-assert-no-client-names.sh's own v2.1.0 changelog entry. The
+  # new self-test step below proves the fail-closed capability itself still
+  # works (a real regression, not just a comment), and the final step's
+  # assertion on its own output means a future revert back to the old
+  # misleading wording fails this job outright.
   no-client-names:
     name: No client names in tracked files (authoritative scan)
     runs-on: ubuntu-latest
@@ -538,13 +555,57 @@ jobs:
           echo "OK: gate correctly failed (exit 1) on the planted fixture"
           rm -rf "$TMP"
 
-      # Roster absent in CI → STRUCTURAL mode: the gate must NOT fail-open. It
-      # scans for the operator path + any leaked .example placeholder names,
-      # WARNS that the full roster-specific scan was skipped, and passes (exit 0)
-      # only when the tree is clean. The authoritative roster scan runs on
-      # operator boxes / pre-commit where the roster exists.
-      - name: Assert no operator paths / placeholder leaks in any tracked file (structural)
-        run: bash scripts/qc-assert-no-client-names.sh
+      - name: Self-test — fail-closed path MUST exit non-zero with NO roster anywhere (AGW item 25)
+        run: |
+          # Simulate a human's machine (not CI) with neither a curated roster
+          # NOR an accounts.md-derived one reachable, by pointing HOME at an
+          # empty scratch dir and unsetting the CI-detection vars for just this
+          # step. The gate must FAIL CLOSED (exit 2) here, never exit 0 — this
+          # is the mutation proof that the fail-closed branch actually bites,
+          # not merely a comment claiming it does.
+          FAKE_HOME="$(mktemp -d)"
+          set +e
+          env -u OPENCLAW_CLIENT_ROSTER -u OPENCLAW_ACCOUNTS_MD -u GITHUB_ACTIONS -u CI \
+            HOME="$FAKE_HOME" bash scripts/qc-assert-no-client-names.sh
+          RC=$?
+          set -e
+          rm -rf "$FAKE_HOME"
+          if [ "$RC" -ne 2 ]; then
+            echo "ERROR: fail-closed path returned exit $RC, expected 2 — the check is broken"
+            exit 1
+          fi
+          echo "OK: gate correctly fails closed (exit 2) with no roster reachable outside CI"
+
+      # Real CI never has a curated OR accounts.md-derived roster (no operator-
+      # local files on a bare runner; client PII is never provisioned into CI
+      # secrets) — the gate itself detects GITHUB_ACTIONS/CI and reports
+      # CANNOT VERIFY (exit 0, loud ::warning:: annotation) for that state
+      # instead of a bare PASS, while the operator-path + .example placeholder-
+      # leak checks still run unconditionally and fail closed on a hit. The
+      # authoritative per-name scan runs on operator boxes / pre-commit where
+      # a roster (curated or accounts.md-derived) exists.
+      - name: Assert no operator paths / placeholder leaks in any tracked file (structural, CI report-only)
+        run: |
+          bash scripts/qc-assert-no-client-names.sh 2>&1 | tee /tmp/no-client-names-out.txt
+          RC=${PIPESTATUS[0]}
+          if [ "$RC" -ne 0 ]; then
+            echo "ERROR: structural CI run exited $RC — a real hit was found (operator path or placeholder leak); see output above."
+            exit "$RC"
+          fi
+          # Regression guard for the exact AGW item 25 defect: this job must
+          # never again report a bare/misleading PASS while having skipped the
+          # roster-specific scan. If the roster genuinely was unreachable here
+          # (the normal case on this bare runner), the output MUST say CANNOT
+          # VERIFY, never the old "STRUCTURAL PASS" wording.
+          if grep -q "STRUCTURAL PASS" /tmp/no-client-names-out.txt; then
+            echo "ERROR: REGRESSION — output uses the old misleading 'STRUCTURAL PASS' wording. A skipped scan must say CANNOT VERIFY, never PASS."
+            exit 1
+          fi
+          if grep -q "CANNOT VERIFY" /tmp/no-client-names-out.txt && ! grep -q "::warning" /tmp/no-client-names-out.txt; then
+            echo "ERROR: REGRESSION — a CANNOT VERIFY state must also emit a loud ::warning:: GitHub Actions annotation."
+            exit 1
+          fi
+          echo "OK: structural run is clean and, if the scan was skipped, said so loudly (no misleading PASS wording)."
 
   # ── Shell script syntax guard (PRD P0-1 regression guard) ─────────────────
   # bash -n every shell script so a broken heredoc / quoting error can never
