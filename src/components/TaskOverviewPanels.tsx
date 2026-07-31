@@ -397,7 +397,16 @@ export function DispatchHoldPanel({ task }: { task: Task }) {
  * in the database and was rendered by nothing before this unit.
  */
 export function BlockedReasonPanel({ task }: { task: Task }) {
-  if (task.status !== 'blocked') return null;
+  // Was `if (task.status !== 'blocked') return null;` here, ABOVE every hook
+  // below (react-hooks/rules-of-hooks). Hook order became conditional on
+  // task.status, which React requires to be identical on every render of the
+  // same component instance. Fix: hoist every hook above the early return so
+  // hook count/order is unconditional, and push the "blocked" gating that used
+  // to skip them entirely INTO each hook's own body instead (see `isBlocked`
+  // checks below) so a non-blocked render still calls the hooks (satisfying
+  // rules-of-hooks) but performs none of the work the early return used to
+  // prevent (no fetch, no interval) -- externally-observable behavior unchanged.
+  const isBlocked = task.status === 'blocked';
 
   const isOwner = task.block_audience === 'OWNER';
   const heading = isOwner ? 'NEEDS YOUR DECISION' : 'Blocked — action needed';
@@ -424,18 +433,17 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
   // Countdown to next_dispatch_eligible_at
   const [retryCountdown, setRetryCountdown] = useState<string>('');
   useEffect(() => {
-    if (!hasHealAttempts || !task.next_dispatch_eligible_at) {
+    if (!isBlocked || !hasHealAttempts || !task.next_dispatch_eligible_at) {
       setRetryCountdown('');
       return;
     }
-    let timer: ReturnType<typeof setInterval> | undefined;
     const tick = () => {
       const now = Date.now();
       const target = new Date(task.next_dispatch_eligible_at!).getTime();
       const diff = target - now;
       if (diff <= 0) {
         setRetryCountdown('now');
-        if (timer) clearInterval(timer);
+        clearInterval(timer);
         return;
       }
       const sec = Math.floor(diff / 1000);
@@ -447,16 +455,22 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
         setRetryCountdown(`in ${sec}s`);
       }
     };
+    // `timer` is a const assigned once from setInterval (prefer-const fix for
+    // the old `let timer` that was only ever written once). It must exist
+    // before `tick` can reference it, so create the interval first and invoke
+    // `tick` once manually right after for the immediate first update — same
+    // two operations as before, reordered so the single assignment can be a
+    // `const` instead of a `let` assigned after declaration.
+    const timer = setInterval(tick, 1000);
     tick();
-    timer = setInterval(tick, 1000);
-    return () => { if (timer) clearInterval(timer); };
-  }, [hasHealAttempts, task.next_dispatch_eligible_at]);
+    return () => clearInterval(timer);
+  }, [isBlocked, hasHealAttempts, task.next_dispatch_eligible_at]);
 
   // Artifacts-banked: fetch a count from /api/tasks/{id}/deliverables
   const [artifactCount, setArtifactCount] = useState<number | null>(null);
   const [artifactLoaded, setArtifactLoaded] = useState(false);
   useEffect(() => {
-    if (!task.id) return;
+    if (!isBlocked || !task.id) return;
     let cancelled = false;
     fetch(`/api/tasks/${task.id}/deliverables`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
@@ -470,7 +484,7 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
         if (!cancelled) setArtifactCount(null);
       });
     return () => { cancelled = true; };
-  }, [task.id]);
+  }, [isBlocked, task.id]);
 
   // Resume action state
   const [resuming, setResuming] = useState(false);
@@ -494,6 +508,8 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
       setResuming(false);
     }
   };
+
+  if (!isBlocked) return null;
 
   return (
     <div
