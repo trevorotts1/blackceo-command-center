@@ -16,7 +16,7 @@
  * clarification, ask the orchestrator", inviting a conversation the pipeline
  * could not carry.
  *
- * Observed in production 2026-07-31 (Jennifer Allen, task 804f4e30): the owner
+ * Observed in production 2026-07-31 (a client, task 804f4e30): the owner
  * posted a scope clarification — "do NOT apply the logo across the whole
  * TalentLMS" — which never reached the agent. An operator context pack posted
  * the same way was also silently dropped, and the specialist re-asked the exact
