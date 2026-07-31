@@ -114,12 +114,30 @@ function optoutFile(ids: string[]) {
 
 // A genuinely below-floor chosen set: CEO + general-task (catch-all) + 3 worker
 // departments. Nowhere near the 28-department floor.
+//
+// STALE-FIXTURE NOTE (2026-07-31): podcast/anthology/presentations are added here as
+// ordinary (non-opted-out) entries because migrations 113 ('seed_podcast_anthology_
+// workspaces', U017) and 114 ('engine_workspace_identity_and_presentations_seed', U037)
+// — both landed AFTER this fixture was authored — unconditionally INSERT OR IGNORE those
+// three fleet-shared "engine" workspaces into EVERY database, including this test's
+// throwaway isolated DB, before reseedWorkspacesFromConfig ever runs. They therefore
+// always show up in `provisioned`/`displayed` regardless of this manifest. Per
+// vertical-derivation-guard-u107.test.ts and departments.config.ts's own VERTICAL_
+// PACK_DEPARTMENTS docs, all three carry universal_primary=true and so are present in
+// EVERY real client's departments.json build output too — listing them here matches a
+// real manifest and keeps `chosen` (listChosenDepartmentIds reads this same file) in
+// sync with `provisioned`/`displayed`, so assertConvergeParity's only genuine, expected
+// discrepancy stays 'legal' (this file's deliberately ambiguous stray row), exactly as
+// before migrations 113/114 existed.
 const belowFloorManifest = [
   { id: 'master-orchestrator', name: 'CEO', slug: 'master-orchestrator', emoji: '🧠' },
   { id: 'general-task', name: 'General Task', slug: 'general-task', emoji: '📁' },
   { id: 'marketing', name: 'Marketing', slug: 'marketing', emoji: '📣' },
   { id: 'sales', name: 'Sales', slug: 'sales', emoji: '💰' },
   { id: 'billing', name: 'Billing', slug: 'billing', emoji: '💳' },
+  { id: 'anthology', name: 'Anthology', slug: 'anthology', emoji: '📚' },
+  { id: 'podcast', name: 'Podcast', slug: 'podcast', emoji: '🎙️' },
+  { id: 'presentations', name: 'Presentations', slug: 'presentations', emoji: '🖥️' },
 ];
 
 beforeAll(() => {
@@ -215,12 +233,14 @@ describe('U110: below-floor department set wires exactly onto the board (no ghos
     expect(displayed).not.toContain('support');
     expect(displayed).not.toContain('hr');
 
-    // The board is EXACTLY the below-floor chosen set PLUS 'legal' — which
+    // The board is EXACTLY the below-floor chosen set (now including the three
+    // fleet-shared engine departments migrations 113/114 always seed — see the
+    // STALE-FIXTURE NOTE on belowFloorManifest above) PLUS 'legal' — which
     // carries no opt-out record at all and must stay untouched (U109's
     // territory: bare manifest omission alone is never a hide signal). This
     // fix removes ONLY what was explicitly, provenance-gated opted out.
     expect(displayed.sort()).toEqual(
-      ['master-orchestrator', 'general-task', 'marketing', 'sales', 'billing', 'legal'].sort(),
+      ['master-orchestrator', 'general-task', 'marketing', 'sales', 'billing', 'anthology', 'podcast', 'presentations', 'legal'].sort(),
     );
 
     // U109's territory respected: 'legal' has NO opt-out record and is merely

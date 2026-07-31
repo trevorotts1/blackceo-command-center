@@ -102,10 +102,28 @@ else
 fi
 
 # ─── Build the name/token ERE alternation (client names + operator paths) ─────
-SCAN_TERMS=()
-SCAN_TERMS+=( ${CLIENT_NAMES[@]+"${CLIENT_NAMES[@]}"} )
-SCAN_TERMS+=( "${OPERATOR_PATHS[@]}" )
-PATTERN=$(printf '%s\n' "${SCAN_TERMS[@]}" | paste -sd'|' -)
+# NAMES are \b-anchored (mirroring the chat-ID pattern below) — a bare substring
+# match let single-token sentinels like 'PlaceholderCo' fire inside unrelated,
+# legitimate identifiers that merely CONTAIN the letters (e.g. the production
+# function `isPlaceholderCompany`, whose name embeds "PlaceholderCo" + "mpany").
+# That was a real false-positive this gate itself produced (2026-07-31): every
+# call site of isPlaceholderCompany() tripped the gate as if it were a leaked
+# client name. \b keeps genuine standalone leaks of a name/sentinel — including
+# multi-word real names, since \b only anchors the two ends of the whole phrase
+# — caught exactly as before. OPERATOR_PATHS are deliberately left as plain
+# substrings: a path like '/Users/blackceomacmini' has no word char before the
+# leading '/', so \b-anchoring it would never match at all and silently defeat
+# the operator-path leak check.
+NAME_PATTERN=""
+if [ "${#CLIENT_NAMES[@]}" -gt 0 ]; then
+  NAME_PATTERN=$(printf '\\b%s\\b\n' "${CLIENT_NAMES[@]}" | paste -sd'|' -)
+fi
+PATH_PATTERN=$(printf '%s\n' "${OPERATOR_PATHS[@]}" | paste -sd'|' -)
+if [ -n "$NAME_PATTERN" ]; then
+  PATTERN="${NAME_PATTERN}|${PATH_PATTERN}"
+else
+  PATTERN="$PATH_PATTERN"
+fi
 
 # Whole-number, \b-anchored alternation for the chat-ID denylist (box mode only).
 CHATID_PATTERN=""

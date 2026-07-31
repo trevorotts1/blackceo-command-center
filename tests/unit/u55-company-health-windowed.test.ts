@@ -258,9 +258,16 @@ test('computeCompanyHealth: companyInputBreakdown aggregates per-input scores, t
   assert.equal(qc.sampleSize, 11);
 
   // sopCoverage: ONLY showcase has data (a, b are null) -> renormalization note.
+  // STALE-FIXTURE NOTE (2026-07-31): migrations 113/114 (U017/U037, landed after this
+  // test was authored) unconditionally seed 3 fleet-shared engine workspaces
+  // (podcast, anthology, presentations) into every database, including this test's
+  // own fresh isolated DB. None of their slugs are excluded by isRealDepartment()
+  // (they are real, client-facing production departments, not scaffolding), so the
+  // "total real departments" denominator is this fixture's 3 (a, b, showcase) plus
+  // those 3 engine departments = 6, not 3.
   const sop = breakdown.sopCoverage;
   assert.equal(sop.score, 100);
-  assert.match(sop.detail, /renormalized across 1 of 3 departments/);
+  assert.match(sop.detail, /renormalized across 1 of 6 departments/);
 
   // kpiAttainment: NO department has data -> null, never a substituted number.
   const kpi = breakdown.kpiAttainment;

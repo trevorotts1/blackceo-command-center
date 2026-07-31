@@ -96,6 +96,26 @@ afterAll(() => {
   }
 });
 
+// STALE-FIXTURE NOTE (2026-07-31): migrations 113 ('seed_podcast_anthology_workspaces',
+// U017) and 114 ('engine_workspace_identity_and_presentations_seed', U037) landed AFTER
+// this fixture was authored and unconditionally INSERT OR IGNORE the podcast/anthology/
+// presentations workspaces on EVERY database — including this test's throwaway isolated
+// DB — before reseedWorkspacesFromConfig ever runs. They are fleet-shared "engine"
+// workspaces (company_id='default'), not a client's own chosen departments, so they are
+// NOT genuinely opt-out-able through reseedWorkspacesFromConfig's insert-time skip (that
+// guard only prevents a first INSERT; migrations 113/114 already inserted them earlier in
+// the SAME getDb() call, so an opt-out entry for one of them would be a no-op that proves
+// nothing — production's real removal path for an already-provisioned ghost column is
+// syncDepartmentOptoutArchive, U110, exercised by tests/unit/department-optout-board-
+// wiring.test.ts, which this file's docstring deliberately does not call). The fixture
+// below therefore lists podcast/anthology/presentations as ordinary (non-opted-out)
+// manifest entries — matching what a real client's departments.json build output
+// contains, since all three carry universal_primary=true in vertical-derivation and are
+// therefore in every build regardless of interview answers — and proves the opt-out arm
+// of this invariant with 'customer-support' instead, a department reseedWorkspacesFromConfig
+// alone genuinely controls.
+const ENGINE_PRESEEDED_BY_MIGRATION = ['podcast', 'anthology', 'presentations'];
+
 describe('floor invariant: displayed == manifest − opt-outs (active company)', () => {
   it('fixture golden equals the manifest minus explicitly opted-out entries (arithmetic contract)', () => {
     const derived = manifest
@@ -109,18 +129,27 @@ describe('floor invariant: displayed == manifest − opt-outs (active company)',
 
   it('reseed seeds exactly the chosen manifest minus opt-outs, all under the active company', () => {
     const r = reseedWorkspacesFromConfig(getDb(), { force: true });
-    expect(r.created).toBe(expectedDisplayed.length); // opted-out dept was NOT created
+    // Everything in expectedDisplayed is freshly CREATED by this call EXCEPT the three
+    // engine workspaces, which migrations 113/114 already inserted earlier in this same
+    // getDb() call — reseed only UPDATEs those (existing=true path), it never re-creates
+    // them. See the STALE-FIXTURE NOTE above.
+    expect(r.created).toBe(expectedDisplayed.length - ENGINE_PRESEEDED_BY_MIGRATION.length);
 
     const displayed = displayedSlugs().sort();
     expect(displayed).toEqual([...expectedDisplayed].sort());
 
-    // Opted-out department (podcast) never got a lane.
-    expect(displayed).not.toContain('podcast');
+    // Opted-out department (customer-support) never got a lane.
+    expect(displayed).not.toContain('customer-support');
 
-    // Every seeded workspace is attributed to the active company.
+    // Every seeded workspace the CLIENT chose is attributed to the active company.
+    // Fleet-shared engine workspaces (podcast/anthology/presentations) are the one
+    // documented exception: migrations 113/114 stamp them company_id='default' ON
+    // PURPOSE (U019 — "visible to ALL clients on the box"), so they are never
+    // attributed to any single company and must be excluded from this check, not
+    // counted as a mis-attribution.
     const foreignCount = (
       getDb()
-        .prepare("SELECT COUNT(*) AS c FROM workspaces WHERE company_id != ?")
+        .prepare("SELECT COUNT(*) AS c FROM workspaces WHERE company_id != ? AND company_id != 'default'")
         .get(ACTIVE) as { c: number }
     ).c;
     expect(foreignCount).toBe(0);

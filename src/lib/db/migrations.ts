@@ -4996,11 +4996,11 @@ export const migrations: Migration[] = [
       // Fable-5 root cause: reseedWorkspacesFromConfig's UPSERT unconditionally
       // overwrote company_id on every boot/converge, and seedCompanyGuarded's
       // "first non-Default row by rowid" resolver returned a stale `command-center`
-      // placeholder (rowid 1) instead of the real client company (e.g. `marico`,
+      // placeholder (rowid 1) instead of the real client company (e.g. `northwind`,
       // rowid 2). The board filtered by resolveActiveCompanyId (placeholder-aware
-      // → `marico`), so the 41 reseeded workspaces (pinned to `command-center`)
+      // → `northwind`), so the 41 reseeded workspaces (pinned to `command-center`)
       // vanished from the board — only the 3 workspaces NOT in departments.json
-      // (never touched by reseed, still `marico`) remained visible.
+      // (never touched by reseed, still `northwind`) remained visible.
       //
       // The resolver fix (resolveSeedingCompanyId) prevents recurrence and fixes
       // NEW workspaces, but does NOT heal existing broken boxes: the UPSERT fix
@@ -5074,6 +5074,24 @@ export const migrations: Migration[] = [
       // under a different id — is left COMPLETELY untouched: the slug existence
       // check is a true no-op guard, and INSERT OR IGNORE additionally keys on the
       // id PRIMARY KEY so re-running never duplicates.
+      //
+      // MIGRATION-DEADLOCK FIX (2026-07-31, proven by tests/unit/db-upgrade-migration-
+      // ordering.test.ts's "upgrade: a v4.72.0-era database" case): workspaces.company_id
+      // has an FK reference to companies(id), and migration 064's own belt-and-suspenders
+      // sentinel INSERT is itself guarded ("companies table not yet present — skipping,
+      // will run again after 012") — a real, historically-possible box shape where that
+      // guard fired left the ledger marked '064 applied' with NO 'default' company row
+      // ever inserted (migrations are never retried once ledgered). Before this fix,
+      // this migration's INSERT with company_id='default' threw
+      // SQLITE_CONSTRAINT_FOREIGNKEY on exactly that box shape — the exact deadlock
+      // class this test file exists to catch: the fix that would repair it ships
+      // inside the very migration the crash prevents from ever completing. Self-heal
+      // here, unconditionally and idempotently (INSERT OR IGNORE, mirrors migration
+      // 064 exactly), so this migration can never depend on 064 having actually
+      // inserted the row on every box in the fleet's history.
+      db.prepare(
+        `INSERT OR IGNORE INTO companies (id, name, slug, config) VALUES ('default', 'Default', 'default', '{}')`,
+      ).run();
       console.log('[Migration 113] Seeding podcast/anthology workspaces (U017)...');
 
       const now = new Date().toISOString();
@@ -5132,6 +5150,16 @@ export const migrations: Migration[] = [
       // Idempotent, additive, and it never touches a row it did not create or
       // rename: the UPDATE is guarded on the exact stale slug, the INSERT on slug
       // absence. Running this twice changes nothing the second time.
+      //
+      // MIGRATION-DEADLOCK FIX (2026-07-31): same self-heal as migration 113 above —
+      // the INSERT below also targets company_id='default', which has an FK reference
+      // to companies(id). See migration 113's comment for the full history of why the
+      // sentinel row is not guaranteed present on every box. Belt-and-suspenders here
+      // too, since this migration must never depend on 113 (or 064) having run first
+      // on every box in the fleet's history.
+      db.prepare(
+        `INSERT OR IGNORE INTO companies (id, name, slug, config) VALUES ('default', 'Default', 'default', '{}')`,
+      ).run();
       console.log('[Migration 114] Engine workspace identity + presentations seed (U037)...');
 
       const now = new Date().toISOString();
@@ -6692,7 +6720,7 @@ export function reseedWorkspacesFromConfig(
     // so a NEW workspace is always attributed to the company the board shows. This
     // is the Fable-5 root-cause fix: seedCompanyGuarded's companyId is the FIRST
     // non-Default row by rowid, which on legacy boxes is a stale `command-center`
-    // placeholder even though the client is `marico` — attributing new depts to a
+    // placeholder even though the client is `northwind` — attributing new depts to a
     // company the board filters OUT. resolveSeedingCompanyId skips placeholders.
     // When only placeholder companies exist (un-branded box) it returns null and we
     // fall back to the row seedCompanyGuarded just ensured exists — always a valid
@@ -6705,7 +6733,7 @@ export function reseedWorkspacesFromConfig(
     // DB) must never OVERWRITE the per-client company_id an existing row already
     // carries. Doing so is the fleet-wide attribution-wipe bug: when the source
     // resolves to a placeholder ('command-center' / 'default') while the board's
-    // resolveActiveCompanyId() resolves to the REAL client (e.g. 'marico'), the
+    // resolveActiveCompanyId() resolves to the REAL client (e.g. 'northwind'), the
     // old `company_id = excluded.company_id` re-homed every workspace to the
     // placeholder — and boardWhereClause() hides any row whose company_id is a
     // real-but-foreign id — so the client's entire board went blank. Existing

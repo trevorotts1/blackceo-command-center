@@ -123,6 +123,23 @@ describe('U035 — PATCH through transition() (warn-mode)', () => {
     const id = seedTask('backlog');
     // Pre-assign agent so transition()'s in_progress precondition is met
     run('UPDATE tasks SET assigned_agent_id = ? WHERE id = ?', [agId, id]);
+    // This test's own purpose (per its name) is "status + assigned_agent_id both
+    // land" — NOT the route's separate Triad auto-resolve path (getBestSOPForTask +
+    // selectPersonaForTask, which shells out to persona-selector-v2.py). Leaving
+    // backlog with no sop_id/persona_id incidentally triggers that async,
+    // subprocess-spawning best-effort resolver, which is exactly the kind of
+    // environment/timing-sensitive dependency this test was never meant to carry —
+    // proven flaky at full-suite-run time (whole-suite ordering can leave
+    // OPENCLAW_ROOT or shared SOP/persona state different from a standalone run;
+    // see the many other test files that intentionally point OPENCLAW_ROOT at a
+    // nonexistent path). Pre-satisfy the Triad Rule directly and deterministically
+    // so this test only ever exercises what it says it does.
+    run(
+      `INSERT INTO sops (id, name, slug, department, steps, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      ['sop-u035-q6', 'Q6 test SOP', 'sop-u035-q6', 'marketing', '[]'],
+    );
+    run('UPDATE tasks SET sop_id = ?, persona_id = ? WHERE id = ?', ['sop-u035-q6', 'test-persona-marketing', id]);
     const r = await doPatch(id, { status: 'in_progress', assigned_agent_id: agId });
     assert.strictEqual(r.http, 200, `Expected 200, got ${r.http}: ${r.error}`);
     const row = dbRow(id);
