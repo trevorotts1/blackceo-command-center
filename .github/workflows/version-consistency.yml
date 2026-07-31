@@ -95,3 +95,37 @@ jobs:
           fi
 
           echo "✅ Annotated tag $V_ROOT exists (type: $TAG_TYPE)"
+
+          # Confirm the tag actually sits on a commit whose OWN /version file carries
+          # this version string. A tag with the right NAME on the wrong commit is worse
+          # than no tag at all: it certifies a false statement while looking green.
+          # (v6.0.81 once pointed at 74e2bad3, whose own /version still read v6.0.80 —
+          # the bump to v6.0.81 landed one commit later, at 0bdac3e. The name-only check
+          # above would have passed the whole time. This step is what would have caught it.)
+          TAG_COMMIT=$(git rev-parse "$V_ROOT^{commit}")
+          if ! TAG_COMMIT_VERSION_RAW=$(git show "$TAG_COMMIT:version" 2>/dev/null); then
+            echo "❌ Tag $V_ROOT resolves to commit $TAG_COMMIT, which has no /version file at all."
+            exit 1
+          fi
+          TAG_COMMIT_VERSION=$(echo "$TAG_COMMIT_VERSION_RAW" | head -1 | tr -d '[:space:]')
+          N_ROOT_FOR_TAG="${V_ROOT#v}"
+          N_TAG_COMMIT_VERSION="${TAG_COMMIT_VERSION#v}"
+          if [ "$N_ROOT_FOR_TAG" != "$N_TAG_COMMIT_VERSION" ]; then
+            echo "❌ TAG $V_ROOT IS ON THE WRONG COMMIT"
+            echo "   Tag $V_ROOT resolves to commit: $TAG_COMMIT"
+            echo "   That commit's own /version file reads: $TAG_COMMIT_VERSION"
+            echo "   Expected it to read: $V_ROOT"
+            echo ""
+            echo "   A tag whose NAME matches the current version but whose COMMIT does"
+            echo "   not is a green check certifying a false statement — anyone checking"
+            echo "   out $V_ROOT would get $TAG_COMMIT_VERSION's code."
+            echo ""
+            echo "FIX: delete this tag and recreate it on the commit where /version"
+            echo "     first became $V_ROOT (search: git log --oneline -- version):"
+            echo "   git tag -d $V_ROOT && git push origin :refs/tags/$V_ROOT"
+            echo "   git tag -a $V_ROOT -m 'Release $V_ROOT' <correct-sha>"
+            echo "   git push origin $V_ROOT"
+            exit 1
+          fi
+
+          echo "✅ Tag $V_ROOT resolves to commit $TAG_COMMIT, whose /version reads $TAG_COMMIT_VERSION — matches"
