@@ -73,6 +73,9 @@ fleet-heartbeat/scripts/rescue-rangers-bridge.py.*
 
 # Build backups
 .next-backup/
+.next.rollback
+.next.PREDEPLOY
+.next.old.*
 test-results/
 
 # graphify (knowledge-graph map) — generated output, never committed

@@ -179,8 +179,14 @@ else
     cp "$ECOSYSTEM_FILE" "${ECOSYSTEM_FILE}.bak"
     printf '%s\n' "$CANONICAL_ECOSYSTEM" > "$ECOSYSTEM_FILE"
     echo "[8b/9] Ecosystem reconciled to canonical (blackceo-command-center + cc-start.sh + circuit-breaker)"
+    # MR-40: Clean up the .bak sidecar now that the canonical file is in place.
+    # The old ecosystem content is preserved in the git history of the bootstrap
+    # script itself — the disk copy is a one-shot migration safety net only.
+    rm -f "${ECOSYSTEM_FILE}.bak" 2>/dev/null || true
   else
     echo "[8b/9] PM2 ecosystem already canonical at $ECOSYSTEM_FILE — no update needed"
+    # Clean up any lingering .bak from a previous interrupted bootstrap run.
+    rm -f "${ECOSYSTEM_FILE}.bak" 2>/dev/null || true
   fi
 fi
 
