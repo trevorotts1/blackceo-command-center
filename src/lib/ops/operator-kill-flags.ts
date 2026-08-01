@@ -341,6 +341,36 @@ export function logKillFlagBanner(): void {
     /* observability only */
   }
 
+  // MR-01: combined warning when BOTH safety-net sweeps are off — the "nothing gets
+  // stuck guarantee broken" state. Individual per-sweep warnings run above, but a
+  // dual-disabled box is a special emergency: a stuck in_progress task is never
+  // freed AND a stale/blocked task is never escalated — the operator sees a false
+  // In Progress and no alarm ever fires. This combined banner makes that
+  // unmistakable at boot.
+  try {
+    const bothDisabled = resolveStaleTaskSweepKillFlag().disabled && resolveEnvOnlyStuckSweepKillFlag().disabled;
+    if (bothDisabled) {
+      console.error('[kill-flags] ##################################################################');
+      console.error('[kill-flags] ##  EMERGENCY: BOTH SAFETY-NET SWEEPS ARE OFF                  ##');
+      console.error('[kill-flags] ##                                                              ##');
+      console.error('[kill-flags] ##  stale-task-sweep          DISABLED  (stale/blocked tasks    ##');
+      console.error('[kill-flags] ##                              never reach a human)            ##');
+      console.error('[kill-flags] ##  stuck-in-progress-sweep   DISABLED  (silent agent failures  ##');
+      console.error('[kill-flags] ##                              never caught or freed)          ##');
+      console.error('[kill-flags] ##                                                              ##');
+      console.error('[kill-flags] ##  Net: a stuck in_progress task will NEVER be detected,       ##');
+      console.error('[kill-flags] ##       NEVER be freed, and NEVER alert the operator.          ##');
+      console.error('[kill-flags] ##       The "nothing gets stuck" guarantee is BROKEN.          ##');
+      console.error('[kill-flags] ##                                                              ##');
+      console.error('[kill-flags] ##  Fix: remove DISABLE_STALE_TASK_SWEEP and                     ##');
+      console.error('[kill-flags] ##       DISABLE_STUCK_IN_PROGRESS_SWEEP from the environment   ##');
+      console.error('[kill-flags] ##       this process was started with, then restart.          ##');
+      console.error('[kill-flags] ##################################################################');
+    }
+  } catch {
+    /* observability only */
+  }
+
   try {
     const file = readOperatorOverrides();
     if (file.path && file.ignoredKeys.length > 0) {
