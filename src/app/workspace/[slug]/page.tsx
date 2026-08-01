@@ -7,6 +7,7 @@ import { ChevronLeft } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { AgentsSidebar } from '@/components/AgentsSidebar';
 import { MissionQueue } from '@/components/MissionQueue';
+import { useDueDateWindowDays } from '@/hooks/useDueDateWindowDays';
 import { useMissionControl } from '@/lib/store';
 import { LiveFeed } from '@/components/LiveFeed';
 import { SSEDebugPanel } from '@/components/SSEDebugPanel';
@@ -40,6 +41,15 @@ export default function WorkspacePage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [deptName, setDeptName] = useState<string | null>(null);
   const logoUrl = useLogoUrl();
+
+  // MR-44 (fix2): resolve the board's effective "Tasks Due" filter window from
+  // the board-SLA config (env BOARD_DUE_DATE_WINDOW_DAYS / board-slas.json
+  // per-department override), so the operator-facing knob actually drives the
+  // board instead of the hardcoded 7-day default. The CEO / default workspace
+  // is cross-department, so it resolves the global default (department = null).
+  const boardDepartment =
+    workspace && workspace.slug !== 'default' && workspace.slug !== 'ceo' ? workspace.slug : null;
+  const dueDateWindowDays = useDueDateWindowDays(boardDepartment);
 
   // Keep the latest workspace in a ref so the onReconnect callback (which is
   // identity-stable via useCallback) can always access the current workspace.id
@@ -411,6 +421,7 @@ export default function WorkspacePage() {
           workspaceId={workspace.id}
           departmentFilter={routeDepartment}
           boardKind={workspace.slug === 'bugs' ? 'bug' : 'task'}
+          dueDateWindowDays={dueDateWindowDays}
         />
 
         {/* Live Feed */}

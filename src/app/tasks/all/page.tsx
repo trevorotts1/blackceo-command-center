@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react';
 import { Header } from '@/components/Header';
 import { AgentsSidebar } from '@/components/AgentsSidebar';
 import { MissionQueue } from '@/components/MissionQueue';
+import { useDueDateWindowDays } from '@/hooks/useDueDateWindowDays';
 import { useMissionControl } from '@/lib/store';
 import { LiveFeed } from '@/components/LiveFeed';
 import { SSEDebugPanel } from '@/components/SSEDebugPanel';
@@ -41,6 +42,11 @@ export default function AllTasksPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+
+  // MR-44 (fix2): this board is cross-department (departmentFilter={null}), so
+  // it resolves the GLOBAL "Tasks Due" filter window (env override / fleet
+  // default) from the board-SLA config rather than a hardcoded 7.
+  const dueDateWindowDays = useDueDateWindowDays(null);
 
   useSSE();
 
@@ -173,7 +179,12 @@ export default function AllTasksPage() {
 
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
         <AgentsSidebar navigateOnSelect isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
-        <MissionQueue departmentFilter={null} loadError={loadError} onRetry={() => handleRetry()} />
+        <MissionQueue
+          departmentFilter={null}
+          loadError={loadError}
+          onRetry={() => handleRetry()}
+          dueDateWindowDays={dueDateWindowDays}
+        />
         <LiveFeed />
       </div>
 

@@ -237,6 +237,15 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // Live-overridable "Tasks Due" window (days). Starts at the prop default;
   // the user can adjust it via the dropdown next to the filter chips.
   const [dueWindowDays, setDueWindowDays] = useState(dueDateWindowDays);
+  // MR-44 (fix2): the `dueDateWindowDays` prop is resolved ASYNCHRONOUSLY by the
+  // parent page (it reads the board-SLA config via useDueDateWindowDays), so it
+  // typically lands one render AFTER mount — useState's initializer alone would
+  // leave the window stuck at the fallback. Sync the live window when the
+  // resolved prop arrives. The prop only changes on config resolution (never on
+  // the user's dropdown interaction), so this does not clobber a manual pick.
+  useEffect(() => {
+    setDueWindowDays(dueDateWindowDays);
+  }, [dueDateWindowDays]);
   // Free-text board search (MR-26): when the search box has a term we fetch
   // matching tasks from the API (?q= param) rather than filtering the entire
   // store client-side. The server-side LIKE scan is bounded by the SQLite index
