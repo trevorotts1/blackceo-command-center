@@ -208,9 +208,14 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
-  // Free-text board search (title/description substring, case-insensitive),
-  // applied alongside whichever filter chip is active.
+  // Free-text board search (MR-26): when the search box has a term we fetch
+  // matching tasks from the API (?q= param) rather than filtering the entire
+  // store client-side. The server-side LIKE scan is bounded by the SQLite index
+  // on tasks.title, so a board with hundreds of tasks stays performant.
   const [searchQuery, setSearchQuery] = useState('');
+  // Server-side search results — populated only when searchQuery is non-empty.
+  const [searchResults, setSearchResults] = useState<Task[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
   // Which column's "+" button opened the create modal — seeds the new task's
   // status instead of always defaulting to backlog. Null = the header-level
   // "New Task" button, which keeps the original backlog default.
@@ -286,6 +291,40 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     setBugRetryCount((c) => c + 1);
   }, []);
 
+  // ── Server-side search (MR-26) ──────────────────────────────────────────
+  // Debounced fetch against /api/tasks?q=<term> to avoid hammering the API on
+  // every keystroke. When searchQuery is empty, clear search results so the
+  // board falls back to the full store.
+  useEffect(() => {
+    if (boardKind !== 'task') return; // bug board has its own search scope
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults(null);
+      setSearchLoading(false);
+      return;
+    }
+    setSearchLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const url = workspaceId
+          ? `/api/tasks?q=${encodeURIComponent(q)}&workspace_id=${encodeURIComponent(workspaceId)}`
+          : `/api/tasks?q=${encodeURIComponent(q)}`;
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) { setSearchResults(null); return; }
+        const data = await res.json();
+        // MR-26 paginated shape: { tasks, total } — extract the array.
+        const results: Task[] = Array.isArray(data) ? data : (data.tasks ?? []);
+        setSearchResults(results);
+      } catch (err) {
+        console.error('[MissionQueue] search fetch error', err);
+        setSearchResults(null);
+      } finally {
+        setSearchLoading(false);
+      }
+    }, 250); // 250ms debounce
+    return () => clearTimeout(timer);
+  }, [searchQuery, workspaceId, boardKind]);
+
   // ── Horizontal scroll affordance state ────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -349,13 +388,19 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   };
 
   const getTasksByStatus = (statusId: string) => {
-    const filteredByDept = tasks.filter(matchesScope);
+    // MR-26 — when search is active, use server-side search results (already
+    // filtered by title+description at the DB level) instead of the full
+    // client-side store. This keeps the board performant on large deployments.
+    const sourceTasks = searchResults !== null ? searchResults : tasks;
+    const filteredByDept = sourceTasks.filter(matchesScope);
     // Six-column mapping (backlog / todo / review are synthetic UI columns
     // that aggregate several underlying statuses) — see taskToColumnId.
     const byColumn = filteredByDept.filter((task) => taskToColumnId(task) === statusId);
 
-    // Apply the board search box (title/description substring match).
-    const searchLower = searchQuery.trim().toLowerCase();
+    // MR-26 — when search is server-side, the title/description filter has
+    // already been applied by the API. Only apply client-side substring match
+    // on the store fallback (no search results / empty query).
+    const searchLower = searchResults !== null ? '' : searchQuery.trim().toLowerCase();
     const bySearch = !searchLower
       ? byColumn
       : byColumn.filter(
@@ -534,7 +579,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // Filter tasks by selected department/workspace for accurate counts.
   // Mirrors the scoping used by getTasksByStatus so the "By Total Tasks"
   // chip count matches what the columns actually render.
-  const filteredTasks = tasks.filter(matchesScope);
+  // MR-26 — when search is active, count search results instead of the full store.
+  const countableTasks = searchResults !== null ? searchResults : tasks;
+  const filteredTasks = countableTasks.filter(matchesScope);
 
   const filters = [
     {
@@ -623,9 +670,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           ))}
         </div>
 
-        {/* Board search — title/description substring, case-insensitive,
-            applied alongside whichever filter chip is active (see
-            getTasksByStatus). Bug board has no search per its own scope. */}
+        {/* Board search (MR-26) — server-side via /api/tasks?q=.
+            Debounced 250ms; shows a spinner while the API fetch is in-flight.
+            Bug board has no search per its own scope. */}
         {boardKind === 'task' && (
           <div className="relative w-full sm:w-64">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
@@ -637,7 +684,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
               aria-label="Search tasks by title or description"
               className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-9 pr-8 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
             />
-            {searchQuery && (
+            {searchLoading && (
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-gray-300 border-t-indigo-500 rounded-full animate-spin" aria-label="Searching" />
+            )}
+            {!searchLoading && searchQuery && (
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
