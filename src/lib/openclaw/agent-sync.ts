@@ -27,6 +27,15 @@
  *     endpoint can retry later when the gateway is ready.
  *   • Idempotent — keyed on the agent's own stable gateway id, with an
  *     ON CONFLICT UPDATE on re-sync so data stays current.
+ *   • A synced specialist is marked specialist_type='permanent' ON PURPOSE: it
+ *     is part of the operator's configured Skill-23 workforce, NOT a transient
+ *     on-call subagent, so the on-call cleanup sweep must never reap it.  (If a
+ *     future sweep assumes on-call agents are the cleanable set, synced
+ *     specialists are deliberately immune — see the operator runbook.)
+ *   • Emoji precedence — a real emoji chosen on the gateway wins; if the
+ *     operator cleared it (empty string) the CC keeps the existing avatar
+ *     rather than overwriting it with an inferred one.  Inference is only used
+ *     when no avatar exists yet (first insert).
  */
 
 import { getDb } from '@/lib/db';
@@ -186,6 +195,15 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
   const db = getDb();
   const now = new Date().toISOString();
 
+  // specialist_type is hardcoded to 'permanent' ON PURPOSE: a synced specialist
+  // is part of the operator's configured Skill-23 workforce, NOT a transient
+  // on-call subagent, so the on-call cleanup sweep must never reap it.  (If a
+  // future sweep assumes on-call agents are the cleanable set, synced
+  // specialists are deliberately immune — see the operator runbook.)
+  //
+  // avatar_emoji uses COALESCE(NULLIF(excluded, ''), agents): a real emoji chosen
+  // on the gateway wins, but an EMPTY string (operator cleared it) falls back to
+  // the existing avatar instead of being overwritten by an inferred one.
   const upsertAgent = db.prepare(`
     INSERT INTO agents
       (id, name, role, description, avatar_emoji, status, is_master,
@@ -195,7 +213,7 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
       name            = excluded.name,
       role            = excluded.role,
       description     = COALESCE(excluded.description, agents.description),
-      avatar_emoji    = COALESCE(excluded.avatar_emoji, agents.avatar_emoji),
+      avatar_emoji    = COALESCE(NULLIF(excluded.avatar_emoji, ''), agents.avatar_emoji),
       status          = COALESCE(excluded.status, agents.status),
       model           = COALESCE(excluded.model, agents.model),
       role_type       = COALESCE(excluded.role_type, agents.role_type),
@@ -244,8 +262,6 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
       const role = name;
       const deptForDesc = dept || 'general';
       const description = `${role} for the ${deptForDesc} department (synced from OpenClaw gateway).`;
-      // Prefer the emoji the operator chose on the gateway; infer one otherwise.
-      const emoji = str(entry.identity?.emoji, '') || inferEmoji(name);
       const model = str(entry.model, '') || null;
       // agents.list carries no role_type; specialists are the only kind it lists
       // (the orchestrator/main agent is filtered above).
@@ -254,6 +270,25 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
       const existedBefore = !!db
         .prepare('SELECT 1 FROM agents WHERE id = ?')
         .get(agentId);
+
+      // Emoji precedence:
+      //   • A real emoji the operator chose on the gateway always wins.
+      //   • An EMPTY value ('' or null) means the operator deliberately cleared
+      //     it on the gateway — on re-sync we keep the existing CC avatar (pass
+      //     '' so the upsert's COALESCE(NULLIF(excluded,''), agents.avatar_emoji)
+      //     preserves it) instead of overwriting with an inferred one.
+      //   • A missing emoji (field absent / undefined), or a brand-new row whose
+      //     emoji was cleared, falls back to inference so we never store an empty
+      //     avatar.
+      const gatewayEmoji = entry.identity?.emoji;
+      let emoji: string;
+      if (typeof gatewayEmoji === 'string' && gatewayEmoji.trim()) {
+        emoji = gatewayEmoji.trim();
+      } else if ((gatewayEmoji === '' || gatewayEmoji === null) && existedBefore) {
+        emoji = '';
+      } else {
+        emoji = inferEmoji(name);
+      }
 
       upsertAgent.run(
         agentId, name, role, description, emoji, 'standby',

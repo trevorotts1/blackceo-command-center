@@ -34,6 +34,13 @@ export default defineConfig({
       // 'task_dispatch_deferred' failure event type in the dispatch sparkline.
       // DB-backed vitest suite, same reason as floor-department-invariant above.
       'tests/unit/workforce-health.test.ts',
+      // MR-14 (fix2): agent-sync emoji + specialist_type regression lock. Drives
+      // the REAL syncSpecialistAgentsFromOpenClaw() against an isolated DB with a
+      // mocked '@/lib/openclaw/client' (no gateway). Locks the cleared-emoji
+      // preserve-existing behavior (COALESCE(NULLIF(excluded,''), agents)) and
+      // the intentional specialist_type='permanent'. vi.mock + vitest globals, so
+      // it only runs here via `npm run test:vitest`, never the tsx --test glob.
+      'tests/unit/mr14-agent-sync-emoji.test.ts',
       // P3-7: seam <-> onboarding-Python parity harness. Lives under src/ (not
       // tests/unit/) so `npm run test:unit` (tsx --test glob) does NOT also pick it
       // up — it uses vitest globals and only runs here via `npm run test:vitest`.
