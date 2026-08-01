@@ -65,6 +65,7 @@ import * as path from 'path';
 import { safeReadFileUtf8, safeReadFileBuffer, safeReaddirNames } from '@/lib/fs/safe-fs';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
+import { broadcast } from '@/lib/events';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { TRIO_ROLE_ALIASES } from '@/lib/db/migrations';
 import { getMissionControlUrl } from '@/lib/config';
@@ -81,6 +82,24 @@ import {
 } from '@/lib/model-providers/ollama-cloud';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection';
 import type { ChatCompletionResponse } from '@/lib/model-providers/types';
+import type { Task } from '@/lib/types';
+
+// ---------------------------------------------------------------------------
+// MR-02: broadcast helper — re-fetches the task row and fans out SSE so the
+// board card moves immediately after every raw status write.  Best-effort;
+// never throws, never blocks the score-return path.
+// ---------------------------------------------------------------------------
+
+function broadcastQCUpdate(taskId: string): void {
+  try {
+    const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (updated) {
+      broadcast({ type: 'task_updated', payload: updated });
+    }
+  } catch {
+    // SSE is best-effort — a broadcast failure must not crash the scorer.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
@@ -4092,6 +4111,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
               now,
             ],
           );
+          // MR-02: broadcast so board card moves immediately.
+          broadcastQCUpdate(taskId);
         };
 
         try {
@@ -4238,6 +4259,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           );
           if ((missingRes.changes ?? 0) > 0) {
             recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
+            // MR-02: broadcast so board card moves immediately.
+            broadcastQCUpdate(taskId);
           }
           return failResult;
         }
@@ -4310,6 +4333,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         );
         if ((afi14Res.changes ?? 0) > 0) {
           recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
+          // MR-02: broadcast so board card moves immediately.
+          broadcastQCUpdate(taskId);
         }
 
         return {
@@ -5142,6 +5167,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         );
         if ((blockRes.changes ?? 0) > 0) {
           recordStatusEvent(taskId, 'review', 'blocked', { actor: 'qc-scorer', reason: blockedNote });
+          // MR-02: broadcast so board card moves immediately.
+          broadcastQCUpdate(taskId);
         }
 
         run(
@@ -5242,6 +5269,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       );
       if ((rerouteRes.changes ?? 0) > 0) {
         recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
+        // MR-02: broadcast so board card moves immediately.
+        broadcastQCUpdate(taskId);
       }
 
       // Write task_status_changed event — visible on the board timeline.
@@ -5310,6 +5339,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
               actor: 'qc-scorer',
               reason: 'auto-route succeeded after QC reroute',
             });
+            // MR-02: broadcast so board card moves immediately.
+            broadcastQCUpdate(taskId);
           }
           console.log(`[QCScorer] Auto-route succeeded for task "${task.title}" (${taskId}) → in_progress`);
         } else {
