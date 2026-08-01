@@ -6793,21 +6793,31 @@ export function reseedWorkspacesFromConfig(
         continue;
       }
 
-      // MR-21: Normalize the manifest entry's id through canonicalDeptSlug()
-      // so Skill-23's `dept-`-prefixed ids (e.g. "dept-marketing") are stored
-      // as bare canonical ids (e.g. "marketing"), matching the shape the sidebar
-      // and routing system expect. The manifest slug is normalized separately;
-      // the workspace id always uses the canonical (bare) form.
+      // MR-21: Skill-23's departments.json writes ids with a `dept-` prefix
+      // (e.g. "dept-marketing"), whereas the CC schema (departments.config.ts,
+      // the sidebar, and routing) uses bare canonical ids ("marketing").
+      // Normalize ONLY `dept-`-prefixed ids through canonicalDeptSlug() so they
+      // map to the bare canonical id the sidebar/routing can match.
+      //
+      // Bare ids (the CC manifest format) are deliberately left UNTOUCHED:
+      // canonicalDeptSlug() also applies alias remaps (e.g. "billing" ->
+      // "billing-finance", "webdev" -> "web-development") that would rewrite an
+      // already-valid workspace id. Doing that on a live box mints a SECOND
+      // workspace row under the new id and orphans the original row's tasks —
+      // and it breaks the U110 opt-out matching, which compares manifest ids to
+      // workspace ids by exact value. So: strip/resolve the `dept-` prefix only.
       // The raw (pre-normalization) id is preserved for dedup below so a dept-
       // prefixed entry for the same department as an existing bare entry still
       // collides correctly.
       const rawId = String(dept.id || '');
       const rawSlug = String(dept.slug || rawId);
-      const canonicalId = canonicalDeptSlug(rawId) || rawId;
-      const canonicalSlug = canonicalDeptSlug(rawSlug) || rawSlug;
+      const normalizeDeptId = (s: string): string =>
+        s.trim().toLowerCase().startsWith('dept-') ? canonicalDeptSlug(s) || s : s;
+      const canonicalId = normalizeDeptId(rawId);
+      const canonicalSlug = normalizeDeptId(rawSlug);
 
       const slugLower = rawSlug.toLowerCase();
-      const isCeo = canonicalSlug === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || canonicalSlug === 'master-orchestrator';
+      const isCeo = canonicalSlug === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || rawId === 'ceo';
       const isGeneralTask = canonicalSlug === 'general-task' || slugLower === 'general-task';
       const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
 
