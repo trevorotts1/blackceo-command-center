@@ -260,13 +260,13 @@ export default function HomePage() {
   // F52: Conversational AI analytics is the 7th card (fills the next 3-col slot).
   const cards: EntryCard[] = [
     {
-      title: 'View All Tasks',
+      title: 'Task Board',
       description: 'Master view with department sidebar',
       detail: 'Every active task across every department in one Kanban. Use the left sidebar to switch the focused department without losing the view.',
       icon: <Kanban className="w-7 h-7 text-white" />,
       gradient: 'from-indigo-500 via-purple-500 to-pink-500',
       route: '/tasks/all',
-      cta: 'Open All Tasks',
+      cta: 'Open Task Board',
     },
     {
       title: 'Departments',
