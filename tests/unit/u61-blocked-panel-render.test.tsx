@@ -315,3 +315,127 @@ describe('BlockedReasonPanel — data-testid convention', () => {
     expect(heading.textContent!.trim().length).toBeGreaterThan(0);
   });
 });
+
+// ── MR-30 — block history on an UNBLOCKED card ───────────────
+// The block_* columns are cleared when a card leaves blocked, so the grey
+// "Previously blocked" panel reads from last_block_event (task_block_events
+// row surfaced by the GET routes). These tests prove the panel renders on a
+// non-blocked card with history, stays silent without it, and never replaces
+// the live red/amber panel on a currently-blocked card.
+
+describe('BlockedReasonPanel — MR-30 previously-blocked history', () => {
+  it('renders nothing when not blocked and no block history', () => {
+    const { container } = render(
+      <BlockedReasonPanel task={baseTask({ status: 'in_progress', last_block_event: null })} />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it('renders nothing when history exists but carries no reason or needs', () => {
+    const { container } = render(
+      <BlockedReasonPanel
+        task={baseTask({
+          status: 'in_progress',
+          last_block_event: {
+            id: 'be-1',
+            task_id: 'task-blocked-1',
+            block_reason: null,
+            block_needs: null,
+            created_at: '2026-07-30T10:00:00.000Z',
+          },
+        })}
+      />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it('renders the grey "Previously blocked" panel for an unblocked card with history', () => {
+    render(
+      <BlockedReasonPanel
+        task={baseTask({
+          status: 'in_progress',
+          last_block_event: {
+            id: 'be-2',
+            task_id: 'task-blocked-1',
+            block_reason: 'Failed QC 3x, last score 4.2/10',
+            block_needs: 'Owner action required: tighten the brief',
+            block_audience: 'OWNER',
+            created_at: '2026-07-30T10:00:00.000Z',
+          },
+        })}
+      />,
+    );
+    const panel = screen.getByTestId('blocked-reason-panel');
+    expect(panel).toBeTruthy();
+    const heading = screen.getByTestId('blocked-panel-heading');
+    expect(heading.textContent).toContain('Previously blocked');
+    expect(screen.getByTestId('blocked-panel-reason').textContent).toContain(
+      'Failed QC 3x, last score 4.2/10',
+    );
+    expect(screen.getByTestId('blocked-panel-needs').textContent).toContain(
+      'Owner action required: tighten the brief',
+    );
+    // Audience line renders the OWNER label
+    expect(panel.textContent).toContain('Owner (client)');
+    // The live-panel Resume button must NOT appear on a historical panel
+    expect(screen.queryByTestId('blocked-panel-resume-btn')).toBeNull();
+  });
+
+  it('renders the snapshotted gaps as "What was missing"', () => {
+    render(
+      <BlockedReasonPanel
+        task={baseTask({
+          status: 'backlog',
+          last_block_event: {
+            id: 'be-3',
+            task_id: 'task-blocked-1',
+            block_reason: 'Failed QC 2x',
+            block_gaps: JSON.stringify(['missing deliverable', 'wrong department']),
+            created_at: '2026-07-30T10:00:00.000Z',
+          },
+        })}
+      />,
+    );
+    const panel = screen.getByTestId('blocked-reason-panel');
+    expect(panel.textContent).toContain('What was missing');
+    expect(panel.textContent).toContain('missing deliverable, wrong department');
+  });
+
+  it('ignores malformed gaps JSON without crashing', () => {
+    render(
+      <BlockedReasonPanel
+        task={baseTask({
+          status: 'backlog',
+          last_block_event: {
+            id: 'be-4',
+            task_id: 'task-blocked-1',
+            block_reason: 'Failed QC 2x',
+            block_gaps: '{not json',
+            created_at: '2026-07-30T10:00:00.000Z',
+          },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('blocked-panel-reason').textContent).toContain('Failed QC 2x');
+  });
+
+  it('a CURRENTLY blocked card still renders the live panel, never the history panel', () => {
+    render(
+      <BlockedReasonPanel
+        task={baseTask({
+          status: 'blocked',
+          block_reason: 'live reason',
+          last_block_event: {
+            id: 'be-5',
+            task_id: 'task-blocked-1',
+            block_reason: 'old reason',
+            created_at: '2026-07-30T10:00:00.000Z',
+          },
+        })}
+      />,
+    );
+    const heading = screen.getByTestId('blocked-panel-heading');
+    expect(heading.textContent).not.toContain('Previously blocked');
+    expect(screen.getByTestId('blocked-panel-reason').textContent).toContain('live reason');
+  });
+});

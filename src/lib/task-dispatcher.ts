@@ -60,6 +60,7 @@ import { getBestSOPForTask, checkTriad } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
+import { recordBlockEvent } from '@/lib/block-events';
 import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
@@ -171,6 +172,13 @@ export function recordDispatchFailure(
         recordStatusEvent(taskId, row?.status ?? 'unknown', 'blocked', {
           actor: opts.context,
           reason: blockNote,
+        });
+        recordBlockEvent({
+          taskId,
+          blockReason: opts.reason,
+          blockNeeds: opts.needs,
+          blockAudience: opts.audience,
+          actor: opts.context,
         });
       }
       run(

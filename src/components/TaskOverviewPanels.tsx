@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users, CheckCircle2, RotateCw, Clock, Package } from 'lucide-react';
+import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users, CheckCircle2, RotateCw, Clock, Package, Info } from 'lucide-react';
 import type { Task } from '@/lib/types';
 // U42 (C-11) — reuse the EXACT card-face chip components for the modal's
 // multi-persona plan + per-page/per-part scoped-blend rows. Single source: the
@@ -509,7 +509,70 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
     }
   };
 
-  if (!isBlocked) return null;
+  // MR-30 — block history: when the task left the blocked column but has a
+  // `last_block_event` row, render a compact grey info panel showing WHY it was
+  // blocked and what was needed, so the operator can confirm resolution.
+  const lastBlock = task.last_block_event;
+  const hasBlockHistory = !isBlocked && lastBlock && (lastBlock.block_reason || lastBlock.block_needs);
+
+  if (!isBlocked) {
+    if (!hasBlockHistory) return null;
+
+    // Non-blocked task with block history — compact historical panel
+    const blockTime = lastBlock!.created_at
+      ? new Date(lastBlock!.created_at).toLocaleDateString(undefined, {
+          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+        })
+      : 'unknown date';
+    const historyAudience = lastBlock!.block_audience ?? null;
+
+    return (
+      <div
+        className="rounded-xl border border-gray-200 bg-gray-50 p-4"
+        data-testid="blocked-reason-panel"
+      >
+        <div className="flex items-center gap-2">
+          <Info className="h-4 w-4 text-gray-500" />
+          <h4 className="text-sm font-semibold text-gray-700" data-testid="blocked-panel-heading">
+            Previously blocked{' '}
+            <span className="font-normal text-gray-500">({blockTime})</span>
+          </h4>
+        </div>
+        <div className="mt-2 space-y-1.5">
+          {lastBlock!.block_reason && (
+            <p className="text-xs text-gray-600" data-testid="blocked-panel-reason">
+              <span className="font-semibold">Reason: </span>
+              {lastBlock!.block_reason}
+            </p>
+          )}
+          {lastBlock!.block_gaps && (() => {
+            let gapsText: string | null = null;
+            try {
+              const parsed = JSON.parse(lastBlock!.block_gaps);
+              if (Array.isArray(parsed)) gapsText = parsed.filter((g: unknown) => typeof g === 'string').join(', ');
+            } catch { /* ignore malformed */ }
+            return gapsText ? (
+              <p className="text-xs text-gray-600">
+                <span className="font-semibold">What was missing: </span>
+                {gapsText}
+              </p>
+            ) : null;
+          })()}
+          {lastBlock!.block_needs && (
+            <p className="text-xs text-gray-600" data-testid="blocked-panel-needs">
+              <span className="font-semibold">Action needed: </span>
+              {lastBlock!.block_needs}
+            </p>
+          )}
+          {historyAudience && (
+            <p className="text-xs text-gray-500">
+              Audience: {historyAudience === 'OWNER' ? 'Owner (client)' : 'System (operator)'}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

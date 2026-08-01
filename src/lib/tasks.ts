@@ -58,6 +58,7 @@ import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
 import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { recordBlockEvent } from '@/lib/block-events';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
@@ -1620,6 +1621,17 @@ export async function blockForOwnerConfirm(
     }
   }
   if (!blocked) return; // already blocked or transition aborted — no duplicate event/notify
+  // MR-30: snapshot block metadata for the block-history audit trail.
+  // (transition() already writes the task_events audit; this is the companion
+  // block-snapshot the task-detail modal reads for the 'Previously blocked'
+  // panel.)
+  recordBlockEvent({
+    taskId,
+    blockReason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
+    blockNeeds: `Owner action required: ${prompt}`,
+    blockAudience: 'OWNER',
+    actor: 'audience-confirm',
+  });
   try {
     run(
       `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,

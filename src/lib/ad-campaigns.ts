@@ -31,6 +31,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { recordBlockEvent } from '@/lib/block-events';
 import { isBlankAsk } from '@/lib/blocked-ask';
 import type { Task } from '@/lib/types';
 
@@ -297,7 +298,24 @@ export async function moveAdStage(jobId: string, input: MoveAdStageInput): Promi
       'UPDATE tasks SET blocked_reason = ?, blocked_on_human = ?, ask = ?, last_progress_at = ? WHERE id = ?',
       [input.blocked_reason, input.blocked_on_human || 'operator', input.ask, now, card.id],
     );
-    return transition(card.id, 'blocked', { actor, reason, operatorOverride: true });
+    const updated = await transition(card.id, 'blocked', { actor, reason, operatorOverride: true });
+    // MR-30 — snapshot the block metadata so the history survives the unblock
+    // (the blocked_* columns are cleared when the card leaves blocked). Gated
+    // on a genuine entry into blocked: transition() is idempotent for same-
+    // state, so a re-sent block on an already-blocked card writes no duplicate
+    // history row.
+    if (card.status !== 'blocked') {
+      recordBlockEvent({
+        taskId: card.id,
+        blockReason: input.blocked_reason,
+        blockNeeds: input.ask ?? null,
+        blockAudience: (input.blocked_on_human || 'operator') === 'owner' ? 'OWNER' : 'SYSTEM',
+        blockedOnHuman: input.blocked_on_human || 'operator',
+        ask: input.ask ?? null,
+        actor,
+      });
+    }
+    return updated;
   }
 
   // Leaving blocked → clear the blocked columns first (back to a clean card).

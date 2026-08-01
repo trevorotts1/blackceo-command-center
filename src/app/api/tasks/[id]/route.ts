@@ -18,6 +18,7 @@ import { selectPersonaForTask, buildPersonaReason, loadPersonaBundleScopes } fro
 import { recordPersonaCompletions } from '@/lib/tasks';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
+import { recordBlockEvent, getLatestBlockEvent } from '@/lib/block-events';
 import { getQcHeuristicPark } from '@/lib/qc-promote';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
@@ -72,6 +73,7 @@ export async function GET(
       persona_bundle_scopes: loadPersonaBundleScopes(task.id),
       dispatch_hold: getOpenDispatchHold(task.id),
       qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
+      last_block_event: getLatestBlockEvent(task.id),
     };
 
     return NextResponse.json(withMismatch);
@@ -802,9 +804,42 @@ export async function PATCH(
       }
       values.push(id);
       run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
-    }
 
-    // U034: `deliverable_url` — register as a `url` deliverable so the produced
+      // MR-30 — capture a block-history snapshot when the UPDATE just landed a
+      // manual block (entering `blocked` with blocked_reason/blocked_on_human/ask).
+      // The snapshot preserves WHY the card was blocked so the operator can
+      // review the history even after the card leaves the blocked column.
+      // Gated on a genuine ENTRY into blocked (existing.status !== 'blocked'):
+      // transition() is idempotent for same-state, so a re-sent status=blocked
+      // PATCH on an already-blocked card must not write a duplicate (and, when
+      // the payload carries no blocked fields, all-NULL) history row. When the
+      // payload omits the human-block fields, fall back to the task's existing
+      // SYSTEM block metadata (qc-scorer / dispatch / sweep columns) so the
+      // snapshot is never emptier than the card it describes.
+      if (enteringBlocked && existing.status !== 'blocked') {
+        const existingTask = existing as Task & {
+          block_reason?: string | null;
+          block_needs?: string | null;
+          block_audience?: 'OWNER' | 'SYSTEM' | null;
+          blocked_on_human?: string | null;
+          ask?: string | null;
+        };
+        const onHuman = blockedPayload.blocked_on_human ?? existingTask.blocked_on_human ?? null;
+        const askVal = blockedPayload.ask ?? existingTask.ask ?? null;
+        recordBlockEvent({
+          taskId: id,
+          blockReason: blockedPayload.blocked_reason ?? existingTask.block_reason ?? null,
+          blockedOnHuman: onHuman,
+          ask: askVal,
+          blockNeeds: askVal ?? existingTask.block_needs ?? null,
+          blockAudience:
+            onHuman === 'owner' ? 'OWNER' :
+            onHuman === 'operator' ? 'SYSTEM' :
+            existingTask.block_audience ?? null,
+          actor: actingAgentId ?? 'operator',
+        });
+      }
+    }
     if (u034Url) {
       try {
         const dup = queryOne<{ id: string }>(

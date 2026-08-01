@@ -5505,6 +5505,35 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '120',
+    name: 'mr30_add_task_block_events',
+    up: (db) => {
+      // MR-30 — block-history audit table. Records a snapshot of block metadata
+      // every time a task enters the blocked column, so operators can see WHY a
+      // card was blocked AND what was needed even after it leaves blocked.
+      const tableExists = !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_block_events'")
+        .get();
+      if (tableExists) return;
+
+      db.exec(`
+        CREATE TABLE task_block_events (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          block_reason TEXT,
+          block_gaps TEXT,
+          block_needs TEXT,
+          block_audience TEXT,
+          blocked_on_human TEXT,
+          ask TEXT,
+          actor TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_task_block_events_task ON task_block_events(task_id, created_at DESC);
+      `);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

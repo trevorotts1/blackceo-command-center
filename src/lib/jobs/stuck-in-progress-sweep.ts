@@ -56,6 +56,7 @@ import { queryAll, queryOne, run, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { notifyByAudience } from '@/lib/notify';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
+import { recordBlockEvent } from '@/lib/block-events';
 import { probeSessionLiveness } from './execution-watcher';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
@@ -178,6 +179,7 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
   //    row (the audit that was missing from the original incident). Fall back to
   //    a raw block write (mirrors recordDispatchFailure) if the transition is
   //    ever rejected, so an edge case never leaves the task silently stuck.
+  let blockedLanded = true;
   try {
     await transition(task.id, 'blocked', { actor: 'stuck-in-progress-sweep', reason });
   } catch (err) {
@@ -189,7 +191,8 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
         `UPDATE tasks SET status='blocked', updated_at=? WHERE id=? AND status='in_progress'`,
         [now, task.id],
       );
-      if ((fallbackRes.changes ?? 0) > 0) {
+      blockedLanded = (fallbackRes.changes ?? 0) > 0;
+      if (blockedLanded) {
         recordStatusEvent(task.id, 'in_progress', 'blocked', { actor: 'stuck-in-progress-sweep', reason });
       }
       try {
@@ -223,6 +226,23 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
       WHERE id = ?`,
     [reason, needs, ask, now, task.id],
   );
+
+  // MR-30 — snapshot the block metadata so the history survives the unblock
+  // (the block_* columns are cleared when the card leaves blocked). Gated on
+  // the status flip actually landing so a lost CAS race never writes a false
+  // block event. Placed AFTER the metadata write so the snapshot carries the
+  // same reason/needs/ask the card is showing while blocked.
+  if (blockedLanded) {
+    recordBlockEvent({
+      taskId: task.id,
+      blockReason: reason,
+      blockNeeds: needs,
+      blockAudience: 'SYSTEM',
+      blockedOnHuman: 'operator',
+      ask,
+      actor: 'stuck-in-progress-sweep',
+    });
+  }
 
   // 3. Free the wedged agent.
   if (task.assigned_agent_id) {
