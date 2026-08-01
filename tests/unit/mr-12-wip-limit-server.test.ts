@@ -45,6 +45,7 @@ let closeDb: DbModule['closeDb'];
 type LifecycleModule = typeof import('../../src/lib/task-lifecycle');
 let transition: LifecycleModule['transition'];
 let TransitionError: LifecycleModule['TransitionError'];
+let checkWipLimit: LifecycleModule['checkWipLimit'];
 
 const now = new Date().toISOString();
 
@@ -100,6 +101,7 @@ test.before(async () => {
   const lc = (await import('../../src/lib/task-lifecycle')) as LifecycleModule;
   transition = lc.transition;
   TransitionError = lc.TransitionError;
+  checkWipLimit = lc.checkWipLimit;
 });
 
 test.after(() => {
@@ -204,4 +206,25 @@ test('a direct move into testing is refused when the review bucket is full', asy
     'a direct move into a full review bucket (via testing) must throw WIP_LIMIT',
   );
   assert.equal(statusOf(mover), 'in_progress', 'the refused move must not change the task status');
+});
+
+// ── 7. the exported probe agrees with transition() (dispatch pre-send hold) ──
+test('checkWipLimit probe flags a full column and clears an uncapped target', async () => {
+  clearReviewBucket();
+  // The review bucket is now empty (0/8); the in_progress column still holds
+  // the tasks seeded by earlier cases (>= 5, its limit of 5).
+  const probeId = `mr12-probe-${RUN_ID}`;
+  seedTask(probeId, 'backlog');
+
+  const ipViolation = checkWipLimit(probeId, 'in_progress', WS_ID);
+  assert.notEqual(ipViolation, null, 'probe must flag a full in_progress column');
+
+  const reviewViolation = checkWipLimit(probeId, 'review', WS_ID);
+  assert.equal(reviewViolation, null, 'probe must clear a review column with capacity');
+
+  const uncappedViolation = checkWipLimit(probeId, 'blocked', WS_ID);
+  assert.equal(uncappedViolation, null, 'probe must never flag an uncapped column');
+
+  // The probe is read-only: it must not have moved the task or changed counts.
+  assert.equal(statusOf(probeId), 'backlog', 'the probe must not write anything');
 });

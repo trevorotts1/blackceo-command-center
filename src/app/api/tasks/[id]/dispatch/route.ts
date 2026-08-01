@@ -17,7 +17,7 @@ import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { recordDispatchFailure } from '@/lib/task-dispatcher';
 import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
-import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecycle';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -514,6 +514,39 @@ If you need help or clarification, ask the orchestrator.`;
       return NextResponse.json(
         { success: false, held: true, reason: 'mc_api_token_unset', message: writeAuth.reason },
         { status: 503 },
+      );
+    }
+
+    // ── MR-12 WIP-limit hold (PRE-SEND, read-only) ──────────────────────────
+    // transition() enforces the in_progress column's WIP limit server-side and
+    // throws WIP_LIMIT when the column is full — but that check runs AFTER
+    // chat.send below. Without this pre-check a full column would let the agent
+    // RECEIVE the work (chat.send already fired) while the board never advances
+    // the card (transition throws → outer catch → bare 500): an agent running
+    // invisible work with no audit trail. So probe the limit BEFORE sending —
+    // read-only, no write — and hold exactly like the routed_but_not_dispatched
+    // / mc_api_token_unset holds above: the task stays in its current status,
+    // the attempt is recorded (backoff + escalation ladder via
+    // recordDispatchFailure), and the operator gets a 429 naming the full
+    // column. The authoritative check + status flip + model_id pin still happen
+    // atomically in the post-send transition() below (MR-04); this probe only
+    // moves the refusal ahead of the irreversible send. The auto-dispatch sweep
+    // is unaffected — it uses task-dispatcher's raw status writer, which (like
+    // the other automated pipelines) is exempt from the operator-facing gate.
+    const wipViolation = checkWipLimit(task.id, 'in_progress', task.workspace_id ?? null);
+    if (wipViolation) {
+      console.error(`[Dispatch] HELD task ${task.id}: in_progress column at its WIP limit — ${wipViolation}`);
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'wip_limit_in_progress',
+        audience: 'SYSTEM',
+        needs:
+          'The in_progress column is at its WIP limit. Move a task out of it ' +
+          '(to review/blocked/backlog) to free a slot, then re-dispatch.',
+        context: 'manual-dispatch',
+      });
+      return NextResponse.json(
+        { success: false, held: true, reason: 'wip_limit_in_progress', message: wipViolation },
+        { status: 429 },
       );
     }
 

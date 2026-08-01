@@ -217,8 +217,16 @@ const WIP_COLUMNS: ReadonlyArray<{
  *
  * Targets that map to no capped column (backlog, todo-bucket statuses, blocked,
  * done) are uncapped and always return null.
+ *
+ * Exported (in addition to its use inside transition()) so callers with an
+ * irreversible side effect BEFORE their transition() call can probe the limit
+ * first: the manual-dispatch route (src/app/api/tasks/[id]/dispatch/route.ts)
+ * fires chat.send to the agent before flipping status, so it holds with a 429
+ * when this returns non-null instead of sending work the board will then
+ * refuse to advance. The probe is read-only and advisory — transition()
+ * remains the authoritative check.
  */
-function checkWipLimit(
+export function checkWipLimit(
   taskId: string,
   to: LifecycleState,
   workspaceId: string | null,
