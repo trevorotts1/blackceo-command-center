@@ -677,7 +677,11 @@ export async function PATCH(
       // is the shared transition() (task-lifecycle.ts, owned by L3): this route,
       // the status route, and the return-to-orchestrator route should all funnel
       // through it — see integrator note.
-      actingAgentId = validatedData.updated_by_agent_id || existing.assigned_agent_id || null;
+      // MR-29: do NOT fall back to assigned_agent_id when updated_by_agent_id
+      // is absent — a UI drag without a verified agent identity is a human
+      // operator action. Falling back to the task's own agent would misattribute
+      // the move and make the audit trail say the agent moved its own card.
+      actingAgentId = validatedData.updated_by_agent_id || null;
       actorName = null;
       if (!validatedData.updated_by_agent_id && cfAccessEmail) {
         actorName = cfAccessEmail; // verified human operator (INGEST-11)
