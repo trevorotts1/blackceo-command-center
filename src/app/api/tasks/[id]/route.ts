@@ -18,6 +18,7 @@ import { selectPersonaForTask, buildPersonaReason, loadPersonaBundleScopes } fro
 import { recordPersonaCompletions } from '@/lib/tasks';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
+import { recordBlockEvent, getLatestBlockEvent } from '@/lib/block-events';
 import { getQcHeuristicPark } from '@/lib/qc-promote';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
@@ -73,6 +74,7 @@ export async function GET(
       persona_bundle_scopes: loadPersonaBundleScopes(task.id),
       dispatch_hold: getOpenDispatchHold(task.id),
       qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
+      last_block_event: getLatestBlockEvent(task.id),
     };
 
     return NextResponse.json(withMismatch);
@@ -824,9 +826,25 @@ export async function PATCH(
       }
       values.push(id);
       run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
-    }
 
-    // U034: `deliverable_url` — register as a `url` deliverable so the produced
+      // MR-30 — capture a block-history snapshot when the UPDATE just landed a
+      // manual block (entering `blocked` with blocked_reason/blocked_on_human/ask).
+      // The snapshot preserves WHY the card was blocked so the operator can
+      // review the history even after the card leaves the blocked column.
+      if (enteringBlocked) {
+        recordBlockEvent({
+          taskId: id,
+          blockReason: blockedPayload.blocked_reason ?? null,
+          blockedOnHuman: blockedPayload.blocked_on_human ?? null,
+          ask: blockedPayload.ask ?? null,
+          blockNeeds: blockedPayload.ask ?? null,
+          blockAudience:
+            blockedPayload.blocked_on_human === 'owner' ? 'OWNER' :
+            blockedPayload.blocked_on_human === 'operator' ? 'SYSTEM' : null,
+          actor: actingAgentId ?? 'operator',
+        });
+      }
+    }
     if (u034Url) {
       try {
         const dup = queryOne<{ id: string }>(

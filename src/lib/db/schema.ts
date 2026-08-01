@@ -676,4 +676,24 @@ CREATE TABLE IF NOT EXISTS bug_ticket_events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_bug_ticket_events_bug ON bug_ticket_events(bug_id, created_at);
+
+-- Block-event history (MR-30). Every time a task enters the blocked column,
+-- a snapshot of its block metadata is recorded here so the operator can see
+-- WHY a card was blocked AND what was needed, even after the card leaves
+-- blocked (the tasks.block_reason/block_needs/block_audience/block_gaps
+-- columns MUST be cleared on unblock — leaving them populated made an
+-- unblocked card still read as SYSTEM-blocked on the board).
+CREATE TABLE IF NOT EXISTS task_block_events (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  block_reason TEXT,       -- snapshotted reason from tasks.block_reason
+  block_gaps TEXT,          -- snapshotted gap detail from tasks.block_gaps
+  block_needs TEXT,         -- snapshotted resolve action from tasks.block_needs
+  block_audience TEXT,      -- snapshotted audience from tasks.block_audience
+  blocked_on_human TEXT,    -- snapshotted human-block target (owner/operator)
+  ask TEXT,                 -- snapshotted human-block ask
+  actor TEXT,               -- who initiated the block (agent id, sweep name, or 'manual')
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_block_events_task ON task_block_events(task_id, created_at DESC);
 `;

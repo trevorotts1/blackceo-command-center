@@ -58,6 +58,7 @@ import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { recordBlockEvent } from '@/lib/block-events';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
@@ -1618,6 +1619,13 @@ export function blockForOwnerConfirm(
   recordStatusEvent(taskId, fromStatus, 'blocked', {
     actor: 'audience-confirm',
     reason: `hard-hold department "${department}" unconfirmed past deadline`,
+  });
+  recordBlockEvent({
+    taskId,
+    blockReason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
+    blockNeeds: `Owner action required: ${prompt}`,
+    blockAudience: 'OWNER',
+    actor: 'audience-confirm',
   });
   try {
     run(

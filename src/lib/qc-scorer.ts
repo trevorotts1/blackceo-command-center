@@ -72,6 +72,7 @@ import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
+import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
@@ -5145,6 +5146,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         );
         if ((blockRes.changes ?? 0) > 0) {
           recordStatusEvent(taskId, 'review', 'blocked', { actor: 'qc-scorer', reason: blockedNote });
+          recordBlockEvent({
+            taskId,
+            blockReason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
+            blockGaps: blockGapsJson,
+            blockNeeds: blockNeeds,
+            blockAudience: blockAudience,
+            actor: 'qc-scorer',
+          });
         }
 
         run(

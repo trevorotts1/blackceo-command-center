@@ -170,6 +170,25 @@ export interface TaskPersonaBundleScope {
   audience_source?: string | null;
 }
 
+/**
+ * MR-30 — one row in task_block_events. A snapshot of block metadata recorded
+ * whenever a task enters the `blocked` column. The most recent row is surfaced
+ * in the task-detail modal even AFTER the card leaves blocked, so the operator
+ * can confirm the underlying issue was resolved.
+ */
+export interface TaskBlockEvent {
+  id: string;
+  task_id: string;
+  block_reason?: string | null;
+  block_gaps?: string | null;
+  block_needs?: string | null;
+  block_audience?: 'OWNER' | 'SYSTEM' | null;
+  blocked_on_human?: string | null;
+  ask?: string | null;
+  actor?: string | null;
+  created_at: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -341,6 +360,12 @@ export interface Task {
     message: string;
     created_at: string;
   } | null;
+  // MR-30 — the most recent block-event row for this task (computed per-row in
+  // the tasks GET routes from task_block_events, exactly like dispatch_hold from
+  // task_activities). Present even when the task is no longer in the blocked
+  // column, so the operator can see the last block's reason, needs, and audience
+  // to confirm the underlying issue was genuinely resolved.
+  last_block_event?: TaskBlockEvent | null;
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;
