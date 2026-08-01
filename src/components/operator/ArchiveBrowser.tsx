@@ -54,11 +54,16 @@ export default function ArchiveBrowser({ initialTasks, initialError }: ArchiveBr
       const res = await fetch('/api/tasks?includeArchived=true&limit=200');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
+      // MR-26: with ?limit the API wraps the rows as `{ tasks, total }`;
+      // without ?limit it returns a flat array. Normalize to an array before
+      // filtering — `json.data ?? json` blew up with a TypeError on the
+      // wrapped shape (json.data undefined, json an object, .filter missing).
+      const list: ArchiveTask[] = Array.isArray(json)
+        ? json
+        : (json.tasks ?? json.data ?? []);
       // Filter client-side to only archived tasks (belt + suspenders: the API
       // returns everything when includeArchived is set).
-      const archived = ((json.data ?? json) as ArchiveTask[]).filter(
-        (t) => t.archived_at != null,
-      );
+      const archived = list.filter((t) => t.archived_at != null);
       setTasks(archived);
     } catch (err) {
       setError((err as Error).message);
