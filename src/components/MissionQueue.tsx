@@ -66,7 +66,7 @@ interface MissionQueueProps {
 // The 'bug' preset renders the 7-lane Bugs Department board.
 // All existing task board code paths are gated behind boardKind === 'task' (the default).
 
-type ColumnDef = { id: string; label: string; gradient: string; tooltip?: string };
+type ColumnDef = { id: string; label: string; gradient: string; tooltip?: string; maxWip?: number };
 
 // Pixel width of the `gap-6` (1.5rem @ a 16px root) Tailwind class on the
 // column-strip flex container below. Columns are now fixed-width at every
@@ -98,8 +98,8 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
   task: [
     { id: 'backlog',     label: BACKLOG_COLUMN_LABEL, gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.backlog },
     { id: 'todo',        label: TODO_COLUMN_LABEL,    gradient: 'column-pill-backlog',  tooltip: COLUMN_TOOLTIPS.todo },
-    { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress', tooltip: COLUMN_TOOLTIPS.in_progress },
-    { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review',   tooltip: COLUMN_TOOLTIPS.review },
+    { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress', tooltip: COLUMN_TOOLTIPS.in_progress, maxWip: 5 },
+    { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review',   tooltip: COLUMN_TOOLTIPS.review,     maxWip: 8 },
     { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked',  tooltip: COLUMN_TOOLTIPS.blocked },
     { id: 'done',        label: 'Done',        gradient: 'column-pill-done',     tooltip: COLUMN_TOOLTIPS.done },
   ],
@@ -113,6 +113,24 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
     { id: 'CLOSED',           label: 'Closed',           gradient: 'column-pill-done' },
   ],
 };
+
+/**
+ * Returns whether a column has a WIP limit and has reached or exceeded it.
+ * Columns without a maxWip are never at capacity.
+ */
+function isColumnAtCapacity(column: ColumnDef, taskCount: number): boolean {
+  return typeof column.maxWip === 'number' && taskCount >= column.maxWip;
+}
+
+/**
+ * Returns the per-column WIP label string for display in the column header.
+ * Returns null when the column has no WIP limit — so the header pill stays
+ * unchanged for columns like Backlog/Blocked/Done that have no limit.
+ */
+function wipLabel(column: ColumnDef, taskCount: number): string | null {
+  if (typeof column.maxWip !== 'number') return null;
+  return `${taskCount}/${column.maxWip}`;
+}
 
 // U45/C-14: taskToColumnId / columnIdToStatus (the six-column bucketing rule
 // and its inverse) now live in src/lib/board-projection.ts — imported above
@@ -390,7 +408,14 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     e.dataTransfer.effectAllowed = 'move';
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragOver = (e: React.DragEvent, column?: ColumnDef, taskCount?: number) => {
+    // When a column has a WIP limit and is already at capacity, disallow the
+    // drop by not preventing the default (no drop zone). The dropTarget style
+    // gating below also visually signals this — the column card list won't
+    // show the drag-over highlight when at capacity.
+    if (column && taskCount !== undefined && isColumnAtCapacity(column, taskCount)) {
+      return; // don't prevent default — drop will be rejected by the browser
+    }
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
   };
@@ -814,26 +839,33 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
               /* Task Board — 6 columns, with loading gate above */
               COLUMNS.map((column) => {
                 const columnTasks = getTasksByStatus(column.id);
+                const atCapacity = isColumnAtCapacity(column, columnTasks.length);
+                const capacityLabel = wipLabel(column, columnTasks.length);
                 return (
                   <div
                     key={column.id}
                     ref={(el) => { columnRefs.current[column.id] = el; }}
                     data-walkthrough={`column-${column.id}`}
                     data-testid={`column-${column.id}`}
-                    className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0"
-                    onDragOver={handleDragOver}
+                    className={`w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0${atCapacity ? ' kanban-column-at-capacity' : ''}`}
+                    onDragOver={(e) => handleDragOver(e, column, columnTasks.length)}
                     onDrop={(e) => handleDrop(e, column.id as TaskStatus | 'todo')}
                   >
                     {/* Column Header */}
                     <div className="flex items-center justify-between shrink-0">
                       <div
-                        className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md cursor-help ${column.gradient}`}
-                        title={column.tooltip}
+                        className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md cursor-help ${atCapacity ? 'kanban-column-pill-at-capacity' : column.gradient}`}
+                        title={atCapacity ? `${column.tooltip ?? ''} (WIP limit ${column.maxWip} reached)` : column.tooltip ?? undefined}
                       >
-                        <span className="text-badge font-bold bg-white/20 px-2 py-0.5 rounded-full">
-                          {columnTasks.length}
+                        <span className={`text-badge font-bold px-2 py-0.5 rounded-full ${atCapacity ? 'bg-red-400 text-white' : 'bg-white/20'}`}>
+                          {capacityLabel ?? columnTasks.length}
                         </span>
                         <span className="text-sm font-bold">{column.label}</span>
+                        {atCapacity && (
+                          <span className="text-badge font-bold bg-red-400 text-white px-1.5 py-0.5 rounded-full" aria-label={`WIP limit ${column.maxWip} reached`}>
+                            FULL
+                          </span>
+                        )}
                       </div>
                       {/* No "+" on the Blocked column: a task can only ENTER
                           Blocked by being moved there (it needs a reason +
@@ -861,7 +893,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                     {/* Tasks — min-h-0 keeps the list constrained so it
                         scrolls internally instead of clipping; pb-6 gives
                         the last card breathing room at the shell edge. */}
-                    <div className="flex flex-col gap-3 lg:gap-4 overflow-y-auto min-h-0 pb-6 overscroll-contain pr-0 lg:pr-2">
+                    <div className={`flex flex-col gap-3 lg:gap-4 overflow-y-auto min-h-0 pb-6 overscroll-contain pr-0 lg:pr-2${atCapacity ? ' kanban-drop-target-at-capacity' : ''}`}>
                       {columnTasks.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-10 text-gray-300 select-none">
                           <InboxIcon className="w-7 h-7 mb-2" aria-hidden="true" />
@@ -894,6 +926,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                             columns={COLUMNS}
                             currentColumnId={column.id}
                             onMove={handleColumnMove}
+                            columnTaskCounts={Object.fromEntries(
+                              COLUMNS.map((c) => [c.id, getTasksByStatus(c.id).length]),
+                            )}
                           />
                         ))
                       )}
@@ -943,18 +978,20 @@ export interface TaskCardProps {
   isDragging: boolean;
   isCompleted?: boolean;
   /** Board columns, for the touch-friendly Move menu (item 9). */
-  columns: { id: string; label: string }[];
+  columns: { id: string; label: string; maxWip?: number }[];
   /** Which column this card is currently rendered under (from the parent's render loop). */
   currentColumnId: string;
   /** Fires the shared status-change path (same one drag-drop uses, including the Blocked modal). */
   onMove: (task: Task, targetColumnId: string) => void;
+  /** Current task count per column id, for WIP limit enforcement in the Move menu. */
+  columnTaskCounts?: Record<string, number>;
 }
 
 // Exported (not just used internally) so the U37 (C-06) class-b hold chip has
 // a direct render-level test target, matching the existing pattern of
 // exporting card-face pieces for testability (kanban/TaskCard.tsx's
 // PersonaSlotChips/PersonaScopeChips).
-export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns, currentColumnId, onMove }: TaskCardProps) {
+export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns, currentColumnId, onMove, columnTaskCounts }: TaskCardProps) {
   // Status pill styles
   const statusPillStyles: Record<string, string> = {
     backlog: 'bg-gray-100 text-gray-600',
@@ -1034,6 +1071,7 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
           currentColumnId={currentColumnId}
           taskTitle={task.title}
           onSelect={(columnId) => onMove(task, columnId)}
+          columnTaskCounts={columnTaskCounts}
         />
       </div>
 
