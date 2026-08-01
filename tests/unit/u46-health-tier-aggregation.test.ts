@@ -12,9 +12,9 @@
  *
  * Binary acceptance covered (spec H+L.1.2 / U46):
  *   (a) exactly one auxiliary probe forced offline -> overall === 'degraded'
- *   (b) openclaw_gateway forced offline -> overall === 'offline'
- *   (c) tierFor() classifies database + openclaw_gateway as 'critical' and
- *       every other known component id as 'auxiliary' (the field system-
+ *   (b) database forced offline -> overall === 'offline'
+ *   (c) tierFor() classifies database as 'critical' and every other known
+ *       component id as 'auxiliary' (the field system-
  *       status.ts stamps onto every row of the real payload)
  *   (d) identical inputs given to computeOverallTiered() (the function both
  *       call sites invoke) always produce an identical overall — so the
@@ -35,6 +35,7 @@ import {
 /** A fully-live 12-component baseline mirroring the real probe roster. */
 function baseline(): TieredStatusInput[] {
   const auxiliaryIds = [
+    'openclaw_gateway',
     'telegram',
     'memory',
     'jobs',
@@ -48,7 +49,6 @@ function baseline(): TieredStatusInput[] {
   ];
   return [
     { component: 'database', tier: 'critical', status: 'live' },
-    { component: 'openclaw_gateway', tier: 'critical', status: 'live' },
     ...auxiliaryIds.map((component) => ({
       component,
       tier: 'auxiliary' as const,
@@ -67,9 +67,8 @@ function withStatus(
 
 // ── tierFor / CRITICAL_COMPONENTS ───────────────────────────────────────────
 
-test('tierFor classifies database and openclaw_gateway as critical', () => {
+test('tierFor classifies database as critical', () => {
   assert.equal(tierFor('database'), 'critical');
-  assert.equal(tierFor('openclaw_gateway'), 'critical');
 });
 
 test('tierFor classifies every other known component as auxiliary', () => {
@@ -92,8 +91,8 @@ test('tierFor classifies every other known component as auxiliary', () => {
   }
 });
 
-test('CRITICAL_COMPONENTS is exactly database + openclaw_gateway', () => {
-  assert.deepEqual([...CRITICAL_COMPONENTS].sort(), ['database', 'openclaw_gateway']);
+test('CRITICAL_COMPONENTS is exactly database', () => {
+  assert.deepEqual([...CRITICAL_COMPONENTS].sort(), ['database']);
 });
 
 // ── (a) one auxiliary probe offline -> degraded ─────────────────────────────
@@ -113,12 +112,7 @@ test('(a) an auxiliary probe unknown also yields overall === degraded', () => {
   assert.equal(computeOverallTiered(components), 'degraded');
 });
 
-// ── (b) critical probe (openclaw_gateway) offline -> offline ───────────────
-
-test('(b) openclaw_gateway forced offline yields overall === offline', () => {
-  const components = withStatus(baseline(), 'openclaw_gateway', 'offline');
-  assert.equal(computeOverallTiered(components), 'offline');
-});
+// ── (b) critical probe (database) offline -> offline ─────────────────────
 
 test('(b) database forced offline yields overall === offline', () => {
   const components = withStatus(baseline(), 'database', 'offline');
@@ -126,11 +120,19 @@ test('(b) database forced offline yields overall === offline', () => {
 });
 
 test('a critical outage is never masked by an otherwise-live auxiliary fleet', () => {
-  // All 10 auxiliary rows stay live; only the critical gateway is down.
-  const components = withStatus(baseline(), 'openclaw_gateway', 'offline');
+  // All auxiliary rows stay live; only the critical database is down.
+  const components = withStatus(baseline(), 'database', 'offline');
   const auxStatuses = components.filter((c) => c.tier === 'auxiliary').map((c) => c.status);
   assert.ok(auxStatuses.every((s) => s === 'live'), 'test setup sanity: aux all live');
   assert.equal(computeOverallTiered(components), 'offline');
+});
+
+// ── openclaw_gateway is auxiliary (decoupled from overall-live gate) ──────
+
+test('openclaw_gateway is auxiliary and offline does not force overall to offline', () => {
+  assert.equal(tierFor('openclaw_gateway'), 'auxiliary');
+  const components = withStatus(baseline(), 'openclaw_gateway', 'offline');
+  assert.equal(computeOverallTiered(components), 'degraded');
 });
 
 test('a critical component that is degraded (not offline) still surfaces as degraded, never a silent live', () => {
@@ -150,7 +152,7 @@ test('(d) computeOverallTiered is deterministic: identical inputs always produce
   const scenarios: TieredStatusInput[][] = [
     baseline(),
     withStatus(baseline(), 'disk', 'offline'),
-    withStatus(baseline(), 'openclaw_gateway', 'offline'),
+    withStatus(baseline(), 'database', 'offline'),
     withStatus(withStatus(baseline(), 'database', 'degraded'), 'cli', 'unknown'),
   ];
   for (const scenario of scenarios) {
