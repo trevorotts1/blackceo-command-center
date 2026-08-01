@@ -57,11 +57,19 @@ export const revalidate = 0;
  * used. When omitted, coverage is computed against the bare canonical floor
  * (mandatory + universal-primary) — the strictest expected set — so the
  * pre-flight can only ever be MORE conservative than the UI, never laxer.
+ *
+ * `retryKick` is the recovery path for the rare case where the build kick fires
+ * into a down gateway or the [WORKFORCE-RESUME] dispatch is lost after the
+ * interview was already marked complete. When true and the interview is already
+ * complete, the idempotency guard is bypassed and the completion script is
+ * re-pressed — re-running QC and re-firing the kick — so the operator has a
+ * one-click retry from the UI rather than a dead-end "already complete" state.
  */
 const requestSchema = z
   .object({
     customDeptIds: z.array(z.string().min(1)).max(200).optional(),
     implicitYesCustomIds: z.array(z.string().min(1)).max(200).optional(),
+    retryKick: z.boolean().optional(),
   })
   .strict()
   .optional();
@@ -193,10 +201,11 @@ export async function POST(req: NextRequest) {
   };
 
   // -- Idempotency: if the interview is already complete, do NOT re-press the
-  //    script (that could re-fire the one-shot build kick). Report the current,
-  //    authoritative QC status from the canonical file instead.
+  //    script unless the caller explicitly requested a retryKick (recovery path
+  //    for a lost [WORKFORCE-RESUME] dispatch). Report the current, authoritative
+  //    QC status from the canonical file instead when retryKick is absent/false.
   const priorState = readBuildState();
-  if (priorState?.interviewComplete === true) {
+  if (priorState?.interviewComplete === true && !body?.retryKick) {
     return finalResponse(priorState, { alreadyComplete: true });
   }
 
