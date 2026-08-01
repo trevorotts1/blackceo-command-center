@@ -137,7 +137,10 @@ export async function recoverFinishedTaskToReview(
     ? `Recovered: finished output found on disk (${recoveredPath}) for a stalled in_progress task — redelivered + advanced to review instead of blocking.`
     : `Recovered: ${registered} deliverable(s) already registered for a stalled in_progress task — advanced to review instead of blocking.`;
   try {
-    await transition(task.id, 'review', { actor, reason: recoverReason });
+    // MR-12: exempt from the review-column WIP limit — recovered finished work
+    // must reach QC even when the column is full (else it would fall through to
+    // the raw-write fallback purely because the column is capped).
+    await transition(task.id, 'review', { actor, reason: recoverReason, operatorOverride: true });
   } catch (err) {
     if (err instanceof TransitionError) {
       // U99-RAW-STATUS-WRITER: fallback-of-last-resort for when transition()

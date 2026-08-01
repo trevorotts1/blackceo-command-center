@@ -791,6 +791,18 @@ export async function PATCH(
               },
               { status: 409 },
             );
+          } else if (err.code === 'WIP_LIMIT') {
+            // MR-12: server-side WIP limit — the target column is full. 429 so
+            // the board can surface "column at capacity" distinctly from a
+            // validation failure; the UI already refuses this drop client-side.
+            return NextResponse.json(
+              {
+                error: err.message,
+                code: err.code,
+                hint: 'The target column is at its WIP limit. Move a task out of it first, or retry with an operator override.',
+              },
+              { status: 429 },
+            );
           } else {
             return NextResponse.json({ error: err.message, code: err.code }, { status: 422 });
           }

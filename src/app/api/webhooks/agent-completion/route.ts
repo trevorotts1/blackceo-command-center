@@ -165,6 +165,10 @@ export async function POST(request: NextRequest) {
             actor: task.assigned_agent_id ?? 'agent-completion',
             reason: 'agent reported TASK_COMPLETE (webhook)',
             expectedFrom: task.status as 'in_progress',
+            // MR-12: exempt from the review-column WIP limit — an agent's
+            // finished work must reach QC even when the column is full; the
+            // limit gates operator moves, not the completion pipeline.
+            operatorOverride: true,
           });
         } catch (err) {
           // CAS_CONFLICT or ILLEGAL_TRANSITION — non-fatal, the task was
@@ -339,6 +343,8 @@ export async function POST(request: NextRequest) {
             actor: agentId ?? 'agent-completion',
             reason: 'agent reported TASK_COMPLETE (webhook, session path)',
             expectedFrom: task.status as 'in_progress',
+            // MR-12: exempt from the review-column WIP limit (see sibling call).
+            operatorOverride: true,
           });
         } catch (err) {
           if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {

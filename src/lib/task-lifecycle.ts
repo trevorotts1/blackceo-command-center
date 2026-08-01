@@ -153,6 +153,109 @@ export const LEGAL_TRANSITIONS: Record<LifecycleState, Set<LifecycleState>> = {
   blocked:          new Set<LifecycleState>(['backlog', 'inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress']),
 };
 
+// ---------------------------------------------------------------------------
+// WIP (work-in-progress) limits — server-side enforcement (MR-12)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-column WIP limits, mirroring the board's client-side `maxWip` values
+ * (src/components/MissionQueue.tsx BOARD_PRESETS.task: in_progress=5, review=8).
+ *
+ * MR-12 originally enforced these ONLY in the UI (drag-over rejection + the
+ * touch Move menu disabling at-capacity columns). That left the limit advisory:
+ * any caller hitting PATCH /api/tasks/{id} — or any path that bypassed the drag
+ * affordance — could overflow the column. This map is the authoritative,
+ * server-side copy so the limit is enforced at the ONE funnel every status
+ * change goes through (transition()), not just in the browser.
+ *
+ * The 'review' limit is keyed by the underlying statuses that BUCKET into the
+ * review column (review + testing — see REVIEW_BUCKET_STATUSES in
+ * src/lib/board-projection.ts); the count is taken across BOTH so a task moving
+ * review→testing is not double-counted against the same column. 'in_progress'
+ * maps 1:1 to its status.
+ */
+export const WIP_LIMITS: Partial<Record<LifecycleState, number>> = {
+  in_progress: 5,
+  review: 8,
+};
+
+/**
+ * Column definitions for the WIP check. Each entry names the limit, the target
+ * statuses whose entry counts as "entering this column" (`targets`), and the
+ * statuses counted toward the column (`counts`).
+ *
+ * The review column buckets BOTH 'review' and 'testing' (see
+ * REVIEW_BUCKET_STATUSES in src/lib/board-projection.ts), so a task moved
+ * directly to 'testing' is gated by the SAME limit as one moved to 'review',
+ * and both statuses are counted — otherwise the column could be overflowed via
+ * the 'testing' sub-state. 'in_progress' maps 1:1.
+ */
+const WIP_COLUMNS: ReadonlyArray<{
+  limit: number;
+  targets: readonly LifecycleState[];
+  counts: readonly LifecycleState[];
+}> = [
+  { limit: WIP_LIMITS.in_progress as number, targets: ['in_progress'], counts: ['in_progress'] },
+  { limit: WIP_LIMITS.review as number, targets: ['review', 'testing'], counts: ['review', 'testing'] },
+];
+
+/**
+ * Server-side WIP check for a transition INTO a capped column.
+ *
+ * Returns a human-readable refusal string when moving `taskId` to `to` would
+ * push the target column's task count to/over its WIP limit, else null
+ * (allowed). The count EXCLUDES `taskId` itself so an idempotent / intra-column
+ * move (e.g. review→testing, both in the review column) never counts the moving
+ * task twice.
+ *
+ * The count is SCOPED TO THE TASK'S WORKSPACE: the board renders one workspace
+ * at a time (MissionQueue fetches `?workspace_id=`), so the client-side WIP
+ * count the operator sees is per-workspace. Counting globally here would
+ * over-refuse on multi-workspace boxes (a full column in workspace A would
+ * block an unrelated move in workspace B). A NULL workspace_id counts against
+ * other NULL-workspace tasks only.
+ *
+ * Targets that map to no capped column (backlog, todo-bucket statuses, blocked,
+ * done) are uncapped and always return null.
+ */
+function checkWipLimit(
+  taskId: string,
+  to: LifecycleState,
+  workspaceId: string | null,
+): string | null {
+  const column = WIP_COLUMNS.find((c) => (c.targets as readonly string[]).includes(to));
+  if (!column) return null; // uncapped column
+
+  const placeholders = column.counts.map(() => '?').join(', ');
+  const workspaceClause = workspaceId === null
+    ? 'workspace_id IS NULL'
+    : 'workspace_id = ?';
+
+  try {
+    const params: unknown[] = [...column.counts, taskId];
+    if (workspaceId !== null) params.push(workspaceId);
+    const row = queryOne<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM tasks
+        WHERE status IN (${placeholders}) AND id != ? AND ${workspaceClause}`,
+      params,
+    );
+    const count = row?.cnt ?? 0;
+    if (count >= column.limit) {
+      return (
+        `Column '${to}' is at its WIP limit (${count}/${column.limit}); ` +
+        `cannot move task ${taskId} there. Free a slot (move a task out of ` +
+        `'${to}') or use operatorOverride to exceed the limit.`
+      );
+    }
+    return null;
+  } catch {
+    // Count query failed (e.g. schema variance on an old DB). Fail OPEN rather
+    // than strand work — the client-side limit still applies in the UI, and a
+    // hard refusal here would block legitimate transitions on a broken count.
+    return null;
+  }
+}
+
 /**
  * Precondition error — thrown (and caught) when a transition's precondition
  * fails.  The caller receives a structured error with `code` and `detail`.
@@ -696,6 +799,22 @@ export async function transition(
       'ILLEGAL_TRANSITION',
       `Illegal transition ${from} → ${to} for task ${taskId}`,
     );
+  }
+
+  // ── WIP limit (MR-12, server-side) ────────────────────────────────────────
+  // Enforce the board's per-column WIP limits at the funnel, not just in the
+  // UI. Skippable via operatorOverride for the same reason the assignment
+  // preconditions are: an override is a deliberate human/system decision to
+  // exceed the soft cap. Automated pipeline flows that push completed work
+  // INTO a capped column (agent-completion webhook, execution-watcher, the
+  // test runner) set operatorOverride so finished work is never stranded by a
+  // full column; the operator PATCH path does NOT set it, so a human drag/
+  // PATCH into a full column is refused here exactly as the UI refuses it.
+  if (!evidence.operatorOverride) {
+    const wipViolation = checkWipLimit(taskId, to, task.workspace_id);
+    if (wipViolation) {
+      throw new TransitionError('WIP_LIMIT', wipViolation);
+    }
   }
 
   // Preconditions
