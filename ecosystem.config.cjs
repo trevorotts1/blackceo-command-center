@@ -36,8 +36,9 @@
  *   vps-docker-bootstrap.sh) do this substitution automatically.
  */
 
+const path = require('path');
 const INSTALL_DIR = process.env.CC_INSTALL_DIR || process.cwd();
-const DB_PATH = process.env.DATABASE_PATH || `${INSTALL_DIR}/mission-control.db`;
+const DB_PATH = process.env.DATABASE_PATH || path.join(INSTALL_DIR, '../data/mission-control.db');
 // Use CC_PORT ONLY — never read process.env.PORT to prevent env-bleed from
 // OpenClaw gateway or Hostinger container-injected PORT. qc-cc.sh enforces this.
 const CC_PORT = process.env.CC_PORT || '4000';

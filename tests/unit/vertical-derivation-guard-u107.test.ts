@@ -297,6 +297,16 @@ test('declaredVerticalPacks() reads verticalPacks.detectedPacks from build-state
 test('loadDepartments() step-3 fallback excludes undeclared vertical departments end-to-end (empty workspaces table, no build-state)', async () => {
   const db = (await import('../../src/lib/db')) as typeof import('../../src/lib/db');
   db.getDb(); // migrate the isolated temp DB; leaves `workspaces` empty (no auto-seed)
+  // STALE-FIXTURE FIX (2026-07-31): migrations 113/114 (U017/U037, landed after this
+  // test was authored) unconditionally seed the podcast/anthology/presentations
+  // engine workspaces as part of getDb()'s own migration chain, so "leaves
+  // `workspaces` empty" above is no longer true on its own — loadDepartments()
+  // then takes step 2 (workspaces-table-driven "semantic routing") instead of the
+  // step-3 fallback floor this test exists to prove, which made the assertions
+  // below fail for an unrelated reason. Restore the genuinely-empty-workspaces
+  // precondition this test's own name and docstring require.
+  db.run('DELETE FROM agents'); // FK: agents.workspace_id references workspaces(id)
+  db.run('DELETE FROM workspaces');
 
   const nonexistentHome = path.join(os.tmpdir(), `u107-nohome-${process.pid}-${Date.now()}`);
   process.env.HOME = nonexistentHome; // resolveWorkspaceDir() -> a dir that has no build-state file
@@ -316,6 +326,10 @@ test('loadDepartments() step-3 fallback excludes undeclared vertical departments
 test('loadDepartments() step-3 fallback INCLUDES a declared vertical\'s departments end-to-end (positive case via build-state fixture)', async () => {
   const db = (await import('../../src/lib/db')) as typeof import('../../src/lib/db');
   db.getDb();
+  // STALE-FIXTURE FIX (2026-07-31): same reason as the test above — restore the
+  // genuinely-empty-workspaces precondition this step-3 test requires.
+  db.run('DELETE FROM agents'); // FK: agents.workspace_id references workspaces(id)
+  db.run('DELETE FROM workspaces');
 
   const wsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'u107-ws-'));
   fs.writeFileSync(

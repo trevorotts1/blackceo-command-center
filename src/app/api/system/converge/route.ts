@@ -203,7 +203,51 @@ export async function POST(req: NextRequest): Promise<Response> {
     try {
       const db = getDb();
       const counts = reseedWorkspacesFromConfig(db, { force: true });
-      result.workspaces = counts;
+      result.workspaces = { created: counts.created, updated: counts.updated };
+
+      // U041 (audit E11). FAIL LOUD on a manifest that resolved but declares no
+      // departments — but ONLY when that would actually leave the board with
+      // ZERO department columns. Before this, converge answered ok:true with
+      // workspaces:{created:0,updated:0} — the same body a healthy steady-state
+      // converge returns — so an operator could converge a BLANK board and be
+      // told it worked. This mirrors the SOP leg of this same endpoint (see the
+      // activeSopCount === 0 check below), which has failed loud on an empty
+      // result all along. The every-boot path deliberately does NOT do this: it
+      // warns and comes up (Rule 3.5 stage 1).
+      //
+      // Gated on the CURRENT provisioned count (not just this call's outcome):
+      // an empty/malformed manifest never DELETES existing workspaces (reseed is
+      // additive-only), so a box that already has departments provisioned still
+      // renders them — that is steady state, not the "board with zero department
+      // columns" defect this guards against, and it must stay a warn-and-continue
+      // (matching the boot path) rather than a hard 500. Only a genuinely blank
+      // board (provisioned count 0) reaching this line is the real regression.
+      if (counts.outcome === 'empty-manifest' || counts.outcome === 'malformed') {
+        const provisionedCount = listProvisionedWorkspaceIds(db).length;
+        if (provisionedCount === 0) {
+          return NextResponse.json(
+            {
+              ok: false,
+              ran_at,
+              scope,
+              error:
+                `converge scope=${scope} resolved a department manifest that declares NO departments ` +
+                `(outcome=${counts.outcome}, raw entries=${counts.manifestEntries}). Zero workspaces were ` +
+                'seeded, so the board would render no department columns. This is NOT "already up to ' +
+                'date". The manifest is written per box at runtime by the workforce build; the repo ' +
+                'template is deliberately an empty array and must stay that way. Check the resolved ' +
+                'path in the [reseed] log line, then re-run converge scope=workspaces.',
+              workspaces: result.workspaces,
+            },
+            { status: 500 },
+          );
+        }
+        console.warn(
+          `[reseed] manifest outcome=${counts.outcome} (raw entries=${counts.manifestEntries}) but the ` +
+            `board already has ${provisionedCount} provisioned workspace(s) — steady state, not a blank ` +
+            'board. Continuing (warn-only), same as the boot path.',
+        );
+      }
 
       // ── Step 1b (C6 / AUD-16): honor the declined set — the ELIMINATE path ──
       //
@@ -290,9 +334,19 @@ export async function POST(req: NextRequest): Promise<Response> {
           );
         }
       } else {
-        // No resolvable departments.json — assert nothing rather than assert wrong
-        // (an empty manifest would flag every live department as unexpected).
-        console.warn('[C6] No departments.json resolved — skipping converge parity assertion.');
+        // Assert nothing rather than assert wrong (an empty manifest would flag
+        // every live department as unexpected). U041: listChosenDepartmentIds()
+        // returns null for THREE different conditions — no file, unparseable
+        // file, empty array (src/lib/workspaces/archive.ts:451) — and this line
+        // used to report all three as "No departments.json resolved", sending
+        // an operator hunting for a missing file that was present and empty.
+        // counts.outcome distinguishes them, so say which one it actually was.
+        console.warn(
+          `[C6] Skipping converge parity assertion — the chosen set is unavailable ` +
+            `(reseed outcome=${counts.outcome}, configPath=${counts.configPath ?? 'none'}). ` +
+            'A manifest that RESOLVED but is empty or malformed is reported as a 500 above; ' +
+            'reaching this line means no manifest was resolvable at all.',
+        );
       }
     } catch (err) {
       return NextResponse.json(

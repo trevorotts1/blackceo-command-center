@@ -25,12 +25,22 @@ import './_isolated-db'; // MUST be first (after env setup).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { v4 as uuidv4 } from 'uuid';
-import { run } from '../../src/lib/db';
+import { run, queryOne } from '../../src/lib/db';
 import { candidateSessionKeys } from '../../src/lib/jobs/execution-watcher';
 
 // A workspace whose slug maps to the dept-presentations runtime dir created above.
-const WS_ID = `ws-${uuidv4()}`;
-run('INSERT INTO workspaces (id, name, slug, sort_order) VALUES (?, ?, ?, 1000)', [WS_ID, 'Presentations', 'presentations']);
+//
+// 'presentations' is a RESERVED slug: migration 114 (U037,
+// engine_workspace_identity_and_presentations_seed) inserts it unconditionally on
+// every fresh DB, including test DBs. A plain INSERT here therefore fails
+// `UNIQUE constraint failed: workspaces.slug` at module load and crashes the
+// entire file before any test runs. Reuse the seeded row; only create one if the
+// migration chain did not.
+const seededWs = queryOne<{ id: string }>('SELECT id FROM workspaces WHERE slug = ?', ['presentations']);
+const WS_ID = seededWs?.id ?? `ws-${uuidv4()}`;
+if (!seededWs) {
+  run('INSERT INTO workspaces (id, name, slug, sort_order) VALUES (?, ?, ?, 1000)', [WS_ID, 'Presentations', 'presentations']);
+}
 
 test('dept runtime present → probes agent:dept-<slug>: FIRST, then falls back to agent:main:', () => {
   const session = 'sess-abc';

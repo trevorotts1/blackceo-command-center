@@ -7,8 +7,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { CreateDeliverableSchema } from '@/lib/validation';
-import { existsSync } from 'fs';
+import { existsSync, lstatSync, readFileSync } from 'fs';
+import { createHash } from 'crypto';
 import path from 'path';
+import { extname } from 'path';
 import type { TaskDeliverable } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -73,6 +75,9 @@ export async function POST(
     // accepted silently and only failed much later inside the QC manifest build.
     let fileExists = true;
     let normalizedPath = path;
+    let mime_type: string | null = null;
+    let file_size_bytes: number | null = null;
+    let sha256: string | null = null;
     if ((deliverable_type === 'file' || deliverable_type === 'artifact') && path) {
       // Expand tilde
       normalizedPath = path.replace(/^~/, process.env.HOME || '');
@@ -80,22 +85,50 @@ export async function POST(
       if (!fileExists) {
         console.warn(`[DELIVERABLE] Warning: File does not exist: ${normalizedPath}`);
       }
+      // U063: capture mime_type, file_size_bytes, sha256 for regular files.
+      // Wrap so a stat failure logs and continues — the POST must still return 201.
+      if (fileExists) {
+        try {
+          const stat = lstatSync(normalizedPath);
+          if (stat.isFile()) {
+            file_size_bytes = stat.size;
+            const ext = extname(normalizedPath).replace(/^\./, '').toLowerCase();
+            const mimeMap: Record<string, string> = {
+              pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+              pdf: 'application/pdf', md: 'text/markdown', mp3: 'audio/mpeg',
+              png: 'image/png', html: 'text/html', htm: 'text/html',
+              json: 'application/json', txt: 'text/plain', csv: 'text/csv',
+              jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+              svg: 'image/svg+xml', webp: 'image/webp',
+            };
+            mime_type = mimeMap[ext] || 'application/octet-stream';
+            const buf = readFileSync(normalizedPath);
+            sha256 = createHash('sha256').update(buf).digest('hex');
+          }
+        } catch (err) {
+          console.warn(`[DELIVERABLE] Could not stat/read file ${normalizedPath}:`, (err as Error).message);
+        }
+      }
     }
 
     const db = getDb();
     const id = crypto.randomUUID();
 
-    // Insert deliverable
+    // Insert deliverable (U063: now writes mime_type, file_size_bytes, sha256
+    // for regular files. Back-fills nothing — the 24 existing rows stay NULL.)
     db.prepare(`
-      INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description, mime_type, file_size_bytes, sha256)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       taskId,
       deliverable_type,
       title,
       path || null,
-      description || null
+      description || null,
+      mime_type,
+      file_size_bytes,
+      sha256,
     );
 
     // Get the created deliverable

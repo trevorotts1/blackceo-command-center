@@ -5,7 +5,10 @@ import { X, Save, Trash2, Activity, Package, Bot, ClipboardList, Plus } from 'lu
 import { useMissionControl } from '@/lib/store';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import { ActivityLog } from './ActivityLog';
+import PhaseStepper from './PhaseStepper';
 import { DeliverablesList } from './DeliverablesList';
+// U063 — Presentation deliverables checklist (nine rows, always).
+import { PresentationDeliverablesPanel } from './PresentationDeliverablesPanel';
 import { SessionsList } from './SessionsList';
 import { PlanningTab } from './PlanningTab';
 import { AgentModal } from './AgentModal';
@@ -22,6 +25,9 @@ import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
 // a task that actually went through the blend (task.blend_directive present)
 // so a plain non-content task never fires the extra gate-status fetch.
 import { AudienceConfirmPanel } from './AudienceConfirmPanel';
+// U064 — persona picker (voice/topic axis), mounted beside AudienceConfirmPanel.
+import { PersonaPickerPanel } from './PersonaPickerPanel';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 // P2-02 — the task-detail panels that fill in and actually USE the modal's
 // fields: who's working on this + why, the SOP link, the QC block transparency,
 // and the planning metadata.
@@ -538,6 +544,12 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {task && task.blend_directive && (
             <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
           )}
+          {/* U064 — Persona picker panel (voice/topic axis). Self-contained +
+              fail-quiet: GETs /api/tasks/[id]/persona-bundle on mount and renders
+              NOTHING when the bundle is null (mirrors AudienceConfirmPanel's
+              early-return pattern). Mounted beside AudienceConfirmPanel so both
+              axes are visible on the same form. */}
+          {task && <PersonaPickerPanel taskId={task.id} onConfirmed={() => window.location.reload()} />}
           {/* P2-02 — task-detail panels for an existing task (skipped on the
               anthology Assembly card, whose overview is the cockpit only). They
               sit OUTSIDE the form so their buttons/links never submit the edit
@@ -956,6 +968,11 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
             </div>
           )}
 
+          {/* U060 — live phase progress stepper mounted beside ActivityLog */}
+          {task && canonicalDeptSlug(task.department) === 'presentations' && (
+            <PhaseStepper taskId={task.id} />
+          )}
+
           {/* Activity Tab */}
           {activeTab === 'activity' && task && (
             <ActivityLog taskId={task.id} engineLabel={engineLabel} />
@@ -963,7 +980,14 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
 
           {/* Deliverables Tab */}
           {activeTab === 'deliverables' && task && (
-            <DeliverablesList taskId={task.id} engineLabel={engineLabel} />
+            <>
+              {/* U063: Presentation deliverables checklist — rendered above the
+                  generic list for presentation-department tasks only. */}
+              {task.department === 'presentations' && (
+                <PresentationDeliverablesPanel taskId={task.id} />
+              )}
+              <DeliverablesList taskId={task.id} engineLabel={engineLabel} />
+            </>
           )}
 
           {/* Sessions Tab */}

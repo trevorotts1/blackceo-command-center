@@ -132,6 +132,10 @@ export default defineConfig({
       // and DB mirror encrypt-on-write / decrypt-on-read. Uses the isolated-DB
       // helper + the '@' alias, so vitest-only, never the tsx --test glob.
       'tests/unit/interview-answers-encryption.test.ts',
+      // U060 — presentation-phases table test: exclusivity + totality proof
+      // against the 26 canonical manifest phase ids, plus phaseIdOf and
+      // computePhaseProgress unit tests.
+      'tests/unit/presentation-phases.test.ts',
       // U010 — interview shell-lock fallback wiring regression lock. Static
       // source checks that verify the middleware imports and calls
       // checkInterviewCompleteViaFallback + signInterviewToken, checks
@@ -139,6 +143,26 @@ export default defineConfig({
       // API but NOT the dead getInterviewCookieOptions export. Remove the
       // fallback call from middleware.ts and this suite goes RED.
       'tests/unit/middleware-shell-lock-fallback.test.ts',
+      // U052 — passthrough write scope anti-rot lock. Derivation test walks
+      // src/app/api/**/route.ts and src/** (excluding src/app/api) to assert
+      // BEARER_REQUIRED_WRITE_ROUTES is in sync with the codebase. Uses glob
+      // for file walking + vitest globals, so vitest-only, never the tsx glob.
+      'src/lib/__tests__/passthrough-write-scope.test.ts',
+      // U032 — promote identity gate test
+      'tests/unit/u032-promote-identity-gate.test.ts',
+      // U063 — Presentation deliverables panel + teleprompter viewer (SAFE
+      // subset). Nine-artifact checklist, size honesty, GHL join on
+      // uploaded[].local_path, symlink refusal, secrets rule. DB-backed
+      // vitest suite; the Node built-in `npm run test:unit` glob skips it
+      // (see below) so it only runs here.
+      'tests/unit/presentation-deliverables.test.ts',
+      // U036 / U039 — ADDED 2026-07-29. Both files import vitest globals, so
+      // `node --test` cannot load them; they were ALSO absent from this include
+      // list, which meant neither executed in ANY runner. Two units shipped with
+      // zero tests actually running. Excluded from the test:unit glob in
+      // package.json in the same commit.
+      'tests/unit/u036-department-canonical.test.ts',
+      'tests/unit/u039-sweep-killflag-sources.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

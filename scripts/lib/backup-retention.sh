@@ -175,9 +175,12 @@ oc_backup_prune() {
       echo "  [backup-prune] KEEP  (current run -- never pruned): $entry"
       continue
     fi
+    # Log intent BEFORE removing (never silent, never after-the-fact): a crash
+    # or kill between the echo and the rm still leaves a record of what was
+    # about to be deleted.
+    echo "  [backup-prune] PRUNE: $entry"
     if rm -rf -- "$entry" 2>/dev/null; then
       pruned=$(( pruned + 1 ))
-      echo "  [backup-prune] PRUNE: $entry"
     else
       echo "  [backup-prune] WARN: could not remove $entry" >&2
     fi

@@ -73,6 +73,19 @@ export type HonoredFlag = (typeof HONORED_FLAGS)[number];
 
 export const STALE_TASK_SWEEP_KILL_FLAG: HonoredFlag = 'DISABLE_STALE_TASK_SWEEP';
 
+/**
+ * U039 (audit E9) — the stuck-in-progress sweep's kill-flag.
+ *
+ * DELIBERATELY NOT IN HONORED_FLAGS. Adding it there would let the durable
+ * overrides file disable a sweep it cannot disable today, which on any box whose
+ * hand-edited overrides file already contains this key would silently turn the
+ * sweep OFF at the next boot. That is a behaviour change and it belongs to its
+ * own unit under Rule 3.5, not to an observability fix. Until then this flag's
+ * ONLY source is process.env, and this module says so out loud rather than
+ * leaving the operator to infer it from an allow-list two hundred lines away.
+ */
+export const STUCK_IN_PROGRESS_SWEEP_KILL_FLAG = 'DISABLE_STUCK_IN_PROGRESS_SWEEP' as const;
+
 /** Canonical filename, used by scripts/operator-flag.sh. Keep the two in sync. */
 export const OVERRIDES_FILENAME = 'operator-overrides.env';
 
@@ -238,6 +251,29 @@ export function resolveStaleTaskSweepKillFlag(): KillFlagResolution {
 }
 
 /**
+ * U039 — resolve an env-ONLY kill flag. Reuses KillFlagResolution so the banner
+ * can render both sweeps identically, but never consults the durable file: for
+ * this flag the file is not a source (HONORED_FLAGS has one element).
+ *
+ * The truthiness test is COPIED FROM stuck-in-progress-sweep.ts:247-248 — an
+ * EXACT '1' | 'true' match — and NOT isTruthyFlagValue(), which also accepts
+ * 'yes' / 'on' / mixed case / surrounding whitespace. Using the wider test here
+ * would make the banner report a sweep as DISABLED that is in fact RUNNING. A
+ * banner that disagrees with the code it describes is worse than no banner.
+ */
+export function resolveEnvOnlyStuckSweepKillFlag(): KillFlagResolution {
+  const raw = process.env[STUCK_IN_PROGRESS_SWEEP_KILL_FLAG];
+  const disabled = raw === '1' || raw === 'true';
+  return {
+    name: STUCK_IN_PROGRESS_SWEEP_KILL_FLAG,
+    disabled,
+    sources: disabled ? ['env'] : [],
+    overrideFile: null,
+    fileError: null,
+  };
+}
+
+/**
  * The `skippedReason` string the sweep reports when the kill-flag is set. Keeps
  * the historical `DISABLE_STALE_TASK_SWEEP set` prefix (nothing should have to
  * re-learn it) and appends the WINNING SOURCE so a disabled sweep can never be
@@ -272,14 +308,38 @@ export function logKillFlagBanner(): void {
     console.warn('[kill-flags] This is an emergency stop, not a resting state. Clear it with:');
     console.warn(`[kill-flags]   bash scripts/operator-flag.sh unset ${res.name}`);
     console.warn('[kill-flags] ==================================================================');
-    return;
+  } else {
+    const where = res.overrideFile ? res.overrideFile : '(no durable overrides file on this box)';
+    console.log(
+      `[kill-flags] stale-task-sweep is ENABLED (no operator kill-flag set). ` +
+        `env ${res.name}=unset/false; durable overrides: ${where}`,
+    );
   }
 
-  const where = res.overrideFile ? res.overrideFile : '(no durable overrides file on this box)';
-  console.log(
-    `[kill-flags] stale-task-sweep is ENABLED (no operator kill-flag set). ` +
-      `env ${res.name}=unset/false; durable overrides: ${where}`,
-  );
+  // U039 (audit E9): the SECOND rescue sweep. It was invisible here — a box could
+  // boot with stuck-in-progress-sweep switched off and emit no signal at all, which
+  // is exactly the failure mode the F6 banner was built to end for the first sweep.
+  try {
+    const stuck = resolveEnvOnlyStuckSweepKillFlag();
+    if (stuck.disabled) {
+      console.warn('[kill-flags] ==================================================================');
+      console.warn('[kill-flags] stuck-in-progress-sweep is DISABLED by an operator kill-flag.');
+      console.warn(`[kill-flags]   flag:   ${stuck.name}`);
+      console.warn('[kill-flags]   set by: env  (this flag has NO durable-file source: it is not in HONORED_FLAGS,');
+      console.warn('[kill-flags]               and scripts/operator-flag.sh REFUSES to write it, exit 2)');
+      console.warn('[kill-flags] While this is set, a task whose agent dies mid-turn is NEVER blocked, the wedged');
+      console.warn('[kill-flags] agent is NEVER freed, and the operator is NEVER alerted. Clear it by removing');
+      console.warn(`[kill-flags] ${stuck.name} from the environment file this process was STARTED with, then restart.`);
+      console.warn('[kill-flags] ==================================================================');
+    } else {
+      console.log(
+        `[kill-flags] stuck-in-progress-sweep is ENABLED (no operator kill-flag set). ` +
+          `env ${stuck.name}=unset/false; this flag has no durable-file source.`,
+      );
+    }
+  } catch {
+    /* observability only */
+  }
 
   try {
     const file = readOperatorOverrides();

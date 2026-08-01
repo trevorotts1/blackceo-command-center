@@ -28,16 +28,22 @@
  * `transition(...,'done',...)` fires `notifyOwnerDone` internally
  * (`task-lifecycle.ts:490-492`) — this route does not call it a second time.
  *
- * SCOPE — deliberately NOT gated behind a verified Cloudflare Access identity
- * (unlike the PATCH review→done path's INGEST-11 guard): this route sits
- * behind the SAME app-wide Cloudflare Access edge (`src/middleware.ts`) every
- * other same-origin task-action route relies on (archive, dispatch,
- * return-to-orchestrator carry no additional per-route auth either); when a
- * verified operator identity IS present it is folded into the audit `reason`
- * text for a richer trail, but its absence never blocks the promote — the
- * card-scope check (heuristic-parked + status='review') is the route's real
- * gate, re-verified here independently of the button's own render gate so a
- * forged POST at an out-of-scope card is refused identically.
+ * SCOPE — gated behind a verified Cloudflare Access identity (U032, audit
+ * E2b). This route writes the TERMINAL status with operatorOverride:true, so
+ * unlike archive/dispatch/return-to-orchestrator it is NOT merely a same-origin
+ * task action — it is the last word on a card. Three gates run in order, all
+ * server-side and all independent of the button's render gate:
+ *   1. status === 'review'                        → else 403
+ *   2. the latest qc_review event is a parked marker (getQcHeuristicPark)
+ *                                                  → else 403
+ *   3. a verified Cf-Access-Authenticated-User-Email is present
+ *                                                  → else 403
+ * Gate 3 is new. Before it, the identity was read and folded into the audit
+ * `reason` text but never checked, so a forged same-origin POST (the
+ * Origin/Referer residual in src/middleware.ts) reached `done` with no token,
+ * no cf-access header, and — before U031 — no process certificate. The
+ * card-scope checks (1 and 2) bound the blast radius to already-parked review
+ * cards; they do not authenticate the mover.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
@@ -94,13 +100,49 @@ export async function POST(
       );
     }
 
-    // Verified operator identity (INGEST-11 boundary), when present, is folded
-    // into the audit reason text only — it is never a hard requirement here
-    // (see file header SCOPE note). middleware.ts strips any inbound copy of
-    // this header from external callers, so a same-origin request through
-    // Cloudflare Access is the only way a genuine value arrives.
+    // ── IDENTITY GATE (U032 / audit E2b) ─────────────────────────────────────
+    // This route reaches the TERMINAL status with operatorOverride:true. Before
+    // U032 the verified identity was read and used only to choose a log string,
+    // so a request with no identity promoted a card exactly as well as one with
+    // an identity — and composed with the same-origin passthrough
+    // (src/middleware.ts, the Origin/Referer residual) that made 'done'
+    // reachable with no token and no cf-access header at all. A promote is a
+    // TERMINAL, owner-visible decision: it must name a human.
+    //
+    // middleware.ts STRIPS any inbound copy of this header from external callers,
+    // so a non-empty value here can only have come from the Cloudflare Access
+    // edge on a same-origin request. Absence is therefore a real refusal, not a
+    // configuration nuisance.
     const cfAccessEmail =
       request.headers.get('cf-access-authenticated-user-email')?.trim() || null;
+    if (!cfAccessEmail) {
+      // Rule 3.5 staging — the target box may not be fronted by Cloudflare
+      // Access, and shipping a hard gate would lock a real operator out of a
+      // real stuck card. This escape hatch is logged loudly on every use so an
+      // auditor cannot mistake it for a permanent bypass. Remove it once the
+      // box is confirmed behind Cloudflare Access.
+      if (process.env.CC_PROMOTE_ALLOW_UNVERIFIED !== 'true') {
+        return NextResponse.json(
+          {
+            error:
+              'Forbidden: promoting a parked review card to done requires a verified operator identity.',
+            code: 'operator_identity_required',
+            hint:
+              'This control writes the TERMINAL status with an operator override, so it must name a human. ' +
+              'Sign in through Cloudflare Access on this subdomain (the edge sets ' +
+              'Cf-Access-Authenticated-User-Email at the trust boundary), or use ' +
+              'PATCH /api/tasks/{id} with updated_by_agent_id set to the department QC Specialist. ' +
+              'If this box is not fronted by Cloudflare Access, that is the thing to fix — see ' +
+              'REQUIRE_CF_ACCESS in src/middleware.ts.',
+          },
+          { status: 403 },
+        );
+      }
+      console.warn(
+        '[SECURITY] CC_PROMOTE_ALLOW_UNVERIFIED is ON — promoting a parked review card to done without a verified operator identity. ' +
+          'Set this ONLY when the box is not yet behind Cloudflare Access. Remove it as soon as Cloudflare Access is active on this subdomain.',
+      );
+    }
 
     // ── Persist via the shared lifecycle state machine ─────────────────────
     // CAS-guarded on expectedFrom:'review': a concurrent writer that already
@@ -115,9 +157,7 @@ export async function POST(
     try {
       const updated = await transition(id, 'done', {
         actor: 'operator',
-        reason: cfAccessEmail
-          ? `[U38 promote] heuristic-parked review card (${park.marker}) promoted by verified operator ${cfAccessEmail}`
-          : `[U38 promote] heuristic-parked review card (${park.marker}) promoted by operator`,
+        reason: `[U38 promote] heuristic-parked review card (${park.marker}) promoted by verified operator ${cfAccessEmail}`,
         operatorOverride: true,
         expectedFrom: 'review',
       });
@@ -156,17 +196,18 @@ export async function GET() {
     endpoint: '/api/tasks/[id]/promote',
     method: 'POST',
     scope:
-      'U38 (C-07) — promotes a review card QC parked for a human (latest qc_review ' +
-      'event is [QC-HEURISTIC] / [QC-HEURISTIC-FINAL], i.e. no LLM/judge key, or ' +
-      '[QC-JUDGE-FAILED-FINAL], i.e. the judge failed every call up to the ' +
-      'bound and is misconfigured) straight to done via the shared transition() state ' +
-      "machine, actor:'operator'. Refuses (403) any task that isn't currently 'review', " +
-      'and any review card whose latest qc_review event is NOT a parked marker — an ' +
-      'LLM-scored card, or one still auto-retrying a provider blip, stays owned by the ' +
-      'QC auto-scorer / PATCH /api/tasks/{id}. Refuses (409 CAS_CONFLICT) if the task ' +
-      'moved out of review between the button rendering and the click.',
+      'U38 (C-07) / U032 (E2b) — promotes a review card QC parked for a human (latest ' +
+      'qc_review event is [QC-HEURISTIC] / [QC-HEURISTIC-FINAL], i.e. no LLM/judge ' +
+      'key, or [QC-JUDGE-FAILED-FINAL]) straight to done via the shared transition() ' +
+      "state machine, actor:'operator'. Three server-side gates run in order: " +
+      "(1) status === 'review', (2) the latest qc_review event is a parked marker " +
+      '(getQcHeuristicPark), (3) a verified Cf-Access-Authenticated-User-Email is ' +
+      'present (U032 identity gate). Refuses (403) any task that fails any of the ' +
+      'three. Refuses (409 CAS_CONFLICT) if the task moved out of review between the ' +
+      'button rendering and the click.',
     returns:
-      '200 with the updated task JSON; 403 out-of-scope card, 404 unknown id, ' +
+      '200 with the updated task JSON; 403 out-of-scope card or missing operator ' +
+      'identity (code operator_identity_required), 404 unknown id, ' +
       '409 CAS conflict, 422 other transition error, 500 error',
   });
 }

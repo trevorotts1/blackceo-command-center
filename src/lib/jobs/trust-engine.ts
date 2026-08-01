@@ -44,7 +44,13 @@
  */
 
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
-import { notifyTelegram, notifySystem, resolveOperatorChatId, resolveOwnerChatId } from '@/lib/notify';
+import {
+  notifyTelegram,
+  notifySystem,
+  recordUndeliverable,
+  resolveOperatorChatId,
+  resolveOwnerChatId,
+} from '@/lib/notify';
 import { v4 as uuidv4 } from 'uuid';
 import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
 import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
@@ -57,6 +63,11 @@ import { broadcast } from '@/lib/events';
 export const ACK_BACKLOG_GRACE_MS = 10 * 60 * 1000; // 10 minutes
 /** Anti-spam: at most one progress message per task per 12h EXCEPT state changes. */
 export const PROGRESS_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+/** A blocked job re-asks at most this often. Distinct from PROGRESS_MIN_INTERVAL_MS: the
+ *  point of a blocked notice is that the requester is the blocker, so a reminder is
+ *  useful, not nagging. Twelve hours was the accidental inherited value; six is a
+ *  deliberate one. */
+export const BLOCKED_RENOTIFY_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 /** Coalesce into ONE digest when a single chat has MORE than this many queued sends. */
 export const DIGEST_THRESHOLD = 3;
 /** Quiet hours (box-local): no messages 22:00–07:00 (DONE included — default hold till morning). */
@@ -120,6 +131,9 @@ export interface TrustTaskRow {
   completion_sent_at: string | null;
   block_audience: string | null;
   block_needs: string | null;
+  blocked_notice_sent_at: string | null;
+  phase_progress_sent_at: string | null;
+  last_reported_phase_label: string | null;
 }
 
 /** A deliverable pointer for a completed task (from the deliverables registry). */
@@ -132,10 +146,11 @@ export interface DeliverableInfo {
  *  `guardColumn` must be NULL for the claim to succeed (the idempotency guard). */
 export interface StampOp {
   taskId: string;
-  guardColumn: 'ack_sent_at' | 'progress_last_sent_at' | 'completion_sent_at';
+  guardColumn: 'ack_sent_at' | 'progress_last_sent_at' | 'completion_sent_at'
+             | 'blocked_notice_sent_at' | 'phase_progress_sent_at';
   /** Additional columns to set in the same claim UPDATE (eta/result columns). */
   extraSets: Record<string, string | null>;
-  eventType: 'trust_ack' | 'trust_progress' | 'trust_done';
+  eventType: 'trust_ack' | 'trust_progress' | 'trust_done' | 'trust_phase_progress';
   eventMessage: string;
 }
 
@@ -157,6 +172,14 @@ export interface PlanContext {
   blockedChatIds?: Set<string>;
   /** Override night-hold detection (defaults to box-local clock on `now`). */
   isNight?: boolean;
+  /** Resolves a task's current phase for per-phase progress. Returns null when the task
+   *  has no phase activity -- a non-pipeline task must produce NO phase messages. */
+  phaseFor?: (taskId: string) => {
+    label: string;        // human words, never an internal phase id
+    budgetMs: number;     // this phase's budget; the silence ceiling
+    doneCount: number;
+    totalCount: number;
+  } | null;
 }
 
 // ── Message builders ──────────────────────────────────────────────────────────
@@ -189,6 +212,21 @@ function blockedMessage(task: TrustTaskRow): string {
   return `⏳ "${task.title}" is paused waiting on you. ${ask}`;
 }
 
+/** Per-phase progress. Names the phase in the requester's words and says what is next.
+ *  Deliberately NOT the tool trace: the operator has already received
+ *  "Exec run # Check -> run python3 inline script -> print text running" from an agent
+ *  asked for status, which is why this unit exists. Never emit an internal phase
+ *  identifier -- pass the human label. */
+function phaseProgressMessage(
+  task: TrustTaskRow,
+  phaseLabel: string,
+  doneCount: number,
+  totalCount: number,
+): string {
+  const of = totalCount > 0 ? ` (step ${doneCount} of ${totalCount})` : '';
+  return `🔄 "${task.title}" — ${phaseLabel}${of}. I'll tell you when the next step finishes.`;
+}
+
 function doneMessage(task: TrustTaskRow, deliverable: DeliverableInfo | null): string {
   if (deliverable) {
     return `✅ Done: "${task.title}". ${deliverable.summary} Find it here: ${deliverable.location}`;
@@ -206,6 +244,30 @@ export function isQuietHour(now: Date): boolean {
   return h >= NIGHT_START_HOUR || h < NIGHT_END_HOUR;
 }
 
+/**
+ * Message types that are NOT held by quiet hours.
+ *
+ * A client waiting on a deck wants "it's ready" and "it's stuck" the moment they are
+ * true; those two are the entire reason the report-back loop exists. ACK and PROGRESS
+ * are courtesy updates and stay held until 07:00, because a 02:00 "it's in progress"
+ * is a notification with no action behind it.
+ *
+ * Keyed off the task STATUS, not the message text, so the rule cannot drift from the
+ * planner's own branches: 'done' -> the DONE message (planSends, the `status === 'done'`
+ * branch); 'blocked' + block_audience 'OWNER' -> the BLOCKED-on-owner ask.
+ *
+ * COST, stated plainly: NIGHT_START_HOUR/NIGHT_END_HOUR are evaluated with
+ * Date#getHours(), which is the BOX-local hour. A client in another timezone can now
+ * receive a DONE or BLOCKED message during THEIR night. That is a deliberate trade:
+ * a nine-hour delay on "your deck is ready" was judged worse than an off-hours ping on
+ * the two messages a client is actually waiting for.
+ */
+export function bypassesQuietHours(task: TrustTaskRow): boolean {
+  if (task.status === 'done') return true;
+  if (task.status === 'blocked' && task.block_audience === 'OWNER') return true;
+  return false;
+}
+
 function ageMs(now: Date, iso: string): number {
   const t = Date.parse(iso);
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : now.getTime() - t;
@@ -218,15 +280,19 @@ function ageMs(now: Date, iso: string): number {
  */
 export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[] {
   const night = ctx.isNight ?? isQuietHour(ctx.now);
-  // Quiet hours: hold EVERYTHING (DONE included by default). Nothing is stamped,
-  // so every held send is re-attempted after 07:00 by the next sweep.
-  if (night) return [];
+  // Quiet hours: hold the COURTESY messages (ACK, PROGRESS) — nothing is stamped for
+  // them, so every held send is re-attempted after 07:00 by the next sweep. DONE and
+  // BLOCKED-on-owner are carved out (bypassesQuietHours) because a client is waiting
+  // on those two and a nine-hour hold on "your deck is ready" is the complaint this
+  // engine exists to answer.
+  const candidates = night ? tasks.filter(bypassesQuietHours) : tasks;
+  if (candidates.length === 0) return [];
 
   // One send per task per sweep (whichever message is due). Grouped by chat at
   // the end so >DIGEST_THRESHOLD sends to one chat coalesce into a digest.
   const perTask: PlannedSend[] = [];
 
-  for (const task of tasks) {
+  for (const task of candidates) {
     const chatId = task.requester_chat_id;
     if (!chatId) continue; // never reported on
     // NEVER target a SYSTEM/operator-internal audience with a client trust message.
@@ -261,13 +327,16 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
 
     // ── Message 2 — BLOCKED on OWNER (the phantom-spec finding: the ask never reached anyone) ──
     if (task.status === 'blocked' && task.block_audience === 'OWNER') {
+      // U065: blocked-with-reason has its OWN stamp. Until 2026-07-26 it shared
+      // progress_last_sent_at, which produced two wrong behaviours: a task that blocked
+      // before its first progress message never received a progress message at all, and a
+      // task that blocked within PROGRESS_MIN_INTERVAL_MS of a progress message stayed
+      // silent about being blocked for up to twelve hours. "Paused waiting on you" is a
+      // STATE CHANGE and is never throttled against an unrelated message.
       const throttled =
-        task.progress_last_sent_at !== null &&
-        ageMs(ctx.now, task.progress_last_sent_at) < PROGRESS_MIN_INTERVAL_MS;
-      // A blocked-on-owner ask is a STATE CHANGE — it may bypass the 12h throttle
-      // the FIRST time (progress stamp null). If a progress msg was already sent
-      // recently we still respect the 12h floor to avoid nagging.
-      if (task.progress_last_sent_at === null || !throttled) {
+        task.blocked_notice_sent_at !== null &&
+        ageMs(ctx.now, task.blocked_notice_sent_at) < BLOCKED_RENOTIFY_INTERVAL_MS;
+      if (!throttled) {
         const message = blockedMessage(task);
         perTask.push({
           chatId,
@@ -276,7 +345,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
           stamps: [
             {
               taskId: task.id,
-              guardColumn: 'progress_last_sent_at',
+              guardColumn: 'blocked_notice_sent_at',
               extraSets: {},
               eventType: 'trust_progress',
               eventMessage: `trust_progress(blocked) -> ${chatId}: ${message}`,
@@ -285,6 +354,40 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
           doneWithoutDeliverable: [],
         });
         continue;
+      }
+    }
+
+    // ── Message 3 — PER-PHASE PROGRESS (U065) ──
+    // Below BLOCKED on purpose: a blocked job must ask for what it needs, not report a
+    // phase. Above ACK on purpose: a moving job has already been acknowledged.
+    // Held during quiet hours (see isQuietHour) -- unlike done and blocked, a phase
+    // report is never urgent enough to wake anyone. U044 must NOT carve this out.
+    if (task.status === 'in_progress' && task.progress_last_sent_at && !night) {
+      const phase = ctx.phaseFor?.(task.id);
+      if (phase && phase.label) {
+        const stale =
+          task.phase_progress_sent_at === null ||
+          ageMs(ctx.now, task.phase_progress_sent_at) >= phase.budgetMs;
+        const advanced = phase.label !== task.last_reported_phase_label;
+        if (advanced && stale) {
+          const message = phaseProgressMessage(task, phase.label, phase.doneCount, phase.totalCount);
+          perTask.push({
+            chatId,
+            channel,
+            message,
+            stamps: [
+              {
+                taskId: task.id,
+                guardColumn: 'phase_progress_sent_at',
+                extraSets: { last_reported_phase_label: phase.label },
+                eventType: 'trust_phase_progress',
+                eventMessage: `trust_phase_progress -> ${chatId}: ${message}`,
+              },
+            ],
+            doneWithoutDeliverable: [],
+          });
+          continue;
+        }
       }
     }
 
@@ -435,6 +538,47 @@ export interface ExecuteResult {
   sent: number;
   claimed: number;
   skipped: number;
+  /** Claims this run wrote and then released because the transport proved the send
+   *  did not happen. A non-zero value is a real alarm, not noise. */
+  released: number;
+}
+
+/**
+ * Release a claim this iteration wrote, when the transport PROVED the send did not
+ * happen. Narrow by construction: the guard column must still hold the exact
+ * timestamp this iteration wrote (`claimedAt`), so a concurrent sweep's fresher
+ * claim is never clobbered. Every column the claim set — the guard plus any
+ * `extraSets` — is reset together, so a released row carries no half-applied
+ * result_summary/result_location.
+ *
+ * Returns the number of stamps actually released (0 when another worker moved on).
+ * Never throws: this runs on a failure path and must not turn a non-send into a crash.
+ */
+function releaseUnsentClaims(stamps: StampOp[], claimedAt: string): number {
+  let released = 0;
+  for (const stamp of stamps) {
+    try {
+      const sets: string[] = [`${stamp.guardColumn} = NULL`, 'updated_at = ?'];
+      const params: (string | null)[] = [claimedAt];
+      for (const col of Object.keys(stamp.extraSets)) {
+        sets.push(`${col} = NULL`);
+      }
+      params.push(stamp.taskId, claimedAt);
+      const res = run(
+        `UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND ${stamp.guardColumn} = ?`,
+        params,
+      );
+      released += res.changes;
+    } catch (err) {
+      console.warn(
+        '[trust-engine] claim release failed for task %s (%s); the stamp stays and the row will not be re-planned:',
+        stamp.taskId,
+        stamp.guardColumn,
+        (err as Error).message,
+      );
+    }
+  }
+  return released;
 }
 
 /**
@@ -455,6 +599,7 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     ((message: string) => notifySystem(message, { agent: 'trust-engine', action: 'escalate' }));
   const nowIso = ctx.now.toISOString();
 
+  let released = 0;
   let sent = 0;
   let claimed = 0;
   let skipped = 0;
@@ -511,13 +656,39 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     // and NO duplicate can be produced. The throw is swallowed so one bad send
     // never aborts the rest of the batch.
     let dispatched = false;
+    let threw = false;
     try {
       dispatched = dispatch(plan);
     } catch (err) {
-      console.warn('[trust-engine] send failed (claim already durable, no duplicate):', (err as Error).message);
+      threw = true;
+      console.warn('[trust-engine] send threw before the transport spawned:', (err as Error).message);
       dispatched = false;
     }
-    if (dispatched) sent += 1;
+    if (dispatched) {
+      sent += 1;
+    } else {
+      // PROVABLE NON-SEND. The transport returns false in exactly two cases, both
+      // of which mean nothing was queued: the suppression short-circuit
+      // (notify.ts:617, before execFile) and a synchronous throw. The ceo-chat
+      // branch's false (notify/appendTrustMessage write failure, trust-engine
+      // defaultTrustSend) is likewise a real non-write. In all of them the claim
+      // this iteration wrote is a lie, so release it and record it.
+      //
+      // NOT COVERED: a gateway that accepts and later fails. `notifyTelegram` is
+      // async execFile and returns true before the child runs, so that outcome is
+      // indistinguishable from success here. See U043 Part B (senior).
+      const releasedCount = releaseUnsentClaims(plan.stamps, nowIso);
+      released += releasedCount;
+      if (releasedCount > 0) {
+        recordUndeliverable(
+          'trust_send_not_dispatched',
+          `trust-engine released ${releasedCount} claim(s) for task(s) ` +
+            `${plan.stamps.map((s) => `${s.taskId}:${s.guardColumn}`).join(', ')} ` +
+            `— the transport reported a provable non-send (${threw ? 'threw' : 'returned false'}); ` +
+            `the row will be re-planned on the next sweep.`,
+        );
+      }
+    }
 
     // ── done-without-deliverable QC smell -> OPERATOR lane ONLY (never the client). ──
     for (const smell of plan.doneWithoutDeliverable) {
@@ -529,7 +700,7 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     }
   }
 
-  return { sent, claimed, skipped };
+  return { sent, claimed, skipped, released };
 }
 
 // ── DB glue: load candidates + deliverable lookup ─────────────────────────────
@@ -539,7 +710,7 @@ const CANDIDATE_SQL = `
   SELECT t.id, t.title, t.status, t.department, a.name AS assigned_agent_name,
          t.created_at, t.requester_channel, t.requester_chat_id,
          t.ack_sent_at, t.progress_last_sent_at, t.completion_sent_at,
-         t.block_audience, t.block_needs
+         t.block_audience, t.block_needs, t.blocked_notice_sent_at, t.phase_progress_sent_at, t.last_reported_phase_label
     FROM tasks t
     LEFT JOIN agents a ON t.assigned_agent_id = a.id
    WHERE t.requester_chat_id IS NOT NULL
@@ -547,19 +718,23 @@ const CANDIDATE_SQL = `
      AND (
        t.ack_sent_at IS NULL
        OR (t.status = 'in_progress' AND t.progress_last_sent_at IS NULL)
-       OR (t.status = 'blocked' AND t.block_audience = 'OWNER')
+       OR (t.status = 'blocked' AND t.block_audience = 'OWNER'
+           AND (t.blocked_notice_sent_at IS NULL
+                OR t.blocked_notice_sent_at < ?))
        OR (t.status = 'done' AND t.completion_sent_at IS NULL)
+       OR (t.status = 'in_progress' AND t.progress_last_sent_at IS NOT NULL)
      )
 `;
 
 export function loadCandidateTasks(taskId?: string): TrustTaskRow[] {
+  const blockedCutoff = new Date(Date.now() - BLOCKED_RENOTIFY_INTERVAL_MS).toISOString();
   if (taskId) {
-    const row = queryOne<TrustTaskRow>(`${CANDIDATE_SQL} AND t.id = ?`, [taskId]);
+    const row = queryOne<TrustTaskRow>(`${CANDIDATE_SQL} AND t.id = ?`, [blockedCutoff, taskId]);
     return row ? [row] : [];
   }
   // Cap per sweep so a large backlog can never fan out an unbounded burst; the
   // next 2-minute sweep drains the rest. Ordered oldest-first (fairness).
-  return queryAll<TrustTaskRow>(`${CANDIDATE_SQL} ORDER BY t.created_at ASC LIMIT 200`, []);
+  return queryAll<TrustTaskRow>(`${CANDIDATE_SQL} ORDER BY t.created_at ASC LIMIT 200`, [blockedCutoff]);
 }
 
 /** Resolve a completed task's newest registered deliverable into a client-safe
@@ -612,12 +787,12 @@ export function runTrustEngineSweep(opts?: {
   escalate?: (message: string) => void;
 }): SweepResult {
   if (process.env.DISABLE_TRUST_ENGINE === '1' || process.env.DISABLE_TRUST_ENGINE === 'true') {
-    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, skippedReason: 'DISABLE_TRUST_ENGINE set' };
+    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0, skippedReason: 'DISABLE_TRUST_ENGINE set' };
   }
   const now = opts?.now ?? new Date();
   const tasks = loadCandidateTasks(opts?.taskId);
   if (tasks.length === 0) {
-    return { scanned: 0, sent: 0, claimed: 0, skipped: 0 };
+    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0 };
   }
   const plans = planSends(tasks, {
     now,

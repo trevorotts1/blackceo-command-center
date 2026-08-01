@@ -34,9 +34,17 @@ export default defineConfig({
       // U37 (C-06) — class-b "routed but not runnable" hold chip (card face)
       // + DispatchHoldPanel (task-detail modal) real render proof.
       'tests/unit/u37-c-06-dispatch-hold-render.test.tsx',
+      // U061 — BlockedReasonPanel surfaces heal-attempt data (dispatch_attempts,
+      // next_dispatch_eligible_at) + malformed-gaps fallback real render proof.
+      'tests/unit/u61-blocked-panel-render.test.tsx',
       // U38 (C-07) — S3 closure human-promote control: "Promote to Done
       // (operator)" (QcPromotePanel, task-detail modal) real render proof.
       'tests/unit/u38-c-07-qc-promote-render.test.tsx',
+      // U038 (audit E8) — board department label render proof: the card chip
+      // (:1066) shows 🖥️ Presentations rather than the 🏢 fallback, the three
+      // alias labels that worked before still work, and the header (:520-521)
+      // resolves both 'presentations' and 'Presentations'.
+      'tests/unit/u038-board-chip-render.test.tsx',
       // U50 (HL/U62) — model-catalog honesty: sticky ModelFilterBar + D14
       // "Show deprecated/stale" toggle + a visible ModelCard badge, real
       // render proof.
@@ -78,6 +86,13 @@ export default defineConfig({
       // from src/components/fleet with barrel-export verification, tone
       // color mapping, null-value rendering, and children rendering.
       'tests/unit/fleet-components.test.tsx',
+      // U062 — task-board loading / empty / filtered-empty / failed-load states are
+      // four DIFFERENT renders, and the loading render never says "No tasks".
+      'tests/unit/mission-queue-board-states.test.tsx',
+      // U064 — PersonaPickerPanel (voice/topic axis) fail-quiet, rationale
+      // projection, primary-submit safety (action: 'reaim', never 'name-voice'),
+      // data-testid coverage, real render proof.
+      'tests/unit/persona-picker.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

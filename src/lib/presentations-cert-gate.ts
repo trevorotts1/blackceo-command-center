@@ -65,10 +65,23 @@ export interface PresentationsGateResult {
   persistCert?: string | null;
 }
 
+/**
+ * The shape prove-deck.py emits: hashlib.sha256(...).hexdigest() -> 64 lowercase
+ * hex characters. Exported so the route, the schema test and the contract test
+ * all measure against ONE definition instead of three copies of a regex.
+ */
+export const PROCESS_CERTIFICATE_SHA_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Normalise AND validate. A value that is not a sha256 digest is treated as
+ * ABSENT, never as a certificate -- so it can neither satisfy the gate nor be
+ * persisted as the certificate of record (U033 / audit E3).
+ */
 function normCert(v: string | null | undefined): string | null {
   if (typeof v !== 'string') return null;
   const t = v.trim().toLowerCase();
-  return t.length ? t : null;
+  if (!t.length) return null;
+  return PROCESS_CERTIFICATE_SHA_RE.test(t) ? t : null;
 }
 
 /**
@@ -128,5 +141,35 @@ export function evaluatePresentationsDoneGate(
     applies: true,
     ok: true,
     persistCert: provided && provided !== stored ? provided : null,
+  };
+}
+
+
+export interface PresentationsRegistrationInput {
+  department: string | null | undefined;
+  currentStatus: string | null | undefined;
+  targetStatus: string | null | undefined;
+  storedCert: string | null | undefined;
+  sopAuthoringForTaskId?: string | null;
+}
+
+export function requiresRegisteredCertificate(
+  input: PresentationsRegistrationInput,
+): { applies: boolean; ok: boolean; code?: 'process_certificate_required'; error?: string; remediation?: string } {
+  const target = (input.targetStatus ?? '').toString();
+  if (!PRESENTATIONS_TERMINAL_STATUSES.has(target)) return { applies: false, ok: true };
+  if (input.currentStatus === target) return { applies: false, ok: true };
+  const deptCanon = canonicalDeptSlug(input.department || '') || (input.department ?? '');
+  if (deptCanon !== 'presentations') return { applies: false, ok: true };
+  if (input.sopAuthoringForTaskId) return { applies: false, ok: true };
+  const stored = typeof input.storedCert === 'string' ? input.storedCert.trim().toLowerCase() : '';
+  if (stored.length > 0) return { applies: true, ok: true };
+  return {
+    applies: true, ok: false, code: 'process_certificate_required',
+    error: `Forbidden: a presentations task requires a registered process_certificate_sha to be marked ${target}`,
+    remediation:
+      `Generate the deck proof with prove-deck.py (it writes PROCESS-CERTIFICATE.json), then ` +
+      `PATCH this task with {"status":"${target}","process_certificate_sha":"<sha256>"} so the ` +
+      `certificate is registered on the card. Only then can any path mark it ${target}.`,
   };
 }

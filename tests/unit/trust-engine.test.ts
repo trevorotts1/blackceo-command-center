@@ -208,12 +208,20 @@ test('DONE with ZERO deliverables sends the honest message (NO fabricated locati
 
 // ── PLANNER: quiet hours, digest, operator-audience guard ────────────────────
 
-test('QUIET HOURS: nothing is sent between 22:00 and 07:00 (DONE included, default hold till morning)', () => {
-  const plans = engine.planSends(
-    [mkTask({ id: 't9', status: 'done' }), mkTask({ id: 't10', status: 'in_progress' })],
+test('QUIET HOURS: courtesy messages (ACK, PROGRESS) are held at night; DONE and BLOCKED-on-owner are carved out', () => {
+  // A done task at night: carved out, 1 plan.
+  const donePlans = engine.planSends(
+    [mkTask({ id: 't9', status: 'done' })],
     { now: DAYTIME, isNight: true, deliverableFor: noDeliverable },
   );
-  assert.equal(plans.length, 0, 'quiet hours hold everything');
+  assert.equal(donePlans.length, 1, 'DONE is carved out of quiet hours');
+  assert.equal(donePlans[0].stamps[0].guardColumn, 'completion_sent_at');
+  // An in_progress task at night: still held (courtesy message).
+  const progressPlans = engine.planSends(
+    [mkTask({ id: 't10', status: 'in_progress' })],
+    { now: DAYTIME, isNight: true, deliverableFor: noDeliverable },
+  );
+  assert.equal(progressPlans.length, 0, 'PROGRESS is still held during quiet hours');
 });
 
 test('DIGEST: more than the threshold of sends to ONE chat coalesce into a single digest message', () => {
@@ -277,7 +285,7 @@ test('EXECUTOR idempotency: re-running the sweep does NOT re-send (the durable s
   assert.ok(row?.ack_sent_at, 'ack_sent_at must be stamped exactly once');
 });
 
-test('EXECUTOR crash-safety: a throw in the send step leaves the claim durable — resweep produces NO duplicate', () => {
+test('EXECUTOR crash-safety: a throw in the send step releases the claim — resweep re-sends exactly once, still no duplicate', () => {
   insertTask({ id: 'ex2', title: 'Crashy task', status: 'assigned', requester_chat_id: '5002' });
 
   // Simulate a crash between the durable claim and the fire-and-forget dispatch.
@@ -294,8 +302,9 @@ test('EXECUTOR crash-safety: a throw in the send step leaves the claim durable �
     now: DAYTIME,
     send: (chat, msg) => { sent2.push(`${chat}:${msg}`); return true; },
   });
-  assert.equal(sent2.length, 0, 'no duplicate on resweep — the durable stamp is the guard');
-  assert.equal(r2.scanned, 0);
+  assert.equal(sent2.length, 1, 'Part A: the released claim is re-planned on the resweep — exactly one send, still no duplicate');
+  assert.equal(r2.scanned, 1, 'Part A: the released row is now a candidate again');
+  assert.equal(r2.released, 0, 'the resweep send succeeded, so nothing was released');
 });
 
 test('EXECUTOR re-attempts UNSTAMPED sends: a task held at night is delivered on the next daytime sweep', () => {

@@ -78,6 +78,9 @@ const CRITICAL_TASKS_DISPATCH_COLUMNS: { name: string; ddl: string; owner: strin
   { name: 'last_dispatch_attempt_at', ddl: 'ALTER TABLE tasks ADD COLUMN last_dispatch_attempt_at TEXT', owner: '077' },
   { name: 'next_dispatch_eligible_at', ddl: 'ALTER TABLE tasks ADD COLUMN next_dispatch_eligible_at TEXT', owner: '077' },
   { name: 'block_reason', ddl: 'ALTER TABLE tasks ADD COLUMN block_reason TEXT', owner: '078' },
+  { name: 'block_gaps', ddl: 'ALTER TABLE tasks ADD COLUMN block_gaps TEXT', owner: '073' },
+  { name: 'block_needs', ddl: 'ALTER TABLE tasks ADD COLUMN block_needs TEXT', owner: '073' },
+  { name: 'block_audience', ddl: "ALTER TABLE tasks ADD COLUMN block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM'))", owner: '073' },
 ];
 
 const CRITICAL_TASKS_DISPATCH_INDEXES: { name: string; column: string; ddl: string; owner: string }[] = [
@@ -3066,9 +3069,22 @@ export const migrations: Migration[] = [
         // SQLite does not enforce CHECK on ALTER TABLE ADD COLUMN in all versions,
         // but the app layer validates the value before writing.
         db.exec(`ALTER TABLE tasks ADD COLUMN block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM'))`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_block_audience ON tasks(block_audience) WHERE block_audience IS NOT NULL`);
         console.log('[Migration 073] Added tasks.block_audience');
       }
+      // The index is created UNCONDITIONALLY, outside the column guard above.
+      //
+      // `block_audience` is ALSO part of schema.ts's base CREATE TABLE, so on a
+      // FRESH install the column already exists, the guard above is FALSE, and an
+      // index created inside it would never be reached -- every fresh box then ran
+      // a full table scan on the query this partial index backs.
+      //
+      // It cannot be declared in schema.ts instead: `tests/unit/db-upgrade-migration-ordering.test.ts`
+      // enforces "schema.ts never indexes a column that a migration ALTER-adds
+      // (deadlock class)", because on a database predating 073 schema.ts runs
+      // before the column exists. This unconditional placement is the same pattern
+      // schema.ts's own comment describes for migration 002, which "owns both
+      // indexes and creates them unconditionally".
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_block_audience ON tasks(block_audience) WHERE block_audience IS NOT NULL`);
 
       console.log('[Migration 073] Block transparency columns ready');
     },
@@ -4980,11 +4996,11 @@ export const migrations: Migration[] = [
       // Fable-5 root cause: reseedWorkspacesFromConfig's UPSERT unconditionally
       // overwrote company_id on every boot/converge, and seedCompanyGuarded's
       // "first non-Default row by rowid" resolver returned a stale `command-center`
-      // placeholder (rowid 1) instead of the real client company (e.g. `marico`,
+      // placeholder (rowid 1) instead of the real client company (e.g. `northwind`,
       // rowid 2). The board filtered by resolveActiveCompanyId (placeholder-aware
-      // → `marico`), so the 41 reseeded workspaces (pinned to `command-center`)
+      // → `northwind`), so the 41 reseeded workspaces (pinned to `command-center`)
       // vanished from the board — only the 3 workspaces NOT in departments.json
-      // (never touched by reseed, still `marico`) remained visible.
+      // (never touched by reseed, still `northwind`) remained visible.
       //
       // The resolver fix (resolveSeedingCompanyId) prevents recurrence and fixes
       // NEW workspaces, but does NOT heal existing broken boxes: the UPSERT fix
@@ -5058,6 +5074,24 @@ export const migrations: Migration[] = [
       // under a different id — is left COMPLETELY untouched: the slug existence
       // check is a true no-op guard, and INSERT OR IGNORE additionally keys on the
       // id PRIMARY KEY so re-running never duplicates.
+      //
+      // MIGRATION-DEADLOCK FIX (2026-07-31, proven by tests/unit/db-upgrade-migration-
+      // ordering.test.ts's "upgrade: a v4.72.0-era database" case): workspaces.company_id
+      // has an FK reference to companies(id), and migration 064's own belt-and-suspenders
+      // sentinel INSERT is itself guarded ("companies table not yet present — skipping,
+      // will run again after 012") — a real, historically-possible box shape where that
+      // guard fired left the ledger marked '064 applied' with NO 'default' company row
+      // ever inserted (migrations are never retried once ledgered). Before this fix,
+      // this migration's INSERT with company_id='default' threw
+      // SQLITE_CONSTRAINT_FOREIGNKEY on exactly that box shape — the exact deadlock
+      // class this test file exists to catch: the fix that would repair it ships
+      // inside the very migration the crash prevents from ever completing. Self-heal
+      // here, unconditionally and idempotently (INSERT OR IGNORE, mirrors migration
+      // 064 exactly), so this migration can never depend on 064 having actually
+      // inserted the row on every box in the fleet's history.
+      db.prepare(
+        `INSERT OR IGNORE INTO companies (id, name, slug, config) VALUES ('default', 'Default', 'default', '{}')`,
+      ).run();
       console.log('[Migration 113] Seeding podcast/anthology workspaces (U017)...');
 
       const now = new Date().toISOString();
@@ -5083,6 +5117,208 @@ export const migrations: Migration[] = [
       console.log(
         `[Migration 113] Seeded workspaces — podcast=${podcast} anthology=${anthology} (0 = already present)`,
       );
+    },
+  },
+  {
+    id: '114',
+    name: 'engine_workspace_identity_and_presentations_seed',
+    up: (db) => {
+      // U037 (audit E7). TWO defects, one row-shape, one migration.
+      //
+      // (a) IDENTITY. The presentations workspace carries id='presentations' but
+      //     slug='dept-presentations'. Measured 2026-07-26 on the live box: of 67
+      //     workspace rows, 65 have id == slug, ONE has slug = 'dept-' || id (this
+      //     one), and one is an interface-created row with a generated id.
+      //     Checksum 65 + 1 + 1 = 67. The `dept-` spelling contradicts the repo's
+      //     own documented invariant — "the workspaces table stores the bare id
+      //     (the sync script strips `dept-`)", api/departments/[id]/personas/
+      //     route.ts:49-51 — and it is why routing survives only on the `id` arm of
+      //     resolveWorkspaceId (ingest/route.ts:244). canonicalDeptSlug() already
+      //     maps BOTH spellings to 'presentations', so nothing downstream regresses;
+      //     every runtime-dir resolver probes `dept-${slug}` FIRST
+      //     (task-dispatcher.ts:282, dispatch/route.ts:82, context-pack.ts:244), so
+      //     after this rename they find ~/.openclaw/agents/dept-presentations via
+      //     the dept-prefixed arm instead of by accident on the bare arm. The agent
+      //     runtime directory name does NOT change and MUST NOT be changed.
+      //
+      // (b) SEEDING. docs/ENGINES.md:11-12 requires a workspace-seeding migration
+      //     per engine. Migration 113 seeds podcast and anthology only. This adds
+      //     presentations on the same proven shape (INSERT OR IGNORE, slug-existence
+      //     no-op guard, company_id='default'), so a box onboarded before the engine
+      //     existed gets the row on the next update roll.
+      //
+      // Idempotent, additive, and it never touches a row it did not create or
+      // rename: the UPDATE is guarded on the exact stale slug, the INSERT on slug
+      // absence. Running this twice changes nothing the second time.
+      //
+      // MIGRATION-DEADLOCK FIX (2026-07-31): same self-heal as migration 113 above —
+      // the INSERT below also targets company_id='default', which has an FK reference
+      // to companies(id). See migration 113's comment for the full history of why the
+      // sentinel row is not guaranteed present on every box. Belt-and-suspenders here
+      // too, since this migration must never depend on 113 (or 064) having run first
+      // on every box in the fleet's history.
+      db.prepare(
+        `INSERT OR IGNORE INTO companies (id, name, slug, config) VALUES ('default', 'Default', 'default', '{}')`,
+      ).run();
+      console.log('[Migration 114] Engine workspace identity + presentations seed (U037)...');
+
+      const now = new Date().toISOString();
+
+      // (a) Rename the stale slug ONLY when it is exactly the stale value and the
+      //     canonical slug is not already taken by some other row. A box that
+      //     already reads slug='presentations' is untouched; a box that somehow
+      //     carries BOTH is left alone and logged loudly rather than merged — two
+      //     rows for one department is a data question, not a migration's decision.
+      const canonicalTaken = db
+        .prepare("SELECT id FROM workspaces WHERE lower(slug) = 'presentations' LIMIT 1")
+        .get() as { id: string } | undefined;
+      const staleRow = db
+        .prepare("SELECT id FROM workspaces WHERE lower(slug) = 'dept-presentations' LIMIT 1")
+        .get() as { id: string } | undefined;
+
+      let renamed = 0;
+      if (staleRow && canonicalTaken && canonicalTaken.id !== staleRow.id) {
+        console.warn(
+          `[Migration 114] BOTH spellings present (id=${staleRow.id} slug=dept-presentations, ` +
+            `id=${canonicalTaken.id} slug=presentations) — leaving both untouched. ` +
+            'This needs a human: two workspace rows for one department.',
+        );
+      } else if (staleRow) {
+        renamed = db
+          .prepare(
+            `UPDATE workspaces SET slug = 'presentations', updated_at = ?
+              WHERE lower(slug) = 'dept-presentations'`,
+          )
+          .run(now).changes;
+      }
+
+      // (b) Seed the row when it is absent entirely — same guard shape as 113.
+      const exists = db.prepare(`SELECT 1 FROM workspaces WHERE lower(slug) = ?`);
+      const insert = db.prepare(
+        `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'default', ?, ?, ?)`,
+      );
+      let seeded = 0;
+      if (exists.get('presentations')) {
+        console.log("[Migration 114] 'presentations' workspace already present — leaving untouched");
+      } else {
+        seeded = insert
+          .run(
+            'presentations',
+            'Presentations',
+            'presentations',
+            'Presentations production engine workspace.',
+            '\u{1F5A5}️',
+            100,
+            now,
+            now,
+          ).changes;
+      }
+
+      console.log(
+        `[Migration 114] renamed=${renamed} seeded=${seeded} (0 = already correct / already present)`,
+      );
+    },
+  },
+  {
+    id: '115',
+    name: 'add_trust_engine_phase_columns',
+    // Purely ADDITIVE: three nullable TEXT columns on `tasks`. ALTER TABLE only; no
+    // rows read, written, moved or destroyed. Follows the migration-098 pattern
+    // exactly: inspect the LIVE schema (PRAGMA table_info), never the ledger, and
+    // add whatever is genuinely missing.
+    //
+    // U065: four message kinds, five stamps, no sharing. Before this migration the
+    // blocked-on-owner and in-progress branches shared `progress_last_sent_at`, which
+    // caused two defects: (a) a task that blocked before its first progress message
+    // never received one at all, and (b) a task that blocked within 12h of progress
+    // stayed silent about being blocked. These three columns uncouple them.
+    //
+    //   blocked_notice_sent_at       stamp: blocked-on-owner notice was planned and
+    //                                claimed — NOT "delivered" (see U043); the stamp
+    //                                is the idempotency guard, not a delivery receipt
+    //   phase_progress_sent_at       stamp: per-phase progress msg was planned and
+    //                                claimed — NOT "delivered"; same qualification
+    //   last_reported_phase_label    tracks the last phase label sent (extraSets only,
+    //                                never a guardColumn) so a recurring phase is not
+    //                                re-sent on every sweep
+    up: (db) => {
+      console.log('[Migration 115] Adding trust-engine phase-progress columns to tasks...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 115] tasks table absent — nothing to add');
+        return;
+      }
+
+      const presentCols = () =>
+        new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+
+      const wanted: { name: string; ddl: string }[] = [
+        { name: 'blocked_notice_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN blocked_notice_sent_at TEXT' },
+        { name: 'phase_progress_sent_at', ddl: 'ALTER TABLE tasks ADD COLUMN phase_progress_sent_at TEXT' },
+        { name: 'last_reported_phase_label', ddl: 'ALTER TABLE tasks ADD COLUMN last_reported_phase_label TEXT' },
+      ];
+
+      const added: string[] = [];
+      for (const { name, ddl } of wanted) {
+        if (!presentCols().has(name)) {
+          db.exec(ddl);
+          added.push(name);
+        }
+      }
+
+      console.log(
+        `[Migration 115] Added columns: ${added.length > 0 ? added.join(', ') : 'none (all already present)'}`,
+      );
+    },
+  },
+  {
+    id: '116',
+    name: 'u064_client_persona_choice',
+    up: (db) => {
+      // U064 — persona-picker: nullable client-choice columns on
+      // task_persona_bundle so the operator can name a specific voice persona
+      // (express client choice, suppressing the blend) without colliding with
+      // the confirm_state gate.  Guarded by PRAGMA table_info — re-running is a
+      // no-op.  The CHECK constraint on client_persona_source is BYTE-IDENTICAL
+      // to the base CREATE TABLE in schema.ts, so a fresh install and a migrated
+      // box enforce the same vocabulary.
+      //
+      // task_persona_bundle itself was created back at migration 090 — on any
+      // box that has genuinely walked the migration chain it will already
+      // exist here. But `PRAGMA table_info()` on a table that does not exist
+      // returns an empty array, not an error (a documented SQLite footgun),
+      // which is indistinguishable from "table exists, has no columns yet".
+      // Without this explicit sqlite_master existence check, the ALTER TABLE
+      // below throws `no such table: task_persona_bundle` on any fixture or
+      // partial-migration state that skips straight to id 116 without ever
+      // creating the table. Existence check matches the `tableExists` helper
+      // convention already used elsewhere in this file (see detectTestResidue).
+      const tableExists = !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get('task_persona_bundle');
+      if (!tableExists) {
+        return;
+      }
+
+      const columns = (db.prepare('PRAGMA table_info(task_persona_bundle)').all() as {
+        cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number;
+      }[]);
+      const columnNames = new Set(columns.map((c) => c.name));
+
+      const adds: Record<string, string> = {
+        client_persona_id: 'TEXT',
+        client_persona_source: `TEXT CHECK (client_persona_source IS NULL OR client_persona_source IN
+    ('client-choice','client','locked','config-named','express'))`,
+        client_persona_set_at: 'TEXT',
+      };
+      for (const [col, type] of Object.entries(adds)) {
+        if (!columnNames.has(col)) {
+          db.prepare(`ALTER TABLE task_persona_bundle ADD COLUMN ${col} ${type}`).run();
+        }
+      }
     },
   },
 ];
@@ -6379,20 +6615,48 @@ export function isDepartmentOptedOut(dept: unknown): boolean {
  */
 export const ENGINE_WORKSPACE_SLUGS: readonly string[] = ['podcast', 'anthology'];
 
+/**
+ * U041 (audit E11). The `outcome` field exists because {created: 0, updated: 0}
+ * is the CORRECT, HEALTHY result on every well-configured box at steady state —
+ * and was ALSO the result when the manifest resolved to an empty array, which
+ * means "this client has no departments at all." Those two are opposite facts
+ * and were byte-indistinguishable to both callers. `outcome` separates them
+ * WITHOUT throwing, because the two callers need opposite behaviour: the
+ * converge endpoint must fail loud (it is an explicit operator action with a
+ * response body), and the every-boot path must NOT crash startup (see
+ * autoSeedFromDepartmentsJson's own comment). A throw would be caught by that
+ * path's existing handler and logged as '[Auto-seed] Skipped:' — the same line
+ * it already uses for genuine hiccups — putting us back where we started.
+ *
+ * `manifestEntries` is the RAW array length before any opt-out, malformed-entry,
+ * test-residue or duplicate-slug filtering, so a caller can distinguish "the
+ * manifest was empty" from "the manifest had entries and every one was filtered
+ * out" — a different defect with a different fix.
+ */
+export type ReseedOutcome =
+  | 'seeded'          // a manifest with at least one entry was processed
+  | 'no-config'       // resolveDepartmentsConfigPath() found nothing
+  | 'unreadable'      // the file exists but could not be read
+  | 'malformed'       // the file parsed to something that is not an array
+  | 'empty-manifest'  // the file parsed to an array of length 0
+  | 'partial-company-config'; // fail-closed on a template/blank company config
+
 export function reseedWorkspacesFromConfig(
   db: Database.Database,
   opts: { force: boolean } = { force: true }
-): { created: number; updated: number } {
+): { created: number; updated: number; outcome: ReseedOutcome; configPath: string | null; manifestEntries: number } {
   void opts; // reserved; the upsert is always idempotent so `force` is a no-op today
   let created = 0;
   let updated = 0;
+  let configPath: string | null = null;
+  let depts: unknown = null;
 
   try {
-    const configPath = resolveDepartmentsConfigPath();
+    configPath = resolveDepartmentsConfigPath();
 
     if (!configPath) {
       console.warn('[reseed] No departments.json found — skipping workspace reseed');
-      return { created, updated };
+      return { created, updated, outcome: 'no-config', configPath: null, manifestEntries: 0 };
     }
     console.log('[reseed] Using departments.json:', configPath);
 
@@ -6403,10 +6667,42 @@ export function reseedWorkspacesFromConfig(
     const raw = safeReadFileUtf8(configPath);
     if (raw == null) {
       console.warn('[reseed] departments.json unreadable (absent or TCC-blocked) — skipping workspace reseed:', configPath);
-      return { created, updated };
+      return { created, updated, outcome: 'unreadable', configPath, manifestEntries: 0 };
     }
-    const depts = JSON.parse(raw);
-    if (!Array.isArray(depts) || depts.length === 0) return { created, updated };
+    depts = JSON.parse(raw);
+
+    // U041 (audit E11). This branch used to be the ONLY exit in this function
+    // that returned without logging anything, and it is the exit that means "we
+    // found this client's manifest and it declares no departments." The result
+    // it produced — {created: 0, updated: 0} — is byte-identical to the healthy
+    // steady-state result, so a box whose manifest was an empty array looked
+    // exactly like a box that was already correct, on every boot and every
+    // converge, forever. Both conditions are now named and logged, and the
+    // outcome is returned so the caller can decide: converge fails loud (an
+    // explicit operator action), boot warns and continues (startup must not
+    // crash). See the ReseedOutcome docstring above.
+    if (!Array.isArray(depts)) {
+      console.error(
+        '[reseed] departments.json is NOT a JSON array — refusing to reseed. ' +
+          `Parsed type: ${depts === null ? 'null' : typeof depts}. File: ${configPath}. ` +
+          'Expected an array of {id, slug, name, emoji, workspacePath} objects.',
+      );
+      return { created, updated, outcome: 'malformed', configPath, manifestEntries: 0 };
+    }
+
+    if (depts.length === 0) {
+      console.error(
+        '[reseed] departments.json resolved to an EMPTY ARRAY (0 entries) — no department ' +
+          `will be seeded, so the board will render NO department columns. File: ${configPath}. ` +
+          'This is NOT the same as "already up to date": it means the manifest itself declares ' +
+          'no departments. The manifest is written per box at runtime by the workforce build ' +
+          '(copy_departments_to_command_center); the repo template is deliberately [] and must ' +
+          'stay that way (.github/workflows/config-guard.yml). If this box should have ' +
+          'departments, the build did not write its manifest to a path this resolver reaches — ' +
+          'the resolver logged the exact path it used one line above.',
+      );
+      return { created, updated, outcome: 'empty-manifest', configPath, manifestEntries: 0 };
+    }
 
     // Ensure a company row exists (seedCompanyGuarded creates the real brand row
     // from company-config.json, or the 'default' sentinel on an un-branded box —
@@ -6417,14 +6713,14 @@ export function reseedWorkspacesFromConfig(
     const seedResult = seedCompanyGuarded(db);
     if (seedResult.reason === 'partial-config') {
       console.warn('[reseed] Aborting workspace reseed: partial/template company config (fail-closed, no mis-attribution)');
-      return { created, updated };
+      return { created, updated, outcome: 'partial-company-config', configPath, manifestEntries: depts.length };
     }
     // Resolve the ACTIVE company through the ONE canonical, placeholder-aware
     // resolver — the SAME function the board filter uses (resolveActiveCompanyId),
     // so a NEW workspace is always attributed to the company the board shows. This
     // is the Fable-5 root-cause fix: seedCompanyGuarded's companyId is the FIRST
     // non-Default row by rowid, which on legacy boxes is a stale `command-center`
-    // placeholder even though the client is `marico` — attributing new depts to a
+    // placeholder even though the client is `northwind` — attributing new depts to a
     // company the board filters OUT. resolveSeedingCompanyId skips placeholders.
     // When only placeholder companies exist (un-branded box) it returns null and we
     // fall back to the row seedCompanyGuarded just ensured exists — always a valid
@@ -6437,7 +6733,7 @@ export function reseedWorkspacesFromConfig(
     // DB) must never OVERWRITE the per-client company_id an existing row already
     // carries. Doing so is the fleet-wide attribution-wipe bug: when the source
     // resolves to a placeholder ('command-center' / 'default') while the board's
-    // resolveActiveCompanyId() resolves to the REAL client (e.g. 'marico'), the
+    // resolveActiveCompanyId() resolves to the REAL client (e.g. 'northwind'), the
     // old `company_id = excluded.company_id` re-homed every workspace to the
     // placeholder — and boardWhereClause() hides any row whose company_id is a
     // real-but-foreign id — so the client's entire board went blank. Existing
@@ -6556,7 +6852,7 @@ export function reseedWorkspacesFromConfig(
     throw err; // Re-throw so converge endpoint can FAIL LOUD
   }
 
-  return { created, updated };
+  return { created, updated, outcome: 'seeded', configPath, manifestEntries: depts.length };
 }
 
 /**
@@ -6651,9 +6947,23 @@ export function checkDispatchSchemaHealth(db: Database.Database): DispatchSchema
 // startup, exactly as the previous first-boot seeder did.
 function autoSeedFromDepartmentsJson(db: Database.Database) {
   try {
-    const { created, updated } = reseedWorkspacesFromConfig(db, { force: true });
+    const { created, updated, outcome, manifestEntries } = reseedWorkspacesFromConfig(db, { force: true });
     if (created > 0 || updated > 0) {
       console.log(`[Auto-seed] Departments synced on boot — created=${created} updated=${updated}`);
+    }
+    // U041 (audit E11), Rule 3.5 STAGE 1 — WARN, never fail, on the boot path.
+    // An empty or malformed manifest is a REAL state on a box that has not been
+    // through a workforce build yet, and a boot that hard-failed on it would
+    // brick every such box on day one. So boot reports the count and comes up;
+    // the converge endpoint is where this becomes an error, because converge is
+    // an explicit operator action that can answer with a 500. Flipping boot to
+    // fail-closed is a SEPARATE unit and must not happen in this batch.
+    if (outcome === 'empty-manifest' || outcome === 'malformed') {
+      console.warn(
+        `[Auto-seed] Department manifest problem on boot: ${outcome} (raw entries=${manifestEntries}). ` +
+          'The board will show NO department columns. Details logged by [reseed] above. ' +
+          'Startup continues — this is warn-mode, not a boot failure.',
+      );
     }
   } catch (err) {
     console.log('[Auto-seed] Skipped:', (err as Error).message);

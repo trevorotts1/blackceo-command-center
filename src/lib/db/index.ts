@@ -140,6 +140,43 @@ export function getDb(): Database.Database {
 
   const handle = new Database(dbPath);
   handle.pragma('journal_mode = WAL');
+  // U040 (audit E10). BOUND THE WRITE-AHEAD LOG'S HIGH-WATER MARK.
+  //
+  // Without this, SQLite never shrinks the -wal file: a checkpoint that resets
+  // the log leaves the file at whatever size it once needed, and the space is
+  // reused in place forever. Measured on the live box 2026-07-26T12:08:54Z and
+  // again at 12:16:36Z: the -wal was 59,970,752 bytes BOTH times (14,556 frames
+  // of 4,120 = one page + a 24-byte frame header, plus a 32-byte file header;
+  // remainder 0), while the write-ahead-log index reported only 314 LIVE frames
+  // and the log header carried checkpoint sequence 66 AT THAT INSTANT. Both are
+  // LIVE COUNTERS and will differ when you read them; what does not change is
+  // that the live frames are a small fraction of the 14,556-frame high-water
+  // mark. Do not treat 314 or 66 as fixed values. So automatic
+  // checkpointing was working correctly and the 57 MB was 100% stale reserved
+  // space, NOT unflushed data and NOT unbounded growth. The high-water mark was
+  // set by ONE bulk import on 2026-07-20 (2,555 of 2,579 `sops` rows;
+  // `sops.steps` alone is 48,100,023 bytes; the table is 13,512 of the
+  // database's 17,556 pages) and nothing since has needed a log that large.
+  //
+  // journal_size_limit truncates the log back down to this many bytes whenever a
+  // checkpoint RESETS it. It is a post-checkpoint target, never a cap on a live
+  // transaction: a bulk import or a migration still grows the log as far as it
+  // needs, commits normally, and simply does not leave the space behind.
+  //
+  // 8 MiB is chosen against SQLite's own automatic-checkpoint threshold of 1,000
+  // pages (~4,120,000 bytes of log). 8,388,608 / 4,120 = 2,036 whole frames,
+  // about 2.04x that threshold — so steady-state operation checkpoints and
+  // resets WITHOUT ever hitting the limit, and no ordinary commit pays for a
+  // file truncation. Only a burst that genuinely exceeded 8 MiB gets trimmed.
+  //
+  // This is deliberately NOT a scheduled `wal_checkpoint(TRUNCATE)` job. One
+  // already exists at scripts/atomic-deploy.sh:380-390 (asserted by
+  // scripts/qc-cc.sh:454 and tests/unit/b2-atomic-deploy.test.ts:714), and an
+  // exclusive checkpoint issued from inside this process would have to win the
+  // write lock against the second writer the comment below names, at a five-
+  // second busy timeout, with the scheduler's own wrap() swallowing the failure.
+  // See U040.
+  handle.pragma('journal_size_limit = 8388608');
   // DATA-15: this DB is written by TWO processes — the Node app and the detached
   // Python persona selector (persona-selector.ts spawns it with DASHBOARD_DB_PATH).
   // SQLite allows a single writer; without a busy timeout a concurrent write fails

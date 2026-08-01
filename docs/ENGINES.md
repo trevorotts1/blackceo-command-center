@@ -17,7 +17,9 @@ Podcast (`slug='podcast'`) and Anthology (`slug='anthology'`) are the canonical
 examples.
 
 **U017 is the reference implementation of this pattern.** It shipped migration
-112 — a one-time, idempotent workspace-seeding migration:
+113 (`seed_podcast_anthology_workspaces`) — a one-time, idempotent
+workspace-seeding migration. (Migration 112 is a `company_id` re-pointer and is
+NOT the seeder; this document named it in error until U037.)
 
 ```sql
 INSERT OR IGNORE INTO workspaces (slug, name, company_id, ...)
