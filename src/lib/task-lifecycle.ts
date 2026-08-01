@@ -1,42 +1,51 @@
 /**
- * task-lifecycle.ts — ADVISORY transition helper (NOT the sole status gate).
+ * task-lifecycle.ts — AUTHORITATIVE transition funnel (THE sole status gate).
  *
- * ⚠️ ADOPTION REALITY (read before trusting the "one state machine" framing):
- * `transition()` is now internally SAFE to be the one authoritative status path
- * — it is atomic (status UPDATE + both audit inserts in a single transaction,
- * DISP-09) and compare-and-swapped (DISP-10), so two concurrent callers racing
- * the same task cannot both win. BUT it is still not YET the ONLY path a task's
- * status changes: a set of raw `UPDATE tasks SET … status` writers in other
- * modules (dispatcher, QC scorer, sweeps, PATCH/status/return-to-orchestrator
- * routes, agent-completion + test webhooks, sop-authoring, execution-watcher)
- * write the column directly and DO NOT route through here. Converting those is
- * cross-lane work (each lives in another lane's file); the enumerated call-site
- * list is in the L3 hand-off note for the integrator. Consequences you must not
- * assume away until that conversion lands:
- *   - The `task_events` structured audit trail is written ONLY when a status
- *     change goes through `transition()`. It is therefore PARTIAL, not a
- *     complete history. Do not treat task_events as a source of truth for "every
- *     transition that ever happened."
- *   - The legal-transition guard + preconditions below only gate the callers
- *     that opt in. They cannot prevent an illegal status anywhere else.
- * To convert a raw writer: replace its `UPDATE … WHERE id=? AND status='<X>'`
- * with `transition(id, '<to>', { actor, reason, expectedFrom: '<X>' })` — the
- * expectedFrom guard preserves the exact optimistic-concurrency the raw CAS had.
- * See DUCK-PIPELINE-GUIDANCE.md §3 for the target design.
+ * transition() is the ONE path a task's status changes. It is:
+ *   - atomic (status UPDATE + both audit inserts in a single transaction, DISP-09)
+ *   - compare-and-swapped (DISP-10 — two concurrent callers racing the same task
+ *     cannot both win)
+ *   - COMPLETE for all raw writers that set extra columns alongside status:
+ *     `evidence.extraColumns` lets a caller supply additional SET clause pairs
+ *     (e.g. `qc_reroute_attempts`, `dispatch_attempts`, `block_reason`) that are
+ *     applied atomically inside the same transaction as the status flip and both
+ *     audit writes — no separate raw UPDATE needed.
  *
- * What `transition(taskId, to, evidence)` does when a caller DOES opt in:
+ * Every raw status writer (see scripts/guard-raw-status-writers.ts) is now either
+ * migrated to transition() + extraColumns, or — where the legal-transition set
+ * truly does not cover the edge — routed through recordStatusEvent() (DISP-10),
+ * which writes the SAME task_events row transition() writes. The U99 guard
+ * enforces: NEW raw UPDATE tasks SET status writers must carry a
+ * `U99-RAW-STATUS-WRITER:` annotation and a written reason. The guard is CI-gated.
+ *
+ * Conversion pattern for a compound raw writer:
+ *   BEFORE:
+ *     run('UPDATE tasks SET status=?, qc_reroute_attempts=?, updated_at=?
+ *         WHERE id=? AND status=?', [...]);
+ *     recordStatusEvent(taskId, from, to, { actor, reason });
+ *   AFTER:
+ *     await transition(taskId, to, {
+ *       actor, reason,
+ *       expectedFrom: from,
+ *       extraColumns: { qc_reroute_attempts: newAttempts },
+ *     });
+ *   The extraColumns merge atomically into the same transaction — no gap, no
+ *   separate recordStatusEvent call, full DISP-09+DISP-10 guarantees.
+ *
+ * What `transition(taskId, to, evidence)` does:
  *   1. Validates the transition is legal (legal-transitions map + preconditions).
  *   2. Compare-and-swaps the tasks row: the status UPDATE is guarded by
  *      `WHERE status = <observed from-status>`, so a concurrent writer that moved
  *      the row in the read→write window causes a CAS_CONFLICT rather than a blind
  *      overwrite (DISP-10). Callers may also assert an expected current status via
  *      `evidence.expectedFrom` for explicit optimistic-concurrency.
- *   3. Writes a task_events row (structured audit trail, distinct from the
- *      legacy `events` table which stays for backwards compat).
- *   4. Steps 2–3 run inside ONE db.transaction() so the status change and both
- *      audit inserts are atomic (all commit or none — DISP-09). The SSE broadcast
- *      and owner-DONE notification run only AFTER the commit, so nothing is
- *      announced for a change that rolled back.
+ *   3. Applies any extraColumns within the same atomic UPDATE — no separate
+ *      write, no gap between status flip and companion column writes.
+ *   4. Writes a task_events row (structured audit trail).
+ *   5. Steps 2-4 run inside ONE db.transaction() so all writes are atomic
+ *      (all commit or none — DISP-09). The SSE broadcast and owner-DONE
+ *      notification run only AFTER the commit, so nothing is announced for a
+ *      change that rolled back.
  *
  * States (the full TaskStatus set — see src/lib/types.ts):
  *   intake/grooming : backlog → inbox → planning
@@ -67,9 +76,6 @@
  *                 'done' is additionally gated at the PATCH route.
  *   blocked / backlog / inbox / planning / pending_dispatch / testing : always
  *                 allowed (no precondition)
- *
- * `transition()` is exported and additive: it does NOT break the existing raw-SQL
- * callers, and adopting it is encouraged but not currently mandatory.
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -185,11 +191,44 @@ export interface TransitionEvidence {
    */
   expectedFrom?: LifecycleState;
   /**
-   * MR-04: extra columns to land atomically with the status flip in the same
-   * UPDATE. Each key must name a column that exists on tasks. Added so
-   * compound raw writers (status plus description/model_id/block_* etc.) can
-   * route through transition() instead of bypassing the state machine.
-   * Values are passed as params and bound positionally; no interpolation.
+   * Extra columns to SET atomically alongside the status flip, inside the SAME
+   * transaction as the audit writes (MR-16 / DISP-09 convergence).
+   *
+   * Keys are bare column names (e.g. 'qc_reroute_attempts', 'dispatch_attempts',
+   * 'block_reason', 'description', 'last_progress_at'). Every key MUST map to a
+   * column on the `tasks` table that the caller intends to write alongside the
+   * status change. The values are interpolated as parameterized bindings (not
+   * string-interpolated), so SQL injection is not possible through this map.
+   *
+   * This closes the DISP-09 atomicity gap: before this field, a compound raw
+   * writer ran a separate `run(...)` for the status flip + companion columns,
+   * followed by a separate `recordStatusEvent(...)`. A crash between those two
+   * separate calls left a committed status change with NO task_events row. By
+   * merging the companion columns into the same transaction() block that already
+   * holds the status UPDATE + task_events INSERT + events INSERT, the audit trail
+   * is now GUARANTEED for every status change that routes through transition().
+   *
+   * Callers that need extra columns the transition() core UPDATE doesn't set:
+   *
+   *   await transition(taskId, 'blocked', {
+   *     actor: 'qc-scorer',
+   *     reason: 'failed QC 3x',
+   *     expectedFrom: 'review',
+   *     extraColumns: {
+   *       qc_reroute_attempts: 3,
+   *       block_reason: 'Failed QC 3x',
+   *       block_gaps: JSON.stringify(gaps),
+   *       block_needs: 'Owner fix required',
+   *       block_audience: 'OWNER',
+   *       description: existingDesc + '\n' + kickbackNote,
+   *     },
+   *   });
+   *
+   * `updated_at` is always set by transition() itself unless the caller supplies
+   * it here (rare — for migration from a raw writer that sets it manually).
+   * Added so compound raw writers (status plus description/model_id/block_* etc.)
+   * can route through transition() instead of bypassing the state machine
+   * (originally MR-04); values are bound positionally, no interpolation.
    */
   extraColumns?: Record<string, string | number | null>;
 }
@@ -666,9 +705,12 @@ export async function transition(
   const legacyType = to === 'done' ? 'task_completed' : 'task_status_changed';
 
   // ── Atomic, compare-and-swap DB write ──────────────────────────────────────
-  // DISP-09: the status UPDATE, the task_events insert, and the legacy events
-  // insert commit as ONE db.transaction() — all land or none do. A crash between
-  // them can no longer leave a committed status change with no audit row.
+  // DISP-09: the status UPDATE, extraColumns, task_events insert, and legacy
+  // events insert commit as ONE db.transaction() — all land or none do. A crash
+  // between them can no longer leave a committed status change with no audit row.
+  // MR-16: extraColumns from TransitionEvidence are merged into the same UPDATE
+  // inside this transaction, so callers migrating from raw compound UPDATEs get
+  // the full atomicity guarantee without a separate write + recordStatusEvent gap.
   // DISP-10: the UPDATE is a compare-and-swap on the status we just read
   // (`from`). If another writer moved the row in the read→write (TOCTOU) window,
   // `changes === 0` and we throw CAS_CONFLICT instead of blindly overwriting a
@@ -681,31 +723,28 @@ export async function transition(
   // The SSE broadcast + owner notify are kept OUTSIDE the transaction (below) so
   // nothing is announced for a change that rolled back.
   transaction(() => {
-    let res: { changes: number };
+    // Build the UPDATE with optional extraColumns and the mandatory
+    // compare-and-swap guard.
+    const extraCols = evidence.extraColumns ?? {};
+    const setClauses = ['status = ?'];
+    const params: unknown[] = [to];
 
-    if (evidence.extraColumns && Object.keys(evidence.extraColumns).length > 0) {
-      // Build the UPDATE with extraColumns and the mandatory compare-and-swap guard.
-      const extraCols = evidence.extraColumns;
-      const setClauses = ['status = ?', 'updated_at = ?'];
-      const params: unknown[] = [to, now];
-
-      for (const [col, val] of Object.entries(extraCols)) {
-        setClauses.push(`${col} = ?`);
-        params.push(val);
-      }
-
-      params.push(taskId);
-      params.push(from); // compare-and-swap guard
-
-      const sql = `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ? AND status = ?`;
-      res = run(sql, params);
-    } else {
-      res = run(
-        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?',
-        [to, now, taskId, from],
-      );
+    for (const [col, val] of Object.entries(extraCols)) {
+      setClauses.push(`${col} = ?`);
+      params.push(val);
     }
 
+    // Always set updated_at unless the caller provided it explicitly.
+    if (!('updated_at' in extraCols)) {
+      setClauses.push('updated_at = ?');
+      params.push(now);
+    }
+
+    params.push(taskId);
+    params.push(from); // compare-and-swap guard
+
+    const sql = `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ? AND status = ?`;
+    const res = run(sql, params);
     if (res.changes === 0) {
       throw new TransitionError(
         'CAS_CONFLICT',

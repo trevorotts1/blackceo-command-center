@@ -40,7 +40,7 @@ import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { resolveSpecialistSessionKey, deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
@@ -322,25 +322,32 @@ export async function probeSessionLiveness(
  * guard beyond only selecting in_progress tasks; transition() closes the TOCTOU.
  */
 async function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): Promise<void> {
-  const now = new Date().toISOString();
+  // MR-16: migrated from raw UPDATE + recordStatusEvent to transition() for
+  // DISP-09 atomicity — the status flip, task_events insert, and events insert
+  // now commit as ONE transaction. No separate run() / recordStatusEvent() gap.
+  // The caller only ever selects in_progress tasks so no CAS guard is needed
+  // beyond transition()'s own from-status guard.
   try {
     await transition(taskId, 'review', {
       actor: agentId ?? 'execution-watcher',
-      reason: `agent reported TASK_COMPLETE (reconcile): ${summary}`,
-      expectedFrom: 'in_progress',
+      reason: 'agent reported TASK_COMPLETE (reconcile)',
     });
   } catch (err) {
-    // CAS_CONFLICT: another writer already moved the task — non-fatal, just stop.
-    if (err instanceof Error && err.message.includes('CAS_CONFLICT')) return;
+    if (err instanceof TransitionError) {
+      // CAS_CONFLICT: another writer already moved the task. Don't double-move
+      // the agent to standby — just log and return.
+      console.warn(`[execution-watcher] advanceToReview transition failed for ${taskId}: ${err.code} ${err.message}`);
+      return;
+    }
     throw err;
   }
-  run(
-    `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-    [uuidv4(), 'task_completed', agentId, taskId, `${agentName ?? 'Agent'} completed: ${summary}`, now]
-  );
+
+  // Post-commit: free the agent (transition() already handled broadcast +
+  // events + task_events).
   if (agentId) {
-    run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['standby', now, agentId]);
+    run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['standby', new Date().toISOString(), agentId]);
   }
+
   const updated = queryOne<Task>(
     `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji
      FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = ?`,
@@ -426,7 +433,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
         // reconcile resolve it directly rather than re-deriving.
         upsertActiveSession(task.assigned_agent_id, task.openclaw_session_id, task.id);
         advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match).catch(err =>
-          console.error('[execution-watcher] advanceToReview failed:', err),
+          console.warn(`[execution-watcher] advanceToReview transition failed for task ${task.id}:`, (err as Error).message),
         );
         runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
         continue; // task advanced — don't fall back to deliverable check.
