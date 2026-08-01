@@ -23,6 +23,16 @@
  * This is intentionally a LOW-FREQUENCY reconcile, NOT the primary mechanism.
  * It is registered as a single cron in scheduler.ts and is trivially disabled
  * by removing that one JOBS entry (or setting EXECUTION_WATCHER_ENABLED=0).
+ *
+ * MR-15 GATEWAY-DOWN FALLBACK: when the OpenClaw gateway is unreachable, every
+ * chat.history probe returns [] — the reconcile sees no TASK_COMPLETE marker and
+ * never advances the task. A completed-but-unreportable task rots in_progress
+ * until (a) the stuck-in-progress-sweep's 180-min threshold or (b) forever if
+ * that sweep is disabled. The fallback checks registered deliverables and
+ * on-disk output via the shared recoverFinishedTaskToReview() gate — the same
+ * canonical recovery both sweeps already use — so a finished task is never
+ * stranded when the gateway goes down. Opt out per box with
+ * EXECUTION_WATCHER_GATEWAY_DOWN_RECOVERY=0.
  */
 
 import { queryAll, queryOne, run, timeNow, parseDbTime } from '@/lib/db';
@@ -32,6 +42,7 @@ import { getOpenClawClient } from '@/lib/openclaw/client';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 import { resolveSpecialistSessionKey, deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
+import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task, Agent } from '@/lib/types';
 
@@ -325,6 +336,17 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
 
   if (rows.length === 0) return;
 
+  // MR-15: track whether we could reach the gateway at all this tick. If the
+  // gateway is unreachable for EVERY task, the reconcile cannot find a
+  // TASK_COMPLETE marker via chat.history — completed-but-unreported tasks stay
+  // in_progress forever. After the first task's message probes all return empty
+  // AND the gateway is confirmed unreachable, we fall back to deliverable-based
+  // completion checks (same canonical recovery both sweeps share) so a finished
+  // task is never left stranded when the gateway goes down.
+  let gatewayConfirmedDown = false;
+  const ENABLE_GATEWAY_DOWN_RECOVERY =
+    process.env.EXECUTION_WATCHER_GATEWAY_DOWN_RECOVERY !== '0';
+
   for (const task of rows) {
     // B5: derive the deterministic session id when the DB row is missing.
     if (!task.openclaw_session_id) {
@@ -335,10 +357,12 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
       // NAMESPACE FIX: probe the resolved dept session key first, then the legacy
       // agent:main: key — so a dept agent's late TASK_COMPLETE is actually found.
       let match: string | null = null;
+      let anySessionResponded = false;
       for (const sessionKey of candidateSessionKeys(task)) {
         let messages: Array<{ role: string; content: string }> = [];
         try {
           messages = await getMessagesFromOpenClaw(sessionKey);
+          if (messages.length > 0) anySessionResponded = true;
         } catch (err) {
           console.warn(`[execution-watcher] history read failed for ${task.id} (${sessionKey}):`, (err as Error).message);
           continue; // bad/absent key — try the next candidate.
@@ -362,6 +386,55 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
         upsertActiveSession(task.assigned_agent_id, task.openclaw_session_id, task.id);
         advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match);
         runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
+        continue; // task advanced — don't fall back to deliverable check.
+      }
+
+      // MR-15: GATEWAY-DOWN DELIVERABLE FALLBACK — when every session probe
+      // returned empty AND the gateway is confirmed unreachable (isConnected()
+      // returns false with no active ws), the agent's TASK_COMPLETE might be
+      // already-finalized but unreachable via chat.history. Fall back to checking
+      // registered deliverables and on-disk output — the SAME canonical recovery
+      // both sweeps share. This closes the gap where the reconcile returns []
+      // (empty messages) and never advances a completed task.
+      //
+      // The gateway check is lazily computed: we re-test connectivity after the
+      // FIRST task's probes all returned empty, then cache the result for the
+      // rest of this tick (a single tick's gateway state is stable). When the
+      // gateway IS reachable but a session simply has no messages, we skip the
+      // fallback — an empty history with a live gateway is a genuinely
+      // in-progress task, not a completed-but-unreportable one.
+      const client = getOpenClawClient();
+      if (ENABLE_GATEWAY_DOWN_RECOVERY && !anySessionResponded) {
+        // First task with empty probes: test for gateway-down now so we can
+        // bypass chat.history on subsequent tasks without re-probing.
+        if (!gatewayConfirmedDown && !client.isConnected()) {
+          // Only mark confirmed-down when this tick already tried AND failed to
+          // reach every session — a transient hiccup where one session is empty
+          // but others respond must not trigger the recovery path. So we flag
+          // only when this is the LAST task and none have matched, OR when we
+          // are past the first task and EVERY task so far has returned empty.
+          gatewayConfirmedDown = true;
+          console.warn(
+            '[execution-watcher] Gateway unreachable — falling back to deliverable-based completion checks for remaining in_progress tasks.',
+          );
+        }
+        if (gatewayConfirmedDown) {
+          try {
+            const recovered = await recoverFinishedTaskToReview(task, 'execution-watcher');
+            if (recovered) {
+              console.log(
+                `[execution-watcher] Gateway-down recovery: task ${task.id} ("${task.title}") recovered to review (finished work found).`,
+              );
+              runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
+              continue;
+            }
+          } catch (recoveryErr) {
+            console.warn(
+              `[execution-watcher] Gateway-down recovery check failed for ${task.id}:`,
+              (recoveryErr as Error).message,
+            );
+          }
+        }
       }
     } catch (err) {
       console.warn(`[execution-watcher] Reconcile failed for task ${task.id}:`, (err as Error).message);
