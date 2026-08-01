@@ -117,7 +117,7 @@ export function upsertActiveSession(agentId: string | null, openclawSessionId: s
   try {
     const now = timeNow();
     const existing = queryOne<{ id: string }>(
-      `SELECT id FROM openclaw_sessions WHERE agent_id = ? AND status = 'active' LIMIT 1`,
+      `SELECT id FROM openclaw_sessions WHERE agent_id = ? AND status = 'active' AND deleted_at IS NULL LIMIT 1`,
       [agentId],
     );
     if (existing) {
@@ -318,7 +318,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
             s.openclaw_session_id
      FROM tasks t
      LEFT JOIN agents a ON t.assigned_agent_id = a.id
-     LEFT JOIN openclaw_sessions s ON s.agent_id = t.assigned_agent_id AND s.status = 'active'
+     LEFT JOIN openclaw_sessions s ON s.agent_id = t.assigned_agent_id AND s.status = 'active' AND s.deleted_at IS NULL
      WHERE t.status = 'in_progress'
        AND t.assigned_agent_id IS NOT NULL`
   );

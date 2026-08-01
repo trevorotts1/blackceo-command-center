@@ -615,7 +615,7 @@ export async function autoDispatchTask(
     // the row is ever purged.
     const openclawSessionId = deterministicOpenclawSessionId(agent.name);
     let session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ? AND deleted_at IS NULL',
       [agent.id, 'active'],
     );
 

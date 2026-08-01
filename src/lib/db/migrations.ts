@@ -5321,6 +5321,22 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '117',
+    name: 'add_openclaw_sessions_deleted_at',
+    up: (db) => {
+      // MR-05: soft-delete for openclaw_sessions so the completion webhook can
+      // always read task_id even after the session has been marked dead. A
+      // hard-delete of a mid-flight session row loses the task_id attribution
+      // and the task stays in_progress forever.
+      const cols = (db.prepare('PRAGMA table_info(openclaw_sessions)').all() as {
+        name: string;
+      }[]);
+      if (!cols.some((c) => c.name === 'deleted_at')) {
+        db.prepare('ALTER TABLE openclaw_sessions ADD COLUMN deleted_at TEXT').run();
+      }
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
 
     // If filtering by database fields, query the database
     if (sessionType || status) {
-      let sql = 'SELECT * FROM openclaw_sessions WHERE 1=1';
+      let sql = 'SELECT * FROM openclaw_sessions WHERE deleted_at IS NULL';
       const params: unknown[] = [];
 
       if (sessionType) {

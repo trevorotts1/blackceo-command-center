@@ -261,7 +261,7 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
             a.role AS assigned_agent_role,
             t.workspace_id,
             (SELECT s.openclaw_session_id FROM openclaw_sessions s
-               WHERE s.agent_id = t.assigned_agent_id AND s.status = 'active'
+               WHERE s.agent_id = t.assigned_agent_id AND s.status = 'active' AND s.deleted_at IS NULL
                ORDER BY s.updated_at DESC LIMIT 1) AS openclaw_session_id,
             t.last_progress_at, t.updated_at,
             (SELECT MAX(e.created_at) FROM events e

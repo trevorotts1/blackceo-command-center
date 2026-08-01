@@ -246,7 +246,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // Get or create OpenClaw session for this agent
     let session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ? AND deleted_at IS NULL',
       [agent.id, 'active']
     );
 

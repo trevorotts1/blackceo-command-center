@@ -22,7 +22,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     const session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ? AND deleted_at IS NULL',
       [id, 'active']
     );
 
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // Check if already linked
     const existingSession = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ? AND deleted_at IS NULL',
       [id, 'active']
     );
     if (existingSession) {
@@ -132,7 +132,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     const existingSession = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ? AND deleted_at IS NULL',
       [id, 'active']
     );
 
@@ -143,11 +143,11 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Mark the session as inactive
+    // Mark the session as soft-deleted (MR-05: preserve task_id for completion attribution)
     const now = new Date().toISOString();
     run(
-      'UPDATE openclaw_sessions SET status = ?, updated_at = ? WHERE id = ?',
-      ['inactive', now, existingSession.id]
+      'UPDATE openclaw_sessions SET status = ?, deleted_at = ?, updated_at = ? WHERE id = ?',
+      ['inactive', now, now, existingSession.id]
     );
 
     // Log event
