@@ -7,6 +7,7 @@ import { getDb } from '@/lib/db';
 import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 import { getSession } from '@/lib/interview/store';
 import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -17,12 +18,33 @@ interface DepartmentEntry {
   id: string;
   emoji: string;
   name: string;
+  /** Skill 23 writes `role`; the CC schema uses `headTitle`. Normalized on read. */
   headTitle: string;
+  /** Skill 23 may write `role` instead of `headTitle`. Accepted on read, never written. */
+  role?: string;
+}
+
+/**
+ * Normalize a raw departments.json entry to the CC DepartmentEntry shape.
+ * Skill 23 writes `role`; the CC schema expects `headTitle`. This function
+ * remaps `role` to `headTitle` so every consumer sees the CC shape.
+ */
+function normalizeDeptEntry(entry: Record<string, unknown>): DepartmentEntry {
+  const id = String(entry.id || '');
+  const name = String(entry.name || '');
+  const emoji = String(entry.emoji || '📁');
+  // Accept `role` as an alias for `headTitle` (Skill-23 manifest format).
+  const headTitle = String(
+    entry.headTitle ?? entry.role ?? `Head of ${name}`,
+  );
+  return { id, emoji, name, headTitle };
 }
 
 async function readDepartments(): Promise<DepartmentEntry[]> {
   const raw = await readFile(DEPARTMENTS_CONFIG_PATH, 'utf-8');
-  return JSON.parse(raw) as DepartmentEntry[];
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) return [];
+  return (parsed as Record<string, unknown>[]).map(normalizeDeptEntry);
 }
 
 // GET /api/departments — return current department list
@@ -370,7 +392,11 @@ export async function POST(request: NextRequest) {
   }
 
   // ─── UPDATE mode (pre-existing behavior) ──────────────────────────────────
-  const { id, name, emoji, headTitle } = b as Partial<DepartmentEntry>;
+  // MR-21: accept `role` as alias for `headTitle` (Skill-23 manifest format).
+  const { id: rawId, name, emoji, headTitle: bodyHeadTitle } = b as Partial<DepartmentEntry & { role?: string }>;
+  const headTitle = bodyHeadTitle ?? (b as Record<string, unknown>).role as string | undefined;
+
+  const id = rawId ? canonicalDeptSlug(rawId) || rawId : rawId;
 
   if (!id || typeof id !== 'string') {
     return NextResponse.json(
@@ -395,14 +421,19 @@ export async function POST(request: NextRequest) {
 
   if (headTitle !== undefined && typeof headTitle !== 'string') {
     return NextResponse.json(
-      { success: false, message: 'Field "headTitle" must be a string.' },
+      { success: false, message: 'Field "headTitle" (or "role") must be a string.' },
       { status: 400 }
     );
   }
 
   try {
     const departments = await readDepartments();
-    const index = departments.findIndex((d) => d.id === id);
+    // MR-21: normalize both the stored id and the id param through canonicalDeptSlug()
+    // so a Skill-23 manifest entry with dept- prefix matches a bare-id lookup.
+    const index = departments.findIndex((d) => {
+      const storedCanonical = canonicalDeptSlug(d.id) || d.id;
+      return d.id === id || d.id === rawId || storedCanonical === id;
+    });
 
     if (index === -1) {
       return NextResponse.json(

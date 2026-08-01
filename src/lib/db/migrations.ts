@@ -6809,9 +6809,32 @@ export function reseedWorkspacesFromConfig(
         continue;
       }
 
-      const slugLower = String(dept.slug || dept.id || '').toLowerCase();
-      const isCeo = slugLower === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || dept.id === 'ceo';
-      const isGeneralTask = slugLower === 'general-task';
+      // MR-21: Skill-23's departments.json writes ids with a `dept-` prefix
+      // (e.g. "dept-marketing"), whereas the CC schema (departments.config.ts,
+      // the sidebar, and routing) uses bare canonical ids ("marketing").
+      // Normalize ONLY `dept-`-prefixed ids through canonicalDeptSlug() so they
+      // map to the bare canonical id the sidebar/routing can match.
+      //
+      // Bare ids (the CC manifest format) are deliberately left UNTOUCHED:
+      // canonicalDeptSlug() also applies alias remaps (e.g. "billing" ->
+      // "billing-finance", "webdev" -> "web-development") that would rewrite an
+      // already-valid workspace id. Doing that on a live box mints a SECOND
+      // workspace row under the new id and orphans the original row's tasks —
+      // and it breaks the U110 opt-out matching, which compares manifest ids to
+      // workspace ids by exact value. So: strip/resolve the `dept-` prefix only.
+      // The raw (pre-normalization) id is preserved for dedup below so a dept-
+      // prefixed entry for the same department as an existing bare entry still
+      // collides correctly.
+      const rawId = String(dept.id || '');
+      const rawSlug = String(dept.slug || rawId);
+      const normalizeDeptId = (s: string): string =>
+        s.trim().toLowerCase().startsWith('dept-') ? canonicalDeptSlug(s) || s : s;
+      const canonicalId = normalizeDeptId(rawId);
+      const canonicalSlug = normalizeDeptId(rawSlug);
+
+      const slugLower = rawSlug.toLowerCase();
+      const isCeo = canonicalSlug === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || rawId === 'ceo';
+      const isGeneralTask = canonicalSlug === 'general-task' || slugLower === 'general-task';
       const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
 
       // Slug-uniqueness guard (FM-6): never (re)create a SECOND workspace whose
@@ -6821,9 +6844,12 @@ export function reseedWorkspacesFromConfig(
       // 2026-07-08 'app-development' and 'engineering' are DISTINCT canonical slugs
       // (the destructive app-development→engineering alias was removed), so two
       // chosen depts App Development + Engineering no longer collide here.
-      const canonOwner = findCanonicalWorkspaceId(db, dept.slug || dept.id);
-      if (canonOwner && canonOwner !== dept.id) {
-        console.log(`[reseed] Skipping "${dept.id}" — department already represented by workspace "${canonOwner}"`);
+      // Compare against BOTH the canonical id AND the raw id — a manifest entry
+      // with raw id "dept-marketing" and a DB row with id "marketing" collide.
+      let canonOwner = findCanonicalWorkspaceId(db, rawSlug);
+      if (!canonOwner) canonOwner = findCanonicalWorkspaceId(db, canonicalSlug);
+      if (canonOwner && canonOwner !== canonicalId && canonOwner !== rawId) {
+        console.log(`[reseed] Skipping "${rawId}" (canonical "${canonicalId}") — department already represented by workspace "${canonOwner}"`);
         continue;
       }
 
@@ -6834,13 +6860,16 @@ export function reseedWorkspacesFromConfig(
       // workspaces are attributed to the active company normally. (The ON
       // CONFLICT branch above never touches company_id, so an existing engine
       // row keeps whatever it has; this only governs the NEW-row INSERT.)
-      const insertCompanyId = ENGINE_WORKSPACE_SLUGS.includes(slugLower) ? 'default' : companyId;
+      const insertCompanyId = (ENGINE_WORKSPACE_SLUGS.includes(slugLower) || ENGINE_WORKSPACE_SLUGS.includes(canonicalSlug)) ? 'default' : companyId;
 
-      const existing = existsCheck.get(dept.id);
+      // Use the CANONICAL id for the workspace row so the sidebar and routing
+      // can match against it. The manifest slug (raw) is preserved as the workspace
+      // slug for backward compat, but the canonical slug is the authoritative one.
+      const existing = existsCheck.get(canonicalId);
       upsertStmt.run(
-        dept.id,
+        canonicalId,
         dept.name,
-        dept.slug || dept.id,
+        canonicalSlug,
         dept.name + ' department workspace',
         dept.emoji || '📁',
         insertCompanyId,
