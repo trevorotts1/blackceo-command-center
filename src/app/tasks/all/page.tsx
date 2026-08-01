@@ -166,7 +166,7 @@ export default function AllTasksPage() {
         <Breadcrumb
           items={[
             { label: 'Home', href: '/' },
-            { label: 'All Tasks' },
+            { label: 'Task Board' },
           ]}
         />
       </div>
