@@ -244,6 +244,83 @@ test('DISABLE_OPERATOR_COLUMN_AGE_DIGEST=1: short-circuits the whole run', async
   }
 });
 
+// ── MR-42: Archival transparency ──────────────────────────────────────────
+
+test('buildColumnAgeDigestMessage: includes archival section when recentlyArchivedCount > 0', () => {
+  const now = Date.now();
+  const rows: DigestTaskRow[] = [
+    { id: 'a', title: 'Card A', department: 'web-development', status: 'backlog', last_progress_at: null, updated_at: new Date(now - 12 * 3600_000).toISOString() },
+  ];
+  const entries = computeColumnAgeEntries(rows, now);
+  const message = buildColumnAgeDigestMessage(entries, 1, 1, 5);
+
+  assert.match(message, /\[DAILY DIGEST\]/);
+  assert.match(message, /\[ARCHIVAL\]\s+5 done task/);
+  assert.match(message, /\?includeArchived=true/);
+  assert.match(message, /hidden, not deleted/);
+});
+
+test('buildColumnAgeDigestMessage: omits archival section when recentlyArchivedCount is 0', () => {
+  const now = Date.now();
+  const rows: DigestTaskRow[] = [
+    { id: 'a', title: 'Card A', department: 'web-development', status: 'backlog', last_progress_at: null, updated_at: new Date(now - 12 * 3600_000).toISOString() },
+  ];
+  const entries = computeColumnAgeEntries(rows, now);
+  const message = buildColumnAgeDigestMessage(entries, 1, 1, 0);
+
+  assert.match(message, /\[DAILY DIGEST\]/);
+  // No archival section when count is 0.
+  assert.doesNotMatch(message, /\[ARCHIVAL\]/);
+  assert.doesNotMatch(message, /\?includeArchived=true/);
+});
+
+test('buildColumnAgeDigestMessage: omits archival section when recentlyArchivedCount is omitted (default 0)', () => {
+  const now = Date.now();
+  const rows: DigestTaskRow[] = [
+    { id: 'a', title: 'Card A', department: 'web-development', status: 'backlog', last_progress_at: null, updated_at: new Date(now - 12 * 3600_000).toISOString() },
+  ];
+  const entries = computeColumnAgeEntries(rows, now);
+  // Call with 3 arguments — the pre-existing signature before MR-42.
+  const message = buildColumnAgeDigestMessage(entries, 1, 1);
+
+  assert.match(message, /\[DAILY DIGEST\]/);
+  assert.doesNotMatch(message, /\[ARCHIVAL\]/);
+});
+
+test('runOperatorColumnAgeDigest: recentlyArchivedCount field is present in result', async () => {
+  clearFixtures();
+  seedTask({ title: 'Active backlog', status: 'backlog', department: 'sales', updatedAt: hoursAgo(5) });
+
+  const result = await runOperatorColumnAgeDigest();
+  assert.equal(result.digestSent, true);
+  assert.ok(typeof result.recentlyArchivedCount === 'number', 'recentlyArchivedCount must be present');
+  // No archived tasks seeded, so count should be 0.
+  assert.equal(result.recentlyArchivedCount, 0);
+});
+
+test('runOperatorColumnAgeDigest: recentlyArchivedCount counts done tasks archived in past 7 days', async () => {
+  clearFixtures();
+  // Seed a done-and-archived task (simulating a board-hygiene rule-4 sweep).
+  const id = uuidv4();
+  const archiveDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(); // 3 days ago
+  run(
+    `INSERT INTO tasks
+       (id, title, status, workspace_id, business_id, department, updated_at, archived_at)
+     VALUES (?, ?, 'done', NULL, NULL, 'marketing', ?, ?)`,
+    [id, 'Archived done task', archiveDate, archiveDate],
+  );
+  // Seed an active backlog card so the board isn't empty (and digest fires).
+  seedTask({ title: 'Active card', status: 'backlog', department: 'sales', updatedAt: hoursAgo(2) });
+
+  const result = await runOperatorColumnAgeDigest();
+  assert.equal(result.digestSent, true);
+  assert.ok(result.recentlyArchivedCount >= 1, 'should count the recently-archived done task');
+  if (result.message) {
+    assert.match(result.message, /\[ARCHIVAL\]/);
+    assert.match(result.message, /\?includeArchived=true/);
+  }
+});
+
 // ── Sanity: DIGEST_STATUSES never includes the terminal 'done' status ───────
 
 test('DIGEST_STATUSES excludes the terminal done status', () => {

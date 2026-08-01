@@ -13,6 +13,7 @@ import {
   Search,
   Phone,
   Globe,
+  Archive,
   ArrowUpRight,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -123,6 +124,14 @@ const TILES: OperatorTile[] = [
     icon: <Globe size={22} />,
     accent: '#6366F1',
     cardId: 'web-agent',
+  },
+  {
+    href: '/operator/archive',
+    title: 'Archive',
+    tagline: 'Browse and restore soft-archived done tasks.',
+    icon: <Archive size={22} />,
+    accent: '#78716C',
+    cardId: 'archive',
   },
 ];
 

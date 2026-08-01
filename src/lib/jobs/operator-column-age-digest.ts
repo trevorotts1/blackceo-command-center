@@ -22,6 +22,14 @@
  * SYSTEM audience only (MOVE-IN-SILENCE) — this is an operator-facing digest,
  * never a client-facing one.
  *
+ * MR-42 ARCHIVAL TRANSPARENCY (added post-ship): the digest now additionally
+ * queries how many done tasks were soft-archived in the past 7 days (by
+ * board-hygiene's rule 4 and the weekly-done-clear Sunday sweep). An archival
+ * count above zero adds a section to the digest naming it and naming the
+ * escape hatch: `?includeArchived=true` on any board query. This closes the
+ * gap where an operator lost visible history without knowing why — the daily
+ * read now calls it out explicitly.
+ *
  * BATCHING DISCIPLINE: exactly one notifySystem() call per run, no matter how
  * many departments/columns have activity — mirrors board-hygiene's stale-
  * backlog "digestNoRequester" batching (rule 5) and the 2.5 "batched, never a
@@ -118,6 +126,9 @@ export interface OperatorColumnAgeDigestResult {
   digestSent: boolean;
   /** The exact text sent to notifySystem() (present only when digestSent). */
   message?: string;
+  /** MR-42: count of done tasks archived in the past 7 days (rule 4 + Sunday
+   *  sweep). Zero means nothing was recently cleaned up. */
+  recentlyArchivedCount: number;
 }
 
 // ── Pure grouping logic (DB-free — directly unit-testable) ─────────────────
@@ -201,11 +212,17 @@ function formatAge(ageHours: number): string {
  * Build the ONE batched message notifySystem() sends. Deliberately never
  * emits a per-task line — one line per non-empty (department, status) group,
  * carrying the count and the single oldest card.
+ *
+ * @param recentlyArchivedCount  MR-42: count of done tasks soft-archived in
+ *  the past 7 days. Included in the message so the operator knows tasks were
+ *  removed from the visible board — and that ?includeArchived=true still
+ *  surfaces them.
  */
 export function buildColumnAgeDigestMessage(
   entries: ColumnAgeEntry[],
   totalTasks: number,
   departmentCount: number,
+  recentlyArchivedCount: number = 0,
 ): string {
   const lines: string[] = [
     `[DAILY DIGEST] Column ages — ${departmentCount} department(s), ${totalTasks} active task(s).`,
@@ -223,6 +240,17 @@ export function buildColumnAgeDigestMessage(
     );
   }
 
+  // MR-42: archival transparency — operator knows what was cleaned up and how
+  // to see it. Only included when count > 0 to avoid noise on an idle board.
+  if (recentlyArchivedCount > 0) {
+    lines.push('');
+    lines.push(
+      `[ARCHIVAL] ${recentlyArchivedCount} done task(s) soft-archived this week ` +
+      `(rule 4 / Sunday sweep). Use ?includeArchived=true on any board query ` +
+      `to browse them — they are hidden, not deleted.`,
+    );
+  }
+
   return lines.join('\n');
 }
 
@@ -234,7 +262,7 @@ function isDisabled(): boolean {
 }
 
 function emptyResult(ranAt: string, skippedReason: string): OperatorColumnAgeDigestResult {
-  return { ranAt, skippedReason, totalTasks: 0, departmentCount: 0, entries: [], digestSent: false };
+  return { ranAt, skippedReason, totalTasks: 0, departmentCount: 0, entries: [], digestSent: false, recentlyArchivedCount: 0 };
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -274,6 +302,23 @@ export async function runOperatorColumnAgeDigest(): Promise<OperatorColumnAgeDig
   const totalTasks = rows.length;
   const departmentCount = new Set(entries.map((e) => e.department)).size;
 
+  // MR-42: query recently-archived done tasks (past 7 days) so the operator
+  // gets a daily reminder when board-hygiene's rule-4 or the weekly-done-clear
+  // Sunday sweep silently removes cards from the visible board.
+  let recentlyArchivedCount = 0;
+  try {
+    recentlyArchivedCount =
+      queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM tasks
+          WHERE status = 'done'
+            AND archived_at IS NOT NULL
+            AND archived_at >= datetime('now', '-7 days')`,
+        [],
+      )?.n ?? 0;
+  } catch {
+    recentlyArchivedCount = 0;
+  }
+
   // Cooldown/day-dedup guard: at most one digest per COOLDOWN window, so a
   // restart or a double cron tick on the same day never sends a second copy.
   let recentDigest = 0;
@@ -296,10 +341,11 @@ export async function runOperatorColumnAgeDigest(): Promise<OperatorColumnAgeDig
       departmentCount,
       entries,
       digestSent: false,
+      recentlyArchivedCount,
     };
   }
 
-  const message = buildColumnAgeDigestMessage(entries, totalTasks, departmentCount);
+  const message = buildColumnAgeDigestMessage(entries, totalTasks, departmentCount, recentlyArchivedCount);
   notifySystem(message, { agent: 'operator-column-age-digest', action: 'daily_digest' });
 
   try {
@@ -313,5 +359,5 @@ export async function runOperatorColumnAgeDigest(): Promise<OperatorColumnAgeDig
     /* cooldown marker is best-effort — the notifySystem() call above already fired */
   }
 
-  return { ranAt, totalTasks, departmentCount, entries, digestSent: true, message };
+  return { ranAt, totalTasks, departmentCount, entries, digestSent: true, message, recentlyArchivedCount };
 }
