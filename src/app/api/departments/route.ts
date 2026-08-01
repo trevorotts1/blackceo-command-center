@@ -7,7 +7,7 @@ import { getDb } from '@/lib/db';
 import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 import { getSession } from '@/lib/interview/store';
 import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
-import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { normalizeDeptPrefixedId } from '@/lib/routing/canonical-slug';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { boardWhereClause } from '@/lib/workspaces/board-query';
 
@@ -422,12 +422,21 @@ export async function POST(request: NextRequest) {
   // surface in sync with what both the routing engine (loadDepartments()) and
   // GET /api/departments now query.
   // MR-21: accept `role` as alias for `headTitle` (Skill-23 manifest format),
-  // and normalize the id param through canonicalDeptSlug() so a Skill-23
-  // manifest entry with dept- prefix matches a bare-id workspace lookup.
+  // and normalize a `dept-`-prefixed id (Skill-23 manifest format) to the bare
+  // canonical id the workspaces table is keyed on.
   const { id: rawId, name, emoji, headTitle: bodyHeadTitle } = b as Partial<DepartmentEntry & { role?: string }>;
-  const headTitle = bodyHeadTitle ?? (b as Record<string, unknown>).role as string | undefined;
+  const role = typeof (b as Record<string, unknown>).role === 'string'
+    ? (b as Record<string, unknown>).role as string
+    : undefined;
+  const headTitle = bodyHeadTitle ?? role;
 
-  const id = rawId ? canonicalDeptSlug(rawId) || rawId : rawId;
+  // MR-21 (fix2): normalize ONLY `dept-`-prefixed ids — the SAME guard the
+  // reseed uses (normalizeDeptPrefixedId). The original fix ran EVERY id
+  // through canonicalDeptSlug(), which also applies alias remaps
+  // (e.g. "billing" -> "billing-finance"): an update for a workspace stored
+  // under the bare id "billing" then looked up "billing-finance" and 404'd.
+  // Bare ids must pass through untouched so exact-id updates keep working.
+  const id = rawId ? normalizeDeptPrefixedId(rawId) : rawId;
 
   if (!id || typeof id !== 'string') {
     return NextResponse.json(
