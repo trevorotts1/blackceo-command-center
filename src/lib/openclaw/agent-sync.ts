@@ -10,9 +10,9 @@
  * dispatch.
  *
  * FIX: On boot (instrumentation.ts) and on converge (POST /api/system/converge),
- * call the gateway's `sessions.list` RPC to discover active agent sessions,
- * then `agent.describe` each agent to extract its department, role, and name.
- * UPSERT those specialist agents into the CC `agents` table.
+ * call the gateway's `agents.list` RPC — the authoritative roster of configured
+ * agents — and UPSERT each specialist into the CC `agents` table, carrying over
+ * the display name, emoji, and model the operator chose on the gateway.
  *
  * This is deliberately ASYNC and fire-and-forget on boot — the synchronous
  * runMigrations() does NOT block on a gateway RPC.  The instrumentation hook
@@ -21,47 +21,20 @@
  *
  * Invariants:
  *   • NEVER touches the master Orchestrator row (is_master=1).
+ *   • NEVER touches the gateway's default/main orchestrator agent.
  *   • NEVER touches CC-generated trio/head agent rows (qc-agent-*, research-agent-*, da-agent-*, head-agent-*).
  *   • Gateway-unreachable → logged and skipped (non-fatal).  The converge
  *     endpoint can retry later when the gateway is ready.
- *   • Idempotent — INSERT OR IGNORE on the agent's own stable node id, plus
- *     an UPDATE on re-sync so data stays current.
+ *   • Idempotent — keyed on the agent's own stable gateway id, with an
+ *     ON CONFLICT UPDATE on re-sync so data stays current.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '@/lib/db';
-import { getOpenClawClient, type OpenClawClient } from './client';
-
-/* ─────────────────────────────── Types ─────────────────────────────────────── */
-
-/** Shape of one session returned by sessions.list (OpenClawSessionInfo + extensions). */
-interface GatewaySession {
-  id: string;
-  channel?: string;
-  peer?: string;
-  agentId?: string;
-  agent_id?: string;
-  agentName?: string;
-  agent_name?: string;
-  status?: string;
-  model?: string;
-}
-
-/** Shape of one agent returned by the gateway's agent.info / agent.describe RPC. */
-interface GatewayAgent {
-  id: string;
-  name?: string;
-  displayName?: string;
-  label?: string;
-  role?: string;
-  roleType?: string;
-  type?: string;
-  status?: string;
-  description?: string;
-  model?: string;
-  workspaceId?: string;
-  department?: string;
-}
+import {
+  getOpenClawClient,
+  type OpenClawAgentEntry,
+  type OpenClawAgentsList,
+} from './client';
 
 /* ─────────────────────────────── Helpers ───────────────────────────────────── */
 
@@ -111,20 +84,6 @@ function isCcManagedAgentId(id: string): boolean {
   return /^(qc|research|da)-agent-/.test(id) || /^head-agent-/.test(id);
 }
 
-/** Derive a role_type from a node's metadata, never returning a trio role. */
-function inferRoleType(node: GatewayAgent): string {
-  const rt = str(node.roleType, '') || str(node.role, '') || str(node.type, '') || 'specialist';
-  const lowered = rt.toLowerCase();
-  // Trio roles are CC-managed — never ingest them as a specialist.
-  if (['research', 'deep-research', 'devils-advocate', 'da', 'qc', 'quality-control'].includes(lowered)) {
-    return 'specialist';
-  }
-  if (['leadership', 'head', 'lead'].includes(lowered)) return 'leadership';
-  if (lowered === 'healer') return 'healer';
-  if (lowered === 'orchestrator') return 'orchestrator';
-  return 'specialist';
-}
-
 /** Resolve a workspace id from a department slug, falling back to the slug itself. */
 function resolveWorkspaceId(db: ReturnType<typeof getDb>, slug: string): string {
   if (!slug) return 'default';
@@ -160,11 +119,12 @@ export interface SyncResult {
  * Sync specialist agents from the OpenClaw gateway into the CC agents table.
  *
  * Strategy:
- *   1. Call sessions.list to discover active agent sessions on the gateway.
- *   2. For each unique agent id found, call agent.describe (or node.describe)
- *      to get the agent's name, role, department, and model.
- *   3. Resolve the department → workspace id from the CC `workspaces` table.
- *   4. UPSERT the agent row (INSERT OR IGNORE on id, UPDATE on re-sync).
+ *   1. Call agents.list to fetch the gateway's configured agent roster.
+ *   2. Filter out the gateway orchestrator/main agent and CC-managed trio/head
+ *      ids (those are owned by the CC, never by this sync).
+ *   3. Resolve each specialist's department → workspace id from the CC
+ *      `workspaces` table (best-effort; falls back to 'default').
+ *   4. UPSERT the agent row (keyed on the gateway id, UPDATE on re-sync).
  *
  * Non-fatal: a missing gateway or partial data → logged and the remaining
  * agents are processed.  This is a best-effort sync, not a transaction.
@@ -183,47 +143,47 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
     }
   }
 
-  // ── 2. Discover agent sessions ────────────────────────────────────────────
-  let sessions: GatewaySession[];
+  // ── 2. Discover the specialist roster via agents.list ─────────────────────
+  // The gateway's `agents.list` RPC is the AUTHORITATIVE source for the Skill-23
+  // workforce: it returns every configured agent with its display name, emoji,
+  // and model in one call.
+  //
+  // (FABLE CORRECTION — the original fix discovered agents via sessions.list and
+  // then called node.describe per agent id. That is broken: the gateway's
+  // node.describe handler ONLY resolves paired *devices/nodes* (it looks the id
+  // up in the node catalog and returns "unknown nodeId" otherwise), so EVERY
+  // specialist agent id failed to describe and rows were inserted with garbage
+  // fallback names like "Agent a1b2c3d4". agents.list is the RPC the MR-14
+  // recommendation names, and it returns the real names + emojis directly.)
+  let agentsList: OpenClawAgentsList;
   try {
-    sessions = (await client.listSessions()) as GatewaySession[];
+    agentsList = await client.listAgents();
   } catch (err) {
-    result.message = `sessions.list RPC failed — skipping specialists ingest (non-fatal): ${(err as Error).message}`;
+    result.message = `agents.list RPC failed — skipping specialists ingest (non-fatal): ${(err as Error).message}`;
     return result;
   }
 
-  if (!Array.isArray(sessions) || sessions.length === 0) {
-    result.message = 'No sessions returned by the gateway — nothing to ingest.';
+  const gatewayAgents: OpenClawAgentEntry[] = Array.isArray(agentsList?.agents)
+    ? agentsList.agents
+    : [];
+
+  if (gatewayAgents.length === 0) {
+    result.message = 'No agents returned by the gateway — nothing to ingest.';
     return result;
   }
 
-  // ── 3. Extract unique agent ids from sessions ─────────────────────────────
-  const agentIds = new Set<string>();
-  for (const s of sessions) {
-    const aid = str(s.agentId, '') || str(s.agent_id, '');
-    if (aid) agentIds.add(aid);
-  }
-
-  if (agentIds.size === 0) {
-    result.message =
-      `Scanned ${sessions.length} session(s), found zero agent ids — nothing to ingest.`;
-    return result;
-  }
-
-  console.log(
-    `[Agent-Sync] Discovered ${agentIds.size} unique agent id(s) across ${sessions.length} session(s).`,
+  // The gateway's default/main agent is the operator-facing orchestrator bridge;
+  // it maps to the CC master Orchestrator, so never ingest it as a specialist.
+  const reservedIds = new Set<string>(
+    [agentsList.defaultId, agentsList.mainKey, 'main'].filter(
+      (x): x is string => typeof x === 'string' && x.trim().length > 0,
+    ),
   );
 
-  // ── 4. Describe each agent via the gateway ────────────────────────────────
+  console.log(`[Agent-Sync] Discovered ${gatewayAgents.length} agent(s) on the gateway.`);
+
+  // ── 3. Upsert each specialist ─────────────────────────────────────────────
   const db = getDb();
-
-  // Workspace slug → id lookup
-  const wsRows = db.prepare('SELECT id, slug FROM workspaces').all() as { id: string; slug: string }[];
-  const workspaceBySlug = new Map<string, string>();
-  for (const ws of wsRows) {
-    workspaceBySlug.set(ws.slug.toLowerCase(), ws.id);
-  }
-
   const now = new Date().toISOString();
 
   const upsertAgent = db.prepare(`
@@ -242,15 +202,27 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
       updated_at      = excluded.updated_at
   `);
 
-  for (const agentId of Array.from(agentIds)) {
+  for (const entry of gatewayAgents) {
+    const agentId = str(entry?.id, '');
     try {
+      if (!agentId) {
+        result.skipped++;
+        continue;
+      }
+
+      // Skip the gateway orchestrator / main agent.
+      if (reservedIds.has(agentId)) {
+        result.skipped++;
+        continue;
+      }
+
       // Skip CC-managed agents (trio/head patterns).
       if (isCcManagedAgentId(agentId)) {
         result.skipped++;
         continue;
       }
 
-      // Skip the master orchestrator.
+      // Skip the master orchestrator if it somehow shares an id.
       const existing = db
         .prepare('SELECT is_master FROM agents WHERE id = ?')
         .get(agentId) as { is_master: number } | undefined;
@@ -259,76 +231,33 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
         continue;
       }
 
-      // Describe the agent. node.describe and agent.describe may both work;
-      // we try node.describe first (see client.ts).
-      let agent: GatewayAgent | null = null;
-      try {
-        const raw = await client.describeNode(agentId);
-        if (raw && typeof raw === 'object') {
-          const obj = raw as Record<string, unknown>;
-          agent = {
-            id: agentId,
-            name: str(obj.name, '') || str(obj.displayName, '') || str(obj.label, '') || undefined,
-            displayName: str(obj.displayName, ''),
-            label: str(obj.label, ''),
-            role: str(obj.role, ''),
-            roleType: str(obj.roleType, '') || str(obj.role, ''),
-            type: str(obj.type, ''),
-            status: str(obj.status, ''),
-            description: str(obj.description, ''),
-            model: str(obj.model, ''),
-            workspaceId: str(obj.workspaceId, '') || str(obj.workspace_id, ''),
-            department: str(obj.department, ''),
-          };
-          // If the describe payload embeds the department inside metadata.
-          const meta = obj.metadata;
-          if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
-            const m = meta as Record<string, unknown>;
-            if (!agent.department) agent.department = str(m.department, '');
-            if (!agent.workspaceId) agent.workspaceId = str(m.workspaceId, '') || str(m.workspace_id, '');
-            if (!agent.name) agent.name = str(m.name, '') || str(m.agentName, '');
-            if (!agent.role) agent.role = str(m.role, '');
-          }
-        }
-      } catch {
-        // node.describe failed — the agent may not be a node.
-        // Still try to create a minimal entry from the session data.
-      }
+      // Display name: identity.name wins, then entry.name, then a stable fallback.
+      const name =
+        str(entry.identity?.name, '') ||
+        str(entry.name, '') ||
+        `Agent ${agentId.length > 8 ? agentId.slice(0, 8) : agentId}`;
 
-      if (!agent || !agent.name) {
-        // Use the agent id itself as a fallback name (strip hex noise).
-        const fallback = agentId.length > 8 ? `Agent ${agentId.slice(0, 8)}` : `Agent ${agentId}`;
-        if (!agent) {
-          agent = { id: agentId, name: fallback };
-        } else {
-          agent.name = agent.name || fallback;
-        }
-      }
-
-      // At this point agent and agent.name are guaranteed non-null.
-      const agentName: string = agent.name!;
-      const agentDept = agent.department;
-
-      // Resolve department → workspace id.
-      const dept: string | null = agentDept || inferDeptFromAgentName(agentName);
+      // Resolve department → workspace id from the agent's name.
+      const dept = inferDeptFromAgentName(name);
       const workspaceId = dept ? resolveWorkspaceId(db, dept) : 'default';
 
-      const name = agentName;
-      const role = agent.role || name;
+      const role = name;
       const deptForDesc = dept || 'general';
-      const description = agent.description || `${role} for the ${deptForDesc} department (synced from OpenClaw gateway).`;
-      const emoji = inferEmoji(`${name} ${role}`);
-      const ccStatus = mapGatewayStatus(agent.status);
-      const model = agent.model || null;
-      const roleType = inferRoleType(agent);
+      const description = `${role} for the ${deptForDesc} department (synced from OpenClaw gateway).`;
+      // Prefer the emoji the operator chose on the gateway; infer one otherwise.
+      const emoji = str(entry.identity?.emoji, '') || inferEmoji(name);
+      const model = str(entry.model, '') || null;
+      // agents.list carries no role_type; specialists are the only kind it lists
+      // (the orchestrator/main agent is filtered above).
+      const roleType = 'specialist';
 
       const existedBefore = !!db
         .prepare('SELECT 1 FROM agents WHERE id = ?')
         .get(agentId);
 
       upsertAgent.run(
-        agentId, name, role, description || null, emoji, ccStatus,
-        workspaceId, model || null, roleType, now, now,
+        agentId, name, role, description, emoji, 'standby',
+        workspaceId, model, roleType, now, now,
       );
 
       if (existedBefore) result.updated++;
@@ -349,14 +278,6 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
 }
 
 /* ────────────────────────────── Helpers ────────────────────────────────────── */
-
-function mapGatewayStatus(status: string | undefined): string {
-  const s = (status ?? '').toLowerCase();
-  if (s === 'online' || s === 'active' || s === 'standby' || s === 'idle') return 'standby';
-  if (s === 'busy' || s === 'working') return 'working';
-  if (s === 'offline' || s === 'disconnected') return 'offline';
-  return 'standby';
-}
 
 /** Guess a department slug from an agent name like "Marketing Specialist" → "marketing". */
 function inferDeptFromAgentName(name: string): string | null {

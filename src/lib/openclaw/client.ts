@@ -68,6 +68,31 @@ interface GatewayFrame {
   event?: unknown;
 }
 
+/**
+ * Shape of the gateway's `agents.list` RPC response (see the gateway's
+ * `listAgentsForGateway`). Only the fields the CC agent-sync reads are typed;
+ * the gateway returns more (workspace, thinkingLevels, runtimes, …).
+ */
+export interface OpenClawAgentEntry {
+  id: string;
+  name?: string | null;
+  identity?: {
+    name?: string | null;
+    emoji?: string | null;
+    avatar?: string | null;
+    theme?: string | null;
+  } | null;
+  workspace?: string | null;
+  model?: string | null;
+}
+
+export interface OpenClawAgentsList {
+  defaultId?: string;
+  mainKey?: string;
+  scope?: string;
+  agents: OpenClawAgentEntry[];
+}
+
 // ── U020 ANTI-FURNACE: bounded reconnect backoff ─────────────────────────────
 // A flapping gateway used to trigger an infinite fixed-10s reconnect loop.
 // Mirrors the task-dispatcher's anti-furnace pattern (MAX_DISPATCH_ATTEMPTS,
@@ -786,6 +811,17 @@ export class OpenClawClient extends EventEmitter {
   // Session management methods
   async listSessions(): Promise<OpenClawSessionInfo[]> {
     return this.call<OpenClawSessionInfo[]>('sessions.list');
+  }
+
+  /**
+   * List the agents configured on the gateway (the Skill-23 specialist roster).
+   * Backed by the gateway's `agents.list` RPC, which returns
+   * `{ defaultId, mainKey, scope, agents: [{ id, name, identity, workspace, model }] }`.
+   * This is the authoritative source for agent display names + emojis — unlike
+   * `node.describe`, which only resolves paired *devices*, not agents.
+   */
+  async listAgents(): Promise<OpenClawAgentsList> {
+    return this.call<OpenClawAgentsList>('agents.list', {});
   }
 
   async getSessionHistory(sessionId: string): Promise<unknown[]> {
