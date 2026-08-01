@@ -342,6 +342,32 @@ export interface TransitionEvidence {
    * (originally MR-04); values are bound positionally, no interpolation.
    */
   extraColumns?: Record<string, string | number | null>;
+  /**
+   * Optional overrides for the LEGACY `events` row transition() writes for
+   * backwards-compat with the live feed (MR-16 events-feed regression fix).
+   *
+   * By default that row is written as:
+   *   type     = to === 'done' ? 'task_completed' : 'task_status_changed'
+   *   agent_id = NULL
+   *   message  = `[lifecycle] Task "<title>" moved <from> → <to>[: <reason>]`
+   *
+   * A caller migrating from a raw writer that used to write a RICHER legacy row
+   * (e.g. the execution-watcher reconcile, which emitted a `task_completed` row
+   * carrying the completing agent's id and its actual completion summary) can
+   * supply these fields so the single atomic transition() write reproduces that
+   * row exactly — instead of silently dropping the agent pill from the activity
+   * feed (events.agent_id LEFT JOINs agents), downgrading the type to
+   * `task_status_changed`, and losing the summary. All three are applied inside
+   * the SAME transaction as the status flip + task_events insert, so MR-16's
+   * DISP-09 atomicity guarantee is preserved (no separate post-commit re-insert).
+   *
+   * `eventAgentId` is bound to events.agent_id (a FK to agents); pass null/omit
+   * it when the actor is not an agent id ('system', 'qc-scorer', …) — it is NOT
+   * defaulted from `actor`, which is frequently a non-agent string.
+   */
+  eventType?: string;
+  eventAgentId?: string | null;
+  eventMessage?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +855,15 @@ export async function transition(
   checkPreconditions(task, to, evidence);
 
   const now = new Date().toISOString();
-  const legacyType = to === 'done' ? 'task_completed' : 'task_status_changed';
+  // Legacy `events` row fields — overridable via evidence (MR-16 events-feed
+  // regression fix). Defaults reproduce the pre-override behavior exactly, so
+  // every existing caller is unaffected; a migrating raw writer that used to set
+  // agent_id / a richer type+message supplies the overrides to restore its row.
+  const legacyType = evidence.eventType ?? (to === 'done' ? 'task_completed' : 'task_status_changed');
+  const legacyAgentId = evidence.eventAgentId ?? null;
+  const legacyMessage =
+    evidence.eventMessage ??
+    `[lifecycle] Task "${task.title}" moved ${from} → ${to}${evidence.reason ? ': ' + evidence.reason : ''}`;
 
   // ── Atomic, compare-and-swap DB write ──────────────────────────────────────
   // DISP-09: the status UPDATE, extraColumns, task_events insert, and legacy
@@ -883,15 +917,19 @@ export async function transition(
     writeTaskEvent(taskId, from, to, evidence, now);
 
     // Legacy events row for backwards-compat (live feed, existing queries).
+    // agent_id is bound (NULL unless the caller supplied evidence.eventAgentId)
+    // so the activity feed's `LEFT JOIN agents ON e.agent_id` can render the
+    // agent pill for migrated raw writers (MR-16 events-feed regression fix).
     try {
       run(
-        `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
         [
           uuidv4(),
           legacyType,
+          legacyAgentId,
           taskId,
-          `[lifecycle] Task "${task.title}" moved ${from} → ${to}${evidence.reason ? ': ' + evidence.reason : ''}`,
+          legacyMessage,
           now,
         ],
       );
