@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# pre-push hook — refuses a push whose tracked files contain a client name.
+#
+# WHY THIS EXISTS (AGW item 29):
+#   `blackceo-command-center` is a PUBLIC repo. Real client names have
+#   historically been committed to `main` and pushed to public branches, and
+#   CI could not catch any of it: a bare GitHub-hosted runner has no client
+#   roster by design (client PII is intentionally never provisioned into CI
+#   secrets), so the CI tier of scripts/qc-assert-no-client-names.sh is
+#   structurally report-only there. Until now this repo had NO git hooks at
+#   all (core.hooksPath unset, .git/hooks/ held only *.sample files), so
+#   nothing local ever stopped a client name from being pushed. This hook is
+#   the push-path gate that actually runs where the real roster exists: the
+#   operator's own machine.
+#
+# WHAT IT DOES:
+#   Runs scripts/qc-assert-no-client-names.sh — the repo's own authoritative
+#   client-name gate — against the current tracked-file state and refuses the
+#   push (non-zero exit) on ANY hit. It does NOT reimplement roster tiering:
+#   it reuses the gate's own three-tier load order verbatim:
+#     1. curated roster ($OPENCLAW_CLIENT_ROSTER or ~/.openclaw/client-roster.txt)
+#     2. roster DERIVED from accounts.md (scripts/qc-derive-roster-from-accounts.py)
+#        — never echoes a name, only a count
+#     3. neither available:
+#          - outside CI (this machine, a normal `git push`): FAIL CLOSED (exit 2)
+#          - inside CI (GITHUB_ACTIONS=true / CI=true): report-only (exit 0),
+#            loud "CANNOT VERIFY" instead of a false PASS
+#   A pre-push hook is a purely client-side mechanism — GitHub never invokes it
+#   on the receiving end — so in practice this ALWAYS runs on an operator
+#   machine, never inside a bare CI runner. That means the "neither roster
+#   available" branch will almost always mean FAIL CLOSED here, which is the
+#   conservative, correct default for a push gate: if the authoritative check
+#   cannot run, the push does not go through either.
+#
+# ACTIVATION — this hook is a NO-OP until enabled. Committing it to .githooks/
+# does nothing by itself: git only invokes it after
+#     git config core.hooksPath .githooks
+# is set once, locally, per clone/worktree. See .githooks/README.md.
+#
+# Never bypass this with `git push --no-verify` to slip a real finding through
+# — fix the leak (replace the name with a neutral placeholder) instead.
+
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$REPO_ROOT" ]; then
+  # Not inside a git working tree somehow — nothing this hook can check.
+  # Fail open rather than block an operation git itself cannot locate a repo for.
+  exit 0
+fi
+cd "$REPO_ROOT" || exit 1
+
+GATE="$REPO_ROOT/scripts/qc-assert-no-client-names.sh"
+if [ ! -f "$GATE" ]; then
+  # Gate script isn't present on this ref (e.g. a very old checkout).
+  # Nothing to run — do not invent a check that doesn't exist here.
+  exit 0
+fi
+
+bash "$GATE"
+GATE_EXIT=$?
+
+if [ "$GATE_EXIT" -ne 0 ]; then
+  echo "" >&2
+  echo "PUSH BLOCKED (pre-push hook): scripts/qc-assert-no-client-names.sh exited $GATE_EXIT." >&2
+  echo "A real client name, chat ID, operator machine path, or placeholder leak" >&2
+  echo "was found in a tracked file (see the gate's file:line output above)." >&2
+  echo "" >&2
+  echo "Fix: replace each hit with a neutral placeholder (see the gate's own" >&2
+  echo "REMEDY output above), then re-commit and push again." >&2
+  echo "" >&2
+  echo "This repo is PUBLIC. Never bypass this with 'git push --no-verify' to" >&2
+  echo "get a real finding through — that defeats the entire point of the gate." >&2
+  exit 1
+fi
+
+exit 0
