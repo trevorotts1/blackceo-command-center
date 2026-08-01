@@ -96,11 +96,15 @@ export default function AllTasksPage() {
           const newTasks: Task[] = await res.json();
           const currentTasks = useMissionControl.getState().tasks;
 
+          // Compare count + updated_at timestamps so field changes beyond
+          // status (assigned_agent_id, dispatch_hold, block_reason, etc.) are
+          // detected and the board re-renders without a manual reload.
           const hasChanges =
             newTasks.length !== currentTasks.length ||
             newTasks.some((t) => {
               const current = currentTasks.find((ct) => ct.id === t.id);
-              return !current || current.status !== t.status;
+              if (!current) return true;
+              return current.status !== t.status || current.updated_at !== t.updated_at;
             });
 
           if (hasChanges) {
