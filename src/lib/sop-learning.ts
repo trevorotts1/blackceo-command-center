@@ -14,6 +14,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
 import type { SOP } from '@/lib/sops';
+import { isKnownPersonaId } from '@/lib/persona-library';
 
 // ---------- types ----------
 
@@ -491,14 +492,12 @@ export function proposeDraftFromTask(input: TriadDraftInput): TriadDraftResult {
 }
 
 /**
- * Local persona validity check mirroring sops.ts isValidPersonaId without
- * importing the route-layer module into the learning helpers. Used only to
- * decide how to word the draft's evidence line.
+ * Local persona validity check mirroring sops.ts isValidPersonaId.
+ * Uses the shared persona library (MR-32) instead of sentinel-only check.
+ * Used only to decide how to word the draft's evidence line.
  */
 function isValidTriadPersona(personaId: string | null | undefined): boolean {
-  if (!personaId) return false;
-  const v = personaId.toLowerCase().trim();
-  return !['schemaversion', 'schema_version', 'null', 'none', 'undefined', ''].includes(v);
+  return isKnownPersonaId(personaId);
 }
 
 // ---------- Approval (creates the actual SOP row) ----------
