@@ -5,7 +5,7 @@ import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore } from '@/lib/tasks';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
-import { notifyOwnerAssigned, notifyOwnerSchemaError } from '@/lib/owner-reports';
+import { notifyOwnerSchemaError } from '@/lib/owner-reports';
 import { getSelfClient } from '@/lib/clients';
 // ANTHOLOGY-CC — pure, framework-free helper that surfaces the anthology
 // sole-writer subject key onto the card's `Ref:` line (see below). Import-safe
@@ -788,12 +788,8 @@ export async function POST(request: NextRequest) {
 
     const { task, deduped } = result;
 
-    // W5.2 — ASSIGNMENT owner notification (spec §5): fires when a department was
-    // resolved, so the owner knows "I'm sending this task to the [Dept] department."
-    // Best-effort; gateway-routed; deduped tasks skip since they were already notified.
-    if (!deduped && resolvedDepartment) {
-      try { notifyOwnerAssigned(task.id, { department: resolvedDepartment }); } catch { /* non-fatal */ }
-    }
+    // Owner assignment notification now lives in createTaskCore (MR-36) so both
+    // the UI create path and the ingest path share a single fire site.
 
     // Deduped tasks are returned as 200 (not 201) so callers can distinguish.
     if (deduped) {

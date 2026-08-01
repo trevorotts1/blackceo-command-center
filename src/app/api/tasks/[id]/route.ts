@@ -23,6 +23,7 @@ import { getQcHeuristicPark } from '@/lib/qc-promote';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwner } from '@/lib/notify';
+import { notifyOwnerAssigned, notifyOwnerDone } from '@/lib/owner-reports';
 import { evaluatePresentationsDoneGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
 import { transition, TransitionError, type LifecycleState, LEGAL_TRANSITIONS } from '@/lib/task-lifecycle';
 
@@ -726,6 +727,10 @@ export async function PATCH(
              VALUES (?, ?, ?, ?, ?, ?)`,
             [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`, now]
           );
+
+          // MR-36: Owner assignment notification for the PATCH assignment branch.
+          // Best-effort; gateway-routed; never throws into the PATCH handler.
+          try { notifyOwnerAssigned(id, { department: existing.department }); } catch { /* non-fatal */ }
 
           // Auto-dispatch if already in in_progress status or being moved to in_progress now
           if (existing.status === 'in_progress' || validatedData.status === 'in_progress') {
