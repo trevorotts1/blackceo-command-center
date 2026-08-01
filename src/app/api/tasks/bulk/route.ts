@@ -13,12 +13,20 @@
  * rest. Results are enumerated per-task so the UI can revert individual cards
  * whose PATCH was rejected.
  *
+ * Gates: bulk move carries no updated_by_agent_id, so the agent-only PATCH
+ * gates do not apply — but the two gates PATCH applies to operator moves DO:
+ * the completion-evidence gate (T0-01) on any move into 'done', and the Triad
+ * Rule gate on any move out of 'backlog'. Bulk move is therefore never a
+ * bypass of the invariants the single-card PATCH path protects.
+ *
  * Body: { operation: "move" | "archive" | "assign", taskIds: string[], ...params }
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
+import { checkTriad } from '@/lib/sops';
 import type { Task, TaskStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -90,12 +98,54 @@ export async function POST(request: NextRequest) {
               continue;
             }
 
-            // Guard: blocked-to-same-status (the full blocked gate runs on PATCH)
-            // This route skips the full Triad/QC-blocked gates that PATCH enforces
-            // — it is an operator convenience tool, and the operator already moved
-            // each card to its current column through those gates individually.
-            // We DO reject moves from blocked to blocked (no-op) but allow all other
-            // moves because the operator is trusted.
+            // This route is an operator convenience tool: it carries no
+            // updated_by_agent_id, so the AGENT-only PATCH gates (blocked-field
+            // gate N36, QC-authority/self-grade/score-on-record gates T0-42)
+            // legitimately do not apply — those only fire for agent callers, and
+            // the UI already refuses 'blocked' as a bulk target (it needs
+            // per-task human fields).
+            //
+            // But TWO gates PATCH applies to OPERATOR moves too must hold here
+            // as well, or bulk move becomes a bypass:
+            //
+            // 1. COMPLETION-EVIDENCE GATE (T0-01): every move into 'done' —
+            //    from ANY source status, by ANY caller — requires a registered,
+            //    reachable deliverable. Without this check a bulk move could
+            //    mark evidence-less tasks done, which PATCH refuses.
+            if (targetStatus === 'done') {
+              const completion = collectCompletionEvidence(taskId);
+              if (!completion.hasEvidence) {
+                results.push({
+                  taskId,
+                  ok: false,
+                  error: noEvidenceMessage(taskId, completion),
+                });
+                continue;
+              }
+            }
+
+            // 2. TRIAD RULE GATE: leaving 'backlog' requires description +
+            //    valid SOP + valid persona. PATCH evaluates this for operator
+            //    moves too (and auto-resolves missing pieces in-band); bulk
+            //    move does no auto-resolve, so it rejects and names what is
+            //    missing. The operator can fix the card and retry, or move it
+            //    individually (drag-drop auto-resolves via PATCH).
+            if (existing.status === 'backlog') {
+              const { missing } = checkTriad({
+                description: existing.description,
+                sop_id: existing.sop_id,
+                persona_id: existing.persona_id,
+              });
+              if (missing.length > 0) {
+                results.push({
+                  taskId,
+                  ok: false,
+                  error: `Triad incomplete — cannot leave backlog (missing: ${missing.join(', ')}). Fix the task or move it individually.`,
+                });
+                continue;
+              }
+            }
+
             run('UPDATE tasks SET status = ?, updated_at = ?, last_progress_at = ? WHERE id = ?', [
               targetStatus, now, now, taskId,
             ]);
