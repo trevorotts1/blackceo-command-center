@@ -72,7 +72,10 @@ export function useSSE(options?: UseSSEOptions) {
           fresh.length !== current.length ||
           fresh.some((t) => {
             const c = current.find((ct) => ct.id === t.id);
-            return !c || c.status !== t.status;
+            // Compare updated_at too: a delta that leaves status unchanged
+            // (title/priority/assignee edits, activity) still bumps updated_at,
+            // and status-only comparison would silently skip the reconcile.
+            return !c || c.status !== t.status || c.updated_at !== t.updated_at;
           });
         if (changed) {
           debug.sse('Reconnect catch-up: board changed, reconciling store');
