@@ -88,6 +88,19 @@ describe('MR-14 agent-sync emoji + specialist_type', () => {
     expect(getAgent('spec-writer').avatar_emoji).toBe('🚀');
   });
 
+  it('preserves the existing avatar on re-sync when the gateway omits the emoji field (undefined)', async () => {
+    // The operator edited the avatar in the CC UI after the last sync.
+    getDb().prepare(`UPDATE agents SET avatar_emoji = '🎯' WHERE id = 'spec-writer'`).run();
+    // Re-sync: the gateway returns the agent but its identity has NO emoji key
+    // (undefined) — "no emoji from the gateway" must preserve the CC avatar,
+    // not overwrite it with an inferred one. Over the wire an absent field is
+    // indistinguishable in intent from ''/null, so both must preserve.
+    roster.current = [{ id: 'spec-writer', name: 'Copywriter Pro', identity: { name: 'Copywriter Pro' } }];
+    const res = await syncSpecialistAgentsFromOpenClaw();
+    expect(res.updated).toBe(1);
+    expect(getAgent('spec-writer').avatar_emoji).toBe('🎯');
+  });
+
   it('infers an emoji on first insert when the gateway provides none', async () => {
     // No identity.emoji at all → inferEmoji('Graphic Designer') → '🎨'.
     roster.current = [{ id: 'spec-designer', name: 'Graphic Designer', identity: { name: 'Graphic Designer' } }];

@@ -273,18 +273,21 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
 
       // Emoji precedence:
       //   • A real emoji the operator chose on the gateway always wins.
-      //   • An EMPTY value ('' or null) means the operator deliberately cleared
-      //     it on the gateway — on re-sync we keep the existing CC avatar (pass
-      //     '' so the upsert's COALESCE(NULLIF(excluded,''), agents.avatar_emoji)
-      //     preserves it) instead of overwriting with an inferred one.
-      //   • A missing emoji (field absent / undefined), or a brand-new row whose
-      //     emoji was cleared, falls back to inference so we never store an empty
-      //     avatar.
+      //   • On RE-SYNC, any non-real gateway emoji — cleared ('' / null) OR the
+      //     field being absent / undefined — means "no emoji from the gateway",
+      //     so we keep the CC's existing avatar (pass '' so the upsert's
+      //     COALESCE(NULLIF(excluded,''), agents.avatar_emoji) preserves it)
+      //     instead of overwriting it with an inferred one.  Over the wire "no
+      //     emoji" can arrive as either an explicit ''/null or a missing field,
+      //     so we must not depend on that distinction — both preserve.
+      //   • On FIRST INSERT with no gateway emoji, fall back to inference so we
+      //     never store an empty avatar (matches the module-header invariant:
+      //     inference is only used when no avatar exists yet).
       const gatewayEmoji = entry.identity?.emoji;
       let emoji: string;
       if (typeof gatewayEmoji === 'string' && gatewayEmoji.trim()) {
         emoji = gatewayEmoji.trim();
-      } else if ((gatewayEmoji === '' || gatewayEmoji === null) && existedBefore) {
+      } else if (existedBefore) {
         emoji = '';
       } else {
         emoji = inferEmoji(name);
