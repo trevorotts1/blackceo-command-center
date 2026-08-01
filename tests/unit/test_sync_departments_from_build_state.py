@@ -254,7 +254,7 @@ def test_find_db_explicit_and_env_take_priority(_clean_env, monkeypatch, tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# reseed_workspaces — Issue #13 (slug upsert crash) + Issue #11 (prune/adopt)
+# reseed_workspaces -- Issue #13 (slug upsert crash) + Issue #11 (prune/adopt)
 # ---------------------------------------------------------------------------
 import sqlite3
 
@@ -405,11 +405,14 @@ def test_prune_keeps_workspace_with_tasks(_clean_env, capsys):
 
 def test_prune_never_deletes_reserved_system_workspaces(_clean_env):
     """--prune must leave reserved infra workspaces (bugs/general-task/default/
-    master-orchestrator) alone even though they are absent from departments.json."""
+    master-orchestrator, ceo, dept-ceo, ceo-com, podcast, anthology) alone
+    even though they are absent from departments.json.  podcast + anthology
+    were seeded by migration-113-podcast-anthology-seed and MUST survive prune."""
     home = _clean_env
     db_path = _make_db(home)
     conn = sqlite3.connect(db_path)
-    for wid in ("bugs", "general-task", "default", "master-orchestrator", "inbox"):
+    for wid in ("bugs", "general-task", "default", "master-orchestrator", "inbox",
+                "ceo", "dept-ceo", "ceo-com", "podcast", "anthology"):
         conn.execute(
             "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
             "VALUES (?,?,?,?,?,?)",
@@ -421,7 +424,8 @@ def test_prune_never_deletes_reserved_system_workspaces(_clean_env):
     mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO), prune=True)
 
     ws = _workspaces(db_path)
-    for wid in ("bugs", "general-task", "default", "master-orchestrator", "inbox"):
+    for wid in ("bugs", "general-task", "default", "master-orchestrator", "inbox",
+                "ceo", "dept-ceo", "ceo-com", "podcast", "anthology"):
         assert wid in ws, f"reserved workspace {wid} was wrongly pruned"
 
 
@@ -666,3 +670,67 @@ def test_merge_config_head_title_not_removed_when_source_lacks_it(_clean_env):
         result = json.load(f)
 
     assert result[0]["headTitle"] == "CMO"
+
+
+# ---------------------------------------------------------------------------
+# R-39 -- engine workspace company_id must never be re-homed to client slug
+# ---------------------------------------------------------------------------
+
+def test_reseed_never_rehomes_engine_workspace_companies(_clean_env):
+    """R-39: fleet-shared engine workspaces (podcast/anthology) must ALWAYS
+    stay company_id='default' on the UPDATE branch -- the sync script must
+    NOT re-home them to the client slug (no-comingling posture)."""
+    home = _clean_env
+    db_path = _make_db(home)
+    conn = sqlite3.connect(db_path)
+    # Seed podcast and anthology as engine workspaces with company_id='default'
+    for wid in ("podcast", "anthology"):
+        conn.execute(
+            "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (wid, wid.title(), wid, "", "\U0001f4c1", "default"))
+    conn.commit()
+    conn.close()
+
+    # departments.json contains podcast + anthology (edge case: a build that
+    # accidentally lists engine slugs). The UPDATE branch must update
+    # display fields but must NOT touch company_id.
+    depts = [
+        {"id": "podcast",   "name": "Podcast",   "emoji": "\U0001f399"},
+        {"id": "anthology", "name": "Anthology", "emoji": "\U0001f4da"},
+        {"id": "dept-marketing", "name": "Marketing", "emoji": "\U0001f4e2"},
+    ]
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO))
+
+    ws = _workspaces(db_path)
+    # Engine workspaces must still be 'default', NOT re-homed to 'acme-corp'.
+    assert ws["podcast"] == "default", \
+        f"podcast company_id was re-homed to {ws['podcast']!r} -- must stay 'default'"
+    assert ws["anthology"] == "default", \
+        f"anthology company_id was re-homed to {ws['anthology']!r} -- must stay 'default'"
+    # Non-engine workspaces are re-homed normally.
+    assert ws["marketing"] == "acme-corp", \
+        f"marketing company_id expected 'acme-corp' but got {ws['marketing']!r}"
+
+
+def test_reseed_engine_workspace_caseless_match(_clean_env):
+    """R-39: the engine workspace guard is case-insensitive -- 'Podcast'
+    and 'PODCAST' are still recognized as engine-owned."""
+    home = _clean_env
+    db_path = _make_db(home)
+    conn = sqlite3.connect(db_path)
+    # Seed podcast with company_id='default'
+    conn.execute(
+        "INSERT INTO workspaces (id, name, slug, description, icon, company_id) "
+        "VALUES (?,?,?,?,?,?)",
+        ("PODCAST", "Podcast Mixcase", "podcast", "", "\U0001f4c1", "default"))
+    conn.commit()
+    conn.close()
+
+    depts = [{"id": "PODCAST", "name": "Podcast", "emoji": "\U0001f399"}]
+    mod.reseed_workspaces(db_path, depts, dict(_COMPANY_INFO))
+
+    ws = _workspaces(db_path)
+    # company_id must still be 'default' (case-insensitive engine guard fired).
+    assert ws["PODCAST"] == "default", \
+        f"PODCAST company_id was re-homed to {ws['PODCAST']!r} -- guard must be case-insensitive"

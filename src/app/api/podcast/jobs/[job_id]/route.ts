@@ -29,8 +29,14 @@ export function GET(
   }
   const db = getPodcastReadDb();
   const clientId = db ? resolvePodcastClientId(db) : null;
+  // R-37: when the engine DB is absent, return 200 with an empty body shape the
+  // client already handles (matching the list route's empty-state semantics).
+  // Only 404 when the DB is live but the specific job does not exist.
   if (!db || !clientId) {
-    return NextResponse.json({ error: 'Not found' }, { status: 404, headers: NO_STORE });
+    return NextResponse.json(
+      { job: null, events: [] },
+      { headers: NO_STORE }
+    );
   }
   const jobId = params.job_id;
   if (!/^pj_[A-Za-z0-9_-]+$/.test(jobId)) {

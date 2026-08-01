@@ -54,7 +54,6 @@ export type ProbeTier = 'critical' | 'auxiliary';
  */
 export const CRITICAL_COMPONENTS: readonly string[] = [
   'database',
-  'openclaw_gateway',
 ];
 
 /** Tier lookup used by both the fresh-probe and cached-read code paths. */

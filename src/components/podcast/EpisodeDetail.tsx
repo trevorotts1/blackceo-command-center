@@ -326,6 +326,9 @@ export function EpisodeDetailLoader({
         return res.json() as Promise<DetailPayload>;
       })
       .then((payload) => {
+        // R-37: when the engine DB is absent the API returns { job: null }.
+        // Treat that as a not-found state the same as a bad status.
+        if (!payload.job) throw new Error('not found');
         setData(payload);
         setLoading(false);
       })
