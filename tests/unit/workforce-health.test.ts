@@ -54,8 +54,13 @@ beforeAll(() => {
   insertTask.run('t-review-stuck', 'Stuck in review', 'review', null, '-25 hours');
   // review 30h but already scored → must NOT count.
   insertTask.run('t-review-scored', 'Scored review', 'review', null, '-30 hours');
-  // in_progress 49h → inProgressStale (threshold 48h).
+  // in_progress 49h → inProgressStale (threshold 12h, aligned with MR-07's
+  // stuck-in-progress hard ceiling of 720 min).
   insertTask.run('t-stale', 'Stale in-progress', 'in_progress', null, '-49 hours');
+  // in_progress 13h → just past the 12h ceiling, must count.
+  insertTask.run('t-stale-13h', 'Stale in-progress 13h', 'in_progress', null, '-13 hours');
+  // in_progress 11h → under the 12h ceiling, must NOT count.
+  insertTask.run('t-fresh-11h', 'Fresh in-progress 11h', 'in_progress', null, '-11 hours');
   // in_progress 1h → fresh, must NOT count.
   insertTask.run('t-fresh', 'Fresh in-progress', 'in_progress', null, '-1 hour');
 
@@ -85,7 +90,8 @@ describe('getWorkforceHealth (MR-08)', () => {
     // SQL always yields 0 for all of them.
     expect(stuckTasks.dispatchStuck).toBe(1);
     expect(stuckTasks.reviewStuck).toBe(1);
-    expect(stuckTasks.inProgressStale).toBe(1);
+    // 49h + 13h count; 11h and 1h sit under the 12h ceiling and must not.
+    expect(stuckTasks.inProgressStale).toBe(2);
   });
 
   it('reports agent connectivity with live task counts', () => {
@@ -94,8 +100,8 @@ describe('getWorkforceHealth (MR-08)', () => {
     const a = agents.find((row) => row.agentId === 'agt-1');
     expect(a).toBeDefined();
     expect(a!.status).toBe('working');
-    // pending_dispatch x2 + review x2 + in_progress x2 (blocked excluded).
-    expect(a!.currentTaskCount).toBe(6);
+    // pending_dispatch x2 + review x2 + in_progress x4 (blocked excluded).
+    expect(a!.currentTaskCount).toBe(8);
     expect(a!.completedCount).toBe(0);
   });
 

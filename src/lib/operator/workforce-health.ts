@@ -29,7 +29,12 @@ export interface StuckTaskCounters {
   dispatchStuck: number;
   /** Tasks in review for more than 24 hours without a QC result. */
   reviewStuck: number;
-  /** Tasks in in_progress for more than 48 hours without updates. */
+  /** Tasks in in_progress for more than 12 hours without updates. The 12h
+   * threshold mirrors MR-07's stuck-in-progress hard ceiling
+   * (DEFAULT_STUCK_IN_PROGRESS_HARD_CEILING_MINUTES = 720): the sweep
+   * guarantees no in_progress card outlives 12h, so the dashboard must flag
+   * stale cards at the same horizon — a 48h threshold would stay blind to
+   * cards the sweep has already given up on for two days. */
   inProgressStale: number;
 }
 
@@ -151,12 +156,16 @@ function computeStuckTaskCounters(): StuckTaskCounters {
         )`,
   );
 
-  // Tasks in in_progress for more than 48 hours without updates
+  // Tasks in in_progress for more than 12 hours without updates — aligned
+  // with MR-07's hard ceiling (720 min / 12h) in stuck-in-progress-sweep.ts,
+  // so the dashboard surfaces stale cards at the same horizon the sweep
+  // guarantees no card outlives (a 48h threshold would report 0 for up to
+  // two days after the ceiling had already condemned the card).
   const inProgressStale = queryCount(
     `SELECT COUNT(*) AS c FROM tasks
       WHERE status = 'in_progress'
         AND archived_at IS NULL
-        AND (julianday('now') - julianday(updated_at)) * 24 > 48`,
+        AND (julianday('now') - julianday(updated_at)) * 24 > 12`,
   );
 
   return {

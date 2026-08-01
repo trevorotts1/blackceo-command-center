@@ -223,6 +223,10 @@ export default function OperatorHealthPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Stable callback: the error path reads prior data via the functional
+  // setState form instead of closing over `data`, so the identity does not
+  // change on every poll. Depending on `data` re-created the callback (and
+  // tore down / re-armed the poll interval) after every successful fetch.
   const fetchHealth = useCallback(async () => {
     try {
       const res = await fetch('/api/operator/health-workforce', { cache: 'no-store' });
@@ -230,12 +234,16 @@ export default function OperatorHealthPage() {
       setData((await res.json()) as WorkforceHealthPayload);
       setError(null);
     } catch (err) {
-      // Keep prior data visible on transient error
-      if (!data) setError(err instanceof Error ? err.message : 'Failed to load');
+      // Keep prior data visible on transient error: only surface the message
+      // when nothing has loaded yet.
+      setData((prev) => {
+        if (!prev) setError(err instanceof Error ? err.message : 'Failed to load');
+        return prev;
+      });
     } finally {
       setLoading(false);
     }
-  }, [data]);
+  }, []);
 
   useEffect(() => {
     fetchHealth();
@@ -304,21 +312,21 @@ export default function OperatorHealthPage() {
           <StatTile
             label="Dispatch Stuck"
             value={s?.dispatchStuck ?? '—'}
-            subtitle="pending &gt;2h"
+            subtitle="pending >2h"
             icon={<Zap size={18} />}
             warn={hasDispatchStuck}
           />
           <StatTile
             label="Review Stuck"
             value={s?.reviewStuck ?? '—'}
-            subtitle="unscored &gt;24h"
+            subtitle="unscored >24h"
             icon={<Clock size={18} />}
             warn={hasReviewStuck}
           />
           <StatTile
             label="In-Progress Stale"
             value={s?.inProgressStale ?? '—'}
-            subtitle="no update &gt;48h"
+            subtitle="no update >12h"
             icon={<Clock size={18} />}
           />
           <StatTile
