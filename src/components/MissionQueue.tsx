@@ -1476,8 +1476,9 @@ export interface TaskCardProps {
 /**
  * MR-46 — Agent status dot color mapping.
  * Agents.status CHECK accepts: standby, working, busy, degraded, offline (migration 034).
+ * Exported for unit testing (MR-46 fix2).
  */
-function getAgentStatusDot(status: string | undefined): string {
+export function getAgentStatusDot(status: string | undefined): string {
   switch (status) {
     case 'working':  return 'bg-emerald-500';
     case 'busy':     return 'bg-amber-500';
