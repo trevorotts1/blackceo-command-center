@@ -70,7 +70,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { TRIO_ROLE_ALIASES } from '@/lib/db/migrations';
 import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
-import { notifyOwner } from '@/lib/notify';
+import { notifyOwner, notifySystem } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
@@ -4947,6 +4947,20 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         console.warn(
           `[QCScorer] Task "${task.title}" (${taskId}): no-key heuristic reached pass ${thisPass}/${noKeyMaxPasses} — ` +
             `escalated ONCE to [QC-HEURISTIC-FINAL] (manual-promote); permanently excluded from qc-review-sweep`,
+        );
+
+        // MR-25: the terminal [QC-HEURISTIC-FINAL] park writes an event but never
+        // called notifySystem(), so the operator got no alert when cards accumulated
+        // in Review/QC with no LLM judge key. Now fires once per escalation, same
+        // pattern as intake-advance-sweep's QC-cap notification.
+        notifySystem(
+          `[qc-heuristic-park] Task "${task.title}" (${taskId}) reached the no-key ` +
+          `heuristic cap (${thisPass}/${noKeyMaxPasses} passes) and is now ` +
+          `PERMANENTLY excluded from the QC review sweep. This box has NO client ` +
+          `Ollama Cloud judge configured — tasks cannot auto-advance review→done. ` +
+          `MANUAL REVIEW REQUIRED: promote the task to done manually, or configure ` +
+          `a judge model and clear the marker to re-enable scoring.`,
+          { agent: 'qc-scorer', action: 'escalate' },
         );
 
         return result;
