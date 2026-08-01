@@ -40,6 +40,9 @@ interface MissionQueueProps {
   loadError?: string | null;
   /** Retry callback wired to the parent page's loadData(). */
   onRetry?: () => void;
+  /** "Tasks Due" filter window in days. Defaults to 7 (matching the prior hardcoded value).
+   *  Can be overridden per-board or read from board-slas.json per-department. */
+  dueDateWindowDays?: number;
 }
 
 // ── Lean Kanban board model (Trevor-approved) ──────────────────────────────
@@ -201,13 +204,16 @@ export const departmentNames: Record<string, string> = {
   'general-task': 'General Task',
 };
 
-export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task', loadError, onRetry }: MissionQueueProps) {
+export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task', loadError, onRetry, dueDateWindowDays = 7 }: MissionQueueProps) {
   const { tasks, isLoading, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
+  // Live-overridable "Tasks Due" window (days). Starts at the prop default;
+  // the user can adjust it via the dropdown next to the filter chips.
+  const [dueWindowDays, setDueWindowDays] = useState(dueDateWindowDays);
   // Free-text board search (title/description substring, case-insensitive),
   // applied alongside whichever filter chip is active.
   const [searchQuery, setSearchQuery] = useState('');
@@ -368,11 +374,13 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     return bySearch.filter((task) => {
       switch (activeFilter) {
         case 'due':
-          // Only tasks with a due date in the next 7 days OR overdue
+          // Only tasks with a due date in the configurable window OR overdue.
+          // Driven by the `dueWindowDays` state (initialised from the prop,
+          // user-adjustable via the window-size dropdown next to the filter chips).
           if (!task.due_date) return false;
           const due = new Date(task.due_date).getTime();
-          const sevenDays = 7 * 24 * 60 * 60 * 1000;
-          return due - Date.now() <= sevenDays;
+          const windowMs = dueWindowDays * 24 * 60 * 60 * 1000;
+          return due - Date.now() <= windowMs;
         case 'agent':
           // Only tasks that have an assigned agent
           return !!task.assigned_agent_id;
@@ -621,6 +629,22 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
               )}
             </button>
           ))}
+          {/* Due-date window dropdown — visible only when "Tasks Due" filter is active.
+              Lets the user pick a horizon (1d / 3d / 7d / 14d / 30d) without leaving the board. */}
+          {activeFilter === 'due' && (
+            <select
+              value={dueWindowDays}
+              onChange={(e) => setDueWindowDays(Number(e.target.value))}
+              aria-label="Due date window"
+              className="px-2.5 py-2 rounded-lg text-sm font-medium bg-gray-50 border border-gray-200 text-gray-700 hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent cursor-pointer"
+            >
+              <option value={1}>1 day</option>
+              <option value={3}>3 days</option>
+              <option value={7}>7 days</option>
+              <option value={14}>14 days</option>
+              <option value={30}>30 days</option>
+            </select>
+          )}
         </div>
 
         {/* Board search — title/description substring, case-insensitive,

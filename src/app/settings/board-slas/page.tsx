@@ -35,6 +35,7 @@ export default function BoardSlasSettingsPage() {
   const globalDefaults: Record<keyof BoardSlaOverrides, number> = {
     ...BOARD_HYGIENE_GLOBAL_DEFAULTS,
     ...STALE_TASK_SWEEP_GLOBAL_DEFAULTS,
+    dueDateWindowDays: 7,
   };
 
   let departmentSlugs: string[] = [];
