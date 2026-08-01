@@ -159,6 +159,19 @@ body {
   background: linear-gradient(135deg, #059669, #047857);
 }
 
+/* WIP limit enforcement (MR-12) */
+.kanban-column-pill-at-capacity {
+  background: linear-gradient(135deg, #DC2626, #B91C1C);
+}
+.kanban-column-at-capacity {
+  opacity: 0.85;
+}
+.kanban-drop-target-at-capacity {
+  border: 2px dashed #FCA5A5;
+  border-radius: 1rem;
+  background: #FEF2F2;
+}
+
 /* Priority badge styles */
 .priority-critical {
   background: #FEE2E2;

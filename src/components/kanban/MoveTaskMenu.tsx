@@ -18,6 +18,7 @@ import { Move } from 'lucide-react';
 interface MoveTaskMenuColumn {
   id: string;
   label: string;
+  maxWip?: number;
 }
 
 interface MoveTaskMenuProps {
@@ -25,9 +26,17 @@ interface MoveTaskMenuProps {
   currentColumnId: string;
   onSelect: (columnId: string) => void;
   taskTitle: string;
+  /** Current task count per column id, for WIP limit enforcement. */
+  columnTaskCounts?: Record<string, number>;
 }
 
-export function MoveTaskMenu({ columns, currentColumnId, onSelect, taskTitle }: MoveTaskMenuProps) {
+function isMoveTargetAtCapacity(col: MoveTaskMenuColumn, columnTaskCounts?: Record<string, number>): boolean {
+  if (typeof col.maxWip !== 'number' || !columnTaskCounts) return false;
+  const count = columnTaskCounts[col.id] ?? 0;
+  return count >= col.maxWip;
+}
+
+export function MoveTaskMenu({ columns, currentColumnId, onSelect, taskTitle, columnTaskCounts }: MoveTaskMenuProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -74,22 +83,25 @@ export function MoveTaskMenu({ columns, currentColumnId, onSelect, taskTitle }: 
         >
           {columns.map((col) => {
             const isCurrent = col.id === currentColumnId;
+            const atCapacity = isMoveTargetAtCapacity(col, columnTaskCounts);
+            const disabled = isCurrent || atCapacity;
             return (
               <button
                 key={col.id}
                 type="button"
                 role="menuitem"
-                disabled={isCurrent}
+                disabled={disabled}
                 onClick={() => {
                   setOpen(false);
                   onSelect(col.id);
                 }}
                 className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                  isCurrent ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-50'
+                  isCurrent ? 'text-gray-300 cursor-not-allowed' : atCapacity ? 'text-gray-300 cursor-not-allowed line-through' : 'text-gray-700 hover:bg-gray-50'
                 }`}
               >
                 {col.label}
                 {isCurrent && <span className="text-gray-300"> (current)</span>}
+                {atCapacity && !isCurrent && <span className="text-red-400"> (at capacity)</span>}
               </button>
             );
           })}
