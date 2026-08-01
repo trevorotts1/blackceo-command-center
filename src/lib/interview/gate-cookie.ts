@@ -24,6 +24,14 @@
  * both the setter and the middleware run in the same box process, so they agree.
  */
 
+// MR-17 fix2 — nonce + revocation for the bypass token. Edge-safe (Web-standard
+// globals + a module-scope Map only), so it stays importable from the middleware.
+import {
+  generateBypassNonce,
+  recordBypassNonce,
+  consumeBypassNonce,
+} from './bypass-replay';
+
 /** Edge-readable cookie name. Kept in one place so setter + reader can't drift. */
 export const INTERVIEW_COOKIE_NAME = 'mc_interview_complete';
 
@@ -253,12 +261,17 @@ export async function signLatchToken(): Promise<{ value: string; maxAge: number 
 
 /* U057 — Interview bypass ("Skip for now") */
 
-interface BypassPayload { exp: number; }
+interface BypassPayload { exp: number; nonce: string; }
 
 export async function signInterviewBypassToken(): Promise<{ value: string; maxAge: number }> {
   if (devSecretInProduction()) throw new Error('DATA-13: forgeable bypass token');
   const exp = Math.floor(Date.now() / 1000) + BYPASS_TTL_SECONDS;
-  const payload: BypassPayload = { exp };
+  // MR-17 fix2: bind a fresh random nonce to the token and register it in the
+  // process-local replay ledger so the verifier can consume it exactly once.
+  // Without the nonce the signed token is replayable for its whole 1h TTL.
+  const nonce = generateBypassNonce();
+  recordBypassNonce(nonce, exp);
+  const payload: BypassPayload = { exp, nonce };
   const payloadB64 = strToB64url(JSON.stringify(payload));
   const sig = await hmacB64url(payloadB64);
   return { value: payloadB64 + '.' + sig, maxAge: BYPASS_TTL_SECONDS };
@@ -277,5 +290,9 @@ export async function verifyInterviewBypassToken(value: string | undefined | nul
   let payload: BypassPayload;
   try { payload = JSON.parse(b64urlToStr(payloadB64)) as BypassPayload; } catch { return false; }
   if (typeof payload.exp !== 'number') return false;
-  return payload.exp >= Math.floor(Date.now() / 1000);
+  if (payload.exp < Math.floor(Date.now() / 1000)) return false;
+  // MR-17 fix2: single-use enforcement. A nonce is consumed on its first valid
+  // presentation; every replay (a captured URL / lifted cookie) is refused.
+  if (typeof payload.nonce !== 'string' || payload.nonce.length === 0) return false;
+  return consumeBypassNonce(payload.nonce, payload.exp);
 }

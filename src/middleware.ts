@@ -633,6 +633,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       //      the bypass cookie, usable when the operator can't even reach the
       //      interview page to click "Skip". The operator constructs the token
       //      with the same HMAC key (MC_INTERVIEW_COOKIE_SECRET / MC_API_TOKEN).
+      // MR-17 fix2: each bypass token carries a single-use nonce (see
+      // lib/interview/bypass-replay.ts). verifyInterviewBypassToken CONSUMES the
+      // nonce on the first valid presentation, so a captured URL / lifted cookie
+      // cannot be replayed within its 1h TTL — the signature alone no longer
+      // grants a reusable 1-hour pass.
       // U010: fall back to the latch cookie first, then the gate-status endpoint.
       let admitted = false;
       let needCookie = false;
