@@ -24,6 +24,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
 import { AUTH_REJECTED_PATH } from '@/lib/probes/unauthorized-401-contract';
+import { CSRF_COOKIE_NAME } from '@/lib/csrf-protection';
 
 const BOARD_HOST = 'board.example.com';
 const BOARD_ORIGIN = `https://${BOARD_HOST}`;
@@ -93,6 +94,7 @@ interface ReqOpts {
   origin?: string; // a raw cross-origin Origin header
   bearer?: string; // Authorization: Bearer <bearer>
   cf?: boolean; // simulate a verified Cloudflare Access assertion
+  csrf?: string; // MR-23: signed CSRF cookie value for mutating same-origin requests
 }
 
 function makeReq(path: string, opts: ReqOpts = {}): NextRequest {
@@ -104,6 +106,7 @@ function makeReq(path: string, opts: ReqOpts = {}): NextRequest {
     headers['cf-access-jwt-assertion'] = 'edge-verified-jwt';
     headers['cf-access-authenticated-user-email'] = 'operator@example.com';
   }
+  if (opts.csrf) headers['cookie'] = `${CSRF_COOKIE_NAME}=${opts.csrf}`;
   return new NextRequest(`${BOARD_ORIGIN}${path}`, {
     method: opts.method ?? 'GET',
     headers,
@@ -172,16 +175,35 @@ describe('plain Cloudflare Tunnel box (no CF Access), secrets provisioned, produ
     },
   );
 
-  it('same-origin board WRITE (DELETE /api/tasks/:id) still passes through', async () => {
+  // MR-23: same-origin mutating requests now require a signed CSRF cookie.
+  // The middleware still passes them through — but only when the browser has the
+  // cookie (which is set by the middleware on every non-API page response).
+
+  it('same-origin board WRITE (DELETE /api/tasks/:id) passes through with a valid CSRF cookie (MR-23)', async () => {
     const mw = await loadMiddleware(ENV);
-    const res = await mw(makeReq('/api/tasks/abc123', { method: 'DELETE', sameOrigin: true }));
+    // Dynamically import the sign function to mint a valid token under the same env.
+    const { signCsrfToken } = await import('@/lib/csrf-protection');
+    const { value: csrfValue } = await signCsrfToken();
+    const res = await mw(makeReq('/api/tasks/abc123', { method: 'DELETE', sameOrigin: true, csrf: csrfValue }));
     expect(isPassthrough(res)).toBe(true);
   });
 
-  it('same-origin board WRITE (POST /api/workspaces) still passes through', async () => {
+  it('same-origin board WRITE (POST /api/workspaces) passes through with a valid CSRF cookie (MR-23)', async () => {
     const mw = await loadMiddleware(ENV);
-    const res = await mw(makeReq('/api/workspaces', { method: 'POST', sameOrigin: true }));
+    const { signCsrfToken } = await import('@/lib/csrf-protection');
+    const { value: csrfValue } = await signCsrfToken();
+    const res = await mw(makeReq('/api/workspaces', { method: 'POST', sameOrigin: true, csrf: csrfValue }));
     expect(isPassthrough(res)).toBe(true);
+  });
+
+  it('MR-23: same-origin board WRITE WITHOUT a CSRF cookie is rejected', async () => {
+    const mw = await loadMiddleware(ENV);
+    const res = await mw(makeReq('/api/tasks/abc123', { method: 'DELETE', sameOrigin: true }));
+    // Without the signed CSRF cookie the mutating same-origin request is
+    // refused. This is a misconfiguration/forgery signal, not a credential
+    // failure — it returns a direct 401, not a rewrite to the 401 sink.
+    expect(isPassthrough(res)).toBe(false);
+    expect(res.status).toBe(401);
   });
 
   it('external cross-origin read WITHOUT bearer is rejected (401)', async () => {

@@ -13,6 +13,14 @@ import {
 import { INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, signInterviewToken } from '@/lib/interview/gate-cookie';
 import { checkInterviewCompleteViaFallback } from '@/lib/interview/gate-fallback';
 import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '@/lib/bearer-required-routes';
+import {
+  CSRF_COOKIE_NAME,
+  CSRF_COOKIE_TTL_SECONDS,
+  CSRF_COOKIE_ATTRIBUTES,
+  signCsrfToken,
+  verifyCsrfToken,
+  isReadOnlyMethod,
+} from '@/lib/csrf-protection';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).
@@ -493,11 +501,29 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // they fall through to the bearer check below instead of being waved past.
     // The 61 routes the interface DOES call cannot be closed here; see
     // docs/SECURITY-RESIDUALS.md.
+    //
+    // MR-23: ALL mutating same-origin API calls now require a signed CSRF cookie
+    // (mc_csrf_token, httpOnly + SameSite=Strict). Read-only methods (GET/HEAD/
+    // OPTIONS) are exempt — the board must still render its data on every box.
     if (
       !isWebhookSecretRoute(pathname) &&
       !requiresBearerForWrite(pathname, request.method) &&
       isSameOriginRequest(request)
     ) {
+      // MR-23: mutating methods require the signed CSRF cookie. A forged
+      // same-origin header cannot satisfy this check because the httpOnly cookie
+      // value is signed with a server-side secret the attacker does not possess.
+      if (!isReadOnlyMethod(request.method)) {
+        const csrfToken = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+        const csrfValid = await verifyCsrfToken(csrfToken);
+        if (!csrfValid) {
+          return unauthorized(
+            request,
+            'Unauthorized',
+            'missing-csrf-token',
+          );
+        }
+      }
       const passthrough = NextResponse.next();
       if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;
@@ -619,6 +645,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
           maxAge,
           secure: process.env.NODE_ENV === 'production',
         });
+        // MR-23: set signed CSRF cookie on page responses so mutating API calls
+        // from the browser carry the token.
+        await setCsrfCookieIfMissing(response, request);
         if (cfEmail) response.headers.set('x-operator-email', cfEmail);
         return response;
       }
@@ -627,8 +656,47 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   // Non-API path. CF Access already enforced above (or not required).
   const response = NextResponse.next();
+  // MR-23: set signed CSRF cookie on page responses so mutating API calls
+  // from the browser carry the token.
+  await setCsrfCookieIfMissing(response, request);
   if (cfEmail) response.headers.set('x-operator-email', cfEmail);
   return response;
+}
+
+/**
+ * MR-23: Set a signed CSRF cookie on page (non-API) responses.
+ *
+ * The cookie is set on EVERY non-API page response so the browser always has a
+ * fresh token. When the browser subsequently makes a mutating /api/* request,
+ * the cookie travels automatically (same-origin) and the same-origin passthrough
+ * block verifies it. A direct-to-origin attacker forging Origin/Referer cannot
+ * satisfy the check because they do not know the HMAC signing key.
+ *
+ * The cookie is ONLY set when a valid CSRF token is NOT already present in the
+ * request — this avoids re-signing on every request and keeps the HMAC overhead
+ * per fresh-visit rather than per-navigation.
+ */
+async function setCsrfCookieIfMissing(
+  response: NextResponse,
+  request: NextRequest,
+): Promise<void> {
+  const existing = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+  // Verify the existing cookie first — if valid, no need to re-sign.
+  if (existing) {
+    const valid = await verifyCsrfToken(existing);
+    if (valid) return;
+  }
+  try {
+    const { value, maxAge } = await signCsrfToken();
+    response.cookies.set(CSRF_COOKIE_NAME, value, {
+      ...CSRF_COOKIE_ATTRIBUTES,
+      maxAge,
+    });
+  } catch {
+    // Dev-secret-in-production hard-lock — fail silently so the page still
+    // renders. Mutating API calls will be rejected by the CSRF check, which
+    // is the correct fail-safe (DATA-13 pattern).
+  }
 }
 
 /**

@@ -76,7 +76,8 @@ export type AuthRejectionSignal =
   | CredentialFailureReason
   | 'cf-access-misconfigured'
   | 'mc-api-token-unset'
-  | 'webhook-secret-unset';
+  | 'webhook-secret-unset'
+  | 'missing-csrf-token';
 
 /** The two signals that mean "a caller was turned away for bad credentials". */
 export const CREDENTIAL_FAILURE_REASONS: readonly CredentialFailureReason[] = [
