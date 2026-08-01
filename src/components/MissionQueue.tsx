@@ -1413,12 +1413,15 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
         </div>
       )}
 
-      {/* U060 — live phase progress stepper for presentation-department tasks */}
-      {canonicalDeptSlug(task.department) === 'presentations' && (
-        <div className="mt-2 pt-2 border-t border-gray-50">
-          <PhaseStepper taskId={task.id} />
-        </div>
-      )}
+      {/* MR-38 — live phase progress stepper for ALL departments */}
+      <div className="mt-2 pt-2 border-t border-gray-50">
+        <PhaseStepper
+          taskId={task.id}
+          preferGeneric={
+            canonicalDeptSlug(task.department) !== 'presentations'
+          }
+        />
+      </div>
 
       {/* Footer */}
       <div className="flex items-center justify-between pt-4 border-t border-gray-50">

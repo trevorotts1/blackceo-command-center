@@ -968,9 +968,17 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
             </div>
           )}
 
-          {/* U060 — live phase progress stepper mounted beside ActivityLog */}
-          {task && canonicalDeptSlug(task.department) === 'presentations' && (
-            <PhaseStepper taskId={task.id} />
+          {/* MR-38 — live phase progress stepper rendered for ALL departments.
+              For presentations, uses the specialist 7-step route; for every
+              other department, uses the generic 6-step lifecycle route
+              derived from task_events + current task status. */}
+          {task && (
+            <PhaseStepper
+              taskId={task.id}
+              preferGeneric={
+                canonicalDeptSlug(task.department) !== 'presentations'
+              }
+            />
           )}
 
           {/* Activity Tab */}

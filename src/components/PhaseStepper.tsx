@@ -1,8 +1,17 @@
 'use client';
 
 /**
- * PhaseStepper (U060) — always-visible 7-step stepper showing live phase
- * progress for a presentation task.
+ * PhaseStepper (U060 / MR-38) — always-visible lifecycle stepper showing live
+ * phase progress for a task in ANY department.
+ *
+ * Originally, the stepper only rendered for presentations and used the
+ * presentation-specific /api/presentations/[taskId]/phases endpoint. MR-38
+ * generalizes it: the stepper now accepts an optional `preferGeneric` flag
+ * that switches to /api/tasks/[id]/phases, a generic 6-step lifecycle
+ * endpoint driven by task_events + task status fallback.
+ *
+ * For presentations, the component uses the specialist 7-step route by
+ * default; for every other department, it uses the generic route.
  *
  * Accessibility shape copied from ProgressRail.tsx:
  *   - role="progressbar" with aria-valuemin/max/now on the root
@@ -39,18 +48,53 @@ export interface PhaseStepperProps {
   taskId: string;
   /** Optional pre-fetched data. When absent the stepper fetches on mount. */
   initialData?: PhaseProgressData | null;
+  /**
+   * MR-38: when true, the stepper uses the generic /api/tasks/[id]/phases
+   * endpoint instead of the presentation-specific route. Set this for
+   * non-presentation tasks so they get the generic 6-step lifecycle bar.
+   */
+  preferGeneric?: boolean;
 }
 
 const POLL_INTERVAL_MS = 5_000;
 
-export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps) {
-  const [data, setData] = useState<PhaseProgressData | null>(initialData ?? null);
+/**
+ * Build the fallback placeholder array from a label list — called when data
+ * is absent and we need the generic defaults (for generic mode without
+ * pre-importing presentation labels).
+ */
+function placeholderPhases(
+  labels: readonly string[],
+): PhaseStepData[] {
+  return labels.map((label) => ({
+    label,
+    status: 'not_started' as PhaseStepStatus,
+    started_at: null,
+    elapsed_s: null,
+    artifacts: [] as string[],
+    percent: 0,
+  }));
+}
+
+export default function PhaseStepper({
+  taskId,
+  initialData,
+  preferGeneric,
+}: PhaseStepperProps) {
+  const [data, setData] = useState<PhaseProgressData | null>(
+    initialData ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Determine the API endpoint based on mode.
+  const apiUrl = preferGeneric
+    ? `/api/tasks/${taskId}/phases`
+    : `/api/presentations/${taskId}/phases`;
+
   const fetchPhases = useCallback(async () => {
     try {
-      const res = await fetch(`/api/presentations/${taskId}/phases`, { cache: 'no-store' });
+      const res = await fetch(apiUrl, { cache: 'no-store' });
       if (!res.ok) {
         // Non-200: leave last-known state; the poll keeps trying
         return;
@@ -61,7 +105,7 @@ export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps)
     } catch (err) {
       // Network drop or error — leave last-known state
     }
-  }, [taskId]);
+  }, [apiUrl]);
 
   // Fetch on mount if no initialData; start poll.
   useEffect(() => {
@@ -88,26 +132,38 @@ export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps)
 
   if (error && !data) {
     return (
-      <div className="text-xs text-red-500 py-2" data-testid="phase-stepper-error">
+      <div
+        className="text-xs text-red-500 py-2"
+        data-testid="phase-stepper-error"
+      >
         {error}
       </div>
     );
   }
 
-  const phases = data?.phases ?? PHASE_LABELS.map((label) => ({
-    label,
-    status: 'not_started' as PhaseStepStatus,
-    started_at: null,
-    elapsed_s: null,
-    artifacts: [] as string[],
-    percent: 0,
-  }));
+  const phases =
+    data?.phases ??
+    (preferGeneric
+      ? placeholderPhases([
+          'Intake',
+          'Planning',
+          'Dispatch',
+          'Execution',
+          'Review',
+          'Done',
+        ])
+      : placeholderPhases(PHASE_LABELS));
 
   // Find the active step: the first phase whose status ends in "_progress" or
   // the first not_started after a done/in_progress. Simpler: the first
   // in_progress, or the last done if all are done.
-  const activeLabel = data?.current_phase ?? phases.find((p) => p.status === 'in_progress')?.label ?? null;
-  const doneCount = phases.filter((p) => p.status === 'done' || p.status === 'in_progress').length;
+  const activeLabel =
+    data?.current_phase ??
+    phases.find((p) => p.status === 'in_progress')?.label ??
+    null;
+  const doneCount = phases.filter(
+    (p) => p.status === 'done' || p.status === 'in_progress',
+  ).length;
   const totalCount = phases.length;
 
   return (
@@ -121,7 +177,11 @@ export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps)
         aria-valuemin={0}
         aria-valuemax={totalCount}
         aria-valuenow={doneCount}
-        aria-label="Presentation progress"
+        aria-label={
+          preferGeneric
+            ? 'Task lifecycle progress'
+            : 'Presentation progress'
+        }
         className="flex items-center gap-1 min-w-max py-2"
       >
         {phases.map((step, idx) => {
@@ -153,7 +213,9 @@ export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps)
                 className={`w-2.5 h-2.5 rounded-full shrink-0 ${dotClass}`}
                 aria-hidden="true"
               />
-              <span className={`text-[10px] font-medium truncate ${textClass}`}>
+              <span
+                className={`text-[10px] font-medium truncate ${textClass}`}
+              >
                 {step.label}
               </span>
               {idx < totalCount - 1 && (
