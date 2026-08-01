@@ -28,6 +28,12 @@ const TOP_LEVEL_NAV: PaletteAction[] = [
   { id: 'topnav:/tasks/by-department', label: 'Departments', hint: '/tasks/by-department', href: '/tasks/by-department' },
   { id: 'topnav:/ceo-board', label: 'Performance Board', hint: '/ceo-board', href: '/ceo-board' },
   { id: 'topnav:/conversational-ai', label: 'Conversational AI', hint: '/conversational-ai', href: '/conversational-ai' },
+  // P13 — the Rescue Rangers ticket view. Listed unconditionally (like every
+  // other top-level destination here): the page itself renders a graceful
+  // "no ticket data yet" state on a box without the durable store, so this is
+  // never a dead end. The VISIBLE affordance on the home grid is separately
+  // gated on store presence, which is where a box-specific surface belongs.
+  { id: 'topnav:/rescue', label: 'Rescue Rangers', hint: '/rescue', href: '/rescue' },
   { id: 'topnav:/personas', label: 'Personas', hint: '/personas', href: '/personas' },
   // NB: /sops has no page.tsx of its own (only /sops/proposals does) — routing
   // here would just recreate the /agent-roster 404 this pass exists to fix.
