@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   Home,
+  HeartPulse,
   MessageSquare,
   FolderOpen,
   Wand2,
@@ -30,6 +31,7 @@ interface OperatorNavItem {
 
 export const OPERATOR_NAV: OperatorNavItem[] = [
   { href: '/operator', label: 'Console', icon: <Home size={16} />, accent: '#43A047' },
+  { href: '/operator/health', label: 'Health', icon: <HeartPulse size={16} />, accent: '#EF4444' },
   { href: '/operator/bridge', label: 'Bridge', icon: <MessageSquare size={16} />, accent: '#3B82F6' },
   { href: '/operator/workspace', label: 'Workspace', icon: <FolderOpen size={16} />, accent: '#8B5CF6' },
   { href: '/operator/studio', label: 'Studio', icon: <Wand2 size={16} />, accent: '#EC4899' },

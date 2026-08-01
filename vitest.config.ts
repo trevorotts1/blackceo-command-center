@@ -28,6 +28,12 @@ export default defineConfig({
       // columns; catch-all always honored). DB-backed vitest suite, same
       // reason as floor-department-invariant.test.ts above.
       'tests/unit/department-optout-board-wiring.test.ts',
+      // MR-08 fable-correction: /operator/health data layer must report real
+      // numbers — locks the parenthesised julianday hour math (unparenthesised
+      // SQL precedence silently zeros every stuck-task counter) and the real
+      // 'task_dispatch_deferred' failure event type in the dispatch sparkline.
+      // DB-backed vitest suite, same reason as floor-department-invariant above.
+      'tests/unit/workforce-health.test.ts',
       // P3-7: seam <-> onboarding-Python parity harness. Lives under src/ (not
       // tests/unit/) so `npm run test:unit` (tsx --test glob) does NOT also pick it
       // up — it uses vitest globals and only runs here via `npm run test:vitest`.
