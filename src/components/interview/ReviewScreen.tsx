@@ -191,6 +191,8 @@ interface CompleteResponse {
   message?: string;
   error?: string;
   missing?: CompleteMissingItem[];
+  alreadyComplete?: boolean;
+  retryKickAcknowledged?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -331,6 +333,9 @@ export default function ReviewScreen({
   const [submitting, setSubmitting] = useState(false);
   const [completeError, setCompleteError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  /** True when the server already had interviewComplete set (idempotency guard)
+   *  — next press should POST with retryKick to re-fire a potentially lost kick. */
+  const [needsRetryKick, setNeedsRetryKick] = useState(false);
 
   const flags = state?.flags ?? ALL_GATES_FALSE;
   const allGatesPass =
@@ -423,19 +428,31 @@ export default function ReviewScreen({
     if (!allGatesPass || submitting) return; // belt-and-suspenders
     setSubmitting(true);
     setCompleteError(null);
+    setNeedsRetryKick(false);
     try {
-      // NOTE: the complete route's schema is STRICT ({customDeptIds?,
-      // implicitYesCustomIds?} only) — posting any other key (the old
-      // `sessionId`) failed validation with a 400 whenever a conversational
-      // session existed, killing the Build button. The trigger needs no body.
+      // The complete route's schema accepts {retryKick?: boolean} after MR-37 —
+      // when the idempotency guard returned alreadyComplete on a prior attempt,
+      // we include retryKick:true so the script re-presses and re-fires the kick.
       const res = await fetch('/api/interview/complete', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify(needsRetryKick ? { retryKick: true } : {}),
       });
       const data = (await res.json().catch(() => ({}))) as CompleteResponse;
 
       if (res.ok && data.status === 'pass') {
+        // If the server already had interviewComplete set (idempotency guard hit),
+        // THIS call did not re-press the script — so the build kick may have been
+        // lost on the original run. Do NOT silently redirect into a possibly-dead
+        // build; flag a retry so the next press sends retryKick:true and re-fires
+        // the kick (MR-37). The operator gets a one-click retry, not a dead-end.
+        if (data.alreadyComplete) {
+          setNeedsRetryKick(true);
+          setCompleteError(
+            'This interview was already completed. If the build hasn’t started, press “Build my company” again to re-send it.',
+          );
+          return;
+        }
         try {
           await refreshInterviewGate();
         } catch {
@@ -458,10 +475,15 @@ export default function ReviewScreen({
         return;
       }
       if (res.status === 409) {
+        // If the 409 includes alreadyComplete + the interview is indeed done, flag
+        // the next submission as a retry-kick so the operator can recover a lost kick.
+        if (data.alreadyComplete) setNeedsRetryKick(true);
         setCompleteError(formatMissing(data));
         void loadState();
         return;
       }
+      // Catch-all: flag alreadyComplete so the next press retries with a kick.
+      if (data.alreadyComplete) setNeedsRetryKick(true);
       setCompleteError(
         data.message ?? "We couldn't start the build just yet. Please try again.",
       );
@@ -470,7 +492,7 @@ export default function ReviewScreen({
     } finally {
       setSubmitting(false);
     }
-  }, [allGatesPass, loadState, router, submitting]);
+  }, [allGatesPass, loadState, needsRetryKick, router, submitting]);
 
   /* ---- renders: terminal screens first ---- */
 
