@@ -99,7 +99,7 @@ function markRegistered(): void {
  * never rethrown. src/lib/jobs/sweep-liveness.ts reads this table to detect an
  * advancer (intake-advance) or qc-review-sweep gone silent.
  */
-export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error', errorMessage?: string): void {
+export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error' | 'disabled', errorMessage?: string): void {
   try {
     run(
       `INSERT INTO job_liveness (job_name, last_ran_at, last_status, last_error)
@@ -119,15 +119,31 @@ export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error
  * Wrap a task body so thrown errors are caught and logged. node-cron 4 will
  * surface them via the `execution:failed` event, but we want a single log line
  * regardless of the consumer.
+ *
+ * MR-31: `wrap()` previously recorded `'ok'` for EVERY resolution that did
+ * not throw — including a sweep that returned instantly because its kill flag
+ * was set (skippedReason).  The sweep-liveness watchdog then saw a "healthy"
+ * tick for a job doing zero work — a blind "watch the watchers" layer.  Now
+ * `wrap()` inspects the return value for a `skippedReason` string and records
+ * `'disabled'` instead, so the watchdog can distinguish "ticking and working"
+ * from "ticking but disabled" at a glance without polling every kill flag
+ * itself.
  */
 function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise<void> {
   return async () => {
     const startedAt = new Date().toISOString();
     try {
       console.log(`[cron] ${name} starting at ${startedAt}`);
-      await fn();
+      const result = await fn();
       console.log(`[cron] ${name} finished`);
-      recordJobTick(name, startedAt, 'ok');
+
+      // Detect disabled/skipped sweeps — a non-null skippedReason means the job
+      // body returned immediately without doing real work (kill flag set, opt-in
+      // not enabled, etc.).  Record 'disabled' so the liveness watchdog can see
+      // the distinction instead of reporting a false green.
+      const maybeSkipped = result as { skippedReason?: string } | undefined;
+      const skipped = maybeSkipped && typeof maybeSkipped.skippedReason === 'string' && maybeSkipped.skippedReason.length > 0;
+      recordJobTick(name, startedAt, skipped ? 'disabled' : 'ok', skipped ? maybeSkipped.skippedReason : undefined);
     } catch (error) {
       console.error(`[cron] ${name} failed:`, error);
       recordJobTick(name, startedAt, 'error', error instanceof Error ? error.message : String(error));
@@ -437,9 +453,12 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       const result = await runSweepLivenessSweep();
       if (result.skippedReason) {
         console.log(`[cron] sweep-liveness: skipped — ${result.skippedReason}`);
-      } else if (result.staleJobs.length > 0) {
+      } else if (result.staleJobs.length > 0 || result.disabledJobs.length > 0) {
+        const parts: string[] = [];
+        if (result.staleJobs.length > 0) parts.push(`STALE — ${result.staleJobs.join(', ')}`);
+        if (result.disabledJobs.length > 0) parts.push(`DISABLED — ${result.disabledJobs.join(', ')}`);
         console.warn(
-          `[cron] sweep-liveness: STALE — ${result.staleJobs.join(', ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
+          `[cron] sweep-liveness: ${parts.join(' | ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
         );
       }
     },

@@ -93,6 +93,12 @@ export interface WatchedJobLiveness {
   ageMinutes: number | null;
   staleThresholdMinutes: number;
   stale: boolean;
+  /** True when the sweep ticked recently but its body returned immediately with
+   *  a skippedReason — the job is "alive" (wrapped cron is firing) but doing
+   *  NO work (kill flag set).  Distinct from stale (no tick at all), because
+   *  a disabled sweep looks green to a naive age-only check while actually
+   *  leaving the board unserviced. */
+  disabled: boolean;
 }
 
 /**
@@ -101,6 +107,11 @@ export interface WatchedJobLiveness {
  * yet (never ticked since this table existed — e.g. right after migration on
  * a box that has not reached the job's first cron fire) is reported stale:
  * "never observed" is not evidence of health.
+ *
+ * Also computes `disabled` from the `last_status` column: a recently-ticked
+ * job whose last_status is 'disabled' is NOT stale (the wrapped cron is
+ * firing on schedule) but its body returned immediately with a skippedReason
+ * — the kill flag is set and the board-advancement loop is unserviced.
  */
 export function getWatchedJobLiveness(): WatchedJobLiveness[] {
   return Object.entries(WATCHED_JOB_CADENCE_MINUTES).map(([jobName, cadenceMinutes]) => {
@@ -124,11 +135,13 @@ export function getWatchedJobLiveness(): WatchedJobLiveness[] {
         ageMinutes: null,
         staleThresholdMinutes,
         stale: true,
+        disabled: false,
       };
     }
 
     const ageMs = Date.now() - parseDbTime(row.last_ran_at);
     const ageMinutes = Number.isFinite(ageMs) ? ageMs / 60000 : Infinity;
+    const isDisabled = row.last_status === 'disabled';
 
     return {
       jobName,
@@ -138,6 +151,7 @@ export function getWatchedJobLiveness(): WatchedJobLiveness[] {
       ageMinutes: Number.isFinite(ageMinutes) ? ageMinutes : null,
       staleThresholdMinutes,
       stale: !Number.isFinite(ageMinutes) || ageMinutes > staleThresholdMinutes,
+      disabled: isDisabled,
     };
   });
 }
@@ -154,6 +168,11 @@ export interface SweepLivenessCheckResult {
  * gates the top-level pass/indeterminate verdict — the caller (the deep
  * health route) must place this under `advisory`, mirroring
  * `checkAnthologyBoardProjection`'s posture exactly (A7).
+ *
+ * MR-31: now reports disabled sweeps distinctly (pass=false with detail
+ * naming the disabled job) — a ticked-but-disabled sweep was previously
+ * invisible (wrap() recorded 'ok' even for a no-op return from a kill-flagged
+ * body, so the watchdog saw a healthy sweep silently doing zero work).
  */
 export function checkSweepLiveness(): SweepLivenessCheckResult {
   if (isDisabled()) {
@@ -166,8 +185,9 @@ export function checkSweepLiveness(): SweepLivenessCheckResult {
 
   const watched = getWatchedJobLiveness();
   const stale = watched.filter((w) => w.stale);
+  const disabled = watched.filter((w) => w.disabled && !w.stale);
 
-  if (stale.length === 0) {
+  if (stale.length === 0 && disabled.length === 0) {
     return {
       pass: true,
       detail: `sweep_liveness: OK — ${watched.map((w) => w.jobName).join(', ')} ticking within threshold`,
@@ -175,12 +195,25 @@ export function checkSweepLiveness(): SweepLivenessCheckResult {
     };
   }
 
-  return {
-    pass: false,
-    detail:
-      `sweep_liveness: DRIFT — ${stale
+  const parts: string[] = [];
+  if (stale.length > 0) {
+    parts.push(
+      `${stale
         .map((w) => `${w.jobName} silent for ${w.ageMinutes === null ? 'ever (never observed)' : `${Math.round(w.ageMinutes)}m`} (threshold ${w.staleThresholdMinutes}m)`)
         .join('; ')}`,
+    );
+  }
+  if (disabled.length > 0) {
+    parts.push(
+      `${disabled
+        .map((w) => `${w.jobName} DISABLED (${w.lastStatus ?? 'kill flag'}, ticking but doing no work)`)
+        .join('; ')}`,
+    );
+  }
+
+  return {
+    pass: false,
+    detail: `sweep_liveness: ${parts.join(' — ')}`,
     watched,
   };
 }
@@ -189,6 +222,8 @@ export interface SweepLivenessSweepResult {
   ranAt: string;
   skippedReason?: string;
   staleJobs: string[];
+  /** MR-31: jobs that ticked recently but returned disabled (kill flag set). */
+  disabledJobs: string[];
   alerted: boolean;
 }
 
@@ -200,22 +235,30 @@ export interface SweepLivenessSweepResult {
  * out for free — the very next intake-advance tick upserts a fresh
  * `job_liveness` row, and this function (and checkSweepLiveness) recompute
  * live on every call, no caching.
+ *
+ * MR-31: also scans for disabled-but-ticking sweeps (returned with
+ * skippedReason by the wrapped body).  These are NOT stale — the cron is
+ * firing on schedule — but the board-advancement loop is unserviced because
+ * the kill flag is set.  Each disabled job shares the same cooldown window as
+ * stale alerts, so a multi-hour disable does not spam either.
  */
 export async function runSweepLivenessSweep(): Promise<SweepLivenessSweepResult> {
   const ranAt = timeNow();
 
   if (isDisabled()) {
-    return { ranAt, skippedReason: 'DISABLE_SWEEP_LIVENESS set', staleJobs: [], alerted: false };
+    return { ranAt, skippedReason: 'DISABLE_SWEEP_LIVENESS set', staleJobs: [], disabledJobs: [], alerted: false };
   }
 
   const watched = getWatchedJobLiveness();
   const stale = watched.filter((w) => w.stale);
+  const disabled = watched.filter((w) => w.disabled && !w.stale);
 
-  if (stale.length === 0) {
-    return { ranAt, staleJobs: [], alerted: false };
+  if (stale.length === 0 && disabled.length === 0) {
+    return { ranAt, staleJobs: [], disabledJobs: [], alerted: false };
   }
 
   const staleJobNames = stale.map((w) => w.jobName);
+  const disabledJobNames = disabled.map((w) => w.jobName);
 
   let recentAlert = 0;
   try {
@@ -231,14 +274,27 @@ export async function runSweepLivenessSweep(): Promise<SweepLivenessSweepResult>
 
   if (recentAlert > 0) {
     // Already alerted within the cooldown window -- stay quiet, still report
-    // the stale set so the caller's log line is honest about the ongoing drift.
-    return { ranAt, staleJobs: staleJobNames, alerted: false };
+    // the stale/disabled set so the caller's log line is honest about the ongoing condition.
+    return { ranAt, staleJobs: staleJobNames, disabledJobs: disabledJobNames, alerted: false };
   }
 
+  const lines: string[] = [];
+  if (stale.length > 0) {
+    lines.push(
+      `${stale
+        .map((w) => `${w.jobName} silent for ${w.ageMinutes === null ? 'ever (never observed)' : `${Math.round(w.ageMinutes)}m`}`)
+        .join('; ')}`,
+    );
+  }
+  if (disabled.length > 0) {
+    lines.push(
+      `${disabled
+        .map((w) => `${w.jobName} DISABLED (kill flag set, ticking but doing no work)`)
+        .join('; ')}`,
+    );
+  }
   const message =
-    `[SWEEP-LIVENESS] watchdog: ${stale
-      .map((w) => `${w.jobName} silent for ${w.ageMinutes === null ? 'ever (never observed)' : `${Math.round(w.ageMinutes)}m`}`)
-      .join('; ')} -- the board-advancement loop may be stalled (INTAKE_ADVANCE_SWEEP_ENABLED / DISABLE_QC_REVIEW_SWEEP, a crashed process, or a hung DB lock). Check scheduler liveness on this box.`;
+    `[SWEEP-LIVENESS] watchdog: ${lines.join(' — ')} -- the board-advancement loop may be stalled (INTAKE_ADVANCE_SWEEP_ENABLED / DISABLE_QC_REVIEW_SWEEP, a crashed process, or a hung DB lock). Check scheduler liveness on this box.`;
 
   notifySystem(message, { agent: 'sweep-liveness', action: 'escalate' });
 
@@ -251,5 +307,5 @@ export async function runSweepLivenessSweep(): Promise<SweepLivenessSweepResult>
     /* cooldown marker is best-effort -- the notifySystem() call above already fired */
   }
 
-  return { ranAt, staleJobs: staleJobNames, alerted: true };
+  return { ranAt, staleJobs: staleJobNames, disabledJobs: disabledJobNames, alerted: true };
 }
