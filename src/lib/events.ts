@@ -134,6 +134,67 @@ function dropClient(controller: ReadableStreamDefaultController): void {
 }
 
 /**
+ * MR-10 (fix2) — enqueue bytes to an SSE controller while honouring the SAME
+ * MSG-08 backpressure policy broadcast() applies above.
+ *
+ * The cross-process journal poll in the stream route used to call
+ * controller.enqueue() directly, which bypassed this guard entirely: a slow or
+ * dead consumer made the poll buffer journal payloads without bound — the exact
+ * leak MSG-08 exists to prevent. Routing the poll's enqueue through this helper
+ * closes that gap. It shares the `backpressureStrikes` WeakMap with broadcast(),
+ * so a consumer that is backed up on BOTH the push path and the poll path
+ * accumulates strikes toward a single drop rather than two independent budgets.
+ *
+ * Returns `true` when the chunk was enqueued, `false` when it was dropped
+ * (consumer backed up or broken). A dropped delta self-heals on the client's
+ * next reconnect via useSSE's catch-up refetch (MSG-07), exactly as a coalesced
+ * broadcast() delta does.
+ */
+export function enqueueWithBackpressure(
+  controller: ReadableStreamDefaultController,
+  chunk: Uint8Array,
+): boolean {
+  // `desiredSize` is the consumer's remaining high-water-mark budget: `null`
+  // once the stream is errored/closed, and `<= 0` when the consumer is not
+  // draining. Blindly enqueuing in either case grows an unbounded buffer.
+  const desired = controller.desiredSize;
+
+  if (desired === null) {
+    // Stream is already broken — prune immediately.
+    dropClient(controller);
+    return false;
+  }
+
+  if (desired <= 0) {
+    // Backed up this round: coalesce (skip this chunk) and count a strike. A
+    // consumer that stays backed up past the strike budget is dropped so it
+    // reconnects fresh.
+    const strikes = (backpressureStrikes.get(controller) ?? 0) + 1;
+    if (strikes >= MAX_BACKPRESSURE_STRIKES) {
+      console.error(
+        `[SSE] Dropping persistently backed-up client after ${strikes} backpressure strikes`
+      );
+      dropClient(controller);
+    } else {
+      backpressureStrikes.set(controller, strikes);
+    }
+    return false;
+  }
+
+  try {
+    controller.enqueue(chunk);
+    // Healthy again — reset the strike counter.
+    backpressureStrikes.delete(controller);
+    return true;
+  } catch (error) {
+    // Consumer disconnected mid-enqueue — prune it.
+    console.error('Failed to send SSE event to client:', error);
+    dropClient(controller);
+    return false;
+  }
+}
+
+/**
  * MR-10 — dual-write an event into the shared SQLite fan-out journal so
  * every SSE stream route (across ALL processes sharing the database) can
  * discover cross-process events during its poll loop. Best-effort only: a
@@ -165,47 +226,14 @@ export function broadcast(event: SSEEvent): void {
   const data = `data: ${JSON.stringify(event)}\n\n`;
   const encoded = encoder.encode(data);
 
-  // Send to all connected clients
+  // Send to all connected clients. MSG-08: enqueueWithBackpressure honours
+  // stream backpressure before enqueuing and drops persistently backed-up or
+  // broken consumers, so a slow client cannot make the server buffer without
+  // bound. The cross-process poll in the stream route routes through the same
+  // helper so both delivery paths share one policy (and one strike budget).
   const clientsArray = Array.from(clients);
   for (const client of clientsArray) {
-    // MSG-08: honour stream backpressure before enqueuing. `desiredSize` is the
-    // consumer's remaining high-water-mark budget: `null` once the stream is
-    // errored/closed, and `<= 0` when the consumer is not draining. Blindly
-    // enqueuing in either case grows an unbounded in-memory buffer.
-    const desired = client.desiredSize;
-
-    if (desired === null) {
-      // Stream is already broken — prune immediately.
-      dropClient(client);
-      continue;
-    }
-
-    if (desired <= 0) {
-      // Backed up this round: coalesce (skip this delta for this consumer) and
-      // count a strike. A missed delta self-heals on the client's next
-      // reconnect via useSSE's catch-up refetch (MSG-07). A consumer that stays
-      // backed up past the strike budget is dropped so it reconnects fresh.
-      const strikes = (backpressureStrikes.get(client) ?? 0) + 1;
-      if (strikes >= MAX_BACKPRESSURE_STRIKES) {
-        console.error(
-          `[SSE] Dropping persistently backed-up client after ${strikes} backpressure strikes`
-        );
-        dropClient(client);
-      } else {
-        backpressureStrikes.set(client, strikes);
-      }
-      continue;
-    }
-
-    try {
-      client.enqueue(encoded);
-      // Healthy again — reset the strike counter.
-      backpressureStrikes.delete(client);
-    } catch (error) {
-      // Client disconnected, remove it
-      console.error('Failed to send SSE event to client:', error);
-      dropClient(client);
-    }
+    enqueueWithBackpressure(client, encoded);
   }
 
   // MR-10: dual-write to the shared SQLite journal so clients pinned to

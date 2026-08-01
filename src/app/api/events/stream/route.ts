@@ -22,6 +22,7 @@ import { NextRequest } from 'next/server';
 import {
   registerClient,
   unregisterClient,
+  enqueueWithBackpressure,
   SSE_PROCESS_ORIGIN,
 } from '@/lib/events';
 
@@ -100,7 +101,14 @@ export async function GET(request: NextRequest) {
             // Skip events this process already pushed on the in-memory path.
             if (row.origin === SSE_PROCESS_ORIGIN) continue;
             const data = `data: ${row.payload}\n\n`;
-            controller.enqueue(encoder.encode(data));
+            // MSG-08 (fix2): route through the SAME backpressure guard
+            // broadcast() uses. The previous direct controller.enqueue() bypassed
+            // it, so a slow/dead consumer made the poll buffer journal payloads
+            // without bound. enqueueWithBackpressure coalesces (drops) the chunk
+            // when the consumer is backed up and drops it outright after the
+            // strike budget; a dropped delta self-heals on the client's next
+            // reconnect via useSSE's catch-up refetch (MSG-07).
+            enqueueWithBackpressure(controller, encoder.encode(data));
           }
 
           // Periodic cleanup: delete rows older than JOURNAL_MAX_AGE_MS.
@@ -108,10 +116,21 @@ export async function GET(request: NextRequest) {
           pollTickCount++;
           if (pollTickCount % CLEANUP_EVERY_N_TICKS === 0) {
             try {
+              // fix2: sargable predicate. The previous form wrapped the column
+              // in julianday() (`julianday('now') - julianday(created_at) > …`),
+              // which forces a full table scan on every cleanup. created_at is
+              // stored by SQLite's datetime('now') as 'YYYY-MM-DD HH:MM:SS'
+              // (UTC) and is indexed (idx_sse_event_log_created), so compare it
+              // directly against a precomputed cutoff in the SAME format and the
+              // index range-scan is used. String comparison is safe because the
+              // fixed-width ISO-like format sorts chronologically.
+              const cutoff = new Date(Date.now() - JOURNAL_MAX_AGE_MS)
+                .toISOString()
+                .slice(0, 19)
+                .replace('T', ' ');
               db.prepare(
-                `DELETE FROM sse_event_log
-                 WHERE julianday('now') - julianday(created_at) > (? / 86400000.0)`,
-              ).run(JOURNAL_MAX_AGE_MS);
+                `DELETE FROM sse_event_log WHERE created_at < ?`,
+              ).run(cutoff);
             } catch {
               // Cleanup is best-effort — stale rows are harmless.
             }
