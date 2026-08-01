@@ -1576,11 +1576,11 @@ export function isHardHoldConfirmDepartment(department: string | null | undefine
  * self-escalating with zero new machinery. Idempotent: the status-guarded
  * UPDATE only fires once; the event + notify only fire on that transition.
  */
-export function blockForOwnerConfirm(
+export async function blockForOwnerConfirm(
   taskId: string,
   department: string,
   decision: AudienceConfirmDecision,
-): void {
+): Promise<void> {
   const now = new Date().toISOString();
   const prompt = decision.prompt
     ?? 'Confirm the audience / conversion goal before this content task can be written.';
@@ -1591,21 +1591,35 @@ export function blockForOwnerConfirm(
   // are all legal transitions. The `operatorOverride: true` flag is set because
   // the original raw writer guard (`WHERE status != 'blocked'`) intentionally
   // did NOT check for assigned_agent_id — it blocks ANY non-blocked task.
-  transition(taskId, 'blocked', {
-    actor: 'audience-confirm',
-    reason: `hard-hold department "${department}" unconfirmed past deadline`,
-    operatorOverride: true,
-    extraColumns: {
-      block_reason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
-      block_needs: `Owner action required: ${prompt}`,
-      block_audience: 'OWNER',
-    },
-  }).catch(err => {
-    // CAS_CONFLICT or already blocked — non-fatal.
+  //
+  // FABLE-CORRECTION (MR-04): the audit event + owner notify MUST be gated on
+  // the transition actually landing. The original raw writer used
+  // `if (changed !== 1) return;` to avoid duplicate events/notifies when the
+  // task was already blocked (or a concurrent writer won the CAS race). A
+  // fire-and-forget transition() would fire the notify unconditionally and
+  // before the status flip commits, regressing that dedup. Await it and only
+  // emit the side effects on success.
+  let blocked = false;
+  try {
+    await transition(taskId, 'blocked', {
+      actor: 'audience-confirm',
+      reason: `hard-hold department "${department}" unconfirmed past deadline`,
+      operatorOverride: true,
+      extraColumns: {
+        block_reason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
+        block_needs: `Owner action required: ${prompt}`,
+        block_audience: 'OWNER',
+      },
+    });
+    blocked = true;
+  } catch (err) {
+    // CAS_CONFLICT (already blocked / concurrent writer won) — non-fatal, and
+    // we must NOT emit a duplicate event/notify. Anything else is worth a warn.
     if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
       console.warn(`[audience-confirm] blockForOwnerConfirm transition failed for task ${taskId}:`, err);
     }
-  });
+  }
+  if (!blocked) return; // already blocked or transition aborted — no duplicate event/notify
   try {
     run(
       `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
