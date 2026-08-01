@@ -138,8 +138,12 @@ export function upsertActiveSession(agentId: string | null, openclawSessionId: s
 }
 
 // Message-object timestamp field candidates the gateway may expose on chat.history.
-interface RawHistoryMessage {
+// `content` is the message text body; it is optional (some gateways omit it from
+// the history RPC) but is used by the liveness probe to scope messages to a
+// specific task so unrelated agent chatter cannot mask a dead card.
+export interface RawHistoryMessage {
   role?: string;
+  content?: string;
   ts?: unknown;
   timestamp?: unknown;
   time?: unknown;
@@ -213,8 +217,17 @@ export async function readSessionHistory(sessionKey: string): Promise<RawHistory
  * block). The session IS the real liveness channel: a chat.history message newer
  * than the cutoff proves the turn is alive.
  *
+ * MR-07 (SESSION-LIVENESS-TOO-BROAD): the original probe returned `alive` for ANY
+ * recent message in the session, regardless of which task the agent was working
+ * on. An agent chatting about task #B while task #A quietly rotted would evade the
+ * sweep forever — the agent kept the session "alive" without touching the stuck
+ * card. We now require at least one recent message that references the probed
+ * TASK ID (or, when no messages carry content, we fall through to the broad
+ * check as a conservative backstop — a gateway that omits content never
+ * incorrectly returns `idle`).
+ *
  * Returns:
- *   • 'alive'   — a timestamped message newer than the cutoff was found → SKIP.
+ *   • 'alive'   — a timestamped, task-scoped message newer than the cutoff was found → SKIP.
  *   • 'idle'    — the session responded but showed no message newer than cutoff.
  *   • 'unknown' — no session id / gateway not connected / no timestamps available.
  *
@@ -249,6 +262,9 @@ export async function probeSessionLiveness(
   };
 
   let sawResponse = false;
+  let sawAnyRecent = false; // broad fallback: at least one message crossed the cutoff
+  let sawContentWithTimestamp = false; // at least one message had BOTH content + timestamp
+
   for (const sessionKey of candidateSessionKeys(probeRow)) {
     let messages: RawHistoryMessage[];
     try {
@@ -259,9 +275,29 @@ export async function probeSessionLiveness(
     if (messages.length > 0) sawResponse = true;
     for (const m of messages) {
       const ms = extractMessageTimeMs(m);
-      if (ms !== null && ms > cutoffMs) return 'alive';
+      const recent = ms !== null && ms > cutoffMs;
+      if (recent) sawAnyRecent = true;
+      // MR-07: scope liveness to task-specific messages. The agent must reference
+      // the task id in its message content — unrelated chatter is not liveness for
+      // this particular task. The task id appears in dispatch prompts, tool args,
+      // and the assigned-task context block, so a genuine work turn ALWAYS names it.
+      const hasContent = typeof m.content === 'string' && m.content.length > 0;
+      if (hasContent && ms !== null) sawContentWithTimestamp = true;
+      if (recent && hasContent && m.content!.includes(task.id)) {
+        return 'alive'; // task-scoped liveness confirmed
+      }
     }
   }
+
+  // MR-07 conservative fallback: if every recent message lacks content (gateway
+  // omits it), fall through to the broad check — a "false idle" on a live task
+  // is worse than a "false alive" on a stuck one, so we err on the side of
+  // letting a genuinely live task keep running. A content-omitting gateway is rare
+  // and the HARD CEILING in the sweep caller still catches the truly stuck.
+  if (!sawContentWithTimestamp && sawAnyRecent) {
+    return 'alive'; // no task-scoping possible, give the benefit of the doubt
+  }
+
   return sawResponse ? 'idle' : 'unknown';
 }
 

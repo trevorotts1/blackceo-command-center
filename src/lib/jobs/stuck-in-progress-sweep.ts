@@ -72,11 +72,29 @@ export const STUCK_IN_PROGRESS_SWEEP_CRON = '*/5 * * * *';
  * session probe catches confirmed-alive long turns immediately. */
 const DEFAULT_STUCK_IN_PROGRESS_MINUTES = 180;
 
+/** MR-07: hard ceiling in minutes — even when the session-liveness probe reports
+ * `alive`, a task stuck past this age MUST be blocked. The probe's task-scoping
+ * (content inspection) and conservative fallback (content-omitting gateway) can
+ * still false-alive a genuinely dead card; this ceiling is the backstop that
+ * guarantees no in_progress card outlives it. Default 720 (12h) — two full
+ * work periods. Set STUCK_IN_PROGRESS_HARD_CEILING_MINUTES to 0 to disable
+ * the ceiling (the original behavior). */
+const DEFAULT_STUCK_IN_PROGRESS_HARD_CEILING_MINUTES = 720;
+
 /** Read the threshold at CALL time (not module load) so a runtime env override
  * actually takes effect — the env is read on every sweep tick. */
 function stuckThresholdMinutes(): number {
   const parsed = parseFloat(process.env.STUCK_IN_PROGRESS_MINUTES || String(DEFAULT_STUCK_IN_PROGRESS_MINUTES));
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STUCK_IN_PROGRESS_MINUTES;
+}
+
+/** MR-07: read the hard ceiling at call time. Returns 0 when disabled (the
+ * env set to 0 explicitly means "no ceiling"). */
+function hardCeilingMinutes(): number {
+  const parsed = parseFloat(
+    process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES ?? String(DEFAULT_STUCK_IN_PROGRESS_HARD_CEILING_MINUTES),
+  );
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_STUCK_IN_PROGRESS_HARD_CEILING_MINUTES;
 }
 
 /**
@@ -318,13 +336,41 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     // message newer than the cutoff proves the turn is ALIVE, so skip it. Only a
     // confirmed-alive signal skips; an unreachable gateway / no timestamp falls
     // through to the block path, preserving the silent-death safety net.
+    //
+    // MR-07: the probe now scopes to task-specific messages (the task id must
+    // appear in message content) so unrelated chatter cannot mask a dead card.
+    // Still, a conservative fallback for content-omitting gateways can produce
+    // false-alives; the HARD CEILING below catches those.
     try {
       const liveness = await probeSessionLiveness(task, cutoffMs);
       if (liveness === 'alive') {
-        console.log(
-          `[stuck-in-progress-sweep] task ${task.id} skipped — OpenClaw session shows activity newer than the cutoff (alive)`,
-        );
-        continue;
+        // MR-07: hard ceiling override. Even a task-scoped "alive" probe can
+        // false-signal (content-omitting gateway, conservative fallback). If the
+        // task is past the hard ceiling, block it regardless — no in_progress
+        // card should outlive this upper bound.
+        const ceilingMin = hardCeilingMinutes();
+        if (ceilingMin > 0) {
+          const ceilingMs = Date.now() - ceilingMin * 60_000;
+          const hardAgeMinutes = (Date.now() - progressMs) / 60_000;
+          if (progressMs < ceilingMs) {
+            console.warn(
+              `[stuck-in-progress-sweep] task ${task.id} past hard ceiling ` +
+              `(${Math.round(hardAgeMinutes)}min > ${ceilingMin}min) — ` +
+              `overriding session-liveness skip and force-blocking`,
+            );
+            // fall through to blockStuckTask below
+          } else {
+            console.log(
+              `[stuck-in-progress-sweep] task ${task.id} skipped — OpenClaw session shows task-scoped activity newer than the cutoff (alive)`,
+            );
+            continue;
+          }
+        } else {
+          console.log(
+            `[stuck-in-progress-sweep] task ${task.id} skipped — OpenClaw session shows task-scoped activity newer than the cutoff (alive)`,
+          );
+          continue;
+        }
       }
     } catch (err) {
       console.warn(`[stuck-in-progress-sweep] liveness probe failed for ${task.id} (non-fatal):`, (err as Error).message);
