@@ -10,6 +10,7 @@ import { queryAll, queryOne } from '@/lib/db';
 import type { Task } from '@/lib/types';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { isEmbeddingAvailable, rankSOPsBySemantic } from '@/lib/sop-embeddings';
+import { isKnownPersonaId } from '@/lib/persona-library';
 
 /**
  * F3.9 — a step-level SOP → persona-role SLOT contract.
@@ -399,22 +400,18 @@ export async function getBestSOPForTask(
 }
 
 /**
- * Sentinel values that should be treated as "no persona set" even if the
- * field is non-null. Earned from prior incidents where 'schemaVersion' and
- * similar harness leftovers ended up in persona_id.
+ * Validate a persona_id against the ACTUAL persona library (persona-categories.json).
+ *
+ * Prior art: this function was sentinel-only — any non-sentinel string passed,
+ * including garbage like "blahblahblah". MR-32 closes that gap by routing through
+ * isKnownPersonaId, which validates against the loaded persona catalog.
+ *
+ * Degradation: if persona-categories.json is unavailable (TCC block, missing file,
+ * etc.) the gate falls back to sentinel-only so the system stays operational rather
+ * than locking every card in Backlog.
  */
-const PERSONA_SENTINELS = new Set([
-  'schemaversion',
-  'schema_version',
-  'null',
-  'none',
-  'undefined',
-  '',
-]);
-
 export function isValidPersonaId(personaId: string | null | undefined): boolean {
-  if (!personaId) return false;
-  return !PERSONA_SENTINELS.has(personaId.toLowerCase().trim());
+  return isKnownPersonaId(personaId);
 }
 
 /**
