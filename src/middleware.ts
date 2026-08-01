@@ -13,6 +13,14 @@ import {
 import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, verifyInterviewBypassToken, signInterviewToken } from '@/lib/interview/gate-cookie';
 import { checkInterviewCompleteViaFallback } from '@/lib/interview/gate-fallback';
 import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '@/lib/bearer-required-routes';
+import {
+  CSRF_COOKIE_NAME,
+  CSRF_COOKIE_TTL_SECONDS,
+  CSRF_COOKIE_ATTRIBUTES,
+  signCsrfToken,
+  verifyCsrfToken,
+  isReadOnlyMethod,
+} from '@/lib/csrf-protection';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).
@@ -499,11 +507,36 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // they fall through to the bearer check below instead of being waved past.
     // The 61 routes the interface DOES call cannot be closed here; see
     // docs/SECURITY-RESIDUALS.md.
+    //
+    // MR-23: ALL mutating same-origin API calls now require a signed CSRF cookie
+    // (mc_csrf_token, httpOnly + SameSite=Strict). Read-only methods (GET/HEAD/
+    // OPTIONS) are exempt — the board must still render its data on every box.
     if (
       !isWebhookSecretRoute(pathname) &&
       !requiresBearerForWrite(pathname, request.method) &&
       isSameOriginRequest(request)
     ) {
+      // MR-23: mutating methods require the signed CSRF cookie. This closes the
+      // CROSS-SITE forgery vector (SameSite=Strict means a foreign site's request
+      // never carries the cookie) and the unsigned-double-submit forgery vector
+      // (the value is HMAC-signed, so a third party cannot mint one). It does NOT
+      // close the DIRECT-to-origin forgery vector on its own: the cookie is minted
+      // on unauthenticated public page loads, so a non-browser caller reaching the
+      // origin directly can harvest a valid token and replay it with a forged
+      // same-origin header. That residual is closed only by REQUIRE_CF_ACCESS=true
+      // (Layer 1 rejects any request lacking the CF-Access edge assertion BEFORE
+      // this block runs). See docs/SECURITY-RESIDUALS.md (MR-23).
+      if (!isReadOnlyMethod(request.method)) {
+        const csrfToken = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+        const csrfValid = await verifyCsrfToken(csrfToken);
+        if (!csrfValid) {
+          return unauthorized(
+            request,
+            'Unauthorized',
+            'missing-csrf-token',
+          );
+        }
+      }
       const passthrough = NextResponse.next();
       if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;
@@ -650,6 +683,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
           maxAge,
           secure: process.env.NODE_ENV === 'production',
         });
+        // MR-23: set signed CSRF cookie on page responses so mutating API calls
+        // from the browser carry the token.
+        await setCsrfCookieIfMissing(response, request);
         if (cfEmail) response.headers.set('x-operator-email', cfEmail);
         return response;
       }
@@ -658,8 +694,55 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   // Non-API path. CF Access already enforced above (or not required).
   const response = NextResponse.next();
+  // MR-23: set signed CSRF cookie on page responses so mutating API calls
+  // from the browser carry the token.
+  await setCsrfCookieIfMissing(response, request);
   if (cfEmail) response.headers.set('x-operator-email', cfEmail);
   return response;
+}
+
+/**
+ * MR-23: Set a signed CSRF cookie on page (non-API) responses.
+ *
+ * The cookie is set on EVERY non-API page response so the browser always has a
+ * fresh token. When the browser subsequently makes a mutating /api/* request,
+ * the cookie travels automatically (same-origin) and the same-origin passthrough
+ * block verifies it. The HMAC signature stops a THIRD PARTY from minting a token
+ * (unsigned double-submit forgery) and SameSite=Strict stops a foreign site from
+ * sending one (cross-site CSRF).
+ *
+ * SECURITY SCOPE (read before trusting this): the token is minted on
+ * UNAUTHENTICATED page loads, so a caller who can reach the origin directly can
+ * harvest a valid token and replay it with a forged Origin/Referer. The signature
+ * does NOT defend against that harvest-and-replay — it only proves the server
+ * minted the token, not that the presenter is the operator. The direct-to-origin
+ * residual named by MR-23 is closed only by REQUIRE_CF_ACCESS=true (Layer 1).
+ *
+ * The cookie is ONLY set when a valid CSRF token is NOT already present in the
+ * request — this avoids re-signing on every request and keeps the HMAC overhead
+ * per fresh-visit rather than per-navigation.
+ */
+async function setCsrfCookieIfMissing(
+  response: NextResponse,
+  request: NextRequest,
+): Promise<void> {
+  const existing = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+  // Verify the existing cookie first — if valid, no need to re-sign.
+  if (existing) {
+    const valid = await verifyCsrfToken(existing);
+    if (valid) return;
+  }
+  try {
+    const { value, maxAge } = await signCsrfToken();
+    response.cookies.set(CSRF_COOKIE_NAME, value, {
+      ...CSRF_COOKIE_ATTRIBUTES,
+      maxAge,
+    });
+  } catch {
+    // Dev-secret-in-production hard-lock — fail silently so the page still
+    // renders. Mutating API calls will be rejected by the CSRF check, which
+    // is the correct fail-safe (DATA-13 pattern).
+  }
 }
 
 /**

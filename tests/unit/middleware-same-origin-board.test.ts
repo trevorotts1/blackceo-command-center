@@ -24,6 +24,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
 import { AUTH_REJECTED_PATH } from '@/lib/probes/unauthorized-401-contract';
+import { CSRF_COOKIE_NAME } from '@/lib/csrf-protection';
 
 const BOARD_HOST = 'board.example.com';
 const BOARD_ORIGIN = `https://${BOARD_HOST}`;
@@ -93,6 +94,7 @@ interface ReqOpts {
   origin?: string; // a raw cross-origin Origin header
   bearer?: string; // Authorization: Bearer <bearer>
   cf?: boolean; // simulate a verified Cloudflare Access assertion
+  csrf?: string; // MR-23: signed CSRF cookie value for mutating same-origin requests
 }
 
 function makeReq(path: string, opts: ReqOpts = {}): NextRequest {
@@ -104,6 +106,7 @@ function makeReq(path: string, opts: ReqOpts = {}): NextRequest {
     headers['cf-access-jwt-assertion'] = 'edge-verified-jwt';
     headers['cf-access-authenticated-user-email'] = 'operator@example.com';
   }
+  if (opts.csrf) headers['cookie'] = `${CSRF_COOKIE_NAME}=${opts.csrf}`;
   return new NextRequest(`${BOARD_ORIGIN}${path}`, {
     method: opts.method ?? 'GET',
     headers,
@@ -172,16 +175,35 @@ describe('plain Cloudflare Tunnel box (no CF Access), secrets provisioned, produ
     },
   );
 
-  it('same-origin board WRITE (DELETE /api/tasks/:id) still passes through', async () => {
+  // MR-23: same-origin mutating requests now require a signed CSRF cookie.
+  // The middleware still passes them through — but only when the browser has the
+  // cookie (which is set by the middleware on every non-API page response).
+
+  it('same-origin board WRITE (DELETE /api/tasks/:id) passes through with a valid CSRF cookie (MR-23)', async () => {
     const mw = await loadMiddleware(ENV);
-    const res = await mw(makeReq('/api/tasks/abc123', { method: 'DELETE', sameOrigin: true }));
+    // Dynamically import the sign function to mint a valid token under the same env.
+    const { signCsrfToken } = await import('@/lib/csrf-protection');
+    const { value: csrfValue } = await signCsrfToken();
+    const res = await mw(makeReq('/api/tasks/abc123', { method: 'DELETE', sameOrigin: true, csrf: csrfValue }));
     expect(isPassthrough(res)).toBe(true);
   });
 
-  it('same-origin board WRITE (POST /api/workspaces) still passes through', async () => {
+  it('same-origin board WRITE (POST /api/workspaces) passes through with a valid CSRF cookie (MR-23)', async () => {
     const mw = await loadMiddleware(ENV);
-    const res = await mw(makeReq('/api/workspaces', { method: 'POST', sameOrigin: true }));
+    const { signCsrfToken } = await import('@/lib/csrf-protection');
+    const { value: csrfValue } = await signCsrfToken();
+    const res = await mw(makeReq('/api/workspaces', { method: 'POST', sameOrigin: true, csrf: csrfValue }));
     expect(isPassthrough(res)).toBe(true);
+  });
+
+  it('MR-23: same-origin board WRITE WITHOUT a CSRF cookie is rejected', async () => {
+    const mw = await loadMiddleware(ENV);
+    const res = await mw(makeReq('/api/tasks/abc123', { method: 'DELETE', sameOrigin: true }));
+    // Without the signed CSRF cookie the mutating same-origin request is
+    // refused. This is a misconfiguration/forgery signal, not a credential
+    // failure — it returns a direct 401, not a rewrite to the 401 sink.
+    expect(isPassthrough(res)).toBe(false);
+    expect(res.status).toBe(401);
   });
 
   it('external cross-origin read WITHOUT bearer is rejected (401)', async () => {
@@ -288,3 +310,77 @@ describe('CF-Access-fronted box (opt-in REQUIRE_CF_ACCESS=true still enforces)',
     expect(isCredentialRejection(res)).toBe(true);
   });
 });
+
+/**
+ * MR-23 security-posture regression guard.
+ *
+ * The signed CSRF cookie closes CROSS-SITE forgery (SameSite=Strict) and
+ * UNSIGNED double-submit forgery (HMAC). It does NOT close the DIRECT-to-origin
+ * forgery the finding names, because the token is minted on unauthenticated
+ * public page loads and can be harvested + replayed. These tests pin that truth
+ * so a future change cannot silently regress either way:
+ *   • harvest-and-replay still passes on a plain-tunnel box (residual OPEN), and
+ *   • REQUIRE_CF_ACCESS=true closes it at Layer 1 (residual CLOSED).
+ */
+describe('MR-23 direct-to-origin forgery — true security posture', () => {
+  const ENV: EnvOverrides = {
+    NODE_ENV: 'production',
+    MC_API_TOKEN: TOKEN,
+    WEBHOOK_SECRET: SECRET,
+    REQUIRE_CF_ACCESS: undefined,
+    ALLOW_INSECURE_OPEN_API: undefined,
+    DEMO_MODE: undefined,
+  };
+
+  /** Harvest a valid CSRF cookie the way a direct-to-origin caller would: load a
+   *  gate-exempt public page with no auth and read the Set-Cookie. */
+  async function harvestCsrfCookie(mw: Middleware): Promise<string | undefined> {
+    const pageRes = await mw(
+      new NextRequest(`${BOARD_ORIGIN}/interview`, { method: 'GET', headers: { host: BOARD_HOST } }),
+    );
+    const setCookie = pageRes.headers.get('set-cookie') ?? '';
+    return setCookie.match(new RegExp(`${CSRF_COOKIE_NAME}=([^;]+)`))?.[1];
+  }
+
+  it('a direct caller harvests a valid CSRF cookie from an unauthenticated public page', async () => {
+    const mw = await loadMiddleware(ENV);
+    const token = await harvestCsrfCookie(mw);
+    expect(token).toBeTruthy();
+  });
+
+  it('RESIDUAL OPEN on plain tunnel: harvested cookie + forged same-origin header reaches a mutating route (no bearer, no CF)', async () => {
+    const mw = await loadMiddleware(ENV);
+    const token = await harvestCsrfCookie(mw);
+    expect(token).toBeTruthy();
+    const attack = new NextRequest(`${BOARD_ORIGIN}/api/tasks/abc123`, {
+      method: 'DELETE',
+      headers: {
+        host: BOARD_HOST,
+        referer: `${BOARD_ORIGIN}/`, // forged same-origin
+        cookie: `${CSRF_COOKIE_NAME}=${token}`,
+      },
+    });
+    // Documents (does not endorse) that the direct-forgery residual persists
+    // without CF Access. The signed cookie cannot defeat harvest-and-replay.
+    expect(isPassthrough(await mw(attack))).toBe(true);
+  });
+
+  it('RESIDUAL CLOSED by REQUIRE_CF_ACCESS=true: the same harvest-and-replay is rejected at Layer 1', async () => {
+    const cfEnv: EnvOverrides = { ...ENV, REQUIRE_CF_ACCESS: 'true' };
+    const mw = await loadMiddleware(cfEnv);
+    const token = await harvestCsrfCookie(mw); // page load is also rejected under CF
+    const attack = new NextRequest(`${BOARD_ORIGIN}/api/tasks/abc123`, {
+      method: 'DELETE',
+      headers: {
+        host: BOARD_HOST,
+        referer: `${BOARD_ORIGIN}/`,
+        ...(token ? { cookie: `${CSRF_COOKIE_NAME}=${token}` } : {}),
+      },
+    });
+    const res = await mw(attack);
+    // No CF-Access assertion -> Layer 1 misconfiguration 401, before passthrough.
+    expect(isPassthrough(res)).toBe(false);
+    expect(res.status).toBe(401);
+  });
+});
+

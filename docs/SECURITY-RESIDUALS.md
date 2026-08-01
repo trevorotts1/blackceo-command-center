@@ -49,6 +49,16 @@ Two paths exist; neither is a code change in `middleware.ts`:
 - **`Sec-Fetch-Site: same-origin`**: Browsers set it honestly, but a non-browser caller can send any header it likes. Defends against cross-site, not against the direct-to-origin caller.
 - **Unsigned double-submit cookie/header pair**: An attacker who can set headers can set both halves to the same arbitrary value.
 
+### MR-23 status (signed CSRF cookie, `src/lib/csrf-protection.ts`)
+
+MR-23 added a signed `mc_csrf_token` double-submit cookie (httpOnly + SameSite=Strict + HMAC-SHA256) that the middleware mints on non-API page responses and verifies on every mutating same-origin `/api/*` passthrough. Its actual coverage, verified by test:
+
+- **Closes cross-site CSRF** — SameSite=Strict means a foreign site's request never carries the cookie.
+- **Closes unsigned double-submit forgery** — the value is HMAC-signed, so a third party cannot mint one (the rejected approach above).
+- **Does NOT close the direct-to-origin forgery this section names.** The token is minted on UNAUTHENTICATED public page loads (e.g. `/interview`), so a non-browser caller reaching the origin directly harvests a valid signed token and replays it with a forged `Origin`/`Referer`. The signature proves the server minted the token, not that the presenter is the operator, so it cannot defeat harvest-and-replay. (Reproduced: GET a gate-exempt page → read `Set-Cookie: mc_csrf_token=…` → DELETE `/api/tasks/:id` with that cookie + a forged same-origin `Referer` and no bearer → passthrough 200.)
+
+Therefore the direct-to-origin residual is closed **only by Part B** (`REQUIRE_CF_ACCESS=true`): Layer 1 rejects any request lacking the Cloudflare-Access edge assertion before the passthrough runs. The CSRF cookie is defense-in-depth for the cross-site and unsigned-forgery vectors; it is not a substitute for CF Access on the direct-forgery vector.
+
 ### Interface call census
 
 The interface-kept routes (61 at authoring, 63 as of 2026-07-29) were determined by intersecting (a) all 106 `POST`/`PATCH`/`PUT`/`DELETE`-exporting routes (104 at authoring; 106 as of 2026-07-29) under `src/app/api/` with (b) every mutating `fetch()` call in `src/` outside `src/app/api/`. The anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts this intersection — a new route added without classification, or a new interface call site to a listed route, fails the test.
