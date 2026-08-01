@@ -327,10 +327,23 @@ async function advanceToReview(taskId: string, agentId: string | null, agentName
   // now commit as ONE transaction. No separate run() / recordStatusEvent() gap.
   // The caller only ever selects in_progress tasks so no CAS guard is needed
   // beyond transition()'s own from-status guard.
+  //
+  // MR-16 (events-feed regression fix): the raw writer this replaced emitted a
+  // LEGACY events row of `type='task_completed'`, `agent_id=agentId`,
+  // `message="<agentName> completed: <summary>"`. Routing through transition()
+  // without overrides downgraded that to `task_status_changed` (to='review'),
+  // dropped agent_id (the feed's agent pill disappeared), and lost the agent's
+  // completion summary. Restore the exact row via the legacy-events overrides —
+  // still inside transition()'s single atomic transaction, so the summary is
+  // back in the audit trail and downstream `WHERE type='task_completed'`
+  // consumers (e.g. the agent-completion webhook) see reconcile completions.
   try {
     await transition(taskId, 'review', {
       actor: agentId ?? 'execution-watcher',
       reason: 'agent reported TASK_COMPLETE (reconcile)',
+      eventType: 'task_completed',
+      eventAgentId: agentId,
+      eventMessage: `${agentName ?? 'Agent'} completed: ${summary}`,
     });
   } catch (err) {
     if (err instanceof TransitionError) {
