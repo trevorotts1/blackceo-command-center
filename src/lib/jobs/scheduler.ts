@@ -362,7 +362,11 @@ async function runSopLearning(): Promise<void> {
   await tagPendingProposalsWithQC();
 }
 
-const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezone?: string }> = [
+// MR-31: fn returns Promise<unknown> (not Promise<void>) so a sweep body can
+// hand its result — including a skippedReason — back up to wrap(), which reads
+// it to record 'disabled' vs 'ok' in job_liveness. wrap() already accepts
+// () => Promise<unknown> | unknown, so this just aligns the declared type.
+const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unknown; timezone?: string }> = [
   // model-refresh: Sundays 03:00 server local. DESTRUCTIVE — it can deprecate
   // catalog rows. Kill switch: DISABLE_MODEL_REFRESH_CRON=1 (see runModelRefresh).
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
@@ -404,6 +408,9 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
       } else if (result.scanned > 0) {
         console.log(`[cron] qc-review-sweep: scanned ${result.scanned} task(s), scored ${result.scored}`);
       }
+      // MR-31: return the result so wrap() can see skippedReason and record
+      // 'disabled' (not a false 'ok') when the kill flag short-circuits the body.
+      return result;
     },
   },
   // ceo-delegation: every 5 minutes, push CEO-stranded backlog tasks down to
@@ -434,6 +441,9 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<void>; timezon
           `[cron] intake-advance: scanned ${result.scanned}, routed ${result.routed}, dispatched ${result.dispatched}`,
         );
       }
+      // MR-31: return the result so wrap() can see skippedReason and record
+      // 'disabled' (not a false 'ok') when the kill flag short-circuits the body.
+      return result;
     },
   },
 
