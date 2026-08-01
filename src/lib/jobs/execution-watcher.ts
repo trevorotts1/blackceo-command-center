@@ -390,11 +390,15 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
   // MR-15: track whether we could reach the gateway at all this tick. If the
   // gateway is unreachable for EVERY task, the reconcile cannot find a
   // TASK_COMPLETE marker via chat.history — completed-but-unreported tasks stay
-  // in_progress forever. After the first task's message probes all return empty
-  // AND the gateway is confirmed unreachable, we fall back to deliverable-based
-  // completion checks (same canonical recovery both sweeps share) so a finished
-  // task is never left stranded when the gateway goes down.
+  // in_progress forever. The deliverable-based fallback (same canonical recovery
+  // both sweeps share) runs only once the gateway is confirmed down — i.e.
+  // isConnected() is false AND EVERY task probed so far this tick returned
+  // empty (the every-task-empty guard). That guard is what keeps a transient
+  // blip from false-recovering a genuinely in-progress task whose session
+  // simply has no messages yet; a finished task is never left stranded when the
+  // gateway goes down.
   let gatewayConfirmedDown = false;
+  let everyTaskEmptySoFar = true;
   const ENABLE_GATEWAY_DOWN_RECOVERY =
     process.env.EXECUTION_WATCHER_GATEWAY_DOWN_RECOVERY !== '0';
 
@@ -450,22 +454,23 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
       // both sweeps share. This closes the gap where the reconcile returns []
       // (empty messages) and never advances a completed task.
       //
-      // The gateway check is lazily computed: we re-test connectivity after the
-      // FIRST task's probes all returned empty, then cache the result for the
-      // rest of this tick (a single tick's gateway state is stable). When the
-      // gateway IS reachable but a session simply has no messages, we skip the
-      // fallback — an empty history with a live gateway is a genuinely
-      // in-progress task, not a completed-but-unreportable one.
+      // The gateway check is lazily computed and cached for the rest of the tick
+      // (a single tick's gateway state is stable). When the gateway IS reachable
+      // but a session simply has no messages, we skip the fallback — an empty
+      // history with a live gateway is a genuinely in-progress task, not a
+      // completed-but-unreportable one.
+      //
+      // EVERY-TASK-EMPTY GUARD (fix2): confirm-down requires isConnected() false
+      // AND every task probed so far this tick to have returned empty. An empty
+      // probe on the FIRST task while isConnected() is false is ambiguous — the
+      // ws may be mid-reconnect, or that one session may simply be new — and
+      // recovering it on a transient blip would false-recover a genuinely
+      // in-progress task. Once a later task's session DOES respond, the gateway
+      // is proven reachable and the guard trips off for the rest of the tick, so
+      // a single dead session can never drag a live gateway into recovery.
       const client = getOpenClawClient();
       if (ENABLE_GATEWAY_DOWN_RECOVERY && !anySessionResponded) {
-        // First task with empty probes: test for gateway-down now so we can
-        // bypass chat.history on subsequent tasks without re-probing.
-        if (!gatewayConfirmedDown && !client.isConnected()) {
-          // Only mark confirmed-down when this tick already tried AND failed to
-          // reach every session — a transient hiccup where one session is empty
-          // but others respond must not trigger the recovery path. So we flag
-          // only when this is the LAST task and none have matched, OR when we
-          // are past the first task and EVERY task so far has returned empty.
+        if (!gatewayConfirmedDown && !client.isConnected() && everyTaskEmptySoFar) {
           gatewayConfirmedDown = true;
           console.warn(
             '[execution-watcher] Gateway unreachable — falling back to deliverable-based completion checks for remaining in_progress tasks.',
@@ -488,6 +493,11 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
             );
           }
         }
+      } else {
+        // This task's session responded (or recovery is disabled): the gateway
+        // is reachable. Trip the every-task-empty guard so a later empty task
+        // cannot confirm-down on a live gateway.
+        everyTaskEmptySoFar = false;
       }
     } catch (err) {
       console.warn(`[execution-watcher] Reconcile failed for task ${task.id}:`, (err as Error).message);
