@@ -59,6 +59,8 @@ MR-23 added a signed `mc_csrf_token` double-submit cookie (httpOnly + SameSite=S
 
 Therefore the direct-to-origin residual is closed **only by Part B** (`REQUIRE_CF_ACCESS=true`): Layer 1 rejects any request lacking the Cloudflare-Access edge assertion before the passthrough runs. The CSRF cookie is defense-in-depth for the cross-site and unsigned-forgery vectors; it is not a substitute for CF Access on the direct-forgery vector.
 
+**Secret hygiene (fix2).** The CSRF cookie is HMAC-signed with a key that resolves from a DEDICATED var first — `MC_CSRF_COOKIE_SECRET` — then falls back to `MC_INTERVIEW_COOKIE_SECRET` → `MC_API_TOKEN` → `WEBHOOK_SECRET` → a public dev fallback (which hard-locks sign/verify in production). The dedicated var decouples CSRF signing from the API token lifecycle: `MC_API_TOKEN` is the credential an external caller presents, so sharing it as an HMAC key would widen the blast radius of a token leak into cookie forgery. Operators should set `MC_CSRF_COOKIE_SECRET` explicitly (see `.env.example`). This does not close the harvest-and-replay residual above — only `REQUIRE_CF_ACCESS=true` does — but it keeps the CSRF signature from being keyed on a credential that crosses the trust boundary.
+
 ### Interface call census
 
 The interface-kept routes (61 at authoring, 63 as of 2026-07-29) were determined by intersecting (a) all 106 `POST`/`PATCH`/`PUT`/`DELETE`-exporting routes (104 at authoring; 106 as of 2026-07-29) under `src/app/api/` with (b) every mutating `fetch()` call in `src/` outside `src/app/api/`. The anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts this intersection — a new route added without classification, or a new interface call site to a listed route, fails the test.
