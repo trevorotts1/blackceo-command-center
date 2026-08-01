@@ -43,22 +43,33 @@ if (!docDeptMatch) {
 } else {
   const docCount = parseInt(docDeptMatch[1], 10);
 
-  // Dynamically import the TypeScript module so we don't re-parse the config.
-  // DEFAULT_DEPARTMENTS is the canonical source of truth.
-  const { DEFAULT_DEPARTMENTS } = await import(
-    resolve(ROOT, 'src/lib/routing/departments.config.ts')
-  );
-  const codeCount = DEFAULT_DEPARTMENTS.length;
-
-  if (docCount !== codeCount) {
-    fail(
-      `QC.md rubric #4 claims ${docCount} departments but ` +
-        `DEFAULT_DEPARTMENTS has ${codeCount} entries`
-    );
+  // Count the entries in DEFAULT_DEPARTMENTS directly from the TypeScript source.
+  // We parse the source text rather than `await import()`-ing the module because
+  // departments.config.ts uses extensionless relative imports (`./canonical-slug`)
+  // that Node's ESM resolver rejects even with type-stripping, which would crash
+  // this gate with ERR_MODULE_NOT_FOUND. Counting `{ id: ... }` entries in the
+  // array literal is dependency-free and matches the canonical source of truth.
+  const deptSrc = read('src/lib/routing/departments.config.ts');
+  const arrStart = deptSrc.indexOf('export const DEFAULT_DEPARTMENTS');
+  const bracketStart = deptSrc.indexOf('[', arrStart);
+  const bracketEnd = deptSrc.indexOf('\n];', bracketStart);
+  if (arrStart === -1 || bracketStart === -1 || bracketEnd === -1) {
+    fail('departments.config.ts: could not locate the DEFAULT_DEPARTMENTS array literal');
   } else {
-    process.stdout.write(
-      `OK: QC.md department count (${docCount}) matches DEFAULT_DEPARTMENTS (${codeCount})\n`
-    );
+    const arrayBody = deptSrc.slice(bracketStart + 1, bracketEnd);
+    const idEntries = arrayBody.match(/^\s*id:\s*['"]/gm);
+    const codeCount = idEntries ? idEntries.length : 0;
+
+    if (docCount !== codeCount) {
+      fail(
+        `QC.md rubric #4 claims ${docCount} departments but ` +
+          `DEFAULT_DEPARTMENTS has ${codeCount} entries`
+      );
+    } else {
+      process.stdout.write(
+        `OK: QC.md department count (${docCount}) matches DEFAULT_DEPARTMENTS (${codeCount})\n`
+      );
+    }
   }
 }
 
