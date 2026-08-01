@@ -615,8 +615,20 @@ If you need help or clarification, ask the orchestrator.`;
       });
     } catch (err) {
       console.error('Failed to send message to agent:', err);
+      // MR-24: mirror the auto-dispatch path's chat.send failure handling —
+      // record the failed advance attempt (backoff accounting + event) so
+      // repeated dispatch failures are surfaced and eventually escalate rather
+      // than producing an invisible uncapped re-loop with no audit trail.
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'chat_send_failed',
+        audience: 'SYSTEM',
+        needs:
+          'OpenClaw chat.send failed at manual dispatch. ' +
+          'The task was not advanced; retry or check gateway connectivity.',
+        context: 'manual-dispatch',
+      });
       return NextResponse.json(
-        { error: 'Internal server error' },
+        { error: 'chat.send failed — dispatch attempt recorded, task held in backlog' },
         { status: 500 }
       );
     }
