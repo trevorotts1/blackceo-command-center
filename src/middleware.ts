@@ -10,7 +10,7 @@ import {
   logUnauthorized401,
   sanitizeHeaderValue,
 } from '@/lib/probes/unauthorized-401-contract';
-import { INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, signInterviewToken } from '@/lib/interview/gate-cookie';
+import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, verifyInterviewBypassToken, signInterviewToken } from '@/lib/interview/gate-cookie';
 import { checkInterviewCompleteViaFallback } from '@/lib/interview/gate-fallback';
 import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '@/lib/bearer-required-routes';
 
@@ -183,6 +183,7 @@ function isWebhookSecretRoute(pathname: string): boolean {
  * Exempt:
  *   • /interview(/*)            — the lock target itself (no redirect loop)
  *   • /onboarding(/*)           — resume redirect (P0-7) + /onboarding/building
+ *   • /settings(/*)             — MR-17: admin rescue surface (env, build state)
  *   • /api/*                    — never lock an API route (also returned earlier)
  *   • /_next/*                  — framework internals + RSC/data payloads
  *   • asset-like requests       — anything whose last path segment has a dot
@@ -191,6 +192,11 @@ function isWebhookSecretRoute(pathname: string): boolean {
 function isInterviewGateExempt(pathname: string): boolean {
   if (pathname === '/interview' || pathname.startsWith('/interview/')) return true;
   if (pathname === '/onboarding' || pathname.startsWith('/onboarding/')) return true;
+  // MR-17: /settings must always be reachable — a corrupted build-state file or
+  // rotated signing key that traps the dashboard behind /interview would also
+  // lock the operator out of /settings, which is the one place they could fix
+  // configuration (env vars, build state, provisioning).
+  if (pathname === '/settings' || pathname.startsWith('/settings/')) return true;
   // The Anthology participant token page is a public, self-authenticating
   // surface for external co-authors (SPEC 11.3) — it must never be redirected
   // to the operator interview shell.
@@ -583,9 +589,34 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (verdict.complete === true) {
       // Primary cookie is valid-complete — admit immediately.
     } else {
+      // MR-17: admin escape hatches BEFORE the fallback chain. A corrupted
+      // build-state file or rotated signing key can trap the operator out of
+      // the entire dashboard (the completion cookie never becomes "complete").
+      // Two escape routes:
+      //   1. Bypass cookie (U057 "Skip for now") — set by the interview page's
+      //      "Skip" button via skipInterviewForNow(). Short-ttl, HMAC-signed.
+      //      Already minted by gate-actions.ts; wired from the middleware here.
+      //   2. `?bypass_interview=<HMAC>` query parameter — same HMAC format as
+      //      the bypass cookie, usable when the operator can't even reach the
+      //      interview page to click "Skip". The operator constructs the token
+      //      with the same HMAC key (MC_INTERVIEW_COOKIE_SECRET / MC_API_TOKEN).
       // U010: fall back to the latch cookie first, then the gate-status endpoint.
       let admitted = false;
       let needCookie = false;
+
+      // MR-17 escape hatch 1: bypass cookie (U057 — "Skip for now").
+      const bypassCookie = request.cookies.get(INTERVIEW_BYPASS_COOKIE_NAME)?.value;
+      if (bypassCookie && await verifyInterviewBypassToken(bypassCookie)) {
+        admitted = true;
+      }
+
+      // MR-17 escape hatch 2: query-parameter admin escape hatch.
+      if (!admitted) {
+        const bypassParam = request.nextUrl.searchParams.get('bypass_interview');
+        if (bypassParam && await verifyInterviewBypassToken(bypassParam)) {
+          admitted = true;
+        }
+      }
       const latchToken = request.cookies.get(LATCH_COOKIE_NAME)?.value;
       if (latchToken) {
         const latchVerdict = await verifyInterviewToken(latchToken);
