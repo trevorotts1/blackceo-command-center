@@ -62,13 +62,29 @@ export const PHANTOM_HEALED_REASON = 'assigned_agent_missing';
 /**
  * Heal ONE task's phantom assignment.
  *
- * CAS-guarded: the UPDATE's WHERE clause matches only `assigned_agent_id =
- * deadAgentId` (the exact stale value the caller observed), so two callers
+ * CAS-guarded with optimistic locking: the UPDATE's WHERE clause matches
+ * `assigned_agent_id = deadAgentId` (the exact stale value the caller
+ * observed) AND optionally `updated_at = expectedUpdatedAt` (the row
+ * snapshot timestamp from the batch SELECT). When a concurrent operation
+ * modifies the row between SELECT and UPDATE — whether it cleared the
+ * assignment, reassigned it to a different agent, or rewrote the phantom
+ * id itself — the `updated_at` bump invalidates the snapshot and the CAS
+ * loses cleanly: UPDATE matches 0 rows, writes NO duplicate event, and
+ * returns `false`.
+ *
+ * Without the `updated_at` guard on the batch path, a concurrent re-assign
+ * to a DIFFERENT phantom id between the SELECT and per-row heal could slip
+ * past the `assigned_agent_id`-only WHERE clause — the row would carry a
+ * new phantom that the batch scan already passed, requiring another sweep
+ * tick to catch (the TOCTOU oscillation described in MR-33). The
+ * optimistic-lock `updated_at` check closes that window: ANY row
+ * modification between scan and heal → CAS failure → row stays in the
+ * phantom set for the NEXT tick's batch scan to pick up. Two callers
  * racing the SAME phantom id (e.g. a dispatch attempt and the sweep-tail
- * firing in the same window) heal it exactly once — the loser's UPDATE
- * matches 0 rows, writes NO duplicate event, and returns `false`. This is
- * the "capped" half of "loud, capped, self-healing": no matter how many
- * callers observe the same phantom, exactly one events row and one
+ * firing in the same window) still heal it exactly once — the loser's
+ * UPDATE matches 0 rows, writes NO duplicate event, and returns `false`.
+ * This is the "capped" half of "loud, capped, self-healing": no matter how
+ * many callers observe the same phantom, exactly one events row and one
  * broadcast result from it.
  *
  * Never touches a `done` task (callers are expected to pre-filter, but the
@@ -76,25 +92,39 @@ export const PHANTOM_HEALED_REASON = 'assigned_agent_missing';
  * safe to call from any context) and never DELETEs anything — the events
  * row preserves what was removed.
  *
+ * @param expectedUpdatedAt — when provided (batch path), the UPDATE also
+ *   requires `updated_at` to still match this value, catching any
+ *   concurrent modification of the row between scan and heal. When omitted
+ *   (real-time dispatch catch in autoDispatchTask), the caller has a fresh
+ *   in-memory observation so the simpler CAS is sufficient.
  * @returns true if THIS call performed the heal; false if there was nothing
- *   to heal (already healed by a concurrent caller, or the id no longer
- *   matches).
+ *   to heal (already healed by a concurrent caller, row modified since
+ *   scan, or the id no longer matches).
  */
 export function healPhantomAgentAssignment(
   taskId: string,
   deadAgentId: string,
   healedBy: string,
+  expectedUpdatedAt?: string,
 ): boolean {
   const now = new Date().toISOString();
   return transaction(() => {
+    const hasSnapshot = expectedUpdatedAt !== undefined;
     const claim = run(
-      `UPDATE tasks SET assigned_agent_id = NULL, updated_at = ?
-         WHERE id = ? AND assigned_agent_id = ? AND status != 'done'`,
-      [now, taskId, deadAgentId],
+      hasSnapshot
+        ? `UPDATE tasks SET assigned_agent_id = NULL, updated_at = ?
+             WHERE id = ? AND assigned_agent_id = ? AND status != 'done'
+               AND updated_at = ?`
+        : `UPDATE tasks SET assigned_agent_id = NULL, updated_at = ?
+             WHERE id = ? AND assigned_agent_id = ? AND status != 'done'`,
+      hasSnapshot
+        ? [now, taskId, deadAgentId, expectedUpdatedAt as string]
+        : [now, taskId, deadAgentId],
     );
     if (claim.changes !== 1) {
       // Already healed (or reassigned to something else) by a concurrent
-      // caller, or the task is done. No duplicate event, no duplicate alert.
+      // caller, row modified since scan, or the task is done. No duplicate
+      // event, no duplicate alert.
       return false;
     }
     run(
@@ -152,12 +182,12 @@ export function healPhantomAssignmentsBatch(opts: {
 }): PhantomHealBatchResult {
   const { healedBy, statuses } = opts;
 
-  let rows: Array<{ id: string; assigned_agent_id: string }>;
+  let rows: Array<{ id: string; assigned_agent_id: string; updated_at: string }>;
   try {
     if (statuses && statuses.length > 0) {
       const placeholders = statuses.map(() => '?').join(',');
       rows = queryAll(
-        `SELECT id, assigned_agent_id FROM tasks
+        `SELECT id, assigned_agent_id, updated_at FROM tasks
           WHERE assigned_agent_id IS NOT NULL
             AND assigned_agent_id NOT IN (SELECT id FROM agents)
             AND status IN (${placeholders})
@@ -166,7 +196,7 @@ export function healPhantomAssignmentsBatch(opts: {
       );
     } else {
       rows = queryAll(
-        `SELECT id, assigned_agent_id FROM tasks
+        `SELECT id, assigned_agent_id, updated_at FROM tasks
           WHERE assigned_agent_id IS NOT NULL
             AND assigned_agent_id NOT IN (SELECT id FROM agents)
             AND status NOT IN ('done')
@@ -186,7 +216,7 @@ export function healPhantomAssignmentsBatch(opts: {
   const healedIds: string[] = [];
   for (const row of rows) {
     try {
-      if (healPhantomAgentAssignment(row.id, row.assigned_agent_id, healedBy)) {
+      if (healPhantomAgentAssignment(row.id, row.assigned_agent_id, healedBy, row.updated_at)) {
         healedIds.push(row.id);
         try {
           const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [row.id]);
