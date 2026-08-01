@@ -72,6 +72,18 @@ interface MissionControlState {
   // real-time channel. Process-local: same store, same SSE hook.
   activityPulse: number;
   incrementActivityPulse: () => void;
+
+  // MR-45 — bulk selection state for the kanban board multi-select toolbar.
+  // A Set of task IDs (not an array — lookups are O(1) and no duplicate guard
+  // needed). Operations: toggle one, select a column's worth, clear all.
+  selectedTaskIds: Set<string>;
+  toggleTaskSelection: (taskId: string) => void;
+  setSelectedTaskIds: (taskIds: Set<string>) => void;
+  clearTaskSelection: () => void;
+  /** Bulk-apply a status change to all selected tasks in the store optimistically,
+   *  then fire the server PATCHes individually. Each failure reverts its own card
+   *  and surfaces a toast message (pushed via the caller's toast handler). */
+  bulkUpdateTaskStatuses: (taskIds: string[], status: TaskStatus) => void;
 }
 
 export const useMissionControl = create<MissionControlState>((set) => ({
@@ -189,4 +201,22 @@ export const useMissionControl = create<MissionControlState>((set) => ({
   activityPulse: 0,
   incrementActivityPulse: () =>
     set((state) => ({ activityPulse: state.activityPulse + 1 })),
+
+  // MR-45 — bulk selection state
+  selectedTaskIds: new Set<string>(),
+  toggleTaskSelection: (taskId) =>
+    set((state) => {
+      const next = new Set(state.selectedTaskIds);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return { selectedTaskIds: next };
+    }),
+  setSelectedTaskIds: (taskIds) => set({ selectedTaskIds: taskIds }),
+  clearTaskSelection: () => set({ selectedTaskIds: new Set<string>() }),
+  bulkUpdateTaskStatuses: (taskIds, status) =>
+    set((state) => ({
+      tasks: state.tasks.map((task) =>
+        taskIds.includes(task.id) ? { ...task, status } : task
+      ),
+    })),
 }));

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Search, Inbox as InboxIcon } from 'lucide-react';
+import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Search, Inbox as InboxIcon, CheckSquare, Square, Archive, ArrowRight, UserPlus, XCircle } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { ErrorState } from './podcast/states';
 import { X } from 'lucide-react';
@@ -224,6 +224,11 @@ export const departmentNames: Record<string, string> = {
 
 export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task', loadError, onRetry, dueDateWindowDays = 7 }: MissionQueueProps) {
   const { tasks, isLoading, updateTaskStatus, updateTask, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
+  const selectedTaskIds = useMissionControl((s) => s.selectedTaskIds);
+  const toggleTaskSelection = useMissionControl((s) => s.toggleTaskSelection);
+  const clearTaskSelection = useMissionControl((s) => s.clearTaskSelection);
+  const setSelectedTaskIds = useMissionControl((s) => s.setSelectedTaskIds);
+  const bulkUpdateTaskStatuses = useMissionControl((s) => s.bulkUpdateTaskStatuses);
   const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
@@ -250,6 +255,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // The task currently in the Blocked confirmation modal (dropped/moved onto
   // Blocked but not yet confirmed with the required human-only fields).
   const [blockingTask, setBlockingTask] = useState<Task | null>(null);
+
+  // MR-45 — bulk operation in-flight state and assign target picker.
+  const [bulkAssignAgentId, setBulkAssignAgentId] = useState('');
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
 
   // Select the active column set from BOARD_PRESETS; default is 'task' (6
   // columns, unchanged). Computed early (used by the scroll-tracking effects
@@ -660,6 +669,208 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     setBlockingTask(null);
   };
 
+  // ── MR-45 bulk operations ────────────────────────────────────────────────
+  // These fire the /api/tasks/bulk endpoint for the three supported operations:
+  // move, archive, and assign. Each reverts the optimistic store update for any
+  // individual failure and surfaces per-task error details via toasts.
+
+  /** Compute accessible task IDs for the currently visible column. Used by the
+   *  "Select all in column" checkbox in each column header. */
+  const getAllVisibleTaskIds = useCallback((): string[] => {
+    const allTaskIds: string[] = [];
+    for (const column of COLUMNS) {
+      const columnTasks = boardKind === 'bug'
+        ? getBugsByStatus(column.id)
+        : getTasksByStatus(column.id);
+      for (const task of columnTasks) {
+        allTaskIds.push(task.id);
+      }
+    }
+    return allTaskIds;
+    // getTasksByStatus and getBugsByStatus depend on tasks/bugTickets/searchQuery/activeFilter,
+    // all of which are React state, so they trigger re-renders naturally.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks, bugTickets, searchQuery, activeFilter, boardKind]);
+
+  const selectAllVisible = useCallback(() => {
+    const visibleIds = getAllVisibleTaskIds();
+    setSelectedTaskIds(new Set(visibleIds));
+  }, [getAllVisibleTaskIds, setSelectedTaskIds]);
+
+  const numSelected = selectedTaskIds.size;
+
+  const handleBulkMove = useCallback(async (targetColumnId: string) => {
+    const targetStatus = columnIdToStatus(targetColumnId);
+    const ids = Array.from(selectedTaskIds);
+    if (ids.length === 0) return;
+
+    // Skip blocked as a bulk target — it requires per-task human fields.
+    if (targetStatus === 'blocked') {
+      pushToast({
+        tone: 'error',
+        title: 'Cannot bulk-move to Blocked',
+        detail: 'Blocked requires a reason, audience, and ask per task. Move tasks individually.',
+      });
+      return;
+    }
+
+    setBulkSubmitting(true);
+
+    // Optimistic: apply to store first
+    bulkUpdateTaskStatuses(ids, targetStatus);
+
+    try {
+      const res = await fetch('/api/tasks/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operation: 'move', taskIds: ids, targetStatus }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Bulk move failed');
+
+      // Revert any individual failures
+      for (const r of data.results) {
+        if (!r.ok) {
+          // Revert to the original status — we don't have the previous status handy
+          // without a store snapshot, so refetch instead.
+          pushToast({
+            tone: 'error',
+            title: `Could not move ${r.taskId.slice(0, 8)}...`,
+            detail: r.error ?? 'Unknown error',
+          });
+        }
+      }
+
+      if (data.failed > 0) {
+        pushToast({
+          tone: 'error',
+          title: `${data.failed} of ${data.total} tasks could not be moved`,
+          detail: 'Reverted failed cards. Reload the board to see current state.',
+        });
+      } else {
+        pushToast({
+          tone: 'info',
+          title: `Moved ${data.ok} task${data.ok === 1 ? '' : 's'} to ${targetStatus}`,
+        });
+      }
+
+      // Always refetch to reconcile fully
+      setTimeout(async () => {
+        try {
+          const r = await fetch('/api/tasks');
+          if (r.ok) useMissionControl.getState().setTasks(await r.json());
+        } catch { /* best-effort */ }
+      }, 300);
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: 'Bulk move failed',
+        detail: (err as Error).message,
+      });
+      // Refetch to revert
+      try {
+        const r = await fetch('/api/tasks');
+        if (r.ok) useMissionControl.getState().setTasks(await r.json());
+      } catch { /* best-effort */ }
+    } finally {
+      setBulkSubmitting(false);
+      clearTaskSelection();
+    }
+  }, [selectedTaskIds, bulkUpdateTaskStatuses, pushToast, clearTaskSelection]);
+
+  const handleBulkArchive = useCallback(async () => {
+    const ids = Array.from(selectedTaskIds);
+    if (ids.length === 0) return;
+
+    setBulkSubmitting(true);
+
+    try {
+      const res = await fetch('/api/tasks/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operation: 'archive', taskIds: ids }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Bulk archive failed');
+
+      // Remove archived tasks from the store (they'll be hidden without includeArchived)
+      useMissionControl.getState().setTasks(
+        useMissionControl.getState().tasks.filter((t) => !ids.includes(t.id)),
+      );
+
+      pushToast({
+        tone: 'info',
+        title: `Archived ${data.ok} task${data.ok === 1 ? '' : 's'}`,
+      });
+
+      if (data.failed > 0) {
+        pushToast({
+          tone: 'error',
+          title: `${data.failed} tasks could not be archived`,
+        });
+      }
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: 'Bulk archive failed',
+        detail: (err as Error).message,
+      });
+    } finally {
+      setBulkSubmitting(false);
+      clearTaskSelection();
+    }
+  }, [selectedTaskIds, pushToast, clearTaskSelection]);
+
+  const handleBulkAssign = useCallback(async () => {
+    const ids = Array.from(selectedTaskIds);
+    if (ids.length === 0 || !bulkAssignAgentId) return;
+
+    setBulkSubmitting(true);
+
+    try {
+      const res = await fetch('/api/tasks/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operation: 'assign', taskIds: ids, agentId: bulkAssignAgentId }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Bulk assign failed');
+
+      pushToast({
+        tone: 'info',
+        title: `Assigned ${data.ok} task${data.ok === 1 ? '' : 's'}`,
+      });
+
+      if (data.failed > 0) {
+        pushToast({
+          tone: 'error',
+          title: `${data.failed} tasks could not be assigned`,
+        });
+      }
+
+      // Refetch to get the updated agent info
+      setTimeout(async () => {
+        try {
+          const r = await fetch('/api/tasks');
+          if (r.ok) useMissionControl.getState().setTasks(await r.json());
+        } catch { /* best-effort */ }
+      }, 300);
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: 'Bulk assign failed',
+        detail: (err as Error).message,
+      });
+    } finally {
+      setBulkSubmitting(false);
+      setBulkAssignAgentId('');
+      clearTaskSelection();
+    }
+  }, [selectedTaskIds, bulkAssignAgentId, pushToast, clearTaskSelection]);
+
   const confirmBlockedMove = (details: BlockTaskDetails) => {
     if (!blockingTask) return;
     const task = blockingTask;
@@ -807,6 +1018,86 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           </div>
         )}
       </div>
+
+      {/* MR-45 — bulk selection toolbar. Appears when >=1 card is checked.
+          Shows count + actions: move to column, archive, and assign. */}
+      {boardKind === 'task' && numSelected > 0 && (
+        <div className="bg-brand-600 text-white px-4 lg:px-8 py-2.5 flex flex-wrap items-center gap-3 shrink-0 animate-in fade-in slide-in-from-top-1 duration-150">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={clearTaskSelection}
+              className="p-1 rounded-md hover:bg-brand-500 transition-colors"
+              title="Clear selection"
+              aria-label="Clear selection"
+            >
+              <XCircle className="w-4 h-4" />
+            </button>
+            <span className="text-sm font-semibold whitespace-nowrap">
+              {numSelected} selected
+            </span>
+            <button
+              type="button"
+              onClick={selectAllVisible}
+              className="text-xs underline underline-offset-2 hover:text-brand-100 whitespace-nowrap"
+            >
+              Select all visible
+            </button>
+          </div>
+
+          <span className="hidden sm:block text-brand-400" aria-hidden="true">|</span>
+
+          {/* Bulk move dropdown */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs text-brand-200 hidden sm:inline">Move to:</span>
+            {COLUMNS.filter((c) => c.id !== 'blocked').map((col) => (
+              <button
+                key={col.id}
+                type="button"
+                disabled={bulkSubmitting}
+                onClick={() => handleBulkMove(col.id)}
+                className="px-2 py-1 rounded-md bg-white/15 hover:bg-white/25 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap"
+              >
+                {col.label}
+              </button>
+            ))}
+          </div>
+
+          <span className="hidden sm:block text-brand-400" aria-hidden="true">|</span>
+
+          {/* Bulk archive */}
+          <button
+            type="button"
+            disabled={bulkSubmitting}
+            onClick={handleBulkArchive}
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-white/15 hover:bg-white/25 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap"
+          >
+            <Archive className="w-3.5 h-3.5" />
+            Archive
+          </button>
+
+          {/* Bulk assign */}
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={bulkAssignAgentId}
+              onChange={(e) => setBulkAssignAgentId(e.target.value)}
+              placeholder="Agent ID..."
+              aria-label="Agent ID to bulk-assign"
+              className="w-32 px-2 py-1 rounded-md bg-white/20 placeholder-brand-200 text-white text-xs border border-white/20 focus:outline-none focus:ring-1 focus:ring-white/50"
+            />
+            <button
+              type="button"
+              disabled={bulkSubmitting || !bulkAssignAgentId.trim()}
+              onClick={handleBulkAssign}
+              className="flex items-center gap-1 px-2 py-1 rounded-md bg-white/15 hover:bg-white/25 text-xs font-medium transition-colors disabled:opacity-40 whitespace-nowrap"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              Assign
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Mobile column picker — board mobile-responsiveness finding. Below
           `lg` the columns render as a horizontally-scrollable, snap-aligned
@@ -985,19 +1276,49 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                   >
                     {/* Column Header */}
                     <div className="flex items-center justify-between shrink-0">
-                      <div
-                        className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md cursor-help ${atCapacity ? 'kanban-column-pill-at-capacity' : column.gradient}`}
-                        title={atCapacity ? `${column.tooltip ?? ''} (WIP limit ${column.maxWip} reached)` : column.tooltip ?? undefined}
-                      >
-                        <span className={`text-badge font-bold px-2 py-0.5 rounded-full ${atCapacity ? 'bg-red-400 text-white' : 'bg-white/20'}`}>
-                          {capacityLabel ?? columnTasks.length}
-                        </span>
-                        <span className="text-sm font-bold">{column.label}</span>
-                        {atCapacity && (
-                          <span className="text-badge font-bold bg-red-400 text-white px-1.5 py-0.5 rounded-full" aria-label={`WIP limit ${column.maxWip} reached`}>
-                            FULL
+                      <div className="flex items-center gap-2">
+                        {/* MR-45: select-all-in-column checkbox */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const colTaskIds = columnTasks.map((t) => t.id);
+                            const allSelected = colTaskIds.every((id) => selectedTaskIds.has(id));
+                            if (allSelected) {
+                              // Deselect this column's tasks
+                              const next = new Set(selectedTaskIds);
+                              for (const id of colTaskIds) next.delete(id);
+                              setSelectedTaskIds(next);
+                            } else {
+                              // Add this column's tasks to selection
+                              const next = new Set(selectedTaskIds);
+                              for (const id of colTaskIds) next.add(id);
+                              setSelectedTaskIds(next);
+                            }
+                          }}
+                          className="shrink-0 text-white/60 hover:text-white transition-colors"
+                          title={columnTasks.every((t) => selectedTaskIds.has(t.id)) && columnTasks.length > 0 ? 'Deselect all in column' : 'Select all in column'}
+                          aria-label={columnTasks.every((t) => selectedTaskIds.has(t.id)) && columnTasks.length > 0 ? `Deselect all in ${column.label}` : `Select all in ${column.label}`}
+                        >
+                          {columnTasks.length > 0 && columnTasks.every((t) => selectedTaskIds.has(t.id)) ? (
+                            <CheckSquare className="w-4 h-4" />
+                          ) : (
+                            <Square className="w-4 h-4" />
+                          )}
+                        </button>
+                        <div
+                          className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md cursor-help ${atCapacity ? 'kanban-column-pill-at-capacity' : column.gradient}`}
+                          title={atCapacity ? `${column.tooltip ?? ''} (WIP limit ${column.maxWip} reached)` : column.tooltip ?? undefined}
+                        >
+                          <span className={`text-badge font-bold px-2 py-0.5 rounded-full ${atCapacity ? 'bg-red-400 text-white' : 'bg-white/20'}`}>
+                            {capacityLabel ?? columnTasks.length}
                           </span>
-                        )}
+                          <span className="text-sm font-bold">{column.label}</span>
+                          {atCapacity && (
+                            <span className="text-badge font-bold bg-red-400 text-white px-1.5 py-0.5 rounded-full" aria-label={`WIP limit ${column.maxWip} reached`}>
+                              FULL
+                            </span>
+                          )}
+                        </div>
                       </div>
                       {/* No "+" on the Blocked column: a task can only ENTER
                           Blocked by being moved there (it needs a reason +
@@ -1138,6 +1459,10 @@ function getAgentStatusDot(status: string | undefined): string {
 // exporting card-face pieces for testability (kanban/TaskCard.tsx's
 // PersonaSlotChips/PersonaScopeChips).
 export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns, currentColumnId, onMove, columnTaskCounts }: TaskCardProps) {
+  const isSelected = useMissionControl((s) => s.selectedTaskIds.has(task.id));
+  const toggleSelection = useMissionControl((s) => s.toggleTaskSelection);
+
+
   // Status pill styles
   const statusPillStyles: Record<string, string> = {
     backlog: 'bg-gray-100 text-gray-600',
@@ -1200,18 +1525,35 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
       draggable
       onDragStart={(e) => onDragStart(e, task)}
       onClick={onClick}
-      className={`bg-white rounded-xl lg:rounded-2xl p-4 lg:p-5 card-shadow card-hover cursor-pointer border border-gray-50 w-full ${
+      className={`bg-white rounded-xl lg:rounded-2xl p-4 lg:p-5 card-shadow card-hover cursor-pointer border w-full ${
         isDragging ? 'opacity-50 scale-95' : ''
-      } ${isCompleted ? 'opacity-75' : ''}`}
+      } ${isCompleted ? 'opacity-75' : ''} ${
+        isSelected ? 'border-brand-500 ring-2 ring-brand-200' : 'border-gray-50'
+      }`}
     >
-      {/* Title + touch-friendly Move affordance — native HTML5 drag-and-drop
-          (used elsewhere on this card) doesn't fire on touch devices, so this
-          real button + real menu is the only way to change columns on
-          mobile/tablet (item 9). */}
+      {/* MR-45 bulk-select checkbox + title row */}
       <div className="flex items-start justify-between gap-2 mb-1">
-        <h3 className={`text-base font-semibold text-gray-900 leading-snug flex-1 min-w-0 ${isCompleted ? 'line-through text-gray-400' : ''}`}>
-          {task.title}
-        </h3>
+        <div className="flex items-start gap-2 flex-1 min-w-0">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSelection(task.id);
+            }}
+            className="mt-0.5 shrink-0 text-gray-300 hover:text-brand-600 transition-colors"
+            title={isSelected ? 'Deselect this task' : 'Select this task'}
+            aria-label={isSelected ? `Deselect "${task.title}"` : `Select "${task.title}"`}
+          >
+            {isSelected ? (
+              <CheckSquare className="w-5 h-5 text-brand-600" />
+            ) : (
+              <Square className="w-5 h-5" />
+            )}
+          </button>
+          <h3 className={`text-base font-semibold text-gray-900 leading-snug min-w-0 ${isCompleted ? 'line-through text-gray-400' : ''}`}>
+            {task.title}
+          </h3>
+        </div>
         <MoveTaskMenu
           columns={columns}
           currentColumnId={currentColumnId}

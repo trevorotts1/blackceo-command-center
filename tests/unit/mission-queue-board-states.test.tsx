@@ -3,10 +3,10 @@ import { describe,it,expect,vi,afterEach,beforeEach } from "vitest";
 import { render,screen,cleanup,fireEvent,waitFor } from "@testing-library/react";
 global.ResizeObserver=class{observe(){}unobserve(){}disconnect(){}};
 const {m}=vi.hoisted(()=>({m:vi.fn()}));
-vi.mock("@/lib/store",()=>({useMissionControl:()=>m()}));
+vi.mock("@/lib/store",()=>({useMissionControl:(sel)=>{const st=m();return sel?sel(st):st;}}));
 vi.mock("next/navigation",()=>({useRouter:()=>({push:vi.fn()})}));
 import { MissionQueue } from "../../src/components/MissionQueue";
-function s(o){return {tasks:[],isLoading:false,updateTaskStatus:vi.fn(),addEvent:vi.fn(),selectedDepartment:null,setSelectedDepartment:vi.fn(),...o}}
+function s(o){return {tasks:[],isLoading:false,updateTaskStatus:vi.fn(),addEvent:vi.fn(),selectedDepartment:null,setSelectedDepartment:vi.fn(),selectedTaskIds:new Set(),toggleTaskSelection:vi.fn(),setSelectedTaskIds:vi.fn(),clearTaskSelection:vi.fn(),bulkUpdateTaskStatuses:vi.fn(),...o}}
 beforeEach(()=>{m.mockReturnValue(s())});
 afterEach(()=>{cleanup();vi.restoreAllMocks()});
 describe("U062",()=>{
