@@ -216,16 +216,16 @@ const reachableCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 106 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(106);
+  it('API routes exporting a mutating method: 107 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(107);
   });
 
   it('protected by isWebhookSecretRoute: 5', () => {
     expect(webhookProtectedCount).toBe(5);
   });
 
-  it('REACHABLE via forged same-origin: 101', () => {
-    expect(reachableCount).toBe(101);
+  it('REACHABLE via forged same-origin: 102', () => {
+    expect(reachableCount).toBe(102);
   });
 
   it('interface call templates found by multi-line scanner', () => {
