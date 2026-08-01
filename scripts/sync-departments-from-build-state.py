@@ -337,6 +337,19 @@ RESERVED_WORKSPACE_IDS = frozenset({
     "podcast", "anthology",
 })
 
+# R-39: fleet-shared producer-engine workspace ids. These are NOT per-client
+# departments -- they are shared engines (podcast + anthology producers) that
+# every client on a multi-client box sees. They must ALWAYS carry
+# company_id='default' so a converge with an active company set never
+# re-attributes them to one client (which would hide them from every OTHER
+# client on the same box). The sync-depts script must NOT re-home their
+# company_id to the client slug. Must stay in sync with
+# src/lib/db/migrations.ts ENGINE_WORKSPACE_SLUGS.
+ENGINE_WORKSPACE_IDS = frozenset({
+    "podcast",
+    "anthology",
+})
+
 
 def _table_exists(cur, name):
     row = cur.execute(
@@ -393,15 +406,29 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
         description = f"{name} department workspace"
         icon = dept.get("emoji", "\U0001f4c1")
         if dept_id in existing:
-            cur.execute("""
-                UPDATE workspaces
-                SET name=?, slug=?, description=?, icon=?, company_id=?
-                WHERE id=?
-            """, (name, dept_id, description, icon, slug, dept_id))
-            updated += 1
-            if existing[dept_id] != slug:
-                print(f"  [sync] re-homed workspace {dept_id}: company_id "
-                      f"{existing[dept_id]!r} -> {slug!r}")
+            # R-39: fleet-shared engine workspaces (podcast/anthology)
+            # must ALWAYS stay company_id='default' -- never re-home
+            # them to the client slug. The TS reseedWorkspacesFromConfig
+            # enforces the same guard (ENGINE_WORKSPACE_SLUGS). Update
+            # display fields (name/slug/description/icon) but keep the
+            # existing company_id for engine-owned workspaces.
+            if dept_id.lower() in ENGINE_WORKSPACE_IDS:
+                cur.execute("""
+                    UPDATE workspaces
+                    SET name=?, slug=?, description=?, icon=?
+                    WHERE id=?
+                """, (name, dept_id, description, icon, dept_id))
+                updated += 1
+            else:
+                cur.execute("""
+                    UPDATE workspaces
+                    SET name=?, slug=?, description=?, icon=?, company_id=?
+                    WHERE id=?
+                """, (name, dept_id, description, icon, slug, dept_id))
+                updated += 1
+                if existing[dept_id] != slug:
+                    print(f"  [sync] re-homed workspace {dept_id}: company_id "
+                          f"{existing[dept_id]!r} -> {slug!r}")
         else:
             cur.execute("""
                 INSERT INTO workspaces (id, name, slug, description, icon, company_id)
