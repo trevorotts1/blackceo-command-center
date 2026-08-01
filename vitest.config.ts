@@ -163,6 +163,9 @@ export default defineConfig({
       // package.json in the same commit.
       'tests/unit/u036-department-canonical.test.ts',
       'tests/unit/u039-sweep-killflag-sources.test.ts',
+      // MR-38 — task-phases generic lifecycle progress unit tests. Uses vitest
+      // globals + the '@/...' alias, so vitest-only, never the tsx --test glob.
+      'tests/unit/task-phases.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
