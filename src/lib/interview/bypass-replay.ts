@@ -11,16 +11,34 @@
  *   window: the signature stays valid on every re-presentation. Haiku flagged
  *   exactly this ("Bypass token in URL replayable 1h no nonce").
  *
- * THE FIX — nonce + revocation:
- *   Each bypass token now carries a random `nonce` (see gate-cookie.ts). This
- *   module keeps a process-local ledger of every nonce it has seen and whether
- *   it has been consumed:
+ * THE FIX — nonce + revocation, SPLIT BY SURFACE (read carefully):
+ *   Each bypass token carries a random `nonce` (see gate-cookie.ts). This module
+ *   keeps a process-local ledger of every nonce it has seen and whether it has
+ *   been consumed. The two bypass SURFACES get different nonce semantics, because
+ *   a persistent cookie CANNOT be single-use without breaking the feature:
+ *
+ *     • `?bypass_interview=` URL escape hatch → SINGLE-USE. The URL is the
+ *       capture-prone surface Haiku named (it lands in browser history, proxy /
+ *       access logs, Referer headers). `consumeBypassNonce` admits the FIRST
+ *       valid presentation and refuses every replay, so a copied URL dies after
+ *       one use. This is the replay window that was actually flagged, and it is
+ *       the one that CAN be closed.
+ *
+ *     • `mc_interview_bypass` cookie → NON-CONSUMING, TTL-scoped. The browser
+ *       resends the SAME httpOnly cookie on every navigation for the whole 1h
+ *       session; if the verifier consumed the nonce on the first load, every
+ *       later page load would bounce the operator back to /interview (a hard
+ *       regression of U057 "Skip for now"). `checkBypassNonce` validates the
+ *       nonce WITHOUT consuming it, so the cookie grants the full TTL session.
+ *       The cookie is httpOnly + SameSite=lax and never appears in a URL, log,
+ *       or Referer, so it is not the capture surface the finding targets; its
+ *       residual is the ordinary one every session cookie carries (XSS theft),
+ *       bounded by the 1h TTL.
+ *
+ *   Ledger operations:
  *     • `recordBypassNonce(nonce, exp)`  — the minter registers a fresh nonce.
- *     • `consumeBypassNonce(nonce, exp)` — the verifier consumes it ONCE.
- *   A nonce is single-use: the FIRST valid presentation consumes it and every
- *   subsequent presentation (a replay) is refused. That closes the replay
- *   window — a stolen token works zero extra times against the process that
- *   issued it, and at most once anywhere.
+ *     • `consumeBypassNonce(nonce, exp)` — URL verifier: admit-once, then latch.
+ *     • `checkBypassNonce(nonce, exp)`   — cookie verifier: validate, no latch.
  *
  * EDGE-SAFETY (critical — mirror gate-cookie.ts):
  *   src/middleware.ts runs in the EDGE runtime and imports this module, so it
@@ -30,22 +48,26 @@
  *   runtime and the Node server runtime. A single Node import here would break
  *   the Edge build.
  *
- * HONEST SCOPE — process-local, not distributed:
- *   The ledger is a module-scope Map, i.e. PER-PROCESS. This is the strongest
- *   revocation the Edge runtime allows (Edge has no fs / DB / shared cache).
- *   Concretely:
- *     • The Node minter (the `skipInterviewForNow` server action) and the Edge
- *       middleware run in the SAME single-process `next start` box this product
- *       ships, so a nonce minted by the server action is consumed by the
- *       middleware — single-use holds end to end.
- *     • A token hand-constructed by an operator (the documented
- *       `?bypass_interview=` admin escape hatch) carries a nonce the process
- *       never minted; an unrecognised nonce is admitted ONCE and then marked
- *       consumed, so even an operator-crafted URL cannot be replayed against
- *       the same box.
- *     • Across a multi-replica deployment the ledger is not shared, so a token
- *       replays once per replica. Full cross-replica revocation needs a shared
- *       store the Edge runtime cannot reach; that is out of scope here.
+ * HONEST SCOPE — process-local, and the Edge/Node realms are SEPARATE:
+ *   The ledger is a module-scope Map. Next.js runs the Edge middleware in an
+ *   ISOLATED VM context (next/dist/server/web/sandbox/context.js → vm.runInContext),
+ *   so the middleware's copy of this module is a DIFFERENT realm from the Node
+ *   server action that mints the cookie — their Maps do NOT share state (the
+ *   middleware itself documents this: "module state does not cross that
+ *   boundary", src/middleware.ts). Consequences, all handled by the design above:
+ *     • A Node-minted cookie nonce is UNRECOGNISED in the middleware's ledger.
+ *       `checkBypassNonce` therefore must NOT treat "unrecognised" as fatal —
+ *       it validates any well-formed, unexpired nonce (the cookie path never
+ *       relies on the ledger having recorded the nonce). This is what keeps the
+ *       cookie feature working across the realm boundary.
+ *     • The URL escape hatch is operator-hand-built and verified entirely within
+ *       the middleware realm, so `consumeBypassNonce`'s admit-once-then-consume
+ *       rule makes it single-use against the box. (A Node-minted token presented
+ *       as a URL would be admitted once as an unrecognised nonce — acceptable:
+ *       the URL surface is not how the minter is used, and it is still single-use.)
+ *     • Across a multi-replica deployment the ledger is not shared, so a URL
+ *       token replays once per replica. Full cross-replica revocation needs a
+ *       shared store the Edge runtime cannot reach; out of scope here.
  *   The ledger self-prunes expired nonces (bounded memory) and is capped so a
  *   flood of junk nonces cannot grow it without bound.
  */
@@ -147,6 +169,36 @@ export function consumeBypassNonce(nonce: string, exp: number): boolean {
   nonces.set(nonce, { exp, consumed: true });
   enforceCap();
   return true;
+}
+
+/**
+ * NON-consuming nonce check for the COOKIE verifier. Unlike consumeBypassNonce,
+ * this does NOT latch the nonce, so the same cookie stays valid for its whole
+ * TTL — required because the browser resends the identical httpOnly cookie on
+ * every navigation of a "Skip for now" session (consuming it would bounce the
+ * operator to /interview on the second page load).
+ *
+ * Returns true for any well-formed, unexpired nonce — whether or not this
+ * process recorded it. That is deliberate and load-bearing: the cookie is minted
+ * by a Node server action that lives in a DIFFERENT VM realm than the Edge
+ * middleware (see the module docstring), so its nonce is normally UNRECOGNISED
+ * here. Treating "unrecognised" as valid is what keeps the cookie feature working
+ * across the realm boundary. The cookie's replay exposure is bounded by its 1h
+ * TTL and by the fact that it is httpOnly + SameSite=lax and never rides in a
+ * URL, log, or Referer — it is not the capture surface the MR-17 finding targets
+ * (that is the `?bypass_interview=` URL, which uses consumeBypassNonce instead).
+ *
+ * An EXPIRED nonce is still refused (the TTL is the cookie's revocation bound).
+ * A nonce this process has already CONSUMED via the URL path is also refused, so
+ * a token burned as a one-time URL cannot then be laundered into a cookie grant.
+ */
+export function checkBypassNonce(nonce: string, exp: number): boolean {
+  if (!nonce || typeof nonce !== 'string') return false;
+  const now = nowSeconds();
+  if (exp < now) return false; // expired → refuse (TTL is the revocation bound)
+  const entry = nonces.get(nonce);
+  if (entry && entry.consumed) return false; // burned as a URL → no cookie grant
+  return true; // well-formed + unexpired (+ unconsumed) → valid for the session
 }
 
 /**

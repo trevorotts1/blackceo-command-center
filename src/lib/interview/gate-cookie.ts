@@ -30,6 +30,7 @@ import {
   generateBypassNonce,
   recordBypassNonce,
   consumeBypassNonce,
+  checkBypassNonce,
 } from './bypass-replay';
 
 /** Edge-readable cookie name. Kept in one place so setter + reader can't drift. */
@@ -277,22 +278,55 @@ export async function signInterviewBypassToken(): Promise<{ value: string; maxAg
   return { value: payloadB64 + '.' + sig, maxAge: BYPASS_TTL_SECONDS };
 }
 
-export async function verifyInterviewBypassToken(value: string | undefined | null): Promise<boolean> {
-  if (devSecretInProduction()) return false;
-  if (!value || typeof value !== 'string') return false;
+/**
+ * Shared signature/expiry/nonce-shape validation for a bypass token. Returns the
+ * parsed payload (signature valid, unexpired, nonce present) or null. The two
+ * public verifiers below differ ONLY in how they treat the nonce afterwards —
+ * the URL escape hatch consumes it (single-use), the cookie does not (session).
+ */
+async function parseValidBypassPayload(value: string | undefined | null): Promise<BypassPayload | null> {
+  if (devSecretInProduction()) return null;
+  if (!value || typeof value !== 'string') return null;
   const dot = value.lastIndexOf('.');
-  if (dot <= 0 || dot === value.length - 1) return false;
+  if (dot <= 0 || dot === value.length - 1) return null;
   const payloadB64 = value.slice(0, dot);
   const sig = value.slice(dot + 1);
   let expected: string;
-  try { expected = await hmacB64url(payloadB64); } catch { return false; }
-  if (!timingSafeEqual(sig, expected)) return false;
+  try { expected = await hmacB64url(payloadB64); } catch { return null; }
+  if (!timingSafeEqual(sig, expected)) return null;
   let payload: BypassPayload;
-  try { payload = JSON.parse(b64urlToStr(payloadB64)) as BypassPayload; } catch { return false; }
-  if (typeof payload.exp !== 'number') return false;
-  if (payload.exp < Math.floor(Date.now() / 1000)) return false;
-  // MR-17 fix2: single-use enforcement. A nonce is consumed on its first valid
-  // presentation; every replay (a captured URL / lifted cookie) is refused.
-  if (typeof payload.nonce !== 'string' || payload.nonce.length === 0) return false;
+  try { payload = JSON.parse(b64urlToStr(payloadB64)) as BypassPayload; } catch { return null; }
+  if (typeof payload.exp !== 'number') return null;
+  if (payload.exp < Math.floor(Date.now() / 1000)) return null;
+  // MR-17 fix2: a nonce is MANDATORY — the legacy nonce-less {exp} shape is the
+  // replayable token the finding flagged and is always refused.
+  if (typeof payload.nonce !== 'string' || payload.nonce.length === 0) return null;
+  return payload;
+}
+
+/**
+ * Verify the `?bypass_interview=` URL escape hatch — SINGLE-USE. The URL is the
+ * capture-prone surface (browser history / proxy logs / Referer), so the nonce is
+ * CONSUMED on the first valid presentation and every replay is refused. This is
+ * the replay window MR-17 flagged, closed here.
+ */
+export async function verifyInterviewBypassToken(value: string | undefined | null): Promise<boolean> {
+  const payload = await parseValidBypassPayload(value);
+  if (!payload) return false;
   return consumeBypassNonce(payload.nonce, payload.exp);
+}
+
+/**
+ * Verify the `mc_interview_bypass` cookie — NON-consuming, TTL-scoped session
+ * grant. The browser resends the SAME httpOnly cookie on every navigation, so the
+ * nonce is validated but NOT consumed; consuming it would bounce the operator to
+ * /interview on the second page load (a hard regression of U057 "Skip for now").
+ * The cookie is httpOnly + SameSite=lax and never appears in a URL/log/Referer,
+ * so it is not the capture surface the finding targets; its replay exposure is
+ * bounded by the 1h TTL (see bypass-replay.ts module docstring).
+ */
+export async function verifyInterviewBypassCookieToken(value: string | undefined | null): Promise<boolean> {
+  const payload = await parseValidBypassPayload(value);
+  if (!payload) return false;
+  return checkBypassNonce(payload.nonce, payload.exp);
 }

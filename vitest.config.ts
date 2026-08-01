@@ -131,8 +131,17 @@ export default defineConfig({
       'tests/integration/redirect-loop.test.ts',
       // U057 — Interview skip/defer bypass option tests. Verifies that the
       // bypass token signs/verifies correctly, rejects tampered/expired/absent
-      // tokens, and has the correct 1-hour TTL.
+      // tokens, and has the correct 1-hour TTL. MR-17 fix2: the URL escape-hatch
+      // token is single-use (nonce consumed) while the COOKIE verifier is
+      // non-consuming (a "Skip for now" session survives repeated page loads).
       'tests/unit/interview-skip-defer.test.ts',
+      // MR-17 fix2 — bypass replay guard driven through the REAL middleware: the
+      // bypass COOKIE admits every page load for its TTL (non-consuming session
+      // grant, incl. the cross-realm case where the Node-minted nonce is absent
+      // from the Edge ledger), while the ?bypass_interview= URL escape hatch is
+      // single-use (replay → /interview). vi.resetModules re-import of the
+      // middleware, same pattern as redirect-loop.test.ts — vitest-only.
+      'tests/unit/middleware-bypass-replay.test.ts',
       // U048 — interview answers encryption at rest. Crypto round-trip, file
       // encryption (raw bytes never contain plaintext), plaintext migration,
       // and DB mirror encrypt-on-write / decrypt-on-read. Uses the isolated-DB

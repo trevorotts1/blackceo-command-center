@@ -10,7 +10,7 @@ import {
   logUnauthorized401,
   sanitizeHeaderValue,
 } from '@/lib/probes/unauthorized-401-contract';
-import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, verifyInterviewBypassToken, signInterviewToken } from '@/lib/interview/gate-cookie';
+import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, verifyInterviewBypassToken, verifyInterviewBypassCookieToken, signInterviewToken } from '@/lib/interview/gate-cookie';
 import { checkInterviewCompleteViaFallback } from '@/lib/interview/gate-fallback';
 import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '@/lib/bearer-required-routes';
 import {
@@ -633,22 +633,33 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       //      the bypass cookie, usable when the operator can't even reach the
       //      interview page to click "Skip". The operator constructs the token
       //      with the same HMAC key (MC_INTERVIEW_COOKIE_SECRET / MC_API_TOKEN).
-      // MR-17 fix2: each bypass token carries a single-use nonce (see
-      // lib/interview/bypass-replay.ts). verifyInterviewBypassToken CONSUMES the
-      // nonce on the first valid presentation, so a captured URL / lifted cookie
-      // cannot be replayed within its 1h TTL — the signature alone no longer
-      // grants a reusable 1-hour pass.
+      // MR-17 fix2: each bypass token carries a nonce (see lib/interview/
+      // bypass-replay.ts), and the two surfaces get DIFFERENT nonce semantics:
+      //   • the `?bypass_interview=` URL escape hatch is SINGLE-USE —
+      //     verifyInterviewBypassToken CONSUMES the nonce on first valid
+      //     presentation, so a captured URL (browser history / proxy log /
+      //     Referer — the surface Haiku flagged) cannot be replayed within the
+      //     1h TTL. The signature alone no longer grants a reusable URL pass.
+      //   • the bypass COOKIE is a NON-consuming TTL session grant —
+      //     verifyInterviewBypassCookieToken validates the nonce WITHOUT
+      //     consuming it, because the browser resends the same httpOnly cookie
+      //     on every navigation of a "Skip for now" session; consuming it would
+      //     bounce the operator to /interview on the second page load. The
+      //     cookie never rides in a URL/log/Referer, so it is not the capture
+      //     surface the finding targets; its exposure is bounded by the 1h TTL.
       // U010: fall back to the latch cookie first, then the gate-status endpoint.
       let admitted = false;
       let needCookie = false;
 
-      // MR-17 escape hatch 1: bypass cookie (U057 — "Skip for now").
+      // MR-17 escape hatch 1: bypass cookie (U057 — "Skip for now"). NON-consuming
+      // so the session survives repeated page loads for the whole 1h TTL.
       const bypassCookie = request.cookies.get(INTERVIEW_BYPASS_COOKIE_NAME)?.value;
-      if (bypassCookie && await verifyInterviewBypassToken(bypassCookie)) {
+      if (bypassCookie && await verifyInterviewBypassCookieToken(bypassCookie)) {
         admitted = true;
       }
 
-      // MR-17 escape hatch 2: query-parameter admin escape hatch.
+      // MR-17 escape hatch 2: query-parameter admin escape hatch. SINGLE-USE —
+      // consumes its nonce so a captured URL cannot be replayed.
       if (!admitted) {
         const bypassParam = request.nextUrl.searchParams.get('bypass_interview');
         if (bypassParam && await verifyInterviewBypassToken(bypassParam)) {

@@ -8,14 +8,18 @@
  *   4. Edge case: verifyInterviewBypassToken rejects a tampered token.
  *   5. Edge case: verifyInterviewBypassToken rejects an absent/null/empty token.
  *   6. Edge case: bypass token expires after BYPASS_TTL_SECONDS (1 hour).
- *   7. MR-17 fix2: a bypass token is SINGLE-USE — a replay is refused.
+ *   7. MR-17 fix2: the URL escape-hatch token is SINGLE-USE — a replay is refused.
  *   8. MR-17 fix2: each minted token carries a distinct nonce (no shared nonce).
+ *   9. MR-17 fix2: the COOKIE verifier is NON-consuming — the same token stays
+ *      valid across repeated presentations (a "Skip for now" session), while the
+ *      URL verifier consumes it.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   signInterviewBypassToken,
   verifyInterviewBypassToken,
+  verifyInterviewBypassCookieToken,
   BYPASS_TTL_SECONDS,
 } from '@/lib/interview/gate-cookie';
 import { __resetBypassNoncesForTest } from '@/lib/interview/bypass-replay';
@@ -85,11 +89,11 @@ describe('U057 — Interview skip/defer bypass cookie', () => {
 
   /* ── MR-17 fix2 — nonce + revocation (replay resistance) ─────────────── */
 
-  it('a bypass token is SINGLE-USE: the first verify passes, a replay is refused', async () => {
+  it('the URL escape-hatch token is SINGLE-USE: first verify passes, a replay is refused', async () => {
     const { value } = await signInterviewBypassToken();
-    // First presentation consumes the nonce → admitted.
+    // First URL presentation consumes the nonce → admitted.
     expect(await verifyInterviewBypassToken(value)).toBe(true);
-    // Replays of the SAME captured token are refused (nonce already consumed).
+    // Replays of the SAME captured URL are refused (nonce already consumed).
     expect(await verifyInterviewBypassToken(value)).toBe(false);
     expect(await verifyInterviewBypassToken(value)).toBe(false);
   });
@@ -106,7 +110,26 @@ describe('U057 — Interview skip/defer bypass cookie', () => {
     expect(await verifyInterviewBypassToken(b.value)).toBe(false);
   });
 
-  it('a token without a nonce is rejected (legacy replayable shape)', async () => {
+  it('the COOKIE verifier is NON-consuming: the same token stays valid across repeated loads (session grant)', async () => {
+    const { value } = await signInterviewBypassToken();
+    // The browser resends the same httpOnly cookie on every navigation of a
+    // "Skip for now" session — the cookie verifier must admit EVERY load for the
+    // whole TTL, not just the first (consuming it would bounce the operator to
+    // /interview on the second page load — the regression this test locks out).
+    expect(await verifyInterviewBypassCookieToken(value)).toBe(true);
+    expect(await verifyInterviewBypassCookieToken(value)).toBe(true);
+    expect(await verifyInterviewBypassCookieToken(value)).toBe(true);
+  });
+
+  it('a nonce burned via the URL path cannot be laundered into a cookie grant', async () => {
+    const { value } = await signInterviewBypassToken();
+    // Consume it as a one-time URL.
+    expect(await verifyInterviewBypassToken(value)).toBe(true);
+    // The now-consumed nonce must NOT then validate as a (non-consuming) cookie.
+    expect(await verifyInterviewBypassCookieToken(value)).toBe(false);
+  });
+
+  it('a token without a nonce is rejected by BOTH verifiers (legacy replayable shape)', async () => {
     // Reconstruct the pre-fix payload shape ({exp} only, no nonce) and sign it
     // with the REAL key — it must still be refused, proving the nonce is mandatory.
     const { webcrypto } = await import('node:crypto');
@@ -124,6 +147,8 @@ describe('U057 — Interview skip/defer bypass cookie', () => {
     let bin = '';
     for (let i = 0; i < sig.length; i++) bin += String.fromCharCode(sig[i]);
     const sigB64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    expect(await verifyInterviewBypassToken(`${payloadB64}.${sigB64}`)).toBe(false);
+    const nonceless = `${payloadB64}.${sigB64}`;
+    expect(await verifyInterviewBypassToken(nonceless)).toBe(false);
+    expect(await verifyInterviewBypassCookieToken(nonceless)).toBe(false);
   });
 });
