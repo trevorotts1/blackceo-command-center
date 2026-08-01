@@ -154,7 +154,32 @@ export async function register(): Promise<void> {
     // device is pending approval. Either way the pending request is now on the
     // gateway and the status route will report the precise remediation.
     client.connect().then(
-      () => console.log('[instrumentation] Bridge connected to OpenClaw gateway on boot'),
+      async () => {
+        console.log('[instrumentation] Bridge connected to OpenClaw gateway on boot');
+
+        // 6. MR-14: Ingest Skill-23 specialist agents from the gateway into the
+        // CC agents table.  Only the trio + heads were auto-seeded before; the
+        // full specialist roster (Marketing Specialist, Sales Rep, Content
+        // Writer, etc.) was invisible to routing and the board's agent pill.
+        // This runs AFTER the gateway is connected so the sync has a live
+        // transport.  Fire-and-forget on boot: a failure here is non-fatal
+        // (the converge endpoint retries it on the next explicit converge).
+        // Opt out with DISABLE_AGENT_SYNC=1 (e.g. CI, or a box with no Skill-23
+        // workforce build).
+        if (process.env.DISABLE_AGENT_SYNC !== '1' && process.env.DISABLE_AGENT_SYNC !== 'true') {
+          try {
+            const { syncSpecialistAgentsFromOpenClaw } =
+              await import('@/lib/openclaw/agent-sync');
+            const result = await syncSpecialistAgentsFromOpenClaw();
+            console.log(`[instrumentation] Agent sync: ${result.message}`);
+          } catch (err) {
+            console.log(
+              '[instrumentation] Agent sync skipped (non-fatal):',
+              (err as Error).message,
+            );
+          }
+        }
+      },
       (err) =>
         console.log(
           `[instrumentation] Bridge not yet connected (expected until paired): ${err instanceof Error ? err.message : String(err)}`,

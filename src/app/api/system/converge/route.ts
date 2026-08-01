@@ -361,6 +361,21 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
   }
 
+  // ── Step 1d (MR-14): Sync Skill-23 specialist agents from the OpenClaw
+  // gateway into the CC agents table.  Best-effort on converge — a gateway
+  // hiccup is logged, not hard-failed (the operator can retry converge later).
+  if (scope === 'all' || scope === 'workspaces') {
+    try {
+      const { syncSpecialistAgentsFromOpenClaw } = await import('@/lib/openclaw/agent-sync');
+      const syncResult = await syncSpecialistAgentsFromOpenClaw();
+      console.log(`[/api/system/converge] Agent sync: ${syncResult.message}`);
+    } catch (err) {
+      console.warn(
+        `[/api/system/converge] Agent sync skipped (non-fatal): ${(err as Error).message}`,
+      );
+    }
+  }
+
   // ── Step 2: Ingest role-library / SOPs ────────────────────────────────────
   if (scope === 'all' || scope === 'sops') {
     try {
