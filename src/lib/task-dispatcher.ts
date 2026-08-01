@@ -1146,11 +1146,17 @@ If you need help or clarification, ask the orchestrator.`;
       // W8.2: account for the failed advance + back off so the sweeps don't
       // re-select this un-wireable task every tick; block+report (SYSTEM — wire
       // the dept runtime) once the cap is hit instead of re-looping forever.
+      // P1-01 / MR-34: a missing per-department runtime is NON-TRANSIENT — no retry
+      // can materialize a runtime directory. The old ladder retried it
+      // MAX_DISPATCH_ATTEMPTS× over ~33 min before blocking, leaving the card
+      // stalled in the backlog with only a small dispatch_hold chip that the
+      // operator can easily miss. Block + report on attempt 1 (hardBlock).
       recordDispatchFailure(task.id, agent.id, {
         reason: 'no_specialist_runtime',
         audience: 'SYSTEM',
         needs: `No OpenClaw runtime for "${agent.name}". Wire ~/.openclaw/agents/<dept-slug>/ to release this department.`,
         context,
+        hardBlock: true,
       });
       return;
     }
