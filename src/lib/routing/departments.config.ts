@@ -1440,7 +1440,7 @@ function queryDispatchRulesOverrides(
   db: Database.Database,
   deptSlug: string,
   deptId: string,
-): { keywords: string[]; priority: number } | null {
+): { keywords: string[]; priority: number | null } | null {
   try {
     const canonicalForRules = canonicalDeptSlug(deptSlug) || canonicalDeptSlug(deptId) || deptSlug || deptId;
     const row = db
@@ -1460,10 +1460,13 @@ function queryDispatchRulesOverrides(
           .filter((k) => k.length > 0 && k.length < 60)
           .slice(0, 30)
       : [];
+    // null when the operator set no priority (or it is out of range) so the
+    // caller can fall through to the seed — a stored 5 is a real override and
+    // must not be mistaken for "unset".
     const priority =
       typeof row.priority === 'number' && row.priority >= 1 && row.priority <= 10
         ? row.priority
-        : 5;
+        : null;
 
     return { keywords, priority };
   } catch {
@@ -1507,7 +1510,7 @@ function workspaceToDept(
   }
 
   let priority: number;
-  if (overrides && overrides.priority !== 5) {
+  if (overrides && overrides.priority != null) {
     priority = overrides.priority;
   } else if (seed?.priority) {
     priority = seed.priority;
@@ -1515,9 +1518,8 @@ function workspaceToDept(
     priority = 5;
   }
 
-  const agentRoles = overrides
-    ? (seed?.agentRoles ?? []) // dispatch_rules has no agent_roles column — keep seed or fallback
-    : (seed?.agentRoles ?? []);
+  // dispatch_rules has no agent_roles column — always keep the seed roles (or []).
+  const agentRoles = seed?.agentRoles ?? [];
 
   return {
     // Use the workspace's actual id/name — NOT the hardcoded canonical slug.
