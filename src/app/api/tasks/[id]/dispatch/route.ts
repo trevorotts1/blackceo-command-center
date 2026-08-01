@@ -17,7 +17,7 @@ import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { recordDispatchFailure } from '@/lib/task-dispatcher';
 import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -550,17 +550,12 @@ If you need help or clarification, ask the orchestrator.`;
       // resolved/requested, not a gateway-confirmed runtime model — the gateway
       // selects the agent's own configured model (see contract note above). The
       // pill is labeled accordingly. v4.0.1 P0-7 / B1.
-      // U99-RAW-STATUS-WRITER: compound single-row UPDATE (model_id must land
-      // atomically with the status flip so the UI 🤖 pill never shows a stale
-      // model for an in_progress task); audited immediately below via
-      // recordStatusEvent (DISP-10).
-      run(
-        'UPDATE tasks SET status = ?, model_id = ?, updated_at = ? WHERE id = ?',
-        ['in_progress', settings.model || null, now, id]
-      );
-      recordStatusEvent(id, task.status, 'in_progress', {
+      // MR-04: route through transition() with extraColumns so model_id lands
+      // atomically with the status flip AND the legal-transition guard + CAS run.
+      await transition(id, 'in_progress', {
         actor: 'manual-dispatch',
         reason: 'operator-triggered dispatch (Send to Agent)',
+        extraColumns: { model_id: settings.model || null },
       });
 
       // Broadcast task update

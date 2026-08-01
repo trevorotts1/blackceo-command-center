@@ -4,7 +4,7 @@ import { createHmac } from 'crypto';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import { deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
@@ -133,18 +133,21 @@ export async function POST(request: NextRequest) {
       // (Don't overwrite user's approval)
       const movedToReview = task.status !== 'review' && task.status !== 'done';
       if (movedToReview) {
-        // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the
-        // movedToReview check above; audited immediately below via
-        // recordStatusEvent (DISP-10).
-        run(
-          'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-          ['review', now, task.id]
-        );
-        // DISP-10: complete the task_events audit sink for this advance.
-        recordStatusEvent(task.id, task.status, 'review', {
-          actor: task.assigned_agent_id ?? 'agent-completion',
-          reason: 'agent reported TASK_COMPLETE (webhook)',
-        });
+        try {
+          // MR-04: route through transition() instead of raw SQL so the
+          // legal-transition guard, preconditions, and CAS all run.
+          await transition(task.id, 'review', {
+            actor: task.assigned_agent_id ?? 'agent-completion',
+            reason: 'agent reported TASK_COMPLETE (webhook)',
+            expectedFrom: task.status as 'in_progress',
+          });
+        } catch (err) {
+          // CAS_CONFLICT or ILLEGAL_TRANSITION — non-fatal, the task was
+          // already advanced by a concurrent writer.
+          if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
+            console.warn('[agent-completion] transition failed for task', task.id, err);
+          }
+        }
       }
 
       // Log completion
@@ -280,18 +283,19 @@ export async function POST(request: NextRequest) {
       // (Don't overwrite user's approval)
       const movedToReviewSession = task.status !== 'review' && task.status !== 'done';
       if (movedToReviewSession) {
-        // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the
-        // movedToReviewSession check above; audited immediately below via
-        // recordStatusEvent (DISP-10).
-        run(
-          'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-          ['review', now, task.id]
-        );
-        // DISP-10: complete the task_events audit sink for this advance.
-        recordStatusEvent(task.id, task.status, 'review', {
-          actor: agentId ?? 'agent-completion',
-          reason: 'agent reported TASK_COMPLETE (webhook, session path)',
-        });
+        try {
+          // MR-04: route through transition() instead of raw SQL so the
+          // legal-transition guard, preconditions, and CAS all run.
+          await transition(task.id, 'review', {
+            actor: agentId ?? 'agent-completion',
+            reason: 'agent reported TASK_COMPLETE (webhook, session path)',
+            expectedFrom: task.status as 'in_progress',
+          });
+        } catch (err) {
+          if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
+            console.warn('[agent-completion] transition failed for task', task.id, err);
+          }
+        }
       }
 
       // Log completion with summary

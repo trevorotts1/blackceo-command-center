@@ -30,7 +30,7 @@ import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import { resolveSpecialistSessionKey, deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task, Agent } from '@/lib/types';
@@ -269,19 +269,24 @@ export async function probeSessionLiveness(
  * Advance one task to `review` and broadcast. Mirrors
  * /api/webhooks/agent-completion so behavior is identical regardless of which
  * path (instant webhook vs reconcile) detected the completion.
+ *
+ * MR-04: converted from raw status write to transition() so the legal-transition
+ * guard, precondition checks, and CAS all run. The previous raw write had no CAS
+ * guard beyond only selecting in_progress tasks; transition() closes the TOCTOU.
  */
-function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): void {
+async function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): Promise<void> {
   const now = new Date().toISOString();
-  // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the caller
-  // only ever selecting in_progress tasks; audited immediately below via
-  // recordStatusEvent (DISP-10).
-  run('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?', ['review', now, taskId]);
-  // DISP-10: complete the task_events audit sink for this in_progress→review
-  // advance (the watcher only ever selects in_progress tasks).
-  recordStatusEvent(taskId, 'in_progress', 'review', {
-    actor: agentId ?? 'execution-watcher',
-    reason: 'agent reported TASK_COMPLETE (reconcile)',
-  });
+  try {
+    await transition(taskId, 'review', {
+      actor: agentId ?? 'execution-watcher',
+      reason: `agent reported TASK_COMPLETE (reconcile): ${summary}`,
+      expectedFrom: 'in_progress',
+    });
+  } catch (err) {
+    // CAS_CONFLICT: another writer already moved the task — non-fatal, just stop.
+    if (err instanceof Error && err.message.includes('CAS_CONFLICT')) return;
+    throw err;
+  }
   run(
     `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
     [uuidv4(), 'task_completed', agentId, taskId, `${agentName ?? 'Agent'} completed: ${summary}`, now]
@@ -360,7 +365,9 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
         // B5: persist the (possibly derived) session so the webhook / next
         // reconcile resolve it directly rather than re-deriving.
         upsertActiveSession(task.assigned_agent_id, task.openclaw_session_id, task.id);
-        advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match);
+        advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match).catch(err =>
+          console.error('[execution-watcher] advanceToReview failed:', err),
+        );
         runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
       }
     } catch (err) {

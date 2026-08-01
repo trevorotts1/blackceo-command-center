@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { chromium } from 'playwright';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import { existsSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
 import * as csstree from 'css-tree';
@@ -171,18 +171,20 @@ export async function POST(
 
     if (passed) {
       // Tests passed -> stays in review for human approval
-      // U99-RAW-STATUS-WRITER: two-column write with no CAS guard on the
-      // observed from-status (route already loaded+validated `task` above);
-      // audited immediately below via recordStatusEvent (DISP-10).
-      run(
-        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-        ['review', now, taskId]
-      );
-      // DISP-10: complete the task_events audit sink for this advance.
-      recordStatusEvent(taskId, task.status, 'review', {
-        actor: 'test-runner',
-        reason: 'automated tests passed',
-      });
+      // MR-04: route through transition() so legal-transition guard + CAS run.
+      try {
+        await transition(taskId, 'review', {
+          actor: 'test-runner',
+          reason: 'automated tests passed',
+          expectedFrom: task.status as 'testing',
+        });
+      } catch (err) {
+        if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
+          console.warn('[test-route] transition to review failed:', err);
+        }
+        // Continue regardless — the task's status may have been advanced by
+        // a concurrent writer. We still log activity below.
+      }
       newStatus = 'review';
 
       run(
@@ -198,18 +200,18 @@ export async function POST(
       );
     } else {
       // Tests failed -> move back to in_progress for agent to fix
-      // U99-RAW-STATUS-WRITER: two-column write with no CAS guard on the
-      // observed from-status; audited immediately below via recordStatusEvent
-      // (DISP-10).
-      run(
-        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
-        ['in_progress', now, taskId]
-      );
-      // DISP-10: complete the task_events audit sink for this move-back.
-      recordStatusEvent(taskId, task.status, 'in_progress', {
-        actor: 'test-runner',
-        reason: 'automated tests failed',
-      });
+      // MR-04: route through transition() so legal-transition guard + CAS run.
+      try {
+        await transition(taskId, 'in_progress', {
+          actor: 'test-runner',
+          reason: 'automated tests failed',
+          expectedFrom: task.status as 'testing',
+        });
+      } catch (err) {
+        if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
+          console.warn('[test-route] transition to in_progress failed:', err);
+        }
+      }
       newStatus = 'in_progress';
 
       run(

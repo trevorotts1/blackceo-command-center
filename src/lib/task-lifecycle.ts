@@ -184,6 +184,14 @@ export interface TransitionEvidence {
    * Independent of the always-on row-level CAS on the observed from-status.
    */
   expectedFrom?: LifecycleState;
+  /**
+   * MR-04: extra columns to land atomically with the status flip in the same
+   * UPDATE. Each key must name a column that exists on tasks. Added so
+   * compound raw writers (status plus description/model_id/block_* etc.) can
+   * route through transition() instead of bypassing the state machine.
+   * Values are passed as params and bound positionally; no interpolation.
+   */
+  extraColumns?: Record<string, string | number | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -667,13 +675,37 @@ export async function transition(
   // status whose transition we never validated FROM. This is what lets
   // transition() serve as the ONE authoritative status path: even two concurrent
   // callers racing the same task cannot both succeed.
+  // MR-04: extraColumns allows compound writers (status + description/model_id/
+  // block_*/etc.) to route through transition() atomically instead of bypassing
+  // the state machine with a raw UPDATE.
   // The SSE broadcast + owner notify are kept OUTSIDE the transaction (below) so
   // nothing is announced for a change that rolled back.
   transaction(() => {
-    const res = run(
-      'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?',
-      [to, now, taskId, from],
-    );
+    let res: { changes: number };
+
+    if (evidence.extraColumns && Object.keys(evidence.extraColumns).length > 0) {
+      // Build the UPDATE with extraColumns and the mandatory compare-and-swap guard.
+      const extraCols = evidence.extraColumns;
+      const setClauses = ['status = ?', 'updated_at = ?'];
+      const params: unknown[] = [to, now];
+
+      for (const [col, val] of Object.entries(extraCols)) {
+        setClauses.push(`${col} = ?`);
+        params.push(val);
+      }
+
+      params.push(taskId);
+      params.push(from); // compare-and-swap guard
+
+      const sql = `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ? AND status = ?`;
+      res = run(sql, params);
+    } else {
+      res = run(
+        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?',
+        [to, now, taskId, from],
+      );
+    }
+
     if (res.changes === 0) {
       throw new TransitionError(
         'CAS_CONFLICT',
