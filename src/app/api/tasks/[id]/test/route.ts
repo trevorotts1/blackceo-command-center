@@ -177,6 +177,9 @@ export async function POST(
           actor: 'test-runner',
           reason: 'automated tests passed',
           expectedFrom: task.status as 'testing',
+          // MR-12: exempt from the review-column WIP limit — verified work must
+          // return to review for human approval even when the column is full.
+          operatorOverride: true,
         });
       } catch (err) {
         if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
@@ -206,6 +209,9 @@ export async function POST(
           actor: 'test-runner',
           reason: 'automated tests failed',
           expectedFrom: task.status as 'testing',
+          // MR-12: exempt from the in_progress-column WIP limit — a failed-test
+          // kickback must return to the agent even when the column is full.
+          operatorOverride: true,
         });
       } catch (err) {
         if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {

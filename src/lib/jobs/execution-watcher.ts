@@ -331,6 +331,9 @@ async function advanceToReview(taskId: string, agentId: string | null, agentName
     await transition(taskId, 'review', {
       actor: agentId ?? 'execution-watcher',
       reason: 'agent reported TASK_COMPLETE (reconcile)',
+      // MR-12: exempt from the review-column WIP limit — reconciled completed
+      // work must reach QC even when the column is full.
+      operatorOverride: true,
     });
   } catch (err) {
     if (err instanceof TransitionError) {
