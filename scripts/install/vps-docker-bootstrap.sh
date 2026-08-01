@@ -187,8 +187,11 @@ else
     cp "$ECOSYSTEM_FILE" "${ECOSYSTEM_FILE}.bak"
     write_canonical_ecosystem
     echo "[8b/9] Ecosystem reconciled to canonical (blackceo-command-center + cc-start.sh + circuit-breaker)"
+    # MR-40: Clean up the .bak sidecar now that the canonical file is in place.
+    rm -f "${ECOSYSTEM_FILE}.bak" 2>/dev/null || true
   else
     echo "[8b/9] PM2 ecosystem already canonical at $ECOSYSTEM_FILE — no update needed"
+    rm -f "${ECOSYSTEM_FILE}.bak" 2>/dev/null || true
   fi
 fi
 

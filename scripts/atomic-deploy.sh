@@ -744,6 +744,31 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
   pm2 save >/dev/null 2>&1 \
     && _ok "  pm2 process list saved — CC app + cloudflared connector will auto-resurrect after restart/OOM." \
     || _warn "  pm2 save FAILED — process list NOT persisted. Run 'pm2 save' manually so this box survives a reboot."
+
+  # ── Cleanup rollback + parked build artefacts ──────────────────────────
+  # MR-40: On a green deploy the rollback snapshot and any parked
+  # .next.old.* directories are stale — the just-deployed build IS the new
+  # known-good. Leaving these inside the app tree inflates the deploy,
+  # leaks into backups, and confuses audits. The rollback lives in the git
+  # history via atomic-deploy.sh's own code; disk snapshot is only needed
+  # for immediate rollback within this deploy window. Non-fatal: cleanup
+  # failures do not fail an otherwise-green deploy.
+  _log "[5] Cleaning up rollback snapshot + parked build artefacts ..."
+  if [[ -n "${ROLLBACK_DIR:-}" && -d "$ROLLBACK_DIR" ]]; then
+    rm -rf "$ROLLBACK_DIR" 2>/dev/null \
+      && _ok "  Rollback snapshot removed: ${ROLLBACK_DIR}" \
+      || _warn "  Could not remove rollback snapshot: ${ROLLBACK_DIR}"
+  fi
+  # Sweep any stale .next.old.* park dirs left by interrupted prior deploys.
+  find "$APP_DIR" -maxdepth 1 -type d -name '.next.old.*' -exec rm -rf {} + 2>/dev/null || true
+  # Sweep legacy .next.PREDEPLOY from the pre-atomic-deploy era
+  # (deploy.sh used to rename .next to .next.PREDEPLOY before a
+  # non-atomic build — that script is gone, but the relic may still
+  # litter long-running boxes).
+  if [[ -d "${APP_DIR}/.next.PREDEPLOY" ]]; then
+    rm -rf "${APP_DIR}/.next.PREDEPLOY" 2>/dev/null || true
+  fi
+
   _success_receipt "$HEALTH_JSON" "$BUILD_ID"
   exit 0
 
