@@ -1,8 +1,11 @@
 /**
- * U035 — PATCH /api/tasks/[id] through transition() (warn-mode).
+ * U035 — PATCH /api/tasks/[id] through transition().
  *
  * Throwaway DB via DATABASE_PATH. Required cases from the unit card step 7.
  * Uses the Node built-in test runner (not vitest).
+ *
+ * MR-11: the warn-mode fallback that permitted illegal transitions via a raw
+ * UPDATE was removed; illegal edges now return 409 with the legal targets.
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -69,7 +72,7 @@ async function doPatch(taskId: string, body: Record<string, unknown>) {
   return { http: res.status, code: (b as any).code ?? null, error: ((b as any).error as string) ?? '' };
 }
 
-describe('U035 — PATCH through transition() (warn-mode)', () => {
+describe('U035 — PATCH through transition()', () => {
   it('Q1 legal edge in_progress->review returns 200, one task_events, one events, one history', async () => {
     const id = seedTask('in_progress');
     const r = await doPatch(id, { status: 'review' });
@@ -80,12 +83,13 @@ describe('U035 — PATCH through transition() (warn-mode)', () => {
     assert.strictEqual(cnt('task_history', id), 1);
   });
 
-  it('Q2 illegal edge in_progress->done returns 200 in warn-mode with task_events', async () => {
+  it('Q2 illegal edge in_progress->done returns 409 with legal targets, status unchanged', async () => {
     const id = seedTask('in_progress');
     const r = await doPatch(id, { status: 'done' });
-    assert.strictEqual(r.http, 200, `Expected 200 in warn-mode, got ${r.http}: ${r.error}`);
-    assert.strictEqual(dbStatus(id), 'done');
-    assert.strictEqual(cnt('task_events', id), 1, 'task_events must be 1 via recordStatusEvent');
+    assert.strictEqual(r.http, 409, `Expected 409 for illegal edge, got ${r.http}: ${r.error}`);
+    assert.strictEqual(r.code, 'ILLEGAL_TRANSITION');
+    assert.strictEqual(dbStatus(id), 'in_progress', 'status must NOT change on illegal edge');
+    assert.strictEqual(cnt('task_events', id), 0, 'no task_events row may be written for a rejected transition');
   });
 
   it('Q3 CAS conflict: stale expectedFrom returns 409 with status unchanged', async () => {
@@ -155,9 +159,9 @@ describe('U035 — PATCH through transition() (warn-mode)', () => {
   });
 
   it('Q8 done fires notifyOwnerDone exactly once', async () => {
-    // The route's notifyOwnerDone is guarded (u035WarnFallback) and only fires
-    // on warn-mode. transition() fires notifyOwnerDone once for -> done on the
-    // normal path. VERIFY step 3 confirms the guard is in place. This test
+    // transition() fires notifyOwnerDone once for -> done on the normal path.
+    // The old warn-mode fallback (which double-fired notifyOwnerDone) was
+    // removed in MR-11; illegal edges now return 409 instead. This test
     // validates the end-to-end behaviour: a legal review->done PATCH completes
     // and the task_events row is present (transition() ran and wrote it).
     const id = seedTask('review');
