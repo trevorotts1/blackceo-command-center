@@ -6,6 +6,7 @@ import { loadSubtaskPersonas, loadPersonaBundleScopes } from '@/lib/persona-sele
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
 import { getQcHeuristicPark } from '@/lib/qc-promote';
+import { getLatestBlockEvent } from '@/lib/block-events';
 import type { Task, CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -199,6 +200,15 @@ export async function GET(request: NextRequest) {
       // event, so this skips the per-row events lookup for the rest of the
       // board. getQcHeuristicPark is fail-soft: never breaks the board.
       qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
+      // MR-30 — block history. The board (this route) is the data source the
+      // task-detail modal renders from (TaskModal takes the store's task prop
+      // and never refetches by id), so last_block_event MUST be attached here
+      // for BlockedReasonPanel's grey "Previously blocked" panel to render on
+      // an unblocked card. Short-circuited to non-blocked cards: a currently-
+      // blocked card renders the red/amber live panel from the block_* columns
+      // and needs no history lookup. getLatestBlockEvent is fail-soft (null on
+      // a pre-migration-117 box or a never-blocked task): never breaks the board.
+      last_block_event: task.status === 'blocked' ? null : getLatestBlockEvent(task.id),
     }));
 
     return NextResponse.json(transformedTasks);

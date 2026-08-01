@@ -51,6 +51,7 @@ import { broadcast } from '@/lib/events';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { recordBlockEvent } from '@/lib/block-events';
 import type { Task } from '@/lib/types';
 
 export interface BacklogRedispatchResult {
@@ -129,6 +130,18 @@ function escalateStuckBacklogTask(
     recordStatusEvent(row.id, 'backlog', 'blocked', {
       actor: 'backlog-redispatch-sweep',
       reason: `re-dispatch cap: ${priorCount} attempts over ≥${hours}h`,
+    });
+    // MR-30 — snapshot the block metadata so the history survives the unblock
+    // (the block_* columns are cleared when the card leaves blocked). Same
+    // CAS gate as the audit row above: a lost race never writes a false event.
+    recordBlockEvent({
+      taskId: row.id,
+      blockReason: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
+      blockNeeds:
+        `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
+        `and re-route or fix. It will not auto-retry further.`,
+      blockAudience: 'SYSTEM',
+      actor: 'backlog-redispatch-sweep',
     });
   }
 

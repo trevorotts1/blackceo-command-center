@@ -831,16 +831,33 @@ export async function PATCH(
       // manual block (entering `blocked` with blocked_reason/blocked_on_human/ask).
       // The snapshot preserves WHY the card was blocked so the operator can
       // review the history even after the card leaves the blocked column.
-      if (enteringBlocked) {
+      // Gated on a genuine ENTRY into blocked (existing.status !== 'blocked'):
+      // transition() is idempotent for same-state, so a re-sent status=blocked
+      // PATCH on an already-blocked card must not write a duplicate (and, when
+      // the payload carries no blocked fields, all-NULL) history row. When the
+      // payload omits the human-block fields, fall back to the task's existing
+      // SYSTEM block metadata (qc-scorer / dispatch / sweep columns) so the
+      // snapshot is never emptier than the card it describes.
+      if (enteringBlocked && existing.status !== 'blocked') {
+        const existingTask = existing as Task & {
+          block_reason?: string | null;
+          block_needs?: string | null;
+          block_audience?: 'OWNER' | 'SYSTEM' | null;
+          blocked_on_human?: string | null;
+          ask?: string | null;
+        };
+        const onHuman = blockedPayload.blocked_on_human ?? existingTask.blocked_on_human ?? null;
+        const askVal = blockedPayload.ask ?? existingTask.ask ?? null;
         recordBlockEvent({
           taskId: id,
-          blockReason: blockedPayload.blocked_reason ?? null,
-          blockedOnHuman: blockedPayload.blocked_on_human ?? null,
-          ask: blockedPayload.ask ?? null,
-          blockNeeds: blockedPayload.ask ?? null,
+          blockReason: blockedPayload.blocked_reason ?? existingTask.block_reason ?? null,
+          blockedOnHuman: onHuman,
+          ask: askVal,
+          blockNeeds: askVal ?? existingTask.block_needs ?? null,
           blockAudience:
-            blockedPayload.blocked_on_human === 'owner' ? 'OWNER' :
-            blockedPayload.blocked_on_human === 'operator' ? 'SYSTEM' : null,
+            onHuman === 'owner' ? 'OWNER' :
+            onHuman === 'operator' ? 'SYSTEM' :
+            existingTask.block_audience ?? null,
           actor: actingAgentId ?? 'operator',
         });
       }

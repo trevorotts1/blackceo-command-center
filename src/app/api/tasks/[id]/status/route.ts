@@ -6,6 +6,7 @@ import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { Task } from '@/lib/types';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
+import { recordBlockEvent } from '@/lib/block-events';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -418,6 +419,20 @@ export async function POST(
     }
     supValues.push(id);
     run(`UPDATE tasks SET ${supUpdates.join(', ')} WHERE id = ?`, supValues);
+
+    // MR-30 — block-history snapshot. This route carries no blocked_reason /
+    // blocked_on_human / ask fields (the producer posts only status + note), so
+    // the snapshot records the producer's note as the reason. Gated on a genuine
+    // entry into blocked (statusChanged), mirroring the task_history gate below,
+    // so an idempotent re-send writes no duplicate history row.
+    if (statusChanged && status === 'blocked') {
+      recordBlockEvent({
+        taskId: id,
+        blockReason: trimmedNote ?? `Board producer (${boardSource}) moved the card to blocked`,
+        blockAudience: 'SYSTEM',
+        actor: `board:${boardSource}`,
+      });
+    }
 
     // ── Audit trail: task_history (parity with PATCH) ──────────────────────────
     // transition() writes the task_events + legacy `events` rows, so this route no
