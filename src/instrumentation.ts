@@ -50,6 +50,30 @@ export async function register(): Promise<void> {
   // so the marker has to already be set by then.
   globalThis.__CC_SERVER_ENTRYPOINT__ = true;
 
+  // 0. STARTUP FILESYSTEM LOCK (MR-35): prevent a second CC process from
+  // booting against the same database path. Two Next.js servers sharing one
+  // SQLite file create independent in-memory Client sets over a single source
+  // of truth — task dispatching races, the SSE single-process constraint breaks,
+  // and the Kanban board diverges. This lock is the LAST line of defence: it
+  // runs INSIDE the process and cannot be bypassed by any external config or
+  // shell command.
+  //
+  // Must run BEFORE the DB import below — once `getDb()` opens the WAL, a
+  // second process would already hold the file handle by the time the lock is
+  // checked. The lock file sits next to the database (same directory).
+  //
+  // Skipped when NODE_ENV=test, VITEST is active, or DISABLE_STARTUP_LOCK=1
+  // (operator escape hatch for emergency debugging).
+  const { claimStartupLock } = await import('@/lib/startup-lock');
+  const { dirname } = await import('node:path');
+  const lockDbDir = process.env.DATABASE_PATH
+    ? dirname(process.env.DATABASE_PATH)
+    : process.cwd();
+  if (!claimStartupLock(lockDbDir)) {
+    console.error('[instrumentation] FATAL: startup lock denied — another CC process holds the lock. See log above for recovery instructions.');
+    process.exit(1);
+  }
+
   // 1. DB init — migrations + first-boot auto-seed (workspaces + starter SOPs).
   //
   // DATA-02: do NOT swallow a boot-time DB-init failure. getDb() records the
