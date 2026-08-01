@@ -510,9 +510,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       !requiresBearerForWrite(pathname, request.method) &&
       isSameOriginRequest(request)
     ) {
-      // MR-23: mutating methods require the signed CSRF cookie. A forged
-      // same-origin header cannot satisfy this check because the httpOnly cookie
-      // value is signed with a server-side secret the attacker does not possess.
+      // MR-23: mutating methods require the signed CSRF cookie. This closes the
+      // CROSS-SITE forgery vector (SameSite=Strict means a foreign site's request
+      // never carries the cookie) and the unsigned-double-submit forgery vector
+      // (the value is HMAC-signed, so a third party cannot mint one). It does NOT
+      // close the DIRECT-to-origin forgery vector on its own: the cookie is minted
+      // on unauthenticated public page loads, so a non-browser caller reaching the
+      // origin directly can harvest a valid token and replay it with a forged
+      // same-origin header. That residual is closed only by REQUIRE_CF_ACCESS=true
+      // (Layer 1 rejects any request lacking the CF-Access edge assertion BEFORE
+      // this block runs). See docs/SECURITY-RESIDUALS.md (MR-23).
       if (!isReadOnlyMethod(request.method)) {
         const csrfToken = request.cookies.get(CSRF_COOKIE_NAME)?.value;
         const csrfValid = await verifyCsrfToken(csrfToken);
@@ -669,8 +676,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
  * The cookie is set on EVERY non-API page response so the browser always has a
  * fresh token. When the browser subsequently makes a mutating /api/* request,
  * the cookie travels automatically (same-origin) and the same-origin passthrough
- * block verifies it. A direct-to-origin attacker forging Origin/Referer cannot
- * satisfy the check because they do not know the HMAC signing key.
+ * block verifies it. The HMAC signature stops a THIRD PARTY from minting a token
+ * (unsigned double-submit forgery) and SameSite=Strict stops a foreign site from
+ * sending one (cross-site CSRF).
+ *
+ * SECURITY SCOPE (read before trusting this): the token is minted on
+ * UNAUTHENTICATED page loads, so a caller who can reach the origin directly can
+ * harvest a valid token and replay it with a forged Origin/Referer. The signature
+ * does NOT defend against that harvest-and-replay — it only proves the server
+ * minted the token, not that the presenter is the operator. The direct-to-origin
+ * residual named by MR-23 is closed only by REQUIRE_CF_ACCESS=true (Layer 1).
  *
  * The cookie is ONLY set when a valid CSRF token is NOT already present in the
  * request — this avoids re-signing on every request and keeps the HMAC overhead

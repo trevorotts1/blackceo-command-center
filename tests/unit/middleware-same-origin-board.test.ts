@@ -310,3 +310,77 @@ describe('CF-Access-fronted box (opt-in REQUIRE_CF_ACCESS=true still enforces)',
     expect(isCredentialRejection(res)).toBe(true);
   });
 });
+
+/**
+ * MR-23 security-posture regression guard.
+ *
+ * The signed CSRF cookie closes CROSS-SITE forgery (SameSite=Strict) and
+ * UNSIGNED double-submit forgery (HMAC). It does NOT close the DIRECT-to-origin
+ * forgery the finding names, because the token is minted on unauthenticated
+ * public page loads and can be harvested + replayed. These tests pin that truth
+ * so a future change cannot silently regress either way:
+ *   • harvest-and-replay still passes on a plain-tunnel box (residual OPEN), and
+ *   • REQUIRE_CF_ACCESS=true closes it at Layer 1 (residual CLOSED).
+ */
+describe('MR-23 direct-to-origin forgery — true security posture', () => {
+  const ENV: EnvOverrides = {
+    NODE_ENV: 'production',
+    MC_API_TOKEN: TOKEN,
+    WEBHOOK_SECRET: SECRET,
+    REQUIRE_CF_ACCESS: undefined,
+    ALLOW_INSECURE_OPEN_API: undefined,
+    DEMO_MODE: undefined,
+  };
+
+  /** Harvest a valid CSRF cookie the way a direct-to-origin caller would: load a
+   *  gate-exempt public page with no auth and read the Set-Cookie. */
+  async function harvestCsrfCookie(mw: Middleware): Promise<string | undefined> {
+    const pageRes = await mw(
+      new NextRequest(`${BOARD_ORIGIN}/interview`, { method: 'GET', headers: { host: BOARD_HOST } }),
+    );
+    const setCookie = pageRes.headers.get('set-cookie') ?? '';
+    return setCookie.match(new RegExp(`${CSRF_COOKIE_NAME}=([^;]+)`))?.[1];
+  }
+
+  it('a direct caller harvests a valid CSRF cookie from an unauthenticated public page', async () => {
+    const mw = await loadMiddleware(ENV);
+    const token = await harvestCsrfCookie(mw);
+    expect(token).toBeTruthy();
+  });
+
+  it('RESIDUAL OPEN on plain tunnel: harvested cookie + forged same-origin header reaches a mutating route (no bearer, no CF)', async () => {
+    const mw = await loadMiddleware(ENV);
+    const token = await harvestCsrfCookie(mw);
+    expect(token).toBeTruthy();
+    const attack = new NextRequest(`${BOARD_ORIGIN}/api/tasks/abc123`, {
+      method: 'DELETE',
+      headers: {
+        host: BOARD_HOST,
+        referer: `${BOARD_ORIGIN}/`, // forged same-origin
+        cookie: `${CSRF_COOKIE_NAME}=${token}`,
+      },
+    });
+    // Documents (does not endorse) that the direct-forgery residual persists
+    // without CF Access. The signed cookie cannot defeat harvest-and-replay.
+    expect(isPassthrough(await mw(attack))).toBe(true);
+  });
+
+  it('RESIDUAL CLOSED by REQUIRE_CF_ACCESS=true: the same harvest-and-replay is rejected at Layer 1', async () => {
+    const cfEnv: EnvOverrides = { ...ENV, REQUIRE_CF_ACCESS: 'true' };
+    const mw = await loadMiddleware(cfEnv);
+    const token = await harvestCsrfCookie(mw); // page load is also rejected under CF
+    const attack = new NextRequest(`${BOARD_ORIGIN}/api/tasks/abc123`, {
+      method: 'DELETE',
+      headers: {
+        host: BOARD_HOST,
+        referer: `${BOARD_ORIGIN}/`,
+        ...(token ? { cookie: `${CSRF_COOKIE_NAME}=${token}` } : {}),
+      },
+    });
+    const res = await mw(attack);
+    // No CF-Access assertion -> Layer 1 misconfiguration 401, before passthrough.
+    expect(isPassthrough(res)).toBe(false);
+    expect(res.status).toBe(401);
+  });
+});
+

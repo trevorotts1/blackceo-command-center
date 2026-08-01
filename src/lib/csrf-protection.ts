@@ -18,9 +18,21 @@
  *   The cookie is httpOnly + SameSite=Strict:
  *     - httpOnly: XSS cannot read it.
  *     - SameSite=Strict: the browser will NOT send it on cross-site requests,
- *       closing the traditional CSRF vector.
- *     - HMAC-SHA256 signed: a direct-to-origin attacker cannot forge its value
- *       because they do not know the server-side signing secret.
+ *       closing the traditional (cross-site) CSRF vector.
+ *     - HMAC-SHA256 signed: a THIRD PARTY cannot mint a token (closes the
+ *       unsigned-double-submit forgery the residuals doc rejects).
+ *
+ * SECURITY SCOPE — what this does and does NOT close (MR-23):
+ *   This closes CROSS-SITE forgery (SameSite=Strict) and UNSIGNED double-submit
+ *   forgery (HMAC). It does NOT, on its own, close the DIRECT-to-origin forgery
+ *   the finding names: the token is minted on UNAUTHENTICATED public page loads,
+ *   so a non-browser caller reaching the origin directly can harvest a valid
+ *   signed token and replay it with a forged Origin/Referer. The signature proves
+ *   the server minted the token, not that the presenter is the operator — so it
+ *   cannot defeat harvest-and-replay. That residual is closed only by
+ *   REQUIRE_CF_ACCESS=true (middleware Layer 1 rejects any request lacking the
+ *   CF-Access edge assertion before the passthrough runs). See
+ *   docs/SECURITY-RESIDUALS.md.
  *
  * EDGE-SAFETY: This module imports only Web-standard globals (globalThis.crypto.subtle,
  * TextEncoder, btoa/atob). It is safe for import from src/middleware.ts.
