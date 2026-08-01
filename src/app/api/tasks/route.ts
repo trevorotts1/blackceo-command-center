@@ -190,7 +190,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const tasks = queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; created_by_agent_name?: string }>(sql, params);
+    const tasks = queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; assigned_agent_status?: string; created_by_agent_name?: string }>(sql, params);
 
     // Transform to include nested agent info.
     // ROBUST null-name guard (AF-TASKBOARD-NULLNAME): only emit the nested
@@ -212,7 +212,7 @@ export async function GET(request: NextRequest) {
               id: task.assigned_agent_id,
               name: task.assigned_agent_name,
               avatar_emoji: task.assigned_agent_emoji,
-              status: (task as any).assigned_agent_status || 'standby',
+              status: task.assigned_agent_status || 'standby',
             }
           : undefined,
       // DEP-5 / F3.7 — attach the multi-persona plan rows so the kanban card can
