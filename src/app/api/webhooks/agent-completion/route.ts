@@ -5,6 +5,7 @@ import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { collectCompletionEvidence } from '@/lib/completion-evidence';
 import { deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 
@@ -133,6 +134,30 @@ export async function POST(request: NextRequest) {
       // (Don't overwrite user's approval)
       const movedToReview = task.status !== 'review' && task.status !== 'done';
       if (movedToReview) {
+        // MR-18: soft evidence check — non-artifact tasks may reach review
+        // with no deliverable registered.  Do NOT hard-block (the QC scorer
+        // is the gate), but WRITE an audit event so operators can see which
+        // completions arrived unevidenced.
+        const evidence = collectCompletionEvidence(task.id);
+        if (!evidence.hasEvidence) {
+          try {
+            run(
+              `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                uuidv4(),
+                'review_no_evidence',
+                task.assigned_agent_id,
+                task.id,
+                `[MR-18] Agent reported completion for "${task.title}" with no reachable deliverable registered. Problems: ${evidence.problems.join('; ') || 'no deliverable rows at all'}. The task will proceed to review regardless — the QC scorer gates done.`,
+                now,
+              ],
+            );
+          } catch {
+            /* events audit is best-effort — never block the transition on audit failure */
+          }
+        }
+
         // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the
         // movedToReview check above; audited immediately below via
         // recordStatusEvent (DISP-10).
@@ -254,6 +279,30 @@ export async function POST(request: NextRequest) {
       // (Don't overwrite user's approval)
       const movedToReviewSession = task.status !== 'review' && task.status !== 'done';
       if (movedToReviewSession) {
+        // MR-18: soft evidence check — non-artifact tasks may reach review
+        // with no deliverable registered.  Do NOT hard-block (the QC scorer
+        // is the gate), but WRITE an audit event so operators can see which
+        // completions arrived unevidenced.
+        const evidence = collectCompletionEvidence(task.id);
+        if (!evidence.hasEvidence) {
+          try {
+            run(
+              `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                uuidv4(),
+                'review_no_evidence',
+                agentId,
+                task.id,
+                `[MR-18] Agent reported completion for "${task.title}" with no reachable deliverable registered. Problems: ${evidence.problems.join('; ') || 'no deliverable rows at all'}. The task will proceed to review regardless — the QC scorer gates done.`,
+                now,
+              ],
+            );
+          } catch {
+            /* events audit is best-effort — never block the transition on audit failure */
+          }
+        }
+
         // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the
         // movedToReviewSession check above; audited immediately below via
         // recordStatusEvent (DISP-10).
