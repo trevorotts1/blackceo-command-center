@@ -22,6 +22,12 @@
  *     - HMAC-SHA256 signed: a THIRD PARTY cannot mint a token (closes the
  *       unsigned-double-submit forgery the residuals doc rejects).
  *
+ *   The HMAC key resolves from a DEDICATED var first — MC_CSRF_COOKIE_SECRET —
+ *   then falls back to MC_INTERVIEW_COOKIE_SECRET → MC_API_TOKEN →
+ *   WEBHOOK_SECRET → a public dev fallback (which hard-locks sign/verify in
+ *   production). Set MC_CSRF_COOKIE_SECRET explicitly so CSRF signing is
+ *   decoupled from the API token lifecycle (see .env.example).
+ *
  * SECURITY SCOPE — what this does and does NOT close (MR-23):
  *   This closes CROSS-SITE forgery (SameSite=Strict) and UNSIGNED double-submit
  *   forgery (HMAC). It does NOT, on its own, close the DIRECT-to-origin forgery
@@ -71,8 +77,20 @@ interface CsrfPayload {
 
 const DEV_FALLBACK_SECRET = 'mc-csrf-unsigned-dev-secret';
 
+/**
+ * Resolve the HMAC key that signs the CSRF cookie.
+ *
+ * MC_CSRF_COOKIE_SECRET is the DEDICATED key for this cookie (MR-23 fix2): it
+ * decouples CSRF signing from the interview gate's key and, critically, from
+ * the MC_API_TOKEN fallback — the API token is the credential an external
+ * caller presents, so sharing it as an HMAC key widens the blast radius of a
+ * token leak into cookie forgery. The remaining fallbacks keep an
+ * already-provisioned box working when only the legacy vars are set; the
+ * public dev fallback hard-locks sign/verify in production (DATA-13 pattern).
+ */
 function csrfSecret(): string {
   return (
+    process.env.MC_CSRF_COOKIE_SECRET ||
     process.env.MC_INTERVIEW_COOKIE_SECRET ||
     process.env.MC_API_TOKEN ||
     process.env.WEBHOOK_SECRET ||
@@ -142,8 +160,8 @@ export async function signCsrfToken(): Promise<{ value: string; maxAge: number }
   if (devSecretInProduction()) {
     throw new Error(
       '[CSRF] Cookie secret resolves to the public dev fallback in production. ' +
-        'Set MC_INTERVIEW_COOKIE_SECRET (or MC_API_TOKEN / WEBHOOK_SECRET). ' +
-        'Refusing to sign a forgeable CSRF token.',
+        'Set MC_CSRF_COOKIE_SECRET (or MC_INTERVIEW_COOKIE_SECRET / MC_API_TOKEN / ' +
+        'WEBHOOK_SECRET). Refusing to sign a forgeable CSRF token.',
     );
   }
   const exp = Math.floor(Date.now() / 1000) + CSRF_COOKIE_TTL_SECONDS;
