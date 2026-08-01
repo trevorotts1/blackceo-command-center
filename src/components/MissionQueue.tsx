@@ -220,7 +220,7 @@ export const departmentNames: Record<string, string> = {
 };
 
 export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task', loadError, onRetry }: MissionQueueProps) {
-  const { tasks, isLoading, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
+  const { tasks, isLoading, updateTaskStatus, updateTask, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
@@ -431,6 +431,16 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
    * optimistic move and surfaces the server's {error, message/remediation/
    * hint} via a toast. The 'Triad incomplete' 400 keeps its existing special
    * case (open the edit modal instead of a toast).
+   *
+   * MR-27: Revert refetches the current task from the server (/api/tasks/[id])
+   * instead of restoring a captured `previousStatus`. In a multi-tab scenario,
+   * an SSE `task_updated` event can arrive between the optimistic store update
+   * and the PATCH failure. Reverting with the stale captured status would
+   * permanently overwrite the incoming SSE update, desyncing the board from the
+   * server until the next page load. The refetch guarantees the revert writes
+   * back the TRUE server state, and it reuses `updateTask` (the same path the
+   * SSE handler uses) so the two are arbitration-free — whichever lands last
+   * wins in the store, and both carry server-authoritative data.
    */
   const applyStatusChange = async (
     task: Task,
@@ -439,6 +449,37 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   ) => {
     const previousStatus = task.status;
     updateTaskStatus(task.id, targetStatus);
+
+    /**
+     * MR-27: Revert the optimistic move by refetching the current task from the
+     * server. This is safer than `updateTaskStatus(task.id, previousStatus)`
+     * because an SSE update from another tab can arrive between the optimistic
+     * store write and the PATCH failure — reverting with a stale captured status
+     * would overwrite the SSE update and permanently desync the board.
+     */
+    const revertOptimisticMove = async () => {
+      try {
+        const res = await fetch(`/api/tasks/${task.id}`, { cache: 'no-store' });
+        if (res.ok) {
+          const serverTask: Task = await res.json();
+          updateTask(serverTask);
+          return;
+        }
+      } catch {
+        // best-effort — fall through to the stale-status revert below
+      }
+      // The fetch failed; fall back to the captured status. An SSE update
+      // could have landed, so this is a known gap, but the page's periodic
+      // poll and the SSE stream will reconcile it eventually. We also push
+      // a refresh toast so the operator knows the board may need a manual
+      // refresh.
+      updateTaskStatus(task.id, previousStatus);
+      pushToast({
+        tone: 'info',
+        title: `Couldn't verify server state for "${task.title}"`,
+        detail: 'The board may be out of sync. Refresh the page if the task appears in the wrong column.',
+      });
+    };
 
     try {
       const body: Record<string, unknown> = { status: targetStatus };
@@ -480,7 +521,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
       }
 
       // Non-ok response: revert the optimistic move and surface why.
-      updateTaskStatus(task.id, previousStatus);
+      await revertOptimisticMove();
 
       let errBody: { error?: string; message?: string; missing?: string[]; remediation?: string; hint?: string } | null = null;
       try {
@@ -502,7 +543,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
       });
     } catch (error) {
       console.error('Failed to update task status:', error);
-      updateTaskStatus(task.id, previousStatus);
+      await revertOptimisticMove();
       pushToast({
         tone: 'error',
         title: `Couldn't move "${task.title}"`,
@@ -544,8 +585,25 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     handleColumnMove(task, targetColumnId);
   };
 
-  const cancelBlockedMove = () => {
-    if (blockingTask) updateTaskStatus(blockingTask.id, blockingTask.status);
+  /**
+   * MR-27: Cancel the Blocked move by refetching the task from the server
+   * instead of restoring the captured status. While the Blocked-confirm modal
+   * is open, an SSE update from another tab can change the task's server status
+   * (e.g. a PATCH from another tab or an agent completion). Reverting with the
+   * frozen snapshot from `setBlockingTask(task)` would overwrite that update.
+   */
+  const cancelBlockedMove = async () => {
+    if (!blockingTask) { setBlockingTask(null); return; }
+    try {
+      const res = await fetch(`/api/tasks/${blockingTask.id}`, { cache: 'no-store' });
+      if (res.ok) {
+        const serverTask: Task = await res.json();
+        updateTask(serverTask);
+        setBlockingTask(null);
+        return;
+      }
+    } catch { /* best-effort — fall through to the stale-status revert */ }
+    updateTaskStatus(blockingTask.id, blockingTask.status);
     setBlockingTask(null);
   };
 
