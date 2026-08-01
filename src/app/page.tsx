@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic, Sparkles } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic, Sparkles, LifeBuoy } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -15,6 +15,7 @@ import {
   selectProducerCardSlugs,
   type EngineDbPresence,
 } from '@/lib/dashboard-workspaces';
+import { shouldShowRescueEntry, type RescueProbeStatus } from '@/lib/rescue/severity';
 
 const cardVariants = {
   hidden: { opacity: 0, y: 30, scale: 0.95 },
@@ -75,6 +76,12 @@ export default function HomePage() {
   // for this box. Null until resolved so the card never flashes then vanishes.
   const [ceoBetaEnabled, setCeoBetaEnabled] = useState<boolean | null>(null);
   const [engineDbPresence, setEngineDbPresence] = useState<EngineDbPresence>(null);
+  // P13: does this box carry the durable rescue ticket store? Same fail-closed
+  // posture as the producer-board gating — 'loading'/'error' both hide the
+  // card, so a client box (which never runs a rescue receiver) shows nothing
+  // rather than a card that leads to a permanently empty page.
+  const [rescueProbe, setRescueProbe] = useState<RescueProbeStatus>('loading');
+  const [rescueAvailable, setRescueAvailable] = useState(false);
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
   const cardBackground = hasBrand
@@ -225,6 +232,30 @@ export default function HomePage() {
     loadEngineDbPresence();
   }, []);
 
+  useEffect(() => {
+    // P13: probe for the durable rescue ticket store. The route always answers
+    // 200 with `available:false` where there is no store, so a non-ok response
+    // means the probe itself failed — both cases keep the card hidden
+    // (shouldShowRescueEntry fails closed on 'error' as well as 'loading').
+    let cancelled = false;
+    async function loadRescuePresence() {
+      try {
+        const res = await fetch('/api/rescue/summary', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        setRescueAvailable(data?.available === true);
+        setRescueProbe('ok');
+      } catch {
+        if (!cancelled) setRescueProbe('error');
+      }
+    }
+    loadRescuePresence();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // PRD 3.8 + v4.0.1 P0-1: landing layout. Operator Console is the 5th card.
   // F52: Conversational AI analytics is the 7th card (fills the next 3-col slot).
   const cards: EntryCard[] = [
@@ -368,9 +399,31 @@ export default function HomePage() {
   // the core seven-card order. Falls back to appending if that card ever moves.
   const conversationalIdx = cards.findIndex((c) => c.route === '/conversational-ai');
   const insertAt = conversationalIdx >= 0 ? conversationalIdx + 1 : cards.length;
-  const coreCards: EntryCard[] = producerCards.length
+  const withProducers: EntryCard[] = producerCards.length
     ? [...cards.slice(0, insertAt), ...producerCards, ...cards.slice(insertAt)]
     : cards;
+
+  // P13: the Rescue Rangers ticket view. Gated on the durable ticket store
+  // being present on THIS box (the operator box runs the rescue receiver;
+  // client boxes never do), so no deployment gets a card into a page that can
+  // only ever say "no data". Slotted directly before the Operator Console
+  // card — it is operator tooling and belongs beside it.
+  const rescueCard: EntryCard = {
+    title: 'Rescue Rangers',
+    description: 'Fleet escalations and fixes',
+    detail:
+      'Every escalation the fleet raised: open tickets by severity, what we fixed versus what we told the agent to fix, who is still waiting on a human, standing blocks, and the full audit timeline for each ticket.',
+    icon: <LifeBuoy className="w-7 h-7 text-white" />,
+    gradient: 'from-rose-500 via-red-500 to-orange-500',
+    route: '/rescue',
+    cta: 'Open Rescue Rangers',
+  };
+  const showRescue = shouldShowRescueEntry(rescueProbe, rescueAvailable);
+  const operatorIdx = withProducers.findIndex((c) => c.route === '/operator');
+  const rescueAt = operatorIdx >= 0 ? operatorIdx : withProducers.length;
+  const coreCards: EntryCard[] = showRescue
+    ? [...withProducers.slice(0, rescueAt), rescueCard, ...withProducers.slice(rescueAt)]
+    : withProducers;
 
   // P5-01: the "My AI CEO" BETA card leads the grid (a prominent, deliberate
   // competitor to Telegram) — but ONLY when the flag is enabled on this box.
