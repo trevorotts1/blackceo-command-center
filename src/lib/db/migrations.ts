@@ -5275,6 +5275,64 @@ export const migrations: Migration[] = [
     },
   },
   {
+    id: '117',
+    name: 'add_disabled_to_job_liveness_status',
+    // MR-31: job_liveness CHECK constraint currently allows only 'ok'/'error',
+    // but wrap() records 'ok' even when a sweep returns instantly because its
+    // kill-flag is set (skippedReason ≠ undefined) — a false green: the watchdog
+    // sees a ticking sweep that is doing zero work.  This migration widens the
+    // CHECK to allow 'disabled' as a distinct third status so the liveness layer
+    // can differentiate "ticking and working" from "ticking but disabled".
+    //
+    // SQLite does not support ALTER TABLE … DROP CHECK, so we recreate the table
+    // in a transaction.  The table is a pure cache (one row per job, upserted by
+    // every tick), so there is no data loss risk — any row present before this
+    // migration is re-copied with its last_status intact (only 'ok'/'error' rows
+    // can exist before this migration; if somehow a 'disabled' row already exists
+    // from a direct write it survives too).  Guarded by a column-count check so
+    // re-running on an already-migrated database is a no-op (the column list
+    // matches the new schema exactly).
+    up: (db) => {
+      console.log('[Migration 117] Widening job_liveness.last_status CHECK to include disabled...');
+      const tableExists = !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get('job_liveness');
+      if (!tableExists) {
+        console.log('[Migration 117] job_liveness table does not exist, skipping');
+        return;
+      }
+
+      // Count columns to detect whether we already ran (4 → old schema, same
+      // count → safe no-op; anything else was already migrated or is malformed).
+      const cols = db
+        .prepare('PRAGMA table_info(job_liveness)')
+        .all() as { name: string }[];
+      if (cols.length !== 4) {
+        console.log('[Migration 117] job_liveness column count != 4, skipping (already migrated or unexpected)');
+        return;
+      }
+
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE job_liveness_new (
+            job_name TEXT PRIMARY KEY,
+            last_ran_at TEXT NOT NULL,
+            last_status TEXT NOT NULL DEFAULT 'ok' CHECK (last_status IN ('ok', 'error', 'disabled')),
+            last_error TEXT
+          );
+        `);
+        db.exec(`
+          INSERT INTO job_liveness_new (job_name, last_ran_at, last_status, last_error)
+          SELECT job_name, last_ran_at, last_status, last_error FROM job_liveness;
+        `);
+        db.exec('DROP TABLE job_liveness');
+        db.exec('ALTER TABLE job_liveness_new RENAME TO job_liveness');
+      })();
+
+      console.log('[Migration 117] job_liveness CHECK widened to (ok, error, disabled)');
+    },
+  },
+  {
     id: '116',
     name: 'u064_client_persona_choice',
     up: (db) => {

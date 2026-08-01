@@ -288,7 +288,7 @@ CREATE INDEX IF NOT EXISTS idx_ceo_chat_session ON ceo_chat_messages(session_id,
 CREATE TABLE IF NOT EXISTS job_liveness (
   job_name TEXT PRIMARY KEY,
   last_ran_at TEXT NOT NULL,
-  last_status TEXT NOT NULL DEFAULT 'ok' CHECK (last_status IN ('ok', 'error')),
+  last_status TEXT NOT NULL DEFAULT 'ok' CHECK (last_status IN ('ok', 'error', 'disabled')),
   last_error TEXT
 );
 
