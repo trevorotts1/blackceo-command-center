@@ -153,6 +153,31 @@ test('started interview builds the P0-7 resume link', async () => {
   clearWorkspace();
 });
 
+// ── 4b. an in-progress interview wins over a stale buildCompletedAt ───────────
+test('a reset-and-restarted interview is not blocked by an earlier buildCompletedAt', async () => {
+  // Real-world shape: an owner's company build finished once (buildCompletedAt
+  // is set from that run), then the interview was deliberately reset and is
+  // genuinely underway again (interviewComplete is back to false). The route
+  // must treat the in-progress interview as authoritative and still offer the
+  // resume link — buildCompletedAt alone must never 409 this.
+  writeBuildState({
+    interviewSessionId: SESSION_ID,
+    interviewComplete: false,
+    buildCompletedAt: '2026-06-19T00:00:00.000Z',
+  });
+  writeHandoff();
+  const res = await POST(buildRequest());
+  assert.notEqual(res.status, 409, 'buildCompletedAt alone must not block a genuinely in-progress interview');
+  assert.equal(res.status, 502, 'owner unreachable in tests (send disabled)');
+  const body = await res.json();
+  assert.equal(body.mode, 'resume');
+  assert.equal(
+    body.link,
+    `https://acme.zerohumanworkforce.com/onboarding/resume/${SESSION_ID}`,
+  );
+  clearWorkspace();
+});
+
 // ── 5. cooldown: a recent recorded send blocks; force bypasses ────────────────
 test('cooldown blocks a re-send within the window; force:true bypasses', async () => {
   clearWorkspace();

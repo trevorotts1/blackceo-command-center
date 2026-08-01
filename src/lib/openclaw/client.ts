@@ -832,8 +832,25 @@ export class OpenClawClient extends EventEmitter {
     await this.call('sessions.send', { session_id: sessionId, content });
   }
 
+  /**
+   * `channel` is accepted for signature compatibility with every existing
+   * caller but is never sent: it has no field on the gateway's own
+   * `sessions.create` schema and is discarded here rather than upstream, so
+   * no caller needs touching. Proven live against the gateway: a bare
+   * `{channel, peer}` payload (this method's old body) is rejected outright
+   * with "unexpected property 'channel'" — and a bare `peer` field alone is
+   * *also* rejected the same way ("unexpected property 'peer'"). Neither
+   * field is optional-but-ignored; both are hard schema violations on every
+   * gateway version observed, so dropping them is required, not just safe.
+   * `peer` (an owner/caller identity string) rides on `label` instead — a
+   * free-form 1–512 char display field the schema does accept — so
+   * attribution isn't silently lost even though it no longer participates in
+   * session routing/addressing (routing continuity, where needed, already
+   * happens by the caller reusing a previously-returned session id, not by
+   * re-deriving it from `peer` on every call).
+   */
   async createSession(channel: string, peer?: string): Promise<OpenClawSessionInfo> {
-    return this.call<OpenClawSessionInfo>('sessions.create', { channel, peer });
+    return this.call<OpenClawSessionInfo>('sessions.create', peer ? { label: peer } : {});
   }
 
   // Node methods (device capabilities)

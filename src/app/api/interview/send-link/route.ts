@@ -150,8 +150,17 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Read canonical interview state (pure fs; no scripts, no writes) ────────
+  // Block ONLY on the interview's own completion flag. `buildCompletedAt` is a
+  // separate historical fact (when the company build finished) that can
+  // legitimately coexist with `interviewComplete === false` — e.g. an
+  // interview that was reset for a redo after an earlier build already
+  // completed. Blocking on `buildCompletedAt` too conflated "the build once
+  // finished" with "the interview is finished", which left no sanctioned way
+  // to send a resume link to anyone whose interview was reset post-build.
+  // `interviewComplete` alone is the guard's original, correctly-scoped
+  // intent: never re-invite someone whose interview is actually done.
   const state = readBuildState();
-  if (state?.interviewComplete === true || state?.buildCompletedAt) {
+  if (state?.interviewComplete === true) {
     return NextResponse.json(
       {
         ok: false,
