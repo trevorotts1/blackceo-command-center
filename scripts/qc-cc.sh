@@ -891,6 +891,17 @@ warn_check "17.6" "no working directory hosts more than one Command Center app (
 check "17.7" "src/lib/events.ts still exports warnIfClustered AND still calls it at module scope" \
   '/usr/bin/grep -aq "export function warnIfClustered" src/lib/events.ts && /usr/bin/grep -aqE "^warnIfClustered\(" src/lib/events.ts' \
   "the runtime warning is the loud half of the constraint"
+
+blue ""
+blue "── 18. Documentation-drift gate (MR-28) ──"
+
+# MR-28: PRD.md / QC.md must agree with code constants. This gate catches the
+# exact class of doc-drift bug: a developer adds a department or column to the
+# code but forgets to update the prose docs, and vice-versa.
+check "18.1" "scripts/check-doc-drift.mjs exits zero (doc claims match code constants)" \
+  "node scripts/check-doc-drift.mjs" \
+  "update PRD.md / QC.md to match src/lib/routing/departments.config.ts and src/components/MissionQueue.tsx BOARD_PRESETS"
+
 blue ""
 blue "════════════════════════════════════════════════════════════"
 if [ $FAIL -eq 0 ]; then

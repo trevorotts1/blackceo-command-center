@@ -60,29 +60,46 @@ The BlackCEO Command Center is a Next.js dashboard application that provides a c
 
 ### 3. Kanban Boards
 
-**Purpose:** Visual task management with two view modes.
+**Purpose:** Visual task management with two view modes plus a full-site task board.
 
-**View A: Department Browser**
+**View A: Department Browser** (`/ceo-board`)
 - Left sidebar: Vertical list of all departments
   - Emoji + department name
   - Task count badges
   - Click to select active department
 - Right panel: Kanban for selected department
-  - Columns: New, Queued, In Progress, Review, Done
+  - Columns: New, Queued, In Progress, Review, Done (5 columns)
   - Cards show: task title, assigned agent, persona pill, priority badge
 
-**View B: Focused Single-Department**
+**View B: Focused Single-Department** (`/ceo-board/[dept]/focus`)
 - Full-screen Kanban for one department
 - No sidebar, maximum task visibility
 - Large "Back" button returns to Department Browser
-- Accessible via `/ceo-board/[dept]/focus`
+- Columns: New, Queued, In Progress, Review, Done (5 columns)
 
-**Columns:**
+**View C: Full Task Board** (`/tasks/all`, `/workspace/[slug]`)
+- MissionQueue component with config-driven column set
+- Columns: Backlog, To Do, In Progress, Review/QC, Blocked, Done (6 columns)
+- Backlog column: tasks being prepared (gated by the Triad Rule: must have description, SOP, persona, and assigned agent)
+- Blocked column: tasks waiting on a human action (decision, approval, credential, or payment)
+- Supports both task and bug board presets (bug board uses Reported/Triaged/Healing/Verifying/Healed/Regression Watch/Closed)
+
+**Column Definitions:**
+
+For the 5-column Department Browser / Focus view:
 1. **New** - Tasks just created, not yet prioritized
 2. **Queued** - Prioritized and waiting for agent assignment
 3. **In Progress** - Currently being worked by an agent
 4. **Review** - Completed, awaiting approval
 5. **Done** - Approved and archived
+
+For the 6-column Full Task Board:
+1. **Backlog** - Tasks being prepared; gated by the Triad Rule
+2. **To Do** - Groomed and ready for dispatch
+3. **In Progress** - An agent is actively working
+4. **Review/QC** - Finished, being QC-checked before Done
+5. **Blocked** - Stuck, needs human attention (decision, approval, credential, or payment)
+6. **Done** - Completed and approved
 
 **Data Sources:**
 - Database: tasks table with department_id filtering
