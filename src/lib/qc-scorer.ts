@@ -4062,29 +4062,26 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           .join('\n');
 
         const writeStructuredHandbackFallback = (): void => {
-          // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
-          // last_progress_at must land atomically with the status flip, and
-          // this is the in-process SQL fallback for when the HTTP handback to
-          // return-to-orchestrator is unreachable/rejected); audited
-          // immediately below via recordStatusEvent (DISP-10), gated on the
-          // CAS actually landing.
-          const fallbackRes = run(
-            `UPDATE tasks SET status = 'backlog',
-               description = CASE
-                 WHEN description IS NULL OR description = '' THEN ?
-                 ELSE ? || char(10) || char(10) || '---' || char(10) || char(10) || description
-               END,
-               last_progress_at = ?,
-               updated_at = ?
-             WHERE id = ? AND status = 'review'`,
-            [structuredHandbackNote, structuredHandbackNote, now, now, taskId],
-          );
-          if ((fallbackRes.changes ?? 0) > 0) {
-            recordStatusEvent(taskId, 'review', 'backlog', {
-              actor: 'qc-scorer',
-              reason: `no-artifact handback fallback: ${noArtifactReason}`,
-            });
-          }
+          // MR-04: route through transition() with extraColumns so the description
+          // + last_progress_at land atomically AND the legal-transition guard +
+          // preconditions + CAS run (review→backlog is legal).
+          // Build the new description (prepend handback note to existing).
+          const desc = task.description && task.description !== ''
+            ? `${structuredHandbackNote}\n\n---\n\n${task.description}`
+            : structuredHandbackNote;
+          transition(taskId, 'backlog', {
+            actor: 'qc-scorer',
+            reason: `no-artifact handback fallback: ${noArtifactReason}`,
+            expectedFrom: 'review',
+            extraColumns: {
+              description: desc,
+              last_progress_at: now,
+            },
+          }).catch(err => {
+            if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
+              console.warn('[QCScorer] handback fallback transition failed:', err);
+            }
+          });
           run(
             `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
             [

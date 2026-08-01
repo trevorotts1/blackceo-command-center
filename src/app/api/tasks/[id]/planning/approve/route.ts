@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import type { PlanningQuestion, PlanningCategory } from '@/lib/types';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -117,18 +117,14 @@ export async function POST(
     `).run(specId, taskId, specMarkdown);
 
     // Update task description with spec and move to backlog
-    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description must land
-    // atomically with the status flip — it carries the locked spec); audited
-    // immediately below via recordStatusEvent (DISP-10).
-    getDb().prepare(`
-      UPDATE tasks
-      SET description = ?, status = 'backlog', updated_at = datetime('now')
-      WHERE id = ?
-    `).run(specMarkdown, taskId);
-    recordStatusEvent(taskId, task.status, 'backlog', {
+    // MR-04: route through transition() with extraColumns so the description
+    // and status land atomically AND the legal-transition guard + preconditions
+    // run (planning→backlog is a legal transition — see LEGAL_TRANSITIONS).
+    transition(taskId, 'backlog', {
       actor: 'planning-approve',
       reason: 'planning spec locked',
-    });
+      extraColumns: { description: specMarkdown },
+    }).catch(err => console.warn('[planning-approve] transition failed:', err));
 
     // Log activity
     const activityId = crypto.randomUUID();

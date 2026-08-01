@@ -27,7 +27,7 @@ import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -102,27 +102,17 @@ export async function POST(
       : handbackNote;
 
     // Update the task: set status=backlog, increment attempt counter, bump progress.
-    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
-    // qc_reroute_attempts + last_progress_at must land atomically with the
-    // status flip); audited immediately below via recordStatusEvent (DISP-10).
-    run(
-      `UPDATE tasks SET
-        status = 'backlog',
-        description = ?,
-        qc_reroute_attempts = ?,
-        last_progress_at = ?,
-        updated_at = ?
-       WHERE id = ?`,
-      [updatedDescription, newAttempts, now, now, id],
-    );
-
-    // DISP-10: complete the structured task_events audit sink for this return.
-    // The UPDATE above also rewrites description / qc_reroute_attempts /
-    // last_progress_at, so it stays a raw multi-column write; this only closes
-    // the task_events gap (backlog is a legal target from every non-terminal state).
-    recordStatusEvent(id, existing.status, 'backlog', {
+    // MR-04: route through transition() with extraColumns so the compound UPDATE
+    // goes through the legal-transition guard + preconditions + CAS atomically.
+    // Backlog is a legal target from every non-terminal state.
+    await transition(id, 'backlog', {
       actor: data.returned_by_agent_id ?? 'return-to-orchestrator',
-      reason: `returned to orchestrator: ${data.problem}`,
+      reason: data.problem ?? 'task returned to orchestrator',
+      extraColumns: {
+        description: updatedDescription,
+        qc_reroute_attempts: newAttempts,
+        last_progress_at: now,
+      },
     });
 
     // Write the task_returned event (audit trail).

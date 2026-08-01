@@ -47,7 +47,7 @@ import { notifySystem } from '@/lib/notify';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -248,7 +248,7 @@ async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
  * Mirrors the POST /api/tasks/[id]/return-to-orchestrator logic inline
  * so the sweep does not depend on an HTTP round-trip to itself.
  */
-function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
+async function returnToOrchestrator(task: StaleTaskRow, reason: string): Promise<void> {
   const now = new Date().toISOString();
   const currentAttempts = task.qc_reroute_attempts ?? 0;
   const newAttempts = currentAttempts + 1;
@@ -278,23 +278,22 @@ function returnToOrchestrator(task: StaleTaskRow, reason: string): void {
     : '';
 
   try {
-    // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description /
-    // qc_reroute_attempts / dispatch-accounting reset must land atomically
-    // with the status flip, mirroring return-to-orchestrator/route.ts);
-    // audited immediately below via recordStatusEvent (DISP-10).
-    run(
-      `UPDATE tasks SET
-        status = 'backlog',
-        description = ?,
-        qc_reroute_attempts = ?,
-        last_progress_at = ?,
-        updated_at = ?${dispatchResetClause}
-       WHERE id = ?`,
-      [updatedDescription, newAttempts, now, now, task.id],
-    );
-    recordStatusEvent(task.id, task.status, 'backlog', {
+    // MR-04: route through transition() with extraColumns so the compound
+    // UPDATE goes through the legal-transition guard + preconditions + CAS
+    // atomically, instead of a raw SQL write with no guard.
+    const extraCols: Record<string, string | number | null> = {
+      description: updatedDescription,
+      qc_reroute_attempts: newAttempts,
+      last_progress_at: now,
+    };
+    if (fromBlocked) {
+      extraCols.dispatch_attempts = 0;
+      extraCols.next_dispatch_eligible_at = null;
+    }
+    await transition(task.id, 'backlog', {
       actor: 'stale-task-sweep',
       reason,
+      extraColumns: extraCols,
     });
 
     run(
@@ -391,7 +390,9 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
 
         if (ageHours >= returnThreshold) {
           // Second threshold passed: return to orchestrator.
-          returnToOrchestrator(task, `Blocked task stale for ${Math.round(ageHours)}h with no human response to: "${task.ask ?? '(no ask)'}"`);
+          returnToOrchestrator(task, `Blocked task stale for ${Math.round(ageHours)}h with no human response to: "${task.ask ?? '(no ask)'}"`).catch(err =>
+            console.warn(`[stale-task-sweep] returnToOrchestrator failed for ${task.id}:`, (err as Error).message),
+          );
           returned++;
         } else if (ageHours >= repingThreshold) {
           // SWEEP-DEDUP: re-ping AT MOST ONCE PER WINDOW, not once per 10-min tick.
@@ -462,6 +463,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
         returnToOrchestrator(
           task,
           `Task stale in '${task.status}' for ${Math.round(ageHours)}h (threshold: ${thresholdHours}h) with no progress`,
+        ).catch(err =>
+          console.warn(`[stale-task-sweep] returnToOrchestrator failed for ${task.id}:`, (err as Error).message),
         );
         returned++;
       }
