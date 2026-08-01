@@ -161,7 +161,7 @@ test.describe('Home dashboard — induced /api/workspaces failure (U43 / C-12)',
     // The rest of the always-present entry-card grid must be intact and
     // navigable post-recovery — the page never got stuck in a partial/broken
     // render while the fault was active.
-    await expect(page.getByRole('heading', { name: 'View All Tasks' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Task Board' })).toBeVisible();
 
     await page.screenshot({
       path: 'test-results/home-dashboard-fault/recovered.png',
