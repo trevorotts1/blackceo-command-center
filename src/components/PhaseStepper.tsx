@@ -12,11 +12,18 @@
  *
  * The wide variant wraps in its own overflow-x: auto container so the
  * stepper scrolls inside itself and never scrolls the page body.
+ *
+ * U060 / MR-39: Reacts to the `activityPulse` counter from the SSE feed
+ * instead of running an independent poll. When an activity_logged event
+ * arrives on the SSE stream, useSSE increments the pulse, and this component
+ * re-fetches phase data. A long-interval fallback poll (120 s) keeps the
+ * stepper alive if the SSE stream drops silently.
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { PHASE_LABELS } from '@/lib/presentation-phases';
 import type { PhaseStepStatus } from '@/lib/presentation-phases';
+import { useMissionControl } from '@/lib/store';
 
 export interface PhaseStepData {
   label: string;
@@ -41,12 +48,17 @@ export interface PhaseStepperProps {
   initialData?: PhaseProgressData | null;
 }
 
-const POLL_INTERVAL_MS = 5_000;
+/** Long-interval fallback poll in case the SSE stream drops silently. */
+const FALLBACK_POLL_MS = 120_000;
 
 export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps) {
   const [data, setData] = useState<PhaseProgressData | null>(initialData ?? null);
   const [error, setError] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fallbackPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // U060 — subscribe to the SSE-driven pulse so we re-fetch on every
+  // activity_logged event instead of running an independent poll.
+  const activityPulse = useMissionControl((s) => s.activityPulse);
 
   const fetchPhases = useCallback(async () => {
     try {
@@ -63,14 +75,14 @@ export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps)
     }
   }, [taskId]);
 
-  // Fetch on mount if no initialData; start poll.
+  // Fetch on mount if no initialData; start fallback poll.
   useEffect(() => {
     if (!initialData) {
       fetchPhases();
     }
-    pollRef.current = setInterval(fetchPhases, POLL_INTERVAL_MS);
+    fallbackPollRef.current = setInterval(fetchPhases, FALLBACK_POLL_MS);
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      if (fallbackPollRef.current) clearInterval(fallbackPollRef.current);
     };
   }, [fetchPhases, initialData]);
 
@@ -78,6 +90,13 @@ export default function PhaseStepper({ taskId, initialData }: PhaseStepperProps)
   useEffect(() => {
     fetchPhases();
   }, [taskId, fetchPhases]);
+
+  // U060 — re-fetch whenever the SSE activityPulse ticks (activity_logged event).
+  useEffect(() => {
+    if (activityPulse > 0) {
+      fetchPhases();
+    }
+  }, [activityPulse, fetchPhases]);
 
   // If we receive new initialData, update.
   useEffect(() => {
