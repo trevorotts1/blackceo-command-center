@@ -1095,6 +1095,20 @@ export interface TaskCardProps {
   columnTaskCounts?: Record<string, number>;
 }
 
+/**
+ * MR-46 — Agent status dot color mapping.
+ * Agents.status CHECK accepts: standby, working, busy, degraded, offline (migration 034).
+ */
+function getAgentStatusDot(status: string | undefined): string {
+  switch (status) {
+    case 'working':  return 'bg-emerald-500';
+    case 'busy':     return 'bg-amber-500';
+    case 'degraded': return 'bg-orange-500';
+    case 'offline':  return 'bg-gray-400';
+    default:         return 'bg-blue-400'; // standby
+  }
+}
+
 // Exported (not just used internally) so the U37 (C-06) class-b hold chip has
 // a direct render-level test target, matching the existing pattern of
 // exporting card-face pieces for testability (kanban/TaskCard.tsx's
@@ -1311,9 +1325,17 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
         )}
 
         {/* Agent Pill — guard against a null/empty agent name (belt-and-suspenders;
-            the API now drops null-name agent objects at the source). */}
+            the API now drops null-name agent objects at the source).
+            MR-46: the agent pill now includes a status dot so operators can
+            tell at a glance if the assigned agent is working, standby, or offline. */}
         {task.assigned_agent && (task.assigned_agent as { name: string | null }).name && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700">
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${getAgentStatusDot(
+                (task.assigned_agent as { status?: string }).status,
+              )}`}
+              title={`Assigned agent is ${(task.assigned_agent as { status?: string }).status || 'standby'}`}
+            />
             {(task.assigned_agent as { name: string }).name}
           </span>
         )}
