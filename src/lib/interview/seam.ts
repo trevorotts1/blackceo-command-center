@@ -41,6 +41,11 @@ import {
   updateInterviewStateScript,
   verticalDerivationGuardScript,
 } from './paths';
+// Mandatory-field ids for the answer-completeness pre-flight (see
+// computeAnswerCompleteness below) — the SAME vendored branding-questions.json
+// answer/route.ts already imports for its structured cards, so this can never
+// name a field the rest of the app doesn't already know about.
+import { BRANDING_QUESTIONS } from '@/lib/interview-questions';
 import { readEncryptedFile, writeEncryptedFile, migratePlaintextFile } from './crypto';
 
 const execFileAsync = promisify(execFile);
@@ -183,6 +188,27 @@ export interface GateFlags {
   genuineTranscriptReady: boolean;
   decisionCoverageComplete: boolean;
   noUnprovenancedDeclines: boolean;
+  /** See computeAnswerCompleteness() — question count (25-35) + mandatory
+   *  branding/structural fields. Added 2026-07-30 (client
+   *  incident): the pre-flight used to only check `genuine` (>=3 Q-blocks,
+   *  not synthetic, >512 bytes) — a bar low enough that a 19-question
+   *  interview with 5 missing mandatory fields passed it cleanly. */
+  answerCompletenessOk: boolean;
+}
+
+/** Result of computeAnswerCompleteness() — the answer-evidence pre-flight. */
+export interface AnswerCompleteness {
+  /** Real Q/A block count parsed from the (already-decrypted) transcript. */
+  questionCount: number;
+  /** Mandatory branding + structural field ids currently unanswered. */
+  missingFields: string[];
+  /** True only when the count is in/exempt from the healthy range AND no
+   *  mandatory field is missing. False blocks POST /api/interview/complete. */
+  ok: boolean;
+  /** True when the count is borderline (24 or 36) — informational only. */
+  borderline: boolean;
+  /** Human-readable summary for the 409 response. */
+  reason: string;
 }
 
 /** Typed error surfaced when a Skill-23 script exits non-zero. */
@@ -930,6 +956,112 @@ export function noUnprovenancedDeclines(buildState: BuildState | null): boolean 
   return true;
 }
 
+/* ─────────────────── Answer-evidence completeness (2026-07-30 fix) ─────────── */
+
+const STRUCTURAL_REQUIRED_FIELDS: Array<{ key: string; altKey?: string }> = [
+  { key: 'companyName', altKey: 'company_name' },
+  { key: 'industry' },
+  { key: 'ownerChat', altKey: 'owner_chat' },
+  { key: 'agentName', altKey: 'agent_name' },
+];
+
+/** Ids of BRANDING_QUESTIONS entries marked required:true — the SAME set
+ *  qc-interview-completion.py's check_mandatory_fields() derives from the
+ *  canonical branding-questions.json (this file is the vendored copy). */
+function brandingMandatoryFieldIds(): string[] {
+  return BRANDING_QUESTIONS.filter((q) => q.required).map((q) => q.id);
+}
+
+/** Mirrors qc-interview-completion.py's field_present(): checked at the
+ *  state's top level, then brandingAnswers{}, then interview{}. */
+function fieldPresent(state: BuildState | null, key: string): boolean {
+  const s = (state ?? {}) as Record<string, unknown>;
+  const branding = s.brandingAnswers as Record<string, unknown> | undefined;
+  const nested = s.interview as Record<string, unknown> | undefined;
+  const v = s[key] ?? branding?.[key] ?? nested?.[key];
+  return v != null && String(v).trim() !== '';
+}
+
+/**
+ * Defense-in-depth mirror of qc-interview-completion.py's check #1 (question
+ * count 25-35) and check #3 (mandatory branding + structural fields) — added
+ * after the 2026-07-30 incident reported by the client:
+ * a 19-question interview with 5 missing mandatory fields was
+ * marked interviewComplete=true because THIS route's own pre-flight only
+ * checked `genuine` (readAnswers().genuine — >=3 Q-blocks, not synthetic,
+ * >512 bytes: a bar low enough that 19 real questions sailed through), never
+ * count-in-range or field coverage. The AUTHORITATIVE, blocking gate is now
+ * update-interview-state.sh's evidence check (it runs qc-interview-
+ * completion.py BEFORE writing interviewComplete and refuses with exit 87 on
+ * a hard fail) — this function does NOT replace that; it lets THIS route
+ * refuse with an accurate, itemized 409 (exact count + exact missing field
+ * names) instead of a generic "refused" with an empty `missing[]`.
+ *
+ * Deliberately simpler than the Python gate (no jargon scan, no
+ * no-fabrication check, and only the cheap legacy/tailored exemption signals
+ * — the full anti-fabrication substance floor stays Python-only/
+ * authoritative). This pre-flight is intentionally the MORE conservative of
+ * the two only in one direction: it never trades a false-complete for a
+ * false-incomplete on its own, because a case it happens to let through still
+ * has to clear the authoritative script-side gate before interviewComplete is
+ * ever written.
+ */
+export function computeAnswerCompleteness(state: BuildState | null): AnswerCompleteness {
+  const questionCount = readAnswerBlocks(state).length;
+
+  const missingFields: string[] = [];
+  for (const fid of brandingMandatoryFieldIds()) {
+    if (!fieldPresent(state, fid)) missingFields.push(fid);
+  }
+  for (const { key, altKey } of STRUCTURAL_REQUIRED_FIELDS) {
+    if (!fieldPresent(state, key) && !(altKey && fieldPresent(state, altKey))) {
+      missingFields.push(key);
+    }
+  }
+
+  // Cheap mirror of is_legacy_interview()/is_tailored_short_interview(): these
+  // signals only ever LIFT the count floor, never the mandatory-field check.
+  const legacy = state?.legacyInterview as { preStandard?: boolean } | undefined;
+  const hasLegacyFlag = legacy?.preStandard === true;
+  const qc = (state?.interviewQc ?? {}) as Record<string, unknown>;
+  const overrideReason = String(qc.overrideReason ?? '').toLowerCase();
+  const scope = String(
+    (state?.scope as string | undefined) ??
+      ((state?.interviewProgress as Record<string, unknown> | undefined)?.scope as
+        | string
+        | undefined) ??
+      '',
+  ).toLowerCase();
+  const tailoredTokens = ['tailored', 'founder', 'self-build', 'gap-only', 'gap only'];
+  const exempt =
+    hasLegacyFlag || tailoredTokens.some((t) => overrideReason.includes(t) || scope.includes(t));
+
+  const borderline = questionCount === 24 || questionCount === 36;
+  const tooFew = questionCount < 24 && !exempt;
+  const tooMany = questionCount > 36;
+  const ok = !tooFew && !tooMany && missingFields.length === 0;
+
+  const parts: string[] = [];
+  if (tooMany) {
+    parts.push(`${questionCount} questions is above the 25-35 range (too many)`);
+  } else if (tooFew) {
+    parts.push(`only ${questionCount} of the required 25-35 questions answered`);
+  } else if (borderline) {
+    parts.push(`${questionCount} questions is borderline (target 25-35, human review)`);
+  }
+  if (missingFields.length) {
+    parts.push(`missing required field(s): ${missingFields.join(', ')}`);
+  }
+
+  return {
+    questionCount,
+    missingFields,
+    ok,
+    borderline,
+    reason: parts.length ? parts.join('; ') : 'answer evidence supports completion',
+  };
+}
+
 /* ─────────────────────────── Composite gate snapshot ───────────────────────── */
 
 export interface InterviewGateSnapshot {
@@ -943,16 +1075,23 @@ export interface InterviewGateSnapshot {
   canonical: CanonicalDepartments | null;
   coverage: DecisionCoverage;
   flags: GateFlags;
+  /** Question-count + mandatory-field evidence (2026-07-30 fix). */
+  completeness: AnswerCompleteness;
 }
 
 /**
  * One-call readiness snapshot for the /api/interview/state route + the gated
  * Build button. Reads the canonical FILES (never a divergent DB copy) and shells
  * to list-canonical-departments.py for the live floor. The three UI gate flags
- * mirror the server gates #2/#3/#8:
+ * mirror the server gates #2/#3/#8, plus a 4th (2026-07-30 fix):
  *   genuineTranscriptReady       — genuine transcript (gate #2)
  *   decisionCoverageComplete     — every expected dept decided (gate #3)
  *   noUnprovenancedDeclines      — zero un-provenanced declines (gate #8)
+ *   answerCompletenessOk         — question count 25-35 + mandatory fields
+ *                                  (see computeAnswerCompleteness) — added
+ *                                  after `genuine`'s low bar (>=3 Q-blocks)
+ *                                  let a 19-question/5-missing-field
+ *                                  interview through cleanly
  *
  * If the canonical script is unavailable, coverage is reported incomplete
  * (fail-closed) and the flag is false, so the Build button stays disabled rather
@@ -992,10 +1131,13 @@ export async function getInterviewGateSnapshot(
     };
   }
 
+  const completeness = computeAnswerCompleteness(buildState);
+
   const flags: GateFlags = {
     genuineTranscriptReady: answers.genuine,
     decisionCoverageComplete: coverage.complete,
     noUnprovenancedDeclines: noUnprovenancedDeclines(buildState),
+    answerCompletenessOk: completeness.ok,
   };
 
   return {
@@ -1009,6 +1151,7 @@ export async function getInterviewGateSnapshot(
     canonical,
     coverage,
     flags,
+    completeness,
   };
 }
 

@@ -256,6 +256,7 @@ export async function GET(request: NextRequest) {
       genuineTranscriptReady: false,
       decisionCoverageComplete: false,
       noUnprovenancedDeclines: false,
+      answerCompletenessOk: false,
     };
     return NextResponse.json(
       {

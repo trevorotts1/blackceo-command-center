@@ -17,6 +17,10 @@
  *   2) Stamp progress via update-interview-state.sh --phase --question-number
  *      --asked-by (seam.updateInterviewState → execFile). The script owns the
  *      build-state write; this route never touches build-state with TS/jq.
+ *      --question-number is SELF-DERIVED (2026-07-30 fix) from the real
+ *      Q-block count in the transcript this same request just appended to
+ *      (step 1) — never trusted as-is from the client — so lastQuestionNumber
+ *      can never freeze below the transcript's true size.
  *   3) Mirror branding answers onto the clients table so BrandTheme re-themes the
  *      whole Command Center live: client.brand_color (via resolveBrandColor) and
  *      client.logo_url — the EXACT storeOn columns declared in
@@ -48,6 +52,7 @@ import {
   updateInterviewState,
   getOrCreateInterviewSessionId,
   resolveInterviewWriteIdentity,
+  readAnswerBlocks,
   InterviewScriptError,
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
@@ -298,10 +303,30 @@ export async function POST(req: NextRequest) {
     cfAccessEmail: req.headers.get('Cf-Access-Authenticated-User-Email'),
     operatorEmail: req.headers.get('x-operator-email'),
   });
+
+  // P0 FIX (2026-07-30, client incident — frozen progress
+  // counter): `questionNumber` used to be trusted exactly as the client sent
+  // it (optional — the structured-card builder only includes it when its own
+  // caller passed a positive number, buildAnswerPayload() in answer-
+  // payload.ts). If any submit ever omitted it, or the caller's number
+  // stalled for any reason, `interviewProgress.lastQuestionNumber` could
+  // freeze while the transcript kept growing — exactly what the incident
+  // showed: 19 real Q/A blocks landed while the counter sat at 11. The
+  // transcript we just appended in step 4 (above) is a number this route can
+  // PROVE, so it self-derives from the real Q-block count and only ever moves
+  // the stamped number UP to at least that count — it can never regress it
+  // below what the caller supplied (a legitimate out-of-order/back-navigation
+  // resubmit still keeps its own number when it is already >= the real count).
+  const transcriptQuestionCount = readAnswerBlocks().length;
+  const effectiveQuestionNumber =
+    typeof body.questionNumber === 'number'
+      ? Math.max(body.questionNumber, transcriptQuestionCount)
+      : transcriptQuestionCount;
+
   try {
     await updateInterviewState({
       phase: body.phase,
-      questionNumber: body.questionNumber,
+      questionNumber: effectiveQuestionNumber,
       askedBy,
       rateLimitSessionId,
     });

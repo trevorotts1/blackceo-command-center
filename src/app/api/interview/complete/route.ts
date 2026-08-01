@@ -5,18 +5,30 @@
  * Telegram agent presses at the end of a Skill-23 interview, exposed to the web
  * skin — and NOTHING MORE. Its whole job is:
  *
- *   1. PRE-FLIGHT (defense-in-depth, mirrors server gates #2/#3/#8 via P0-1):
- *      confirm the answers transcript is genuine, decision coverage is complete,
- *      and there are zero un-provenanced declines. If anything is missing, refuse
- *      with a structured 409 that lists exactly what is missing — the UI's own
- *      gate flags should already make this unreachable, but the route fails closed.
+ *   1. PRE-FLIGHT (defense-in-depth, mirrors server gates #2/#3/#8 via P0-1,
+ *      plus a 4th added 2026-07-30): confirm the answers transcript is
+ *      genuine, decision coverage is complete, there are zero un-provenanced
+ *      declines, AND the answer evidence itself supports completion (question
+ *      count 25-35 + every mandatory branding/structural field present — see
+ *      seam.computeAnswerCompleteness). If anything is missing, refuse with a
+ *      structured 409 that lists exactly what is missing — the UI's own gate
+ *      flags should already make this unreachable, but the route fails closed.
+ *      (2026-07-30 incident: a 19-question interview with 5 missing mandatory
+ *      fields was marked complete because `genuineTranscriptReady` was the
+ *      only transcript-related check here, and it only asserts the transcript
+ *      isn't fabricated — not that it's actually DONE.)
  *
  *   2. TRIGGER: execFile `update-interview-state.sh --complete` (via the P0-1 seam
  *      wrapper) — the SAME script the Telegram agent presses. That script owns:
- *        • setting `interviewComplete` (+ interviewCompletedAt),
- *        • seeding interviewQc.status=pending + the *Status pendings + the
- *          departments=[] sentinel + buildKickRequestedAt,
- *        • auto-running qc-interview-completion.py --write-state,
+ *        • running qc-interview-completion.py --write-state FIRST and
+ *          REFUSING (exit 87, interviewComplete never written) unless the
+ *          verdict is PASS or NEEDS-REVIEW — the same evidence check step 1
+ *          performs here, now enforced as the authoritative, non-bypassable
+ *          gate for every caller (web, Telegram agent, resume-cron recovery),
+ *          not just this route's own pre-flight,
+ *        • only THEN setting `interviewComplete` (+ interviewCompletedAt) and
+ *          seeding the *Status pendings + the departments=[] sentinel +
+ *          buildKickRequestedAt,
  *        • firing the ONE [WORKFORCE-RESUME] build-kick — and ONLY when
  *          interviewQc.status==pass.
  *
@@ -74,23 +86,28 @@ const BUILD_REDIRECT = '/onboarding/building';
 /* -------------------------------------------------------------------------- */
 
 interface MissingItem {
-  /** which server gate this maps to (#2 transcript / #3 coverage / #8 declines). */
-  gate: 'transcript' | 'decision_coverage' | 'unprovenanced_declines';
+  /** which server gate this maps to (#2 transcript / #3 coverage / #8 declines
+   *  / answer_completeness added 2026-07-30). */
+  gate: 'transcript' | 'decision_coverage' | 'unprovenanced_declines' | 'answer_completeness';
   reason: string;
   /** dept ids still needing a provenanced decision (gate #3). */
   departments?: string[];
   /** dept ids whose decline is not provenanced and would be rejected (gate #8). */
   rejections?: string[];
+  /** mandatory field ids still unanswered (answer_completeness gate). */
+  missingFields?: string[];
+  /** real question count found in the transcript (answer_completeness gate). */
+  questionCount?: number;
 }
 
 /**
  * Build the `missing[]` list from a gate snapshot. Empty array === ready to
- * press the trigger. Mirrors the three server gates so the 409 tells the owner
+ * press the trigger. Mirrors the server gates so the 409 tells the owner
  * (or the UI) precisely what still blocks the build.
  */
 function collectMissing(snapshot: InterviewGateSnapshot): MissingItem[] {
   const missing: MissingItem[] = [];
-  const { flags, answers, coverage, canonical } = snapshot;
+  const { flags, answers, coverage, canonical, completeness } = snapshot;
 
   if (!flags.genuineTranscriptReady) {
     missing.push({
@@ -100,6 +117,25 @@ function collectMissing(snapshot: InterviewGateSnapshot): MissingItem[] {
         : !answers.exists
           ? 'No interview transcript has been recorded yet.'
           : `The interview transcript is too thin (found ${answers.qBlockCount} answered question(s); a genuine interview needs more).`,
+    });
+  }
+
+  // answer_completeness (2026-07-30 fix, client incident):
+  // `genuineTranscriptReady` above only asserts the transcript isn't FAKE
+  // (>=3 Q-blocks) — it never asserted the interview is actually DONE (25-35
+  // questions, every mandatory branding/structural field answered). A
+  // 19-question interview with 5 missing fields passed the transcript gate
+  // cleanly and had nothing else in this route's OWN pre-flight to catch it;
+  // the only thing that caught it was the (best-effort, post-hoc, non-fatal)
+  // QC run inside update-interview-state.sh. This gate makes the SAME
+  // question-count + mandatory-field evidence a pre-flight 409 here too, with
+  // the exact numbers, instead of relying solely on the script's exit 87.
+  if (!flags.answerCompletenessOk) {
+    missing.push({
+      gate: 'answer_completeness',
+      reason: completeness.reason,
+      missingFields: completeness.missingFields.length ? completeness.missingFields : undefined,
+      questionCount: completeness.questionCount,
     });
   }
 
