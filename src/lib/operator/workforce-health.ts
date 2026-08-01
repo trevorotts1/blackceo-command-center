@@ -12,7 +12,7 @@
  */
 
 import { getDb } from '@/lib/db';
-import { loadBoardSlaConfig, resolveSlaThreshold } from '@/lib/board-slas';
+import { resolveSlaThreshold } from '@/lib/board-slas';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -114,8 +114,6 @@ function queryCount(sql: string, ...params: unknown[]): number {
 // ---------------------------------------------------------------------------
 
 function computeStuckTaskCounters(): StuckTaskCounters {
-  const db = getDb();
-
   const blocked = queryCount(
     `SELECT COUNT(*) AS c FROM tasks WHERE status = 'blocked' AND archived_at IS NULL`,
   );
@@ -128,12 +126,17 @@ function computeStuckTaskCounters(): StuckTaskCounters {
     `SELECT COUNT(*) AS c FROM tasks WHERE status = 'blocked' AND block_audience = 'SYSTEM' AND archived_at IS NULL`,
   );
 
-  // Tasks stuck in pending_dispatch for more than 2 hours
+  // Tasks stuck in pending_dispatch for more than 2 hours.
+  // NOTE: the subtraction MUST be parenthesised before the *24 hours
+  // conversion — `julianday('now') - julianday(updated_at) * 24` binds the
+  // multiplication to julianday(updated_at) first (SQL precedence), yielding
+  // a large negative number that is never > 2, i.e. every counter would
+  // silently report 0 forever.
   const dispatchStuck = queryCount(
     `SELECT COUNT(*) AS c FROM tasks
       WHERE status = 'pending_dispatch'
         AND archived_at IS NULL
-        AND julianday('now') - julianday(updated_at) * 24 > 2`,
+        AND (julianday('now') - julianday(updated_at)) * 24 > 2`,
   );
 
   // Tasks in review for more than 24 hours without a QC result
@@ -141,7 +144,7 @@ function computeStuckTaskCounters(): StuckTaskCounters {
     `SELECT COUNT(*) AS c FROM tasks t
       WHERE t.status = 'review'
         AND t.archived_at IS NULL
-        AND julianday('now') - julianday(t.updated_at) * 24 > 24
+        AND (julianday('now') - julianday(t.updated_at)) * 24 > 24
         AND NOT EXISTS (
           SELECT 1 FROM task_qc_results q
           WHERE q.task_id = t.id AND q.scoring_path = 'llm'
@@ -153,7 +156,7 @@ function computeStuckTaskCounters(): StuckTaskCounters {
     `SELECT COUNT(*) AS c FROM tasks
       WHERE status = 'in_progress'
         AND archived_at IS NULL
-        AND julianday('now') - julianday(updated_at) * 24 > 48`,
+        AND (julianday('now') - julianday(updated_at)) * 24 > 48`,
   );
 
   return {
@@ -182,8 +185,7 @@ interface AgentTaskRow {
 }
 
 function computeAgentConnectivity(): AgentConnectivityRow[] {
-  const db = getDb();
-  const rows = db
+  const rows = getDb()
     .prepare(
       `SELECT
          a.id,
@@ -252,17 +254,20 @@ interface DispatchHourRow {
 }
 
 function computeDispatchSparkline(): DispatchFailurePoint[] {
-  const db = getDb();
-
-  const rows = db
+  // Dispatch failures are recorded by task-dispatcher.ts as
+  // 'task_dispatch_deferred' events (transient failure + backoff); there is
+  // no 'dispatch_failed' event type in this codebase, so counting that would
+  // always yield 0. 'triad_gate_hold' rows carry task_id only (agent_id is
+  // NULL), which is fine here — the sparkline never groups by agent.
+  const rows = getDb()
     .prepare(
       `SELECT
          strftime('%Y-%m-%dT%H:00:00Z', e.created_at) AS hourBucket,
          COUNT(*) AS total,
-         SUM(CASE WHEN e.type = 'dispatch_failed' THEN 1 ELSE 0 END) AS failed,
+         SUM(CASE WHEN e.type = 'task_dispatch_deferred' THEN 1 ELSE 0 END) AS failed,
          SUM(CASE WHEN e.type = 'triad_gate_hold' THEN 1 ELSE 0 END) AS held
        FROM events e
-       WHERE e.type IN ('task_dispatched', 'dispatch_failed', 'triad_gate_hold')
+       WHERE e.type IN ('task_dispatched', 'task_dispatch_deferred', 'triad_gate_hold')
          AND e.created_at >= datetime('now', '-48 hours')
        GROUP BY strftime('%Y-%m-%dT%H:00:00Z', e.created_at)
        ORDER BY hourBucket ASC`,
@@ -290,9 +295,7 @@ interface SlaTaskRow {
 }
 
 function computeSlaViolations(): SlaViolationSummary {
-  const db = getDb();
-
-  const tasks = db
+  const tasks = getDb()
     .prepare(
       `SELECT id, department, status, updated_at, block_audience
          FROM tasks

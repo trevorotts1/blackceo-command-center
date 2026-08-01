@@ -21,7 +21,6 @@ import {
   Shield,
 } from 'lucide-react';
 import type { WorkforceHealthPayload } from '@/lib/operator/workforce-health';
-import ModuleHealthDot from '@/components/operator/ModuleHealthDot';
 
 const POLL_INTERVAL_MS = 30 * 1000;
 const SPARKLINE_HOURS = 48;
