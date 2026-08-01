@@ -5151,6 +5151,16 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
         const blockedNote = `[QC-BLOCKED] Task failed QC ${newAttempts} time(s) (cap: ${QC_MAX_REROUTES}). Last score: ${result.score.toFixed(1)}/10. Audience: ${blockAudience}. ${result.reason}`;
 
+        // MR-06 BLOCKED-ASK FIX: populate blocked_on_human and ask alongside the
+        // existing block_* metadata so the blocked card is ANSWERABLE. Without
+        // `ask`, a blocked card re-escalates forever with "(no ask specified)"
+        // and can never be cleared. SYSTEM blocks name 'operator', OWNER blocks
+        // name 'owner'. ask is capped at 500 to match UpdateTaskSchema.ask's max
+        // length. Both columns land atomically with the status flip; the
+        // migration-104 triggers enforce the invariant going forward.
+        const qcBlockedOnHuman = isSystemBlock ? 'operator' : 'owner';
+        const qcAsk = blockNeeds.slice(0, 500);
+
         // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
         // qc_reroute_attempts + the full block_* metadata must land atomically
         // with the status flip, mirroring recordDispatchFailure); audited
@@ -5167,6 +5177,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
              block_gaps = ?,
              block_needs = ?,
              block_audience = ?,
+             blocked_on_human = ?,
+             ask = ?,
              updated_at = ?
            WHERE id = ? AND status = 'review'`,
           [
@@ -5175,6 +5187,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             blockGapsJson,
             blockNeeds,
             blockAudience,
+            qcBlockedOnHuman,
+            qcAsk,
             now,
             taskId,
           ],

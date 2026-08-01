@@ -153,6 +153,15 @@ CREATE TABLE IF NOT EXISTS tasks (
   block_gaps TEXT,                            -- migration 073 (added to CRITICAL registry by U061 step 4)
   block_needs TEXT,                           -- migration 073 (added to CRITICAL registry by U061 step 4)
   block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM')),  -- migration 073 (added to CRITICAL registry by U061 step 4)
+  blocked_reason TEXT CHECK (blocked_reason IN ('decision','approval','credential','payment') OR blocked_reason IS NULL),  -- migration 072
+  blocked_on_human TEXT CHECK (blocked_on_human IN ('owner','operator') OR blocked_on_human IS NULL),  -- migration 072
+  ask TEXT,                                   -- migration 072 (answerable instruction for the blocked_on_human)
+  -- NOTE: last_progress_at is deliberately NOT in this base CREATE. Migration 072
+  -- creates idx_tasks_last_progress INSIDE its column-absence guard; declaring the
+  -- column here would skip that guard on fresh installs and silently lose the index
+  -- (the exact defect class db-upgrade-migration-ordering.test.ts locks against —
+  -- see migration 096's "Family B"). Migration 072 runs on fresh installs too, so
+  -- its guard fires and adds the column + index + backfill.
   redispatch_count INTEGER DEFAULT 0,         -- migration 084
   persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
   -- P2-02 (migration 099 owns this for existing DBs; this base CREATE covers
