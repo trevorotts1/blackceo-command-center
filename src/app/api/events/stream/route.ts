@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
         try {
           // Dynamic import so Next.js doesn't bundle better-sqlite3 into
           // the edge runtime build.
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
           const { getDb } = require('@/lib/db') as typeof import('@/lib/db');
           const db = getDb();
           const rows = db

@@ -143,7 +143,7 @@ function dropClient(controller: ReadableStreamDefaultController): void {
  */
 function journalEvent(event: SSEEvent): void {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
     const { getDb } = require('@/lib/db') as typeof import('@/lib/db');
     const db = getDb();
     db.prepare(

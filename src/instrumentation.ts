@@ -65,7 +65,7 @@ export async function register(): Promise<void> {
   // Skipped when NODE_ENV=test, VITEST is active, or DISABLE_STARTUP_LOCK=1
   // (operator escape hatch for emergency debugging).
   const { claimStartupLock } = await import('@/lib/startup-lock');
-  const { dirname } = await import('node:path');
+  const { dirname } = await import('path');
   const lockDbDir = process.env.DATABASE_PATH
     ? dirname(process.env.DATABASE_PATH)
     : process.cwd();

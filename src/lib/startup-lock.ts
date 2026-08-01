@@ -43,8 +43,8 @@
  *   board. This lock PREVENTS the second process from even opening the DB.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
 
 const LOCK_FILENAME = 'mission-control.lock';
 
