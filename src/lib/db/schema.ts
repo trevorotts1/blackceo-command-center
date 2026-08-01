@@ -153,6 +153,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   block_gaps TEXT,                            -- migration 073 (added to CRITICAL registry by U061 step 4)
   block_needs TEXT,                           -- migration 073 (added to CRITICAL registry by U061 step 4)
   block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM')),  -- migration 073 (added to CRITICAL registry by U061 step 4)
+  blocked_reason TEXT CHECK (blocked_reason IN ('decision','approval','credential','payment') OR blocked_reason IS NULL),  -- migration 072
+  blocked_on_human TEXT CHECK (blocked_on_human IN ('owner','operator') OR blocked_on_human IS NULL),  -- migration 072
+  ask TEXT,                                   -- migration 072 (answerable instruction for the blocked_on_human)
+  last_progress_at TEXT,                      -- migration 072 (bumped on any status/progress change)
   redispatch_count INTEGER DEFAULT 0,         -- migration 084
   persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
   -- P2-02 (migration 099 owns this for existing DBs; this base CREATE covers

@@ -5321,6 +5321,73 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '117',
+    name: 'mr06_backfill_blocked_ask',
+    // MR-06 — backfill blocked_on_human + ask on legacy blocked rows.
+    //
+    // The QC scorer block path and recordDispatchFailure() both wrote block_audience
+    // and block_needs but SKIPPED blocked_on_human (who is being waited on) and ask
+    // (the instruction). The stale-task sweep reads `ask` to re-ping the human; a
+    // missing ask renders as "(no ask specified)" and the card can never leave
+    // Blocked — re-escalating every 10-minute tick forever.
+    //
+    // This migration backfills as many poisoned rows as it can reconstruct using
+    // the surviving block_audience + block_needs columns that WERE written. Every
+    // backfilled row is DERIVED (never guessed) from data the original producer
+    // already wrote, so no human review is required. Rows that genuinely can't be
+    // backfilled (no block_needs, no block_audience) are reported in the boot log
+    // for manual triage.
+    //
+    // The migration-104 triggers enforce the invariant FORWARD; this backfill
+    // cleans the rows already in the hole BEFORE 104 landed. Forward-only
+    // enforcement is the whole design — existing rows are repaired, not destroyed.
+    //
+    // Idempotent: UPDATE only WHERE blocked_on_human IS NULL, so re-running is a
+    // no-op. Safe in the additive-only self-heal path (row data writes are not
+    // schema DDL, but the trigger already exist from 104; this just repairs
+    // pre-existing data and has zero schema impact).
+    up: (db) => {
+      console.log('[Migration 117] MR-06 backfilling blocked_on_human + ask on legacy blocked rows...');
+
+      // Guard: blocked_on_human / ask columns must exist (migration 072).
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('blocked_on_human') || !cols.includes('ask')) {
+        console.log('[Migration 117] tasks.blocked_on_human / tasks.ask absent — skipping (migration 072 owns them)');
+        return;
+      }
+
+      // Backfill blocked rows whose block_audience tells us WHO and block_needs
+      // tells us WHAT, but those fields were never copied into blocked_on_human/ask
+      // (the gap that caused the infinite-re-escalation incident).
+      //
+      // blocked_on_human is derived from block_audience: SYSTEM → 'operator',
+      // OWNER → 'owner'. No guessing — the audience IS the human class.
+      const backfillResult = db.prepare(
+        `UPDATE tasks
+           SET blocked_on_human = CASE
+                 WHEN block_audience = 'SYSTEM' THEN 'operator'
+                 WHEN block_audience = 'OWNER'   THEN 'owner'
+                 ELSE blocked_on_human
+               END,
+               ask = CASE
+                 WHEN ask IS NULL OR trim(ask) = '' THEN
+                   substring(
+                     coalesce(block_needs,
+                       'Task blocked. Reply here to unblock or reassign.'),
+                     1, 500)
+                 ELSE ask
+               END
+         WHERE status = 'blocked'
+           AND (blocked_on_human IS NULL OR trim(blocked_on_human) = '')
+           AND archived_at IS NULL`,
+      ).run();
+
+      console.log(
+        `[Migration 117] Backfilled blocked_on_human + ask on ${backfillResult.changes} legacy blocked row(s)`,
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

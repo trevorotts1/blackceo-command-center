@@ -147,15 +147,25 @@ export function recordDispatchFailure(
           `attempt ${attempts} (not retried). ${opts.needs}`
         : `[dispatch-blocked] ${opts.reason} after ${attempts} failed advance attempt(s) ` +
           `(cap ${MAX_DISPATCH_ATTEMPTS}). ${opts.needs}`;
+      // MR-06 BLOCKED-ASK FIX: when a dispatch path blocks a task, also populate
+      // blocked_on_human and ask so the blocked card is ANSWERABLE — the named
+      // human knows who they are and WHAT they must do. Without `ask`, a blocked
+      // card re-escalates forever with "(no ask specified)" and can never be
+      // cleared. The blocked-ask invariant triggers (migration 104) enforce that
+      // blocked_on_human set ⇒ ask must be non-blank, so both land atomically.
+      // ask is capped at 500 to match UpdateTaskSchema.ask's max length.
+      const dispatchBlockedOnHuman = opts.audience === 'SYSTEM' ? 'operator' : 'owner';
+      const dispatchAsk = opts.needs.slice(0, 500);
       // U99-RAW-STATUS-WRITER: compound single-row UPDATE (the full dispatch-
       // accounting + block_* metadata must land atomically with the status
       // flip); audited immediately below via recordStatusEvent (DISP-10),
       // gated on the CAS actually landing.
       const blockRes = run(
         `UPDATE tasks SET status = 'blocked', dispatch_attempts = ?, last_dispatch_attempt_at = ?,
-           next_dispatch_eligible_at = NULL, block_reason = ?, block_needs = ?, block_audience = ?, updated_at = ?
+           next_dispatch_eligible_at = NULL, block_reason = ?, block_needs = ?, block_audience = ?,
+           blocked_on_human = ?, ask = ?, updated_at = ?
          WHERE id = ? AND status NOT IN ('done') AND archived_at IS NULL`,
-        [attempts, now, opts.reason, opts.needs, opts.audience, now, taskId],
+        [attempts, now, opts.reason, opts.needs, opts.audience, dispatchBlockedOnHuman, dispatchAsk, now, taskId],
       );
       if ((blockRes.changes ?? 0) > 0) {
         recordStatusEvent(taskId, row?.status ?? 'unknown', 'blocked', {
