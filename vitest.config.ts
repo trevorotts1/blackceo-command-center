@@ -28,6 +28,11 @@ export default defineConfig({
       // columns; catch-all always honored). DB-backed vitest suite, same
       // reason as floor-department-invariant.test.ts above.
       'tests/unit/department-optout-board-wiring.test.ts',
+      // MR-21 (fix2): the reseed MIGRATES a pre-MR-21 `dept-`-prefixed workspace
+      // row (re-keys its id to the bare canonical id + re-homes its tasks/agents)
+      // instead of minting a duplicate canonical row and orphaning the original.
+      // DB-backed vitest suite, same reason as floor-department-invariant above.
+      'tests/unit/mr21-reseed-dept-prefix-migration.test.ts',
       // MR-08 fable-correction: /operator/health data layer must report real
       // numbers — locks the parenthesised julianday hour math (unparenthesised
       // SQL precedence silently zeros every stuck-task counter) and the real

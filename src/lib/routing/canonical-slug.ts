@@ -220,6 +220,38 @@ export function canonicalDeptFromAnyLabel(label: string | null | undefined): str
 }
 
 /**
+ * Normalize a department id/slug that may carry the Skill-23 `dept-` prefix
+ * (e.g. "dept-marketing") to the bare canonical form the CC schema, sidebar,
+ * and routing expect ("marketing") — WITHOUT applying alias remaps to ids that
+ * are already in bare CC form.
+ *
+ * canonicalDeptSlug() does two things at once: it strips the `dept-` prefix AND
+ * it applies the ALIAS_MAP remaps (e.g. "billing" -> "billing-finance",
+ * "webdev" -> "web-development"). Running an already-valid bare CC id through
+ * it rewrites that id to a DIFFERENT canonical id. When that happens at a
+ * storage join point — the workspace reseed, or the departments POST update —
+ * it mints a SECOND workspace row under the new id and orphans the original
+ * row's tasks/agents, and it breaks exact-id matching (e.g. the U110 opt-out
+ * board wiring, which compares manifest ids to workspace ids by value).
+ *
+ * This guard applies canonicalDeptSlug() ONLY to `dept-`-prefixed ids and
+ * returns every other id untouched, so bare CC ids (and bare alias ids like
+ * "billing" that a live box may legitimately store) pass through exactly as
+ * written. Both the reseed (migrations.ts) and the departments POST route use
+ * this one helper so the two surfaces can never drift apart.
+ *
+ * @example
+ *   normalizeDeptPrefixedId('dept-marketing') → 'marketing'
+ *   normalizeDeptPrefixedId('dept-ceo')       → 'master-orchestrator'
+ *   normalizeDeptPrefixedId('billing')        → 'billing'   (NOT 'billing-finance')
+ *   normalizeDeptPrefixedId('marketing')      → 'marketing'
+ */
+export function normalizeDeptPrefixedId(id: string | null | undefined): string {
+  if (!id) return '';
+  return id.trim().toLowerCase().startsWith('dept-') ? canonicalDeptSlug(id) || id : id;
+}
+
+/**
  * Return true if `slug` (after canonicalization) is the master-orchestrator
  * / CEO department.
  */

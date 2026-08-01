@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { seedStarterSOPs } from '../sops-seed';
-import { canonicalDeptSlug } from '../routing/canonical-slug';
+import { canonicalDeptSlug, normalizeDeptPrefixedId } from '../routing/canonical-slug';
 import {
   safeReaddirNames,
   safeReadFileUtf8,
@@ -7018,16 +7018,15 @@ export function reseedWorkspacesFromConfig(
       // already-valid workspace id. Doing that on a live box mints a SECOND
       // workspace row under the new id and orphans the original row's tasks —
       // and it breaks the U110 opt-out matching, which compares manifest ids to
-      // workspace ids by exact value. So: strip/resolve the `dept-` prefix only.
-      // The raw (pre-normalization) id is preserved for dedup below so a dept-
-      // prefixed entry for the same department as an existing bare entry still
-      // collides correctly.
+      // workspace ids by exact value. So: strip/resolve the `dept-` prefix only
+      // (normalizeDeptPrefixedId, shared with the departments POST route so the
+      // two surfaces never drift). The raw (pre-normalization) id is preserved
+      // for dedup below so a dept-prefixed entry for the same department as an
+      // existing bare entry still collides correctly.
       const rawId = String(dept.id || '');
       const rawSlug = String(dept.slug || rawId);
-      const normalizeDeptId = (s: string): string =>
-        s.trim().toLowerCase().startsWith('dept-') ? canonicalDeptSlug(s) || s : s;
-      const canonicalId = normalizeDeptId(rawId);
-      const canonicalSlug = normalizeDeptId(rawSlug);
+      const canonicalId = normalizeDeptPrefixedId(rawId);
+      const canonicalSlug = normalizeDeptPrefixedId(rawSlug);
 
       const slugLower = rawSlug.toLowerCase();
       const isCeo = canonicalSlug === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || rawId === 'ceo';
@@ -7048,6 +7047,50 @@ export function reseedWorkspacesFromConfig(
       if (canonOwner && canonOwner !== canonicalId && canonOwner !== rawId) {
         console.log(`[reseed] Skipping "${rawId}" (canonical "${canonicalId}") — department already represented by workspace "${canonOwner}"`);
         continue;
+      }
+
+      // MR-21 (fix2): MIGRATE a pre-MR-21 `dept-`-prefixed workspace row instead
+      // of orphaning it. A box seeded before MR-21 carries a row with id
+      // "dept-marketing"; this entry's canonicalId is "marketing". The dedup
+      // above does NOT skip it (canonOwner === rawId), and the upsert below keys
+      // on canonicalId — so without this branch the INSERT would mint a SECOND
+      // "marketing" row and strand every task/agent still pointing at the old
+      // "dept-marketing" row, which the sidebar/routing (now matching the bare
+      // canonical id) would never display again. Re-key the old row's id to the
+      // canonical id (and re-home its tasks/agents) so the upsert's
+      // ON CONFLICT(id) DO UPDATE then refreshes it in place — one row, no
+      // orphans. Only fires when the canonical target id is actually free; if a
+      // "marketing" row already exists alongside the "dept-marketing" row, the
+      // FM-6 uniqueness guard above has already routed this entry elsewhere.
+      if (canonOwner && canonOwner === rawId && canonOwner !== canonicalId) {
+        const canonicalTaken = !!existsCheck.get(canonicalId);
+        if (!canonicalTaken) {
+          // Re-keying a workspace id trips the FK constraint whichever order we
+          // write: re-point the children first and they momentarily reference a
+          // not-yet-existing parent; re-key the parent first and the children
+          // momentarily dangle. So — exactly like migration 051's canonical
+          // reshape — drop FK enforcement for the rehome, re-point every child
+          // that carries a workspace_id FK, re-key the parent, then restore.
+          const fkRow = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+          const fkWasOn = fkRow?.foreign_keys === 1;
+          db.exec('PRAGMA foreign_keys = OFF');
+          try {
+            const rehome = db.transaction(() => {
+              for (const child of ['tasks', 'agents', 'bug_tickets']) {
+                try {
+                  db.prepare(`UPDATE ${child} SET workspace_id = ? WHERE workspace_id = ?`).run(canonicalId, canonOwner);
+                } catch {
+                  /* table absent on an older DB — nothing to re-home */
+                }
+              }
+              db.prepare('UPDATE workspaces SET id = ? WHERE id = ?').run(canonicalId, canonOwner);
+            });
+            rehome();
+          } finally {
+            if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+          }
+          console.log(`[reseed] Migrated pre-MR-21 workspace "${canonOwner}" -> "${canonicalId}" (re-homed its tasks/agents; no orphan)`);
+        }
       }
 
       // U019: engine workspaces (podcast/anthology) are fleet-shared, never
