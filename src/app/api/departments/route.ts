@@ -8,6 +8,8 @@ import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 import { getSession } from '@/lib/interview/store';
 import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { resolveActiveCompanyId } from '@/lib/company';
+import { boardWhereClause } from '@/lib/workspaces/board-query';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -47,12 +49,35 @@ async function readDepartments(): Promise<DepartmentEntry[]> {
   return (parsed as Record<string, unknown>[]).map(normalizeDeptEntry);
 }
 
-// GET /api/departments — return current department list
+/**
+ * MR-47: GET /api/departments — return current department list from the
+ * CANONICAL workspaces table, NOT the flat departments.json file. This
+ * guarantees the API surface matches what routing (loadDepartments() in
+ * departments.config.ts) actually uses, eliminating the two-sources-of-truth
+ * drift that caused "department missing from board" bugs.
+ */
 export async function GET() {
   try {
-    const departments = await readDepartments();
+    const db = getDb();
+    const scope = boardWhereClause(resolveActiveCompanyId(db), { includeArchived: false });
+
+    const workspaces = db.prepare(`
+      SELECT w.id, w.name, w.icon, w.slug
+        FROM workspaces w
+        ${scope.sql}
+        ORDER BY w.sort_order ASC, w.name ASC
+    `).all(...scope.params) as { id: string; name: string; icon: string; slug: string }[];
+
+    const departments: DepartmentEntry[] = workspaces.map((ws) => ({
+      id: ws.id,
+      emoji: ws.icon || '📁',
+      name: ws.name,
+      headTitle: '',
+    }));
+
     return NextResponse.json({ success: true, departments });
-  } catch {
+  } catch (err) {
+    console.error('[GET /api/departments] failed to query workspaces:', err);
     return NextResponse.json(
       { success: false, message: 'Failed to load departments configuration.' },
       { status: 500 }
@@ -391,8 +416,14 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // ─── UPDATE mode (pre-existing behavior) ──────────────────────────────────
-  // MR-21: accept `role` as alias for `headTitle` (Skill-23 manifest format).
+  // ─── UPDATE mode ──────────────────────────────────────────────────────────
+  // MR-47: Updates are written to the workspaces table (canonical source of
+  // truth) instead of the flat departments.json file. This keeps the update
+  // surface in sync with what both the routing engine (loadDepartments()) and
+  // GET /api/departments now query.
+  // MR-21: accept `role` as alias for `headTitle` (Skill-23 manifest format),
+  // and normalize the id param through canonicalDeptSlug() so a Skill-23
+  // manifest entry with dept- prefix matches a bare-id workspace lookup.
   const { id: rawId, name, emoji, headTitle: bodyHeadTitle } = b as Partial<DepartmentEntry & { role?: string }>;
   const headTitle = bodyHeadTitle ?? (b as Record<string, unknown>).role as string | undefined;
 
@@ -427,34 +458,42 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const departments = await readDepartments();
-    // MR-21: normalize both the stored id and the id param through canonicalDeptSlug()
-    // so a Skill-23 manifest entry with dept- prefix matches a bare-id lookup.
-    const index = departments.findIndex((d) => {
-      const storedCanonical = canonicalDeptSlug(d.id) || d.id;
-      return d.id === id || d.id === rawId || storedCanonical === id;
-    });
+    const db = getDb();
 
-    if (index === -1) {
+    const existing = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(id) as { id: string } | undefined;
+    if (!existing) {
       return NextResponse.json(
         { success: false, message: `Department with id "${id}" not found.` },
         { status: 404 }
       );
     }
 
-    // Apply updates
-    if (name !== undefined) departments[index].name = name.trim();
-    if (emoji !== undefined) departments[index].emoji = emoji.trim();
-    if (headTitle !== undefined) departments[index].headTitle = headTitle.trim();
-
-    await writeFile(DEPARTMENTS_CONFIG_PATH, JSON.stringify(departments, null, 2), 'utf-8');
+    // Apply updates to the canonical workspaces table
+    if (name !== undefined) {
+      db.prepare('UPDATE workspaces SET name = ?, updated_at = datetime(\'now\') WHERE id = ?')
+        .run(name.trim(), id);
+    }
+    if (emoji !== undefined) {
+      db.prepare('UPDATE workspaces SET icon = ?, updated_at = datetime(\'now\') WHERE id = ?')
+        .run(emoji.trim(), id);
+    }
+    if (headTitle !== undefined) {
+      // headTitle maps to the department head agent's name;
+      // update the agent record if this workspace has a head_agent_id
+      const headAgentId = (db.prepare('SELECT head_agent_id FROM workspaces WHERE id = ?').get(id) as { head_agent_id: string | null } | undefined)?.head_agent_id;
+      if (headAgentId) {
+        db.prepare('UPDATE agents SET name = ?, updated_at = datetime(\'now\') WHERE id = ?')
+          .run(headTitle.trim(), headAgentId);
+      }
+    }
 
     return NextResponse.json({
       success: true,
       message: 'Department updated successfully.',
-      department: departments[index],
+      department: { id, name: name?.trim() ?? null, emoji: emoji?.trim() ?? null, headTitle: headTitle?.trim() ?? null },
     });
-  } catch {
+  } catch (err) {
+    console.error('[PATCH /api/departments] failed to update workspace:', err);
     return NextResponse.json(
       { success: false, message: 'Failed to save departments configuration.' },
       { status: 500 }
