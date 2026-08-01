@@ -4,7 +4,8 @@
  *
  * B3: probeSessionLiveness() classifies a session as alive / idle / unknown from
  *     an injected chat.history reader (no live gateway needed) — the caller skips
- *     the force-block ONLY on 'alive'. Also asserts the higher default threshold.
+ *     the force-block ONLY on 'alive'. MR-07 adds task-scoping: a message must
+ *     reference the probed task id to count as liveness for that task.
  * B6: the intake-advance sweep surfaces a QC-reroute-capped task to the operator
  *     EXACTLY once (task_capped event dedup); the stale sweep does NOT bounce a
  *     review task deliberately parked by QC (heuristic / provider-down markers).
@@ -24,7 +25,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, run, queryOne, queryAll } from '../../src/lib/db';
-import { probeSessionLiveness, type SessionHistoryReader } from '../../src/lib/jobs/execution-watcher';
+import { probeSessionLiveness, type SessionHistoryReader, type RawHistoryMessage } from '../../src/lib/jobs/execution-watcher';
 import { runStaleTaskSweep } from '../../src/lib/jobs/stale-task-sweep';
 import { runIntakeAdvanceSweep } from '../../src/lib/jobs/intake-advance-sweep';
 
@@ -36,8 +37,10 @@ function hoursAgoIso(h: number): string {
   return new Date(Date.now() - h * 3600_000).toISOString();
 }
 
+const taskId = `task-${uuidv4().slice(0, 8)}`;
+
 const baseTask = {
-  id: 't',
+  id: taskId,
   assigned_agent_id: 'a',
   assigned_agent_name: 'Engineering',
   assigned_agent_role: 'Head',
@@ -45,12 +48,16 @@ const baseTask = {
   openclaw_session_id: 'mission-control-engineering',
 };
 
+function taskMentionedMessage(content: string, ageMin = 2): RawHistoryMessage {
+  return { role: 'assistant', content, ts: Date.now() - ageMin * 60_000 };
+}
+
 // ── B3: liveness probe ───────────────────────────────────────────────────────
 
 test('B3: probe → alive when a session message is newer than the cutoff', async () => {
   const cutoffMs = Date.now() - 60 * 60_000; // 60 min ago
   const reader: SessionHistoryReader = async () => [
-    { role: 'assistant', ts: Date.now() - 2 * 60_000 }, // 2 min ago → newer than cutoff
+    { role: 'assistant', content: `Working on task ${taskId}...`, ts: Date.now() - 2 * 60_000 }, // 2 min ago → newer than cutoff
   ];
   assert.equal(await probeSessionLiveness(baseTask, cutoffMs, reader), 'alive');
 });
@@ -58,15 +65,68 @@ test('B3: probe → alive when a session message is newer than the cutoff', asyn
 test('B3: probe → alive with an ISO-string timestamp too', async () => {
   const cutoffMs = Date.now() - 60 * 60_000;
   const reader: SessionHistoryReader = async () => [
-    { role: 'assistant', created_at: new Date(Date.now() - 3 * 60_000).toISOString() },
+    { role: 'assistant', content: `Deploying fix for ${taskId}`, created_at: new Date(Date.now() - 3 * 60_000).toISOString() },
   ];
   assert.equal(await probeSessionLiveness(baseTask, cutoffMs, reader), 'alive');
+});
+
+test('B3: MR-07 — probe → idle when recent messages exist but none reference the probed task', async () => {
+  const cutoffMs = Date.now() - 60 * 60_000;
+  // The agent is chatting about OTHER tasks but NOT the probed one.
+  const reader: SessionHistoryReader = async () => [
+    taskMentionedMessage('Working on task other-123 ...', 3),
+    taskMentionedMessage('Deploying task other-456 ...', 5),
+  ];
+  assert.equal(
+    await probeSessionLiveness(baseTask, cutoffMs, reader),
+    'idle',
+    'unrelated chatter does NOT count as liveness for the probed task',
+  );
+});
+
+test('B3: MR-07 — probe → alive when one of several messages references the probed task', async () => {
+  const cutoffMs = Date.now() - 60 * 60_000;
+  const reader: SessionHistoryReader = async () => [
+    taskMentionedMessage('Working on task other-123 ...', 5),
+    taskMentionedMessage(`Now finishing task ${taskId} — almost done`, 2),
+  ];
+  assert.equal(await probeSessionLiveness(baseTask, cutoffMs, reader), 'alive');
+});
+
+test('B3: MR-07 — probe → idle when task-reference message is OLD (before cutoff) but unrelated chatter is recent', async () => {
+  const cutoffMs = Date.now() - 60 * 60_000;
+  // Task-referenced message is 90 min ago (older than 60 min cutoff).
+  // Unrelated recent chatter (10 min ago) should NOT keep the task alive.
+  const reader: SessionHistoryReader = async () => [
+    taskMentionedMessage(`Still working on ${taskId}...`, 90),
+    taskMentionedMessage('Chatting about something else entirely', 10),
+  ];
+  assert.equal(
+    await probeSessionLiveness(baseTask, cutoffMs, reader),
+    'idle',
+    'old task mention + recent unrelated chat is still idle for this task',
+  );
+});
+
+test('B3: MR-07 — probe → alive (conservative) when recent messages lack content but have timestamps', async () => {
+  // When the gateway does not include `content` in messages, every message is
+  // content-less. The probe cannot task-scope, so it falls back to the broad
+  // check — a "false idle" is worse than a "false alive".
+  const cutoffMs = Date.now() - 60 * 60_000;
+  const reader: SessionHistoryReader = async () => [
+    { role: 'assistant', ts: Date.now() - 2 * 60_000 },
+  ];
+  assert.equal(
+    await probeSessionLiveness(baseTask, cutoffMs, reader),
+    'alive',
+    'content-omitting gateway: broad fallback returns alive so a live task is never falsely blocked',
+  );
 });
 
 test('B3: probe → idle when the session responds but all messages predate the cutoff', async () => {
   const cutoffMs = Date.now() - 60 * 60_000;
   const reader: SessionHistoryReader = async () => [
-    { role: 'assistant', ts: Date.now() - 120 * 60_000 }, // 2h ago → older than cutoff
+    { role: 'assistant', content: `task ${taskId}`, ts: Date.now() - 120 * 60_000 }, // 2h ago → older than cutoff
   ];
   assert.equal(await probeSessionLiveness(baseTask, cutoffMs, reader), 'idle');
 });
@@ -77,7 +137,7 @@ test('B3: probe never falsely reports alive — empty → unknown, untimed → i
   // A response with messages but no usable timestamp is idle (NEVER 'alive'), so
   // the caller falls through to the block path — the safety net is preserved.
   assert.equal(
-    await probeSessionLiveness(baseTask, cutoffMs, async () => [{ role: 'assistant' }]),
+    await probeSessionLiveness(baseTask, cutoffMs, async () => [{ role: 'assistant', content: `task ${taskId}` }]),
     'idle',
     'a response with no timestamp is idle, not alive',
   );
@@ -85,7 +145,7 @@ test('B3: probe never falsely reports alive — empty → unknown, untimed → i
 
 test('B3: probe → unknown when no session id can be derived', async () => {
   const t = { ...baseTask, openclaw_session_id: null, assigned_agent_name: null };
-  assert.equal(await probeSessionLiveness(t, Date.now(), async () => [{ ts: Date.now() }]), 'unknown');
+  assert.equal(await probeSessionLiveness(t, Date.now(), async () => [{ ts: Date.now(), content: `task ${taskId}` }]), 'unknown');
 });
 
 // ── B6: stale sweep must NOT churn a QC-parked review task ────────────────────

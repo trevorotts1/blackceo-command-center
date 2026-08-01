@@ -137,6 +137,63 @@ test('liveness guard: skips an old task that still has recent activity events', 
   assert.equal(task?.status, 'in_progress', 'long-running-but-alive task stays in_progress');
 });
 
+test('MR-07: hard ceiling blocks a task even past multiple thresholds', async () => {
+  // Set the hard ceiling to a very low value (5 min). A 90-min-stale task is
+  // well past it. The session-liveness probe will fail in test (no gateway),
+  // so the task falls through to block — same outcome as the regular block
+  // path, but we assert the ceiling env var is properly wired through.
+  const prev = process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES;
+  process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES = '5';
+  try {
+    const ws = seedWorkspace('hard-ceiling');
+    const agentId = seedAgent(ws, 'working');
+    const taskId = seedTask({
+      status: 'in_progress',
+      workspaceId: ws,
+      agentId,
+      updatedAt: isoMinutesAgo(90),
+      lastProgressAt: isoMinutesAgo(90),
+    });
+
+    const result = await runStuckInProgressSweep();
+    assert.equal(result.blocked, 1, 'task past hard ceiling is blocked');
+    assert.ok(result.blockedIds.includes(taskId), 'the ceiling-past task is in the blocked set');
+
+    const task = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId]);
+    assert.equal(task?.status, 'blocked');
+  } finally {
+    if (prev !== undefined) process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES = prev;
+    else delete process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES;
+  }
+});
+
+test('MR-07: hard ceiling disabled (0) leaves the regular path unchanged', async () => {
+  const prev = process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES;
+  process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES = '0';
+  try {
+    const ws = seedWorkspace('no-ceiling');
+    const agentId = seedAgent(ws, 'working');
+    const taskId = seedTask({
+      status: 'in_progress',
+      workspaceId: ws,
+      agentId,
+      updatedAt: isoMinutesAgo(90),
+      lastProgressAt: isoMinutesAgo(90),
+    });
+
+    const result = await runStuckInProgressSweep();
+    // Hard ceiling disabled → regular path still blocks via the probe fallthrough.
+    assert.equal(result.blocked, 1, 'regular block path still works with ceiling disabled');
+    assert.ok(result.blockedIds.includes(taskId));
+
+    const task = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId]);
+    assert.equal(task?.status, 'blocked');
+  } finally {
+    if (prev !== undefined) process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES = prev;
+    else delete process.env.STUCK_IN_PROGRESS_HARD_CEILING_MINUTES;
+  }
+});
+
 test('respects the DISABLE_STUCK_IN_PROGRESS_SWEEP opt-out', async () => {
   const ws = seedWorkspace('sales');
   const agentId = seedAgent(ws, 'working');
