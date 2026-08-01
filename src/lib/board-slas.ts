@@ -53,6 +53,8 @@ export interface BoardSlaOverrides {
   staleBacklogHours?: number;
   staleTodoHours?: number;
   staleBlockedRepingedHours?: number;
+  // MissionQueue "Tasks Due" filter window (days). Default 7; per-department overridable.
+  dueDateWindowDays?: number;
 }
 
 export const BOARD_SLA_KEYS: (keyof BoardSlaOverrides)[] = [
@@ -67,6 +69,7 @@ export const BOARD_SLA_KEYS: (keyof BoardSlaOverrides)[] = [
   'staleBacklogHours',
   'staleTodoHours',
   'staleBlockedRepingedHours',
+  'dueDateWindowDays',
 ];
 
 /** The matching env var name for each key (must stay in lockstep with the
@@ -83,6 +86,7 @@ export const BOARD_SLA_ENV_VAR: Record<keyof BoardSlaOverrides, string> = {
   staleBacklogHours: 'STALE_BACKLOG_HOURS',
   staleTodoHours: 'STALE_TODO_HOURS',
   staleBlockedRepingedHours: 'STALE_BLOCKED_REPINGED_HOURS',
+  dueDateWindowDays: 'BOARD_DUE_DATE_WINDOW_DAYS',
 };
 
 /** Human label for the settings-surface table (acceptance c). */
@@ -98,6 +102,7 @@ export const BOARD_SLA_LABEL: Record<keyof BoardSlaOverrides, string> = {
   staleBacklogHours: 'Stale sweep: backlog (hours)',
   staleTodoHours: 'Stale sweep: to-do (hours)',
   staleBlockedRepingedHours: 'Stale sweep: blocked re-ping+return (hours)',
+  dueDateWindowDays: '"Tasks Due" filter window (days)',
 };
 
 export type BoardSlaConfig = Record<string, BoardSlaOverrides>;
