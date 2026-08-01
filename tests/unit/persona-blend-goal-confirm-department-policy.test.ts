@@ -159,15 +159,18 @@ test('[dept] NO-WEAKENING: env override widens (never silently narrows) the hard
 
 // ── B. blockForOwnerConfirm ──────────────────────────────────────────────────
 
-test('[block] sets status=blocked, block_audience=OWNER, writes one event, idempotent', () => {
+test('[block] sets status=blocked, block_audience=OWNER, writes one event, idempotent', async () => {
   const id = nextId('block');
   insertTask(id, 'funnels');
   const gate = { hold: false, state: 'deadline_fallback' as const,
     reason: 'unconfirmed past deadline', audienceLabel: 'Founders', candidates: ['Founders'],
     prompt: 'Confirm the audience for this content task: "Founders".', firstHold: false };
 
-  blockForOwnerConfirm(id, 'funnels', gate);
-  blockForOwnerConfirm(id, 'funnels', gate); // second call must be a no-op (idempotent)
+  // blockForOwnerConfirm is async (MR-04 routes it through transition()); the
+  // block event + notify are written AFTER the awaited transition lands, so the
+  // calls must be awaited or the event-count assertion below races the write.
+  await blockForOwnerConfirm(id, 'funnels', gate);
+  await blockForOwnerConfirm(id, 'funnels', gate); // second call must be a no-op (idempotent)
 
   const row = queryOne<{ status: string; block_audience: string | null; block_reason: string | null; block_needs: string | null }>(
     'SELECT status, block_audience, block_reason, block_needs FROM tasks WHERE id = ?',
@@ -185,7 +188,7 @@ test('[block] sets status=blocked, block_audience=OWNER, writes one event, idemp
   assert.equal(events.length, 1, 'exactly one block event even after a repeated call (idempotent)');
 });
 
-test('[block] never releases under house-voice — no confirm_state mutation, no deadline_fallback event', () => {
+test('[block] never releases under house-voice — no confirm_state mutation, no deadline_fallback event', async () => {
   const id = nextId('block-no-release');
   insertTask(id, 'funnels');
   persistPersonaBundle(id, bundle({ confirm_required: true }));
@@ -193,7 +196,7 @@ test('[block] never releases under house-voice — no confirm_state mutation, no
   const gate = evaluateAudienceConfirmGate(id, Date.now() + AUDIENCE_CONFIRM_DEADLINE_MS + 60_000);
   assert.equal(gate.state, 'deadline_fallback', 'sanity: past-deadline signal fires identically regardless of department');
 
-  blockForOwnerConfirm(id, 'funnels', gate);
+  await blockForOwnerConfirm(id, 'funnels', gate);
 
   const bundleRow = queryOne<{ confirm_state: string }>(
     'SELECT confirm_state FROM task_persona_bundle WHERE task_id = ?', [id],

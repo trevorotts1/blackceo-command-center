@@ -72,7 +72,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner, notifySystem } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
-import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence } from '@/lib/completion-evidence';
@@ -4081,7 +4081,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           .filter(Boolean)
           .join('\n');
 
-        const writeStructuredHandbackFallback = (): void => {
+        const writeStructuredHandbackFallback = async (): Promise<void> => {
           // MR-04: route through transition() with extraColumns so the description
           // + last_progress_at land atomically AND the legal-transition guard +
           // preconditions + CAS run (review→backlog is legal).
@@ -4089,19 +4089,29 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           const desc = task.description && task.description !== ''
             ? `${structuredHandbackNote}\n\n---\n\n${task.description}`
             : structuredHandbackNote;
-          transition(taskId, 'backlog', {
-            actor: 'qc-scorer',
-            reason: `no-artifact handback fallback: ${noArtifactReason}`,
-            expectedFrom: 'review',
-            extraColumns: {
-              description: desc,
-              last_progress_at: now,
-            },
-          }).catch(err => {
+          // fix2(MR-04): AWAIT the transition and gate the task_returned event +
+          // broadcast on it landing. The fire-and-forget form ran the event
+          // INSERT below regardless of outcome, so a lost CAS race (task no
+          // longer in review) left an orphan [RETURN] event recording a handback
+          // that never landed.
+          let landed = false;
+          try {
+            await transition(taskId, 'backlog', {
+              actor: 'qc-scorer',
+              reason: `no-artifact handback fallback: ${noArtifactReason}`,
+              expectedFrom: 'review',
+              extraColumns: {
+                description: desc,
+                last_progress_at: now,
+              },
+            });
+            landed = true;
+          } catch (err) {
             if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
               console.warn('[QCScorer] handback fallback transition failed:', err);
             }
-          });
+          }
+          if (!landed) return;
           run(
             `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
             [
@@ -4135,12 +4145,12 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           });
           if (!returnResp.ok) {
             // Endpoint reachable but rejected/failed — write the structured handback directly.
-            writeStructuredHandbackFallback();
+            await writeStructuredHandbackFallback();
             console.warn(`[QCScorer] return-to-orchestrator returned ${returnResp.status} — wrote structured handback directly`);
           }
         } catch (returnErr) {
           // Endpoint unreachable — write the structured handback directly.
-          writeStructuredHandbackFallback();
+          await writeStructuredHandbackFallback();
           console.warn('[QCScorer] return-to-orchestrator call failed (non-fatal) — wrote structured handback directly:', (returnErr as Error).message);
         }
 
@@ -4247,21 +4257,32 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           const prevAttempts = task.qc_reroute_attempts ?? 0;
           const newAttempts = prevAttempts + 1;
           const kickbackNote = `[QC-FAIL] Score 2.0/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Missing deliverables: ${missingReasons.join('; ')}`;
-          // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
-          // qc_reroute_attempts must land atomically with the status flip);
-          // audited immediately below via recordStatusEvent (DISP-10), gated
-          // on the CAS actually landing.
-          const missingRes = run(
-            `UPDATE tasks SET status = 'backlog',
-               description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-               qc_reroute_attempts = ?, updated_at = ?
-             WHERE id = ? AND status = 'review'`,
-            [kickbackNote, kickbackNote, newAttempts, now, taskId],
-          );
-          if ((missingRes.changes ?? 0) > 0) {
-            recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
-            // MR-02: broadcast so board card moves immediately.
-            broadcastQCUpdate(taskId);
+          // fix2(MR-04): route through transition() with extraColumns so the
+          // description + qc_reroute_attempts land atomically with the status
+          // flip AND the legal-transition guard + CAS run (review→backlog is
+          // legal). The raw compound UPDATE this replaces bypassed the state
+          // machine; transition() also writes the task_events audit row + the
+          // task_updated broadcast itself. expectedFrom preserves the raw
+          // writer's `WHERE status = 'review'` CAS; a lost race is a normal
+          // concurrent advance (the task already left review) — return the
+          // fail result without a duplicate broadcast.
+          const missingDesc = task.description && task.description !== ''
+            ? `${task.description}\n\n${kickbackNote}`
+            : kickbackNote;
+          try {
+            await transition(taskId, 'backlog', {
+              actor: 'qc-scorer',
+              reason: kickbackNote,
+              expectedFrom: 'review',
+              extraColumns: {
+                description: missingDesc,
+                qc_reroute_attempts: newAttempts,
+              },
+            });
+          } catch (txErr) {
+            if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
+              console.warn(`[QCScorer] missing-deliverables kickback transition failed for ${taskId}:`, (txErr as Error).message);
+            }
           }
           return failResult;
         }
@@ -4321,21 +4342,32 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         const prevAttempts = task.qc_reroute_attempts ?? 0;
         const newAttempts = prevAttempts + 1;
         const kickbackNote = `[QC-AF-I14 FAIL] AF-I14 violations (attempt ${newAttempts}/${QC_MAX_REROUTES}): ${afi14.violations.join('; ')}`;
-        // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
-        // qc_reroute_attempts must land atomically with the status flip);
-        // audited immediately below via recordStatusEvent (DISP-10), gated on
-        // the CAS actually landing.
-        const afi14Res = run(
-          `UPDATE tasks SET status = 'backlog',
-             description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description || char(10) || char(10) || ? END,
-             qc_reroute_attempts = ?, updated_at = ?
-           WHERE id = ? AND status = 'review'`,
-          [kickbackNote, kickbackNote, newAttempts, nowAf, taskId],
-        );
-        if ((afi14Res.changes ?? 0) > 0) {
-          recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
-          // MR-02: broadcast so board card moves immediately.
-          broadcastQCUpdate(taskId);
+        // fix2(MR-04): route through transition() with extraColumns so the
+        // description + qc_reroute_attempts land atomically with the status
+        // flip AND the legal-transition guard + CAS run (review→backlog is
+        // legal). The raw compound UPDATE this replaces bypassed the state
+        // machine; transition() also writes the task_events audit row + the
+        // task_updated broadcast itself. expectedFrom preserves the raw
+        // writer's `WHERE status = 'review'` CAS; a lost race is a normal
+        // concurrent advance — return the fail result without a duplicate
+        // broadcast.
+        const afi14Desc = task.description && task.description !== ''
+          ? `${task.description}\n\n${kickbackNote}`
+          : kickbackNote;
+        try {
+          await transition(taskId, 'backlog', {
+            actor: 'qc-scorer',
+            reason: kickbackNote,
+            expectedFrom: 'review',
+            extraColumns: {
+              description: afi14Desc,
+              qc_reroute_attempts: newAttempts,
+            },
+          });
+        } catch (txErr) {
+          if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
+            console.warn(`[QCScorer] AF-I14 kickback transition failed for ${taskId}:`, (txErr as Error).message);
+          }
         }
 
         return {
@@ -5162,40 +5194,43 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         const qcBlockedOnHuman = isSystemBlock ? 'operator' : 'owner';
         const qcAsk = blockNeeds.slice(0, 500);
 
-        // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
-        // qc_reroute_attempts + the full block_* metadata must land atomically
-        // with the status flip, mirroring recordDispatchFailure); audited
-        // immediately below via recordStatusEvent (DISP-10), gated on the CAS
-        // actually landing.
-        const blockRes = run(
-          `UPDATE tasks SET status = 'blocked',
-             description = CASE
-               WHEN description IS NULL OR description = '' THEN ?
-               ELSE description || char(10) || char(10) || ?
-             END,
-             qc_reroute_attempts = ?,
-             block_reason = ?,
-             block_gaps = ?,
-             block_needs = ?,
-             block_audience = ?,
-             blocked_on_human = ?,
-             ask = ?,
-             updated_at = ?
-           WHERE id = ? AND status = 'review'`,
-          [
-            blockedNote, blockedNote, newAttempts,
-            `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
-            blockGapsJson,
-            blockNeeds,
-            blockAudience,
-            qcBlockedOnHuman,
-            qcAsk,
-            now,
-            taskId,
-          ],
-        );
-        if ((blockRes.changes ?? 0) > 0) {
-          recordStatusEvent(taskId, 'review', 'blocked', { actor: 'qc-scorer', reason: blockedNote });
+        // fix2(MR-04): route through transition() with extraColumns so the
+        // description + qc_reroute_attempts + the full block_* metadata land
+        // atomically with the status flip (mirroring recordDispatchFailure) AND
+        // the legal-transition guard + CAS run (review→blocked is legal). The
+        // raw compound UPDATE this replaces bypassed the state machine;
+        // transition() also writes the task_events audit row + the task_updated
+        // broadcast itself. expectedFrom preserves the raw writer's
+        // `WHERE status = 'review'` CAS; the block snapshot + operator-feed
+        // events below are gated on the transition actually landing so a lost
+        // race never records a block that never happened.
+        const blockDesc = task.description && task.description !== ''
+          ? `${task.description}\n\n${blockedNote}`
+          : blockedNote;
+        let blockLanded = false;
+        try {
+          await transition(taskId, 'blocked', {
+            actor: 'qc-scorer',
+            reason: blockedNote,
+            expectedFrom: 'review',
+            extraColumns: {
+              description: blockDesc,
+              qc_reroute_attempts: newAttempts,
+              block_reason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
+              block_gaps: blockGapsJson,
+              block_needs: blockNeeds,
+              block_audience: blockAudience,
+              blocked_on_human: qcBlockedOnHuman,
+              ask: qcAsk,
+            },
+          });
+          blockLanded = true;
+        } catch (txErr) {
+          if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
+            console.warn(`[QCScorer] block-after-cap transition failed for ${taskId}:`, (txErr as Error).message);
+          }
+        }
+        if (blockLanded) {
           // MR-30: snapshot block metadata for the block-history audit trail.
           recordBlockEvent({
             taskId,
@@ -5205,8 +5240,13 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             blockAudience: blockAudience,
             actor: 'qc-scorer',
           });
-          // MR-02: broadcast so board card moves immediately.
-          broadcastQCUpdate(taskId);
+        }
+
+        if (!blockLanded) {
+          // CAS lost (task already left review) or transition failed — do not
+          // record the operator-feed events, escalate to the master
+          // orchestrator, or notify the owner about a block that never landed.
+          return result;
         }
 
         run(
@@ -5290,25 +5330,41 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         ? `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Rework needed: ${result.gaps.join('; ')}`
         : `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
 
-      // U99-RAW-STATUS-WRITER: compound single-row UPDATE (description +
-      // qc_reroute_attempts must land atomically with the status flip);
-      // audited immediately below via recordStatusEvent (DISP-10), gated on
-      // the CAS actually landing.
-      const rerouteRes = run(
-        `UPDATE tasks SET status = 'backlog',
-           description = CASE
-             WHEN description IS NULL OR description = '' THEN ?
-             ELSE description || char(10) || char(10) || ?
-           END,
-           qc_reroute_attempts = ?,
-           updated_at = ?
-         WHERE id = ? AND status = 'review'`,
-        [kickbackNote, kickbackNote, newAttempts, now, taskId],
-      );
-      if ((rerouteRes.changes ?? 0) > 0) {
-        recordStatusEvent(taskId, 'review', 'backlog', { actor: 'qc-scorer', reason: kickbackNote });
-        // MR-02: broadcast so board card moves immediately.
-        broadcastQCUpdate(taskId);
+      // fix2(MR-04): route through transition() with extraColumns so the
+      // description + qc_reroute_attempts land atomically with the status flip
+      // AND the legal-transition guard + CAS run (review→backlog is legal). The
+      // raw compound UPDATE this replaces bypassed the state machine;
+      // transition() also writes the task_events audit row + the task_updated
+      // broadcast itself. expectedFrom preserves the raw writer's
+      // `WHERE status = 'review'` CAS; the reroute/auto-route events below are
+      // gated on the transition actually landing so a lost race never records a
+      // reroute that never happened.
+      const rerouteDesc = task.description && task.description !== ''
+        ? `${task.description}\n\n${kickbackNote}`
+        : kickbackNote;
+      let rerouteLanded = false;
+      try {
+        await transition(taskId, 'backlog', {
+          actor: 'qc-scorer',
+          reason: kickbackNote,
+          expectedFrom: 'review',
+          extraColumns: {
+            description: rerouteDesc,
+            qc_reroute_attempts: newAttempts,
+          },
+        });
+        rerouteLanded = true;
+      } catch (txErr) {
+        if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
+          console.warn(`[QCScorer] reroute-to-backlog transition failed for ${taskId}:`, (txErr as Error).message);
+        }
+      }
+
+      if (!rerouteLanded) {
+        // CAS lost (task already left review) or transition failed — do not
+        // record the reroute events or trigger auto-route for a kickback that
+        // never landed.
+        return result;
       }
 
       // Write task_status_changed event — visible on the board timeline.
@@ -5363,24 +5419,31 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       }).then(async (resp) => {
         if (resp.ok) {
           // Auto-route succeeded: move the task to in_progress so it leaves backlog.
-          // U99-RAW-STATUS-WRITER: fire-and-forget continuation of an async
-          // fetch().then() — not a good fit for the async transition() call
-          // inside a non-async .then() callback without restructuring the
-          // surrounding promise chain; audited immediately below via
-          // recordStatusEvent (DISP-10), gated on the CAS actually landing.
-          const autoRouteRes = run(
-            `UPDATE tasks SET status = 'in_progress', updated_at = ? WHERE id = ? AND status = 'backlog'`,
-            [new Date().toISOString(), taskId],
-          );
-          if ((autoRouteRes.changes ?? 0) > 0) {
-            recordStatusEvent(taskId, 'backlog', 'in_progress', {
+          // fix2(MR-04): route through transition(). This .then() callback is
+          // already async, so the async transition() can be awaited directly
+          // (the old raw writer's "not a good fit" note predates this
+          // conversion). expectedFrom preserves the raw writer's
+          // `WHERE status = 'backlog'` CAS; operatorOverride is set because this
+          // claim does not re-validate assignment (the raw writer did not
+          // either) — the task was just dispatched on this same path.
+          // transition() writes the task_events audit row + the task_updated
+          // broadcast itself.
+          try {
+            await transition(taskId, 'in_progress', {
               actor: 'qc-scorer',
               reason: 'auto-route succeeded after QC reroute',
+              expectedFrom: 'backlog',
+              operatorOverride: true,
             });
-            // MR-02: broadcast so board card moves immediately.
-            broadcastQCUpdate(taskId);
+            console.log(`[QCScorer] Auto-route succeeded for task "${task.title}" (${taskId}) → in_progress`);
+          } catch (txErr) {
+            if (txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT') {
+              // Task already left backlog (another advancer claimed it) — the
+              // raw writer was silent on changes===0; keep that.
+            } else {
+              console.warn('[QCScorer] Auto-route transition failed (non-fatal):', (txErr as Error).message);
+            }
           }
-          console.log(`[QCScorer] Auto-route succeeded for task "${task.title}" (${taskId}) → in_progress`);
         } else {
           console.warn(`[QCScorer] Auto-route returned ${resp.status} for task ${taskId} — stays in backlog for ceo-delegation-sweep`);
         }

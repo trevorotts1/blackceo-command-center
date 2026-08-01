@@ -50,7 +50,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { broadcast } from '@/lib/events';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
-import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
 import type { Task } from '@/lib/types';
 
@@ -92,12 +92,12 @@ export const REDISPATCH_ESCALATE_HOURS = 6;
  * with a [REDISPATCH-CAP] operator-feed note. Concurrency-safe (WHERE status =
  * 'backlog'), SYSTEM audience (no client Telegram), best-effort broadcast.
  */
-function escalateStuckBacklogTask(
+async function escalateStuckBacklogTask(
   row: BacklogTaskRow,
   priorCount: number,
   cap: number,
   hours: number,
-): void {
+): Promise<void> {
   const blockedNote =
     `[REDISPATCH-CAP] Re-dispatched ${priorCount} time(s) (cap ${cap}) over ≥${hours}h without advancing — ` +
     `escalating to blocked for operator action. Likely a config problem or an unresolved hold the executor ` +
@@ -107,38 +107,48 @@ function escalateStuckBacklogTask(
   // MR-04: route through transition() with extraColumns so the block_*
   // metadata lands atomically AND the legal-transition guard + preconditions
   // + CAS run (backlog→blocked is a legal edge — see LEGAL_TRANSITIONS).
-  transition(row.id, 'blocked', {
-    actor: 'backlog-redispatch-sweep',
-    reason: `re-dispatch cap: ${priorCount} attempts over ≥${hours}h`,
-    extraColumns: {
-      block_reason: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
-      block_needs: `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
-        `and re-route or fix. It will not auto-retry further.`,
-      block_audience: 'SYSTEM',
-      next_dispatch_eligible_at: null,
-    },
-  })
-    .then(() => {
-      // MR-30 — snapshot the block metadata so the history survives the unblock
-      // (the block_* columns are cleared when the card leaves blocked). Only
-      // fires when the transition actually landed, so a lost CAS race never
-      // writes a false event.
-      recordBlockEvent({
-        taskId: row.id,
-        blockReason: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
-        blockNeeds:
-          `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
+  // fix2(MR-04): AWAIT the transition and gate every follow-up write on it
+  // landing. The fire-and-forget form wrote the operator-feed events + block
+  // snapshot below regardless of outcome, so a lost CAS race (another advancer
+  // already moved the task) left orphan events recording a block that never
+  // landed. A CAS_CONFLICT is a normal race (return silently); any other
+  // failure rethrows so the caller's try/catch logs it and does not count the
+  // task as escalated.
+  let landed = false;
+  try {
+    await transition(row.id, 'blocked', {
+      actor: 'backlog-redispatch-sweep',
+      reason: `re-dispatch cap: ${priorCount} attempts over ≥${hours}h`,
+      extraColumns: {
+        block_reason: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
+        block_needs: `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
           `and re-route or fix. It will not auto-retry further.`,
-        blockAudience: 'SYSTEM',
-        actor: 'backlog-redispatch-sweep',
-      });
-    })
-    .catch(err => {
-      // CAS_CONFLICT: another advancer already moved the task — non-fatal.
-      if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
-        console.error('[backlog-redispatch] transition to blocked failed:', err);
-      }
+        block_audience: 'SYSTEM',
+        next_dispatch_eligible_at: null,
+      },
     });
+    landed = true;
+  } catch (err) {
+    // CAS_CONFLICT: another advancer already moved the task — non-fatal.
+    if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
+      throw err;
+    }
+  }
+  if (!landed) return;
+
+  // MR-30 — snapshot the block metadata so the history survives the unblock
+  // (the block_* columns are cleared when the card leaves blocked). Only
+  // fires when the transition actually landed, so a lost CAS race never
+  // writes a false event.
+  recordBlockEvent({
+    taskId: row.id,
+    blockReason: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
+    blockNeeds:
+      `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
+      `and re-route or fix. It will not auto-retry further.`,
+    blockAudience: 'SYSTEM',
+    actor: 'backlog-redispatch-sweep',
+  });
 
   // Operator-feed events (SYSTEM audience → no client Telegram, per silent-updates doctrine).
   run(
@@ -248,7 +258,7 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
     // path) → block + operator note instead of re-firing forever.
     if (priorCount >= escalateCap && row.updated_at <= stuckCutoff) {
       try {
-        escalateStuckBacklogTask(row, priorCount, escalateCap, escalateHours);
+        await escalateStuckBacklogTask(row, priorCount, escalateCap, escalateHours);
         escalated++;
       } catch (err) {
         console.warn(

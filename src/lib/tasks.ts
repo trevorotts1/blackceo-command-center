@@ -58,7 +58,7 @@ import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
 import { notifyOwnerAssigned } from '@/lib/owner-reports';
-import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
@@ -1594,6 +1594,21 @@ export async function blockForOwnerConfirm(
   // the original raw writer guard (`WHERE status != 'blocked'`) intentionally
   // did NOT check for assigned_agent_id — it blocks ANY non-blocked task.
   //
+  // fix2(MR-04) — done→blocked narrowing is INTENDED and unreachable here:
+  // the original raw writer's `status != 'blocked'` guard technically also
+  // admitted a `done` task, but LEGAL_TRANSITIONS only allows `done → backlog`
+  // (re-open only, by design), so routing through transition() drops the
+  // done→blocked edge. That is safe: this function is ONLY reachable from
+  // autoDispatchTask's audience-confirm deadline path (task-dispatcher.ts),
+  // which never dispatches a `done` task — a done card is terminal and is never
+  // selected for dispatch, so it can never hit the confirm-deadline HARD-HOLD.
+  // The lost edge is therefore unreachable in practice; if it were ever hit,
+  // transition() throws ILLEGAL_TRANSITION, the catch below warns, `blocked`
+  // stays false, and no duplicate event/notify fires (fail-safe, no silent
+  // block). We deliberately do NOT widen LEGAL_TRANSITIONS to re-admit
+  // done→blocked, since "done re-opens to backlog only" is a documented
+  // state-machine invariant relied on elsewhere.
+  //
   // FABLE-CORRECTION (MR-04): the audit event + owner notify MUST be gated on
   // the transition actually landing. The original raw writer used
   // `if (changed !== 1) return;` to avoid duplicate events/notifies when the
@@ -1601,12 +1616,24 @@ export async function blockForOwnerConfirm(
   // fire-and-forget transition() would fire the notify unconditionally and
   // before the status flip commits, regressing that dedup. Await it and only
   // emit the side effects on success.
+  // fix2(MR-04): restore the original raw writer's idempotency. The raw
+  // `WHERE status != 'blocked'` + `if (changed !== 1) return` guaranteed an
+  // already-blocked task emitted NO duplicate event/notify. transition() has an
+  // idempotent short-circuit (from === to returns the current row as SUCCESS),
+  // so without this guard a second call "succeeds" and re-fires the event +
+  // notify below. Read the current status: if already blocked, return early
+  // (the raw writer's changed===0 path). Otherwise pass expectedFrom so a
+  // concurrent blocker that wins the read→write race surfaces as a caught
+  // CAS_CONFLICT rather than a silent overwrite.
+  const current = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId]);
+  if (!current || current.status === 'blocked') return; // already blocked — idempotent no-op
   let blocked = false;
   try {
     await transition(taskId, 'blocked', {
       actor: 'audience-confirm',
       reason: `hard-hold department "${department}" unconfirmed past deadline`,
       operatorOverride: true,
+      expectedFrom: current.status as LifecycleState,
       extraColumns: {
         block_reason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
         block_needs: `Owner action required: ${prompt}`,
@@ -1615,13 +1642,13 @@ export async function blockForOwnerConfirm(
     });
     blocked = true;
   } catch (err) {
-    // CAS_CONFLICT (already blocked / concurrent writer won) — non-fatal, and
+    // CAS_CONFLICT (concurrent writer won the read→write race) — non-fatal, and
     // we must NOT emit a duplicate event/notify. Anything else is worth a warn.
     if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
       console.warn(`[audience-confirm] blockForOwnerConfirm transition failed for task ${taskId}:`, err);
     }
   }
-  if (!blocked) return; // already blocked or transition aborted — no duplicate event/notify
+  if (!blocked) return; // transition aborted (CAS lost / illegal / error) — no duplicate event/notify
   // MR-30: snapshot block metadata for the block-history audit trail.
   // (transition() already writes the task_events audit; this is the companion
   // block-snapshot the task-detail modal reads for the 'Previously blocked'
