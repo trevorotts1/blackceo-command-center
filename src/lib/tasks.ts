@@ -57,6 +57,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
+import { notifyOwnerAssigned } from '@/lib/owner-reports';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
@@ -2539,6 +2540,14 @@ export async function createTaskCore(
     }
   }
   // --- END INSTANT ROUTING ---
+
+  // W5.2 — OWNER ASSIGNMENT NOTIFICATION (MR-36): fire when a department was
+  // resolved and an agent was assigned via the UI create path (which goes through
+  // createTaskCore but had no notifyOwnerAssigned call before this). Best-effort;
+  // gateway-routed; never throws into task creation.
+  if (resolvedAgentId && resolvedDepartment) {
+    try { notifyOwnerAssigned(id, { department: resolvedDepartment }); } catch { /* non-fatal */ }
+  }
 
   // --- CAMPAIGN BOARD FEED (W8.4) ---
   // Attach the new card to its department's live campaign board so routed work
