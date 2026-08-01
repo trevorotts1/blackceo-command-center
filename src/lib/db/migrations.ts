@@ -5321,6 +5321,41 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '117',
+    name: 'mr10_sse_event_log',
+    up: (db) => {
+      // MR-10 — shared SSE fan-out bus for multi-process deployments.
+      //
+      // The in-process `clients` Set in src/lib/events.ts only reaches browsers
+      // connected to THIS Node process. When multiple Command Center processes
+      // share one database (N independent PM2 fork apps, or horizontally scaled
+      // boxes), a task mutation served by process A never reaches a browser
+      // connected to process B — the board goes silently stale.
+      //
+      // This table is a shared fan-out journal: every broadcast() call writes
+      // one row here, and every SSE stream route polls it for cross-process
+      // events. Together with the in-memory push (the existing fast path for
+      // same-process clients), this closes the multi-process gap without
+      // adding a Redis dependency.
+      //
+      // Created with the same pattern as job_liveness (migration 102): a
+      // minimal table with a single index, created only if it does not
+      // already exist.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sse_event_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_type TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_sse_event_log_created
+        ON sse_event_log(created_at)
+      `);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

@@ -113,7 +113,31 @@ function dropClient(controller: ReadableStreamDefaultController): void {
 }
 
 /**
- * Broadcast an event to all connected SSE clients
+ * MR-10 — dual-write an event into the shared SQLite fan-out journal so
+ * every SSE stream route (across ALL processes sharing the database) can
+ * discover cross-process events during its poll loop. Best-effort only: a
+ * journal-write failure MUST NOT interrupt the in-memory broadcast or throw
+ * through to the mutation's caller. The in-memory path handles same-process
+ * clients; the journal catches the rest on the next poll tick.
+ */
+function journalEvent(event: SSEEvent): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getDb } = require('@/lib/db') as typeof import('@/lib/db');
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO sse_event_log (event_type, payload) VALUES (?, ?)`,
+    ).run(event.type, JSON.stringify(event));
+  } catch {
+    // Journal write is best-effort — the in-memory broadcast already
+    // covers same-process clients, and the polling backstop self-heals.
+  }
+}
+
+/**
+ * Broadcast an event to all connected SSE clients, AND journal it to the
+ * shared SQLite fan-out bus so cross-process clients see it on their next
+ * poll tick.
  */
 export function broadcast(event: SSEEvent): void {
   const encoder = new TextEncoder();
@@ -162,6 +186,10 @@ export function broadcast(event: SSEEvent): void {
       dropClient(client);
     }
   }
+
+  // MR-10: dual-write to the shared SQLite journal so clients pinned to
+  // OTHER processes discover this event during their poll loop.
+  journalEvent(event);
 
   console.log(`[SSE] Broadcast ${event.type} to ${clients.size} client(s)`);
 }
