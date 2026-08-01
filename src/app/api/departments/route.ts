@@ -1,12 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile, writeFile } from 'fs/promises';
 import { execFileSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { getDb } from '@/lib/db';
 import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 import { getSession } from '@/lib/interview/store';
-import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
 import { normalizeDeptPrefixedId } from '@/lib/routing/canonical-slug';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { boardWhereClause } from '@/lib/workspaces/board-query';
@@ -14,39 +12,20 @@ import { boardWhereClause } from '@/lib/workspaces/board-query';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const DEPARTMENTS_CONFIG_PATH = ensureRuntimeConfigFile('departments.json');
-
 interface DepartmentEntry {
   id: string;
   emoji: string;
   name: string;
-  /** Skill 23 writes `role`; the CC schema uses `headTitle`. Normalized on read. */
+  /**
+   * Head display title — the real per-client head agent name when one is
+   * registered (workspaces.head_agent_id → agents.name), else the generic
+   * "Head of <Dept>" fallback. Same derivation as resolveDepartment()
+   * (src/lib/routing/resolve-department.ts) so the list and detail surfaces
+   * agree.
+   */
   headTitle: string;
-  /** Skill 23 may write `role` instead of `headTitle`. Accepted on read, never written. */
+  /** Skill 23 may POST `role` instead of `headTitle`. Accepted on write, never emitted. */
   role?: string;
-}
-
-/**
- * Normalize a raw departments.json entry to the CC DepartmentEntry shape.
- * Skill 23 writes `role`; the CC schema expects `headTitle`. This function
- * remaps `role` to `headTitle` so every consumer sees the CC shape.
- */
-function normalizeDeptEntry(entry: Record<string, unknown>): DepartmentEntry {
-  const id = String(entry.id || '');
-  const name = String(entry.name || '');
-  const emoji = String(entry.emoji || '📁');
-  // Accept `role` as an alias for `headTitle` (Skill-23 manifest format).
-  const headTitle = String(
-    entry.headTitle ?? entry.role ?? `Head of ${name}`,
-  );
-  return { id, emoji, name, headTitle };
-}
-
-async function readDepartments(): Promise<DepartmentEntry[]> {
-  const raw = await readFile(DEPARTMENTS_CONFIG_PATH, 'utf-8');
-  const parsed: unknown = JSON.parse(raw);
-  if (!Array.isArray(parsed)) return [];
-  return (parsed as Record<string, unknown>[]).map(normalizeDeptEntry);
 }
 
 /**
@@ -61,18 +40,22 @@ export async function GET() {
     const db = getDb();
     const scope = boardWhereClause(resolveActiveCompanyId(db), { includeArchived: false });
 
+    // LEFT JOIN the head agent so headTitle carries the REAL per-client agent
+    // name (PRD 2.9(e)) — same derivation as resolveDepartment(), never ''.
     const workspaces = db.prepare(`
-      SELECT w.id, w.name, w.icon, w.slug
+      SELECT w.id, w.name, w.icon, w.slug,
+             a.name AS head_agent_name
         FROM workspaces w
+        LEFT JOIN agents a ON a.id = w.head_agent_id
         ${scope.sql}
         ORDER BY w.sort_order ASC, w.name ASC
-    `).all(...scope.params) as { id: string; name: string; icon: string; slug: string }[];
+    `).all(...scope.params) as { id: string; name: string; icon: string; slug: string; head_agent_name: string | null }[];
 
     const departments: DepartmentEntry[] = workspaces.map((ws) => ({
       id: ws.id,
       emoji: ws.icon || '📁',
       name: ws.name,
-      headTitle: '',
+      headTitle: ws.head_agent_name || `Head of ${ws.name}`,
     }));
 
     return NextResponse.json({ success: true, departments });
