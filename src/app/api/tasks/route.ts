@@ -144,7 +144,49 @@ export async function GET(request: NextRequest) {
       params.push(campaignId);
     }
 
+    // ── Server-side full-text search (MR-26) ──────────────────────────────
+    // ?q=<term> does a case-insensitive LIKE scan across title + description.
+    // Boards with hundreds of tasks previously loaded every row and filtered
+    // client-side (linear degradation). The server-side search lets SQLite's
+    // own LIKE engine narrow the result set before the transform loop.
+    const q = searchParams.get('q');
+    if (q && q.trim()) {
+      const term = `%${q.trim()}%`;
+      sql += ' AND (t.title LIKE ? OR t.description LIKE ?)';
+      params.push(term, term);
+    }
+
+    // ── Pagination (MR-26) ─────────────────────────────────────────────────
+    // ?limit=N caps the result set; ?offset=N skips rows. When neither is
+    // supplied the route still returns every row (unchanged behaviour for the
+    // main board which receives all tasks then buckets them client-side into
+    // columns). A paginated response includes `total` in the JSON envelope so
+    // consumers can render a page-control UI.
+    const limitRaw = searchParams.get('limit');
+    const offsetRaw = searchParams.get('offset');
+    const limit = limitRaw ? Math.max(1, Math.min(1000, parseInt(limitRaw, 10) || 100)) : null;
+    const offset = offsetRaw ? Math.max(0, parseInt(offsetRaw, 10) || 0) : null;
+
+    // TOTAL COUNT — needs its own query before the LIMIT clause is appended.
+    // Uses the same WHERE clause and params so counts are always accurate.
+    let total: number | null = null;
+    if (limit !== null) {
+      // Count query: SELECT COUNT(*) FROM tasks t ... WHERE ... (same joins, same WHERE)
+      const countSql = sql.replace(/^[\s\S]*?FROM tasks t/, 'SELECT COUNT(*) as cnt FROM tasks t');
+      const countRow = queryOne<{ cnt: number }>(countSql, params);
+      total = countRow?.cnt ?? 0;
+    }
+
     sql += ' ORDER BY t.created_at DESC';
+
+    if (limit !== null) {
+      sql += ' LIMIT ?';
+      params.push(limit);
+      if (offset !== null) {
+        sql += ' OFFSET ?';
+        params.push(offset);
+      }
+    }
 
     const tasks = queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; created_by_agent_name?: string }>(sql, params);
 
@@ -201,6 +243,12 @@ export async function GET(request: NextRequest) {
       qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
     }));
 
+    // MR-26 — paginated response. When ?limit was supplied the body wraps
+    // `{ tasks, total }` so consumers can render a page-control UI. Without
+    // ?limit the response is a flat array (unchanged back-compat).
+    if (total !== null) {
+      return NextResponse.json({ tasks: transformedTasks, total });
+    }
     return NextResponse.json(transformedTasks);
   } catch (error) {
     console.error('Failed to fetch tasks:', error);
