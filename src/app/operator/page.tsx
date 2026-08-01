@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
+  HeartPulse,
   MessageSquare,
   FolderOpen,
   Wand2,
@@ -46,6 +47,14 @@ const TILES: OperatorTile[] = [
     icon: <MessageSquare size={22} />,
     accent: '#3B82F6',
     cardId: 'bridge',
+  },
+  {
+    href: '/operator/health',
+    title: 'Workforce Health',
+    tagline: 'Agent connectivity, stuck tasks, dispatch failures, and SLA violations.',
+    icon: <HeartPulse size={22} />,
+    accent: '#EF4444',
+    cardId: 'health',
   },
   {
     href: '/operator/workspace',
