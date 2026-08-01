@@ -30,7 +30,7 @@ import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { resolveSpecialistSessionKey, deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task, Agent } from '@/lib/types';
@@ -270,25 +270,33 @@ export async function probeSessionLiveness(
  * /api/webhooks/agent-completion so behavior is identical regardless of which
  * path (instant webhook vs reconcile) detected the completion.
  */
-function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): void {
-  const now = new Date().toISOString();
-  // U99-RAW-STATUS-WRITER: two-column write, no CAS guard beyond the caller
-  // only ever selecting in_progress tasks; audited immediately below via
-  // recordStatusEvent (DISP-10).
-  run('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?', ['review', now, taskId]);
-  // DISP-10: complete the task_events audit sink for this in_progress→review
-  // advance (the watcher only ever selects in_progress tasks).
-  recordStatusEvent(taskId, 'in_progress', 'review', {
-    actor: agentId ?? 'execution-watcher',
-    reason: 'agent reported TASK_COMPLETE (reconcile)',
-  });
-  run(
-    `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-    [uuidv4(), 'task_completed', agentId, taskId, `${agentName ?? 'Agent'} completed: ${summary}`, now]
-  );
-  if (agentId) {
-    run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['standby', now, agentId]);
+async function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): Promise<void> {
+  // MR-16: migrated from raw UPDATE + recordStatusEvent to transition() for
+  // DISP-09 atomicity — the status flip, task_events insert, and events insert
+  // now commit as ONE transaction. No separate run() / recordStatusEvent() gap.
+  // The caller only ever selects in_progress tasks so no CAS guard is needed
+  // beyond transition()'s own from-status guard.
+  try {
+    await transition(taskId, 'review', {
+      actor: agentId ?? 'execution-watcher',
+      reason: 'agent reported TASK_COMPLETE (reconcile)',
+    });
+  } catch (err) {
+    if (err instanceof TransitionError) {
+      // CAS_CONFLICT: another writer already moved the task. Don't double-move
+      // the agent to standby — just log and return.
+      console.warn(`[execution-watcher] advanceToReview transition failed for ${taskId}: ${err.code} ${err.message}`);
+      return;
+    }
+    throw err;
   }
+
+  // Post-commit: free the agent (transition() already handled broadcast +
+  // events + task_events).
+  if (agentId) {
+    run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['standby', new Date().toISOString(), agentId]);
+  }
+
   const updated = queryOne<Task>(
     `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji
      FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = ?`,
@@ -360,7 +368,9 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
         // B5: persist the (possibly derived) session so the webhook / next
         // reconcile resolve it directly rather than re-deriving.
         upsertActiveSession(task.assigned_agent_id, task.openclaw_session_id, task.id);
-        advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match);
+        advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match).catch(err =>
+          console.warn(`[execution-watcher] advanceToReview transition failed for task ${task.id}:`, (err as Error).message),
+        );
         runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
       }
     } catch (err) {
