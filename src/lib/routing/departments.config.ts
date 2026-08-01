@@ -1265,9 +1265,136 @@ function derivePurpose(
   return ws.name;
 }
 
+// Stopwords excluded from auto-derived keyword sets — these are so generic in
+// department description text that counting them as keywords would add noise
+// rather than routing signal.
+const DERIVED_KEYWORD_STOPWORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'of', 'in', 'on', 'at', 'to', 'for',
+  'with', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'it', 'its',
+  'that', 'this', 'these', 'those', 'from', 'by', 'as', 'not', 'no', 'all',
+  'each', 'every', 'can', 'will', 'may', 'has', 'have', 'had', 'do', 'does',
+  'did', 'which', 'who', 'whom', 'whose', 'about', 'into', 'through', 'during',
+  'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over', 'under',
+  'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why',
+  'how', 'just', 'also', 'very', 'too', 'quite', 'rather', 'department',
+  'director', 'manager', 'specialist', 'lead', 'head', 'chief', 'office',
+]);
+
+/**
+ * Tokenize free text into a deduplicated, stopword-filtered keyword set.
+ *
+ * Splits on non-alphanumeric boundaries, lowercases, strips tokens shorter than
+ * 3 chars or longer than 50, and removes stopwords. Multi-word phrases
+ * (bigrams/trigrams) are NOT extracted — the keywordScore() function in
+ * department-router.ts already does substring matching, so a token like
+ * "publishing" will match against the workspace name "Publishing Studio"
+ * without needing a bigram. The name-token bonus in keywordScore() provides
+ * the compound-phrase signal separately.
+ *
+ * Never throws — returns an empty array on degenerate input.
+ */
+function tokenizeKeywords(text: string, maxKeywords: number = 25): string[] {
+  if (!text || text.trim().length === 0) return [];
+
+  const seen = new Set<string>();
+  const tokens = text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && t.length <= 50 && !DERIVED_KEYWORD_STOPWORDS.has(t));
+
+  const out: string[] = [];
+  for (const t of tokens) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= maxKeywords) break;
+  }
+  return out;
+}
+
+/**
+ * Derive keywords for a workspace row when there is no DEFAULT_DEPARTMENTS
+ * seed hit.  Sources (in priority order):
+ *   1. SOP task_keywords — already aggregated in derivePurpose() but only for
+ *      the purpose string; re-aggregate here for keywords.
+ *   2. Workspace description — tokenize the description text into keywords.
+ *   3. Workspace name — tokenize the bare name as a last-resort signal.
+ *
+ * When a seed IS available (the workspace maps to a standard dept), the seed's
+ * keywords are used directly — no derivation needed.
+ */
+function deriveKeywords(
+  ws: { id: string; slug: string; name: string; description: string | null },
+  db: Database.Database,
+): string[] {
+  const parts: string[] = [];
+
+  // Source 1: SOP task_keywords for this workspace
+  try {
+    const sopRows = db
+      .prepare(
+        'SELECT task_keywords FROM sops WHERE workspace_id = ? AND task_keywords IS NOT NULL AND deleted_at IS NULL LIMIT 20',
+      )
+      .all(ws.id) as { task_keywords: string }[];
+
+    if (sopRows.length > 0) {
+      for (const row of sopRows) {
+        parts.push(row.task_keywords);
+      }
+    }
+  } catch {
+    // DB query failed — skip SOP keywords
+  }
+
+  // Source 2: Workspace description
+  if (ws.description && ws.description.trim().length > 0) {
+    parts.push(ws.description.trim());
+  }
+
+  // Source 3: Workspace name (bare fallback)
+  parts.push(ws.name);
+
+  return tokenizeKeywords(parts.join(' '));
+}
+
+/**
+ * Assign a routing priority for a custom department that has no seed from
+ * DEFAULT_DEPARTMENTS.  The heuristic:
+ *   - Has a real description → priority 6 (above the noise floor, below
+ *     dedicated standard depts which range 7–10).
+ *   - Bare name only (no description, no SOP keywords) → priority 4 (below
+ *     any described dept, above only General Task at 1).
+ *
+ * This keeps custom depts differentiated — a well-described "Publishing
+ * Studio" routes more aggressively than a bare "Bugs" stub, while still
+ * staying below canonical departments like Sales (8) or Marketing (7).
+ */
+function derivePriority(
+  ws: { id: string; slug: string; name: string; description: string | null },
+  db: Database.Database,
+): number {
+  if (ws.description && ws.description.trim().length > 0) return 6;
+
+  try {
+    const row = db
+      .prepare(
+        'SELECT 1 FROM sops WHERE workspace_id = ? AND task_keywords IS NOT NULL AND deleted_at IS NULL LIMIT 1',
+      )
+      .get(ws.id);
+    if (row) return 6;
+  } catch {
+    // DB query failed — fall through
+  }
+
+  return 4;
+}
+
 /**
  * Build a DepartmentConfig from a raw workspace row.
  * Merges keyword hints from DEFAULT_DEPARTMENTS when names align.
+ * When no canonical seed exists, derives keywords and a priority from the
+ * workspace's own description text so custom departments carry meaningful
+ * routing signals (MR-13).
  */
 function workspaceToDept(
   ws: { id: string; slug: string; name: string; description: string | null },
@@ -1283,9 +1410,9 @@ function workspaceToDept(
     id: ws.id,
     name: ws.name,
     purpose: derivePurpose(ws, db, defaultMap),
-    keywords: seed?.keywords ?? [],
+    keywords: seed?.keywords ?? deriveKeywords(ws, db),
     agentRoles: seed?.agentRoles ?? [],
-    priority: seed?.priority ?? 5,
+    priority: seed?.priority ?? derivePriority(ws, db),
   };
 }
 
