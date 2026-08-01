@@ -27,6 +27,7 @@ import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-e
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { checkTriad } from '@/lib/sops';
+import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task, TaskStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -146,9 +147,27 @@ export async function POST(request: NextRequest) {
               }
             }
 
+            // U99-RAW-STATUS-WRITER: deliberate raw writer (NOT routed through
+            // transition()). The bulk-move operator tool moves cards across
+            // ARBITRARY columns in one request; routing through transition()
+            // would subject each move to the legal-transition guard +
+            // preconditions, which would reject legitimate operator repositioning
+            // (e.g. done→inbox) the UI explicitly permits here. The two gates
+            // that MUST hold for operator moves (completion-evidence on →done,
+            // Triad on leaving backlog) are enforced manually above. Paired with
+            // recordStatusEvent() below (DISP-10 thin variant) so the move still
+            // lands a structured task_events audit row — this writer is NOT
+            // unaudited.
             run('UPDATE tasks SET status = ?, updated_at = ?, last_progress_at = ? WHERE id = ?', [
               targetStatus, now, now, taskId,
             ]);
+
+            // Structured task_events audit row (DISP-10 thin variant) — closes
+            // the audit gap the raw writer would otherwise leave.
+            recordStatusEvent(taskId, existing.status, targetStatus, {
+              actor: 'bulk-move',
+              reason: `bulk-moved to ${targetStatus}`,
+            });
 
             // Write an audit event
             run(

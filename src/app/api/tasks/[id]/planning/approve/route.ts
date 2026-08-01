@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import type { PlanningQuestion, PlanningCategory } from '@/lib/types';
-import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { transition } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -120,11 +120,18 @@ export async function POST(
     // MR-04: route through transition() with extraColumns so the description
     // and status land atomically AND the legal-transition guard + preconditions
     // run (planning→backlog is a legal transition — see LEGAL_TRANSITIONS).
-    transition(taskId, 'backlog', {
+    // fix2(MR-04): AWAIT the transition. The original raw run() was synchronous,
+    // so the activity row + {success: true} response below only ever ran after
+    // the write landed. A fire-and-forget transition() broke that contract: the
+    // client could get success + a "moved to inbox" activity row while the
+    // status flip was still pending — or had failed. Awaiting restores the
+    // ordering; a thrown transition aborts before the activity row is written
+    // and surfaces as the 500 below (a truthful failure).
+    await transition(taskId, 'backlog', {
       actor: 'planning-approve',
       reason: 'planning spec locked',
       extraColumns: { description: specMarkdown },
-    }).catch(err => console.warn('[planning-approve] transition failed:', err));
+    });
 
     // Log activity
     const activityId = crypto.randomUUID();
