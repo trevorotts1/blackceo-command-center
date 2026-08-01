@@ -441,9 +441,18 @@ export default function ReviewScreen({
       const data = (await res.json().catch(() => ({}))) as CompleteResponse;
 
       if (res.ok && data.status === 'pass') {
-        // alreadyComplete && status pass means the QC already passed on a prior
-        // run but the kick may have been lost. Show a success indicator for the
-        // retry, then redirect — the build will start from the kick this call fired.
+        // If the server already had interviewComplete set (idempotency guard hit),
+        // THIS call did not re-press the script — so the build kick may have been
+        // lost on the original run. Do NOT silently redirect into a possibly-dead
+        // build; flag a retry so the next press sends retryKick:true and re-fires
+        // the kick (MR-37). The operator gets a one-click retry, not a dead-end.
+        if (data.alreadyComplete) {
+          setNeedsRetryKick(true);
+          setCompleteError(
+            'This interview was already completed. If the build hasn’t started, press “Build my company” again to re-send it.',
+          );
+          return;
+        }
         try {
           await refreshInterviewGate();
         } catch {
