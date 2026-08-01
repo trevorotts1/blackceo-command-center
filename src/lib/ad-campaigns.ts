@@ -322,8 +322,17 @@ export async function moveAdStage(jobId: string, input: MoveAdStageInput): Promi
   // (input.status is already narrowed to non-'blocked' here: the blocked branch
   // above returns early, so reaching this point means status !== 'blocked'.)
   if (card.status === 'blocked') {
+    // Clear ALL SIX block-metadata columns, not just the human-block trio.
+    // B3 (parity with tasks/[id]/route.ts): also NULL the SYSTEM block-metadata
+    // columns (block_reason / block_needs / block_audience) the QC-scorer and
+    // stuck-in-progress sweep write. Leaving them populated made an unblocked
+    // campaign card still read as SYSTEM-blocked on the board and in audience
+    // routing. All six clear in the SAME UPDATE so the unblock is atomic.
     run(
-      'UPDATE tasks SET blocked_reason = NULL, blocked_on_human = NULL, ask = NULL WHERE id = ?',
+      `UPDATE tasks
+          SET blocked_reason = NULL, blocked_on_human = NULL, ask = NULL,
+              block_reason = NULL, block_needs = NULL, block_audience = NULL
+        WHERE id = ?`,
       [card.id],
     );
   }
