@@ -1266,8 +1266,98 @@ function derivePurpose(
 }
 
 /**
+ * Extract candidate keywords from a department's purpose/description string.
+ *
+ * When a custom department has no DEFAULT_DEPARTMENTS seed match (keywords
+ * would be []) the purpose/description IS the only semantic signal we have
+ * about what the dept does — so extract meaningful tokens from it as routing
+ * keywords rather than leaving them empty.
+ *
+ * Tokenisation: split on non-alpha boundaries, filter noise (short tokens,
+ * pure numeric, stopwords that would match everything), deduplicate, and
+ * return the first 30.
+ */
+function deriveKeywordsFromPurpose(purpose: string): string[] {
+  const RAW_STOPWORDS = new Set([
+    'the', 'and', 'for', 'that', 'this', 'with', 'from', 'your', 'our',
+    'its', 'are', 'was', 'has', 'have', 'been', 'will', 'can', 'may',
+    'not', 'but', 'all', 'any', 'each', 'which', 'who', 'how', 'what',
+    'when', 'where', 'why',
+  ]);
+
+  const tokens = purpose
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !RAW_STOPWORDS.has(t) && !/^\d+$/.test(t));
+
+  const seen = new Set<string>();
+  const keywords: string[] = [];
+  for (const t of tokens) {
+    if (!seen.has(t)) {
+      seen.add(t);
+      keywords.push(t);
+      if (keywords.length >= 30) break;
+    }
+  }
+  return keywords;
+}
+
+/**
+ * Query the dispatch_rules table for a department's operator-configured
+ * keywords and priority overrides. The dispatch_rules table (migration 054)
+ * stores per-department task_keywords and priority — the manual operator
+ * override surface that makes custom departments routable without a seed
+ * match in DEFAULT_DEPARTMENTS.
+ *
+ * Returns null when the table is not yet provisioned or has no row for this
+ * department, so the caller falls through to derived/defaults.
+ */
+function queryDispatchRulesOverrides(
+  db: Database.Database,
+  deptSlug: string,
+  deptId: string,
+): { keywords: string[]; priority: number } | null {
+  try {
+    const canonicalForRules = canonicalDeptSlug(deptSlug) || canonicalDeptSlug(deptId) || deptSlug || deptId;
+    const row = db
+      .prepare(
+        `SELECT task_keywords, priority FROM dispatch_rules
+         WHERE department_slug = ? OR department_slug = ?
+         ORDER BY priority DESC LIMIT 1`,
+      )
+      .get(canonicalForRules, deptId) as { task_keywords: string | null; priority: number | null } | undefined;
+
+    if (!row) return null;
+
+    const keywords = row.task_keywords
+      ? row.task_keywords
+          .split(/[,\n]+/)
+          .map((k) => k.trim().toLowerCase())
+          .filter((k) => k.length > 0 && k.length < 60)
+          .slice(0, 30)
+      : [];
+    const priority =
+      typeof row.priority === 'number' && row.priority >= 1 && row.priority <= 10
+        ? row.priority
+        : 5;
+
+    return { keywords, priority };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build a DepartmentConfig from a raw workspace row.
  * Merges keyword hints from DEFAULT_DEPARTMENTS when names align.
+ *
+ * Resolution order for keywords + priority:
+ *   1. dispatch_rules table (operator-configured override)
+ *   2. DEFAULT_DEPARTMENTS seed match (standard department enrichment)
+ *   3. Derived from description/purpose text (custom depts — ensures every
+ *      department has at least some routing keywords, closing the gap where
+ *      custom departments got keywords:[] and could only route via semantic
+ *      embeddings or name-token matching in keywordScore())
  */
 function workspaceToDept(
   ws: { id: string; slug: string; name: string; description: string | null },
@@ -1276,16 +1366,44 @@ function workspaceToDept(
 ): DepartmentConfig {
   const canon = canonicalDeptSlug(ws.id) || canonicalDeptSlug(ws.slug);
   const seed = defaultMap.get(canon) ?? defaultMap.get(ws.name.toLowerCase().trim());
+  const purpose = derivePurpose(ws, db, defaultMap);
+
+  // Priority resolution order — same for keywords
+  const overrides = queryDispatchRulesOverrides(db, ws.slug, ws.id);
+
+  let keywords: string[];
+  if (overrides && overrides.keywords.length > 0) {
+    keywords = overrides.keywords;
+  } else if (seed?.keywords && seed.keywords.length > 0) {
+    keywords = seed.keywords;
+  } else {
+    // Custom department: seed had no keywords. Derive from description/purpose
+    // so the dept can participate in keyword-based routing (keywordScore()).
+    keywords = deriveKeywordsFromPurpose(purpose);
+  }
+
+  let priority: number;
+  if (overrides && overrides.priority !== 5) {
+    priority = overrides.priority;
+  } else if (seed?.priority) {
+    priority = seed.priority;
+  } else {
+    priority = 5;
+  }
+
+  const agentRoles = overrides
+    ? (seed?.agentRoles ?? []) // dispatch_rules has no agent_roles column — keep seed or fallback
+    : (seed?.agentRoles ?? []);
 
   return {
     // Use the workspace's actual id/name — NOT the hardcoded canonical slug.
     // This is the key fix: the routing universe uses the CLIENT'S real names.
     id: ws.id,
     name: ws.name,
-    purpose: derivePurpose(ws, db, defaultMap),
-    keywords: seed?.keywords ?? [],
-    agentRoles: seed?.agentRoles ?? [],
-    priority: seed?.priority ?? 5,
+    purpose,
+    keywords,
+    agentRoles,
+    priority,
   };
 }
 
