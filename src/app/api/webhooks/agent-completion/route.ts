@@ -60,7 +60,7 @@ export const revalidate = 0;
  */
 function verifyWebhookSignature(signature: string, rawBody: string): boolean {
   const webhookSecret = process.env.WEBHOOK_SECRET;
-  
+
   if (!webhookSecret) {
     // Dev mode - skip validation
     return true;
@@ -79,14 +79,14 @@ function verifyWebhookSignature(signature: string, rawBody: string): boolean {
 
 /**
  * POST /api/webhooks/agent-completion
- * 
+ *
  * Receives completion notifications from agents.
  * Expected payload:
  * {
  *   "session_id": "mission-control-engineering",
  *   "message": "TASK_COMPLETE: Built the authentication system"
  * }
- * 
+ *
  * Or can be called with task_id directly:
  * {
  *   "task_id": "uuid",
@@ -97,12 +97,12 @@ export async function POST(request: NextRequest) {
   try {
     // Read raw body for signature verification
     const rawBody = await request.text();
-    
+
     // Verify webhook signature if WEBHOOK_SECRET is set
     const webhookSecret = process.env.WEBHOOK_SECRET;
     if (webhookSecret) {
       const signature = request.headers.get('x-webhook-signature');
-      
+
       if (!signature || !verifyWebhookSignature(signature, rawBody)) {
         console.warn('[WEBHOOK] Invalid signature attempt');
         return NextResponse.json(
@@ -198,9 +198,12 @@ export async function POST(request: NextRequest) {
 
       const summary = completionMatch[1].trim();
 
-      // Find agent by session
+      // Find agent by session.
+      // MR-05: filter deleted_at IS NULL so a soft-deleted row is never
+      // returned live, but a later missed-filter hard-purge still degrades
+      // to the B5 deterministic fallback instead of 404-ing.
       const session = queryOne<OpenClawSession>(
-        'SELECT * FROM openclaw_sessions WHERE openclaw_session_id = ? AND status = ?',
+        'SELECT * FROM openclaw_sessions WHERE openclaw_session_id = ? AND status = ? AND deleted_at IS NULL',
         [body.session_id, 'active']
       );
 
@@ -231,17 +234,40 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Find active task for this agent
-      const task = queryOne<Task & { assigned_agent_name?: string }>(
-        `SELECT t.*, a.name as assigned_agent_name
-         FROM tasks t
-         LEFT JOIN agents a ON t.assigned_agent_id = a.id
-         WHERE t.assigned_agent_id = ?
-           AND t.status = 'in_progress'
-         ORDER BY t.updated_at DESC
-         LIMIT 1`,
-        [agentId]
-      );
+      // MR-05: use the session's stored task_id for DIRECT attribution. The
+      // dispatcher writes task_id on the session row at dispatch time; reading
+      // it here closes the gap where a hard-deleted session row lost the
+      // attribution and the webhook picked the wrong (newest) in_progress task
+      // via the agent scan. The stored task_id is the definitive answer.
+      let task: (Task & { assigned_agent_name?: string }) | null | undefined = null;
+      if (session?.task_id) {
+        task = queryOne<Task & { assigned_agent_name?: string }>(
+          `SELECT t.*, a.name as assigned_agent_name
+           FROM tasks t
+           LEFT JOIN agents a ON t.assigned_agent_id = a.id
+           WHERE t.id = ?`,
+          [session.task_id]
+        );
+        if (!task) {
+          // Stale task_id (task was deleted, etc.) — fall through to agent scan.
+          console.warn(`[agent-completion] session task_id ${session.task_id} not found, falling back to agent scan`);
+        }
+      }
+
+      // Fallback: find active task for this agent (preserved for the
+      // missing/purged session row path, or when stored task_id is stale).
+      if (!task) {
+        task = queryOne<Task & { assigned_agent_name?: string }>(
+          `SELECT t.*, a.name as assigned_agent_name
+           FROM tasks t
+           LEFT JOIN agents a ON t.assigned_agent_id = a.id
+           WHERE t.assigned_agent_id = ?
+             AND t.status = 'in_progress'
+           ORDER BY t.updated_at DESC
+           LIMIT 1`,
+          [agentId]
+        );
+      }
 
       if (!task) {
         return NextResponse.json(
@@ -321,7 +347,7 @@ export async function POST(request: NextRequest) {
 
 /**
  * GET /api/webhooks/agent-completion
- * 
+ *
  * Returns webhook status and recent completions
  */
 export async function GET() {

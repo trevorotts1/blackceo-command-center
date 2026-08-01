@@ -1008,7 +1008,10 @@ export async function DELETE(
     // HARD-BLOCK the task delete, which is why DELETE returned a generic 500
     // once a task had any persona-selection / persona-performance history (every
     // task acquires those the moment the persona backfill sweep runs).
-    run('DELETE FROM openclaw_sessions WHERE task_id = ?', [id]);
+    // MR-05: soft-delete session rows referencing the deleted task so the
+    // completion webhook's task_id-based attribution still degrades cleanly
+    // (it will detect the stale task_id and fall back to the agent scan).
+    run("UPDATE openclaw_sessions SET status = 'deleted', deleted_at = datetime('now') WHERE task_id = ?", [id]);
     run('DELETE FROM events WHERE task_id = ?', [id]);
     // Conversations reference tasks - nullify (task_id is nullable there).
     run('UPDATE conversations SET task_id = NULL WHERE task_id = ?', [id]);

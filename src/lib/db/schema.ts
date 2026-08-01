@@ -397,6 +397,14 @@ CREATE TABLE IF NOT EXISTS openclaw_sessions (
   session_type TEXT DEFAULT 'persistent',
   task_id TEXT REFERENCES tasks(id),
   ended_at TEXT,
+  -- MR-05: soft-delete column. Sessions must never be hard-deleted while a
+  -- dispatched task is in_progress, because the completion webhook reads
+  -- task_id from the session row to attribute the completion. A hard-deleted
+  -- row loses that attribution and the task stays in_progress forever.
+  -- Soft-delete is set at the SAME instant as status='deleted' so queries
+  -- filtering status='active' AND deleted_at IS NULL always return exactly
+  -- one live row per agent.
+  deleted_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

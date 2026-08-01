@@ -183,8 +183,13 @@ export async function DELETE(request: Request, { params }: RouteParams) {
     const taskId = session.task_id;
     const agentId = session.agent_id;
 
-    // Delete the session
-    db.prepare('DELETE FROM openclaw_sessions WHERE id = ?').run(session.id);
+    // MR-05: soft-delete the session instead of hard-deleting it. The
+    // task_id column must survive so the completion webhook can still
+    // attribute the agent's results. A hard-delete loses that link and
+    // the task stays in_progress forever.
+    db.prepare(
+      'UPDATE openclaw_sessions SET status = ?, deleted_at = ? WHERE id = ?',
+    ).run('deleted', new Date().toISOString(), session.id);
 
     // If there's an associated agent that was auto-created (role = 'Sub-Agent'), delete it too
     if (agentId) {
