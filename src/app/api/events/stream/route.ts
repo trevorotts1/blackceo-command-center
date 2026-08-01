@@ -19,7 +19,11 @@
  */
 
 import { NextRequest } from 'next/server';
-import { registerClient, unregisterClient } from '@/lib/events';
+import {
+  registerClient,
+  unregisterClient,
+  SSE_PROCESS_ORIGIN,
+} from '@/lib/events';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -36,6 +40,7 @@ const CLEANUP_EVERY_N_TICKS = 12; // every 6 s at 500 ms poll
 
 interface JournalRow {
   id: number;
+  origin: string;
   event_type: string;
   payload: string;
 }
@@ -60,8 +65,18 @@ export async function GET(request: NextRequest) {
 
       // MR-10: poll the shared SQLite journal for events written by OTHER
       // processes (the in-memory push path already delivers same-process
-      // events, so the poll is ONLY for cross-process fan-out). Best-effort —
-      // a poll failure is logged and the loop keeps running.
+      // events, so the poll is ONLY for cross-process fan-out).
+      //
+      // We fetch every row past the cursor and advance the cursor past ALL of
+      // them, but only ENQUEUE rows whose origin differs from this process.
+      // Rows THIS process journaled were already pushed to this connection's
+      // controller by broadcast(), so re-forwarding them would double-deliver
+      // every event to same-process clients (all clients in a single-process
+      // deploy). Advancing the cursor past own-origin rows (rather than
+      // filtering them in SQL) is deliberate: otherwise, in a single-process
+      // deploy where no cross-process rows ever arrive, the cursor would never
+      // move and every poll would re-scan the whole journal.
+      // Best-effort — a poll failure is logged and the loop keeps running.
       const pollJournal = () => {
         try {
           // Dynamic import so Next.js doesn't bundle better-sqlite3 into
@@ -71,7 +86,7 @@ export async function GET(request: NextRequest) {
           const db = getDb();
           const rows = db
             .prepare(
-              `SELECT id, event_type, payload
+              `SELECT id, origin, event_type, payload
                FROM sse_event_log
                WHERE id > ?
                ORDER BY id ASC
@@ -80,9 +95,12 @@ export async function GET(request: NextRequest) {
             .all(lastJournalId) as JournalRow[];
 
           for (const row of rows) {
+            // Always advance the cursor so own-origin rows are never re-scanned.
+            lastJournalId = row.id;
+            // Skip events this process already pushed on the in-memory path.
+            if (row.origin === SSE_PROCESS_ORIGIN) continue;
             const data = `data: ${row.payload}\n\n`;
             controller.enqueue(encoder.encode(data));
-            lastJournalId = row.id;
           }
 
           // Periodic cleanup: delete rows older than JOURNAL_MAX_AGE_MS.

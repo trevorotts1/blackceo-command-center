@@ -35,7 +35,28 @@
  *   from disagreeing. Closing it at RUNTIME is deliberately NOT done here.
  */
 
+import { randomUUID } from 'crypto';
 import type { SSEEvent } from './types';
+
+/**
+ * MR-10 — a stable, per-process identity for the shared SSE fan-out journal.
+ *
+ * Every broadcast() journals its event to `sse_event_log` so OTHER processes
+ * can discover it. But the in-memory push path ALREADY delivers that same event
+ * to clients connected to THIS process. If the poll loop (in the stream route)
+ * also forwarded this process's own journal rows, every same-process client
+ * would receive each event TWICE — and in the canonical single-process deploy
+ * (ecosystem.config.cjs: instances 1, fork) that is ALL clients. Most store
+ * handlers are idempotent, but `activity_logged` increments a pulse counter and
+ * the poll's raw enqueue also bypasses the MSG-08 backpressure guard.
+ *
+ * So each row is stamped with this origin, and the stream route's poll query
+ * excludes rows whose origin equals its own — it only fans out CROSS-process
+ * events. A fresh UUID per process load guarantees distinct origins across
+ * processes sharing one database, while staying constant within a process so
+ * the route and this module agree on "self".
+ */
+export const SSE_PROCESS_ORIGIN: string = randomUUID();
 
 /**
  * MSG-05: warn once at process startup if this box appears to run more than one
@@ -126,8 +147,8 @@ function journalEvent(event: SSEEvent): void {
     const { getDb } = require('@/lib/db') as typeof import('@/lib/db');
     const db = getDb();
     db.prepare(
-      `INSERT INTO sse_event_log (event_type, payload) VALUES (?, ?)`,
-    ).run(event.type, JSON.stringify(event));
+      `INSERT INTO sse_event_log (origin, event_type, payload) VALUES (?, ?, ?)`,
+    ).run(SSE_PROCESS_ORIGIN, event.type, JSON.stringify(event));
   } catch {
     // Journal write is best-effort — the in-memory broadcast already
     // covers same-process clients, and the polling backstop self-heals.

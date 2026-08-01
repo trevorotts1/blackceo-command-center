@@ -5342,9 +5342,17 @@ export const migrations: Migration[] = [
       // Created with the same pattern as job_liveness (migration 102): a
       // minimal table with a single index, created only if it does not
       // already exist.
+      //
+      // `origin` stamps the per-process UUID (src/lib/events.ts
+      // SSE_PROCESS_ORIGIN) that journaled the row. The stream route's poll
+      // query excludes rows whose origin equals its own process, so a client
+      // only receives CROSS-process events via the journal — same-process
+      // events already arrive on the in-memory push path. Without this filter
+      // every same-process client would be delivered each event twice.
       db.exec(`
         CREATE TABLE IF NOT EXISTS sse_event_log (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          origin TEXT NOT NULL DEFAULT '',
           event_type TEXT NOT NULL,
           payload TEXT NOT NULL,
           created_at TEXT NOT NULL DEFAULT (datetime('now'))
