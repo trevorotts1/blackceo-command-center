@@ -35,7 +35,10 @@
  */
 
 const path = require('path');
-const INSTALL_DIR = process.env.CC_INSTALL_DIR || path.join(process.env.HOME, 'command-center/app');
+// Match the fleet-canonical ecosystem.config.cjs resolution pattern:
+// CC_INSTALL_DIR takes precedence; fall back to process.cwd() so the cc-prod
+// process always starts from the directory this config was loaded from.
+const INSTALL_DIR = process.env.CC_INSTALL_DIR || process.cwd();
 // Canonical absolute DB path — identical to .env.local and the previously
 // working cc-prod pm2 env, so a restart always opens the same database.
 const DB_PATH = process.env.DATABASE_PATH || path.join(process.env.HOME, 'command-center/data/mission-control.db');

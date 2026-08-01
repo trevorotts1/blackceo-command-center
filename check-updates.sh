@@ -129,6 +129,7 @@ if [ -z "$INSTALL_DIR" ] && [ "$INSTALL_DIR_STATUS" != "pin_invalid" ]; then
   CANDIDATES=(
     "$HOME/projects/command-center"
     "/data/projects/command-center"
+    "$HOME/command-center/app"
     "$HOME/clawd/projects/blackceo-command-center"
     "/data/clawd/projects/blackceo-command-center"
     "$HOME/blackceo-command-center"
