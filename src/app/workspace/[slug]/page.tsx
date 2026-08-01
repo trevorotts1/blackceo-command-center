@@ -47,19 +47,26 @@ export default function WorkspacePage() {
   const workspaceRef = useRef<Workspace | null>(null);
   useEffect(() => { workspaceRef.current = workspace; }, [workspace]);
 
-  // MR-20: on SSE reconnect, refetch this department's scoped board so the
-  // built-in catchUpBoardState() (which skips when selectedDepartment !== null)
-  // isn't the only reconciliation path. Without this, the department board sits
-  // stale for up to 60s after a blip until the fallback poll fires.
+  // MR-20: on SSE reconnect, refetch the board so the built-in
+  // catchUpBoardState() (which skips when selectedDepartment !== null) isn't
+  // the only reconciliation path. Without this, the department board sits stale
+  // for up to 60s after a blip until the fallback poll fires.
+  //
+  // NOTE: useSSE invokes EITHER this callback OR its built-in catchUpBoardState
+  // (never both), so this callback must cover BOTH scopes — returning early for
+  // CEO/default would silently drop the unscoped catch-up that the built-in
+  // path previously provided. Mirror the initial-load + fallback-poll scope
+  // logic: CEO/default refetches the unscoped board, departments refetch their
+  // workspace_id-scoped board.
   const onReconnect = useCallback(async () => {
     const ws = workspaceRef.current;
     if (!ws) return;
     const routeDepartment =
       ws.slug === 'default' || ws.slug === 'ceo' ? null : ws.slug;
-    // CEO / default — the built-in catchUpBoardState handles the unscoped board.
-    if (routeDepartment === null) return;
+    const url = routeDepartment === null
+      ? '/api/tasks'
+      : `/api/tasks?workspace_id=${encodeURIComponent(ws.id)}`;
     try {
-      const url = `/api/tasks?workspace_id=${encodeURIComponent(ws.id)}`;
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) return;
       const fresh: Task[] = await res.json();
@@ -72,13 +79,13 @@ export default function WorkspacePage() {
         });
       if (changed) {
         debug.sse(
-          `Reconnect catch-up (dept ${routeDepartment}): board changed, reconciling store`,
+          `Reconnect catch-up (${routeDepartment ?? 'ceo'}): board changed, reconciling store`,
         );
         useMissionControl.getState().setTasks(fresh);
       }
     } catch (error) {
       debug.sse(
-        `Reconnect catch-up (dept ${routeDepartment}) refetch failed`,
+        `Reconnect catch-up (${routeDepartment ?? 'ceo'}) refetch failed`,
         error,
       );
     }
