@@ -791,14 +791,38 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ operation: 'archive', taskIds: ids }),
       });
-      const data = await res.json();
+      const data: {
+        error?: string;
+        total: number;
+        ok: number;
+        failed: number;
+        results: { taskId: string; ok: boolean; error?: string }[];
+      } = await res.json();
 
       if (!res.ok) throw new Error(data.error || 'Bulk archive failed');
 
-      // Remove archived tasks from the store (they'll be hidden without includeArchived)
-      useMissionControl.getState().setTasks(
-        useMissionControl.getState().tasks.filter((t) => !ids.includes(t.id)),
+      // Remove only the tasks the server actually archived. Cards whose archive
+      // failed must stay on the board — filtering out every requested id here
+      // would make failed-archive cards vanish from the UI even though the
+      // server left them un-archived (they'll be hidden without includeArchived
+      // only once genuinely archived).
+      const archivedIds = new Set(
+        data.results.filter((r) => r.ok).map((r) => r.taskId),
       );
+      useMissionControl.getState().setTasks(
+        useMissionControl.getState().tasks.filter((t) => !archivedIds.has(t.id)),
+      );
+
+      // Surface per-task failures (matches handleBulkMove's pattern).
+      for (const r of data.results) {
+        if (!r.ok) {
+          pushToast({
+            tone: 'error',
+            title: `Could not archive ${r.taskId.slice(0, 8)}...`,
+            detail: r.error ?? 'Unknown error',
+          });
+        }
+      }
 
       pushToast({
         tone: 'info',
@@ -808,7 +832,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
       if (data.failed > 0) {
         pushToast({
           tone: 'error',
-          title: `${data.failed} tasks could not be archived`,
+          title: `${data.failed} of ${data.total} tasks could not be archived`,
         });
       }
     } catch (err) {
