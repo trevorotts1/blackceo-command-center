@@ -192,7 +192,6 @@ interface CompleteResponse {
   error?: string;
   missing?: CompleteMissingItem[];
   alreadyComplete?: boolean;
-  retryKickAcknowledged?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
