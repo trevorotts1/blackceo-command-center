@@ -3,11 +3,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Search, Inbox as InboxIcon } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
+import { ErrorState } from './podcast/states';
 import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { MarketingPublishButton } from './MarketingPublishButton';
+import PhaseStepper from './PhaseStepper';
 import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
 import { AnthologyCardFace } from './anthology/AnthologyCardFace';
 import { isAnthologyTask } from './anthology/anthology-card';
@@ -23,6 +25,7 @@ import {
   triadMissingPillText,
 } from '@/lib/board-labels';
 import { taskToColumnId, columnIdToStatus } from '@/lib/board-projection';
+import { canonicalDeptFromAnyLabel, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
 // 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
@@ -33,6 +36,10 @@ interface MissionQueueProps {
   departmentFilter?: string | null;
   /** Selects the column preset. Defaults to 'task' so all existing workspaces are unaffected. */
   boardKind?: BoardKind;
+  /** Error message from the parent page's data fetch — surfaced above the columns. */
+  loadError?: string | null;
+  /** Retry callback wired to the parent page's loadData(). */
+  onRetry?: () => void;
 }
 
 // ── Lean Kanban board model (Trevor-approved) ──────────────────────────────
@@ -113,7 +120,12 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
 // without pulling this whole 'use client' component into the test's module
 // graph. Logic and names are unchanged; this is a pure extraction.
 
-const departmentEmojis: Record<string, string> = {
+// U038: EXPORTED for the same reason departmentNames already is — the comment
+// at :136-147 calls this "a regression-testable, non-reimplemented surface."
+// tests/unit/u038-board-department-label-coverage.test.ts asserts against THIS
+// object; a test that re-declares the map proves only that the test is
+// self-consistent.
+export const departmentEmojis: Record<string, string> = {
   'ceo-com': '👔', 'ceo': '👔',
   'marketing': '📢',
   'sales': '💰',
@@ -131,6 +143,16 @@ const departmentEmojis: Record<string, string> = {
   'openclaw-maintenance': '🦾', 'openclaw': '🦾',
   'social-media': '📱', 'social': '📱',
   'paid-advertisement': '🎯', 'paid-ads': '🎯',
+  // U038 (audit E8): the three producer-engine workspaces. Each has a live
+  // `workspaces` row, so each can put a card on this board; none had a label,
+  // so each rendered the '🏢' fallback plus its raw department string (:1066).
+  // Values are NOT invented — they are the live workspaces.icon for each row
+  // (presentations 🖥️, podcast 🎙️, anthology 📚), which is also what
+  // migration 113 seeds. 🎙️ intentionally duplicates audio-production's; the
+  // row says 🎙️ and a duplicate emoji costs nothing.
+  'presentations': '🖥️',
+  'podcast': '🎙️',
+  'anthology': '📚',
   'general-task': '🗂️', 'general': '🗂️',
 };
 
@@ -163,11 +185,24 @@ export const departmentNames: Record<string, string> = {
   'openclaw-maintenance': 'OpenClaw Maintenance',
   'social-media': 'Social Media',
   'paid-advertisement': 'Paid Advertisement',
+  // U038 (audit E8). Display names are the ones already ratified elsewhere:
+  // DEFAULT_DEPARTMENTS (routing/departments.config.ts) declares
+  // presentations='Presentations' and podcast='Podcast';
+  // ceo-board/DevilsAdvocateFeed.tsx:71,74 uses the same two; the live
+  // workspaces.name column agrees on all three. Nothing here is invented.
+  // NOTE: 'anthology' is in NEITHER CANONICAL_SLUGS nor DEFAULT_DEPARTMENTS
+  // (both 26 entries, measured 2026-07-26) yet DOES have a live workspace row.
+  // It is labelled here so its chip renders, and it is deliberately NOT
+  // asserted by the coverage test in step 4 — adding it to the department
+  // registry is a separate decision this unit does not make.
+  'presentations': 'Presentations',
+  'podcast': 'Podcast',
+  'anthology': 'Anthology',
   'general-task': 'General Task',
 };
 
-export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task' }: MissionQueueProps) {
-  const { tasks, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
+export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task', loadError, onRetry }: MissionQueueProps) {
+  const { tasks, isLoading, updateTaskStatus, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
@@ -229,17 +264,27 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // All bug board code paths are gated behind boardKind === 'bug'.
   const [bugTickets, setBugTickets] = useState<BugTicket[]>([]);
   const [bugLoading, setBugLoading] = useState(false);
+  const [bugError, setBugError] = useState<string | null>(null);
+  const [bugRetryCount, setBugRetryCount] = useState(0);
 
   useEffect(() => {
     if (boardKind !== 'bug') return;
     setBugLoading(true);
+    setBugError(null);
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '?workspace_id=bugs';
     fetch(`/api/bugs${qs}`)
       .then((r) => r.json())
       .then((d) => setBugTickets(d.bugs ?? []))
-      .catch((e) => console.error('[MissionQueue] bug fetch error', e))
+      .catch((e) => {
+        console.error('[MissionQueue] bug fetch error', e);
+        setBugError('Failed to load bug tickets.');
+      })
       .finally(() => setBugLoading(false));
-  }, [boardKind, workspaceId]);
+  }, [boardKind, workspaceId, bugRetryCount]);
+
+  const handleBugRetry = useCallback(() => {
+    setBugRetryCount((c) => c + 1);
+  }, []);
 
   // ── Horizontal scroll affordance state ────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -294,7 +339,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
   const matchesScope = (task: Task): boolean => {
     if (scopeByWorkspace) return task.workspace_id === workspaceId;
-    if (effectiveDepartment) return task.department === effectiveDepartment;
+    if (effectiveDepartment) { return canonicalDeptFromAnyLabel(task.department) === canonicalDeptFromAnyLabel(effectiveDepartment); }
     return true;
   };
 
@@ -517,8 +562,14 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
             <>
               <span className="hidden sm:block text-gray-300 mx-1">|</span>
               <div className="flex items-center gap-2 bg-brand-50 text-brand-700 px-2 lg:px-3 py-1 lg:py-1.5 rounded-lg border border-brand-100 ml-auto lg:ml-0">
-                <span className="text-base lg:text-lg leading-none">{departmentEmojis[effectiveDepartment] || '📋'}</span>
-                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[effectiveDepartment] || effectiveDepartment}</span>
+                {/* U038: canonicalize before lookup — the same defence
+                    ceo-board/DevilsAdvocateFeed.tsx:47 already applies, so a raw
+                    variant ('dept-presentations', 'Presentations', 'billing')
+                    resolves instead of degrading to the generic fallback. The
+                    RAW value is still what renders when the lookup misses, so a
+                    genuinely unknown department is visible rather than blank. */}
+                <span className="text-base lg:text-lg leading-none">{departmentEmojis[canonicalDeptSlug(effectiveDepartment)] || departmentEmojis[effectiveDepartment] || '📋'}</span>
+                <span className="font-semibold text-sm hidden sm:inline">{departmentNames[canonicalDeptSlug(effectiveDepartment)] || departmentNames[effectiveDepartment] || effectiveDepartment}</span>
                 <button 
                   onClick={() => setSelectedDepartment(null)}
                   className="ml-1 p-0.5 rounded-md hover:bg-brand-100 text-brand-400 hover:text-brand-900 transition-colors"
@@ -642,6 +693,16 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         })}
       </div>
 
+      {/* Error banner for both boards */}
+      {(() => {
+        const err = boardKind === 'bug' ? bugError : loadError;
+        const retry = boardKind === 'bug' && bugError ? handleBugRetry : onRetry;
+        if (err && retry) {
+          return <ErrorState onRetry={retry} />;
+        }
+        return null;
+      })()}
+
       {/* Kanban Columns — scroll wrapper with always-visible scrollbar + affordances */}
       {/*
         Layout:
@@ -728,8 +789,29 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                   );
                 })
               )
+            ) : isLoading ? (
+              /* Task Board — loading skeleton */
+              COLUMNS.map((column) => (
+                <div
+                  key={column.id}
+                  data-testid={`column-skeleton-${column.id}`}
+                  className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0"
+                >
+                  <div className="shrink-0">
+                    <div className="inline-flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full shadow-md bg-gray-300 animate-pulse">
+                      <span className="w-6 h-5 rounded-full bg-gray-400/50" />
+                      <span className="h-4 w-16 rounded bg-gray-400/50" />
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-3 lg:gap-4 overflow-y-auto min-h-0 pb-6 pr-0 lg:pr-2">
+                    {[1, 2, 3].map((i) => (
+                      <div key={i} className="h-20 bg-gray-100 rounded-2xl animate-pulse" />
+                    ))}
+                  </div>
+                </div>
+              ))
             ) : (
-              /* Task Board -- original 6 columns, unchanged */
+              /* Task Board — 6 columns, with loading gate above */
               COLUMNS.map((column) => {
                 const columnTasks = getTasksByStatus(column.id);
                 return (
@@ -783,7 +865,22 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                       {columnTasks.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-10 text-gray-300 select-none">
                           <InboxIcon className="w-7 h-7 mb-2" aria-hidden="true" />
-                          <span className="text-xs font-medium text-gray-400">No tasks</span>
+                          <span className="text-xs font-medium text-gray-400">
+                            {searchQuery.trim() !== '' || activeFilter !== 'total'
+                              ? 'No tasks match this filter'
+                              : effectiveDepartment
+                                ? 'No tasks in this department'
+                                : 'No tasks'}
+                          </span>
+                          {(searchQuery.trim() !== '' || activeFilter !== 'total') && (
+                            <button
+                              type="button"
+                              onClick={() => { setSearchQuery(''); setActiveFilter('total'); }}
+                              className="mt-2 text-xs font-medium text-brand-600 underline underline-offset-2 hover:text-brand-800"
+                            >
+                              Clear filter
+                            </button>
+                          )}
                         </div>
                       ) : (
                         columnTasks.map((task) => (
@@ -1063,7 +1160,7 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
         {/* Department Pill */}
         {task.department && (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-            {departmentEmojis[task.department.toLowerCase()] || '🏢'} {departmentNames[task.department.toLowerCase()] || task.department}
+            {departmentEmojis[canonicalDeptSlug(task.department)] || departmentEmojis[task.department.toLowerCase()] || '🏢'} {departmentNames[canonicalDeptSlug(task.department)] || departmentNames[task.department.toLowerCase()] || task.department}
           </span>
         )}
 
@@ -1117,7 +1214,8 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
 
       {/* Block transparency panel — only rendered when the task is blocked and has block fields */}
       {task.status === 'blocked' && (task.block_reason || task.block_needs || task.block_audience) && (
-        <div className="mb-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs space-y-1">
+        <div className="mb-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs space-y-1"
+          data-testid="card-face-blocked-panel">
           {/* Audience badge */}
           {task.block_audience && (
             <div className="flex items-center gap-1.5">
@@ -1160,6 +1258,19 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
               Next step: {task.block_needs}
             </p>
           )}
+          {/* U061 — compact heal indicator on the card face only (detail in the modal) */}
+          {typeof task.dispatch_attempts === 'number' && task.dispatch_attempts > 0 && (
+            <p className="text-red-600 font-medium" data-testid="card-face-heal-attempts">
+              retrying — attempt {task.dispatch_attempts}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* U060 — live phase progress stepper for presentation-department tasks */}
+      {canonicalDeptSlug(task.department) === 'presentations' && (
+        <div className="mt-2 pt-2 border-t border-gray-50">
+          <PhaseStepper taskId={task.id} />
         </div>
       )}
 

@@ -567,6 +567,16 @@ body {
 .iv-btn-quiet:hover:not(:disabled):not(.is-busy) {
   color: var(--iv-ink);
 }
+.iv-btn-secondary {
+  background: var(--iv-surface);
+  border-color: var(--iv-line-strong);
+  color: var(--iv-ink);
+}
+.iv-btn-secondary:hover:not(:disabled):not(.is-busy) {
+  background: var(--iv-surface-2);
+  border-color: var(--iv-accent-ring);
+  transform: translateY(-1px);
+}
 
 /* ── Inputs ─────────────────────────────────────────────────────────────────*/
 .iv-input,

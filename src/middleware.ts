@@ -12,6 +12,7 @@ import {
 } from '@/lib/probes/unauthorized-401-contract';
 import { INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, signInterviewToken } from '@/lib/interview/gate-cookie';
 import { checkInterviewCompleteViaFallback } from '@/lib/interview/gate-fallback';
+import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '@/lib/bearer-required-routes';
 
 /**
  * Layered authentication middleware per PRD Section 3.1 (Fix #1).
@@ -475,13 +476,28 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // HMAC over WEBHOOK_SECRET), even from a same-origin caller — so a forged
     // same-origin Origin/Referer can never reach them without auth.
     //
-    // RESIDUAL (accepted, = v4.69.1): Origin/Referer are client-settable, so a
-    // non-browser caller reaching the origin directly can forge a same-origin
-    // header to READ the board's own data. That surface is READ-only board data;
-    // the ingest/write family above stays fully auth-gated. An operator who fronts
-    // the box with Cloudflare Access (REQUIRE_CF_ACCESS=true) closes even this
-    // residual at the edge for every route.
-    if (!isWebhookSecretRoute(pathname) && isSameOriginRequest(request)) {
+    // U052: RESIDUAL (measured 2026-07-26). Origin/Referer are client-settable,
+    // so a non-browser caller reaching the origin directly can forge a same-origin
+    // header to reach ANY /api/* route not in isWebhookSecretRoute — 99 mutating
+    // routes plus every read route. The 38 routes in BEARER_REQUIRED_WRITE_ROUTES
+    // (routes the interface never calls) are now gated below; the 61 routes the
+    // interface DOES call cannot be closed here and are documented in
+    // docs/SECURITY-RESIDUALS.md. An operator who fronts the box with Cloudflare
+    // Access (REQUIRE_CF_ACCESS=true) closes even this residual at the edge for
+    // every route.
+    //
+    // U052: the passthrough trusts client-settable Origin/Referer (see
+    // isSameOriginRequest). A forged header therefore reaches any /api/* route not
+    // in isWebhookSecretRoute — 99 mutating routes, measured 2026-07-26. Routes
+    // the interface itself never calls have no legitimate tokenless caller, so
+    // they fall through to the bearer check below instead of being waved past.
+    // The 61 routes the interface DOES call cannot be closed here; see
+    // docs/SECURITY-RESIDUALS.md.
+    if (
+      !isWebhookSecretRoute(pathname) &&
+      !requiresBearerForWrite(pathname, request.method) &&
+      isSameOriginRequest(request)
+    ) {
       const passthrough = NextResponse.next();
       if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;

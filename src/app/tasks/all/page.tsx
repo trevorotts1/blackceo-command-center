@@ -39,6 +39,8 @@ export default function AllTasksPage() {
   } = useMissionControl();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
   useSSE();
 
@@ -67,8 +69,10 @@ export default function AllTasksPage() {
           setTasks(tasksData);
         }
         if (eventsRes.ok) setEvents(await eventsRes.json());
+        if (!cancelled) setLoadError(null);
       } catch (error) {
         console.error('Failed to load /tasks/all data:', error);
+        if (!cancelled) setLoadError('Failed to load task board data.');
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -106,6 +110,7 @@ export default function AllTasksPage() {
         }
       } catch (error) {
         console.error('Failed to poll tasks:', error);
+        setLoadError('Task poll failed — data may be stale.');
       }
     }, 60000);
 
@@ -114,6 +119,33 @@ export default function AllTasksPage() {
       clearInterval(taskPoll);
     };
   }, [setAgents, setTasks, setEvents, setIsLoading]);
+
+  const handleRetry = () => {
+    if (retrying) return;
+    setRetrying(true);
+    setLoadError(null);
+    setIsLoading(true);
+    const doLoad = async () => {
+      try {
+        const [agentsRes, tasksRes, eventsRes] = await Promise.all([
+          fetch('/api/agents'),
+          fetch('/api/tasks'),
+          fetch('/api/events'),
+        ]);
+        if (agentsRes.ok) setAgents(unwrapAgents(await agentsRes.json()));
+        if (tasksRes.ok) setTasks(await tasksRes.json());
+        if (eventsRes.ok) setEvents(await eventsRes.json());
+        setLoadError(null);
+      } catch (error) {
+        console.error('Failed to load /tasks/all data:', error);
+        setLoadError('Failed to load task board data.');
+      } finally {
+        setIsLoading(false);
+        setTimeout(() => setRetrying(false), 5000);
+      }
+    };
+    doLoad();
+  };
 
   return (
     /* Shell contract (v4.66.0 bottom-cutoff fix):
@@ -137,7 +169,7 @@ export default function AllTasksPage() {
 
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
         <AgentsSidebar navigateOnSelect isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
-        <MissionQueue departmentFilter={null} />
+        <MissionQueue departmentFilter={null} loadError={loadError} onRetry={() => handleRetry()} />
         <LiveFeed />
       </div>
 

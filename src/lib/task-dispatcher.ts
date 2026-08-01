@@ -52,6 +52,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
@@ -1088,7 +1089,7 @@ ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
 ${personaSection}
 **Specialist Type:** ${specialistType}
-${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
+${renderOwnerMessagesSection(task.id)}${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
 ${renderWriteBackInstructions(missionControlUrl, task.id, 'artifact', `${taskArtifactDir}/filename.png`)}
 
 When complete, reply with:

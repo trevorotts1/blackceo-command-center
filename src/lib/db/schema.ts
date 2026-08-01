@@ -150,6 +150,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   last_dispatch_attempt_at TEXT,              -- migration 077
   next_dispatch_eligible_at TEXT,             -- migration 077 (backoff gate)
   block_reason TEXT,                          -- migration 078
+  block_gaps TEXT,                            -- migration 073 (added to CRITICAL registry by U061 step 4)
+  block_needs TEXT,                           -- migration 073 (added to CRITICAL registry by U061 step 4)
+  block_audience TEXT CHECK (block_audience IN ('OWNER', 'SYSTEM')),  -- migration 073 (added to CRITICAL registry by U061 step 4)
   redispatch_count INTEGER DEFAULT 0,         -- migration 084
   persona_fallback INTEGER DEFAULT 0,         -- migration 083 (defaulted-pin audit flag)
   -- P2-02 (migration 099 owns this for existing DBs; this base CREATE covers
@@ -205,6 +208,10 @@ CREATE TABLE IF NOT EXISTS task_persona_bundle (
   bundle_json TEXT,
   catalog_version TEXT,
   confirm_state TEXT,
+  client_persona_id TEXT,
+  client_persona_source TEXT CHECK (client_persona_source IS NULL OR client_persona_source IN
+    ('client-choice','client','locked','config-named','express')),
+  client_persona_set_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_task_persona_bundle_task ON task_persona_bundle(task_id);

@@ -128,7 +128,64 @@ export const UpdateTaskSchema = z.object({
   // Required when transitioning a `presentations` department task to `done`.
   // The API route enforces presence; Zod accepts it as optional so other
   // departments are completely unaffected by this field.
-  process_certificate_sha: z.string().optional(),
+  // Presentations done-gate (v4.56.0 / no-skip proof).
+  // Required when transitioning a `presentations` department task to `done`.
+  // The API route enforces presence; Zod accepts it as optional so other
+  // departments are completely unaffected by this field.
+  // U033 (audit E3): a sha256 hex digest, exactly as prove-deck.py emits it
+  // (hashlib.sha256(...).hexdigest() -> 64 lowercase hex chars). Lowercased and
+  // trimmed before the check so a producer that upper-cases or pads is accepted
+  // rather than silently 400'd; anything that is not a sha256 is refused HERE,
+  // before it can be written into the anti-spoof slot.
+  process_certificate_sha: z
+    .string()
+    .transform((s) => s.trim().toLowerCase())
+    .refine((s) => /^[0-9a-f]{64}$/.test(s), {
+      message:
+        'process_certificate_sha must be a sha256 hex digest (64 hex characters), as written by prove-deck.py into PROCESS-CERTIFICATE.json',
+    })
+    .optional(),
+  // ── U034 (audit E4): the four fields eight board producers have been sending
+  // and Zod has been silently stripping. Declared so they ARRIVE; persisted by
+  // the PATCH route. Deliberately NOT accompanied by .strict() — see the U034
+  // card's "THE STRICT DECISION".
+  //
+  // RESTORED 2026-07-29: U034 landed these in 8cc525c; a parallel U035 branch
+  // that forked from base-d07 rewrote the same PATCH function and dropped them
+  // while leaving route.ts's u034Url/u034Qc usages in place — which made every
+  // PATCH reaching route.ts:818 throw ReferenceError and return a bare 500.
+  //
+  // phase_id — the producer's own pipeline phase label, free text, recorded in
+  // the audit note. NOT a foreign key: producers mint their own phase ids.
+  phase_id: z.string().min(1).max(128).optional(),
+  // note — appended to description as a timestamped audit line, exactly the way
+  // POST /api/tasks/{id}/status does it.
+  note: z.string().max(2000).optional(),
+  // deliverable_url — where the produced work landed. Persisted as a `url`
+  // deliverable row. http/https only: this value is rendered in the board UI and
+  // a javascript:/data: URL there is a stored-XSS vector.
+  deliverable_url: z
+    .string()
+    .url()
+    .max(2048)
+    .refine((u: string) => /^https?:\/\//i.test(u), {
+      message: 'deliverable_url must be an http(s) URL',
+    })
+    .optional(),
+  // qc_scores — the producer's own gate summary (cc_board.py collect_qc_summary).
+  // Scalars are persisted to task_qc_results; the per-gate array has no column
+  // and rides in `note`. Shaped loosely on purpose: a producer adding a gate
+  // must not start 400-ing.
+  qc_scores: z
+    .object({
+      gates_graded: z.number().int().nonnegative().optional(),
+      overall_pass: z.boolean().optional(),
+      min_average: z.number().nullable().optional(),
+      autofails_total: z.number().int().nonnegative().optional(),
+      gates: z.array(z.record(z.string(), z.unknown())).max(64).optional(),
+    })
+    .passthrough()
+    .optional(),
 })
   // POISON-STATE GATE: `blocked_on_human` set + blank/placeholder `ask` is
   // unanswerable-forever and is rejected here (400). Note this is STRICTER than

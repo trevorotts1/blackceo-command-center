@@ -169,7 +169,25 @@ export function ownerSendsSuppressed(): boolean {
  * `escalateUndeliverableOwner()`.
  */
 function operatorIsOwnerBox(): boolean {
-  return process.env.CC_OPERATOR_IS_OWNER === '1';
+  if (process.env.CC_OPERATOR_IS_OWNER === '1') return true;
+  // ── 2026-07-28 LOOPFIX (durable half of MSG-08) ────────────────────────────
+  // The env var alone proved fragile: the flag lived only in the pm2-stored env
+  // of one process, so every OTHER node process on the operator box (QC battery
+  // scripts, ad-hoc tooling importing this module) silently fell back to the
+  // UNDELIVERABLE escalation and DM'd the operator an identical digest per
+  // process (observed 7× on 2026-07-27). The marker FILE beside the workspace
+  // (`~/.openclaw/.operator-is-owner`) is process-independent: every process
+  // that resolves the same live workspace sees the same answer. A client box
+  // never has this file (and never sets the env var), so client behaviour is
+  // byte-for-byte unchanged. In test runners resolveWorkspaceBase() points at
+  // the tmp sandbox, where the marker never exists — tests are unchanged too.
+  try {
+    return fs.existsSync(
+      path.join(path.dirname(resolveWorkspaceBase()), '.operator-is-owner'),
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -516,6 +534,73 @@ let windowStart = 0;
 let windowCount = 0;
 let windowSuppressed = 0;
 
+/**
+ * ── 2026-07-28 LOOPFIX: DURABLE, CROSS-PROCESS throttle state ────────────────
+ *
+ * WHY: every brake above (dedup map, token bucket) and the digest timer below
+ * used to live in MODULE MEMORY. That state is per-process AND per-bundle:
+ *   - a pm2 restart resets it;
+ *   - Next.js compiles each API route into its own server chunk, so one live
+ *     server can hold SEVERAL independent copies of this module;
+ *   - every ad-hoc node/tsx process (QC battery, scripts) starts from zero.
+ * Net effect, observed live on 2026-07-27: SEVEN byte-identical
+ * "1 owner notification undeliverable" digests reached the operator in one
+ * evening — each from a fresh module instance whose `lastDigestAt` was 0.
+ * An in-memory throttle on a multi-process box is not a throttle.
+ *
+ * The state file lives beside notification-failures.jsonl in the resolved
+ * workspace, so every process that can write the ledger shares ONE throttle.
+ * All IO is fail-open (any error falls back to the in-memory behaviour —
+ * never a reason to drop or to crash), and writes are tmp+rename so a reader
+ * can never see a torn file. Races between two simultaneous processes are
+ * accepted: the worst case is ONE extra message, never a flood.
+ */
+const THROTTLE_STATE_BASENAME = '.notify-throttle.json';
+
+interface DurableThrottleState {
+  digest: { lastAt: number; pending: number };
+  sent: Record<string, number>;
+}
+
+function throttleStatePath(): string {
+  return path.join(resolveWorkspaceBase(), THROTTLE_STATE_BASENAME);
+}
+
+function readThrottleState(): DurableThrottleState | null {
+  try {
+    const raw = fs.readFileSync(throttleStatePath(), 'utf8');
+    const parsed = JSON.parse(raw) as Partial<DurableThrottleState>;
+    return {
+      digest: {
+        lastAt: Number(parsed?.digest?.lastAt) || 0,
+        pending: Number(parsed?.digest?.pending) || 0,
+      },
+      sent: parsed?.sent && typeof parsed.sent === 'object' ? parsed.sent : {},
+    };
+  } catch {
+    return null; // absent or unreadable — caller falls back / starts fresh
+  }
+}
+
+function writeThrottleState(state: DurableThrottleState): void {
+  try {
+    const dir = resolveWorkspaceBase();
+    fs.mkdirSync(dir, { recursive: true });
+    // Prune dead dedup entries so the file cannot grow without bound.
+    const now = Date.now();
+    const pruned: Record<string, number> = {};
+    for (const fp of Object.keys(state.sent)) {
+      if (now - state.sent[fp] < DEDUP_TTL_MS) pruned[fp] = state.sent[fp];
+    }
+    state.sent = pruned;
+    const tmp = path.join(dir, `${THROTTLE_STATE_BASENAME}.tmp-${process.pid}`);
+    fs.writeFileSync(tmp, JSON.stringify(state), 'utf8');
+    fs.renameSync(tmp, throttleStatePath());
+  } catch {
+    /* fail-open: durable state is an optimization on top of the in-memory brakes */
+  }
+}
+
 /** Drop dedup entries older than the TTL so the map cannot grow without bound. */
 function pruneDedup(now: number): void {
   // forEach, not for..of: the repo's tsconfig target predates downlevelIteration,
@@ -535,6 +620,19 @@ function admitOperatorSend(kind: string, message: string): Admission {
   const last = lastSentAt.get(fp);
   if (last !== undefined && now - last < DEDUP_TTL_MS) {
     return { admit: false, reason: 'duplicate' };
+  }
+
+  // 2026-07-28 LOOPFIX: cross-process dedup. The in-memory map above only
+  // protects THIS module instance; the durable state file protects the box.
+  // Identical (kind + message) now goes out at most once per TTL no matter
+  // how many processes, restarts, or route bundles are involved.
+  const durable = readThrottleState();
+  if (durable) {
+    const durableLast = durable.sent[fp];
+    if (durableLast !== undefined && now - durableLast < DEDUP_TTL_MS) {
+      lastSentAt.set(fp, durableLast); // teach this instance what the box knows
+      return { admit: false, reason: 'duplicate' };
+    }
   }
 
   // Roll the rate-limit window, carrying forward whatever we swallowed inside it.
@@ -558,6 +656,14 @@ function admitOperatorSend(kind: string, message: string): Admission {
   windowCount += 1;
   lastSentAt.set(fp, now);
   pruneDedup(now);
+  // 2026-07-28 LOOPFIX: record the admission durably so every OTHER process on
+  // this box sees it (fail-open — an IO error just means in-memory-only).
+  const durableState = readThrottleState() ?? {
+    digest: { lastAt: 0, pending: 0 },
+    sent: {},
+  };
+  durableState.sent[fp] = now;
+  writeThrottleState(durableState);
   return { admit: true, suffix };
 }
 
@@ -588,6 +694,14 @@ export function __resetNotifyThrottleForTests(): void {
   windowSuppressed = 0;
   undeliverableSinceDigest = 0;
   lastDigestAt = 0;
+  // 2026-07-28 LOOPFIX: also clear the DURABLE state file, which in a test
+  // run lives in the tmp sandbox (resolveWorkspaceBase) and would otherwise
+  // leak throttle state between test files exactly like the module state did.
+  try {
+    fs.unlinkSync(throttleStatePath());
+  } catch {
+    /* absent is fine */
+  }
 }
 
 /**
@@ -667,26 +781,67 @@ const DIGEST_INTERVAL_MS = 15 * 60_000;
 let undeliverableSinceDigest = 0;
 let lastDigestAt = 0;
 
+/**
+ * 2026-07-28 LOOPFIX — structural SELF-FEED break. A failure to notify must
+ * NEVER be able to travel back through the notification path that just
+ * failed. Today's call graph is already acyclic (notifySystem terminates at
+ * the durable record), but this guard makes the property survive future
+ * edits: while an escalation is being emitted, any nested escalation attempt
+ * degrades to the durable record and stops.
+ */
+let escalationInFlight = false;
+
 function escalateUndeliverableOwner(reason: string, message: string): void {
   // 1. DURABLE, UNCONDITIONAL, FULL CONTENT. Never rate-limited, never dropped.
   //    This is the record whose absence made MSG-07 necessary; it stays as loud.
   recordUndeliverable('owner_undeliverable', message);
 
-  // 2. The operator digest — aggregated, and itself rate-limited by notifySystem.
-  undeliverableSinceDigest += 1;
-  const now = Date.now();
-  if (now - lastDigestAt < DIGEST_INTERVAL_MS) return; // fold into the next digest
+  if (escalationInFlight) return; // self-feed break: the record above is the floor
 
-  const n = undeliverableSinceDigest;
-  lastDigestAt = now;
-  undeliverableSinceDigest = 0;
+  // 2. The operator digest — aggregated, and rate-limited by DURABLE state
+  //    (2026-07-28 LOOPFIX). The previous in-memory `lastDigestAt` reset to 0
+  //    in every new process and in every Next.js route bundle, so N fresh
+  //    module instances sent N identical digests (observed: 7 in one evening).
+  //    The state file beside notification-failures.jsonl is shared by every
+  //    process on the box; in-memory remains the fallback when IO fails.
+  const now = Date.now();
+  const durable = readThrottleState();
+  let n: number;
+  if (durable) {
+    durable.digest.pending += 1;
+    if (now - durable.digest.lastAt < DIGEST_INTERVAL_MS) {
+      writeThrottleState(durable); // fold into the next digest — box-wide
+      return;
+    }
+    n = durable.digest.pending;
+    durable.digest.lastAt = now;
+    durable.digest.pending = 0;
+    writeThrottleState(durable);
+  } else {
+    // Durable state unavailable (first run or IO error) — seed it, then apply
+    // the in-memory fallback so behaviour is never worse than before.
+    undeliverableSinceDigest += 1;
+    writeThrottleState({
+      digest: { lastAt: now, pending: 0 },
+      sent: {},
+    });
+    if (now - lastDigestAt < DIGEST_INTERVAL_MS) return; // fold into the next digest
+    n = undeliverableSinceDigest;
+    lastDigestAt = now;
+    undeliverableSinceDigest = 0;
+  }
 
   // NOTE the deliberate absence of `message`. Forwarding it IS the bug.
-  notifySystem(
-    `${n} owner notification${n === 1 ? '' : 's'} undeliverable (${reason}) — ` +
-      `see notification-failures.jsonl for full detail. No client message was sent.`,
-    { agent: 'notify', action: 'escalate' },
-  );
+  escalationInFlight = true;
+  try {
+    notifySystem(
+      `${n} owner notification${n === 1 ? '' : 's'} undeliverable (${reason}) — ` +
+        `see notification-failures.jsonl for full detail. No client message was sent.`,
+      { agent: 'notify', action: 'escalate' },
+    );
+  } finally {
+    escalationInFlight = false;
+  }
 }
 
 /**
@@ -709,6 +864,23 @@ export function notifyOwner(message: string): boolean {
   // path intact costs nothing: its escalation funnels into notifyTelegram,
   // where the test-runner hard-refuse stops the actual send.
   if (process.env.OWNER_NOTIFY_TELEGRAM_DISABLED === '1') return false;
+
+  // ── 2026-07-28 LOOPFIX: FIXTURE MESSAGES NEVER REACH A HUMAN ───────────────
+  // Every QC-battery / break-it probe stamps its payload with the RFC-2606
+  // reserved host `example.invalid` ("Where to find it: https://example.invalid/p").
+  // 40 of the 42 undeliverable records that flooded the operator's Telegram on
+  // 2026-07-27 were exactly these probes. A message pointing at a reserved
+  // fixture host is by definition not for a human: record it durably (so the
+  // battery still has its evidence trail) and stop — no owner send, no
+  // operator digest, no escalation.
+  if (message.includes('example.invalid')) {
+    appendNotificationLog({
+      ts: new Date().toISOString(),
+      kind: 'owner_notify_fixture_suppressed',
+      message,
+    });
+    return false;
+  }
 
   const chatId = resolveOwnerChatId();
   if (!chatId) {

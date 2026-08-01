@@ -540,6 +540,17 @@ export interface TaskDeliverable {
   path?: string;
   description?: string;
   created_at: string;
+  // U063: already selected by GET /api/tasks/[id]/deliverables (`SELECT *`,
+  // route.ts:29-34) and already columns in BOTH schemas. Declared here so the
+  // panel can read them. Nullable because the POST route has never written
+  // them (route.ts:89-99) — measured: 0 of 24 live rows carry a size.
+  mime_type?: string | null;
+  file_size_bytes?: number | null;
+  sha256?: string | null;
+  // DELIBERATELY NOT DECLARED: `updated_at` (in schema.ts:421, ABSENT from the
+  // live table) and `discarded` (in the live table, ABSENT from schema.ts).
+  // Declaring either would be true of one schema and false of the other.
+  // Reconciling the two is U034's named follow-up unit.
 }
 
 // Planning types
@@ -968,7 +979,19 @@ export type PersonaBundleConfirmState =
   | 'not_required'       // no audience blend / non-content task — never gated
   | 'deadline_fallback'; // unconfirmed past the deadline — house-voice governance, kept visible
 
-/** A row of the `task_persona_bundle` table (migration 090). */
+/**
+ * U064 — the five persona_source values shared-utils/persona_for_job.py treats
+ * as an EXPRESS CLIENT CHOICE (CLIENT_FINAL_SOURCES, persona_for_job.py:85-87).
+ * A value outside this set is silently IGNORED by that function and the blend
+ * runs anyway — which would be a fail-open on the client's stated wish, so the
+ * database CHECK in the migration mirrors this list exactly.
+ */
+export const CLIENT_FINAL_PERSONA_SOURCES = [
+  'client-choice', 'client', 'locked', 'config-named', 'express',
+] as const;
+export type ClientFinalPersonaSource = typeof CLIENT_FINAL_PERSONA_SOURCES[number];
+
+/** A row of the `task_persona_bundle` table (migration 090, extended by U064). */
 export interface TaskPersonaBundleRow {
   id: string;
   task_id: string;
@@ -976,4 +999,10 @@ export interface TaskPersonaBundleRow {
   catalog_version: string | null;
   confirm_state: PersonaBundleConfirmState | string;
   created_at: string;
+  /** U064 — express client persona choice (supersedes the blend). */
+  client_persona_id?: string | null;
+  /** U064 — the source vocabulary; only CLIENT_FINAL_PERSONA_SOURCES members are honoured by the seam. */
+  client_persona_source?: ClientFinalPersonaSource | string | null;
+  /** U064 — ISO timestamp of when the client choice was set. */
+  client_persona_set_at?: string | null;
 }

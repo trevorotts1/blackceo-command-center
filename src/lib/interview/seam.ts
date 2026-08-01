@@ -570,6 +570,48 @@ export function getOrCreateInterviewSessionId(): string {
   return sessionId;
 }
 
+/**
+ * P0 FIX (client incident, 2026-07): resolve the caller identity
+ * for an interview-answer write, and derive the two values
+ * updateInterviewState() needs, from the SAME three signals the answer route
+ * always checked (explicit body askedBy, Cf-Access email, operator-email
+ * header):
+ *
+ *   - askedBy: UNCHANGED behavior — the real identity when present, else the
+ *     literal 'interview-web' sentinel. Recorded verbatim in
+ *     lastQuestionAskedBy either way (the audit trail is untouched by this fix).
+ *   - rateLimitSessionId: undefined whenever a real identity is present, so
+ *     update-interview-state.sh's rate-limit key stays `askedBy` — the
+ *     authenticated Cf-Access/operator path's behavior is preserved EXACTLY.
+ *     Only when there is NO real identity (askedBy is about to fall back to
+ *     the shared 'interview-web' literal) is the stable interviewSessionId
+ *     resolved and passed through, so that literal can never become the
+ *     rate-limit bucket key again — THE incident: every unauthenticated
+ *     session used to collapse onto one shared bucket.
+ *
+ * Pure aside from the injected session-id resolver (defaults to the real
+ * getOrCreateInterviewSessionId), so this is directly unit-testable without
+ * mocking fs, a DB, or a Next.js request — see
+ * src/lib/interview/__tests__/resolve-interview-write-identity.test.ts.
+ */
+export function resolveInterviewWriteIdentity(
+  args: {
+    bodyAskedBy?: string | null;
+    cfAccessEmail?: string | null;
+    operatorEmail?: string | null;
+  },
+  getSessionId: () => string = getOrCreateInterviewSessionId,
+): { askedBy: string; rateLimitSessionId: string | undefined } {
+  const identity =
+    (args.bodyAskedBy && args.bodyAskedBy.trim()) ||
+    (args.cfAccessEmail && args.cfAccessEmail.trim()) ||
+    (args.operatorEmail && args.operatorEmail.trim()) ||
+    null;
+  const askedBy = identity || 'interview-web';
+  const rateLimitSessionId = identity ? undefined : getSessionId();
+  return { askedBy, rateLimitSessionId };
+}
+
 /* ─────────────────────────── execFile wrappers ─────────────────────────────── */
 
 async function runScript(
@@ -604,12 +646,25 @@ export interface UpdateInterviewStateArgs {
   phasesComplete?: string[];
   /** true → runs `--complete` (marks interviewComplete + seeds gates + auto-QC). */
   complete?: boolean;
+  /**
+   * P0 FIX (client incident, 2026-07): the stable interviewSessionId
+   * to use as the RATE-LIMIT bucket key, in place of `askedBy`. Pass this ONLY
+   * when the caller has no real identity for `askedBy` (i.e. `askedBy` is about
+   * to fall back to the shared 'interview-web' literal) — see the answer route's
+   * call site. When a real identity IS present, leave this undefined so the
+   * script's authenticated-path behavior (bucket key = askedBy) is preserved
+   * EXACTLY, unchanged. lib-interview-rate-limit.sh also independently rejects
+   * the shared literal as a bucket key (defense-in-depth), but callers should
+   * not rely on that as the primary fix — pass the real session id here.
+   */
+  rateLimitSessionId?: string;
 }
 
 /**
  * execFile update-interview-state.sh with exactly the flags the Telegram agent
  * presses. Non-zero exit → InterviewScriptError (carries exitCode so callers can
- * branch on 87/88/2/3). Returns the script's stdout/stderr for logging.
+ * branch on 87/88/2/3, plus 89 = rate-limited — see lib-interview-rate-limit.sh).
+ * Returns the script's stdout/stderr for logging.
  *
  * NOTE: `--complete` is the SAME button the agent presses; the script (not this
  * wrapper) owns setting interviewComplete, auto-running qc-interview-completion.py,
@@ -628,6 +683,7 @@ export async function updateInterviewState(
   if (args.phasesComplete && args.phasesComplete.length) {
     argv.push('--phases-complete', args.phasesComplete.join(','));
   }
+  if (args.rateLimitSessionId) argv.push('--session-id', args.rateLimitSessionId);
   if (args.complete) argv.push('--complete');
   return runScript(updateInterviewStateScript(), 'bash', argv);
 }

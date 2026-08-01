@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users, CheckCircle2 } from 'lucide-react';
+import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users, CheckCircle2, RotateCw, Clock, Package } from 'lucide-react';
 import type { Task } from '@/lib/types';
 // U42 (C-11) — reuse the EXACT card-face chip components for the modal's
 // multi-persona plan + per-page/per-part scoped-blend rows. Single source: the
@@ -58,6 +58,8 @@ const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
   survey: 'a Skill 6 survey build',
   'web-development': 'a Skill 6 web-development build',
   anthology: 'the Anthology Engine',
+  // U030 (audit E1) — the presentations deck-build producer.
+  build_deck: 'the presentations deck build',
 };
 
 const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
@@ -387,39 +389,139 @@ export function DispatchHoldPanel({ task }: { task: Task }) {
 }
 
 /**
- * The QC block-transparency panel (migration 073 block_reason / block_needs /
- * block_audience). Read-only — it explains WHY the scorer blocked the task and
- * what is needed, phrased as "NEEDS YOUR DECISION" for an OWNER-audience block.
- * Distinct from the editable Blocked-gate form fields.
+ * U061 — The blocked-task transparency panel. Explains WHY the task is blocked,
+ * what heal is doing, what artifacts are already banked, and what the client
+ * can do (including a Resume action). Extends the original migration 073 panel
+ * (block_reason / block_needs / block_audience) with the heal-attempt data
+ * (migration 077: dispatch_attempts / next_dispatch_eligible_at) that existed
+ * in the database and was rendered by nothing before this unit.
  */
 export function BlockedReasonPanel({ task }: { task: Task }) {
-  if (task.status !== 'blocked') return null;
+  // Was `if (task.status !== 'blocked') return null;` here, ABOVE every hook
+  // below (react-hooks/rules-of-hooks). Hook order became conditional on
+  // task.status, which React requires to be identical on every render of the
+  // same component instance. Fix: hoist every hook above the early return so
+  // hook count/order is unconditional, and push the "blocked" gating that used
+  // to skip them entirely INTO each hook's own body instead (see `isBlocked`
+  // checks below) so a non-blocked render still calls the hooks (satisfying
+  // rules-of-hooks) but performs none of the work the early return used to
+  // prevent (no fetch, no interval) -- externally-observable behavior unchanged.
+  const isBlocked = task.status === 'blocked';
 
   const isOwner = task.block_audience === 'OWNER';
   const heading = isOwner ? 'NEEDS YOUR DECISION' : 'Blocked — action needed';
 
   // block_gaps is a JSON-encoded string[] when present.
   let gaps: string[] = [];
+  let gapsMalformed = false;
   if (task.block_gaps) {
     try {
       const parsed = JSON.parse(task.block_gaps);
       if (Array.isArray(parsed)) gaps = parsed.filter((g) => typeof g === 'string');
     } catch {
       gaps = [];
+      gapsMalformed = true;
     }
   }
 
-  const hasAny = Boolean(task.block_reason || task.block_needs || gaps.length > 0);
+  const hasAny = Boolean(task.block_reason || task.block_needs || gaps.length > 0 || gapsMalformed);
+
+  // Heal-attempt rendering: only when dispatch_attempts > 0
+  const hasHealAttempts =
+    typeof task.dispatch_attempts === 'number' && task.dispatch_attempts > 0;
+
+  // Countdown to next_dispatch_eligible_at
+  const [retryCountdown, setRetryCountdown] = useState<string>('');
+  useEffect(() => {
+    if (!isBlocked || !hasHealAttempts || !task.next_dispatch_eligible_at) {
+      setRetryCountdown('');
+      return;
+    }
+    const tick = () => {
+      const now = Date.now();
+      const target = new Date(task.next_dispatch_eligible_at!).getTime();
+      const diff = target - now;
+      if (diff <= 0) {
+        setRetryCountdown('now');
+        clearInterval(timer);
+        return;
+      }
+      const sec = Math.floor(diff / 1000);
+      const min = Math.floor(sec / 60);
+      const remainSec = sec % 60;
+      if (min > 0) {
+        setRetryCountdown(`in ${min}m ${remainSec}s`);
+      } else {
+        setRetryCountdown(`in ${sec}s`);
+      }
+    };
+    // `timer` is a const assigned once from setInterval (prefer-const fix for
+    // the old `let timer` that was only ever written once). It must exist
+    // before `tick` can reference it, so create the interval first and invoke
+    // `tick` once manually right after for the immediate first update — same
+    // two operations as before, reordered so the single assignment can be a
+    // `const` instead of a `let` assigned after declaration.
+    const timer = setInterval(tick, 1000);
+    tick();
+    return () => clearInterval(timer);
+  }, [isBlocked, hasHealAttempts, task.next_dispatch_eligible_at]);
+
+  // Artifacts-banked: fetch a count from /api/tasks/{id}/deliverables
+  const [artifactCount, setArtifactCount] = useState<number | null>(null);
+  const [artifactLoaded, setArtifactLoaded] = useState(false);
+  useEffect(() => {
+    if (!isBlocked || !task.id) return;
+    let cancelled = false;
+    fetch(`/api/tasks/${task.id}/deliverables`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((data: unknown[]) => {
+        if (!cancelled) {
+          setArtifactCount(Array.isArray(data) ? data.length : 0);
+          setArtifactLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setArtifactCount(null);
+      });
+    return () => { cancelled = true; };
+  }, [isBlocked, task.id]);
+
+  // Resume action state
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const [resumed, setResumed] = useState(false);
+  const handleResume = async () => {
+    if (!task.id || resuming) return;
+    setResuming(true);
+    setResumeError(null);
+    try {
+      const res = await fetch(`/api/tasks/${task.id}/resume`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setResumed(true);
+      } else {
+        setResumeError(body.error || `Resume failed (status ${res.status})`);
+      }
+    } catch (e: unknown) {
+      setResumeError(e instanceof Error ? e.message : 'Resume request failed');
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  if (!isBlocked) return null;
 
   return (
     <div
       className={`rounded-xl border p-4 ${
         isOwner ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50'
       }`}
+      data-testid="blocked-reason-panel"
     >
       <div className="flex items-center gap-2">
         <AlertTriangle className={`h-4 w-4 ${isOwner ? 'text-red-600' : 'text-amber-600'}`} />
-        <h4 className={`text-sm font-semibold ${isOwner ? 'text-red-900' : 'text-amber-900'}`}>
+        <h4 className={`text-sm font-semibold ${isOwner ? 'text-red-900' : 'text-amber-900'}`}
+          data-testid="blocked-panel-heading">
           {heading}
         </h4>
       </div>
@@ -427,34 +529,104 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
       {hasAny ? (
         <div className="mt-2 space-y-2">
           {task.block_reason && (
-            <p className={`text-xs ${isOwner ? 'text-red-800' : 'text-amber-800'}`}>
+            <p className={`text-xs ${isOwner ? 'text-red-800' : 'text-amber-800'}`}
+              data-testid="blocked-panel-reason">
               <span className="font-semibold">Reason: </span>
               {task.block_reason}
             </p>
           )}
-          {gaps.length > 0 && (
-            <div className={`text-xs ${isOwner ? 'text-red-800' : 'text-amber-800'}`}>
+          {(gaps.length > 0 || gapsMalformed) && (
+            <div className={`text-xs ${isOwner ? 'text-red-800' : 'text-amber-800'}`}
+              data-testid="blocked-panel-gaps">
               <span className="font-semibold">What&apos;s missing:</span>
-              <ul className="mt-1 list-disc list-inside">
-                {gaps.map((g, i) => (
-                  <li key={i}>{g}</li>
-                ))}
-              </ul>
+              {gapsMalformed ? (
+                <p className="mt-1 italic text-red-600">The recorded detail could not be read</p>
+              ) : (
+                <ul className="mt-1 list-disc list-inside">
+                  {gaps.map((g, i) => (
+                    <li key={i}>{g}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
           {task.block_needs && (
-            <p className={`text-xs font-medium ${isOwner ? 'text-red-900' : 'text-amber-900'}`}>
+            <p className={`text-xs font-medium ${isOwner ? 'text-red-900' : 'text-amber-900'}`}
+              data-testid="blocked-panel-needs">
               <span className="font-semibold">Next step: </span>
               {task.block_needs}
             </p>
           )}
         </div>
       ) : (
-        <p className={`mt-2 text-xs italic ${isOwner ? 'text-red-700' : 'text-amber-700'}`}>
+        <p className={`mt-2 text-xs italic ${isOwner ? 'text-red-700' : 'text-amber-700'}`}
+          data-testid="blocked-panel-empty">
           This task is blocked but no machine-readable reason was recorded. Open the requester
           thread or activity trail for context.
         </p>
       )}
+
+      {/* U061 — Heal activity and artifacts section: renders independently of
+          block-transparency fields, because a task can have dispatch attempts
+          even when block_reason/block_needs/block_gaps are absent */}
+      {hasHealAttempts || (artifactLoaded && artifactCount !== null && artifactCount > 0) ? (
+        <div className="mt-2 space-y-2">
+          {hasHealAttempts && (
+            <div className={`text-xs ${isOwner ? 'text-red-800' : 'text-amber-800'}`}
+              data-testid="blocked-panel-heal">
+              <div className="flex items-center gap-1.5">
+                <RotateCw className="h-3 w-3" />
+                <span className="font-semibold">Heal activity: </span>
+                <span>attempt {task.dispatch_attempts}</span>
+              </div>
+              {retryCountdown && (
+                <div className="flex items-center gap-1.5 mt-1" data-testid="blocked-panel-countdown">
+                  <Clock className="h-3 w-3" />
+                  <span>next retry {retryCountdown}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {artifactLoaded && artifactCount !== null && artifactCount > 0 && (
+            <div className={`text-xs ${isOwner ? 'text-red-800' : 'text-amber-800'}`}
+              data-testid="blocked-panel-artifacts">
+              <div className="flex items-center gap-1.5">
+                <Package className="h-3 w-3" />
+                <span className="font-semibold">Artifacts already banked: </span>
+                <span>{artifactCount} deliverable{artifactCount !== 1 ? 's' : ''}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {/* U061 — Resume action: re-enter the dispatch loop through the state machine */}
+      <div className="mt-3 pt-3 border-t border-red-200/50" data-testid="blocked-panel-resume-area">
+        {resumed ? (
+          <p className="text-xs text-green-700 font-medium" data-testid="blocked-panel-resumed">
+            Task resumed — re-entering dispatch queue
+          </p>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={handleResume}
+              disabled={resuming}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              data-testid="blocked-panel-resume-btn"
+            >
+              <RotateCw className={`h-3 w-3 ${resuming ? 'animate-spin' : ''}`} />
+              {resuming ? 'Resuming...' : 'Resume — re-enter dispatch queue'}
+            </button>
+            {resumeError && (
+              <p className="mt-1 text-xs text-red-600" data-testid="blocked-panel-resume-error">
+                {resumeError}
+              </p>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -477,6 +649,10 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
  * expectedFrom:'review'})`. A concurrent status change surfaces the route's
  * 409 CAS_CONFLICT here as an inline error — never a silent overwrite, never
  * a swallowed failure.
+ *
+ * As of U032, the promote now requires a verified operator identity
+ * (Cf-Access-Authenticated-User-Email) and returns
+ * 403 {code:'operator_identity_required'} without it.
  */
 export function QcPromotePanel({ task }: { task: Task }) {
   const [promoting, setPromoting] = useState(false);

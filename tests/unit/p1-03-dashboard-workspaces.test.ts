@@ -31,6 +31,13 @@ import {
 } from '../../src/lib/dashboard-workspaces';
 
 // ── selectProducerCardSlugs — the class-3 fix itself ────────────────────────
+//
+// STALE-FIXTURE NOTE (2026-07-31): U018 added a `notInstalled: string[]` field to
+// the non-degraded return shape (split workspace-present slugs by confirmed
+// engine-DB presence) AFTER these tests were authored. None of the calls below
+// pass the new optional `engineDbPresence` 4th argument, so the function takes
+// its "not supplied" branch and `notInstalled` is always `[]` here — added to
+// each expected object so assert.deepEqual matches the current, correct shape.
 
 test('[P1-03] selectProducerCardSlugs: status="error" returns the degraded sentinel, NEVER an empty list', () => {
   const result = selectProducerCardSlugs('error', new Set(), [{ slug: 'anthology' }, { slug: 'podcast' }]);
@@ -44,17 +51,17 @@ test('[P1-03] selectProducerCardSlugs: status="error" returns the degraded senti
 
 test('[P1-03] selectProducerCardSlugs: status="ok" with a matching slug present returns exactly that slug (real, non-degraded selection)', () => {
   const result = selectProducerCardSlugs('ok', new Set(['anthology']), [{ slug: 'anthology' }, { slug: 'podcast' }]);
-  assert.deepEqual(result, { degraded: false, slugs: ['anthology'] });
+  assert.deepEqual(result, { degraded: false, slugs: ['anthology'], notInstalled: [] });
 });
 
 test('[P1-03] selectProducerCardSlugs: status="ok" with NO matching slugs returns an empty (non-degraded) list — a box with genuinely no producer engines must show zero cards, not a degraded placeholder', () => {
   const result = selectProducerCardSlugs('ok', new Set(), [{ slug: 'anthology' }, { slug: 'podcast' }]);
-  assert.deepEqual(result, { degraded: false, slugs: [] });
+  assert.deepEqual(result, { degraded: false, slugs: [], notInstalled: [] });
 });
 
 test('[P1-03] selectProducerCardSlugs: status="loading" behaves like "ok" (gates strictly on presentSlugs, not degraded) — the degraded state is reserved for a CONFIRMED failure, not the initial unresolved state', () => {
   const result = selectProducerCardSlugs('loading', new Set(), [{ slug: 'anthology' }]);
-  assert.deepEqual(result, { degraded: false, slugs: [] });
+  assert.deepEqual(result, { degraded: false, slugs: [], notInstalled: [] });
 });
 
 test('[P1-03] selectProducerCardSlugs: only candidates whose slug is present are selected — unrelated candidates never leak through', () => {
@@ -63,7 +70,7 @@ test('[P1-03] selectProducerCardSlugs: only candidates whose slug is present are
     new Set(['podcast']),
     [{ slug: 'anthology' }, { slug: 'podcast' }, { slug: 'some-future-engine' }],
   );
-  assert.deepEqual(result, { degraded: false, slugs: ['podcast'] });
+  assert.deepEqual(result, { degraded: false, slugs: ['podcast'], notInstalled: [] });
 });
 
 // ── parseWorkspaceSlugs — tolerant, never-throws parsing ────────────────────
