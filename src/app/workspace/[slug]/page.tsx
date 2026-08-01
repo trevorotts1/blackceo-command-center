@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
@@ -41,8 +41,51 @@ export default function WorkspacePage() {
   const [deptName, setDeptName] = useState<string | null>(null);
   const logoUrl = useLogoUrl();
 
-  // Connect to SSE for real-time updates
-  useSSE();
+  // Keep the latest workspace in a ref so the onReconnect callback (which is
+  // identity-stable via useCallback) can always access the current workspace.id
+  // without re-running the SSE effect on every workspace load.
+  const workspaceRef = useRef<Workspace | null>(null);
+  useEffect(() => { workspaceRef.current = workspace; }, [workspace]);
+
+  // MR-20: on SSE reconnect, refetch this department's scoped board so the
+  // built-in catchUpBoardState() (which skips when selectedDepartment !== null)
+  // isn't the only reconciliation path. Without this, the department board sits
+  // stale for up to 60s after a blip until the fallback poll fires.
+  const onReconnect = useCallback(async () => {
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    const routeDepartment =
+      ws.slug === 'default' || ws.slug === 'ceo' ? null : ws.slug;
+    // CEO / default — the built-in catchUpBoardState handles the unscoped board.
+    if (routeDepartment === null) return;
+    try {
+      const url = `/api/tasks?workspace_id=${encodeURIComponent(ws.id)}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return;
+      const fresh: Task[] = await res.json();
+      const current = useMissionControl.getState().tasks;
+      const changed =
+        fresh.length !== current.length ||
+        fresh.some((t) => {
+          const c = current.find((ct) => ct.id === t.id);
+          return !c || c.status !== t.status;
+        });
+      if (changed) {
+        debug.sse(
+          `Reconnect catch-up (dept ${routeDepartment}): board changed, reconciling store`,
+        );
+        useMissionControl.getState().setTasks(fresh);
+      }
+    } catch (error) {
+      debug.sse(
+        `Reconnect catch-up (dept ${routeDepartment}) refetch failed`,
+        error,
+      );
+    }
+  }, []);
+
+  // Connect to SSE for real-time updates, with department-scoped reconnect catch-up
+  useSSE({ onReconnect });
 
   // Load workspace data
   useEffect(() => {
