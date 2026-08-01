@@ -328,9 +328,13 @@ def merge_config(config_path, departments):
 
 
 # Reserved system/infrastructure workspaces
+# podcast + anthology: seeded by migration-113-podcast-anthology-seed;
+# must never be deleted by --prune even though they are absent from
+# the Zero Human Company departments.json build snapshot.
 RESERVED_WORKSPACE_IDS = frozenset({
     "default", "general-task", "bugs", "inbox",
     "master-orchestrator", "ceo", "dept-ceo", "ceo-com",
+    "podcast", "anthology",
 })
 
 
