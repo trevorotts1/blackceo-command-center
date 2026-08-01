@@ -22,9 +22,8 @@ import { getQcHeuristicPark } from '@/lib/qc-promote';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwner } from '@/lib/notify';
-import { notifyOwnerDone } from '@/lib/owner-reports';
 import { evaluatePresentationsDoneGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
-import { transition, TransitionError, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
+import { transition, TransitionError, type LifecycleState, LEGAL_TRANSITIONS } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -125,7 +124,6 @@ export async function PATCH(
     const values: unknown[] = [];
     const now = new Date().toISOString();
     let u035StatusTarget: LifecycleState | null = null;
-    let u035WarnFallback = false;
     let actingAgentId: string | null = null;
     let actorName: string | null = null;
 
@@ -687,33 +685,9 @@ export async function PATCH(
         const a = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [actingAgentId]);
         actorName = a?.name ?? null;
       }
-      const approverSuffix =
-        !validatedData.updated_by_agent_id && cfAccessEmail ? ` (approved by ${cfAccessEmail})` : '';
-
-      // U035: transition() writes the status-change events row on the normal path;
-      // only emit our own on the warn-mode fallback (transition() threw before writing).
-      if (u035WarnFallback) {
-        const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
-        run(
-          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), eventType, actingAgentId, id, `Task "${existing.title}" moved to ${validatedData.status}${approverSuffix}`, now]
-        );
-      }
-
       // ── OWNER NOTIFICATION (DONE — manual/QC-agent approval) ───────────
-      // U035: transition() fires notifyOwnerDone for -> done. Double-firing
-      // sends the owner two completion messages. Only emit our own on the
-      // warn-mode fallback path.
-      if (validatedData.status === 'done' && existing.status !== 'done') {
-        if (u035WarnFallback) {
-          try {
-            notifyOwnerDone(id);
-          } catch (notifyErr) {
-            console.error('[tasks PATCH] DONE owner notify error (non-fatal):', (notifyErr as Error).message);
-          }
-        }
-      }
+      // transition() fires notifyOwnerDone for -> done; no fallback needed
+      // since ILLEGAL_TRANSITION now returns 409 instead of falling through.
       // ── End OWNER NOTIFICATION (DONE — manual/QC-agent approval) ────────
 
       // Append to task_history (migration 027) so /api/performance can
@@ -793,19 +767,19 @@ export async function PATCH(
               { status: 409 },
             );
           }
-          // WARN-MODE: ILLEGAL_TRANSITION logs and falls through to raw write.
           if (err.code === 'ILLEGAL_TRANSITION') {
-            console.warn(
-              `[U035 WARN] illegal-edge PATCH permitted: ${existing.status} -> ${u035StatusTarget} ` +
-              `task=${id} — stage-2 work item. ${err.message}`,
+            const legalFrom = LEGAL_TRANSITIONS[existing.status as LifecycleState];
+            const legalTargets = legalFrom ? Array.from(legalFrom) : [];
+            return NextResponse.json(
+              {
+                error: err.message,
+                code: err.code,
+                currentStatus: existing.status,
+                legalTargets,
+                hint: `From '${existing.status}', legal targets are: ${legalTargets.join(', ') || '(none)'}`,
+              },
+              { status: 409 },
             );
-            updates.push('status = ?');
-            values.push(u035StatusTarget);
-            recordStatusEvent(id, existing.status, u035StatusTarget, {
-              actor: actingAgentId ?? 'operator',
-              reason: `[U035 warn-mode] illegal edge permitted: ${existing.status} → ${u035StatusTarget}`,
-            });
-            u035WarnFallback = true;
           } else {
             return NextResponse.json({ error: err.message, code: err.code }, { status: 422 });
           }

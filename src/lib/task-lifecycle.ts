@@ -128,7 +128,7 @@ export type LifecycleState =
  * testing) only WIDEN the legal set — no previously-legal transition became
  * illegal, so no existing opt-in caller can break from this change.
  */
-const LEGAL_TRANSITIONS: Record<LifecycleState, Set<LifecycleState>> = {
+export const LEGAL_TRANSITIONS: Record<LifecycleState, Set<LifecycleState>> = {
   // ── intake / grooming ──
   backlog:          new Set<LifecycleState>(['inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'blocked']),
   inbox:            new Set<LifecycleState>(['planning', 'pending_dispatch', 'assigned', 'in_progress', 'backlog', 'blocked']),
