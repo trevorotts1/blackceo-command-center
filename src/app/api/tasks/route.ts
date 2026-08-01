@@ -84,6 +84,7 @@ export async function GET(request: NextRequest) {
         t.workspace_id as department_id,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji,
+        aa.status as assigned_agent_status,
         ca.name as created_by_agent_name,
         mr.label as model_label,
         mr.provider as model_provider,
@@ -168,6 +169,7 @@ export async function GET(request: NextRequest) {
               id: task.assigned_agent_id,
               name: task.assigned_agent_name,
               avatar_emoji: task.assigned_agent_emoji,
+              status: (task as any).assigned_agent_status || 'standby',
             }
           : undefined,
       // DEP-5 / F3.7 — attach the multi-persona plan rows so the kanban card can
