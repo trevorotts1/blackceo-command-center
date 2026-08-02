@@ -61,9 +61,9 @@ test('done→403',async()=>{
   const id=mk('build_deck','review'); const r=await post(id,{status:'done'});
   assert.equal(r.status,403); assert.equal(st(id),'review');
 });
-test('backlog→review→409',async()=>{
+test('backlog→review→200 (FIX-5-HIGH-C10-BOARD-5b)',async()=>{
   const id=mk('build_deck'); const r=await post(id,{status:'review'});
-  assert.equal(r.status,409); assert.equal((await r.json()).code,'ILLEGAL_TRANSITION'); assert.equal(st(id),'backlog');
+  assert.equal(r.status,200); assert.equal(st(id),'review');
 });
 test('engineSourceLabel',async()=>{
   const m=await import('../../src/components/TaskOverviewPanels');
