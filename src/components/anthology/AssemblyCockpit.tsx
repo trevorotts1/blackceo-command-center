@@ -26,6 +26,8 @@ import {
   RefreshCw,
   ArrowUpToLine,
   ArrowDownToLine,
+  ArrowUp,
+  ArrowDown,
   CheckCircle2,
   AlertTriangle,
   Send,
@@ -42,6 +44,8 @@ import {
   reorder,
   moveToFront,
   moveToEnd,
+  moveUp,
+  moveDown,
   pickConfirmOrderAction,
   type AssemblyStatus,
   type AssemblyPhase,
@@ -56,9 +60,9 @@ interface AssemblyCockpitProps {
   anthologyName: string;
 }
 
-const CARD = 'rounded-xl border border-gray-200 bg-white p-4 shadow-sm';
-const H = 'text-sm font-semibold text-gray-900';
-const SUB = 'text-xs text-gray-500';
+const CARD = 'rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-900';
+const H = 'text-sm font-semibold text-gray-900 dark:text-gray-100';
+const SUB = 'text-[13px] text-gray-600 dark:text-gray-300';
 
 export function AssemblyCockpit({ anthologyId, anthologyName }: AssemblyCockpitProps) {
   const [status, setStatus] = useState<AssemblyStatus | null>(null);
@@ -127,15 +131,15 @@ export function AssemblyCockpit({ anthologyId, anthologyName }: AssemblyCockpitP
 
   // -- Frame ---------------------------------------------------------------- //
   return (
-    <section className="space-y-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4">
+    <section className="space-y-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4 dark:border-indigo-900 dark:bg-indigo-950/30">
       <header className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className="rounded-lg bg-indigo-100 p-1.5">
-            <BookOpen className="h-4 w-4 text-indigo-700" />
+          <span className="rounded-lg bg-indigo-100 p-1.5 dark:bg-indigo-900">
+            <BookOpen className="h-4 w-4 text-indigo-700 dark:text-indigo-300" />
           </span>
           <div>
-            <h3 className="text-sm font-semibold text-indigo-900">Assembly cockpit</h3>
-            <p className="text-xs text-indigo-700/80">
+            <h3 className="text-sm font-semibold text-indigo-900 dark:text-indigo-100">Assembly cockpit</h3>
+            <p className="text-[13px] text-indigo-700/80 dark:text-indigo-300/80">
               {anthologyName ? `“${anthologyName}”` : 'This anthology'}
             </p>
           </div>
@@ -144,7 +148,7 @@ export function AssemblyCockpit({ anthologyId, anthologyName }: AssemblyCockpitP
           type="button"
           onClick={() => void refresh()}
           disabled={submitting}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-2.5 py-1.5 text-[13px] font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-800 dark:bg-gray-900 dark:text-indigo-300 dark:hover:bg-indigo-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
         >
           <RefreshCw className="h-3.5 w-3.5" />
           Refresh
@@ -183,6 +187,8 @@ export function AssemblyCockpit({ anthologyId, anthologyName }: AssemblyCockpitP
           onDragEnd={onDragEnd}
           setOpener={(k) => setOrder((prev) => moveToFront(prev, k))}
           setCloser={(k) => setOrder((prev) => moveToEnd(prev, k))}
+          onMoveUp={(k) => setOrder((prev) => moveUp(prev, k))}
+          onMoveDown={(k) => setOrder((prev) => moveDown(prev, k))}
           onConfirmOrder={onConfirmOrder}
           submitting={submitting}
         />
@@ -214,9 +220,9 @@ function ReadinessTicker({ status }: { status: AssemblyStatus | null }) {
     return (
       <div className={CARD}>
         <p className={H}>Readiness</p>
-        <p className="mt-1 text-sm text-gray-700">{label}</p>
+        <p className="mt-1 text-sm text-gray-700 dark:text-gray-200">{label}</p>
         {readiness?.ready && (
-          <p className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-green-700">
+          <p className="mt-1 inline-flex items-center gap-1 text-[13px] font-medium text-green-700 dark:text-green-400">
             <CheckCircle2 className="h-3.5 w-3.5" /> Every chapter is approved or excluded, above the
             {' '}
             {readiness.minChapters}-chapter floor.
@@ -262,20 +268,22 @@ function ArmPanel({
         Arming is one-way. The editors will only proceed once every chapter is approved or excluded
         and at least two chapters are in. Type the anthology&apos;s exact title to confirm.
       </p>
-      <label className="mt-3 block text-xs font-medium text-gray-700" htmlFor="assembly-confirm-name">
-        Anthology title
+      <label className="mt-3 block text-[13px] font-medium text-gray-700 dark:text-gray-200" htmlFor="assembly-confirm-name">
+        Anthology title <span className="text-red-500 font-normal" aria-hidden="true">*</span>
       </label>
       <input
         id="assembly-confirm-name"
         type="text"
         value={typedName}
         onChange={(e) => setTypedName(e.target.value)}
+        required
+        aria-required="true"
         placeholder={anthologyName || 'Type the anthology title'}
         autoComplete="off"
-        className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+        className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
       />
       {typedName.trim().length > 0 && anthologyName && (
-        <p className={`mt-1 text-xs ${matches ? 'text-green-700' : 'text-gray-400'}`}>
+        <p className={`mt-1 text-[13px] ${matches ? 'text-green-700 dark:text-green-400' : 'text-gray-600 dark:text-gray-400'}`}>
           {matches ? 'Matches the anthology title.' : 'Keep typing the exact title…'}
         </p>
       )}
@@ -283,7 +291,7 @@ function ArmPanel({
         type="button"
         onClick={onArm}
         disabled={!canSubmit}
-        className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+        className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950"
       >
         {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Lock className="h-4 w-4" />}
         I&apos;m ready to assemble
@@ -301,6 +309,8 @@ function OrderPanel({
   onDragEnd,
   setOpener,
   setCloser,
+  onMoveUp,
+  onMoveDown,
   onConfirmOrder,
   submitting,
 }: {
@@ -309,6 +319,8 @@ function OrderPanel({
   onDragEnd: (r: DropResult) => void;
   setOpener: (k: string) => void;
   setCloser: (k: string) => void;
+  onMoveUp: (k: string) => void;
+  onMoveDown: (k: string) => void;
   onConfirmOrder: () => void;
   submitting: boolean;
 }) {
@@ -343,7 +355,7 @@ function OrderPanel({
         sits last.
       </p>
       {ordering.overallRationale && (
-        <p className="mt-2 rounded-lg bg-gray-50 px-3 py-2 text-xs italic text-gray-600">
+        <p className="mt-2 rounded-lg bg-gray-50 px-3 py-2 text-[13px] italic text-gray-600 dark:bg-gray-800 dark:text-gray-300">
           {ordering.overallRationale}
         </p>
       )}
@@ -365,8 +377,8 @@ function OrderPanel({
                       <li
                         ref={dragProvided.innerRef}
                         {...dragProvided.draggableProps}
-                        className={`rounded-lg border bg-white ${
-                          dragSnapshot.isDragging ? 'border-indigo-400 shadow-md' : 'border-gray-200'
+                        className={`rounded-lg border bg-white dark:bg-gray-900 ${
+                          dragSnapshot.isDragging ? 'border-indigo-400 shadow-md dark:border-indigo-500' : 'border-gray-200 dark:border-gray-700'
                         }`}
                       >
                         <OrderRow
@@ -376,6 +388,8 @@ function OrderPanel({
                           isCloser={key === closerKey}
                           onOpener={() => setOpener(key)}
                           onCloser={() => setCloser(key)}
+                          onMoveUp={() => onMoveUp(key)}
+                          onMoveDown={() => onMoveDown(key)}
                           dragHandleProps={dragProvided.dragHandleProps}
                         />
                       </li>
@@ -393,12 +407,12 @@ function OrderPanel({
         type="button"
         onClick={onConfirmOrder}
         disabled={submitting || order.length < 2}
-        className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+        className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950"
       >
         {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Lock className="h-4 w-4" />}
         Confirm the finalized set &amp; order
       </button>
-      <p className="mt-1 text-[11px] text-gray-400">
+      <p className="mt-1 text-[13px] text-gray-600 dark:text-gray-400">
         This confirms these are all the co-authors and the finalized chapters, and hands the book to
         the editors to write the closing chapter and bridges.
       </p>
@@ -413,6 +427,8 @@ function OrderRow({
   isCloser,
   onOpener,
   onCloser,
+  onMoveUp,
+  onMoveDown,
   dragHandleProps,
 }: {
   slot: OrderSlot;
@@ -421,19 +437,21 @@ function OrderRow({
   isCloser: boolean;
   onOpener: () => void;
   onCloser: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
   dragHandleProps: React.HTMLAttributes<HTMLElement> | null | undefined;
 }) {
   return (
     <div className="flex items-start gap-3 p-3">
       <span
         {...(dragHandleProps ?? {})}
-        className="mt-1 cursor-grab text-gray-400 hover:text-gray-600"
+        className="mt-1 cursor-grab text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
         aria-label="Drag to reorder"
       >
         <GripVertical className="h-4 w-4" />
       </span>
 
-      <div className="flex h-12 w-9 flex-shrink-0 items-center justify-center overflow-hidden rounded bg-gray-100 text-[10px] text-gray-400">
+      <div className="flex h-12 w-9 flex-shrink-0 items-center justify-center overflow-hidden rounded bg-gray-100 text-[13px] text-gray-500 dark:bg-gray-700 dark:text-gray-400">
         {slot.coverThumbUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={slot.coverThumbUrl} alt="" className="h-full w-full object-cover" />
@@ -444,29 +462,47 @@ function OrderRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-gray-400">{position}.</span>
-          <span className="truncate text-sm font-medium text-gray-900">
+          <span className="text-[13px] font-semibold text-gray-500 dark:text-gray-400">{position}.</span>
+          <span className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
             {slot.chapterTitle || 'Untitled chapter'}
           </span>
         </div>
-        <p className="text-xs text-gray-500">
+        <p className="text-[13px] text-gray-600 dark:text-gray-300">
           {slot.contributorName || 'Co-author'}
           {slot.wordCount != null && ` · ${slot.wordCount.toLocaleString()} words`}
           {slot.tone && (
-            <span className="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">
+            <span className="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-[13px] text-gray-600 dark:bg-gray-700 dark:text-gray-300">
               {slot.tone}
             </span>
           )}
         </p>
-        {slot.rationale && <p className="mt-1 text-xs italic text-gray-500">{slot.rationale}</p>}
+        {slot.rationale && <p className="mt-1 text-[13px] italic text-gray-600 dark:text-gray-300">{slot.rationale}</p>}
 
-        <div className="mt-2 flex gap-2">
+        <div className="mt-2 flex flex-wrap gap-2">
           <PickButton active={isOpener} onClick={onOpener} icon={<ArrowUpToLine className="h-3 w-3" />}>
             Opens the book
           </PickButton>
           <PickButton active={isCloser} onClick={onCloser} icon={<ArrowDownToLine className="h-3 w-3" />}>
             Closes the book
           </PickButton>
+          <button
+            type="button"
+            onClick={onMoveUp}
+            className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[13px] font-medium text-gray-600 transition-colors hover:border-indigo-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            aria-label="Move up"
+          >
+            <ArrowUp className="h-3 w-3" />
+            Up
+          </button>
+          <button
+            type="button"
+            onClick={onMoveDown}
+            className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[13px] font-medium text-gray-600 transition-colors hover:border-indigo-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            aria-label="Move down"
+          >
+            <ArrowDown className="h-3 w-3" />
+            Down
+          </button>
         </div>
       </div>
     </div>
@@ -488,10 +524,10 @@ function PickButton({
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
         active
           ? 'border-indigo-500 bg-indigo-600 text-white'
-          : 'border-gray-200 bg-white text-gray-600 hover:border-indigo-300'
+          : 'border-gray-200 bg-white text-gray-600 hover:border-indigo-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-600'
       }`}
     >
       {icon}
@@ -525,7 +561,7 @@ function SignOffPanel({
         type="button"
         onClick={onSignOff}
         disabled={!enabled || submitting}
-        className="mt-3 inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-700 disabled:opacity-50"
+        className="mt-3 inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950"
       >
         {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         Sign off &amp; deliver the anthology
@@ -539,7 +575,7 @@ function SignOffPanel({
 // --------------------------------------------------------------------------- //
 function Muted({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className={`${CARD} flex items-center gap-2 text-sm text-gray-600`}>
+    <div className={`${CARD} flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300`}>
       {icon}
       <span>{children}</span>
     </div>
@@ -549,8 +585,8 @@ function Muted({ icon, children }: { icon: React.ReactNode; children: React.Reac
 function UnresolvedNotice() {
   return (
     <div className={CARD}>
-      <p className="inline-flex items-center gap-1.5 text-sm font-medium text-amber-800">
-        <AlertTriangle className="h-4 w-4 text-amber-600" /> This anthology&apos;s id isn&apos;t on
+      <p className="inline-flex items-center gap-1.5 text-sm font-medium text-amber-800 dark:text-amber-200">
+        <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" /> This anthology&apos;s id isn&apos;t on
         the card yet.
       </p>
       <p className={`mt-1 ${SUB}`}>
@@ -564,8 +600,8 @@ function UnresolvedNotice() {
 
 function PassthroughChip({ note }: { note: string }) {
   return (
-    <span className="mt-2 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200">
-      <AlertTriangle className="h-3 w-3" /> {note}
+    <span className="mt-2 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[13px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-700">
+      <AlertTriangle className="h-3.5 w-3.5" /> {note}
     </span>
   );
 }
@@ -573,14 +609,14 @@ function PassthroughChip({ note }: { note: string }) {
 function Notice({ result }: { result: DecideResult }) {
   if (result.ok) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
+      <div className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200">
         <CheckCircle2 className="h-4 w-4" />
         Recorded{result.queued ? ' (queued to the local mirror)' : ''}.
       </div>
     );
   }
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+    <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
       <AlertTriangle className="h-4 w-4" />
       {result.message}
     </div>

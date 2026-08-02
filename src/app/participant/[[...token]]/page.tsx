@@ -84,7 +84,7 @@ export default function ParticipantPage({
     <div className="flex min-h-full flex-col">
       <Header />
       <main className="mx-auto flex w-full max-w-xl flex-1 flex-col justify-center px-4 py-8 sm:px-6">
-        <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-card sm:p-8">
+        <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-card sm:p-8 dark:border-gray-700 dark:bg-gray-900">
           {resolved.pinEntry ? (
             <PinEntry {...resolved.pinEntry} />
           ) : resolved.view.ok ? (
@@ -101,10 +101,10 @@ export default function ParticipantPage({
 
 function Header() {
   return (
-    <header className="flex h-14 items-center justify-center border-b border-gray-200 bg-white px-4">
+    <header className="flex h-14 items-center justify-center border-b border-gray-200 bg-white px-4 dark:border-gray-700 dark:bg-gray-900">
       <div className="flex items-center gap-2">
         <span className="inline-block h-2.5 w-2.5 rounded-full bg-brand-600" aria-hidden="true" />
-        <span className="text-[15px] font-semibold tracking-tight text-gray-900">{PLATFORM_NAME}</span>
+        <span className="text-[15px] font-semibold tracking-tight text-gray-900 dark:text-gray-100">{PLATFORM_NAME}</span>
       </div>
     </header>
   );
@@ -120,14 +120,14 @@ function GatePanel({
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[24px] font-bold leading-tight tracking-tight text-gray-900">
+        <h1 className="text-[24px] font-bold leading-tight tracking-tight text-gray-900 dark:text-gray-100">
           {view.heading}
         </h1>
-        <p className="mt-2 text-[15px] leading-relaxed text-gray-600">{view.lede}</p>
+        <p className="mt-2 text-[15px] leading-relaxed text-gray-600 dark:text-gray-300">{view.lede}</p>
       </div>
       <GateForm view={view} credential={credential} />
       {view.validThrough && (
-        <p className="text-center text-[12px] text-gray-400">
+        <p className="text-center text-[13px] text-gray-500 dark:text-gray-400">
           This link is valid through {view.validThrough}.
         </p>
       )}
@@ -138,7 +138,7 @@ function GatePanel({
 function RefusalPanel({ heading, message }: { heading: string; message: string }) {
   return (
     <div className="flex flex-col items-center gap-3 py-4 text-center">
-      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
+      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
         <svg viewBox="0 0 20 20" fill="none" className="h-5 w-5" aria-hidden="true">
           <path
             d="M10 6.5v4M10 13.5h.01M10 2.5a7.5 7.5 0 100 15 7.5 7.5 0 000-15z"
@@ -149,8 +149,8 @@ function RefusalPanel({ heading, message }: { heading: string; message: string }
           />
         </svg>
       </div>
-      <h1 className="text-[20px] font-bold text-gray-900">{heading}</h1>
-      <p className="max-w-sm text-[15px] leading-relaxed text-gray-600">{message}</p>
+      <h1 className="text-[20px] font-bold text-gray-900 dark:text-gray-100">{heading}</h1>
+      <p className="max-w-sm text-[15px] leading-relaxed text-gray-600 dark:text-gray-300">{message}</p>
     </div>
   );
 }
@@ -167,29 +167,32 @@ function PinEntry({ subject, exp, gate }: { subject: string; exp: string; gate?:
       <input type="hidden" name="exp" value={exp} />
       {gate ? <input type="hidden" name="g" value={gate} /> : null}
       <div>
-        <h1 className="text-[24px] font-bold leading-tight tracking-tight text-gray-900">
+        <h1 className="text-[24px] font-bold leading-tight tracking-tight text-gray-900 dark:text-gray-100">
           Enter your PIN
         </h1>
-        <p className="mt-2 text-[15px] leading-relaxed text-gray-600">
+        <p className="mt-2 text-[15px] leading-relaxed text-gray-600 dark:text-gray-300">
           Type the PIN from your email to continue.
         </p>
       </div>
       <label className="flex flex-col gap-1.5">
-        <span className="text-[14px] font-medium text-gray-700">PIN</span>
+        <span className="text-[14px] font-medium text-gray-700 dark:text-gray-200">
+          PIN <span className="text-red-500 font-normal" aria-hidden="true">*</span>
+        </span>
         <input
           name="pin"
           inputMode="numeric"
           pattern="[0-9]*"
           maxLength={8}
           required
+          aria-required="true"
           autoComplete="one-time-code"
           placeholder="8-digit PIN"
-          className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-[18px] tracking-[0.3em] text-gray-900 placeholder:tracking-normal placeholder:text-gray-400 shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-300"
+          className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-[18px] tracking-[0.3em] text-gray-900 placeholder:tracking-normal placeholder:text-gray-400 shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-300 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500"
         />
       </label>
       <button
         type="submit"
-        className="inline-flex items-center justify-center rounded-xl bg-brand-600 px-5 py-3 text-[16px] font-semibold text-white shadow-sm transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 focus-visible:ring-offset-2"
+        className="inline-flex items-center justify-center rounded-xl bg-brand-800 px-5 py-3 text-[16px] font-semibold text-white shadow-sm transition-colors hover:bg-brand-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950"
       >
         Continue
       </button>
@@ -199,7 +202,7 @@ function PinEntry({ subject, exp, gate }: { subject: string; exp: string; gate?:
 
 function Footer() {
   return (
-    <p className="mt-6 text-center text-[12px] text-gray-400">
+    <p className="mt-6 text-center text-[13px] text-gray-500 dark:text-gray-400">
       Powered by {PLATFORM_NAME}
     </p>
   );
