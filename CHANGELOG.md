@@ -1,3 +1,11 @@
+## [v6.0.85] — 2026-08-02 — Skill 59 warfix (FIX-22 WCAG accessibility)
+
+- FIX-22 (59-anthology-engine warfix) — WCAG AA accessibility set for the anthology
+  UI: color-contrast fixes (text-gray-400->500, Continue/primaryBtn bg-brand-600->800),
+  working dark mode scoped to the participant subtree, keyboard Move Up/Down reorder in
+  AssemblyCockpit, focus-visible rings, labels + aria-required on all form fields,
+  non-color status cues (icons + stripes), 13px font floor.
+
 ## [v6.0.84] — 2026-08-02 — Skill 59 warfix (FIX-12b participant preview)
 
 - FIX-12b (59-anthology-engine warfix) — the participant token page now renders the content
