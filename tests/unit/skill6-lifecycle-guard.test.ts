@@ -116,18 +116,15 @@ test.after(() => {
   try { closeDb?.(); } catch { /* ignore */ }
 });
 
-// ── A. Illegal edge is now REFUSED (this is the whole point of the change) ────
-test("illegal edge (backlog → review) is refused with 409 and does NOT mutate the card", async () => {
-  const id = `s6-illegal-${RUN_ID}`;
-  seedCard(id, 'backlog'); // LEGAL_TRANSITIONS.backlog does NOT include 'review'
+// backlog → review is now a legal transition (FIX-5-HIGH-C10-BOARD-5b)
+test("backlog → review is a legal transition (succeeds with 200 without operatorOverride)", async () => {
+  const id = `s6-backlog-review-${RUN_ID}`;
+  seedCard(id, 'backlog'); // LEGAL_TRANSITIONS.backlog now includes 'review'
 
   const res = await callRoute(id, { status: 'review' });
 
-  assert.equal(res.status, 409, 'an illegal lifecycle edge must be rejected with 409');
-  const body = (await res.json()) as { code?: string };
-  assert.equal(body.code, 'ILLEGAL_TRANSITION');
-  // The card must be untouched — before the fix, the raw UPDATE would have written it.
-  assert.equal(currentStatus(id), 'backlog', 'REGRESSION: the illegal status was persisted');
+  assert.equal(res.status, 200, 'backlog → review must succeed (it is a legal transition)');
+  assert.equal(currentStatus(id), 'review', 'the card must be moved to review');
 });
 
 // ── A. Legal edge on an AGENT-LESS producer card still succeeds ───────────────

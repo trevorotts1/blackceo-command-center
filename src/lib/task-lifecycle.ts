@@ -136,7 +136,7 @@ export type LifecycleState =
  */
 export const LEGAL_TRANSITIONS: Record<LifecycleState, Set<LifecycleState>> = {
   // ── intake / grooming ──
-  backlog:          new Set<LifecycleState>(['inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'blocked']),
+  backlog:          new Set<LifecycleState>(['inbox', 'planning', 'pending_dispatch', 'assigned', 'in_progress', 'blocked', 'review']),
   inbox:            new Set<LifecycleState>(['planning', 'pending_dispatch', 'assigned', 'in_progress', 'backlog', 'blocked']),
   planning:         new Set<LifecycleState>(['pending_dispatch', 'assigned', 'in_progress', 'backlog', 'blocked']),
   // ── ready / dispatch ──
