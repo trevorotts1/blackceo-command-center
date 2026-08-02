@@ -1,3 +1,17 @@
+## [v6.0.83] — 2026-08-02 — Skill 59 warfix (FIX-5b anthology lifecycle)
+
+- FIX-5b (59-anthology-engine warfix) — add `review` to `backlog`'s legal transitions in
+  src/lib/task-lifecycle.ts so S1-S6 anthology cards can reach the review column; the
+  producer approval queue is unblocked (was stuck with every backlog->review move returning
+  409 ILLEGAL_TRANSITION).
+
+## [v6.0.82] — 2026-08-02 — Skill 59 warfix (FIX-5b anthology lifecycle)
+
+- FIX-5b (59-anthology-engine warfix) — add `review` to `backlog`'s legal transitions in
+  src/lib/task-lifecycle.ts so S1-S6 anthology cards can reach the review column; the
+  producer approval queue is unblocked (was stuck with every backlog->review move returning
+  409 ILLEGAL_TRANSITION).
+
 ## [v6.0.81] — 2026-07-29 — U041 merge (empty-manifest guard)
 
 - U041 — Make the department config hold the departments or refuse loudly: the converge route now
