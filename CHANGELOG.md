@@ -1,3 +1,10 @@
+## [v6.0.84] — 2026-08-02 — Skill 59 warfix (FIX-12b participant preview)
+
+- FIX-12b (59-anthology-engine warfix) — the participant token page now renders the content
+  being approved: outline text (S4) and a labeled PDF/Doc preview URL pair (S5) above the
+  decision buttons. serialize.ts carries the fields, gate-engine.ts normalizes the engine's
+  dict shape, GateForm renders the read-only preview.
+
 ## [v6.0.83] — 2026-08-02 — Skill 59 warfix (FIX-5b anthology lifecycle)
 
 - FIX-5b (59-anthology-engine warfix) — add `review` to `backlog`'s legal transitions in
