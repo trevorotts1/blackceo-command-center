@@ -36,6 +36,8 @@ import {
   Loader2,
   ShieldAlert,
   History,
+  XCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import { ActivityLog } from '../ActivityLog';
 import {
@@ -138,22 +140,22 @@ export function GatePanel({ task, onDecided }: GatePanelProps) {
         <ZoneHeading>The decision</ZoneHeading>
 
         {success ? (
-          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-800 dark:bg-emerald-950">
             <div className="flex items-start gap-2">
-              <CheckCircle2 className="w-5 h-5 text-emerald-600 mt-0.5 shrink-0" />
-              <div className="text-sm text-emerald-900">
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0" />
+              <div className="text-sm text-emerald-900 dark:text-emerald-100">
                 <p className="font-semibold">Recorded.</p>
-                <p className="mt-0.5 text-emerald-800">
+                <p className="mt-0.5 text-emerald-800 dark:text-emerald-200">
                   {decisionSuccessCopy(success, firstName)}
                 </p>
-                <p className="mt-1 text-xs text-emerald-700">
+                <p className="mt-1 text-[13px] text-emerald-700 dark:text-emerald-300">
                   The board updates as the editors pick it up.
                 </p>
               </div>
             </div>
           </div>
         ) : loading ? (
-          <div className="flex items-center gap-2 text-sm text-gray-500">
+          <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
             <Loader2 className="w-4 h-4 animate-spin" /> Loading the open gate…
           </div>
         ) : (
@@ -171,8 +173,9 @@ export function GatePanel({ task, onDecided }: GatePanelProps) {
         )}
 
         {error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-            {error}
+          <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200 flex items-start gap-2">
+            <XCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+            <span>{error}</span>
           </div>
         )}
       </section>
@@ -183,7 +186,7 @@ export function GatePanel({ task, onDecided }: GatePanelProps) {
           <History className="w-4 h-4 inline-block mr-1 -mt-0.5" aria-hidden="true" />
           The trail
         </ZoneHeading>
-        <div className="rounded-lg border border-gray-200 bg-white p-2">
+        <div className="rounded-lg border border-gray-200 bg-white p-2 dark:border-gray-700 dark:bg-gray-900">
           <ActivityLog taskId={task.id} />
         </div>
       </section>
@@ -255,7 +258,7 @@ function WorkZone({ artifacts }: { artifacts: Artifact[] }) {
               <button
                 type="button"
                 onClick={() => setShowTrail((v) => !v)}
-                className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+                className="inline-flex items-center gap-1 text-[13px] font-medium text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
               >
                 {showTrail ? (
                   <ChevronDown className="w-3.5 h-3.5" />
@@ -272,7 +275,7 @@ function WorkZone({ artifacts }: { artifacts: Artifact[] }) {
                         href={a.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-xs text-indigo-600 hover:underline break-all"
+                        className="inline-flex items-center gap-1 text-[13px] text-indigo-600 hover:underline break-all dark:text-indigo-400"
                       >
                         <ExternalLink className="w-3 h-3 shrink-0" />
                         {a.url}
@@ -305,10 +308,10 @@ function ArtifactLink({
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors no-underline ${
+      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
         primary
           ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-          : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
+          : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700'
       }`}
     >
       {icon}
@@ -355,8 +358,8 @@ function DecisionZone({
     }
     if (status.reason === 'not_ready') {
       return (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 flex items-start gap-2">
-          <ShieldAlert className="w-4 h-4 mt-0.5 shrink-0" />
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200 flex items-start gap-2">
+          <ShieldAlert className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
           <span>
             The anthology engine is not reachable from this box yet, so no
             decision can be recorded. It will work once the engine is provisioned.
@@ -365,11 +368,14 @@ function DecisionZone({
       );
     }
     return (
-      <div className="text-sm text-gray-600">
-        Could not load the open gate.{' '}
-        <button type="button" onClick={onRetry} className="text-indigo-600 hover:underline">
-          Retry
-        </button>
+      <div className="text-sm text-gray-600 dark:text-gray-300 flex items-start gap-2">
+        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+        <span>
+          Could not load the open gate.{' '}
+          <button type="button" onClick={onRetry} className="text-indigo-600 hover:underline dark:text-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded">
+            Retry
+          </button>
+        </span>
       </div>
     );
   }
@@ -410,9 +416,9 @@ function DecisionZone({
 }
 
 const TONE_CLASSES: Record<string, string> = {
-  primary: 'bg-indigo-600 text-white hover:bg-indigo-700',
-  secondary: 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50',
-  destructive: 'bg-white border border-red-300 text-red-700 hover:bg-red-50',
+  primary: 'bg-indigo-600 text-white hover:bg-indigo-700 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950',
+  secondary: 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700',
+  destructive: 'bg-white border border-red-300 text-red-700 hover:bg-red-50 focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 dark:bg-gray-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950',
 };
 
 function ActionControl({
@@ -451,7 +457,7 @@ function ActionControl({
         type="button"
         disabled={disabledAll}
         onClick={confirm}
-        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
+        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:opacity-50 focus-visible:outline-none ${
           TONE_CLASSES[tone]
         } ${isPrimary ? 'w-full py-2.5 shadow-sm' : ''}`}
       >
@@ -462,12 +468,12 @@ function ActionControl({
   }
 
   return (
-    <div className={`rounded-lg border ${open ? 'border-gray-300 bg-gray-50 p-3' : 'border-transparent'}`}>
+    <div className={`rounded-lg border ${open ? 'border-gray-300 bg-gray-50 p-3 dark:border-gray-600 dark:bg-gray-800' : 'border-transparent'}`}>
       <button
         type="button"
         disabled={disabledAll && !open}
         onClick={onOpen}
-        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
+        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:opacity-50 focus-visible:outline-none ${
           TONE_CLASSES[tone]
         } ${isPrimary ? 'w-full py-2.5 shadow-sm' : ''}`}
       >
@@ -482,73 +488,107 @@ function ActionControl({
               images. No action carries that today, so this stays flagged and
               unrendered rather than faking a grid. */}
           {engineGated === 'cover' && (
-            <p className="rounded-md bg-indigo-50 px-2.5 py-1.5 text-xs text-indigo-700">
+            <p className="rounded-md bg-indigo-50 px-2.5 py-1.5 text-[13px] text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
               The four named cover styles will preview here as a grid once the
               cover gate ships. For now, confirm the current selection below.
             </p>
           )}
           {engineGated === 'rewrite' && (
-            <p className="rounded-md bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">
+            <p className="rounded-md bg-amber-50 px-2.5 py-1.5 text-[13px] text-amber-800 dark:bg-amber-950 dark:text-amber-200">
               Editors may rewrite a chapter up to twice. Add clear notes for them
               below.
             </p>
           )}
 
           {field === 'reason' && (
-            <textarea
-              value={draft.reason ?? ''}
-              onChange={(e) => setDraft({ ...draft, reason: e.target.value })}
-              rows={2}
-              placeholder="Why is this on hold? (required)"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+            <label className="flex flex-col gap-1">
+              <span className="text-[13px] font-medium text-gray-700 dark:text-gray-200">
+                Reason <span className="text-red-500 font-normal" aria-hidden="true">*</span>
+              </span>
+              <textarea
+                value={draft.reason ?? ''}
+                onChange={(e) => setDraft({ ...draft, reason: e.target.value })}
+                rows={2}
+                required
+                aria-required="true"
+                placeholder="Why is this on hold?"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 dark:border-gray-600 dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </label>
           )}
           {field === 'notes' && (
-            <textarea
-              value={draft.notes ?? ''}
-              onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-              rows={3}
-              placeholder="Notes for the editors (required)"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+            <label className="flex flex-col gap-1">
+              <span className="text-[13px] font-medium text-gray-700 dark:text-gray-200">
+                Notes <span className="text-red-500 font-normal" aria-hidden="true">*</span>
+              </span>
+              <textarea
+                value={draft.notes ?? ''}
+                onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
+                rows={3}
+                required
+                aria-required="true"
+                placeholder="Notes for the editors"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 dark:border-gray-600 dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </label>
           )}
           {field === 'title' && (
             <>
-              <input
-                type="text"
-                value={draft.title ?? ''}
-                onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-                placeholder="Selected title (required)"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              {optionalSubtitle && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[13px] font-medium text-gray-700 dark:text-gray-200">
+                  Title <span className="text-red-500 font-normal" aria-hidden="true">*</span>
+                </span>
                 <input
                   type="text"
-                  value={draft.subtitle ?? ''}
-                  onChange={(e) => setDraft({ ...draft, subtitle: e.target.value })}
-                  placeholder="Subtitle (optional)"
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  value={draft.title ?? ''}
+                  onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+                  required
+                  aria-required="true"
+                  placeholder="Selected title"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 dark:border-gray-600 dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
+              </label>
+              {optionalSubtitle && (
+                <label className="flex flex-col gap-1">
+                  <span className="text-[13px] font-medium text-gray-700 dark:text-gray-200">Subtitle (optional)</span>
+                  <input
+                    type="text"
+                    value={draft.subtitle ?? ''}
+                    onChange={(e) => setDraft({ ...draft, subtitle: e.target.value })}
+                    placeholder="Subtitle"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 dark:border-gray-600 dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </label>
               )}
             </>
           )}
           {field === 'confirmName' && (
-            <input
-              type="text"
-              value={draft.confirmName ?? ''}
-              onChange={(e) => setDraft({ ...draft, confirmName: e.target.value })}
-              placeholder="Type the anthology name to confirm (required)"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+            <label className="flex flex-col gap-1">
+              <span className="text-[13px] font-medium text-gray-700 dark:text-gray-200">
+                Anthology name <span className="text-red-500 font-normal" aria-hidden="true">*</span>
+              </span>
+              <input
+                type="text"
+                value={draft.confirmName ?? ''}
+                onChange={(e) => setDraft({ ...draft, confirmName: e.target.value })}
+                required
+                aria-required="true"
+                placeholder="Type the anthology name to confirm"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 dark:border-gray-600 dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </label>
           )}
           {tone === 'destructive' && field === null && (
-            <textarea
-              value={draft.reason ?? ''}
-              onChange={(e) => setDraft({ ...draft, reason: e.target.value })}
-              rows={2}
-              placeholder="Reason (optional)"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+            <label className="flex flex-col gap-1">
+              <span className="text-[13px] font-medium text-gray-700 dark:text-gray-200">Reason (optional)</span>
+              <textarea
+                value={draft.reason ?? ''}
+                onChange={(e) => setDraft({ ...draft, reason: e.target.value })}
+                rows={2}
+                placeholder="Reason"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 dark:border-gray-600 dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </label>
           )}
 
           <div className="flex items-center gap-2">
@@ -556,10 +596,10 @@ function ActionControl({
               type="button"
               disabled={submitting || !fieldSatisfied(presentation, draft)}
               onClick={confirm}
-              className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors disabled:opacity-50 ${
+              className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 ${
                 tone === 'destructive'
-                  ? 'bg-red-600 text-white hover:bg-red-700'
-                  : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                  ? 'bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500'
+                  : 'bg-indigo-600 text-white hover:bg-indigo-700 focus-visible:ring-indigo-500'
               }`}
             >
               {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -568,7 +608,7 @@ function ActionControl({
             <button
               type="button"
               onClick={onOpen}
-              className="text-sm text-gray-500 hover:text-gray-700"
+              className="text-sm text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
             >
               Cancel
             </button>
@@ -603,9 +643,9 @@ function fieldSatisfied(p: ActionPresentation, draft: DecideFields): boolean {
 
 function PanelShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-indigo-200 bg-indigo-50/40 p-4 space-y-4">
+    <div className="rounded-xl border border-indigo-200 bg-indigo-50/40 p-4 space-y-4 dark:border-indigo-900 dark:bg-indigo-950/30">
       <div className="flex items-center gap-2">
-        <span className="text-xs font-bold uppercase tracking-wide text-indigo-700">
+        <span className="text-[13px] font-bold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
           Gate Panel
         </span>
       </div>
@@ -615,11 +655,11 @@ function PanelShell({ children }: { children: React.ReactNode }) {
 }
 
 function ZoneHeading({ children }: { children: React.ReactNode }) {
-  return <h4 className="text-sm font-semibold text-gray-900">{children}</h4>;
+  return <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{children}</h4>;
 }
 
 function EmptyNote({ children }: { children: React.ReactNode }) {
-  return <p className="text-sm text-gray-500">{children}</p>;
+  return <p className="text-sm text-gray-600 dark:text-gray-300">{children}</p>;
 }
 
 function decisionSuccessCopy(res: BoardDecideOk, firstName: string | null): string {

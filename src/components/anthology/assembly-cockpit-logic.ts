@@ -371,6 +371,20 @@ export function moveToEnd(order: readonly string[], participantKey: string): str
   return reorder(order, idx, order.length - 1);
 }
 
+/** Move `participantKey` up one position (toward the front). */
+export function moveUp(order: readonly string[], participantKey: string): string[] {
+  const idx = order.indexOf(participantKey);
+  if (idx <= 0) return order.slice();
+  return reorder(order, idx, idx - 1);
+}
+
+/** Move `participantKey` down one position (toward the end). */
+export function moveDown(order: readonly string[], participantKey: string): string[] {
+  const idx = order.indexOf(participantKey);
+  if (idx < 0 || idx >= order.length - 1) return order.slice();
+  return reorder(order, idx, idx + 1);
+}
+
 // --------------------------------------------------------------------------- //
 // Request bodies + decision result.
 // --------------------------------------------------------------------------- //

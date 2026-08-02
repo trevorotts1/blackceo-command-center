@@ -25,6 +25,8 @@ import {
   reorder,
   moveToFront,
   moveToEnd,
+  moveUp,
+  moveDown,
   buildArmBody,
   buildSignOffBody,
   buildConfirmOrderBody,
@@ -354,6 +356,30 @@ test('moveToFront / moveToEnd: producer picks the opener and the last co-author'
   assert.deepEqual(moveToFront(order, 'c'), ['c', 'a', 'b']);
   assert.deepEqual(moveToEnd(order, 'a'), ['b', 'c', 'a']);
   assert.deepEqual(moveToFront(order, 'zzz'), ['a', 'b', 'c'], 'unknown key is a no-op');
+});
+
+test('moveUp: moves an item one position toward the front', () => {
+  const order = ['a', 'b', 'c', 'd'];
+  assert.deepEqual(moveUp(order, 'c'), ['a', 'c', 'b', 'd']);
+  assert.deepEqual(moveUp(order, 'b'), ['b', 'a', 'c', 'd']);
+  // Already at front → no-op, immutable.
+  assert.deepEqual(moveUp(order, 'a'), ['a', 'b', 'c', 'd']);
+  // Unknown key → no-op.
+  assert.deepEqual(moveUp(order, 'zzz'), ['a', 'b', 'c', 'd']);
+  // Original untouched.
+  assert.deepEqual(order, ['a', 'b', 'c', 'd']);
+});
+
+test('moveDown: moves an item one position toward the end', () => {
+  const order = ['a', 'b', 'c', 'd'];
+  assert.deepEqual(moveDown(order, 'b'), ['a', 'c', 'b', 'd']);
+  assert.deepEqual(moveDown(order, 'a'), ['b', 'a', 'c', 'd']);
+  // Already at end → no-op, immutable.
+  assert.deepEqual(moveDown(order, 'd'), ['a', 'b', 'c', 'd']);
+  // Unknown key → no-op.
+  assert.deepEqual(moveDown(order, 'zzz'), ['a', 'b', 'c', 'd']);
+  // Original untouched.
+  assert.deepEqual(order, ['a', 'b', 'c', 'd']);
 });
 
 // --------------------------------------------------------------------------- //

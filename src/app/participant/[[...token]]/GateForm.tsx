@@ -51,13 +51,13 @@ function find(
 }
 
 const inputClass =
-  'w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-[16px] text-gray-900 placeholder:text-gray-400 shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-300';
+  'w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-[16px] text-gray-900 placeholder:text-gray-400 shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-300 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500';
 
 const primaryBtn =
-  'inline-flex items-center justify-center rounded-xl bg-brand-600 px-5 py-3 text-[16px] font-semibold text-white shadow-sm transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60';
+  'inline-flex items-center justify-center rounded-xl bg-brand-800 px-5 py-3 text-[16px] font-semibold text-white shadow-sm transition-colors hover:bg-brand-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 disabled:cursor-not-allowed disabled:opacity-60';
 
 const secondaryBtn =
-  'inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-5 py-3 text-[16px] font-semibold text-gray-700 shadow-sm transition-colors hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60';
+  'inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-5 py-3 text-[16px] font-semibold text-gray-700 shadow-sm transition-colors hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 dark:focus-visible:ring-offset-gray-950 disabled:cursor-not-allowed disabled:opacity-60 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-700';
 
 /** A submit button that names its engine action (captured as the form submitter). */
 function SubmitButton({
@@ -80,7 +80,7 @@ function SubmitButton({
 
 function SuccessPanel({ view }: { view: Extract<SubmitView, { ok: true }> }) {
   return (
-    <div role="status" className="rounded-2xl border border-brand-200 bg-brand-50 p-6 text-center">
+    <div role="status" className="rounded-2xl border border-brand-200 bg-brand-50 p-6 text-center dark:border-brand-800 dark:bg-brand-950">
       <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-brand-600 text-white">
         <svg viewBox="0 0 20 20" fill="none" className="h-5 w-5" aria-hidden="true">
           <path
@@ -92,9 +92,9 @@ function SuccessPanel({ view }: { view: Extract<SubmitView, { ok: true }> }) {
           />
         </svg>
       </div>
-      <h2 className="text-[20px] font-bold text-gray-900">{view.heading}</h2>
-      <p className="mt-2 text-[15px] leading-relaxed text-gray-600">{view.message}</p>
-      <p className="mt-4 text-[13px] text-gray-400">You can close this page.</p>
+      <h2 className="text-[20px] font-bold text-gray-900 dark:text-gray-100">{view.heading}</h2>
+      <p className="mt-2 text-[15px] leading-relaxed text-gray-600 dark:text-gray-300">{view.message}</p>
+      <p className="mt-4 text-[13px] text-gray-500 dark:text-gray-400">You can close this page.</p>
     </div>
   );
 }
@@ -106,8 +106,8 @@ function PreviewUrlsBlock({
 }) {
   if (urls.length === 0) return null;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-      <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-gray-400">
+    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800">
+      <p className="mb-2 text-[13px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
         Preview
       </p>
       <div className="flex flex-wrap gap-3">
@@ -117,7 +117,7 @@ function PreviewUrlsBlock({
             href={u.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 rounded-lg border border-brand-200 bg-white px-4 py-2 text-[14px] font-medium text-brand-700 no-underline transition-colors hover:bg-brand-50 hover:border-brand-300"
+            className="inline-flex items-center gap-2 rounded-lg border border-brand-200 bg-white px-4 py-2 text-[14px] font-medium text-brand-700 no-underline transition-colors hover:bg-brand-50 hover:border-brand-300 dark:border-brand-800 dark:bg-gray-900 dark:text-brand-400 dark:hover:bg-gray-800 dark:hover:border-brand-700"
           >
             <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4" aria-hidden="true">
               <path
@@ -169,7 +169,7 @@ export default function GateForm({
     state && !state.ok ? (
       <div
         role="alert"
-        className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] text-amber-800"
+        className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
       >
         <span className="font-semibold">{state.heading}.</span> {state.message}
       </div>
@@ -185,16 +185,16 @@ export default function GateForm({
       {view.kind === 'outline' && (
         <div className="flex flex-col gap-4">
           {view.outlineText && (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-              <p className="mb-1 text-[12px] font-semibold uppercase tracking-wide text-gray-400">
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800">
+              <p className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
                 Outline
               </p>
-              <p className="text-[15px] leading-relaxed whitespace-pre-wrap text-gray-800">
+              <p className="text-[15px] leading-relaxed whitespace-pre-wrap text-gray-800 dark:text-gray-200">
                 {view.outlineText}
               </p>
             </div>
           )}
-          <p className="text-[15px] leading-relaxed text-gray-600">
+          <p className="text-[15px] leading-relaxed text-gray-600 dark:text-gray-300">
             When you’re happy with your outline, approve it to move on to your draft.
           </p>
           {find(view.actions, 'approve') && (
@@ -230,20 +230,23 @@ function TitleFields({ view, pending }: { view: ParticipantGateView; pending: bo
   return (
     <div className="flex flex-col gap-4">
       <label className="flex flex-col gap-1.5">
-        <span className="text-[14px] font-medium text-gray-700">Title</span>
+        <span className="text-[14px] font-medium text-gray-700 dark:text-gray-200">
+          Title <span className="text-red-500 font-normal" aria-hidden="true">*</span>
+        </span>
         <input
           className={inputClass}
           name="title"
           type="text"
           required
+          aria-required="true"
           maxLength={200}
           placeholder="Your chapter title"
           autoComplete="off"
         />
       </label>
       <label className="flex flex-col gap-1.5">
-        <span className="text-[14px] font-medium text-gray-700">
-          Subtitle <span className="font-normal text-gray-400">(optional)</span>
+        <span className="text-[14px] font-medium text-gray-700 dark:text-gray-200">
+          Subtitle <span className="font-normal text-gray-500 dark:text-gray-400">(optional)</span>
         </span>
         <input
           className={inputClass}
@@ -279,13 +282,14 @@ function ChapterActions({
     return (
       <div className="flex flex-col gap-4">
         <label className="flex flex-col gap-1.5">
-          <span className="text-[14px] font-medium text-gray-700">
-            What would you like changed?
+          <span className="text-[14px] font-medium text-gray-700 dark:text-gray-200">
+            What would you like changed? <span className="text-red-500 font-normal" aria-hidden="true">*</span>
           </span>
           <textarea
             className={`${inputClass} min-h-[140px] resize-y`}
             name="notes"
             required
+            aria-required="true"
             maxLength={4000}
             placeholder="Describe the changes you’d like — as much or as little detail as you want."
           />
