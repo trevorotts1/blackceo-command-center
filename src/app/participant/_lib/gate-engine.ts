@@ -51,6 +51,13 @@ interface EngineStatus {
   // Board-door addition (SPEC B10): `kind` discriminates participant vs
   // anthology (assembly) subjects so the operator panel can label the card.
   kind?: string;
+  // Participant-gate content preview (FIX-12). The engine emits these so the
+  // token page can render WHAT the participant is approving. outline_text is an
+  // optional string (s4 gate). preview_urls is an optional DICT {doc_url, pdf_url}
+  // (s5 gate) — NOT an array. The bridge normalizes the dict into a renderable
+  // labeled list.
+  outline_text?: string | null;
+  preview_urls?: { doc_url?: string | null; pdf_url?: string | null } | null;
   // ASSEMBLY passthrough (U9/U13). For an ASSEMBLY subject, cmd_status also
   // emits the S9 assembly_state, the readiness summary (anthology_state
   // `_readiness`), and U9's ordering view (`build_ordering_view` /
@@ -104,6 +111,10 @@ export type GateLoad =
       actions: string[];
       expiresAt: number | null;
       credential: GateCredential;
+      /** Optional outline text (s4 gate). */
+      outlineText: string | null;
+      /** Labeled preview URLs (s5 gate), e.g. [{label:"PDF",url:"..."}, {label:"Doc",url:"..."}]. */
+      previewUrls: ReadonlyArray<{ label: string; url: string }>;
     }
   | { ok: false; status: GateFailure };
 
@@ -317,12 +328,25 @@ export function loadGate(cred: GateCredential): GateLoad {
     return { ok: false, status: 'nothing_open' };
   }
 
+  // Normalize preview_urls dict into a renderable labeled list (FIX-12).
+  const previewUrls: { label: string; url: string }[] = [];
+  const pu = sjson.preview_urls;
+  if (pu && typeof pu === 'object' && !Array.isArray(pu)) {
+    if (typeof pu.pdf_url === 'string' && pu.pdf_url.length > 0)
+      previewUrls.push({ label: 'PDF', url: pu.pdf_url });
+    if (typeof pu.doc_url === 'string' && pu.doc_url.length > 0)
+      previewUrls.push({ label: 'Doc', url: pu.doc_url });
+  }
+
   return {
     ok: true,
     gate: gate as ParticipantGateId,
     actions: sjson.actions.filter((a): a is string => typeof a === 'string'),
     expiresAt: typeof vjson.expires_at === 'number' ? vjson.expires_at : null,
     credential: cred,
+    outlineText: typeof sjson.outline_text === 'string' && sjson.outline_text.length > 0
+      ? sjson.outline_text : null,
+    previewUrls,
   };
 }
 

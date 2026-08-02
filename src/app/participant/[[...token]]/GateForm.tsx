@@ -99,6 +99,43 @@ function SuccessPanel({ view }: { view: Extract<SubmitView, { ok: true }> }) {
   );
 }
 
+function PreviewUrlsBlock({
+  urls,
+}: {
+  urls: ReadonlyArray<{ readonly label: string; readonly url: string }>;
+}) {
+  if (urls.length === 0) return null;
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+      <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-gray-400">
+        Preview
+      </p>
+      <div className="flex flex-wrap gap-3">
+        {urls.map((u) => (
+          <a
+            key={u.label}
+            href={u.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 rounded-lg border border-brand-200 bg-white px-4 py-2 text-[14px] font-medium text-brand-700 no-underline transition-colors hover:bg-brand-50 hover:border-brand-300"
+          >
+            <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4" aria-hidden="true">
+              <path
+                d="M10 12V3m0 0L7 6m3-3l3 3m-3 6v4m-5-3a7 7 0 0114 0"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            {u.label}
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function GateForm({
   view,
   credential,
@@ -147,6 +184,16 @@ export default function GateForm({
 
       {view.kind === 'outline' && (
         <div className="flex flex-col gap-4">
+          {view.outlineText && (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+              <p className="mb-1 text-[12px] font-semibold uppercase tracking-wide text-gray-400">
+                Outline
+              </p>
+              <p className="text-[15px] leading-relaxed whitespace-pre-wrap text-gray-800">
+                {view.outlineText}
+              </p>
+            </div>
+          )}
           <p className="text-[15px] leading-relaxed text-gray-600">
             When you’re happy with your outline, approve it to move on to your draft.
           </p>
@@ -162,12 +209,17 @@ export default function GateForm({
       )}
 
       {view.kind === 'chapter' && (
-        <ChapterActions
+        <>
+          {view.previewUrls.length > 0 && (
+            <PreviewUrlsBlock urls={view.previewUrls} />
+          )}
+          <ChapterActions
           view={view}
           rewriteMode={rewriteMode}
           setRewriteMode={setRewriteMode}
           pending={pending}
         />
+        </>
       )}
     </form>
   );

@@ -45,6 +45,10 @@ export interface ParticipantGateView {
   readonly actions: ReadonlyArray<ActionDescriptor>;
   /** Friendly "valid through <date>" string, or null when unknown. */
   readonly validThrough: string | null;
+  /** Outline text for the s4 gate (read-only preview). */
+  readonly outlineText: string | null;
+  /** Labeled preview URLs for the s5 gate (read-only preview). */
+  readonly previewUrls: ReadonlyArray<{ readonly label: string; readonly url: string }>;
 }
 
 export interface ParticipantRefusalView {
@@ -172,6 +176,8 @@ export function serializeGate(load: GateLoad): ParticipantView {
     lede: copy.lede,
     actions,
     validThrough: friendlyDate(load.expiresAt),
+    outlineText: load.outlineText,
+    previewUrls: load.previewUrls,
   };
 }
 
