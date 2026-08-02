@@ -100,6 +100,61 @@ if [[ "$CC_PORT" != "4000" ]]; then
   printf '[cc-start] CC_PORT_OVERRIDE_ACK=1 set — proceeding on port %s deliberately.\n' "$CC_PORT" >&2
 fi
 
+# ── 1c. CANONICAL BOX-IDENTITY SEED (H-4) ─────────────────────────────────────
+# src/lib/box-identity.ts resolves this box's OUTBOUND escalation identity from,
+# in order: CC_BOX_NAME -> OPENCLAW_BOX_NAME -> FLEET_STANDING_BOX_SLUG -> hostname.
+#
+# The fleet-canonical slug is ALREADY on every box — but it lives in the OpenClaw
+# env store (openclaw.json -> env.vars), which only reaches processes the gateway
+# itself spawns. A CC started by pm2 resurrect, launchd, atomic-deploy, or a bare
+# SSH shell never sees it, falls through to os.hostname(), and escalates as a raw
+# machine name (or, in Docker, an opaque container id that changes on every
+# recreate). Several boxes report the IDENTICAL default hostname, so those
+# escalations are unattributable by construction — and because the receiver keys
+# its per-client cap on that identity, a collision lets one box eat another's
+# escalation budget.
+#
+# So: seed FLEET_STANDING_BOX_SLUG from the box's own OpenClaw env store whenever
+# it is not already in the environment. An explicit env pin ALWAYS wins — this
+# only ever fills a hole, and it never overrides CC_BOX_NAME (which sits ahead of
+# it in the resolver's chain regardless).
+#
+# FAIL-OPEN, ALWAYS: a missing/unreadable/corrupt openclaw.json, an absent key, or
+# no python3/node is silent and non-fatal. Identity is metadata on an alarm and
+# must never be able to stop the Command Center from starting — an unseeded box
+# simply keeps the old hostname behaviour.
+if [[ -z "${FLEET_STANDING_BOX_SLUG:-}" ]]; then
+  _cc_oc_json=""
+  for _cand in /data/.openclaw/openclaw.json "${HOME:-}/.openclaw/openclaw.json"; do
+    if [[ -f "$_cand" ]]; then _cc_oc_json="$_cand"; break; fi
+  done
+  if [[ -n "$_cc_oc_json" ]]; then
+    _cc_slug=""
+    if command -v python3 >/dev/null 2>&1; then
+      _cc_slug="$(python3 -c 'import json,sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+    v = ((cfg.get("env") or {}).get("vars") or {})
+    print(str(v.get("FLEET_STANDING_BOX_SLUG") or "").strip())
+except Exception:
+    pass' "$_cc_oc_json" 2>/dev/null || true)"
+    fi
+    if [[ -z "$_cc_slug" ]] && command -v node >/dev/null 2>&1; then
+      _cc_slug="$(node -e 'try{const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(String(((c.env||{}).vars||{}).FLEET_STANDING_BOX_SLUG||"").trim())}catch{}' "$_cc_oc_json" 2>/dev/null || true)"
+    fi
+    if [[ -n "$_cc_slug" ]]; then
+      export FLEET_STANDING_BOX_SLUG="$_cc_slug"
+      printf '[cc-start] box identity: seeded FLEET_STANDING_BOX_SLUG=%s from %s\n' "$_cc_slug" "$_cc_oc_json" >&2
+    else
+      printf '[cc-start] box identity: no FLEET_STANDING_BOX_SLUG in %s — escalations will fall back to the hostname.\n' "$_cc_oc_json" >&2
+    fi
+    unset _cc_slug
+  else
+    printf '[cc-start] box identity: no openclaw.json found — escalations will fall back to the hostname.\n' >&2
+  fi
+  unset _cc_oc_json _cand
+fi
+
 # ── 2. ORPHAN-PORT KILLER ─────────────────────────────────────────────────────
 # Find any process currently LISTENing on the CC port and kill it before next
 # tries to bind.  Enumerates the holder via lsof (Mac + most Linux), then fuser

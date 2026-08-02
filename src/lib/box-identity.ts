@@ -77,7 +77,7 @@ const TEMPLATE_CLIENT_NAMES = new Set([
 export interface BoxIdentity {
   /** The client this box belongs to, or UNKNOWN_CLIENT. The per-client cap key. */
   clientName: string;
-  /** This box's own name (hostname unless pinned), or UNKNOWN_BOX. */
+  /** This box's own name (canonical slug unless pinned; hostname last), or UNKNOWN_BOX. */
   boxName: string;
   /** 'VPS' (Docker/Hostinger) | 'Mac' (bare install) | 'unknown'. */
   boxType: 'VPS' | 'Mac' | 'unknown';
@@ -132,9 +132,39 @@ export function resolveClientName(): string {
   return UNKNOWN_CLIENT;
 }
 
-/** This box's name: an explicit pin, else the hostname, else UNKNOWN_BOX. */
+/**
+ * This box's name.
+ *
+ * Precedence:
+ *   1. CC_BOX_NAME env        — the explicit pin an installer/operator writes.
+ *   2. OPENCLAW_BOX_NAME env  — the same pin under the gateway's own key name.
+ *   3. FLEET_STANDING_BOX_SLUG env — the CANONICAL fleet slug. Every box already
+ *      carries this (it is what the box's AGENTS.md escalation block sends, and
+ *      what the standing gate keys on), so preferring it here makes a box
+ *      self-attributing with no per-box env work at all.
+ *   4. os.hostname() — LAST-RESORT only. See below.
+ *   5. UNKNOWN_BOX.
+ *
+ * ── WHY THE HOSTNAME IS A LAST RESORT, NOT A DEFAULT ──────────────────────────
+ * A hostname is not an identity. It is machine-local, unstable, and NOT UNIQUE
+ * across the fleet:
+ *   - it leaks the raw machine name (`<something>-mac-mini.local`) into the
+ *     operator's escalation ledger instead of the slug the gate can key on;
+ *   - inside Docker `os.hostname()` returns the short CONTAINER ID, which is
+ *     fully opaque AND changes on every container recreate;
+ *   - it COLLIDES: multiple boxes in the fleet report the identical default
+ *     hostname (`Mac`, `Mac.lan`). Two different clients writing the same
+ *     `box_slug` are unattributable by construction, and — because `boxId` is
+ *     the receiver's dedup / per-client rate-limit key — a collision also makes
+ *     one box eat another's escalation budget.
+ *
+ * Step 3 is what turns that from "every box must be pinned by hand, forever"
+ * into "a correctly-provisioned box names itself". `scripts/cc-start.sh` seeds
+ * FLEET_STANDING_BOX_SLUG from the box's own OpenClaw env store when it is not
+ * already in the environment, so this step is populated on a normal boot.
+ */
 export function resolveBoxName(): string {
-  const pinned = envValue('CC_BOX_NAME', 'OPENCLAW_BOX_NAME');
+  const pinned = envValue('CC_BOX_NAME', 'OPENCLAW_BOX_NAME', 'FLEET_STANDING_BOX_SLUG');
   if (pinned) return pinned;
   try {
     const host = os.hostname().trim();
