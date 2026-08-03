@@ -27,12 +27,12 @@
 
 set -u
 
-ROOT="/Users/blackceomacmini/clawd/fleet-heartbeat"
+ROOT="$HOME/clawd/fleet-heartbeat"
 PROBE="${ROOT}/scripts/probe-fleet.sh"
 REMEDIATE="${ROOT}/scripts/remediate.sh"
 SESSION_HEALTH="${ROOT}/scripts/session-health.sh"
 CHANGE_LOG="${ROOT}/change-log.md"
-OPENCLAW="/Users/blackceomacmini/.local/bin/openclaw"
+OPENCLAW="$HOME/.local/bin/openclaw"
 LOG_DIR="${ROOT}/logs"
 mkdir -p "$LOG_DIR"
 
@@ -368,7 +368,7 @@ printf '%b' "$new_ledger" > "$ledger_tmp"
 mv -f "$ledger_tmp" "$DOWN_LEDGER"
 
 # Build a single rolled-up chronic line, e.g.
-#   "⏳ Still down 5+ days (no change): Jill Bulluck, Aurelia Gardner"
+#   "⏳ Still down 5+ days (no change): <client-1>, <client-2>"
 chronic_line=""
 if [ -n "$chronic_clients" ]; then
   _names=$(printf '%s' "$chronic_clients" | sed 's/|$//; s/|/, /g')
@@ -482,12 +482,12 @@ fi
 #   - watch mode alerts (down events during the day) → Rescue Rangers room
 #   - smoke-test → Trevor's chat (he's the one initiating it)
 #
-# RESCUE_RANGERS_HELP_CHAT_ID is set in env (or /Users/blackceomacmini/.openclaw/secrets/.env)
+# RESCUE_RANGERS_HELP_CHAT_ID is set in env (or $HOME/.openclaw/secrets/.env)
 # once Trevor manually creates the Rescue Rangers group on Telegram. Until it's
-# set, we fall back to Trevor's chat so we never silently drop alerts.
+# set, we fall back to the operator's chat so we never silently drop alerts.
 
-if [ -z "${RESCUE_RANGERS_HELP_CHAT_ID:-}" ] && [ -f /Users/blackceomacmini/.openclaw/secrets/.env ]; then
-  RESCUE_RANGERS_HELP_CHAT_ID=$(grep -E "^RESCUE_RANGERS_HELP_CHAT_ID=" /Users/blackceomacmini/.openclaw/secrets/.env 2>/dev/null | cut -d= -f2-)
+if [ -z "${RESCUE_RANGERS_HELP_CHAT_ID:-}" ] && [ -f $HOME/.openclaw/secrets/.env ]; then
+  RESCUE_RANGERS_HELP_CHAT_ID=$(grep -E "^RESCUE_RANGERS_HELP_CHAT_ID=" $HOME/.openclaw/secrets/.env 2>/dev/null | cut -d= -f2-)
 fi
 
 target_chat="${RESCUE_RANGERS_HELP_CHAT_ID:-$CHAT_ID}"
