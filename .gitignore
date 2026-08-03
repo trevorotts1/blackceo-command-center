@@ -96,3 +96,35 @@ client-roster.txt
 /config/board-slas.json
 /public/logo-config.json
 /.last-update-check
+
+# ── Deploy / roll artefacts (operator-generated, never committed) ────────────
+# WHY THIS SECTION EXISTS. scripts/atomic-deploy.sh, update.sh and the fleet
+# roll park pre-deploy copies of live files next to the originals so a bad
+# deploy can be reverted (`*.PREDEPLOY-<ts>-keep`, `*.preroll-bak`,
+# `.next.CORRUPT-<ts>`, `<db>.backup-<ts>`). They are deliberately NOT deleted.
+#
+# Left un-ignored, they make `git status --porcelain` permanently non-empty.
+# update-skills.sh's CC currency probe (`_cc_currency_probe`) reads a non-empty
+# porcelain as `state=dirty` and then, by contract, REFUSES to refresh the
+# checkout:
+#     "Command Center has UNCOMMITTED changes, so it cannot fast-forward and
+#      will NOT be refreshed."
+# So a box that deploys once litters itself into permanent staleness: every
+# later roll sees `dirty`, skips the CC refresh, and the checkout never
+# advances again — while the .onboarding-version stamp stays green.
+#
+# Ignoring these restores a clean porcelain so the refresh can actually run.
+# Only operator/deploy-generated backup copies are listed; every real source
+# file (including public/brand.css and the *.example.json templates) stays
+# tracked.
+*.preroll-bak
+*.PREDEPLOY-*-keep
+*.PREFIX-*-keep
+.PREDEPLOY-*-keep/
+.next.PREDEPLOY-*
+.next.CORRUPT-*
+.next-backup-redeploy/
+*.db.backup*
+*.db.rogue-preserved*
+*.orig
+*.rej
