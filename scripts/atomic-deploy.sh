@@ -426,15 +426,32 @@ PYWAL
 fi
 
 # ── 1c. Snapshot current .next as rollback artifact ───────────────────────────
+# ROLLBACK-CORRUPTION GUARD: only snapshot NEXT_DIR over the existing rollback
+# when NEXT_DIR is itself a validated build (has a BUILD_ID). Without this
+# check, running the script against an ALREADY-BROKEN live .next (corrupted by
+# any prior failure — this script, a crash, a manual edit, disk issue) would
+# blindly `rm -rf` the last known-good rollback and replace it with the broken
+# build, destroying the only escape hatch before Phase 2 has even attempted a
+# new build. If a good rollback from a previous run already exists, it is kept
+# untouched instead. Only when there is neither a validated live build nor a
+# pre-existing rollback do we correctly have nothing to fall back to.
 _log "[1c] Snapshotting .next as rollback artifact"
 NEXT_DIR="${APP_DIR}/.next"
 ROLLBACK_DIR="${APP_DIR}/.next.rollback"
 
-if [[ -d "$NEXT_DIR" ]]; then
+if [[ -d "$NEXT_DIR" && -f "$NEXT_DIR/BUILD_ID" ]]; then
   rm -rf "$ROLLBACK_DIR"
   cp -r "$NEXT_DIR" "$ROLLBACK_DIR"
   _ok "  Rollback artifact created: ${ROLLBACK_DIR}"
   ROLLBACK_EXISTS=1
+elif [[ -d "$ROLLBACK_DIR" && -f "$ROLLBACK_DIR/BUILD_ID" ]]; then
+  _warn "  Live .next has no BUILD_ID (looks broken/partial) — refusing to overwrite the existing rollback with it."
+  _warn "  Keeping the rollback artifact already on disk: ${ROLLBACK_DIR}"
+  ROLLBACK_EXISTS=1
+elif [[ -d "$NEXT_DIR" ]]; then
+  _warn "  Live .next exists but has no BUILD_ID (looks broken/partial), and no prior rollback artifact exists."
+  _warn "  On build failure, there is nothing safe to roll back to."
+  ROLLBACK_EXISTS=0
 else
   _warn "  No existing .next directory found — rollback artifact not created."
   _warn "  On build failure, there is nothing to roll back to."
