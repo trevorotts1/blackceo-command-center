@@ -86,6 +86,20 @@ interface FixtureConfig {
   freeDiskGb?: number;
   /** Whether to pre-create .next/BUILD_ID in app dir (simulates existing live build) */
   liveNextExists?: boolean;
+  /**
+   * Whether the pre-created .next (when liveNextExists=true) gets a BUILD_ID.
+   * Set false to simulate a live .next that is already broken/partial (e.g.
+   * left behind by some earlier failure, not necessarily this script) —
+   * exercises the Phase 1c rollback-corruption guard. Default true.
+   */
+  liveNextHasBuildId?: boolean;
+  /**
+   * Pre-seed .next.rollback/BUILD_ID with a distinct marker ('good-rollback-
+   * build-id') BEFORE the run, simulating a good rollback left over from a
+   * previous deploy. Used to prove Phase 1c does not destroy it when the
+   * current live .next is broken. Default false.
+   */
+  preExistingRollback?: boolean;
 }
 
 interface Fixture {
@@ -107,6 +121,8 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
     rollbackHealthExitCode = 0,
     freeDiskGb = 10,
     liveNextExists = true,
+    liveNextHasBuildId = true,
+    preExistingRollback = false,
   } = cfg;
 
   const baseDir = makeTmpDir();
@@ -123,7 +139,17 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
   // Existing live .next
   if (liveNextExists) {
     mkdirSync(path.join(appDir, '.next'), { recursive: true });
-    writeFileSync(path.join(appDir, '.next', 'BUILD_ID'), 'old-build-id');
+    if (liveNextHasBuildId) {
+      writeFileSync(path.join(appDir, '.next', 'BUILD_ID'), 'old-build-id');
+    }
+  }
+
+  // Pre-existing good rollback artifact (simulates a rollback left over from
+  // a previous run) — used to prove Phase 1c never overwrites/destroys it
+  // when the current live .next is broken.
+  if (preExistingRollback) {
+    mkdirSync(path.join(appDir, '.next.rollback'), { recursive: true });
+    writeFileSync(path.join(appDir, '.next.rollback', 'BUILD_ID'), 'good-rollback-build-id');
   }
 
   // ── stub npm ────────────────────────────────────────────────────────────
@@ -334,6 +360,76 @@ test('Spec Verify (a+fg): broken build (npm exits 1) + live BUILD_ID → exit 2,
       !stderr.includes('ATOMIC DEPLOY SUCCESS'),
       `ATOMIC DEPLOY SUCCESS must not appear in output when build failed.\nstderr:\n${stderr}`,
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Phase 1c rollback-corruption guard ─────────────────────────────────────
+
+/**
+ * ROLLBACK-CORRUPTION GUARD: if the live .next is already broken (no
+ * BUILD_ID — e.g. left behind by an earlier failure, not necessarily this
+ * script) AND a good rollback from a previous run already exists on disk,
+ * Phase 1c must NOT overwrite that good rollback with the broken live .next.
+ * Without this guard, simply re-running atomic-deploy.sh against an
+ * already-broken box destroys the one remaining escape hatch before Phase 2
+ * even attempts a new build — this is independent of whether the build that
+ * follows succeeds or fails, so the build is forced to fail here (npm exits
+ * 1) to freeze state right after Phase 1c and inspect the rollback artifact
+ * before any later phase (Phase 5's on-success cleanup) could remove it.
+ */
+test('Rollback-corruption guard: live .next has no BUILD_ID (broken) → Phase 1c does not overwrite an existing good rollback', async () => {
+  const fixture = buildFixture({
+    buildExitCode: 1,
+    liveNextExists: true,
+    liveNextHasBuildId: false,
+    preExistingRollback: true,
+  });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+
+    // Broken build (npm exits 1) still aborts pre-flight as usual.
+    assert.strictEqual(exitCode, 2,
+      `Expected exit 2 (pre-flight abort on build failure) but got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // The GOOD rollback that existed before this run must survive untouched —
+    // Phase 1c must have refused to overwrite it with the broken live .next.
+    const rollbackBuildId = path.join(fixture.appDir, '.next.rollback', 'BUILD_ID');
+    assert.ok(existsSync(rollbackBuildId),
+      '.next.rollback/BUILD_ID must still exist — the pre-existing good rollback must not be deleted');
+    const currentRollbackBuildId = readFileSync(rollbackBuildId, 'utf8').trim();
+    assert.strictEqual(currentRollbackBuildId, 'good-rollback-build-id',
+      `Rollback must remain 'good-rollback-build-id' (the last known-good build); ` +
+      `got '${currentRollbackBuildId}' — Phase 1c overwrote the good rollback with the broken live .next.`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+/**
+ * Sanity companion: when the live .next IS a validated build (has a
+ * BUILD_ID), Phase 1c's normal behavior — replace the rollback with the
+ * current live build — must be unchanged by the guard.
+ */
+test('Rollback-corruption guard: live .next HAS a BUILD_ID → Phase 1c still refreshes the rollback normally', async () => {
+  const fixture = buildFixture({
+    buildExitCode: 1,
+    liveNextExists: true,
+    liveNextHasBuildId: true,
+    preExistingRollback: true,
+  });
+  try {
+    const { exitCode } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 2, 'broken build must still abort pre-flight');
+
+    // The rollback should now reflect the (validated) live build, not the
+    // stale pre-existing marker — normal Phase 1c refresh behavior.
+    const rollbackBuildId = path.join(fixture.appDir, '.next.rollback', 'BUILD_ID');
+    assert.ok(existsSync(rollbackBuildId), '.next.rollback/BUILD_ID must exist');
+    const currentRollbackBuildId = readFileSync(rollbackBuildId, 'utf8').trim();
+    assert.strictEqual(currentRollbackBuildId, 'old-build-id',
+      `Expected the rollback to be refreshed from the validated live build ('old-build-id'), got '${currentRollbackBuildId}'`);
   } finally {
     fixture.cleanup();
   }
