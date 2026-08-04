@@ -91,28 +91,73 @@ export function dedupeCanonicalWorkspaces(db: Database): WorkspaceDedupResult {
     merges: [],
   };
 
-  let rows: { id: string; slug: string; sort_order: number | null; rowid: number }[];
+  let rows: { id: string; slug: string; sort_order: number | null; rowid: number; company_id: string | null }[];
   try {
     rows = db
-      .prepare('SELECT rowid, id, slug, sort_order FROM workspaces')
-      .all() as { id: string; slug: string; sort_order: number | null; rowid: number }[];
+      .prepare('SELECT rowid, id, slug, sort_order, company_id FROM workspaces')
+      .all() as { id: string; slug: string; sort_order: number | null; rowid: number; company_id: string | null }[];
   } catch (err) {
     console.warn('[task-dedup] workspace read failed (non-fatal):', (err as Error).message);
     return result;
   }
 
-  // Group rows by their canonical slug.
-  const groups = new Map<string, typeof rows>();
+  // DEFECT 2 / cross-company guard (verified live incident, 2026-08-04
+  // "WANTED Woman"). Grouping by canonical slug ALONE, with no company
+  // boundary, would merge TWO DIFFERENT companies' "marketing" workspace on a
+  // shared multi-client box into ONE row — splicing one client's task/agent
+  // history onto another client's department. `company_id` NULL / '' /
+  // 'default' is the box's own UNATTRIBUTED data (the same posture
+  // boardWhereClause takes everywhere else in the app) and may merge into any
+  // ONE real company's keeper for the same department. Two rows that each
+  // carry a DIFFERENT real (non-default) company_id must never merge into
+  // each other, no matter how their slugs canonicalize.
+  const isRealCompany = (c: string | null) => !!c && c !== 'default';
+
+  // Pass 1: group by canonical slug only, to find which canon groups span
+  // more than one real company (the hazard case).
+  const byCanon = new Map<string, typeof rows>();
   for (const row of rows) {
     const canon = canonicalDeptSlug(row.slug) || row.slug.toLowerCase();
-    const bucket = groups.get(canon);
+    const bucket = byCanon.get(canon);
     if (bucket) bucket.push(row);
-    else groups.set(canon, [row]);
+    else byCanon.set(canon, [row]);
+  }
+
+  // Pass 2: build the ACTUAL merge groups. A canon group touched by 0 or 1
+  // real company merges as a whole (today's behavior, preserved for the
+  // overwhelmingly common single-tenant / single-client case). A canon group
+  // spanning 2+ real companies is split into one sub-group PER real company
+  // (each deduped independently); unattributed rows are excluded from every
+  // such sub-group — which company they belong to is ambiguous — and are
+  // logged for manual review instead of guessed at.
+  const mergeGroups: { canonSlug: string; members: typeof rows }[] = [];
+  for (const [canon, members] of Array.from(byCanon.entries())) {
+    const realCompanies = Array.from(
+      new Set(members.filter((m) => isRealCompany(m.company_id)).map((m) => m.company_id as string)),
+    );
+
+    if (realCompanies.length <= 1) {
+      mergeGroups.push({ canonSlug: canon, members });
+      continue;
+    }
+
+    const defaultRows = members.filter((m) => !isRealCompany(m.company_id));
+    for (const companyId of realCompanies) {
+      mergeGroups.push({ canonSlug: canon, members: members.filter((m) => m.company_id === companyId) });
+    }
+    if (defaultRows.length > 1) {
+      mergeGroups.push({ canonSlug: canon, members: defaultRows });
+    } else if (defaultRows.length === 1) {
+      console.warn(
+        `[task-dedup] canonical "${canon}" spans ${realCompanies.length} companies (${realCompanies.join(', ')}) ` +
+          `— leaving unattributed workspace "${defaultRows[0].id}" un-merged pending manual review`,
+      );
+    }
   }
 
   const wsTables = tablesWithWorkspaceId(db);
 
-  for (const [canon, members] of Array.from(groups.entries())) {
+  for (const { canonSlug: canon, members } of mergeGroups) {
     if (members.length < 2) continue;
 
     // Score each candidate keeper: agents + tasks attached (more = keep).

@@ -33,6 +33,17 @@ export default defineConfig({
       // instead of minting a duplicate canonical row and orphaning the original.
       // DB-backed vitest suite, same reason as floor-department-invariant above.
       'tests/unit/mr21-reseed-dept-prefix-migration.test.ts',
+      // 2026-08-04 "WANTED Woman" incident (company_id='wanted-woman'): the
+      // dashboard reported 288 agents for a 36-agent, 35-department
+      // workforce. Proves BOTH root causes fixed together — /api/performance
+      // no longer returns a bare unscoped COUNT(*), and reseedWorkspacesFromConfig
+      // now heals a PRE-EXISTING dept-/bare workspace duplicate pair (not just
+      // guards against minting a NEW one) — plus the cross-company guard added
+      // to dedupeCanonicalWorkspaces (task-dedup.ts) so a shared multi-client
+      // box can never merge two different companies' identically-named
+      // department into one row. DB-backed vitest suite, same reason as
+      // floor-department-invariant.test.ts above.
+      'tests/unit/cc-agent-count-dedupe-scope.test.ts',
       // MR-08 fable-correction: /operator/health data layer must report real
       // numbers — locks the parenthesised julianday hour math (unparenthesised
       // SQL precedence silently zeros every stuck-task counter) and the real

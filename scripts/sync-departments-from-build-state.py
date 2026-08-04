@@ -358,6 +358,164 @@ def _table_exists(cur, name):
     return row is not None
 
 
+def _canonical_dept_slug(slug):
+    """Minimal, prefix-only canonicalization mirroring this script's own
+    dept-id normalization two lines above (dept_id = raw_id[5:] if it starts
+    with 'dept-').
+
+    Deliberately narrower than the TS canonicalDeptSlug() in
+    src/lib/routing/canonical-slug.ts (no alias-map remapping, e.g.
+    "billing" -> "billing-finance") -- that full alias table is the CC app's
+    single source of truth and this script must never fork a second, drifting
+    copy of it. The dept- prefix collision is exactly the literal shape of
+    the 2026-08-04 "WANTED Woman" incident (36 `dept-<slug>` rows + 36
+    `<slug>` rows for the same 36 departments); any alias-level duplicate
+    this simpler pass misses is still healed by the TS-side
+    dedupeCanonicalWorkspaces(), which runs on every subsequent boot and
+    converge (reseedWorkspacesFromConfig, src/lib/db/migrations.ts).
+    """
+    s = (slug or "").strip().lower()
+    if s.startswith("dept-"):
+        s = s[5:]
+    return s
+
+
+def _tables_with_workspace_id(cur):
+    tables = []
+    for (name,) in cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall():
+        if name == "workspaces":
+            continue
+        try:
+            cols = [r[1] for r in cur.execute(f"PRAGMA table_info({name})").fetchall()]
+        except sqlite3.OperationalError:
+            continue
+        if "workspace_id" in cols:
+            tables.append(name)
+    return tables
+
+
+def dedupe_canonical_workspaces(cur):
+    """
+    Collapse duplicate workspace rows that canonicalize (dept- prefix only --
+    see _canonical_dept_slug) to the SAME department, WITHIN the same company.
+
+    Mirrors src/lib/db/task-dedup.ts's dedupeCanonicalWorkspaces() one-for-one
+    (same keeper preference: canonical-slug row first, then most agents+tasks,
+    then oldest rowid; same "never touch a workspace with live
+    in_progress/assigned work" safety), so a box whose ONLY sync path is this
+    Python script (e.g. very early in provisioning, before the CC app's own
+    TS reseed has ever run) still self-heals instead of accumulating a
+    `dept-<slug>` / `<slug>` pair forever.
+
+    Company-scope guard (2026-08-04 "WANTED Woman" incident): grouping by
+    canonical slug ALONE, with no company boundary, would merge TWO DIFFERENT
+    companies' "marketing" workspace on a shared multi-client box into one
+    row -- splicing one client's task/agent history onto another client's
+    department. company_id NULL / '' / 'default' is the box's own
+    unattributed data and may merge into any ONE real company's keeper for
+    the same department; two rows that each carry a DIFFERENT real
+    (non-default) company_id must never merge into each other.
+
+    A loser row is a true duplicate SHELL by the time it is deleted -- every
+    workspace_id-bearing row that pointed at it was just reassigned to the
+    keeper above, so nothing unique is lost (same B8/AUD-46 rationale
+    task-dedup.ts's assertArchivedBeforeHardDelete documents; this script has
+    no equivalent audit-trail helper to route through, so the delete is
+    direct).
+
+    Returns (groups_merged, rows_deleted). Never raises on a row-level
+    problem for one canonical group -- logs and continues with the rest.
+    """
+    rows = cur.execute("SELECT rowid, id, slug, company_id FROM workspaces").fetchall()
+    by_canon = {}
+    for rowid, wid, slug, company_id in rows:
+        canon = _canonical_dept_slug(slug) or (slug or "").lower()
+        by_canon.setdefault(canon, []).append(
+            {"rowid": rowid, "id": wid, "slug": slug or "", "company_id": company_id}
+        )
+
+    def is_real_company(cid):
+        return bool(cid) and cid != "default"
+
+    merge_groups = []
+    for canon, members in by_canon.items():
+        real_companies = sorted({m["company_id"] for m in members if is_real_company(m["company_id"])})
+        if len(real_companies) <= 1:
+            merge_groups.append((canon, members))
+            continue
+        # 2+ real companies collide on the same canonical slug -- dedup EACH
+        # company's own rows independently; unattributed rows are excluded
+        # from every sub-group (ambiguous which company they belong to).
+        default_rows = [m for m in members if not is_real_company(m["company_id"])]
+        for company_id in real_companies:
+            merge_groups.append((canon, [m for m in members if m["company_id"] == company_id]))
+        if len(default_rows) > 1:
+            merge_groups.append((canon, default_rows))
+        elif len(default_rows) == 1:
+            print(
+                f"  [sync] canonical '{canon}' spans {len(real_companies)} companies "
+                f"({', '.join(real_companies)}) -- leaving unattributed workspace "
+                f"'{default_rows[0]['id']}' un-merged pending manual review",
+                file=sys.stderr,
+            )
+
+    has_agents = _table_exists(cur, "agents")
+    has_tasks = _table_exists(cur, "tasks")
+    ws_tables = _tables_with_workspace_id(cur)
+    groups_merged = 0
+    rows_deleted = 0
+
+    for canon, members in merge_groups:
+        if len(members) < 2:
+            continue
+
+        scored = []
+        for m in members:
+            a = cur.execute("SELECT COUNT(*) FROM agents WHERE workspace_id=?", (m["id"],)).fetchone()[0] if has_agents else 0
+            t = cur.execute("SELECT COUNT(*) FROM tasks WHERE workspace_id=?", (m["id"],)).fetchone()[0] if has_tasks else 0
+            scored.append({**m, "weight": a + t, "is_canonical": m["slug"].lower() == canon})
+
+        # Keeper preference: canonical slug first, then most attached rows,
+        # then oldest rowid -- identical order to task-dedup.ts.
+        scored.sort(key=lambda x: (not x["is_canonical"], -x["weight"], x["rowid"]))
+        keeper, losers = scored[0], scored[1:]
+
+        live_loser = None
+        if has_tasks:
+            for loser in losers:
+                n = cur.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE workspace_id=? AND status IN ('in_progress','assigned')",
+                    (loser["id"],),
+                ).fetchone()[0]
+                if n > 0:
+                    live_loser = loser
+                    break
+        if live_loser:
+            print(
+                f"  [sync] SKIP merge for canonical '{canon}': loser workspace "
+                f"'{live_loser['id']}' has live in_progress/assigned task(s) -- "
+                "deferring to a quiet re-run",
+                file=sys.stderr,
+            )
+            continue
+
+        for loser in losers:
+            for table in ws_tables:
+                cur.execute(f"UPDATE {table} SET workspace_id=? WHERE workspace_id=?", (keeper["id"], loser["id"]))
+            cur.execute("DELETE FROM workspaces WHERE id=?", (loser["id"],))
+            rows_deleted += 1
+            print(f"  [sync] merged duplicate workspace '{loser['id']}' into '{keeper['id']}' (canonical '{canon}')")
+
+        if keeper["slug"].lower() != canon:
+            cur.execute("UPDATE workspaces SET slug=? WHERE id=?", (canon, keeper["id"]))
+
+        groups_merged += 1
+
+    return groups_merged, rows_deleted
+
+
 def reseed_workspaces(db_path, departments, company_info, prune=False):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
@@ -436,6 +594,16 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
             """, (dept_id, name, dept_id, description, icon, slug))
             inserted += 1
             print(f"  [sync] inserted workspace: {dept_id} ({name})")
+
+    # DEFECT 2 fix (2026-08-04, "WANTED Woman" incident). Heal any PRE-EXISTING
+    # `dept-<slug>` / `<slug>` duplicate pair for this box's own company(ies)
+    # before pruning -- so the stale-department check below operates on the
+    # already-deduped set. Runs on every call (not opt-in): a true no-op on a
+    # board with no duplicates.
+    dedupe_groups, dedupe_deleted = dedupe_canonical_workspaces(cur)
+    if dedupe_groups:
+        print(f"  [sync] healed {dedupe_groups} duplicate workspace group(s) "
+              f"({dedupe_deleted} row(s) merged away)")
 
     pruned = kept_nonempty = 0
     if prune:
