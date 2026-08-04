@@ -7142,19 +7142,42 @@ export function reseedWorkspacesFromConfig(
     // different companies' same-named department — see task-dedup.ts) and a
     // true no-op on a board with no duplicates, so this is safe to run on
     // every steady-state reseed.
-    try {
-      const dedupeResult = dedupeCanonicalWorkspaces(db);
-      if (dedupeResult.groups_merged > 0) {
-        console.log(
-          `[reseed] healed ${dedupeResult.groups_merged} duplicate workspace group(s) ` +
-            `(${dedupeResult.rows_deleted} row(s) merged away) before trio/head seeding`,
-        );
+    //
+    // INGEST-07: this is the SAME destructive merge primitive migrations 081/082
+    // gate behind `deferInAdditiveSelfHeal` (see runMigrations()'s
+    // `additiveOnlySelfHeal` check, ~line 5597) — calling it here, unconditionally,
+    // reopened the exact race that gate exists to prevent: reseedWorkspacesFromConfig
+    // runs from `autoSeedFromDepartmentsJson()` at the tail of `runMigrations()`,
+    // OUTSIDE the `ordered` migrations loop the flag guards, so it fired during the
+    // request-time schema self-heal (src/app/api/tasks/ingest/route.ts sets
+    // OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY=1 for that exact one-shot migrate)
+    // and deleted/reassigned workspace rows mid-request. Mirror the same runner-level
+    // check here so this call site honors the flag identically: deferred (not run,
+    // not recorded) during additive-only self-heal, and runs normally on every
+    // controlled boot/converge — which is the whole point of this fix.
+    const additiveOnlySelfHealForDedupe =
+      process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY === '1';
+    if (additiveOnlySelfHealForDedupe) {
+      console.warn(
+        '[reseed] duplicate-workspace healing pass DEFERRED — ' +
+          'OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY set (destructive merge not run during ' +
+          'request-time self-heal; stays pending for the next controlled boot/converge).',
+      );
+    } else {
+      try {
+        const dedupeResult = dedupeCanonicalWorkspaces(db);
+        if (dedupeResult.groups_merged > 0) {
+          console.log(
+            `[reseed] healed ${dedupeResult.groups_merged} duplicate workspace group(s) ` +
+              `(${dedupeResult.rows_deleted} row(s) merged away) before trio/head seeding`,
+          );
+        }
+      } catch (err) {
+        // Non-fatal: dedupeCanonicalWorkspaces already logs+swallows row-level
+        // failures internally. A failure to even RUN it must not abort the
+        // reseed (the manifest upsert above already succeeded and must stand).
+        console.warn('[reseed] duplicate-workspace healing pass failed (non-fatal):', (err as Error).message);
       }
-    } catch (err) {
-      // Non-fatal: dedupeCanonicalWorkspaces already logs+swallows row-level
-      // failures internally. A failure to even RUN it must not abort the
-      // reseed (the manifest upsert above already succeeded and must stand).
-      console.warn('[reseed] duplicate-workspace healing pass failed (non-fatal):', (err as Error).message);
     }
 
     // Re-seed trio agents and starter SOPs (both idempotent).

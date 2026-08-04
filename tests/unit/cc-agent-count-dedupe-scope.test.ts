@@ -28,6 +28,18 @@
  * companies' identically-named department into one row, and a second
  * company's agents must never appear in the active company's total.
  *
+ * Also proves the INGEST-07 safety gate on the DEFECT 2 call site: an
+ * independent QC review of this PR demonstrated that the new
+ * `dedupeCanonicalWorkspaces(db)` call inside `reseedWorkspacesFromConfig`
+ * ran even when `OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY=1` was set — the
+ * exact flag `/api/tasks/ingest/route.ts`'s request-time schema self-heal
+ * sets to defer destructive migrations 081/082 (the same merge primitive)
+ * while it races live ingest. The call site is now gated the same way the
+ * migration runner gates 081/082, and the tests below prove BOTH directions:
+ * the duplicate survives untouched while the flag is set, and is correctly
+ * merged once it is unset — so a fix that merely disabled the feature would
+ * also fail this file.
+ *
  * MUST import _isolated-db FIRST so getDb() opens a throwaway DB, never the
  * real mission-control.db (mirrors mr21-reseed-dept-prefix-migration.test.ts).
  */
@@ -62,6 +74,7 @@ beforeAll(() => {
   savedEnv.COMPANY_SLUG = process.env.COMPANY_SLUG;
   savedEnv.COMPANY_NAME = process.env.COMPANY_NAME;
   savedEnv.ZERO_HUMAN_COMPANY_DIR = process.env.ZERO_HUMAN_COMPANY_DIR;
+  savedEnv.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY = process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
   process.env.COMPANY_SLUG = ACTIVE;
   delete process.env.COMPANY_NAME;
 
@@ -84,7 +97,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  for (const k of ['COMPANY_SLUG', 'COMPANY_NAME', 'ZERO_HUMAN_COMPANY_DIR']) {
+  for (const k of ['COMPANY_SLUG', 'COMPANY_NAME', 'ZERO_HUMAN_COMPANY_DIR', 'OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY']) {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
   }
@@ -229,5 +242,77 @@ describe('DEFECT 2: reseedWorkspacesFromConfig heals the pre-existing duplicate 
     expect(db.prepare("SELECT workspace_id FROM agents WHERE id = 'agent-other-sales-1'").get()).toEqual({
       workspace_id: 'dept-sales-other',
     });
+  });
+});
+
+describe('DEFECT 2 safety gate (INGEST-07): reseedWorkspacesFromConfig honors OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY', () => {
+  // A fresh, never-before-touched pair. 'crm' is used (not 'billing') because
+  // 'billing' is an ALIAS_MAP entry that canonicalizes to 'billing-finance'
+  // (a pre-existing engine/seed workspace on this DB) — 'crm' is its own
+  // canonical slug (see canonical-slug.ts CANONICAL_SLUGS) with no alias
+  // collision, so the keeper-selection logic in this test is unambiguous.
+  it('a duplicate dept-crm/crm pair SURVIVES reseedWorkspacesFromConfig untouched while the additive-only self-heal flag is set', () => {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order) VALUES ('dept-crm', 'CRM', 'dept-crm', 'Legacy CRM workspace', '🗂️', ?, 5000)",
+    ).run(ACTIVE);
+    db.prepare(
+      "INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order) VALUES ('crm', 'CRM', 'crm', 'Current CRM workspace', '🗂️', ?, 5001)",
+    ).run(ACTIVE);
+    db.prepare(
+      "INSERT INTO agents (id, name, role, workspace_id) VALUES ('agent-crm-legacy-1', 'Legacy CRM Agent', 'specialist', 'dept-crm')",
+    ).run();
+    db.prepare(
+      "INSERT INTO tasks (id, title, workspace_id) VALUES ('task-crm-legacy-1', 'Legacy CRM task', 'dept-crm')",
+    ).run();
+
+    // Reproduces the EXACT sequence src/app/api/tasks/ingest/route.ts's
+    // request-time self-heal performs: set the additive-only flag, then call
+    // the migration/reseed path while it is set.
+    process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY = '1';
+
+    reseedWorkspacesFromConfig(db, { force: true });
+
+    // Both rows must still exist — no merge, no delete, no reassignment.
+    const rows = db
+      .prepare("SELECT id FROM workspaces WHERE id IN ('crm', 'dept-crm') ORDER BY id")
+      .all() as { id: string }[];
+    expect(rows).toEqual([{ id: 'crm' }, { id: 'dept-crm' }]);
+
+    const legacyAgent = db.prepare('SELECT workspace_id FROM agents WHERE id = ?').get('agent-crm-legacy-1') as
+      | { workspace_id: string }
+      | undefined;
+    expect(legacyAgent?.workspace_id).toBe('dept-crm');
+
+    const legacyTask = db.prepare('SELECT workspace_id FROM tasks WHERE id = ?').get('task-crm-legacy-1') as
+      | { workspace_id: string }
+      | undefined;
+    expect(legacyTask?.workspace_id).toBe('dept-crm');
+  });
+
+  it('the SAME dept-crm/crm pair IS correctly merged once the additive-only flag is unset (proves the feature still works)', () => {
+    const db = getDb();
+    // Unset the flag — this is an ordinary controlled boot/converge, exactly
+    // like the DEFECT 2 healing tests above. A "fix" that merely deleted or
+    // permanently disabled the DEFECT 2 dedupe call would fail THIS
+    // assertion even though it would pass the deferral test above.
+    delete process.env.OPENCLAW_MIGRATE_SELF_HEAL_ADDITIVE_ONLY;
+
+    reseedWorkspacesFromConfig(db, { force: true });
+
+    const rows = db.prepare("SELECT id FROM workspaces WHERE id IN ('crm', 'dept-crm')").all() as {
+      id: string;
+    }[];
+    expect(rows).toEqual([{ id: 'crm' }]);
+
+    const legacyAgent = db.prepare('SELECT workspace_id FROM agents WHERE id = ?').get('agent-crm-legacy-1') as
+      | { workspace_id: string }
+      | undefined;
+    expect(legacyAgent?.workspace_id).toBe('crm');
+
+    const legacyTask = db.prepare('SELECT workspace_id FROM tasks WHERE id = ?').get('task-crm-legacy-1') as
+      | { workspace_id: string }
+      | undefined;
+    expect(legacyTask?.workspace_id).toBe('crm');
   });
 });
