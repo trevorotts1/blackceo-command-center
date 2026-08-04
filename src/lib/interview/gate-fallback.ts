@@ -12,7 +12,7 @@
  * Only uses the Web-standard `fetch` API available in both Edge and Node.
  */
 
-/** Path of the gate-status Node endpoint (relative to the origin). */
+/** Path of the gate-status Node endpoint (appended to the internal loopback URL). */
 const GATE_STATUS_PATH = '/api/interview/gate-status';
 
 interface GateStatusResponse {
@@ -24,17 +24,23 @@ interface GateStatusResponse {
  * Call the Node-runtime gate-status endpoint as a fallback when the signed
  * `mc_interview_complete` cookie is absent, expired, or fails verification.
  *
- * @param origin - the request origin (e.g. "https://example.com") from the
- *   Edge middleware's `request.nextUrl.origin`.
+ * ROUTING: this is an internal same-process call. It MUST use the internal
+ * loopback URL (http://127.0.0.1:PORT), NOT the public request origin.
+ * Behind a Cloudflare tunnel, `request.nextUrl.origin` resolves to
+ * `https://0.0.0.0:PORT` (or the https public host), and fetching that would
+ * attempt a TLS handshake against the plain-HTTP Next server — failing in
+ * milliseconds and fail-closing the middleware even when the interview is
+ * complete. 127.0.0.1 is used over `localhost` to avoid any IPv6 `::1`
+ * ambiguity.
+ *
  * @returns true if the canonical files say the interview is complete;
  *   false on any failure (network error, timeout, non-OK status, bad JSON)
  *   so the middleware can fail closed to /interview.
  */
-export async function checkInterviewCompleteViaFallback(
-  origin: string,
-): Promise<boolean> {
+export async function checkInterviewCompleteViaFallback(): Promise<boolean> {
   try {
-    const url = `${origin}${GATE_STATUS_PATH}`;
+    const port = process.env.CC_PORT || process.env.PORT || '4000';
+    const url = `http://127.0.0.1:${port}${GATE_STATUS_PATH}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3_000); // 3s timeout
     const res = await fetch(url, {

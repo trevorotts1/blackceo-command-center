@@ -7,7 +7,7 @@
  *
  * Run with: npx vitest run tests/unit/middleware-shell-lock-fallback.test.ts
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
@@ -70,11 +70,37 @@ describe('U010 — middleware shell-lock fallback wiring (static source checks)'
 
 describe('U010 — gate-fallback fail-closed', () => {
   it('checkInterviewCompleteViaFallback returns false on network error', async () => {
-    const { checkInterviewCompleteViaFallback } = await import(
-      '@/lib/interview/gate-fallback'
+    // Point the env-cascade port at an invalid port so the fetch fails
+    // deterministically — a live Command Center on :4000 would otherwise
+    // answer the gate-status endpoint and admit the fallback.
+    const prevPort = process.env.CC_PORT;
+    process.env.CC_PORT = '99999';
+    try {
+      const { checkInterviewCompleteViaFallback } = await import(
+        '@/lib/interview/gate-fallback'
+      );
+      const result = await checkInterviewCompleteViaFallback();
+      expect(result, 'must fail closed on unreachable origin').toBe(false);
+    } finally {
+      if (prevPort === undefined) delete process.env.CC_PORT;
+      else process.env.CC_PORT = prevPort;
+    }
+  });
+});
+
+describe('U010 — gate-fallback internal localhost routing', () => {
+  it('fetches http://127.0.0.1:PORT not the public origin', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ interviewComplete: true }), { status: 200 })
     );
-    const result = await checkInterviewCompleteViaFallback('http://127.0.0.1:99999');
-    expect(result, 'must fail closed on unreachable origin').toBe(false);
+    vi.stubGlobal('fetch', fetchSpy);
+    const { checkInterviewCompleteViaFallback } = await import('@/lib/interview/gate-fallback');
+    const result = await checkInterviewCompleteViaFallback();
+    expect(result).toBe(true);
+    const calledUrl = fetchSpy.mock.calls[0][0];
+    expect(calledUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(calledUrl).toContain('/api/interview/gate-status');
+    vi.unstubAllGlobals();
   });
 });
 

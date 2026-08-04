@@ -1,3 +1,18 @@
+## [v6.0.86] — 2026-08-04 — fix(gate-fallback): fetch internal localhost not public origin behind CF tunnel
+
+- Interview shell-lock gate fallback (U010) — `checkInterviewCompleteViaFallback()`
+  no longer takes the request `origin` and no longer fetches
+  `request.nextUrl.origin + '/api/interview/gate-status'`. Behind a Cloudflare
+  tunnel, that origin resolves to `https://0.0.0.0:PORT` (or the public https host),
+  so the fallback did a TLS handshake against the plain-HTTP Next server, failed in
+  ~5ms, and the middleware fail-closed to /interview even when the interview WAS
+  complete. The fallback is an internal same-process call and now builds the URL
+  from the env cascade — `http://127.0.0.1:(CC_PORT||PORT||4000)/api/interview/gate-status`
+  — using 127.0.0.1 (not localhost) to avoid IPv6 `::1` ambiguity. 3s timeout,
+  fail-closed-to-/interview, and all other behavior unchanged.
+- Tests: existing fail-closed test updated to the no-arg signature; new behavioral
+  test proves the fetched URL is the internal loopback, not the public origin.
+
 ## [v6.0.85] — 2026-08-02 — Skill 59 warfix (FIX-22 WCAG accessibility)
 
 - FIX-22 (59-anthology-engine warfix) — WCAG AA accessibility set for the anthology

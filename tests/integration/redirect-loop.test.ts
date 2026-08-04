@@ -37,6 +37,7 @@ const ENV_KEYS = [
   'ALLOW_INSECURE_OPEN_API',
   'DEMO_MODE',
   'MC_INTERVIEW_COOKIE_SECRET',
+  'CC_PORT',
 ] as const;
 
 type EnvOverrides = Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
@@ -68,6 +69,10 @@ async function loadMiddleware(env: EnvOverrides = {}): Promise<Middleware> {
     ALLOW_INSECURE_OPEN_API: undefined,
     DEMO_MODE: undefined,
     MC_INTERVIEW_COOKIE_SECRET: TEST_SECRET,
+    // The gate-fallback fetches http://127.0.0.1:CC_PORT — pin an invalid
+    // port so a LIVE Command Center on :4000 can't admit the fallback and
+    // mask the fail-closed invariants this suite locks.
+    CC_PORT: '99999',
     ...env,
   };
   for (const k of ENV_KEYS) {
