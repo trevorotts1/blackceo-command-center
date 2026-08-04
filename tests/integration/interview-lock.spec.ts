@@ -16,6 +16,18 @@
  *      refreshInterviewGate mints the signed `mc_interview_complete` cookie), the
  *      dashboard unlocks: /operator resolves 200 and renders.
  *
+ * STANDARD-FIRST ADDITION (AI Workforce standard-first redesign, PHASE 6b):
+ *   4. STANDARD_READY ≠ UNLOCK — the NEW third state "standard prebuild done +
+ *      interview INCOMPLETE" (build-state standardPrebuild.status="done",
+ *      interviewComplete absent) must leave the shell-lock EXACTLY as locked as
+ *      the bare-incomplete state: every non-exempt page still 302s to
+ *      /interview; only the exemptions stay open — /interview, /onboarding/*,
+ *      and the new READ-ONLY /preview company view (Option L1: the lock gains a
+ *      read-only preview exemption, it is NEVER loosened). gate-status reports
+ *      standardReady=true alongside interviewComplete=false, and /preview
+ *      renders the fixture's chosen-departments artifact with zero mutation
+ *      affordances.
+ *
  * DETERMINISM + SAFETY: state is seeded into a throwaway fixture workspace under
  * test-results/ (interview-lock.fixture.ts), pointed at by the server's
  * OPENCLAW_WORKSPACE_ROOT — never the operator's canonical files, never
@@ -29,7 +41,10 @@ import {
   BASE_URL,
   INTERVIEW_COOKIE_NAME,
   LATCH_COOKIE_NAME,
+  STANDARD_READY_DEPTS,
   writeBuildState,
+  writeStandardPrebuildState,
+  writeDepartmentsJson,
   forgeCompleteCookie,
   forgeExpiredCompleteCookie,
   forgeForgedCookie,
@@ -135,6 +150,17 @@ test.describe('Interview-mode shell lock (WG-9)', () => {
       '/onboarding/* must be exempt from the interview lock',
     ).toBeFalsy();
     expect(onboarding.status(), '/onboarding/building must not server-error').toBeLessThan(500);
+
+    // /preview — the standard-first READ-ONLY company view (Option L1). While the
+    // interview lock holds it must never 302 to /interview (the day-one link
+    // surface) and must never 500 — when no company build exists yet it renders
+    // its "not ready" placeholder.
+    const preview = await page.request.get('/preview', { maxRedirects: 0 });
+    expect(
+      isRedirectToInterview(preview.status(), preview.headers()['location']),
+      '/preview must be exempt from the interview lock (standard-first day-one surface)',
+    ).toBeFalsy();
+    expect(preview.status(), '/preview must not server-error').toBeLessThan(500);
 
     // /api/* — never interview-locked. /api/health is the documented bypass.
     const health = await page.request.get('/api/health', { maxRedirects: 0 });
@@ -318,6 +344,152 @@ test.describe('Interview-mode shell lock — U010 fallback + latch', () => {
 
   test.beforeEach(() => writeBuildState(false));
   test.afterEach(() => writeBuildState(false));
+});
+
+test.describe('Interview-mode shell lock — standard-first (standardReady + incomplete = still LOCKED)', () => {
+  // The standard-first third state: the prebuild driver finished (chosen
+  // artifact written, board seeded) but the owner has NOT completed the
+  // interview. The ratified shell-lock doctrine says the dashboard stays the
+  // closeout reveal — a standardPrebuild block must NEVER unlock the shell.
+  test.beforeAll(() => writeDepartmentsJson());
+  test.beforeEach(() => {
+    writeDepartmentsJson();
+    writeStandardPrebuildState(false);
+  });
+  test.afterEach(() => writeBuildState(false)); // restore the locked baseline
+
+  test('SF-1: standardReady=true + interviewComplete=false → every non-exempt page still 302s to /interview', async ({
+    page,
+    context,
+  }) => {
+    // No completion cookie can exist in this state; clear any leftover so the
+    // middleware runs its full fail-closed chain.
+    await context.clearCookies();
+
+    for (const path of GATED_PAGES) {
+      const resp = await page.request.get(path, { maxRedirects: 0 });
+      const status = resp.status();
+      const location = resp.headers()['location'];
+      expect(
+        isRedirectToInterview(status, location),
+        `standard-prebuilt box: ${path} must still redirect to /interview (got ${status} → ${location ?? 'no Location'})`,
+      ).toBeTruthy();
+    }
+  });
+
+  test('SF-2: standardReady=true → only /interview, /onboarding/*, and /preview stay reachable', async ({
+    page,
+    context,
+  }) => {
+    await context.clearCookies();
+
+    // /interview renders.
+    const interview = await page.request.get('/interview', { maxRedirects: 0 });
+    expect(interview.status(), '/interview must render on a standard-prebuilt box').toBe(200);
+
+    // /onboarding/* stays exempt.
+    const onboarding = await page.request.get('/onboarding/building', { maxRedirects: 0 });
+    expect(
+      isRedirectToInterview(onboarding.status(), onboarding.headers()['location']),
+      '/onboarding/* must stay exempt on a standard-prebuilt box',
+    ).toBeFalsy();
+    expect(onboarding.status()).toBeLessThan(500);
+
+    // /preview — the new read-only company view — resolves and renders the
+    // fixture's chosen-departments artifact.
+    const preview = await page.request.get('/preview', { maxRedirects: 0 });
+    expect(
+      isRedirectToInterview(preview.status(), preview.headers()['location']),
+      '/preview must be exempt while a standard-prebuilt box is locked',
+    ).toBeFalsy();
+    expect(preview.status(), '/preview must resolve 200 once the standard set is ready').toBe(200);
+    const html = await preview.text();
+    for (const dept of STANDARD_READY_DEPTS) {
+      expect(
+        html,
+        `/preview must list the fixture department ${dept.id}`,
+      ).toContain(dept.id);
+    }
+  });
+
+  test('SF-3: gate-status reports standardReady=true alongside interviewComplete=false', async ({
+    page,
+  }) => {
+    const resp = await page.request.get('/api/interview/gate-status', { maxRedirects: 0 });
+    expect(resp.status(), 'gate-status must return 200').toBe(200);
+    const body = await resp.json();
+    expect(body, 'standard-prebuilt + incomplete gate-status').toEqual(
+      expect.objectContaining({
+        interviewComplete: false,
+        buildCompleted: false,
+        standardReady: true,
+      }),
+    );
+
+    // The legacy bare-incomplete state still reports standardReady=false — a box
+    // that never prebuilt is NOT standard-ready.
+    writeBuildState(false);
+    const legacy = await page.request.get('/api/interview/gate-status', { maxRedirects: 0 });
+    expect(legacy.status()).toBe(200);
+    expect(await legacy.json()).toEqual(
+      expect.objectContaining({
+        interviewComplete: false,
+        buildCompleted: false,
+        standardReady: false,
+      }),
+    );
+
+    // Completion flips interviewComplete WITHOUT flipping standardReady off.
+    writeStandardPrebuildState(true);
+    const done = await page.request.get('/api/interview/gate-status', { maxRedirects: 0 });
+    expect(done.status()).toBe(200);
+    expect(await done.json()).toEqual(
+      expect.objectContaining({
+        interviewComplete: true,
+        standardReady: true,
+      }),
+    );
+  });
+
+  test('SF-4: /preview stays reachable AFTER interview completion (the exempt surface survives unlock)', async ({
+    page,
+    context,
+  }) => {
+    await context.clearCookies();
+    writeStandardPrebuildState(true);
+
+    const resp = await page.request.get('/preview', { maxRedirects: 0 });
+    expect(resp.status(), '/preview must resolve 200 after completion').toBe(200);
+    expect(
+      isRedirectToInterview(resp.status(), resp.headers()['location']),
+      '/preview must never be swallowed by the lock redirect',
+    ).toBeFalsy();
+  });
+
+  test('SF-5: the /preview surface is READ-ONLY — zero mutation affordances in the rendered HTML', async ({
+    page,
+  }) => {
+    await page.goto('/preview', { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    expect(new URL(page.url()).pathname, 'must land on /preview, not /interview').toBe('/preview');
+
+    // The preview PAGE itself ships NO forms, NO buttons, NO links — it is a
+    // pure server-rendered read of departments.json + workspaces rows (Option
+    // L1's read-only guarantee: no mutation route reachable from this surface).
+    // Scoped to <main>: the app-wide root-layout chrome (walkthrough helper
+    // etc.) is shared infrastructure every page renders and is NOT part of the
+    // preview surface's affordances.
+    expect(await page.locator('main form').count(), '/preview page must render zero forms').toBe(0);
+    expect(await page.locator('main button').count(), '/preview page must render zero buttons').toBe(0);
+    expect(await page.locator('main a').count(), '/preview page must render zero links').toBe(0);
+
+    // The fixture's departments render in the browser (not just in the raw
+    // server response), proving the chosen artifact drove the view.
+    const bodyText = await page.locator('body').innerText();
+    for (const dept of STANDARD_READY_DEPTS) {
+      expect(bodyText, `/preview must render ${dept.id} in the browser`).toContain(dept.id);
+    }
+  });
 });
 
 // Re-export for a future depth that wants to extend the gated-route list without

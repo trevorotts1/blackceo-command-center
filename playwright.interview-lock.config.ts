@@ -14,6 +14,15 @@ import { BASE_URL, serverEnv } from './tests/integration/interview-lock.fixture'
  *   • MC_INTERVIEW_COOKIE_SECRET pinned so signer + Edge verifier agree.
  *   • A dedicated port (4123) so it never collides with the port-4000 smoke run.
  *
+ * STANDARD-FIRST (AI Workforce standard-first redesign, PHASE 6b): the fixture
+ * also seeds a throwaway COMPANY dir (ZERO_HUMAN_COMPANY_DIR →
+ * test-results/interview-lock/company/departments.json) so the suite can prove
+ * the new third state — standardPrebuild.status="done" WHILE interviewComplete
+ * is still false — leaves the shell LOCKED exactly like the bare-incomplete
+ * state, with the exemptions /interview, /onboarding/* and the new READ-ONLY
+ * /preview surface (Option L1: the lock gains a preview exemption; it is never
+ * loosened). See the "standard-first" describe block in interview-lock.spec.ts.
+ *
  * Kept separate from the shared config on purpose: adding a webServer to
  * playwright.config.ts would force every integration spec to build/boot a server
  * and defeat their skip-when-not-live design. Run it with:
