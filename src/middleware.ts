@@ -200,6 +200,13 @@ function isWebhookSecretRoute(pathname: string): boolean {
 function isInterviewGateExempt(pathname: string): boolean {
   if (pathname === '/interview' || pathname.startsWith('/interview/')) return true;
   if (pathname === '/onboarding' || pathname.startsWith('/onboarding/')) return true;
+  // AI Workforce standard-first (Option L1): the READ-ONLY company preview —
+  // the day-one surface showing the prebuilt standard foundation while the
+  // interview is still incomplete. This is ADDITIVE: the lock itself is not
+  // loosened (WG-9 / OQ-1 ratified), /preview just joins the exemption list
+  // alongside /interview + /onboarding. The route is a pure server-rendered
+  // read of departments.json + workspaces rows with zero mutation affordances.
+  if (pathname === '/preview' || pathname.startsWith('/preview/')) return true;
   // MR-17: /settings must always be reachable — a corrupted build-state file or
   // rotated signing key that traps the dashboard behind /interview would also
   // lock the operator out of /settings, which is the one place they could fix

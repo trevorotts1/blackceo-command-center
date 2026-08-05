@@ -23,7 +23,12 @@
  *      are true, exactly as in InterviewClient/DepartmentBoard. On click it POSTs
  *      /api/interview/complete (the same script the Telegram agent presses) and
  *      routes: pass → /onboarding/building, needs-review → calm holding screen,
- *      fail → drill-back list.
+ *      fail → drill-back list. AI Workforce standard-first (PHASE 6 item 6): on
+ *      a STANDARD_READY box (the `standardReady` prop from the host's
+ *      /api/interview/gate-status read) the trigger reads "Apply my
+ *      customizations" — the interview EDITS the prebuilt foundation instead of
+ *      building from scratch. Same three gate flags arm it; gate #3 is already
+ *      relaxed server-side to declines+adds (KEEPS are implicit).
  *
  * ── Inline edit → genuine provenance (SKILL.md edge case) ─────────────────────
  * An edit does NOT rewrite history. It POSTs /api/interview/answer, which APPENDS
@@ -119,6 +124,16 @@ export interface ReviewScreenProps {
   /** Notified after a successful inline edit, with the updated row. */
   onEdited?: (updated: ReviewAnswer) => void;
   className?: string;
+  /**
+   * AI Workforce standard-first (PHASE 6 item 6): true on a standard-prebuilt
+   * box (build-state `standardPrebuild.status === "done"` — the STANDARD_READY
+   * state read by the host from /api/interview/gate-status). The gated trigger
+   * then reads "Apply my customizations" (the interview EDITS the prebuilt
+   * foundation); legacy boxes (false/absent) keep "Build my company"
+   * byte-identical. The gate mechanics are unchanged — the same three flags arm
+   * the button; gate #3 is relaxed server-side for this lane (KEEPS implicit).
+   */
+  standardReady?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -304,6 +319,7 @@ export default function ReviewScreen({
   onCircleBack,
   onEdited,
   className,
+  standardReady = false,
 }: ReviewScreenProps) {
   const router = useRouter();
 
@@ -341,6 +357,14 @@ export default function ReviewScreen({
     flags.genuineTranscriptReady &&
     flags.decisionCoverageComplete &&
     flags.noUnprovenancedDeclines;
+
+  // AI Workforce standard-first (PHASE 6 item 6): the third-state trigger copy.
+  // On a STANDARD_READY box the interview EDITS the prebuilt foundation (apply
+  // the diff: archive confirmed declines, materialize customs, personalize the
+  // kept departments), so the gated trigger reads "Apply my customizations".
+  // Legacy boxes keep "Build my company" byte-identical. The gate mechanics are
+  // unchanged — the same three flags arm it (gate #3 relaxed server-side).
+  const triggerLabel = standardReady ? 'Apply my customizations' : 'Build my company';
 
   const skipped = state?.resume?.skippedQuestions ?? [];
   const missingDepts = state?.decisionCoverage?.missing?.length ?? 0;
@@ -447,8 +471,10 @@ export default function ReviewScreen({
         // the kick (MR-37). The operator gets a one-click retry, not a dead-end.
         if (data.alreadyComplete) {
           setNeedsRetryKick(true);
+          // Names the trigger by its CURRENT label so the retry guidance stays
+          // accurate in the standard-first third state ("Apply my customizations").
           setCompleteError(
-            'This interview was already completed. If the build hasn’t started, press “Build my company” again to re-send it.',
+            `This interview was already completed. If the build hasn’t started, press “${triggerLabel}” again to re-send it.`,
           );
           return;
         }
@@ -491,7 +517,7 @@ export default function ReviewScreen({
     } finally {
       setSubmitting(false);
     }
-  }, [allGatesPass, loadState, needsRetryKick, router, submitting]);
+  }, [allGatesPass, loadState, needsRetryKick, router, submitting, triggerLabel]);
 
   /* ---- renders: terminal screens first ---- */
 
@@ -615,6 +641,7 @@ export default function ReviewScreen({
           submitting={submitting}
           completeError={completeError}
           onBuild={() => void submitComplete()}
+          standardReady={standardReady}
         />
       </div>
     </div>
@@ -831,6 +858,7 @@ function BuildGate({
   submitting,
   completeError,
   onBuild,
+  standardReady,
 }: {
   flags: GateFlags;
   allGatesPass: boolean;
@@ -838,7 +866,15 @@ function BuildGate({
   submitting: boolean;
   completeError: string | null;
   onBuild: () => void;
+  /** AI Workforce standard-first (PHASE 6 item 6): the third-state copy — the
+   *  trigger reads "Apply my customizations" and the checklist heading speaks
+   *  tailoring, since the foundation is ALREADY BUILT and this press applies
+   *  the owner's diff. Legacy (false) keeps the build-from-scratch wording. */
+  standardReady: boolean;
 }) {
+  // One label for every state of the trigger button (busy / armed / locked) so
+  // the standard-first wording cannot drift between button states.
+  const triggerLabel = standardReady ? 'Apply my customizations' : 'Build my company';
   return (
     <motion.section
       variants={ivScreenVariants}
@@ -849,7 +885,7 @@ function BuildGate({
     >
       <h2 className="flex items-center" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem', fontWeight: 600, color: 'var(--iv-ink)' }}>
         <ShieldCheck className="h-4 w-4" aria-hidden style={{ color: 'var(--iv-accent-strong)' }} />
-        Before we can build
+        {standardReady ? 'Before we apply your customizations' : 'Before we can build'}
       </h2>
       <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
         <GateRow done={flags.genuineTranscriptReady} label="Interview recorded" />
@@ -900,17 +936,17 @@ function BuildGate({
         {submitting ? (
           <>
             <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
-            Building…
+            {standardReady ? 'Applying…' : 'Building…'}
           </>
         ) : allGatesPass ? (
           <>
             <Building2 className="h-5 w-5" aria-hidden />
-            Build my company
+            {triggerLabel}
           </>
         ) : (
           <>
             <Lock className="h-4 w-4" aria-hidden />
-            Build my company
+            {triggerLabel}
           </>
         )}
       </button>

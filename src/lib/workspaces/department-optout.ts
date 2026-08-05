@@ -181,3 +181,124 @@ export function readDepartmentOptoutIds(explicitPath?: string | null): string[] 
   if (!optedOut || typeof optedOut !== 'object') return [];
   return Object.keys(optedOut).filter((id) => optedOut[id]?.optedOut === true);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * AI Workforce standard-first (PHASE 6 item 9) — the RETIRE path's CC leg.
+ *
+ * `archiveDepartment(slug)` soft-archives ONE department's workspaces row —
+ * the Command Center half of the confirmed-decline retire path
+ * (retire-confirmed-decline.sh wraps the full four-step retirement: agent
+ * deregistration, workspace-tree archive to company_dir/.retired/<slug>-<ts>/,
+ * this CC row archive, and the chosen-artifact append).
+ *
+ * DOCTRINE (identical to the two archive passes above):
+ *   • SOFT, NEVER HARD — stamps `workspaces.archived_at` (+ reason); rows are
+ *     PRESERVED, never deleted (archive-only; APFS snapshot doctrine). The
+ *     board hides the lane; the history survives a NO → YES flip.
+ *   • IDEMPOTENT — re-archiving an already-archived row does not restamp it.
+ *   • ORCHESTRATOR COLUMN EXEMPT — `ceo` / `master-orchestrator` is refused
+ *     here exactly as in the opt-out pass (isDepartmentOptoutExempt). A retire
+ *     caller that genuinely needs the orchestrator column gone must go through
+ *     the decline pass, never this one.
+ *   • NORMALIZED MATCH — the slug is matched the same way archive.ts resolves
+ *     workspace ids (norm() over id AND slug), so a punctuation variant can
+ *     never silently miss its lane.
+ *   • NEVER acts on absence — only on an explicit slug handed in by a caller
+ *     that has ALREADY provenanced the decline (the retire script gates on
+ *     canonical_decline.py's reader).
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** `archived_reason` written by the retire path. Distinct from 'declined'
+ *  (build-state decline pass) and 'department-optout' (opt-out pass) so each
+ *  pass's un-archive stays scoped to its own rows. */
+export const DEPARTMENT_RETIRED_REASON = 'retired';
+
+/** Result of a single retire-path archive. */
+export interface ArchiveDepartmentResult {
+  /** True when at least one workspace row exists for the slug. */
+  found: boolean;
+  /** Workspace ids newly stamped archived_at by this call. */
+  archived: string[];
+  /** Workspace ids already archived (no-op — idempotency proof). */
+  alreadyArchived: string[];
+  /** True when the call was refused (exempt orchestrator column / empty slug). */
+  refused: boolean;
+  /** Why a call was refused (null when it ran). */
+  reason: string | null;
+}
+
+/**
+ * Soft-archive the department named by `slug` (the retire path's CC leg).
+ * Requires the DB handle + archive-column availability as arguments (same
+ * shape as archive.ts's primitives) so the retire script's CC call site can
+ * drive it inside its own transaction. Idempotent; never deletes; refuses the
+ * exempt orchestrator column. The caller owns the provenance gate — this
+ * primitive archives exactly what a provenanced retire tells it to.
+ */
+export function archiveDepartment(
+  db: import('better-sqlite3').Database,
+  slug: string,
+  opts: { reason?: string; hasArchiveColumn?: boolean } = {},
+): ArchiveDepartmentResult {
+  const result: ArchiveDepartmentResult = {
+    found: false,
+    archived: [],
+    alreadyArchived: [],
+    refused: false,
+    reason: null,
+  };
+
+  const key = normalize(slug);
+  if (!key) {
+    result.refused = true;
+    result.reason = 'empty slug — nothing to archive';
+    return result;
+  }
+  if (isDepartmentOptoutExempt(slug)) {
+    result.refused = true;
+    result.reason =
+      'the orchestrator column (ceo / master-orchestrator) is exempt from the retire archive pass';
+    return result;
+  }
+
+  const hasColumn =
+    opts.hasArchiveColumn ??
+    (
+      db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]
+    ).some((c) => c.name === 'archived_at');
+  if (!hasColumn) {
+    result.refused = true;
+    result.reason = 'workspaces.archived_at absent (migration 095 not applied)';
+    return result;
+  }
+
+  // Normalized match on BOTH id and slug (archive.ts resolveWorkspaceIds rule).
+  const rows = db.prepare('SELECT id, slug FROM workspaces').all() as {
+    id: string;
+    slug: string | null;
+  }[];
+  const wsIds: string[] = [];
+  for (const r of rows) {
+    if (normalize(r.id) === key || normalize(r.slug || '') === key) {
+      if (!wsIds.includes(r.id)) wsIds.push(r.id);
+    }
+  }
+  if (wsIds.length === 0) return result; // found=false — never provisioned; fine.
+  result.found = true;
+
+  const reason = opts.reason || DEPARTMENT_RETIRED_REASON;
+  for (const wsId of wsIds) {
+    const info = db
+      .prepare(
+        `UPDATE workspaces
+            SET archived_at = COALESCE(archived_at, datetime('now')),
+                archived_reason = COALESCE(archived_reason, ?),
+                updated_at = datetime('now')
+          WHERE id = ? AND archived_at IS NULL`,
+      )
+      .run(reason, wsId);
+    if (info.changes > 0) result.archived.push(wsId);
+    else result.alreadyArchived.push(wsId);
+  }
+  return result;
+}
