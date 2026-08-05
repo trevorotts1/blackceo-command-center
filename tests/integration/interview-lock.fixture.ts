@@ -126,12 +126,18 @@ export const BASE_URL = `http://127.0.0.1:${PORT}`;
  * dev` runs in development, so refreshInterviewGate mints a NON-`secure` cookie
  * that is delivered over plain http://127.0.0.1 (a `secure` cookie would be
  * dropped and the unlock could never be observed).
+ *
+ * ZERO_HUMAN_COMPANY_DIR pins the departments.json resolution (migrations.ts
+ * resolveDepartmentsConfigPath priority 1) at the FIXTURE company dir so the
+ * standard-ready case's /preview read + boot auto-seed see the fixture's
+ * chosen-departments artifact — never the operator's live company build.
  */
 export function serverEnv(): Record<string, string> {
   return {
     OPENCLAW_WORKSPACE_ROOT: WORKSPACE_DIR,
     MC_INTERVIEW_COOKIE_SECRET: COOKIE_SECRET,
     DATABASE_PATH: DB_PATH,
+    ZERO_HUMAN_COMPANY_DIR: COMPANY_DIR,
     PORT: String(PORT),
   };
 }
@@ -139,6 +145,46 @@ export function serverEnv(): Record<string, string> {
 /** Create the fixture workspace dir (idempotent). */
 export function ensureWorkspace(): void {
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+}
+
+/* ────────────────── Standard-first fixture additions (PHASE 6b) ─────────────
+ * AI Workforce standard-first redesign (master plan section 4.2): a box can now
+ * be standard-prebuilt — the canonical floor materialized from the role library,
+ * the chosen artifact written, the board seeded — WHILE the interview is still
+ * incomplete. The shell lock must treat that third state exactly like incomplete:
+ * everything stays 302 → /interview except the exemptions (plus the new
+ * read-only /preview surface). The helpers below seed exactly that state. */
+
+/** Throwaway company dir — the fixture's ZERO_HUMAN_COMPANY_DIR (the
+ *  `company_dir` of the join contract: chosen artifact lives here). */
+export const COMPANY_DIR = path.join(E2E_OUT_DIR, 'company');
+/** The chosen-departments artifact the prebuild driver writes. */
+export const DEPARTMENTS_JSON_PATH = path.join(COMPANY_DIR, 'departments.json');
+
+/** A SMALL distinct department set for the standard-ready case (three entries,
+ *  never 29 — the test must never depend on a hardcoded floor count). Deliberate
+ *  sentinel names so a render assertion can prove the preview page read THIS
+ *  fixture artifact and not some demo/template departments.json. */
+export const STANDARD_READY_DEPTS = [
+  { id: 'alpha-preview-dept', name: 'Alpha Preview Dept', emoji: '🧪' },
+  { id: 'beta-preview-dept', name: 'Beta Preview Dept', emoji: '🧬' },
+  { id: 'gamma-preview-dept', name: 'Gamma Preview Dept', emoji: '🧭' },
+];
+
+/** Create the fixture company dir (idempotent). */
+export function ensureCompanyDir(): void {
+  fs.mkdirSync(COMPANY_DIR, { recursive: true });
+}
+
+/** Seed the chosen-departments artifact the standard prebuild writes into
+ *  company_dir/departments.json (the canonical array-of-objects shape). */
+export function writeDepartmentsJson(): void {
+  ensureCompanyDir();
+  fs.writeFileSync(
+    DEPARTMENTS_JSON_PATH,
+    `${JSON.stringify(STANDARD_READY_DEPTS, null, 2)}\n`,
+    'utf-8',
+  );
 }
 
 /**
@@ -155,5 +201,34 @@ export function writeBuildState(complete: boolean): void {
   const state = complete
     ? { interviewComplete: true, interviewCompletedAt: new Date().toISOString() }
     : { interviewComplete: false };
+  fs.writeFileSync(BUILD_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+}
+
+/**
+ * Seed the STANDARD-PREBUILT state block (master plan PHASE 1 shape): the
+ * prebuild driver's terminal record — status "done" + standardReadyAt + the
+ * prebuilt department ids — alongside `buildType: "standard-first"`. The caller
+ * passes the SAME `complete` bit writeBuildState uses so the two terminal
+ * fields (interviewComplete / buildCompletedAt) stay consistent in one file.
+ *
+ * DOCTRINE GUARDED BY THE SPEC: this block MUST NOT unlock the shell. The lock
+ * reads interviewComplete/buildCompletedAt only; a present-but-not-complete
+ * standardPrebuild block is the exact "standardReady=true + interviewComplete=
+ * false" state the PHASE 6b E2E asserts stays LOCKED.
+ */
+export function writeStandardPrebuildState(complete: boolean): void {
+  ensureWorkspace();
+  const state: Record<string, unknown> = complete
+    ? { interviewComplete: true, interviewCompletedAt: new Date().toISOString() }
+    : { interviewComplete: false };
+  state.buildType = 'standard-first';
+  state.standardPrebuild = {
+    status: 'done',
+    standardReadyAt: new Date().toISOString(),
+    floorVersion: 'naming-map-v2.7.0-e2e-fixture',
+    prebuiltDepartments: STANDARD_READY_DEPTS.map((d) => d.id),
+    agentRegistration: 'deferred',
+    source: 'tests/integration/interview-lock.fixture.ts',
+  };
   fs.writeFileSync(BUILD_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
 }

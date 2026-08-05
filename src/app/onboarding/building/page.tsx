@@ -19,12 +19,29 @@ const STAGE_LABELS: Record<BuildProgress['stage'], string> = {
   idle:        'Preparing to build...',
   manifest:    'Writing manifest...',
   research:    'Researching your industry + competitors...',
-  departments: 'Building 16 departments...',
+  departments: 'Building your departments...',
   roles:       'Generating role-level how-to documents...',
   qc:          'Quality reviewing every document...',
   assembly:    'Assembling org chart + persona matrix...',
   complete:    'Your AI workforce is ready ✓',
 };
+
+/**
+ * AI Workforce standard-first (PHASE 6 item 5): the departments-stage label is
+ * DRIVEN by the live build-status payload — the count of departments the build
+ * is actually working on (legacy full build or standard-first apply-diff), never
+ * a hardcoded number (the old "16" was a stale v2.1-era copy that already lied).
+ * When the payload has no department list yet, fall back to the generic label.
+ */
+function stageLabel(progress: BuildProgress): string {
+  if (progress.stage === 'departments') {
+    const n = progress.departments.length;
+    if (n > 0) {
+      return `Building ${n} department${n === 1 ? '' : 's'}...`;
+    }
+  }
+  return STAGE_LABELS[progress.stage];
+}
 
 export default function OnboardingBuildingPage() {
   const router = useRouter();
@@ -79,7 +96,7 @@ export default function OnboardingBuildingPage() {
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
             {isComplete ? 'Your AI workforce is ready' : 'Building your AI workforce...'}
           </h1>
-          <p className="text-gray-600">{STAGE_LABELS[progress.stage]}</p>
+          <p className="text-gray-600">{stageLabel(progress)}</p>
         </div>
 
         <div className="bg-white rounded-2xl shadow-sm border p-6 mb-6">

@@ -30,7 +30,7 @@
  */
 
 import { cookies } from 'next/headers';
-import { readBuildState } from '@/lib/interview/seam';
+import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, signInterviewToken, signInterviewBypassToken, signLatchToken } from '@/lib/interview/gate-cookie';
 
 /**
@@ -39,12 +39,28 @@ import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME,
  *   • interviewComplete === true  — update-interview-state.sh --complete pressed
  *   • buildCompletedAt present     — the build finished (closeout reveal)
  * Anything mid-interview → false (the shell stays locked). Never throws.
+ *
+ * AI Workforce standard-first (PHASE 6 item 8) — PREBUILT-PREVIEW STATE
+ * AWARENESS: a standard-prebuilt box (build-state carries
+ * `standardPrebuild.status === "done"`, the STANDARD_READY state) is a THIRD
+ * state — files + board present, agents NOT registered, interview incomplete.
+ * It must NOT mint a complete cookie: the read-only /preview surface is the
+ * only early company view (middleware exemption), and the full dashboard stays
+ * locked until interviewComplete. The read below makes this awareness explicit
+ * and pinned by tests: `standardReady` is evaluated and deliberately never
+ * admitted. A future "prebuild unlocks the dashboard" change must be a
+ * deliberate doctrine edit here, not an accidental side effect.
  */
 function deriveInterviewComplete(): boolean {
   const bs = readBuildState();
   if (!bs) return false;
   if (bs.buildCompletedAt) return true;
   if (bs.interviewComplete === true) return true;
+  // STANDARD_READY (standardPrebuild done, interview incomplete) — this third
+  // state is aware-but-not-complete: the shell lock holds, only /preview is
+  // reachable early. Read explicitly (and pinned by tests) so the prebuilt
+  // state can never accidentally mint a complete cookie.
+  if (readStandardPrebuild(bs).standardReady) return false;
   return false;
 }
 

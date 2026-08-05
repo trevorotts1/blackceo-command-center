@@ -95,10 +95,20 @@ interface MissingItem {
  * Build the `missing[]` list from a gate snapshot. Empty array === ready to
  * press the trigger. Mirrors the three server gates so the 409 tells the owner
  * (or the UI) precisely what still blocks the build.
+ *
+ * AI Workforce standard-first (PHASE 6 item 3): gate #3 (decision_coverage)
+ * RELAXES on the standard-first lane — the snapshot's expected set already
+ * contains ONLY recorded declines + customs there (KEEPS are implicit; the
+ * seam's computeExpectedDecisionIds standardFirst branch), so a prebuilt box
+ * with no adds and no declines passes gate #3 with zero decisions. Gates #2
+ * (genuine transcript) and #8 (un-provenanced declines) stay STRICT — the
+ * edit-mode interview still needs a genuine transcript, and a recorded decline
+ * still needs full provenance. The 409 mapping for the script's exit 87/88
+ * below is unchanged.
  */
 function collectMissing(snapshot: InterviewGateSnapshot): MissingItem[] {
   const missing: MissingItem[] = [];
-  const { flags, answers, coverage, canonical } = snapshot;
+  const { flags, answers, coverage, canonical, standardFirst } = snapshot;
 
   if (!flags.genuineTranscriptReady) {
     missing.push({
@@ -116,9 +126,11 @@ function collectMissing(snapshot: InterviewGateSnapshot): MissingItem[] {
     // reason rather than pretending coverage is complete.
     missing.push({
       gate: 'decision_coverage',
-      reason: canonical
-        ? 'Some departments still need a yes / no / later decision on the board.'
-        : 'Could not load the live department floor to verify decision coverage.',
+      reason: !canonical
+        ? 'Could not load the live department floor to verify decision coverage.'
+        : standardFirst
+          ? 'Some added or removed departments still need a provenanced decision (kept departments need none).'
+          : 'Some departments still need a yes / no / later decision on the board.',
       departments: coverage.missing.length ? coverage.missing : undefined,
     });
   }

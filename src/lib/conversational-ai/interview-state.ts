@@ -17,6 +17,16 @@
  *      completed build implies the interview that precedes it is done.
  *
  * Any positive signal -> complete. No signal -> NOT complete (Layer 1 only).
+ *
+ * AI Workforce standard-first (PHASE 6 item 10) — the STANDARD_READY state:
+ * a box can be standard-PREBUILT (build-state carries
+ * `standardPrebuild.status === "done"`) while the interview is still
+ * incomplete. This is a THIRD interview-progress state — the foundation is
+ * materialized but nothing is personalized, no agents are registered, and
+ * Layer 2 must stay LOCKED (there is no interview content to gate on yet).
+ * It is detected and surfaced as `standardReady: true` with `complete: false`
+ * + `known: true` so callers can distinguish "prebuilt, awaiting interview"
+ * from "nothing yet" — never treated as completion evidence.
  */
 
 import path from 'path';
@@ -24,6 +34,17 @@ import { loadCompanyConfig } from '@/lib/company-config';
 import { safeReadFileUtf8, safeReaddirNames } from '@/lib/fs/safe-fs';
 import { candidateWorkspaceRoots, resolveLogFile } from './sources';
 import { getClientContext } from '@/lib/clients';
+
+/**
+ * AI Workforce standard-first (PHASE 6 item 10): the third interview-progress
+ * state. A standard-prebuilt box — `standardPrebuild.status === "done"` in
+ * build-state, interview NOT yet complete — is STANDARD_READY: the canonical
+ * foundation exists on disk + board, but the interview has not happened, so
+ * this state must NEVER be treated as completion. Surfaced via
+ * `InterviewState.standardReady` (complete stays false).
+ */
+export const STANDARD_READY = 'STANDARD_READY' as const;
+export type StandardReadyState = typeof STANDARD_READY;
 
 /**
  * The per-client interview flag (E3). Returns the selected client's DB-backed
@@ -52,17 +73,29 @@ export interface InterviewState {
    * HIDDEN when status is unknown).
    */
   known: boolean;
-  /** Which signal proved completion (for transparency in the UI/debug). */
+  /** Which signal proved completion (for transparency in the UI/debug).
+   *  STANDARD_READY is the one non-completion signal: it marks the prebuilt-
+   *  foundation state while `complete` stays false. */
   signal:
     | 'client-flag'
     | 'company-config-kpis'
     | 'interview-answers-file'
     | 'build-state-complete'
+    | StandardReadyState
     | 'none';
   /** Optional human-readable detail. */
   detail: string;
   /** ISO timestamp this check ran. */
   checkedAt: string;
+  /**
+   * AI Workforce standard-first (PHASE 6 item 10): true when the box is in the
+   * STANDARD_READY state — `standardPrebuild.status === "done"` in build-state
+   * while the interview is NOT yet complete. This is a prebuilt-foundation
+   * marker, NEVER completion evidence: `complete` stays false when only this
+   * signal fires (it merely makes `known` true so callers stop treating the
+   * box as "nothing yet").
+   */
+  standardReady: boolean;
 }
 
 function configSignal(): boolean {
@@ -126,6 +159,39 @@ function readBuildComplete(file: string): boolean {
 }
 
 /**
+ * AI Workforce standard-first (PHASE 6 item 10): the STANDARD_READY detector.
+ * True when some workspace-root .workforce-build-state.json carries
+ * `standardPrebuild.status === "done"` while its `interviewComplete` is NOT
+ * true — the prebuild driver's terminal record on a box whose interview has
+ * not happened yet. Probes the same roots buildStateSignal uses (which honors
+ * OPENCLAW_WORKSPACE_ROOT, so the e2e fixture is reachable). Never throws.
+ *
+ * This is NOT completion evidence: getInterviewState reports it as
+ * `standardReady: true` with `complete: false` (known: true).
+ */
+function standardReadySignal(): boolean {
+  for (const root of candidateWorkspaceRoots()) {
+    const rawStr = safeReadFileUtf8(path.join(root, '.workforce-build-state.json'));
+    if (rawStr == null) continue;
+    try {
+      const data = JSON.parse(rawStr) as Record<string, unknown>;
+      if (data.interview_complete === true || data.interviewComplete === true) continue;
+      const block = data.standardPrebuild;
+      if (
+        block &&
+        typeof block === 'object' &&
+        (block as Record<string, unknown>).status === 'done'
+      ) {
+        return true;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+/**
  * Auto-upgrade helper: when filesystem signals confirm completion but the DB
  * row still shows interview_complete=0, backfill the flag so subsequent calls
  * take the fast path. Called only when clientFlag === false AND a positive
@@ -175,6 +241,7 @@ export function getInterviewState(): InterviewState {
       signal: 'client-flag',
       detail: 'Selected client is marked interview_complete in the tenant record.',
       checkedAt,
+      standardReady: false,
     };
   }
 
@@ -200,6 +267,7 @@ export function getInterviewState(): InterviewState {
       signal: 'company-config-kpis',
       detail: 'company-config.json has interview-derived KPIs and a specific industry.',
       checkedAt,
+      standardReady: false,
     };
   }
   if (interviewFileSignal()) {
@@ -210,6 +278,7 @@ export function getInterviewState(): InterviewState {
       signal: 'interview-answers-file',
       detail: 'workforce-interview-answers.md present in the OpenClaw workspace.',
       checkedAt,
+      standardReady: false,
     };
   }
   if (buildStateSignal()) {
@@ -220,6 +289,24 @@ export function getInterviewState(): InterviewState {
       signal: 'build-state-complete',
       detail: 'AI Workforce build reported complete; interview precedes the build.',
       checkedAt,
+      standardReady: false,
+    };
+  }
+
+  // 2b. AI Workforce standard-first (PHASE 6 item 10) — STANDARD_READY: the
+  //     foundation is prebuilt (standardPrebuild.status === "done") but the
+  //     interview has NOT completed. Known-but-incomplete: callers may surface
+  //     "your company foundation is ready, let's tailor it", and must NOT treat
+  //     this as completion (Layer 2 stays locked; no backfill of the DB flag).
+  if (standardReadySignal()) {
+    return {
+      complete: false,
+      known: true,
+      signal: STANDARD_READY,
+      detail:
+        'The standard company foundation is prebuilt (STANDARD_READY), but the AI Workforce interview has not been completed — Layer-2 views stay locked until it is.',
+      checkedAt,
+      standardReady: true,
     };
   }
 
@@ -232,6 +319,7 @@ export function getInterviewState(): InterviewState {
       detail:
         'Selected client is not yet marked interview_complete, and no filesystem completion evidence found. Complete the AI Workforce interview to unlock persona-tuned Layer-2 views.',
       checkedAt,
+      standardReady: false,
     };
   }
 
@@ -245,5 +333,6 @@ export function getInterviewState(): InterviewState {
     detail:
       'No interview evidence found yet. Showing universal Layer-1 analytics; complete the AI Workforce interview to unlock persona-tuned Layer-2 views.',
     checkedAt,
+    standardReady: false,
   };
 }

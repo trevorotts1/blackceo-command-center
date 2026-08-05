@@ -31,7 +31,20 @@
  *                      correct. Then the conversational depth over
  *                      /api/interview/turn, with pending-reply recovery polling.
  *   5.5 DEPARTMENTS  — <DepartmentBoard>; coverage gate (build gates #3 ∧ #8).
- *   6  REVIEW        — <ReviewScreen>: triple-gated "Build my company".
+ *                      AI Workforce standard-first (PHASE 6 item 6): on a
+ *                      STANDARD_READY box (standardPrebuild.status === "done",
+ *                      interview incomplete — read from /api/interview/gate-status)
+ *                      the board runs in its THIRD state: the foundation is
+ *                      already built, so each department is built-KEEP (default,
+ *                      implicit — no record needed) / REMOVE (confirmed decline
+ *                      with loss warning) / TUNE (content personalization), and
+ *                      the surrounding copy switches to edit-mode framing. The
+ *                      review screen receives `standardReady` from here: its
+ *                      gated trigger reads "Apply my customizations" instead of
+ *                      "Build my company" — armed by the same triple gate with
+ *                      gate #3 relaxed to declines + adds only.
+ *   6  REVIEW        — <ReviewScreen>: triple-gated "Build my company" (or
+ *                      "Apply my customizations" on a STANDARD_READY box).
  *
  * ── Continuity guarantees (new in v4.63) ─────────────────────────────────────
  *   • The structured position is SERVER-derived (transcript → answeredIds →
@@ -162,6 +175,18 @@ interface TurnResponse {
   message?: string;
 }
 
+/** AI Workforce standard-first (PHASE 6 item 6): the shape of
+ *  GET /api/interview/gate-status. `standardReady` is the prebuilt-foundation
+ *  signal (build-state standardPrebuild.status === "done") — it flips the
+ *  decision board into its THIRD state (built-keep / remove / tune) and the
+ *  consent + trigger copy into edit-mode framing. It NEVER unlocks anything:
+ *  the shell lock still keys on interviewComplete alone. */
+interface GateStatusResponse {
+  interviewComplete?: boolean;
+  buildCompleted?: boolean;
+  standardReady?: boolean;
+}
+
 /* -------------------------------------------------------------------------- */
 /* local UI state                                                              */
 /* -------------------------------------------------------------------------- */
@@ -241,6 +266,13 @@ export default function InterviewClient() {
   // Department board completeness (gates #3 ∧ #8), relayed via onCoverageChange.
   const [boardComplete, setBoardComplete] = useState(false);
 
+  // AI Workforce standard-first (PHASE 6 item 6): STANDARD_READY flag from
+  // /api/interview/gate-status — true when the box is standard-prebuilt (the
+  // canonical foundation exists) while the interview is still incomplete.
+  // Drives the decision board's third state (built-keep / remove / tune) and
+  // the edit-mode copy. Defaults false = legacy build-from-scratch framing.
+  const [standardReady, setStandardReady] = useState(false);
+
   // Milestone interstitial (words only).
   const [milestone, setMilestone] = useState<PendingMilestone | null>(null);
   const afterMilestone = useRef<() => void>(() => {});
@@ -316,6 +348,19 @@ export default function InterviewClient() {
     let cancelled = false;
     void (async () => {
       const data = await loadState();
+      // AI Workforce standard-first (PHASE 6 item 6): read the prebuilt-
+      // foundation signal alongside the interview state. gate-status is the
+      // internal endpoint the middleware fallback uses — no auth, pure read.
+      // Failure degrades to legacy framing (standardReady stays false).
+      try {
+        const gsRes = await fetch('/api/interview/gate-status', { cache: 'no-store' });
+        if (gsRes.ok) {
+          const gs = (await gsRes.json()) as GateStatusResponse;
+          if (!cancelled) setStandardReady(gs.standardReady === true);
+        }
+      } catch {
+        /* legacy framing stays */
+      }
       if (cancelled) return;
       setBooting(false);
       if (routedRef.current) return;
@@ -689,12 +734,17 @@ export default function InterviewClient() {
         onCoverageChange={setBoardComplete}
         boardComplete={boardComplete}
         onContinue={() => void goToReview()}
+        standardReady={standardReady}
       />
     );
   } else if (stage === 'review') {
     screen = (
       <div style={brandStyle}>
-        <ReviewScreen sessionId={sessionId ?? undefined} onCircleBack={circleBack} />
+        <ReviewScreen
+          sessionId={sessionId ?? undefined}
+          onCircleBack={circleBack}
+          standardReady={standardReady}
+        />
       </div>
     );
   } else if (stage === 'qa') {
@@ -745,6 +795,7 @@ export default function InterviewClient() {
         onSelect={setConsent}
         onBegin={beginInterview}
         onSkip={handleSkipForNow}
+        standardReady={standardReady}
       />
     );
   }
@@ -900,11 +951,18 @@ function DepartmentsStage({
   onCoverageChange,
   boardComplete,
   onContinue,
+  standardReady,
 }: {
   sessionId: string | null;
   onCoverageChange: (complete: boolean) => void;
   boardComplete: boolean;
   onContinue: () => void;
+  /** AI Workforce standard-first (PHASE 6 item 6): true → the board is in its
+   *  THIRD state — the foundation is ALREADY BUILT, so for each department the
+   *  owner decides built-KEEP (default, needs no record) / REMOVE (confirmed
+   *  decline with loss warning) / TUNE (content personalization). Legacy boxes
+   *  (false) keep the pitch-the-missing-set framing. */
+  standardReady: boolean;
 }) {
   return (
     <div className={iv.dark} style={{ minHeight: '100vh' }}>
@@ -912,8 +970,26 @@ function DepartmentsStage({
         sessionId={sessionId ?? undefined}
         onCoverageChange={onCoverageChange}
       />
+      {standardReady && (
+        <p
+          style={{
+            textAlign: 'center',
+            fontSize: '0.85rem',
+            color: 'var(--iv-ink-soft)',
+            margin: '0.5rem auto 0',
+            maxWidth: '38rem',
+            padding: '0 1rem',
+          }}
+        >
+          Your standard company foundation is already built — review it below.
+          For each department: keep it (the default), tune what it focuses on,
+          or remove the ones you don&apos;t need.
+        </p>
+      )}
       {/* Coverage-gated continue: arms only when the board reports every expected
-          department decided AND zero un-provenanced declines. */}
+          department decided AND zero un-provenanced declines. In the
+          standard-first state KEEPs are implicit, so this arms as soon as any
+          removals/additions are recorded with provenance. */}
       <div
         style={{
           position: 'sticky',
@@ -997,6 +1073,32 @@ const CONSENT_OPTIONS: Array<{ id: Exclude<Consent, null>; title: string; desc: 
   },
 ];
 
+/** AI Workforce standard-first (PHASE 6 item 6): consent options for a
+ *  standard-prebuilt box (STANDARD_READY). Same ids / mechanics — only the
+ *  framing changes from "we build your company" to "your company's standard
+ *  foundation is already set up — this conversation tailors it to you." */
+const STANDARD_READY_CONSENT_OPTIONS: Array<{
+  id: Exclude<Consent, null>;
+  title: string;
+  desc: string;
+}> = [
+  {
+    id: 'full',
+    title: 'Yes — tailor it now',
+    desc: 'Answer in your own words, one question at a time. About 15–20 minutes.',
+  },
+  {
+    id: 'quick',
+    title: "I've only got a few minutes",
+    desc: 'Start now and pick up later — every answer is saved and we can send you a link to continue.',
+  },
+  {
+    id: 'learn',
+    title: 'What happens with my answers?',
+    desc: 'See how this conversation tailors your pre-built company before you begin.',
+  },
+];
+
 function ConsentScreen({
   logoUrl,
   brandStyle,
@@ -1005,6 +1107,7 @@ function ConsentScreen({
   onSelect,
   onBegin,
   onSkip,
+  standardReady,
 }: {
   logoUrl: string;
   brandStyle?: React.CSSProperties;
@@ -1013,7 +1116,11 @@ function ConsentScreen({
   onSelect: (c: Consent) => void;
   onBegin: () => void;
   onSkip: () => void;
+  /** AI Workforce standard-first (PHASE 6 item 6): edit-mode framing for a
+   *  standard-prebuilt box. */
+  standardReady: boolean;
 }) {
+  const consentOptions = standardReady ? STANDARD_READY_CONSENT_OPTIONS : CONSENT_OPTIONS;
   return (
     <div className={iv.root} style={brandStyle}>
       <motion.div
@@ -1026,10 +1133,13 @@ function ConsentScreen({
           <div className="mb-4 flex justify-center">
             <BrandHeader logoUrl={logoUrl} />
           </div>
-          <h1 className={iv.question}>Let&apos;s build your company</h1>
+          <h1 className={iv.question}>
+            {standardReady ? 'Let’s tailor your company' : 'Let’s build your company'}
+          </h1>
           <p className={ivcx(iv.lede, 'mt-2')}>
-            A short conversation about your business. We turn your answers into a full AI
-            workforce — no jargon, just your own words.
+            {standardReady
+              ? "Your company's standard foundation is already set up. This conversation tailors it to your business — no jargon, just your own words."
+              : 'A short conversation about your business. We turn your answers into a full AI workforce — no jargon, just your own words.'}
           </p>
           {/* P1-03 c.4 (interview-lock clarity): a client redirected here by the
               middleware's interview shell-lock (src/middleware.ts) was landing
@@ -1051,7 +1161,7 @@ function ConsentScreen({
           className="mb-6 space-y-3"
           data-walkthrough="interview-consent-options"
         >
-          {CONSENT_OPTIONS.map((opt) => {
+          {consentOptions.map((opt) => {
             const selected = consent === opt.id;
             return (
               <button
@@ -1115,10 +1225,9 @@ function ConsentScreen({
                   style={{ color: 'var(--iv-accent-strong)', flexShrink: 0, marginTop: '0.15rem' }}
                 />
                 <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--iv-ink-soft)' }}>
-                  Your answers are saved on your own box and used only to design your
-                  departments, roles, and playbooks. Nothing is shared. When you finish, we
-                  assemble everything and start building — you can keep going whenever
-                  you&apos;re ready.
+                  {standardReady
+                    ? 'Your answers are saved on your own box and used only to tailor the departments, roles, and playbooks already set up for you. Nothing is shared. When you finish, we apply your customizations — you can keep going whenever you’re ready.'
+                    : 'Your answers are saved on your own box and used only to design your departments, roles, and playbooks. Nothing is shared. When you finish, we assemble everything and start building — you can keep going whenever you’re ready.'}
                 </p>
               </div>
             </motion.div>
@@ -1139,7 +1248,13 @@ function ConsentScreen({
             cursor: consent === null ? 'not-allowed' : 'pointer',
           }}
         >
-          {consent === 'learn' ? "I'm ready — begin interview" : 'Begin interview'}
+          {consent === 'learn'
+            ? standardReady
+              ? 'I’m ready — tailor my company'
+              : "I'm ready — begin interview"
+            : standardReady
+              ? 'Begin tailoring'
+              : 'Begin interview'}
           <ArrowRight className="h-5 w-5" aria-hidden />
         </button>
         {consent === null && (

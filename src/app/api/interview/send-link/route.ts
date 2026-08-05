@@ -36,7 +36,12 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { queryOne, run } from '@/lib/db';
 import { getMissionControlUrl } from '@/lib/config';
-import { readBuildState, readHandoff, readInterviewProgress } from '@/lib/interview/seam';
+import {
+  readBuildState,
+  readHandoff,
+  readInterviewProgress,
+  readStandardPrebuild,
+} from '@/lib/interview/seam';
 import { buildResumeLink } from '@/lib/jobs/interview-nudge-sweep';
 import { notifyOwner } from '@/lib/notify';
 
@@ -62,8 +67,24 @@ function dashboardBase(): string {
   return base.replace(/\/+$/, '');
 }
 
-/** Jargon-free owner copy. The link must be the only "instruction". */
-function startMessage(link: string): string {
+/** Jargon-free owner copy. The link must be the only "instruction".
+ *
+ *  AI Workforce standard-first (PHASE 6 item 7): on a standard-prebuilt box
+ *  (standardPrebuild.status === "done" in build-state) the invitation framing
+ *  changes from "we build your company from what you tell us" to the
+ *  master-plan wording — the standard foundation already exists; the
+ *  conversation TAILORS it. Legacy boxes (no standardPrebuild record) keep
+ *  the original build-from-scratch wording byte-identical. */
+function startMessage(link: string, standardReady: boolean): string {
+  if (standardReady) {
+    return (
+      'Your AI Workforce Interview is ready — and so is your company: the ' +
+      'standard foundation is already set up. This conversation tailors it ' +
+      `to you. When you are ready, start here: ${link}\n\n` +
+      'It works great on your phone. Every answer is saved as you go, so you ' +
+      'can pause anytime and pick up right where you left off.'
+    );
+  }
   return (
     'Your AI Workforce Interview is ready — a short conversation in your own ' +
     'words, and we build your company from what you tell us. When you are ' +
@@ -206,7 +227,11 @@ export async function POST(req: NextRequest) {
 
   // ── Deliver via the gateway (notifyOwner resolves the owner chat id and
   //    rejects operator ids; we never see or return the chat id here). ────────
-  const message = mode === 'resume' ? resumeMessage(link) : startMessage(link);
+  // Standard-first framing: the START invitation tells the owner the standard
+  // foundation is already set up when the box carries the STANDARD_READY
+  // record (read through the seam; the logic above is unchanged).
+  const standardReady = readStandardPrebuild(state).standardReady;
+  const message = mode === 'resume' ? resumeMessage(link) : startMessage(link, standardReady);
   const delivered = notifyOwner(message);
   if (!delivered) {
     return NextResponse.json(

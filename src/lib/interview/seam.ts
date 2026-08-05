@@ -103,6 +103,27 @@ export interface VerticalPacksRecord {
   [k: string]: unknown;
 }
 
+/** AI Workforce standard-first (PHASE 1 state shape): the prebuild driver's
+ *  namespaced state block. Written ONLY by prebuild-standard-workforce.sh/.py
+ *  (never by the CC); the seam only ever READS it. `status: "done"` +
+ *  `standardReadyAt` is the terminal record the STANDARD_READY prover verdict
+ *  and the /preview surface key on. */
+export interface StandardPrebuild {
+  status?: 'pending' | 'done' | 'failed' | string;
+  standardReadyAt?: string;
+  /** Naming-map version (+ git sha) the floor was materialized from. */
+  floorVersion?: string;
+  /** Dept ids the prebuild materialized (the chosen artifact's floor set). */
+  prebuiltDepartments?: string[];
+  /** Lazy registration: agents.list rows deferred until interviewComplete. */
+  agentRegistration?: 'deferred' | string;
+  /** The script that ran the prebuild (provenance). */
+  source?: string;
+  /** Reference to the explicit operator-consent record that authorized it. */
+  operatorConsentRef?: string;
+  [k: string]: unknown;
+}
+
 export interface BuildState {
   interviewComplete?: boolean;
   interviewCompletedAt?: string;
@@ -111,12 +132,38 @@ export interface BuildState {
   interviewQc?: InterviewQc;
   canonicalReconciliation?: CanonicalReconciliation;
   buildCompletedAt?: string;
+  /** AI Workforce standard-first (PHASE 1): lane discriminator. ABSENT or
+   *  "legacy" = the legacy build-from-scratch lane (byte-identical behavior);
+   *  "standard-first" = the prebuilt-floor edit lane. Written by the prebuild
+   *  driver with operator consent — never by the CC. */
+  buildType?: 'legacy' | 'standard-first' | string;
+  /** AI Workforce standard-first (PHASE 1): the prebuild driver's namespaced
+   *  state block (see StandardPrebuild). Its presence MUST NOT unlock the
+   *  interview shell — only interviewComplete/buildCompletedAt do. */
+  standardPrebuild?: StandardPrebuild;
   /** U107 (E5-2, closes G2a): the interview-derived vertical packs record —
    *  written by build-workforce.py's apply_vertical_packs(), read here (never
    *  hand-written) as the sole "declared" signal for the CC-side derivation
    *  guard in src/lib/routing/departments.config.ts. */
   verticalPacks?: VerticalPacksRecord;
   [k: string]: unknown;
+}
+
+/** Typed, never-throws read of the standard-prebuild block (PHASE 6 item 4). */
+export interface StandardPrebuildInfo {
+  /** build-state `buildType` ('standard-first' | 'legacy' | null when absent). */
+  buildType: string | null;
+  /** True when buildType === 'standard-first' — the new-lane discriminator. */
+  standardFirst: boolean;
+  /** True when the standardPrebuild block is present at all. */
+  present: boolean;
+  /** The block's status, or null when absent. */
+  status: string | null;
+  /** status === 'done' — the STANDARD_READY terminal record. */
+  standardReady: boolean;
+  standardReadyAt: string | null;
+  /** Dept ids the prebuild materialized (empty when absent). */
+  prebuiltDepartments: string[];
 }
 
 /** Parsed handoff frontmatter (the resume + progress contract). */
@@ -260,6 +307,48 @@ export function declaredVerticalPacks(state?: BuildState | null): string[] {
     if (typeof pack === 'string' && pack.trim()) packs.add(pack.trim());
   }
   return Array.from(packs);
+}
+
+/**
+ * AI Workforce standard-first (PHASE 6 item 4): READ-ONLY reader for the
+ * `standardPrebuild` state block the prebuild driver writes. Files-win
+ * doctrine intact — this reader never writes build-state, never hand-writes a
+ * prebuild field, and never interprets the block as interview content
+ * (it is namespaced state, not `interviewProgress`/`interviewQc`).
+ *
+ * `standardReady` (status === 'done') is INFORMATIONAL for the shell lock:
+ * gate-status exposes it so a preview surface can render while the box stays
+ * locked — the lock's admission still keys on interviewComplete/
+ * buildCompletedAt alone (asserted by the interview-lock E2E's standard-first
+ * case). Never throws — absence/garbage degrades to an empty-but-typed result.
+ */
+export function readStandardPrebuild(state?: BuildState | null): StandardPrebuildInfo {
+  const s = state ?? readBuildState();
+  const block = (s?.standardPrebuild ?? null) as StandardPrebuild | null;
+  const buildType = typeof s?.buildType === 'string' && s.buildType.trim() ? s.buildType : null;
+  const present = !!block && typeof block === 'object';
+  const status =
+    present && typeof block.status === 'string' && block.status.trim()
+      ? block.status
+      : null;
+  const prebuiltDepartments =
+    present && Array.isArray(block.prebuiltDepartments)
+      ? block.prebuiltDepartments.filter(
+          (d): d is string => typeof d === 'string' && d.trim().length > 0,
+        )
+      : [];
+  return {
+    buildType,
+    standardFirst: buildType === 'standard-first',
+    present,
+    status,
+    standardReady: status === 'done',
+    standardReadyAt:
+      present && typeof block.standardReadyAt === 'string' && block.standardReadyAt.trim()
+        ? block.standardReadyAt
+        : null,
+    prebuiltDepartments,
+  };
 }
 
 /**
@@ -842,13 +931,29 @@ function decisionVerb(d: RawDecision): string {
  * `_expected_decision_ids`: canonical floor (mandatory + universal-primary) ∪
  * custom dept ids, MINUS configured customs treated as implicit-YES.
  *
+ * AI Workforce standard-first (PHASE 6 item 3, mirror of build-workforce's
+ * `_enforce_decision_coverage_or_refuse` standard-first branch): when
+ * `opts.standardFirst` is true the floor departments already EXIST on disk
+ * (prebuilt) and KEEPs are implicit — silence = keep = the safe direction.
+ * The expected set then shrinks to ONLY the net-new customs (adds) plus any
+ * floor dept that carries a RECORDED decline (a decline the owner made must
+ * still be provenanced — gate #8 stays strict). The legacy lane is untouched:
+ * with `standardFirst` false/absent the behavior is byte-identical.
+ *
  * @param canonical  result of listCanonicalDepartments()
  * @param opts.customDeptIds          owner-added custom depts that need a decision
  * @param opts.implicitYesCustomIds   configured customs auto-treated as YES (excluded)
+ * @param opts.standardFirst          standard-first lane → KEEPs implicit (floor exempt)
+ * @param opts.recordedDeclineIds     dept ids with a recorded decline (stay expected)
  */
 export function computeExpectedDecisionIds(
   canonical: CanonicalDepartments,
-  opts: { customDeptIds?: string[]; implicitYesCustomIds?: string[] } = {},
+  opts: {
+    customDeptIds?: string[];
+    implicitYesCustomIds?: string[];
+    standardFirst?: boolean;
+    recordedDeclineIds?: string[];
+  } = {},
 ): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
@@ -858,8 +963,23 @@ export function computeExpectedDecisionIds(
     seen.add(key);
     ids.push(id);
   };
-  for (const d of canonical.mandatory || []) add(d.id);
-  for (const d of canonical.universal_primary_vertical || []) add(d.id);
+
+  if (!opts.standardFirst) {
+    // Legacy lane: every floor dept needs a provenanced decision.
+    for (const d of canonical.mandatory || []) add(d.id);
+    for (const d of canonical.universal_primary_vertical || []) add(d.id);
+  } else {
+    // Standard-first lane: KEEPs are implicit. Only a floor dept with a
+    // RECORDED decline still needs its provenanced decision.
+    const recorded = new Set((opts.recordedDeclineIds || []).map(norm));
+    for (const d of canonical.mandatory || []) {
+      if (recorded.has(norm(d.id))) add(d.id);
+    }
+    for (const d of canonical.universal_primary_vertical || []) {
+      if (recorded.has(norm(d.id))) add(d.id);
+    }
+  }
+
   for (const id of opts.customDeptIds || []) add(id);
   const implicitYes = new Set((opts.implicitYesCustomIds || []).map(norm));
   return ids.filter((id) => !implicitYes.has(norm(id)));
@@ -930,6 +1050,26 @@ export function noUnprovenancedDeclines(buildState: BuildState | null): boolean 
   return true;
 }
 
+/**
+ * AI Workforce standard-first helper: dept ids carrying a RECORDED "no"
+ * decision, provenanced or not. Feeds computeExpectedDecisionIds's
+ * standard-first branch — a recorded decline must stay in the expected set so
+ * its provenance is still demanded (gate #8 applies to it separately and stays
+ * STRICT). Never includes a bare absent entry; an unrecorded floor dept is an
+ * implicit KEEP in the standard-first lane.
+ */
+export function recordedDeclineIds(buildState: BuildState | null): string[] {
+  const decisions = (buildState?.canonicalReconciliation?.decisions ?? {}) as Record<
+    string,
+    RawDecision
+  >;
+  const ids: string[] = [];
+  for (const [rawId, val] of Object.entries(decisions)) {
+    if (decisionVerb(val) === 'no') ids.push(rawId);
+  }
+  return ids;
+}
+
 /* ─────────────────────────── Composite gate snapshot ───────────────────────── */
 
 export interface InterviewGateSnapshot {
@@ -943,6 +1083,12 @@ export interface InterviewGateSnapshot {
   canonical: CanonicalDepartments | null;
   coverage: DecisionCoverage;
   flags: GateFlags;
+  /** AI Workforce standard-first: true when build-state buildType is
+   *  'standard-first' — gate #3 then expects decisions only for declines +
+   *  adds (KEEPS are implicit); gates #2/#8 stay strict. */
+  standardFirst: boolean;
+  /** AI Workforce standard-first: the standardPrebuild block reader. */
+  standardPrebuild: StandardPrebuildInfo;
 }
 
 /**
@@ -953,6 +1099,10 @@ export interface InterviewGateSnapshot {
  *   genuineTranscriptReady       — genuine transcript (gate #2)
  *   decisionCoverageComplete     — every expected dept decided (gate #3)
  *   noUnprovenancedDeclines      — zero un-provenanced declines (gate #8)
+ *
+ * AI Workforce standard-first (PHASE 6 item 3): on the standard-first lane the
+ * expected set for gate #3 is computed with KEEPs implicit (only recorded
+ * declines + customs stay expected); gates #2 and #8 stay strict.
  *
  * If the canonical script is unavailable, coverage is reported incomplete
  * (fail-closed) and the flag is false, so the Build button stays disabled rather
@@ -968,6 +1118,7 @@ export async function getInterviewGateSnapshot(
   const qcStatus = readInterviewQcStatus(buildState);
   const interviewComplete = buildState?.interviewComplete === true;
   const buildCompleted = !!buildState?.buildCompletedAt;
+  const standardPrebuild = readStandardPrebuild(buildState);
 
   let canonical: CanonicalDepartments | null = null;
   try {
@@ -978,7 +1129,13 @@ export async function getInterviewGateSnapshot(
 
   let coverage: DecisionCoverage;
   if (canonical) {
-    const expected = computeExpectedDecisionIds(canonical, opts);
+    const expected = computeExpectedDecisionIds(canonical, {
+      ...opts,
+      standardFirst: standardPrebuild.standardFirst,
+      recordedDeclineIds: standardPrebuild.standardFirst
+        ? recordedDeclineIds(buildState)
+        : undefined,
+    });
     coverage = computeDecisionCoverage(buildState, expected);
   } else {
     // Fail-closed: without the live floor we cannot prove coverage.
@@ -1009,6 +1166,8 @@ export async function getInterviewGateSnapshot(
     canonical,
     coverage,
     flags,
+    standardFirst: standardPrebuild.standardFirst,
+    standardPrebuild,
   };
 }
 
