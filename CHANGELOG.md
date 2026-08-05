@@ -1,3 +1,22 @@
+## [v6.0.87] — 2026-08-05 — Podcast department CC wiring (units 3.1-3.3)
+
+- **Migration 122** — seed `podcast-editor` / `podcast-producer` / `show-notes-writer`
+  specialists (role-slot keyed, C3 guard mirrors migration 065), create `skills` +
+  `agent_skills` tables, seed Skill 58 (`podcast-production-engine`) + bindings, and
+  provision the podcast QC judge model (JUDGE != WRITER; backfills only NULL/'' models).
+  Idempotent; renumbered to 122 (origin/main already carried 114); `role_type` presence
+  guard byte-identical to migration 065 for ledgered-but-not-applied box shapes.
+- **context-pack.ts** — `matchSkillsForTask` intersects filesystem skill search with
+  `agent_skills` bindings (`applySkillBindings` / `queryBoundSkillsForAgent`), additive,
+  degrades to no-op when unbound or tables absent; both dispatch call sites pass `agent.id`.
+- **task-dispatcher.ts / dispatch route** — bound-skill render block names the engine
+  entry point (`ENGINE ENTRY POINT: <sourcePath>/scripts/`).
+- **ecosystem.config.cjs** — conditionally passes `QC_JUDGE_MODEL` + `OLLAMA_CLOUD_API_KEY`
+  (client-owned comment; does not touch the running PM2 process).
+- QC: Fable first review FAIL (migration id 114 collision + no-workspace deferral),
+  two Opus fix cycles (renumber to 122 + role_type guard), RE-REVIEW-2 PASS. Migration-114
+  suite 7/7; live-DB-copy harness RUN 1 seeds / RUN 2 idempotent.
+
 ## [v6.0.86] — 2026-08-04 — fix(gate-fallback): fetch internal localhost not public origin behind CF tunnel
 
 - Interview shell-lock gate fallback (U010) — `checkInterviewCompleteViaFallback()`
