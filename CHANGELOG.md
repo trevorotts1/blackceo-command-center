@@ -1,3 +1,23 @@
+## [v6.0.88] — 2026-08-05 — Podcast capability manifest + push-dispatch hardening (units 3.4-3.6)
+
+- **capability-manifest.ts (new)** — `podcastProcessorActivationStatus()` verifies ALL FOUR
+  activation-layer components fail-closed: department agent runtime dir WITH per-agent files
+  (lazy sqlite excluded), intake-hook route registered, enabled podcast cron in the OpenClaw
+  cron store, and the `podcast_step_driver.py` controller. Each miss names the exact rescue action.
+- **task-dispatcher.ts** — GUARD 8 (`podcast_not_activated`) + `podcast_skill_not_resolvable`
+  now call `recordDispatchFailure(hardBlock:true, SYSTEM)` on attempt 1 (furnace-proof: task is
+  terminal to the 2-min sweep, recoverable `blocked→backlog`, never re-fires). 3.6(a)
+  `no_specialist_runtime` fires `notifySystem` on attempt 1.
+- **tasks.ts / dispatch route** — `createTaskCore` + manual dispatch route mirror BOTH gates
+  before chat.send: capability-manifest gate (422, hardBlock, `routed_but_not_dispatched`,
+  `notifySystem`) + Skill-58 match assertion; an operator click can no longer bypass into a
+  skill-less podcast session.
+- QC: Fable FAIL (furnace + manual-gate gaps + 2-of-4 activation), Opus fix (f468c87), RE-REVIEW
+  PASS. Merge conflict with aiwf-standard-first in dispatch/route.ts resolved (hoisted
+  `matchedSkills`, both gates preserved).
+- NOTE: until unit 1.2 (podcast_step_driver.py) lands, every box reports NOT activated and
+  podcast tasks hardBlock — intended fail-closed ordering per master plan.
+
 ## [v6.0.87] — 2026-08-05 — Podcast department CC wiring (units 3.1-3.3)
 
 - **Migration 122** — seed `podcast-editor` / `podcast-producer` / `show-notes-writer`
