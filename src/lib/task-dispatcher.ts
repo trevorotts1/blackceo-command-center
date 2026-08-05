@@ -1032,13 +1032,15 @@ ${stepLines.join('\n')}
     // Layer A (departments-that-use-skills): match installed SKILL.md files to
     // the task and hand the top-3 to the doer. Async (embeddings) so it runs
     // BEFORE the synchronous pack builder; never throws (degrades to []).
+    // Unit 3.2: pass agentId so the matcher intersects the filesystem search
+    // with the assigned agent's agent_skills bindings (migration 122).
     let matchedSkills: MatchedSkill[] = [];
     try {
       matchedSkills = await matchSkillsForTask({
         title: task.title,
         description: task.description,
         department: task.department,
-      });
+      }, { agentId: agent.id });
     } catch {
       matchedSkills = [];
     }

@@ -5534,6 +5534,234 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    // ── Migration 122 — Podcast Editor seed + skills/agent_skills tables + QC judge model ──
+    // PHASE 3 (master plan 2026-08-04, units 3.1-3.3) — Command Center wiring for the
+    // podcast department. Fixes Leanne's report that the CC has no Podcast Editor agent
+    // row, no skills table, no skill bindings, and no QC judge.
+    //
+    //   3.1  Seed the `podcast-editor` specialist row (idempotent on the ROLE SLOT —
+    //        mirror of seedTrioForWorkspaces' C3 guard, migration 065). This makes
+    //        pickBestAgent (department-router.ts) award a roleMatch for the 'Podcast
+    //        Editor' agentRole in departments.config.ts. Optionally also seeds
+    //        `podcast-producer` and `show-notes-writer`.
+    //   3.2  CREATE TABLE skills + agent_skills (IF NOT EXISTS — additive), seed Skill
+    //        58 (`podcast-production-engine`) pointing at the client-box Skill 58 path,
+    //        and bind `agent_skills(podcast-editor, skill-58)`. context-pack.ts's
+    //        matchSkillsForTask now intersects the filesystem search with these
+    //        bindings (see src/lib/context-pack.ts).
+    //   3.3  Provision the podcast QC judge: set the podcast workspace's QC agent
+    //        `model` to a CLIENT-OWNED ollama-cloud model (JUDGE != WRITER, per
+    //        qc-scorer.ts JUDGE != WRITER guard). The judge id is resolved by
+    //        resolveClientJudgeModel (qc-scorer.ts:1225) from the dept QC agent's
+    //        `model` OR QC_JUDGE_MODEL env. OLLAMA_CLOUD_API_KEY must be present in
+    //        the CC runtime env (client-owned) for the judge to actually score —
+    //        verify with GET /api/system/qc-judge-probe (verdict must be `judge_ok`).
+    //        Optionally set QC_JUDGE_MODEL env on the cc-prod PM2 process (documented;
+    //        this migration does NOT touch PM2).
+    //
+    // NOTE on the QC judge model id: this migration writes the judge model id from the
+    // deploy-time env `PODCAST_QC_JUDGE_MODEL` (fallback `QC_JUDGE_MODEL`, then a
+    // conservative default). The value MUST be an ollama-cloud model (ollama-cloud/<m>
+    // or <m>:cloud) and MUST differ from the writer model used for podcast content
+    // generation. The migration is idempotent: re-running never overwrites a model
+    // that a box operator has since set by hand (only NULL/empty models are backfilled).
+    id: '122',
+    name: 'seed_podcast_editor_skills_and_qc_judge',
+    up: (db) => {
+      console.log('[Migration 122] Seeding Podcast Editor specialist + skills/agent_skills + QC judge model...');
+
+      // ── 3.2 schema: skills + agent_skills (additive, idempotent) ─────────────
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skills (
+          id            TEXT PRIMARY KEY,
+          slug          TEXT NOT NULL UNIQUE,
+          name          TEXT NOT NULL,
+          description   TEXT,
+          source_path   TEXT,
+          version       TEXT,
+          enabled       INTEGER NOT NULL DEFAULT 1,
+          created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS agent_skills (
+          agent_id  TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          skill_id  TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+          priority  INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (agent_id, skill_id)
+        );
+      `);
+
+      // ── 3.1 resolve the podcast workspace + writer/judge models ─────────────
+      // The podcast workspace row is normally seeded by migration 113
+      // (slug='podcast'). If it is still absent on a box that pre-dates 113 (or
+      // whose 113 run predates the engine), seed it HERE in the same migration —
+      // a migration is recorded applied ONCE by id, so deferring to "next boot"
+      // would silently skip the agent/skill/judge seed forever. This mirrors
+      // migration 113's INSERT OR IGNORE shape exactly (company_id='default').
+      const now = new Date().toISOString();
+      const existingWs = db
+        .prepare(`SELECT id FROM workspaces WHERE lower(slug) = 'podcast' LIMIT 1`)
+        .get() as { id: string } | undefined;
+      let podcastWs = existingWs;
+      if (!podcastWs) {
+        db.prepare(
+          `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon, company_id, sort_order, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'default', ?, ?, ?)`,
+        ).run('podcast', 'Podcast', 'podcast', 'Podcast production engine workspace.', '🎙️', 1100, now, now);
+        podcastWs = db
+          .prepare(`SELECT id FROM workspaces WHERE lower(slug) = 'podcast' LIMIT 1`)
+          .get() as { id: string } | undefined;
+        console.log('[Migration 122] Seeded missing podcast workspace row (pre-migration-113 box)');
+      }
+      if (!podcastWs) {
+        console.error('[Migration 122] FATAL: podcast workspace row could not be resolved — seeding aborted');
+        return;
+      }
+      const wsId = podcastWs.id;
+
+      const writerModel =
+        process.env.PODCAST_WRITER_MODEL ||
+        'ollama-cloud/llama-3.3-70b-versatile';
+      const judgeModel =
+        process.env.PODCAST_QC_JUDGE_MODEL ||
+        process.env.QC_JUDGE_MODEL ||
+        'ollama-cloud/qwen3-coder';
+
+      // ── 3.1 seed the Podcast Editor + optional producer / show-notes-writer ───
+      // Idempotent on the ROLE SLOT: skip when ANY specialist in this workspace
+      // already carries the role (any id / alias spelling) — the C3 guard that
+      // migration 065 uses for trio agents.
+      const insertSpecialist = db.prepare(`
+        INSERT OR IGNORE INTO agents
+          (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+           specialist_type, role_type, model, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'standby', 0, ?, 'permanent', 'specialist', ?, datetime('now'), datetime('now'))
+      `);
+
+      const roleSlotFilled = (rolePattern: string): boolean => {
+        const row = db
+          .prepare(
+            `SELECT id FROM agents
+             WHERE workspace_id = ? AND role_type = 'specialist' AND lower(role) LIKE ?
+             LIMIT 1`,
+          )
+          .get(wsId, rolePattern) as { id: string } | undefined;
+        return Boolean(row);
+      };
+
+      const seedPodcast = (
+        id: string,
+        name: string,
+        role: string,
+        description: string,
+        emoji: string,
+      ): number => {
+        if (roleSlotFilled(`%${role.toLowerCase()}%`)) {
+          console.log(`[Migration 122] '${role}' specialist slot already filled — leaving untouched`);
+          return 0;
+        }
+        const info = insertSpecialist.run(id, name, role, description, emoji, wsId, writerModel);
+        return info.changes;
+      };
+
+      const editor = seedPodcast(
+        'podcast-editor',
+        'Podcast Editor',
+        'Podcast Editor',
+        'Runs the Skill 58 Podcast Production Engine end-to-end for podcast episodes.',
+        '🎙️',
+      );
+      // Optional producer + show-notes-writer rows (unit 3.1 "optionally add").
+      const producer = seedPodcast(
+        'podcast-producer',
+        'Podcast Producer',
+        'Podcast Producer',
+        'Owns the end-to-end podcast episode production pipeline (Skill 58): cover, audio, show notes, media upload, and the n8n publish webhook.',
+        '🎧',
+      );
+      const showNotes = seedPodcast(
+        'show-notes-writer',
+        'Show Notes Writer',
+        'Show Notes Writer',
+        'Drafts thorough, enticing episode show notes from the frozen research package + blueprint (Skill 58 Step 12.5).',
+        '📝',
+      );
+
+      // ── 3.2 seed Skill 58 (podcast-production-engine) + bindings ────────────
+      // source_path points at the client-box Skill 58 install. On the operator
+      // canary this is the onboarding repo skill; on client boxes the onboarding
+      // roll materializes the same directory under ~/.openclaw/skills/58-*.
+      const skill58SourcePath =
+        process.env.PODCAST_SKILL58_SOURCE_PATH ||
+        path.join(os.homedir(), '.openclaw', 'skills', '58-podcast-production-engine');
+      db.prepare(
+        `INSERT OR IGNORE INTO skills
+           (id, slug, name, description, source_path, version, enabled)
+         VALUES
+           (?, 'podcast-production-engine', 'Podcast Production Engine',
+            'Runs the Skill 58 podcast production pipeline end-to-end: cover image, episode audio, show notes, GHL media upload, and the n8n publish webhook.',
+            ?, '58', 1)`,
+      ).run('skill-58', skill58SourcePath);
+
+      // Bind every podcast specialist that consumes Skill 58 (agents above now
+      // EXIST, so the agent_skills FK to agents(id) is satisfied even under
+      // PRAGMA foreign_keys = ON). The direct 'podcast-editor' binding is the
+      // required one; producer + show-notes-writer are bound too.
+      db.prepare(
+        `INSERT OR IGNORE INTO agent_skills (agent_id, skill_id)
+         SELECT a.id, 'skill-58' FROM agents a
+         WHERE a.workspace_id = ? AND a.role_type = 'specialist'
+           AND a.id IN ('podcast-editor', 'podcast-producer', 'show-notes-writer')
+           AND NOT EXISTS (SELECT 1 FROM agent_skills as2 WHERE as2.agent_id = a.id AND as2.skill_id = 'skill-58')`,
+      ).run(wsId);
+
+      // ── 3.3 provision the podcast QC judge model ────────────────────────────
+      // JUDGE != WRITER (qc-scorer.ts:1452). Never provision a judge that equals
+      // the writer — the scorer would fail closed on every review.
+      if (judgeModel.trim().toLowerCase() === writerModel.trim().toLowerCase()) {
+        console.warn(
+          `[Migration 122] PODCAST_QC_JUDGE_MODEL (${judgeModel}) equals the writer model — refusing to provision a degenerate judge; QC stays unprovisioned (fail-closed to human review)`,
+        );
+      } else {
+        // Ensure the podcast workspace HAS a QC agent. Migration 060 seeds QC
+        // agents only for workspaces that existed at ITS run; a box whose podcast
+        // workspace was added later (migration 113, or ad hoc) may have NO QC row
+        // yet at migration-122 time (autoSeedFromDepartmentsJson adds it AFTER
+        // migrations). Role-slot guarded + deterministic id `qc-agent-<ws.id>`,
+        // mirroring migration 060's seed. INSERT OR IGNORE is a no-op when a QC
+        // row already exists under any id.
+        const qcAgentExisting = db
+          .prepare(`SELECT id FROM agents WHERE workspace_id = ? AND role_type = 'qc' LIMIT 1`)
+          .get(wsId) as { id: string } | undefined;
+        if (!qcAgentExisting) {
+          db.prepare(
+            `INSERT OR IGNORE INTO agents
+               (id, name, role, description, avatar_emoji, status, is_master, workspace_id,
+                specialist_type, role_type, model, created_at, updated_at)
+             VALUES
+               (?, 'Podcast QC Specialist', 'QC Specialist',
+                'Quality control specialist for the Podcast department. Reviews completed tasks against SOP success criteria and decides whether work moves to Done or back to In Progress.',
+                '🔍', 'standby', 0, ?, 'permanent', 'qc', ?, datetime('now'), datetime('now'))`,
+          ).run(`qc-agent-${wsId}`, wsId, judgeModel);
+        }
+        // Backfill the judge model on any QC agent in this workspace whose model
+        // is NULL/empty. Never clobber an operator's hand-set model. Idempotent
+        // across boots.
+        db.prepare(
+          `UPDATE agents SET model = ?, updated_at = datetime('now')
+           WHERE workspace_id = ? AND role_type = 'qc'
+             AND (model IS NULL OR model = '')`,
+        ).run(judgeModel, wsId);
+      }
+
+      console.log(
+        `[Migration 122] Seeded podcast specialists — editor=${editor} producer=${producer} showNotes=${showNotes} (0 = already present); ` +
+        `skills tables ready; QC judge model=${judgeModel} (writer=${writerModel})`,
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

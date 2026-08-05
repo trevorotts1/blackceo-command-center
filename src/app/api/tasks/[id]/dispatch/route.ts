@@ -404,6 +404,8 @@ ${stepLines.join('\n')}
 
     // Layer A (departments-that-use-skills): match installed SKILL.md files to
     // the task and deliver the top-3 to the doer — parity with the auto path.
+    // Unit 3.2: pass agentId so the matcher intersects the filesystem search
+    // with the assigned agent's agent_skills bindings (migration 122).
     // Never throws (degrades to '').
     let skillsBlock = '';
     try {
@@ -411,7 +413,7 @@ ${stepLines.join('\n')}
         title: task.title,
         description: task.description,
         department: task.department,
-      });
+      }, { agentId: agent.id });
       skillsBlock = renderMatchedSkillsSection(matchedSkills);
     } catch {
       skillsBlock = '';

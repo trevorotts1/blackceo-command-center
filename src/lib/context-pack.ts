@@ -57,7 +57,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import os from 'os';
-import { queryOne } from '@/lib/db';
+import { queryAll, queryOne } from '@/lib/db';
 import { detectPlatform, vaultRoot, zhcLibraryBaseDirs } from '@/lib/platform';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import {
@@ -120,6 +120,21 @@ export interface MatchedSkill {
   departments: string[];
   /** true when `location` resolves on disk right now. */
   resolvable: boolean;
+  /**
+   * True when this skill is BOUND to the assigned agent via the CC `agent_skills`
+   * table (migration 122). A bound skill is one the department explicitly wired —
+   * the engine is EXPECTED to run, so the dispatch message must name it AND its
+   * engine entry point. Undefined/false for unbound filesystem-only matches.
+   */
+  bound?: boolean;
+  /** The `skills.source_path` for a bound skill (the skill install root). */
+  sourcePath?: string | null;
+  /**
+   * The engine entry-point directory relative to `sourcePath` (convention:
+   * `scripts/`). Rendered into the dispatch message so "task assigned -> engine
+   * runs" is explicit. Null when the skill has no engine dir.
+   */
+  engineEntryPoint?: string | null;
 }
 
 /** A task-targeted excerpt from one of the receiving agent's core files. */
@@ -624,7 +639,18 @@ export function renderMatchedSkillsSection(skills: MatchedSkill[]): string {
         ? `semantic ${s.score.toFixed(3)}`
         : `keyword ${s.score}`;
     const desc = s.description ? ` — ${s.description}` : '';
-    lines.push(`- **${s.name}** (${confidence}) — \`${s.location}\`${desc}`);
+    // Unit 3.2: a BOUND skill is one the department explicitly wired for this
+    // agent — name it AND its engine entry point so "task assigned -> engine
+    // runs" is explicit (the specialist reaches for scripts/ under the skill
+    // root instead of improvising).
+    if (s.bound) {
+      const engine = s.engineEntryPoint
+        ? `\n    - **ENGINE ENTRY POINT:** \`${s.sourcePath ?? ''}/${s.engineEntryPoint}\``
+        : '';
+      lines.push(`- **${s.name}** 🔒 (bound, ${confidence}) — \`${s.location}\`${desc}${engine}`);
+    } else {
+      lines.push(`- **${s.name}** (${confidence}) — \`${s.location}\`${desc}`);
+    }
   }
   lines.push('');
   return lines.join('\n');
@@ -661,6 +687,12 @@ interface SkillCandidate {
   description: string;
   location: string;
   departments: string[];
+  /** Set when the skill is bound to the assigned agent via agent_skills (migration 122). */
+  bound?: boolean;
+  /** The skills.source_path for a bound skill (the skill install root). */
+  sourcePath?: string | null;
+  /** Engine entry-point dir relative to sourcePath (convention: `scripts/`). */
+  engineEntryPoint?: string | null;
 }
 
 /**
@@ -885,12 +917,115 @@ function toMatchedSkill(
     matchKind,
     departments: c.departments,
     resolvable: existsSafe(c.location),
+    bound: c.bound,
+    sourcePath: c.sourcePath,
+    engineEntryPoint: c.engineEntryPoint,
   };
+}
+
+// ── Layer-A skill BINDINGS (migration 122, unit 3.2) ───────────────────────────
+//
+// Departments that use skills can BIND skills to specific agents in the CC DB
+// (`agent_skills` + `skills` tables). The filesystem search above finds what is
+// INSTALLED; the binding filter intersects it with what the assigned agent is
+// WIRED to run. When the agent has bindings, ONLY bound skills are eligible for
+// the dispatch handoff — so "task assigned -> engine runs" is explicit, and the
+// dispatch message names the skill AND its engine entry point (`scripts/`).
+
+/** A skill row the assigned agent is bound to (agent_skills ⋈ skills). */
+interface BoundSkill {
+  id: string;
+  slug: string;
+  name: string;
+  sourcePath: string | null;
+}
+
+/** Normalize for loose identity matching (case + non-alphanumerics). */
+function normSkillKey(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * Whether a filesystem skill candidate corresponds to a DB-bound skill.
+ *
+ * The CC `skills.slug`/`name` and the on-disk SKILL.md directory/frontmatter
+ * share the same human identity but not always the same spelling. Match when any
+ * of the following aligns (after normalization):
+ *   • frontmatter name === bound name
+ *   • bound slug appears inside the skill dir key (handles `58-podcast-…`)
+ *   • bound name appears inside the skill dir key or the frontmatter name
+ */
+function skillCorrespondsToBound(c: { name: string; location: string }, bound: BoundSkill): boolean {
+  const dirKey = normSkillKey(path.basename(path.dirname(c.location)));
+  const nameKey = normSkillKey(c.name);
+  const boundSlug = normSkillKey(bound.slug);
+  const boundName = normSkillKey(bound.name);
+  if (boundName && nameKey && nameKey === boundName) return true;
+  if (boundSlug && (dirKey.includes(boundSlug) || nameKey.includes(boundSlug))) return true;
+  if (boundName && (dirKey.includes(boundName) || nameKey.includes(boundName))) return true;
+  return false;
+}
+
+/**
+ * Query the assigned agent's skill bindings (agent_skills ⋈ skills, enabled only).
+ * Returns [] on any DB error — the binding filter is additive and must never
+ * break the dispatch hot path (mirrors matchSkillsForTask's degrade-to-[] ethos).
+ */
+function queryBoundSkillsForAgent(agentId: string | null | undefined): BoundSkill[] {
+  if (!agentId) return [];
+  try {
+    return queryAll<{ id: string; slug: string; name: string; source_path: string | null }>(
+      `SELECT s.id, s.slug, s.name, s.source_path
+         FROM agent_skills as2
+         JOIN skills s ON s.id = as2.skill_id
+        WHERE as2.agent_id = ? AND s.enabled = 1`,
+      [agentId],
+    ).map((r) => ({ id: r.id, slug: r.slug, name: r.name, sourcePath: r.source_path }));
+  } catch (err) {
+    // The skills tables may not exist yet on an un-migrated box (pre-114). That is
+    // fine — bindings simply don't constrain the search there.
+    console.debug('[context-pack] queryBoundSkillsForAgent degraded:', (err as Error).message);
+    return [];
+  }
+}
+
+/**
+ * Intersect a filesystem skill candidate set with the assigned agent's bindings.
+ *
+ *   • No agent, or no bindings → candidates unchanged (backwards compatible for
+ *     departments that do not use the skills tables yet).
+ *   • Bindings exist → keep ONLY candidates that correspond to a bound skill,
+ *     tagging each with its source_path + engine entry point. If every bound
+ *     skill failed to resolve on disk, keep the original candidates rather than
+ *     starving dispatch of context (the filesystem is the source of truth for
+ *     what can RUN; the bindings say what SHOULD).
+ */
+function applySkillBindings(
+  candidates: SkillCandidate[],
+  agentId: string | null | undefined,
+): SkillCandidate[] {
+  const bound = queryBoundSkillsForAgent(agentId);
+  if (bound.length === 0) return candidates;
+
+  const tagged: SkillCandidate[] = [];
+  for (const c of candidates) {
+    const hit = bound.find((b) => skillCorrespondsToBound(c, b));
+    if (!hit) continue;
+    tagged.push({
+      ...c,
+      bound: true,
+      sourcePath: hit.sourcePath,
+      // Engine entry point convention (Skill 58: scripts/ under the skill root).
+      engineEntryPoint: hit.sourcePath ? 'scripts/' : null,
+    });
+  }
+  return tagged.length > 0 ? tagged : candidates;
 }
 
 /**
  * Layer-A skill matcher: return the top-N installed skills (SKILL.md) most
- * relevant to the task, dept-scoped via the onboarding skill-department-map.json.
+ * relevant to the task, dept-scoped via the onboarding skill-department-map.json
+ * AND (unit 3.2) intersected with the assigned agent's `agent_skills` bindings.
  *
  * Scoring reuses the department-router's embedding + cosine machinery:
  *   • when an embedding key is configured (the CLIENT'S OWN key), each skill's
@@ -899,11 +1034,17 @@ function toMatchedSkill(
  *   • otherwise (or if the API errors, or nothing clears the floor) it falls
  *     back to keyword-overlap scoring so the feature works with zero config.
  *
+ * Binding filter (migration 122): when `opts.agentId` resolves to rows in
+ * `agent_skills`, ONLY skills bound to that agent are eligible for the handoff,
+ * and each is tagged with its engine entry point so the dispatch message can say
+ * "task assigned -> engine runs". Agents with no bindings behave exactly as
+ * before (pure filesystem match).
+ *
  * Async (embeddings do I/O). NEVER throws — returns [] on any failure.
  */
 export async function matchSkillsForTask(
   task: { title?: string | null; description?: string | null; department?: string | null },
-  opts?: { limit?: number },
+  opts?: { limit?: number; agentId?: string | null },
 ): Promise<MatchedSkill[]> {
   const limit = opts?.limit ?? 3;
   try {
@@ -913,7 +1054,7 @@ export async function matchSkillsForTask(
     const map = loadSkillDeptMap();
     const deptCanon = task.department ? canonicalDeptSlug(task.department) : null;
 
-    const candidates: SkillCandidate[] = [];
+    let candidates: SkillCandidate[] = [];
     for (const file of files) {
       const meta = parseSkillMeta(file);
       if (!meta) continue;
@@ -927,6 +1068,11 @@ export async function matchSkillsForTask(
         departments: scope.departments,
       });
     }
+    if (candidates.length === 0) return [];
+
+    // Unit 3.2: intersect the filesystem candidates with the assigned agent's
+    // agent_skills bindings. No-op when the agent has no bindings.
+    candidates = applySkillBindings(candidates, opts?.agentId);
     if (candidates.length === 0) return [];
 
     const taskText = [task.title, task.description].filter(Boolean).join(' — ').trim();

@@ -96,7 +96,17 @@ module.exports = {
       // WEBHOOK_SECRET signs the HMAC ingest/status routes. Conditional spread so
       // an unset value never overrides the .env.local layer (never blanks it).
       ...(process.env.MC_API_TOKEN ? { MC_API_TOKEN: process.env.MC_API_TOKEN } : {}),
-      ...(process.env.WEBHOOK_SECRET ? { WEBHOOK_SECRET: process.env.WEBHOOK_SECRET } : {})
+      ...(process.env.WEBHOOK_SECRET ? { WEBHOOK_SECRET: process.env.WEBHOOK_SECRET } : {}),
+      // QC JUDGE (master plan unit 3.3): the podcast QC judge is resolved by
+      // resolveClientJudgeModel (qc-scorer.ts) from the dept QC agent's model OR
+      // QC_JUDGE_MODEL, and scored via the CLIENT's OWN OLLAMA_CLOUD_API_KEY.
+      // Pass both through explicitly so a cwd-drift `pm2 restart` never drops
+      // them (same rationale as MC_API_TOKEN above). Both are client-owned;
+      // never operator/shared. Set them in the host/container .env and run
+      // `pm2 restart blackceo-command-center --update-env` to apply — this
+      // config change alone does NOT touch the running process.
+      ...(process.env.QC_JUDGE_MODEL ? { QC_JUDGE_MODEL: process.env.QC_JUDGE_MODEL } : {}),
+      ...(process.env.OLLAMA_CLOUD_API_KEY ? { OLLAMA_CLOUD_API_KEY: process.env.OLLAMA_CLOUD_API_KEY } : {})
     },
     instances: 1,
     exec_mode: 'fork',
