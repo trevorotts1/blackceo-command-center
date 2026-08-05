@@ -59,6 +59,12 @@ import { listModels } from '@/lib/model-registry';
 import { getBestSOPForTask, checkTriad } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
+import {
+  PODCAST_SKILL_SLUG,
+  isPodcastTask,
+  podcastProcessorActivationStatus,
+  podcastActivationRefusalMessage,
+} from '@/lib/capability-manifest';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { recordBlockEvent } from '@/lib/block-events';
 import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
@@ -543,6 +549,56 @@ export async function autoDispatchTask(
     }
 
     const now = new Date().toISOString();
+
+    // GUARD 8 (Unit 3.4 — capability manifest): a PODCAST task must NEVER be
+    // dispatched to a box whose Skill 58 processor is not activated. This is the
+    // fail-closed guard that makes the phantom-agent incident impossible: when
+    // the capability manifest is absent OR the dept-podcast runtime dir does not
+    // exist, we HOLD the task loudly with "run SOP-PODCAST-07" and NEVER mint or
+    // dispatch an agent id. (The 3.1-3.3 seeding may create the agents row; the
+    // manifest check still gates DISPATCH so a seeded-but-unactivated box can
+    // never have a podcast task pushed into a tool-less session.)
+    if (isPodcastTask(task.department ?? task.workspace_id)) {
+      const activation = podcastProcessorActivationStatus();
+      if (!activation.activated) {
+        const refusal = podcastActivationRefusalMessage();
+        const holdMsg =
+          `[podcast_activation_refused] Task "${task.title}" (${task.id}) is a podcast task ` +
+          `but this box has NO activated podcast processor. ${activation.reason} ${refusal} ` +
+          `Dispatch REFUSED — no agent id invented, no skill-less session spawned.`;
+        console.error(`[${context}] ${holdMsg}`);
+        const nowHold = new Date().toISOString();
+        try {
+          run(
+            `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(), task.id, agent.id, 'routed_but_not_dispatched', holdMsg,
+              JSON.stringify({
+                workspace_id: task.workspace_id ?? null,
+                role: agent.role ?? null,
+                reason: 'podcast_not_activated',
+              }),
+              nowHold,
+            ],
+          );
+        } catch { /* pre-migration tolerant */ }
+        try {
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
+          );
+        } catch { /* pre-migration tolerant */ }
+        try {
+          // SYSTEM audience — operator/rescue channel only, NEVER the client's
+          // Telegram (MOVE-IN-SILENCE discipline). Names the rescue SOP.
+          notifySystem(holdMsg, { agent: context, action: 'escalate' });
+        } catch { /* notify best-effort */ }
+        return; // HOLD: never dispatch a podcast task without an activated processor
+      }
+    }
+    // ── End GUARD 8 (capability manifest) ──────────────────────────────────────
 
     // GUARD 6 (W8.2 anti-furnace backoff): if a prior advance attempt failed and
     // set a backoff window, do NOT re-fire until it elapses. A task that has hit
@@ -1045,6 +1101,83 @@ ${stepLines.join('\n')}
       matchedSkills = [];
     }
 
+    // ── Unit 3.6(b) — PUSH-DISPATCH ASSERTION: a PODCAST task MUST resolve
+    // Skill 58 (podcast-production-engine) before dispatch. A podcast task that
+    // reaches this point with NO Skill 58 match means the skill files are not
+    // installed on this box (or the engine is not wired into the CC skill
+    // search roots). Dispatching a skill-less session is exactly the
+    // phantom-agent failure mode (a tool-less isolated sub-session improvising
+    // the work). HOLD with `podcast_skill_not_resolvable` instead of pushing.
+    // The capability-manifest check (GUARD 8) already refused when the processor
+    // is not activated; this is the SECOND gate that catches a box where the
+    // skill tree itself is absent/not searchable even though activation reports
+    // green — both must pass before a podcast session is pushed.
+    const podcastDept = isPodcastTask(task.department ?? task.workspace_id);
+    if (podcastDept) {
+      // Skill 58 is the engine that MUST govern a podcast task. A match is any
+      // matched skill whose name, slug, or directory key is the podcast engine
+      // (frontmatter `name: podcast-production-engine`, dir `58-podcast-*`, or
+      // location containing `58-podcast-production-engine`).
+      const skill58Match = matchedSkills.find((s) => {
+        const hay = `${s.name} ${s.location}`.toLowerCase();
+        return (
+          s.name.toLowerCase().includes(PODCAST_SKILL_SLUG) ||
+          hay.includes('58-podcast-production-engine') ||
+          hay.includes('58-podcast')
+        );
+      });
+      if (!skill58Match) {
+        const skillHoldMsg =
+          `[podcast_skill_not_resolvable] Task "${task.title}" (${task.id}) is a podcast task ` +
+          `but matchSkillsForTask resolved NO Skill 58 (podcast-production-engine) match on this ` +
+          `box (matched ${matchedSkills.length} non-58 skills) — the skill files are not ` +
+          `installed/searchable in the CC skill roots. Dispatching a skill-less podcast session ` +
+          `is refused (phantom-agent risk). Install the 58-podcast-production-engine skill tree ` +
+          `and re-run SOP-PODCAST-07.`;
+        console.error(`[${context}] ${skillHoldMsg}`);
+        const nowSkill = new Date().toISOString();
+        try {
+          run(
+            `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(), task.id, agent.id, 'routed_but_not_dispatched', skillHoldMsg,
+              JSON.stringify({
+                workspace_id: task.workspace_id ?? null,
+                role: agent.role ?? null,
+                reason: 'podcast_skill_not_resolvable',
+                matched_skill_count: matchedSkills.length,
+                skill58_resolved: false,
+              }),
+              nowSkill,
+            ],
+          );
+        } catch { /* pre-migration tolerant */ }
+        try {
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, skillHoldMsg, nowSkill],
+          );
+        } catch { /* pre-migration tolerant */ }
+        try {
+          // SYSTEM audience — operator/rescue channel only (MOVE-IN-SILENCE).
+          notifySystem(skillHoldMsg, { agent: context, action: 'escalate' });
+        } catch { /* notify best-effort */ }
+        recordDispatchFailure(task.id, agent.id, {
+          reason: 'podcast_skill_not_resolvable',
+          audience: 'SYSTEM',
+          needs:
+            'Skill 58 (podcast-production-engine) did not resolve for a podcast task. ' +
+            'Install the skill tree on this box and re-run SOP-PODCAST-07.',
+          context,
+          hardBlock: true,
+        });
+        return; // HOLD: never dispatch a skill-less podcast session
+      }
+    }
+    // ── End Unit 3.6(b) assertion ───────────────────────────────────────────
+
     const contextPack = (() => {
       try {
         return buildContextPack({
@@ -1163,6 +1296,15 @@ If you need help or clarification, ask the orchestrator.`;
          VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
       );
+      // Unit 3.6(a) — PUSH-DISPATCH HARDENING: fire a SYSTEM report IMMEDIATELY
+      // when the push HELDs with no_specialist_runtime, so a task that routing
+      // already assigned but that cannot reach a runtime is surfaced to the
+      // operator/rescue channel on attempt 1 — never silent until the cap. The
+      // holdMsg above names the exact runtime dir to wire; the report rides the
+      // SYSTEM audience (MOVE-IN-SILENCE: never the client's Telegram).
+      try {
+        notifySystem(holdMsg, { agent: context, action: 'escalate' });
+      } catch { /* notify best-effort */ }
       // W8.2: account for the failed advance + back off so the sweeps don't
       // re-select this un-wireable task every tick; block+report (SYSTEM — wire
       // the dept runtime) once the cap is hit instead of re-looping forever.
