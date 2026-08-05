@@ -61,6 +61,13 @@ export default defineConfig({
       // tests/unit/) so `npm run test:unit` (tsx --test glob) does NOT also pick it
       // up — it uses vitest globals and only runs here via `npm run test:vitest`.
       'src/lib/interview/__tests__/seam-parity.test.ts',
+      // AI Workforce standard-first (PHASE 6 QC pin): unit-pins the
+      // computeExpectedDecisionIds standardFirst branch (gate #3 relaxation:
+      // recorded decline stays expected; unrecorded floor dept is implicit KEEP)
+      // independently of the E2E and of the Python-parity golden (which only
+      // exercises the legacy lane). Lives under src/ for the same reason as
+      // seam-parity.test.ts — vitest globals, vitest-only.
+      'src/lib/interview/__tests__/seam-standard-first.test.ts',
       // v4.72.0 board-blank fix: middleware auth matrix (same-origin board reads
       // pass through with no CF assertion / bearer; external + ingest/webhook paths
       // still require auth). Uses vitest globals + vi.resetModules re-import, so it
