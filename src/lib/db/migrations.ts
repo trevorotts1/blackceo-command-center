@@ -5571,6 +5571,19 @@ export const migrations: Migration[] = [
     up: (db) => {
       console.log('[Migration 122] Seeding Podcast Editor specialist + skills/agent_skills + QC judge model...');
 
+      // Guard: role_type column must exist (added by migration 060). Every
+      // post-060 migration and the auto-seed functions carry this guard (065,
+      // autoSeedTrioAgents) — on the "ledgered 001-113 but 060 column absent"
+      // box shape, referencing role_type without the guard crashes the boot
+      // with "table agents has no column named role_type". Skip (NOT crash):
+      // 060 runs strictly before 122 in numeric order, so any real box adds
+      // the column first; this is a defensive skip for the historical shape.
+      const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(c => c.name);
+      if (!agentCols.includes('role_type')) {
+        console.warn('[Migration 122] agents.role_type column missing — migration 060 may not have run yet; skipping');
+        return;
+      }
+
       // ── 3.2 schema: skills + agent_skills (additive, idempotent) ─────────────
       db.exec(`
         CREATE TABLE IF NOT EXISTS skills (
