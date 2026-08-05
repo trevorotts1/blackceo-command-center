@@ -21,7 +21,14 @@ import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecyc
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
-import { matchSkillsForTask, renderMatchedSkillsSection } from '@/lib/context-pack';
+import { notifySystem } from '@/lib/notify';
+import { matchSkillsForTask, renderMatchedSkillsSection, type MatchedSkill } from '@/lib/context-pack';
+import {
+  PODCAST_SKILL_SLUG,
+  isPodcastTask,
+  podcastProcessorActivationStatus,
+  podcastActivationRefusalMessage,
+} from '@/lib/capability-manifest';
 
 /**
  * P1-5 FIX — no hardcoded operator home.
@@ -230,6 +237,64 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       }
     }
 
+    // ── Unit 3.4 — CAPABILITY-MANIFEST gate (manual-dispatch mirror of
+    // task-dispatcher.ts GUARD 8). A PODCAST task must NEVER be dispatched on a
+    // box whose Skill 58 processor is not activated. The operator click must not
+    // bypass the fail-closed manifest gate the auto path enforces — without this
+    // mirror an empty materialized dept-podcast dir (created for every discovered
+    // department by materialize-dept-agents.sh) lets a skill-less session
+    // dispatch. Refuse loudly with "run SOP-PODCAST-07", record the failed
+    // attempt + terminal block (anti-furnace), and NEVER mint an agent id.
+    if (isPodcastTask(task.department ?? task.workspace_id)) {
+      const activation = podcastProcessorActivationStatus();
+      if (!activation.activated) {
+        const refusal = podcastActivationRefusalMessage();
+        const holdMsg =
+          `[podcast_activation_refused] Task "${task.title}" (${task.id}) is a podcast task ` +
+          `but this box has NO activated podcast processor. ${activation.reason} ${refusal} ` +
+          `Manual dispatch REFUSED — no agent id invented, no skill-less session spawned.`;
+        console.error(`[Dispatch] ${holdMsg}`);
+        const nowHold = new Date().toISOString();
+        run(
+          `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(), task.id, agent.id, 'routed_but_not_dispatched', holdMsg,
+            JSON.stringify({ workspace_id: task.workspace_id ?? null, role: agent.role ?? null, reason: 'podcast_not_activated' }),
+            nowHold,
+          ],
+        );
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, holdMsg, nowHold],
+        );
+        // SYSTEM audience — operator/rescue channel only, NEVER the client's
+        // Telegram (MOVE-IN-SILENCE). Names the rescue SOP.
+        notifySystem(holdMsg, { agent: 'manual-dispatch', action: 'escalate' });
+        // W8.2 / P1-01: reach a TERMINAL blocked state (non-transient — a retry
+        // can never materialize the activation layer), exactly like the auto path.
+        recordDispatchFailure(task.id, agent.id, {
+          reason: 'podcast_not_activated',
+          audience: 'SYSTEM',
+          needs: refusal,
+          context: 'manual-dispatch',
+          hardBlock: true,
+        });
+        return NextResponse.json(
+          {
+            success: false,
+            held: true,
+            blocked: true,
+            reason: 'podcast_not_activated',
+            message: holdMsg,
+          },
+          { status: 422 },
+        );
+      }
+    }
+    // ── End Unit 3.4 capability-manifest gate ────────────────────────────────
+
     // Connect to OpenClaw Gateway
     const client = getOpenClawClient();
     if (!client.isConnected()) {
@@ -406,10 +471,11 @@ ${stepLines.join('\n')}
     // the task and deliver the top-3 to the doer — parity with the auto path.
     // Unit 3.2: pass agentId so the matcher intersects the filesystem search
     // with the assigned agent's agent_skills bindings (migration 122).
-    // Never throws (degrades to '').
+    // Never throws (degrades to []).
+    let matchedSkills: MatchedSkill[] = [];
     let skillsBlock = '';
     try {
-      const matchedSkills = await matchSkillsForTask({
+      matchedSkills = await matchSkillsForTask({
         title: task.title,
         description: task.description,
         department: task.department,
@@ -418,6 +484,78 @@ ${stepLines.join('\n')}
     } catch {
       skillsBlock = '';
     }
+
+    // ── Unit 3.6(b) — PUSH-DISPATCH ASSERTION (manual-dispatch mirror of
+    // task-dispatcher.ts). A PODCAST task MUST resolve Skill 58
+    // (podcast-production-engine) before dispatch; a skill-less podcast session
+    // is the phantom-agent failure mode. This is the SECOND gate (after the
+    // capability-manifest gate above) that catches a box where the skill tree is
+    // absent/not searchable even though activation reports green. Fail-closed:
+    // record the failed attempt + terminal block, never dispatch.
+    if (isPodcastTask(task.department ?? task.workspace_id)) {
+      const skill58Match = matchedSkills.find((s) => {
+        const hay = `${s.name} ${s.location}`.toLowerCase();
+        return (
+          s.name.toLowerCase().includes(PODCAST_SKILL_SLUG) ||
+          hay.includes('58-podcast-production-engine') ||
+          hay.includes('58-podcast')
+        );
+      });
+      if (!skill58Match) {
+        const skillHoldMsg =
+          `[podcast_skill_not_resolvable] Task "${task.title}" (${task.id}) is a podcast task ` +
+          `but matchSkillsForTask resolved NO Skill 58 (podcast-production-engine) match on this ` +
+          `box (matched ${matchedSkills.length} non-58 skills) — the skill files are not ` +
+          `installed/searchable in the CC skill roots. Dispatching a skill-less podcast session ` +
+          `is refused (phantom-agent risk). Install the 58-podcast-production-engine skill tree ` +
+          `and re-run SOP-PODCAST-07.`;
+        console.error(`[Dispatch] ${skillHoldMsg}`);
+        const nowSkill = new Date().toISOString();
+        run(
+          `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(), task.id, agent.id, 'routed_but_not_dispatched', skillHoldMsg,
+            JSON.stringify({
+              workspace_id: task.workspace_id ?? null,
+              role: agent.role ?? null,
+              reason: 'podcast_skill_not_resolvable',
+              matched_skill_count: matchedSkills.length,
+              skill58_resolved: false,
+            }),
+            nowSkill,
+          ],
+        );
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), 'routed_but_not_dispatched', agent.id, task.id, skillHoldMsg, nowSkill],
+        );
+        try {
+          notifySystem(skillHoldMsg, { agent: 'manual-dispatch', action: 'escalate' });
+        } catch { /* notify best-effort */ }
+        recordDispatchFailure(task.id, agent.id, {
+          reason: 'podcast_skill_not_resolvable',
+          audience: 'SYSTEM',
+          needs:
+            'Skill 58 (podcast-production-engine) did not resolve for a podcast task. ' +
+            'Install the skill tree on this box and re-run SOP-PODCAST-07.',
+          context: 'manual-dispatch',
+          hardBlock: true,
+        });
+        return NextResponse.json(
+          {
+            success: false,
+            held: true,
+            blocked: true,
+            reason: 'podcast_skill_not_resolvable',
+            message: skillHoldMsg,
+          },
+          { status: 422 },
+        );
+      }
+    }
+    // ── End Unit 3.6(b) assertion ────────────────────────────────────────────
 
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 

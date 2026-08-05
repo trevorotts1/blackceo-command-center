@@ -595,7 +595,23 @@ export async function autoDispatchTask(
           // Telegram (MOVE-IN-SILENCE discipline). Names the rescue SOP.
           notifySystem(holdMsg, { agent: context, action: 'escalate' });
         } catch { /* notify best-effort */ }
-        return; // HOLD: never dispatch a podcast task without an activated processor
+        // W8.2 / P1-01: account for the failed advance attempt and reach a
+        // TERMINAL blocked state — a missing podcast processor is NON-TRANSIENT
+        // (a retry can never materialize the Skill 58 activation layer). The
+        // intake-advance sweep re-selects backlog tasks every 2 min; without
+        // recordDispatchFailure this HOLD re-fired forever (unbounded
+        // task_activities + events rows, operator alert resend every 15 min).
+        // hardBlock:true transitions the task to `blocked` on attempt 1 — GUARD
+        // 3 + the sweep's status filter then exclude it permanently. Mirrors the
+        // no_specialist_runtime and podcast_skill_not_resolvable siblings.
+        recordDispatchFailure(task.id, agent.id, {
+          reason: 'podcast_not_activated',
+          audience: 'SYSTEM',
+          needs: refusal,
+          context,
+          hardBlock: true,
+        });
+        return; // HOLD + BLOCK: never dispatch a podcast task without an activated processor
       }
     }
     // ── End GUARD 8 (capability manifest) ──────────────────────────────────────

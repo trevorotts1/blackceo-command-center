@@ -54,7 +54,7 @@ import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
 import {
   isPodcastTask,
   podcastProcessorActivationStatus,
@@ -2556,6 +2556,23 @@ export async function createTaskCore(
           // SYSTEM audience — operator/rescue channel only (MOVE-IN-SILENCE).
           notifySystem(msg, { agent: 'createTaskCore', action: 'escalate' });
         } catch { /* notify best-effort */ }
+        // W8.2 / P1-01: record the failed advance attempt and reach a TERMINAL
+        // blocked state. Without this, the task is left unassigned in backlog
+        // and the every-2-min intake-advance sweep re-routes + re-fires it
+        // forever (unbounded events rows, alert resend every 15 min). A missing
+        // podcast processor is NON-TRANSIENT — no retry can fix it — so
+        // hardBlock:true transitions the task straight to `blocked` on attempt
+        // 1 (SYSTEM audience: operator/rescue only, never the client Telegram).
+        // Mirrors the GUARD 8 / no_specialist_runtime / podcast_skill_not_resolvable
+        // siblings. The task was just INSERTed above, so its id is known; no
+        // agent is assigned (resolvedAgentId stays null).
+        recordDispatchFailure(id, null, {
+          reason: 'podcast_not_activated',
+          audience: 'SYSTEM',
+          needs: refusal,
+          context: 'createTaskCore',
+          hardBlock: true,
+        });
       }
     }
     if (!podcastRoutingBlocked) {
