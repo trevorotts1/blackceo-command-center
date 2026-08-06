@@ -49,6 +49,7 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcast } from '@/lib/events';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task } from '@/lib/types';
@@ -64,6 +65,7 @@ export interface BacklogRedispatchResult {
 interface BacklogTaskRow {
   id: string;
   title: string;
+  description: string | null;
   qc_reroute_attempts: number | null;
   redispatch_count: number | null;
   updated_at: string;
@@ -195,6 +197,7 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
   const rows = queryAll<BacklogTaskRow>(
     `SELECT t.id AS id,
             t.title AS title,
+            t.description AS description,
             t.qc_reroute_attempts AS qc_reroute_attempts,
             t.redispatch_count AS redispatch_count,
             t.updated_at AS updated_at
@@ -234,6 +237,23 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
   let escalated = 0;
   for (const row of rows) {
     const priorCount = row.redispatch_count ?? 0;
+
+    // FIX-17 / Error 12 / Rule R12: an OWNER-KILLED task (killed_at column OR
+    // the "OWNER KILLED" note marker) is terminal-for-dispatch. This re-dispatch
+    // sweep must not bump redispatch_count, escalate, or re-fire a killed task —
+    // autoDispatchTask's own GUARD 4b is the backstop, but this check stops the
+    // redispatch_count increment and the REDISPATCH-CAP escalation that happen
+    // before it. One deduped `dispatch_blocked_owner_killed` event row records
+    // the block.
+    if (blockDispatchIfOwnerKilled(
+      { id: row.id, title: row.title, killed_at: loadKilledAtDefensive(row.id), description: row.description },
+      'backlog-redispatch-sweep',
+    )) {
+      console.warn(
+        `[backlog-redispatch] task ${row.id} is OWNER-KILLED (Rule R12) — excluded from re-dispatch; task stays dead`,
+      );
+      continue;
+    }
 
     // ESCALATION CAP: retried at least K times AND stuck ≥ M hours (updated_at
     // stays frozen while a task idles in backlog on a non-recordDispatchFailure

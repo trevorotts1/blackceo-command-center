@@ -68,6 +68,8 @@ import {
   recordModelSkewEvent,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
+import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
+
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import {
@@ -450,6 +452,20 @@ export async function autoDispatchTask(
     if (qcAttempts > QC_MAX_REROUTES) {
       console.warn(
         `[${context}] autoDispatchTask: task ${taskId} hit QC cap (${qcAttempts}/${QC_MAX_REROUTES}) — blocked`,
+      );
+      return;
+    }
+
+    // GUARD 4b (FIX-17 / Error 12 / Rule R12): OWNER-KILLED tasks are
+    // TERMINAL-for-dispatch. If the owner killed this task (killed_at column OR
+    // the "OWNER KILLED" note marker), NEVER re-dispatch it — the incident was a
+    // killed deck task re-dispatched as "LIVE" weeks later. One durable
+    // `dispatch_blocked_owner_killed` event row records the block (deduped, so
+    // every re-entry path and every sweep tick write at most one). An un-kill is
+    // an explicit owner action, never an elapsed clock.
+    if (blockDispatchIfOwnerKilled(task, context)) {
+      console.warn(
+        `[${context}] autoDispatchTask: task ${taskId} is OWNER-KILLED (Rule R12) — re-dispatch BLOCKED; task stays dead`,
       );
       return;
     }

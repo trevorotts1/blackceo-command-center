@@ -15,6 +15,7 @@ import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { recordDispatchFailure } from '@/lib/task-dispatcher';
+import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 import {
@@ -195,6 +196,23 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json(
         { error: 'Task has no assigned agent' },
         { status: 400 }
+      );
+    }
+
+    // FIX-17 / Error 12 / Rule R12: an OWNER-KILLED task (killed_at column OR
+    // the "OWNER KILLED" note marker) is terminal-for-dispatch — the manual
+    // "Send to Agent" route must refuse to revive it, exactly like every auto
+    // re-dispatch path. One deduped `dispatch_blocked_owner_killed` event row
+    // records the block.
+    if (blockDispatchIfOwnerKilled(task, 'manual-dispatch-route')) {
+      return NextResponse.json(
+        {
+          success: false,
+          held: true,
+          reason: 'owner_killed',
+          message: `Task "${task.title}" was killed by the owner (Rule R12) and is terminal-for-dispatch. It will not be revived. Clear the kill (killed_at / OWNER KILLED note) to re-enable dispatch.`,
+        },
+        { status: 409 },
       );
     }
 

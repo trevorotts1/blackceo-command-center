@@ -5085,6 +5085,39 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    id: '114',
+    name: 'add_tasks_killed_at',
+    up: (db) => {
+      // FIX-17 (Error 12 / Rule R12): OWNER-KILLED tasks must never be
+      // re-dispatched. The authoritative kill signal is the `killed_at` column:
+      // when an owner kills a task (or the orchestrator records an owner kill),
+      // this timestamp is stamped and every re-dispatch path (stale-task-sweep's
+      // returnToOrchestrator, autoDispatchTask, the manual dispatch route) treats
+      // the task as terminal-for-dispatch — never returned to the orchestrator,
+      // never re-fired, and a durable `dispatch_blocked_owner_killed` event is
+      // written on any attempt.
+      //
+      // Additive, nullable TEXT column — same PRAGMA-guarded ALTER TABLE pattern
+      // as migration 110/108/107 above, so it is a safe no-op on a fresh DB where
+      // schema.ts's tasks CREATE TABLE already carries the column. A NULL/absent
+      // value means "not killed" — no behavior change for any live task.
+      //
+      // The text-marker fallback ("OWNER KILLED" in the description/notes) is
+      // handled in src/lib/owner-killed.ts, NOT here: this migration only owns
+      // the structured column. Both signals feed the SAME guard primitive
+      // (isOwnerKilled) so the two paths cannot drift.
+      console.log('[Migration 114] Adding killed_at to tasks...');
+
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!tasksInfo.some((col) => col.name === 'killed_at')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN killed_at TEXT`);
+        console.log('[Migration 114] Added killed_at to tasks');
+      }
+
+      console.log('[Migration 114] tasks.killed_at ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

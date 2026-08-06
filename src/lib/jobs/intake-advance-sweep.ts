@@ -38,6 +38,7 @@ import { queryAll, run, queryOne, sqlTime, timeNow } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
 import { routeTask } from '@/lib/routing/department-router';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
@@ -143,6 +144,25 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
 
   for (const task of rows) {
     try {
+      // FIX-17 / Error 12 / Rule R12: an OWNER-KILLED task (killed_at column OR
+      // the "OWNER KILLED" note marker) is terminal-for-dispatch. This advancer
+      // must not ROUTE it (assign a specialist), feed it to the campaign board,
+      // or dispatch it — the incident was a killed deck task re-routed and
+      // re-dispatched as live. autoDispatchTask's own GUARD 4b is the backstop;
+      // this check stops the ROUTE + campaign-feed + task_dispatched writes that
+      // happen before autoDispatchTask. Re-fetch the kill signal defensively —
+      // the row SELECT may predate migration 114 and `killed_at` is absent from
+      // it; the description text marker is always present in the row.
+      if (blockDispatchIfOwnerKilled(
+        { id: task.id, title: task.title, killed_at: loadKilledAtDefensive(task.id), description: task.description },
+        'intake-advance-sweep',
+      )) {
+        console.warn(
+          `[intake-advance] task ${task.id} is OWNER-KILLED (Rule R12) — excluded from routing/dispatch; task stays dead`,
+        );
+        continue;
+      }
+
       let agentId = task.assigned_agent_id;
       let department = task.department;
 

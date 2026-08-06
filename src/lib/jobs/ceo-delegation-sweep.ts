@@ -30,6 +30,7 @@ import { queryAll, run, queryOne } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { routeTask } from '@/lib/routing/department-router';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
@@ -145,6 +146,23 @@ export async function runCeoDelegationSweep(): Promise<void> {
 
   for (const task of allTasks) {
     try {
+      // FIX-17 / Error 12 / Rule R12: an OWNER-KILLED task (killed_at column OR
+      // the "OWNER KILLED" note marker) is terminal-for-dispatch. This re-homing
+      // sweep must not re-route or re-dispatch it — autoDispatchTask's own
+      // GUARD 4b is the backstop, but this check stops the route + task_dispatched
+      // write that happen before it. Re-fetch killed_at defensively (the row
+      // SELECT may predate migration 114); the description text marker is always
+      // present in the row.
+      if (blockDispatchIfOwnerKilled(
+        { id: task.id, title: task.title, killed_at: loadKilledAtDefensive(task.id), description: task.description },
+        'ceo-delegation-sweep',
+      )) {
+        console.warn(
+          `[ceo-delegation] task ${task.id} is OWNER-KILLED (Rule R12) — excluded from re-homing/re-dispatch; task stays dead`,
+        );
+        continue;
+      }
+
       const isQcFail = (task.qc_reroute_attempts ?? 0) > 0;
 
       // Route across ALL departments (workspace_id: null) so the task can be
