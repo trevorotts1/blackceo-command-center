@@ -132,6 +132,14 @@ export interface DepartmentBoardProps {
   /** Skip the initial auto-load (tests / storybook). */
   autoLoad?: boolean;
   className?: string;
+  /**
+   * AI Workforce standard-first (PHASE 6 item 6): true when the box is
+   * standard-prebuilt (foundation already built, interview incomplete). In this
+   * THIRD state every canonical department is built-KEEP by default — it shows
+   * "Kept" with KEEP / REMOVE / TUNE controls instead of the legacy YES / NO /
+   * LATER undecided board. Custom departments are unaffected.
+   */
+  standardReady?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -229,6 +237,7 @@ export default function DepartmentBoard({
   onCoverageChange,
   autoLoad = true,
   className,
+  standardReady = false,
 }: DepartmentBoardProps) {
   // Live canonical catalog (never hardcoded).
   const [catalog, setCatalog] = useState<CanonicalDepartments | null>(null);
@@ -330,7 +339,13 @@ export default function DepartmentBoard({
 
   /* ---- board completeness = client mirror of gates #3 ∧ #8 ---- */
 
-  const boardComplete = flags.decisionCoverageComplete && flags.noUnprovenancedDeclines;
+  // AI Workforce standard-first (PHASE 6 item 6): on a standard-prebuilt box
+  // every canonical department is built-KEEP by default — gate #3 (coverage)
+  // relaxes to only require that declines are recorded. The board is complete
+  // as soon as there are zero unprovenanced declines.
+  const boardComplete = standardReady
+    ? flags.noUnprovenancedDeclines
+    : flags.decisionCoverageComplete && flags.noUnprovenancedDeclines;
 
   // Relay completeness up (Build button). Emitted only on real change.
   const lastEmitted = useRef<boolean | null>(null);
@@ -448,15 +463,27 @@ export default function DepartmentBoard({
       if (local) return local;
       // Covered-but-not-declined and no local verb → a kept "yes".
       if (coveredSet.has(key)) return 'yes';
+      // AI Workforce standard-first (PHASE 6 item 6): on a standard-prebuilt box
+      // every canonical department is built-KEEP by default — the foundation
+      // already exists. null would show "Not yet" with YES/NO/LATER controls,
+      // which is the legacy build-from-scratch third state (the bug).
+      if (standardReady) return 'yes';
       return null;
     },
-    [declinedSet, coveredSet, localDecisions],
+    [declinedSet, coveredSet, localDecisions, standardReady],
   );
 
   /* ---- derived counts (never a hardcoded total) ---- */
 
   const expectedCount = coverage.expected.length;
-  const decidedCount = coverage.covered.length;
+  // AI Workforce standard-first (PHASE 6 item 6): on a standard-prebuilt box
+  // every canonical department is built-KEEP by default — they count as
+  // decided even without an explicit server write. Only declines (removals)
+  // subtract from the total; the board stays complete once all explicit
+  // removals/adds are recorded.
+  const decidedCount = standardReady
+    ? Math.max(coverage.covered.length, expectedCount - coverage.declined.length)
+    : coverage.covered.length;
   const remaining = Math.max(0, expectedCount - decidedCount);
 
   /* ---- renders ---- */
@@ -498,12 +525,14 @@ export default function DepartmentBoard({
           <div>
             <p className={iv.eyebrow}>Your departments</p>
             <h1 className={iv.question} style={{ fontSize: 'clamp(1.6rem, 1.1rem + 2vw, 2.4rem)' }}>
-              Which departments should we build?
+              {standardReady
+                ? 'Review and tune your departments'
+                : 'Which departments should we build?'}
             </h1>
             <p className={iv.lede} style={{ marginTop: '0.5rem' }}>
-              Keep the ones you want, skip the ones you don&apos;t, and add anything unique to your
-              business. {decidedCount} of {expectedCount} decided
-              {remaining > 0 ? ` — ${remaining} to go.` : '.'}
+              {standardReady
+                ? `${decidedCount} departments are already set up — tune what they focus on, or remove the ones you don't need.`
+                : `Keep the ones you want, skip the ones you don't, and add anything unique to your business. ${decidedCount} of ${expectedCount} decided${remaining > 0 ? ` — ${remaining} to go.` : '.'}`}
             </p>
           </div>
           <CompleteBadge complete={boardComplete} remaining={remaining} />
@@ -525,7 +554,10 @@ export default function DepartmentBoard({
         )}
 
         {/* ── core (mandatory) departments ────────────────────────────────── */}
-        <Section title="Core departments" subtitle="Every company runs on these.">
+        <Section
+          title="Core departments"
+          subtitle={standardReady ? 'Every company runs on these — already built and ready to tune.' : 'Every company runs on these.'}
+        >
           <CardGrid>
             {mandatory.map((d) => (
               <DeptCard
@@ -542,6 +574,7 @@ export default function DepartmentBoard({
                 error={cardErrors[d.id] ?? null}
                 disabled={busyDept !== null && busyDept !== d.id}
                 onDecide={(verb) => void decide(d.id, verb)}
+                standardReady={standardReady}
               />
             ))}
           </CardGrid>
@@ -551,7 +584,7 @@ export default function DepartmentBoard({
         {recommended.length > 0 && (
           <Section
             title="Recommended for your industry"
-            subtitle="A great fit for what you do — keep them or opt out."
+            subtitle={standardReady ? 'A great fit for what you do — already built, keep or opt out.' : 'A great fit for what you do — keep them or opt out.'}
           >
             <CardGrid>
               {recommended.map((d) => (
@@ -569,6 +602,7 @@ export default function DepartmentBoard({
                   error={cardErrors[d.id] ?? null}
                   disabled={busyDept !== null && busyDept !== d.id}
                   onDecide={(verb) => void decide(d.id, verb)}
+                  standardReady={standardReady}
                 />
               ))}
             </CardGrid>

@@ -969,6 +969,7 @@ function DepartmentsStage({
       <DepartmentBoard
         sessionId={sessionId ?? undefined}
         onCoverageChange={onCoverageChange}
+        standardReady={standardReady}
       />
       {standardReady && (
         <p

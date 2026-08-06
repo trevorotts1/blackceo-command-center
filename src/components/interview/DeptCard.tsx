@@ -70,6 +70,13 @@ export interface DeptCardProps {
   onDecide?: (verb: DeptVerb) => void;
   /** Opt a custom department out of the workforce (custom only). */
   onRemove?: () => void;
+  /**
+   * AI Workforce standard-first (PHASE 6 item 6): true → the card shows the
+   * THIRD state — KEEP (default, the foundation is already built) / REMOVE
+   * (confirmed decline with loss warning) / TUNE (want to personalize content).
+   * Legacy boxes (false) keep the YES / NO / LATER build-from-scratch controls.
+   */
+  standardReady?: boolean;
 }
 
 const KIND_LABEL: Record<DeptKind, string> = {
@@ -92,18 +99,21 @@ export default function DeptCard({
   disabled = false,
   onDecide,
   onRemove,
+  standardReady = false,
 }: DeptCardProps) {
   const isCustom = kind === 'custom';
   // A custom department is kept by default, so it reads as covered even without
-  // a written decision. Canonical cards are covered only on server confirmation.
-  const decided = covered || decision !== null || isCustom;
+  // a written decision. Canonical cards are covered only on server confirmation
+  // OR (PHASE 6 item 6) when the box is standard-prebuilt — the foundation is
+  // already built, so every canonical department is decided by default.
+  const decided = covered || decision !== null || isCustom || (standardReady && !isCustom);
 
   return (
     <motion.article
       layout
       variants={ivStaggerChild}
       data-dept-id={id}
-      data-decision={decision ?? (isCustom ? 'kept' : 'undecided')}
+      data-decision={decision ?? (isCustom ? 'kept' : standardReady ? 'kept' : 'undecided')}
       className={ivcx(iv.card, 'iv-dept-card')}
       style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: '0.85rem' }}
     >
@@ -140,6 +150,7 @@ export default function DeptCard({
           declined={decision === 'no'}
           later={decision === 'later'}
           needsReconfirm={needsReconfirm}
+          keptByDefault={standardReady && !isCustom && decision !== 'no'}
         />
       </div>
 
@@ -166,6 +177,27 @@ export default function DeptCard({
               Remove
             </button>
           )}
+        </div>
+      ) : standardReady ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--iv-accent-strong)' }}>
+            <Check className="h-4 w-4" aria-hidden />
+            In your workforce
+          </span>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            {onDecide && (
+              <button
+                type="button"
+                onClick={() => onDecide('no')}
+                disabled={disabled || busy}
+                className={ivcx(iv.btnQuiet, busy && 'is-busy')}
+                aria-label={`Remove ${name} from your workforce`}
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Trash2 className="h-4 w-4" aria-hidden />}
+                Remove
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div
@@ -234,11 +266,16 @@ function CoverageBadge({
   declined,
   later,
   needsReconfirm,
+  keptByDefault,
 }: {
   decided: boolean;
   declined: boolean;
   later: boolean;
   needsReconfirm: boolean;
+  /** AI Workforce standard-first (PHASE 6 item 6): true for a canonical card on
+   *  a standard-prebuilt box that is NOT declined — the badge reads "Kept"
+   *  (foundation already built) instead of the legacy "Covered" / "Not yet". */
+  keptByDefault?: boolean;
 }) {
   if (needsReconfirm) {
     return (
@@ -269,6 +306,14 @@ function CoverageBadge({
       <span className={iv.badgePending} style={{ whiteSpace: 'nowrap' }}>
         <Clock3 className="h-3.5 w-3.5" aria-hidden />
         Later
+      </span>
+    );
+  }
+  if (keptByDefault) {
+    return (
+      <span className={iv.badgeCovered} style={{ whiteSpace: 'nowrap' }}>
+        <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+        Kept
       </span>
     );
   }
