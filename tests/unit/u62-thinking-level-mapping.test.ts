@@ -3,7 +3,7 @@
  *
  * U61/S1 (spike evidence, `~/Downloads/skill6-u61-spike-S1-model-effort-
  * override-2026-07-16.md`) directly, verbatim-proved the accepted-AND-LANDING
- * effort set for `ollama/deepseek-v4-flash:cloud` on this gateway version
+ * effort set for `ollama/deepseek-v4-flash:0731-cloud` on this gateway version
  * (2026.6.11) is exactly FOUR values: `off, low, medium, high` — each
  * confirmed by an isolated `thinking_level_change` event matching the
  * request. Two traps proved in the SAME pass:
@@ -99,7 +99,7 @@ describe('isValidGatewayThinkingLevel() — API-boundary defense in depth', () =
  */
 describe('isOllamaReasoningFamily() — scopes the proven ladder to what was actually verified', () => {
   it('recognizes every Ollama-family model_id prefix used elsewhere in this codebase (model-selector.ts tierOf())', () => {
-    expect(isOllamaReasoningFamily('ollama/deepseek-v4-flash:cloud')).toBe(true);
+    expect(isOllamaReasoningFamily('ollama/deepseek-v4-flash:0731-cloud')).toBe(true);
     expect(isOllamaReasoningFamily('ollama-cloud/llama3.3:70b')).toBe(true);
     expect(isOllamaReasoningFamily('ollama-local/llama3.3:70b')).toBe(true);
   });
@@ -113,7 +113,7 @@ describe('isOllamaReasoningFamily() — scopes the proven ladder to what was act
 
 describe('computeThinkingDisabledState() — the ONE place ThinkingSelector\'s degrade reason is decided', () => {
   const ollamaReasoningModel: ModelOption = {
-    model_id: 'ollama/deepseek-v4-flash:cloud',
+    model_id: 'ollama/deepseek-v4-flash:0731-cloud',
     label: 'DeepSeek v4 Flash',
     provider: 'ollama',
     context_window: 64_000,

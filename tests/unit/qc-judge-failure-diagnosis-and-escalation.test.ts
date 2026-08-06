@@ -2,7 +2,7 @@
  * QC judge failure: correct DIAGNOSIS + bounded retry + escalation hatch.
  *
  * ── WHAT ACTUALLY HAPPENED (proved by reproduction on the live box) ─────────
- * The configured judge (`deepseek-v4-flash:cloud`) is a REASONING model: its
+ * The configured judge (`deepseek-v4-flash:0731-cloud`) is a REASONING model: its
  * reply carries a hidden `reasoning` field alongside `content`, billed against
  * the SAME completion budget. `qc-scorer.ts` asked for `max_tokens: 300`. The
  * reasoning consumed the entire budget and `content` came back EMPTY.
@@ -68,7 +68,7 @@ delete process.env.QC_JUDGE_MAX_TOKENS;
 const MAX_PASSES = 3;
 process.env.QC_JUDGE_FAILURE_MAX_PASSES = String(MAX_PASSES);
 
-const JUDGE_MODEL = 'ollama-cloud/deepseek-v4-flash:cloud';
+const JUDGE_MODEL = 'ollama-cloud/deepseek-v4-flash:0731-cloud';
 const FINAL_MARKER = '[QC-JUDGE-FAILED-FINAL]';
 const DEFER_MARKER = '[QC-DEFERRED-PROVIDER-DOWN]';
 
