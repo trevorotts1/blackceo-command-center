@@ -12,6 +12,60 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { isEmbeddingAvailable, rankSOPsBySemantic } from '@/lib/sop-embeddings';
 
 /**
+ * FIX-16 (Error 11 / Rule R11) — owning-department SOP firewall.
+ *
+ * The matcher used to score a SOP against a task by keyword overlap + canonical
+ * department match with NO department floor on keyword-only hits. A deck task
+ * titled "New web property launch" therefore scored 0.5 (keyword cap) on a
+ * "Web Development: New Web Property or Major Feature Launch" SOP and a
+ * Customer Support SOP could win on a department-less row — neither is a
+ * presentation SOP (observed Aug 5; ERROR 11). Rule R11: tasks carry their
+ * owning department's SOP.
+ *
+ * The firewall restricts the candidate pool BEFORE scoring: a task whose
+ * department resolves to a non-empty canonical slug may ONLY be matched against
+ * SOPs of that SAME canonical department. A cross-department SOP — however
+ * strong its keyword or semantic overlap — is excluded outright and can never
+ * surface (keyword path, semantic path, or `getBestSOPForTask`).
+ *
+ * Three carve-outs preserve prior behavior:
+ *   - `general-task` (the mandatory catch-all) is NOT firewalled — a catch-all
+ *     task must be able to match any SOP by design.
+ *   - A task with NO department (department and workspace_id both resolve
+ *     empty) has no owning department to restrict to — legacy unfiltered
+ *     behavior is kept.
+ *   - A DEPARTMENT-LESS SOP (department null/'') declares no owning department,
+ *     so it is not a *cross-department* SOP and stays eligible as a fallback —
+ *     this preserves the Triad Rule floor (a task can still reach a generic
+ *     SOP when the owning department has no SOP of its own). Only a SOP that
+ *     EXPLICITLY declares a different department is excluded.
+ *
+ * A firewalled department with no SOP in the owning set resolves to `null` in
+ * `getBestSOPForTask`, and the dispatch-time fast loop already writes the
+ * `sop_library_gap` event and proceeds SOP-less (human review) — the intended
+ * "presentation SOP or null (held with sop_library_gap)" contract.
+ */
+const SOP_FIREWALL_CATCH_ALL = 'general-task';
+
+export function filterSopsToOwningDepartment<T extends SOP>(
+  sops: T[],
+  task: Pick<Task, 'title' | 'description'> & {
+    department?: string | null;
+    workspace_id?: string | null;
+  },
+): T[] {
+  const taskDeptCanon = canonicalDeptSlug(task.department ?? task.workspace_id ?? '');
+  if (!taskDeptCanon || taskDeptCanon === SOP_FIREWALL_CATCH_ALL) return sops;
+  return sops.filter((sop) => {
+    const sopDeptCanon = canonicalDeptSlug(sop.department ?? '');
+    // Department-less SOP: not a cross-dept SOP — keep it as the fallback floor.
+    if (!sopDeptCanon) return true;
+    // Explicitly-declared department: must equal the task's owning department.
+    return sopDeptCanon === taskDeptCanon;
+  });
+}
+
+/**
  * F3.9 — a step-level SOP → persona-role SLOT contract.
  *
  * An SOP that spans multiple crafts (e.g. "Build a website": CONTENT / CODE /
@@ -289,7 +343,10 @@ export function suggestSOPsForTaskKeyword(
     `SELECT * FROM sops WHERE deleted_at IS NULL`,
     []
   );
-  const scored = sops
+  // FIX-16: the owning-department firewall runs BEFORE scoring — a cross-dept
+  // SOP is removed from the candidate pool and can never win on keywords.
+  const eligible = filterSopsToOwningDepartment(sops, task);
+  const scored = eligible
     .map((sop) => {
       const { score, reasons } = scoreSOPForTask(sop, task);
       return { sop, score, reasons };
@@ -324,8 +381,12 @@ export async function suggestSOPsForTask(
 ): Promise<SOPSuggestion[]> {
   // Always compute keyword scores — they're the guaranteed fallback.
   const sops = queryAll<SOP>(`SELECT * FROM sops WHERE deleted_at IS NULL`, []);
+  // FIX-16: the owning-department firewall runs BEFORE scoring on BOTH paths
+  // (semantic + keyword fallback) so a cross-dept SOP can never surface, even
+  // when it is the strongest semantic neighbor.
+  const eligible = filterSopsToOwningDepartment(sops, task);
   const keywordMap = new Map<string, { score: number; reasons: string[] }>();
-  for (const sop of sops) {
+  for (const sop of eligible) {
     const { score, reasons } = scoreSOPForTask(sop, task);
     keywordMap.set(sop.id, { score, reasons });
   }
@@ -346,7 +407,7 @@ export async function suggestSOPsForTask(
         // Max keyword score for normalization (avoid div-by-zero)
         const maxKw = Math.max(...Array.from(keywordMap.values()).map((v) => v.score), 0.001);
 
-        const blended: SOPSuggestion[] = sops.map((sop) => {
+        const blended: SOPSuggestion[] = eligible.map((sop) => {
           const kw = keywordMap.get(sop.id) ?? { score: 0, reasons: [] };
           const sem = semanticMap.get(sop.id) ?? 0;
           // Map cosine similarity [-1,1] → [0,1]; then weight 70% semantic, 30% keyword
@@ -372,7 +433,7 @@ export async function suggestSOPsForTask(
   }
 
   // Pure keyword fallback — identical to the old synchronous path.
-  const kwResults = sops
+  const kwResults = eligible
     .map((sop) => {
       const { score, reasons } = keywordMap.get(sop.id)
         ? { ...keywordMap.get(sop.id)! }
