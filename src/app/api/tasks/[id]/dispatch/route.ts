@@ -17,6 +17,12 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { recordDispatchFailure } from '@/lib/task-dispatcher';
 import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import {
+  resolveAgentRuntimeModel,
+  modelsMatch,
+  recordModelSkewEvent,
+  type RuntimeModelResolution,
+} from '@/lib/runtime-model';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -543,19 +549,61 @@ If you need help or clarification, ask the orchestrator.`;
         idempotencyKey: `dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
       });
 
+      // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model on the
+      // task, not the CC's "intended" resolution. The gateway has no supported
+      // per-dispatch model override (see contract note above), so the agent runs
+      // on whatever its OWN openclaw.json agent config selects. We resolve that
+      // runtime model (openclaw.json `agents.list[i].model.primary`, cross-checked
+      // against the live gateway session when one is up) and write IT to
+      // tasks.model_id — so the owner's model pill reflects what actually ran,
+      // not the registry default that was never honored.
+      //
+      // When the intended and runtime models diverge, a `model_skew_detected`
+      // event row is written (queryable — the FIX-15 QC gate reads it). Best
+      // effort: never throws, never fails the dispatch; falls back to the
+      // intended model when the runtime model is unresolvable.
+      const runtimeResolved: RuntimeModelResolution = await resolveAgentRuntimeModel(
+        agent,
+        task.workspace_id,
+        session.openclaw_session_id,
+      );
+      const intendedModel = settings.model || null;
+      const runtimeModel = runtimeResolved.model_id || intendedModel;
+      const skew = !!(intendedModel && runtimeModel && !modelsMatch(intendedModel, runtimeModel));
+      if (skew) {
+        console.warn(
+          `[Dispatch] FIX-15 MODEL-SKEW task ${id}: intended="${intendedModel}" runtime="${runtimeModel}" ` +
+            `(source=${runtimeResolved.source})`,
+        );
+      }
+      recordModelSkewEvent({
+        taskId: id,
+        agentId: agent.id,
+        intended: intendedModel,
+        runtime: runtimeModel,
+        skew,
+        detail: {
+          source: runtimeResolved.source,
+          config_agent_id: runtimeResolved.configAgentId,
+          config_primary: runtimeResolved.configPrimary,
+          gateway_model: runtimeResolved.gatewayModel,
+          model_source: settings.modelSource,
+          manual_dispatch: true,
+        },
+      });
+
       // Update task status to in_progress, and pin the resolved model_id so
       // the UI (MissionQueue 🤖 pill) and downstream auditing can show which
-      // model this task was INTENDED to run on. NOTE: this is the model the CC
-      // resolved/requested, not a gateway-confirmed runtime model — the gateway
-      // selects the agent's own configured model (see contract note above). The
-      // pill is labeled accordingly. v4.0.1 P0-7 / B1.
+      // model this task will ACTUALLY run on (FIX-15: runtime model, resolved
+      // from the agent's openclaw.json config / live gateway session above —
+      // not the CC "intended" resolution). v4.0.1 P0-7 / B1.
       // U99-RAW-STATUS-WRITER: compound single-row UPDATE (model_id must land
       // atomically with the status flip so the UI 🤖 pill never shows a stale
       // model for an in_progress task); audited immediately below via
       // recordStatusEvent (DISP-10).
       run(
         'UPDATE tasks SET status = ?, model_id = ?, updated_at = ? WHERE id = ?',
-        ['in_progress', settings.model || null, now, id]
+        ['in_progress', runtimeModel, now, id]
       );
       recordStatusEvent(id, task.status, 'in_progress', {
         actor: 'manual-dispatch',

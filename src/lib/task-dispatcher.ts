@@ -62,6 +62,12 @@ import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@
 import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
+import {
+  resolveAgentRuntimeModel,
+  modelsMatch,
+  recordModelSkewEvent,
+  type RuntimeModelResolution,
+} from '@/lib/runtime-model';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import {
@@ -1267,14 +1273,50 @@ If you need help or clarification, ask the orchestrator.`;
     // fast agent has meanwhile moved to review. Instead pin the resolved model_id
     // and broadcast the CURRENT row so the board reflects live state.
     //
+    // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model, not the
+    // CC "intended" resolution. The gateway has no per-dispatch model override
+    // (chat.send rejects `model`), so the agent runs on its own openclaw.json
+    // agent config. Resolve that runtime model and write IT to tasks.model_id;
+    // when it diverges from the intended model, emit a `model_skew_detected`
+    // event row (the FIX-15 QC gate reads it). Best effort — never throws.
+    //
     // CROSS-LANE NOTE (DISP-10 / DATA-07, U99 — Raw-writer convergence):
     // resolved. The CAS claim above is a raw status write (a multi-status IN
     // clause transition() cannot express as a single expectedFrom), but it is
     // now audited via recordStatusEvent immediately after the claim succeeds,
     // so task_events is complete for this path too. The dispatch is also
     // recorded via the 'task_dispatched' events row + task_activities below.
-    if (settings.model) {
-      run('UPDATE tasks SET model_id = ?, updated_at = ? WHERE id = ?', [settings.model, now, task.id]);
+    const runtimeResolved: RuntimeModelResolution = await resolveAgentRuntimeModel(
+      agent,
+      task.workspace_id,
+      session.openclaw_session_id,
+    );
+    const intendedModel = settings.model || null;
+    const runtimeModel = runtimeResolved.model_id || intendedModel;
+    const skew = !!(intendedModel && runtimeModel && !modelsMatch(intendedModel, runtimeModel));
+    if (skew) {
+      console.warn(
+        `[${context}] FIX-15 MODEL-SKEW task ${task.id}: intended="${intendedModel}" runtime="${runtimeModel}" ` +
+          `(source=${runtimeResolved.source})`,
+      );
+    }
+    recordModelSkewEvent({
+      taskId: task.id,
+      agentId: agent.id,
+      intended: intendedModel,
+      runtime: runtimeModel,
+      skew,
+      detail: {
+        source: runtimeResolved.source,
+        config_agent_id: runtimeResolved.configAgentId,
+        config_primary: runtimeResolved.configPrimary,
+        gateway_model: runtimeResolved.gatewayModel,
+        model_source: settings.modelSource,
+        auto_dispatch: true,
+      },
+    });
+    if (runtimeModel) {
+      run('UPDATE tasks SET model_id = ?, updated_at = ? WHERE id = ?', [runtimeModel, now, task.id]);
     }
     try {
       const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
