@@ -16,7 +16,7 @@ import {
 test("common coach/default ticket routes to MEDIUM (not HARD)", () => {
   const r = classifyTier("The coach-client-agent for the box is not nudging onboarding, can you push it");
   assert.equal(r.tier, "medium");
-  assert.equal(r.model, "ollama/deepseek-v4-flash:cloud");
+  assert.equal(r.model, "ollama/deepseek-v4-flash:0731-cloud");
   assert.equal(r.thinking, "low");
   assert.equal(r.agentTimeout, AGENT_TIMEOUT_MEDIUM);
 });

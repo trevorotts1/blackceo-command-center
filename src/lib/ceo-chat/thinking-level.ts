@@ -6,10 +6,10 @@
  * 2026-07-16.md`), directly, by a literal `thinking_level_change` event for
  * each row, on the live gateway (2026.6.11), never inferred from
  * documentation: the accepted-AND-LANDING effort set for
- * `ollama/deepseek-v4-flash:cloud` is exactly FOUR values —
+ * `ollama/deepseek-v4-flash:0731-cloud` is exactly FOUR values —
  * `off, low, medium, high`. Two traps proved in the same pass:
  *   - `minimal` HARD-REJECTS: `Error: Thinking level "minimal" is not
- *     supported for ollama/deepseek-v4-flash:cloud. Use one of: off, low,
+ *     supported for ollama/deepseek-v4-flash:0731-cloud. Use one of: off, low,
  *     medium, high, max.`
  *   - `max` VALIDATES at the request layer (`status: ok`,
  *     `requestShaping.thinking: "max"`, no error) but the session's own

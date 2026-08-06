@@ -28,7 +28,7 @@ afterEach(() => cleanup());
 
 const MODELS: ModelOption[] = [
   { model_id: 'ollama-cloud/llama3.3:70b', label: 'Llama 3.3 70B', provider: 'ollama-cloud', context_window: 128_000, capabilities: ['text'] },
-  { model_id: 'ollama/deepseek-v4-flash:cloud', label: 'DeepSeek v4 Flash', provider: 'ollama', context_window: 64_000, capabilities: ['text', 'reasoning'] },
+  { model_id: 'ollama/deepseek-v4-flash:0731-cloud', label: 'DeepSeek v4 Flash', provider: 'ollama', context_window: 64_000, capabilities: ['text', 'reasoning'] },
 ];
 
 const AGENTS: AgentOption[] = [
@@ -81,9 +81,9 @@ describe('ModelPicker — interactive (U62)', () => {
     const option = await screen.findByText('DeepSeek v4 Flash');
     fireEvent.click(option);
 
-    expect(onResolved).toHaveBeenLastCalledWith(expect.objectContaining({ model_id: 'ollama/deepseek-v4-flash:cloud' }));
+    expect(onResolved).toHaveBeenLastCalledWith(expect.objectContaining({ model_id: 'ollama/deepseek-v4-flash:0731-cloud' }));
     expect(onUserChange).toHaveBeenCalledTimes(1);
-    expect(onUserChange).toHaveBeenCalledWith(expect.objectContaining({ model_id: 'ollama/deepseek-v4-flash:cloud' }));
+    expect(onUserChange).toHaveBeenCalledWith(expect.objectContaining({ model_id: 'ollama/deepseek-v4-flash:0731-cloud' }));
   });
 
   it('disabled=true (streaming) never opens the menu and carries the honest tooltip — never silently vanishes', async () => {
