@@ -54,7 +54,12 @@ import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
+import {
+  isPodcastTask,
+  podcastProcessorActivationStatus,
+  podcastActivationRefusalMessage,
+} from '@/lib/capability-manifest';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
 import { notifyOwnerAssigned } from '@/lib/owner-reports';
@@ -2520,63 +2525,115 @@ export async function createTaskCore(
   let routedDepartment: string | null = input.department || null;
   let routedReason: string | null = null;
   if (!resolvedAgentId) {
-    try {
-      // Pass workspace_id: null so routeTask considers agents across ALL
-      // departments, not just the workspace the task happened to land in. This
-      // is what lets a CEO/default-landed inbound task get delegated DOWN to
-      // the right department (B8) instead of staying stuck on the CEO. The
-      // winning department is stamped back onto the task below.
-      const routing = await routeTask({
-        title: input.title,
-        description: input.description ?? '',
-        priority: (input.priority as TaskPriority) || 'medium',
-        workspace_id: null,
-        department: input.department ?? undefined,
-      });
-      if (routing) {
-        resolvedAgentId = routing.agentId;
-        routedReason = routing.reason;
-        // comDispatch() (department-router.ts) returns `department` as the
-        // DepartmentConfig's DISPLAY name (e.g. "Marketing"), not its `.id`
-        // slug — the interface comment on DepartmentConfig.id says exactly
-        // that field is "used in task.department field", but comDispatch's
-        // five return sites all send `.name` instead. Persisting the raw
-        // name here would silently clobber the canonical-slug department
-        // backfill computed above (`resolvedDepartment`) the moment routing
-        // succeeds — breaking the board's department filter chip, which
-        // compares `task.department` against a workspace-slug string
-        // (C-10/U41). Resolve back to the real workspace slug the same way
-        // `workspaceSlug` was resolved above; fall back to
-        // canonicalDeptSlug's graceful degradation for department values
-        // with no workspace row (e.g. the CEO/COM last-resort sentinel).
-        if (routing.department) {
-          try {
-            const routedWs = _db
-              .prepare('SELECT slug FROM workspaces WHERE lower(name) = lower(?) OR slug = ? OR id = ?')
-              .get(routing.department, routing.department, routing.department) as
-              | { slug: string }
-              | undefined;
-            routedDepartment = routedWs ? routedWs.slug : canonicalDeptSlug(routing.department) || routedDepartment;
-          } catch {
-            routedDepartment = canonicalDeptSlug(routing.department) || routedDepartment;
-          }
-        }
-        run(
-          `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
-          [resolvedAgentId, routedDepartment, now, id]
-        );
-        // Surface the routing decision so an operator can see why a task moved
-        // (comDispatch already produces a human-readable reason string).
-        run(
-          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), 'task_dispatched', resolvedAgentId, id, `Auto-routed: ${routedReason}`, now]
-        );
+    // Unit 3.4 — CAPABILITY MANIFEST gate BEFORE assigning: a podcast task must
+    // NEVER be routed to (or stamped with) a podcast agent id on a box whose
+    // Skill 58 processor is not activated. The dispatch-time guard in
+    // autoDispatchTask (task-dispatcher.ts GUARD 8) is the fail-closed backstop;
+    // this creation-time gate stops the phantom agent id from ever being
+    // stamped on the card in the first place. When the box is not activated we
+    // leave the task unassigned in backlog (the human-review fallback) and
+    // surface the rescue SOP loudly — never invent an id like audio-podcast-editor.
+    let podcastRoutingBlocked = false;
+    const taskDeptLabel = input.department ?? workspaceSlug;
+    if (isPodcastTask(taskDeptLabel)) {
+      const activation = podcastProcessorActivationStatus();
+      if (!activation.activated) {
+        podcastRoutingBlocked = true;
+        const refusal = podcastActivationRefusalMessage();
+        const msg =
+          `[podcast_activation_refused] Task "${input.title}" (${id}) is a podcast task but this box ` +
+          `has NO activated podcast processor. ${activation.reason} ${refusal} ` +
+          `Left unassigned in backlog — no agent id invented, no skill-less session spawned.`;
+        console.error(`[createTaskCore] ${msg}`);
+        try {
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at)
+             VALUES (?, 'podcast_activation_refused', ?, ?, ?)`,
+            [uuidv4(), id, msg, new Date().toISOString()],
+          );
+        } catch { /* pre-migration tolerant */ }
+        try {
+          // SYSTEM audience — operator/rescue channel only (MOVE-IN-SILENCE).
+          notifySystem(msg, { agent: 'createTaskCore', action: 'escalate' });
+        } catch { /* notify best-effort */ }
+        // W8.2 / P1-01: record the failed advance attempt and reach a TERMINAL
+        // blocked state. Without this, the task is left unassigned in backlog
+        // and the every-2-min intake-advance sweep re-routes + re-fires it
+        // forever (unbounded events rows, alert resend every 15 min). A missing
+        // podcast processor is NON-TRANSIENT — no retry can fix it — so
+        // hardBlock:true transitions the task straight to `blocked` on attempt
+        // 1 (SYSTEM audience: operator/rescue only, never the client Telegram).
+        // Mirrors the GUARD 8 / no_specialist_runtime / podcast_skill_not_resolvable
+        // siblings. The task was just INSERTed above, so its id is known; no
+        // agent is assigned (resolvedAgentId stays null).
+        recordDispatchFailure(id, null, {
+          reason: 'podcast_not_activated',
+          audience: 'SYSTEM',
+          needs: refusal,
+          context: 'createTaskCore',
+          hardBlock: true,
+        });
       }
-    } catch (routeErr) {
-      // Never fail task creation on a routing error — the task simply stays
-      // unassigned in backlog for manual triage.
-      console.warn('[createTaskCore] In-process routing failed (non-fatal):', routeErr);
+    }
+    if (!podcastRoutingBlocked) {
+      try {
+        // Pass workspace_id: null so routeTask considers agents across ALL
+        // departments, not just the workspace the task happened to land in. This
+        // is what lets a CEO/default-landed inbound task get delegated DOWN to
+        // the right department (B8) instead of staying stuck on the CEO. The
+        // winning department is stamped back onto the task below.
+        const routing = await routeTask({
+          title: input.title,
+          description: input.description ?? '',
+          priority: (input.priority as TaskPriority) || 'medium',
+          workspace_id: null,
+          department: input.department ?? undefined,
+        });
+        if (routing) {
+          resolvedAgentId = routing.agentId;
+          routedReason = routing.reason;
+          // comDispatch() (department-router.ts) returns `department` as the
+          // DepartmentConfig's DISPLAY name (e.g. "Marketing"), not its `.id`
+          // slug — the interface comment on DepartmentConfig.id says exactly
+          // that field is "used in task.department field", but comDispatch's
+          // five return sites all send `.name` instead. Persisting the raw
+          // name here would silently clobber the canonical-slug department
+          // backfill computed above (`resolvedDepartment`) the moment routing
+          // succeeds — breaking the board's department filter chip, which
+          // compares `task.department` against a workspace-slug string
+          // (C-10/U41). Resolve back to the real workspace slug the same way
+          // `workspaceSlug` was resolved above; fall back to
+          // canonicalDeptSlug's graceful degradation for department values
+          // with no workspace row (e.g. the CEO/COM last-resort sentinel).
+          if (routing.department) {
+            try {
+              const routedWs = _db
+                .prepare('SELECT slug FROM workspaces WHERE lower(name) = lower(?) OR slug = ? OR id = ?')
+                .get(routing.department, routing.department, routing.department) as
+                | { slug: string }
+                | undefined;
+              routedDepartment = routedWs ? routedWs.slug : canonicalDeptSlug(routing.department) || routedDepartment;
+            } catch {
+              routedDepartment = canonicalDeptSlug(routing.department) || routedDepartment;
+            }
+          }
+          run(
+            `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
+            [resolvedAgentId, routedDepartment, now, id]
+          );
+          // Surface the routing decision so an operator can see why a task moved
+          // (comDispatch already produces a human-readable reason string).
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [uuidv4(), 'task_dispatched', resolvedAgentId, id, `Auto-routed: ${routedReason}`, now]
+          );
+        }
+      } catch (routeErr) {
+        // Never fail task creation on a routing error — the task simply stays
+        // unassigned in backlog for manual triage.
+        console.warn('[createTaskCore] In-process routing failed (non-fatal):', routeErr);
+      }
     }
   }
   // --- END INSTANT ROUTING ---
