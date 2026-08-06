@@ -163,12 +163,15 @@ test('FIX-24: resolveSettings for a presentations text task resolves to the 0731
   seedRow(LIVE_FLEET_REGISTRY_ID);
 
   // Seed a presentations workspace + agent + task so resolveSettings can run
-  // end-to-end through the real Layer-4 task-time selector.
+  // end-to-end through the real Layer-4 task-time selector. The slug must be
+  // UNIQUE — the boot auto-seed already creates a `presentations` workspace
+  // (id `presentations`), so a slug collision would make INSERT OR IGNORE
+  // silently skip THIS row and the agent's workspace_id FK would then fail.
   const now = new Date().toISOString();
   run(
     `INSERT OR IGNORE INTO workspaces (id, slug, name, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?)`,
-    ['fix24-presentations', 'presentations', 'Presentations', now, now],
+    ['fix24-presentations', 'fix24-presentations', 'Presentations (fix24)', now, now],
   );
   run(
     `INSERT OR IGNORE INTO agents (id, name, role, avatar_emoji, status, is_master, workspace_id, created_at, updated_at)
