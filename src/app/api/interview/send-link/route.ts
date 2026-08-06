@@ -77,10 +77,13 @@ function dashboardBase(): string {
  *  the original build-from-scratch wording byte-identical. */
 function startMessage(link: string, standardReady: boolean): string {
   if (standardReady) {
+    const previewLink = link.replace(/\/interview$/, '/preview');
     return (
       'Your AI Workforce Interview is ready — and so is your company: the ' +
-      'standard foundation is already set up. This conversation tailors it ' +
-      `to you. When you are ready, start here: ${link}\n\n` +
+      'standard foundation is already set up with your departments, ready to ' +
+      `review here: ${previewLink}\n\n` +
+      'This conversation tailors the foundation to you. When you are ready to ' +
+      `start the interview, go here: ${link}\n\n` +
       'It works great on your phone. Every answer is saved as you go, so you ' +
       'can pause anytime and pick up right where you left off.'
     );

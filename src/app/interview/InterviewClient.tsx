@@ -972,20 +972,32 @@ function DepartmentsStage({
         standardReady={standardReady}
       />
       {standardReady && (
-        <p
-          style={{
-            textAlign: 'center',
-            fontSize: '0.85rem',
-            color: 'var(--iv-ink-soft)',
-            margin: '0.5rem auto 0',
-            maxWidth: '38rem',
-            padding: '0 1rem',
-          }}
-        >
-          Your standard company foundation is already built — review it below.
-          For each department: keep it (the default), tune what it focuses on,
-          or remove the ones you don&apos;t need.
-        </p>
+        <div style={{ textAlign: 'center', margin: '0.5rem auto 0', maxWidth: '38rem', padding: '0 1rem' }}>
+          <p
+            style={{
+              fontSize: '0.85rem',
+              color: 'var(--iv-ink-soft)',
+              margin: 0,
+            }}
+          >
+            Your standard company foundation is already built — review it below.
+            For each department: keep it (the default), tune what it focuses on,
+            or remove the ones you don&apos;t need.
+          </p>
+          <p style={{ marginTop: '0.5rem' }}>
+            <a
+              href="/preview"
+              style={{
+                fontSize: '0.82rem',
+                color: 'var(--iv-accent-strong)',
+                textDecoration: 'underline',
+                textUnderlineOffset: '0.15em',
+              }}
+            >
+              See a read-only preview of your company
+            </a>
+          </p>
+        </div>
       )}
       {/* Coverage-gated continue: arms only when the board reports every expected
           department decided AND zero un-provenanced declines. In the
@@ -1149,6 +1161,26 @@ function ConsentScreen({
           <p className={ivcx(iv.lede, 'mt-2')} style={{ fontSize: '0.82rem' }}>
             Your Command Center unlocks when the AI Workforce Interview is complete.
           </p>
+          {/* BLOCKER 8(a): day-one experience — on a standard-prebuilt box the
+              owner can see their pre-built foundation before starting the
+              interview. /preview is the read-only company view (no forms, no
+              actions, no mutation affordance) — the motivation surface the
+              prebuild doctrine says must be reachable. */}
+          {standardReady && (
+            <p style={{ marginTop: '1rem' }}>
+              <a
+                href="/preview"
+                style={{
+                  fontSize: '0.85rem',
+                  color: 'var(--iv-accent-strong)',
+                  textDecoration: 'underline',
+                  textUnderlineOffset: '0.15em',
+                }}
+              >
+                Preview your company — your departments are already set up.
+              </a>
+            </p>
+          )}
           {booting && (
             <p className={iv.lede} style={{ fontSize: '0.78rem', marginTop: '0.5rem' }} aria-live="polite">
               Checking for saved progress…

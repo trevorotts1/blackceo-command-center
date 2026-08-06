@@ -40,7 +40,8 @@
  */
 
 import { loadCompanyConfig } from '@/lib/company-config';
-import { readBuildState } from '@/lib/interview/seam';
+import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
+import type { BuildState } from '@/lib/interview/seam';
 import { resolveDepartmentsConfigPath } from '@/lib/db/migrations';
 import fs from 'fs';
 
@@ -125,16 +126,49 @@ function normalizeDepartments(data: unknown): PreviewDepartment[] {
   return out;
 }
 
-/** Read + parse the resolved chosen-departments artifact. Never throws. */
-function readChosenDepartments(): { departments: PreviewDepartment[]; resolved: boolean } {
+/** Read + parse the resolved chosen-departments artifact. Never throws.
+ *
+ *  Resolution order:
+ *   1. resolveDepartmentsConfigPath() — the shared resolver that scans env vars,
+ *      ZHC company directories, CC config, and legacy locations for the
+ *      departments.json the prebuild or build process wrote.
+ *   2. build-state seam fallback (BLOCKER 8(b)): when (1) returns null — e.g. on
+ *      a freshly prebuilt box where the prebuild wrote departments.json to the
+ *      company dir but resolveDepartmentsConfigPath() cannot find it (the function
+ *      scans many paths; the prebuild writes to ONE of them) — fall back to
+ *      buildState.standardPrebuild.prebuiltDepartments, the dept ID list the
+ *      prebuild materializes and records in the seam. These are string ids
+ *      (slugs), so we derive display names from the slug convention.
+ *   3. If both fail, return empty — never fabricate a company. */
+function readChosenDepartments(buildState: BuildState | null): {
+  departments: PreviewDepartment[];
+  resolved: boolean;
+} {
+  // 1. Try the shared resolver first.
   const configPath = resolveDepartmentsConfigPath();
-  if (!configPath) return { departments: [], resolved: false };
-  try {
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    return { departments: normalizeDepartments(raw), resolved: true };
-  } catch {
-    return { departments: [], resolved: false };
+  if (configPath) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      return { departments: normalizeDepartments(raw), resolved: true };
+    } catch {
+      // corrupt file — fall through to seam fallback
+    }
   }
+
+  // 2. Seam fallback: prebuiltDepartments from the prebuild driver's
+  //    standardPrebuild block. These are dept slugs only — no names / emojis
+  //    in the seam record — so we derive display names from the slug convention
+  //    the prebuild itself uses (displayNameFromSlug).
+  const prebuildInfo = readStandardPrebuild(buildState);
+  if (prebuildInfo.prebuiltDepartments.length > 0) {
+    const depts: PreviewDepartment[] = prebuildInfo.prebuiltDepartments.map((id) => ({
+      id,
+      name: displayNameFromSlug(id),
+    }));
+    return { departments: depts, resolved: true };
+  }
+
+  return { departments: [], resolved: false };
 }
 
 /** READ-ONLY: count the seeded board lanes (workspaces rows). Never throws — a
@@ -161,7 +195,7 @@ export default function PreviewPage() {
   const standardReady = standardPrebuild?.status === 'done';
   const interviewComplete = buildState?.interviewComplete === true;
 
-  const { departments, resolved } = readChosenDepartments();
+  const { departments, resolved } = readChosenDepartments(buildState);
   const laneCount = readSeededLaneCount();
 
   // NO chosen artifact yet → the standard foundation is not written. Render the
