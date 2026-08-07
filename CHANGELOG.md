@@ -1,3 +1,22 @@
+## [v6.0.89] — 2026-08-07 — Presentations engine board source (build_deck) legacy-marker support
+
+Loop 2B/2C integration: complete the Presentations engine's board-source
+recognition on `/api/tasks/{id}/status`. Main already recognized the
+`build_deck` source via the immutable stamped `tasks.source` column; this
+release adds the **legacy description-marker fallback** so pre-migration
+Presentation cards carrying `Source: build_deck` / `Source: presentations`
+in the description resolve to an in-scope board source instead of 403.
+
+- Add `build_deck` + `presentations` to `RECOGNIZED_BOARD_SOURCES` (completes
+  the set).
+- Add `PRESENTATIONS_SOURCE_MARKER` + `hasPresentationsMarker()` — legacy
+  fallback mirroring the Skill-6 + anthology markers.
+- `resolveBoardSource()` returns `build_deck` for the legacy marker.
+- `done` remains gated by `FORBIDDEN_STATUSES` (independent QC auto-scorer
+  owns review → done).
+- Tests: `task-status-transition.test.ts` 11/11 pass (stamped-source card +
+  legacy-marker card both → 200).
+
 ## [v6.0.88] — 2026-08-05 — Podcast capability manifest + push-dispatch hardening (units 3.4-3.6)
 
 - **capability-manifest.ts (new)** — `podcastProcessorActivationStatus()` verifies ALL FOUR
