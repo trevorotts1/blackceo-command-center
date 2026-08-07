@@ -194,6 +194,13 @@ export async function GET() {
     // another producer's field or reach the outer catch (which would return
     // 500 + pass:false and trip auto-rollback). Non-gating (B-U13: "never
     // flips a box red").
+    //
+    // This loop IS the wiring: MC_BOARD_SIX_PRODUCERS (deep-checks.ts) is the
+    // single source of truth and names all six producers — 49-signature-funnel,
+    // 50-email-engine, 53-book-writer, 55-product-bio, 56-sales-page-assets,
+    // 57-social-media-in-a-box — so each advisory field below (including
+    // mc_board_53_book_writer_projection) is genuinely produced by
+    // checkMcBoardSixProducerProjection(), never comment-only.
     for (const producer of MC_BOARD_SIX_PRODUCERS) {
       try {
         advisory[producer.key] = checkMcBoardSixProducerProjection(producer);
