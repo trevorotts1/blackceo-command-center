@@ -9,7 +9,7 @@ slowest/most expensive model: `classifyTier` defaulted `tier:"hard"` →
 and paged a human. Live evidence: a ticket was abandoned at **602.2s**.
 
 ## Fix
-1. **A real MEDIUM tier** — coach/how-to → `ollama/deepseek-v4-flash:cloud@low`.
+1. **A real MEDIUM tier** — coach/how-to → `ollama/deepseek-v4-flash:0731-cloud@low`.
    The classifier default flips from `hard` to `medium`; only the
    destructive/credential guardrail still forces `hard` (agent-primary kimi).
 2. **Per-tier agent walls** (`--timeout`): light 180s, structured 200s, medium 210s;

@@ -42,7 +42,7 @@ function sseStreamResponse(events: { event: string; data: unknown }[]): Response
 }
 
 const MODEL: ModelOption = {
-  model_id: 'ollama/deepseek-v4-flash:cloud',
+  model_id: 'ollama/deepseek-v4-flash:0731-cloud',
   label: 'DeepSeek v4 Flash',
   provider: 'ollama',
   context_window: 64_000,

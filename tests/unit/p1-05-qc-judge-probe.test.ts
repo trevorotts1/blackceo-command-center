@@ -222,7 +222,7 @@ test('[P1-05] chat-completion 200 but empty content -> judge_empty_response (the
 // budget a reasoning judge can actually answer within, and so reports judge_ok
 // instead of false-reporting the credential dead.
 test('[P1-05] a REASONING judge is probed with a real budget -> judge_ok, never a false judge_auth_dead', async () => {
-  process.env.QC_JUDGE_MODEL = 'deepseek-v4-flash:cloud';
+  process.env.QC_JUDGE_MODEL = 'deepseek-v4-flash:0731-cloud';
   process.env.OLLAMA_CLOUD_API_KEY = 'sk-real-working-key';
 
   const REASONING_TOKEN_COST = 587; // measured on the live box

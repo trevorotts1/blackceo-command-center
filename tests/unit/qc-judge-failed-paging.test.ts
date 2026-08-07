@@ -64,7 +64,7 @@ const DEFER_MARKER = '[QC-DEFERRED-PROVIDER-DOWN]';
 const SCORER_ESCALATION =
   `${FINAL_MARKER} Score: 8.0/10 | QC judge FAILED 12 consecutive times — this is NOT a transient ` +
   `blip. OBSERVED FAILURE: judge answered but content was EMPTY (provider is UP). Judge model ` +
-  `"ollama-cloud/deepseek-v4-flash:cloud" called at https://ollama.com/v1/chat/completions. ` +
+  `"ollama-cloud/deepseek-v4-flash:0731-cloud" called at https://ollama.com/v1/chat/completions. ` +
   `FIX: raise QC_JUDGE_MAX_TOKENS (default 2048), or configure a non-reasoning judge model.`;
 
 // ── The fetch double: captures the page, guarantees no packet leaves ─────────

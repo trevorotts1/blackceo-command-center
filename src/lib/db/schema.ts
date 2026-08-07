@@ -203,6 +203,15 @@ CREATE TABLE IF NOT EXISTS tasks (
   completion_sent_at TEXT,
   result_summary TEXT,
   result_location TEXT,
+  -- FIX-17 (Error 12 / Rule R12 — migration 123 owns this for existing DBs;
+  -- this base CREATE covers fresh installs). The authoritative owner-kill
+  -- timestamp: when set, the task is terminal-for-dispatch — every re-dispatch
+  -- path (stale-task-sweep returnToOrchestrator, autoDispatchTask, the manual
+  -- dispatch route) treats it as dead and writes a dispatch_blocked_owner_killed
+  -- event on any attempt. Nullable + additive: a NULL value means "not killed"
+  -- and the text-marker fallback (OWNER KILLED in the description/notes,
+  -- src/lib/owner-killed.ts) still guards independently.
+  killed_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
