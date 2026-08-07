@@ -25,7 +25,11 @@ import { randomUUID } from 'crypto';
 
 import { vaultRoot } from '@/lib/platform';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
-import { listModels, bulkUpsertModels } from '@/lib/model-registry';
+import {
+  listModels,
+  bulkUpsertModels,
+  ensureFleetPrimaryModel,
+} from '@/lib/model-registry';
 import type { ModelCapability } from '@/lib/model-registry';
 import {
   discoverRegistryRows,
@@ -212,6 +216,11 @@ export function seedRegistryIfEmpty(): number {
     if (existing.length === 0) {
       ensureRegistrySeeded();
     }
+    // FIX-24 (Error 13 / T-24): whatever the refresh cadence, the LIVE fleet
+    // primary id `deepseek-v4-flash:0731-cloud` must be present in the catalog
+    // from boot forward — the QC gate reads this row. Idempotent; a no-op once
+    // the weekly refresh has populated it.
+    ensureFleetPrimaryModel();
     // Report coverage so the boot log shows what lit up.
     let covered = 0;
     for (const kind of ['image', 'video', 'audio'] as StudioKind[]) {

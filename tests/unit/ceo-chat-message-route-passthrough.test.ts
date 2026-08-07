@@ -133,13 +133,13 @@ describe('POST /api/ceo-chat/message — U62 Phase-B passthrough', () => {
     const { status } = await post({
       sessionId: 'sess-passthrough-1',
       message: 'hi',
-      model: 'ollama/deepseek-v4-flash:cloud',
+      model: 'ollama/deepseek-v4-flash:0731-cloud',
       thinkingLevel: 'Max',
       agentId: 'bug-fix-triager',
     });
     expect(status).toBe(200);
     expect(capturedRequests).toHaveLength(1);
-    expect(capturedRequests[0].model).toBe('ollama/deepseek-v4-flash:cloud');
+    expect(capturedRequests[0].model).toBe('ollama/deepseek-v4-flash:0731-cloud');
     expect(capturedRequests[0].agentId).toBe('bug-fix-triager');
     // "Max" -> the PROVEN gateway value 'high' — never the literal "max".
     expect(capturedRequests[0].thinkingLevel).toBe('high');
@@ -156,7 +156,7 @@ describe('POST /api/ceo-chat/message — U62 Phase-B passthrough', () => {
     await post({
       sessionId: 'sess-passthrough-3',
       message: 'hi',
-      model: 'ollama/deepseek-v4-flash:cloud',
+      model: 'ollama/deepseek-v4-flash:0731-cloud',
       thinkingLevel: 'high',
     });
     expect(capturedRequests[0].thinkingLevel).toBe('high');
@@ -242,7 +242,7 @@ describe('POST /api/ceo-chat/message — U62 Phase-B passthrough', () => {
     const { status } = await post({
       sessionId: 'sess-ollama-scope-1',
       message: 'hi',
-      model: 'ollama/deepseek-v4-flash:cloud',
+      model: 'ollama/deepseek-v4-flash:0731-cloud',
       thinkingLevel: 'Max',
     });
     expect(status).toBe(200);

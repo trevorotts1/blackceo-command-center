@@ -224,6 +224,12 @@ export interface Task {
   // a deck run registers its prove-deck.py PROCESS-CERTIFICATE; the done/delivered
   // gate in PATCH /api/tasks/[id] requires a presentations task to carry/match it.
   process_certificate_sha?: string | null;
+  // FIX-17 (Error 12 / Rule R12 — migration 123): the authoritative owner-kill
+  // timestamp. When set, the task is terminal-for-dispatch — never returned to
+  // the orchestrator, never re-fired (see src/lib/owner-killed.ts). A NULL value
+  // means "not killed"; the text-marker fallback ("OWNER KILLED" in the
+  // description/notes) is still guarded independently by isOwnerKilled().
+  killed_at?: string | null;
   // Planning fields
   planning_session_key?: string;
   planning_messages?: string;

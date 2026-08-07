@@ -324,11 +324,11 @@ describe('gatewayTransport.forward — the REAL transport, driven by a fake Open
     fakeClient.notificationsOnSend = [{ method: 'done', params: {} }];
     const { gatewayTransport } = await loadGateway();
 
-    await collect(gatewayTransport.forward({ ...REQ, model: 'ollama/deepseek-v4-flash:cloud' }));
+    await collect(gatewayTransport.forward({ ...REQ, model: 'ollama/deepseek-v4-flash:0731-cloud' }));
 
     const createCall = fakeClient.callCalls.find((c) => c.method === 'sessions.create');
     const sendCall = fakeClient.callCalls.find((c) => c.method === 'sessions.send');
-    expect(createCall?.params?.model).toBe('ollama/deepseek-v4-flash:cloud');
+    expect(createCall?.params?.model).toBe('ollama/deepseek-v4-flash:0731-cloud');
     expect(sendCall?.params).not.toHaveProperty('model');
   });
 
