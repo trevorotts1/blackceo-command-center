@@ -82,11 +82,14 @@ export const revalidate = 0;
  *      never editable), NOT the caller-controllable description. Legacy rows
  *      predating that column fall back to the "Source: <value>" line
  *      /api/tasks/ingest folds into the description inside a
- *      "— Captured via task-ingest —" block. Two producers stamp such a
+ *      "— Captured via task-ingest —" block. Recognized producers stamp such a
  *      marker: cc_board.py's ingest_task() (06-ghl-install-pages/tools/
  *      cc_board.py, the Skill-6 producer, source 'funnel' | 'survey' |
- *      'web-development') and mc_board.py (the Anthology Engine's FAIL-SOFT
- *      board client, source 'anthology'; W3.1). A task missing any recognized
+ *      'web-development'), mc_board.py (the Anthology Engine's FAIL-SOFT
+ *      board client, source 'anthology'; W3.1), and the Presentations
+ *      department engine's cc_board.py (23-ai-workforce-blueprint/.../
+ *      presentations/scripts/cc_board.py, source 'build_deck').
+ *      A task missing any recognized
  *      marker (i.e. not created by a signed board producer) is rejected with
  *      403 — a signed caller can only move its own producer's cards, not an
  *      arbitrary task on the board. This is the check that gates 'blocked': it
@@ -168,6 +171,24 @@ function hasAnthologyMarker(description: string | null | undefined): boolean {
 }
 
 /**
+ * Presentations department engine scope marker. The Presentations producer
+ * (23-ai-workforce-blueprint/.../presentations/scripts/cc_board.py,
+ * ingest_deck_task) creates each deck card via /api/tasks/ingest with
+ * source="build_deck", so the ingest route folds a "Source: build_deck" line
+ * into the description exactly as it does for the Skill-6 producer's markers.
+ * Recognizing this marker (and its 'presentations' alias) lets a signed caller
+ * drive the Presentations engine's own cards (backlog → in_progress on
+ * P4-RENDER START, and the mid-run status changes that cc_board.patch_phase
+ * routes to this endpoint). 'done' remains gated by FORBIDDEN_STATUSES, so
+ * review → done still belongs to the independent QC auto-scorer.
+ */
+const PRESENTATIONS_SOURCE_MARKER = /^Source:\s*(?:build_deck|presentations)\s*$/m;
+
+function hasPresentationsMarker(description: string | null | undefined): boolean {
+  return typeof description === 'string' && PRESENTATIONS_SOURCE_MARKER.test(description);
+}
+
+/**
  * INGEST-10 — recognized board-producer sources. The board-producer scope was
  * originally derived from a "Source: <value>" line folded into the
  * caller-controllable free-text `description`, so a caller could FORGE scope by
@@ -181,6 +202,7 @@ const RECOGNIZED_BOARD_SOURCES = new Set([
   'web-development',
   'anthology',
   'build_deck',
+  'presentations',
 ]);
 
 /**
@@ -215,6 +237,7 @@ function resolveBoardSource(
     return m ? m[1] : null;
   }
   if (hasAnthologyMarker(task.description)) return 'anthology';
+  if (hasPresentationsMarker(task.description)) return 'build_deck';
   return null;
 }
 
@@ -341,9 +364,9 @@ export async function POST(
             'This route only transitions cards created by a signed board producer: ' +
             'the Skill-6 board hookup (cc_board.py ingest_task, ' +
             'source=funnel|survey|web-development), the Anthology Engine board ' +
-            'client (mc_board.py, source=anthology), or the presentations deck-build ' +
-            'producer (cc_board.py, source=build_deck). Use PATCH /api/tasks/{id} for ' +
-            'other tasks.',
+            'client (mc_board.py, source=anthology), or the Presentations engine ' +
+            '(cc_board.py ingest_deck_task, source=build_deck). Use ' +
+            'PATCH /api/tasks/{id} for other tasks.',
         },
         { status: 403 },
       );
@@ -513,9 +536,8 @@ export async function GET() {
       'Only acts on tasks carrying a signed board-producer source marker ' +
       '("Source: funnel|survey|web-development" for cc_board.py ingest_task() ' +
       'cards, "Source: anthology" for the Anthology Engine mc_board.py cards, ' +
-      'or "Source: build_deck" for the presentations deck-build producer ' +
-      'cc_board.py cards, in the description, written by /api/tasks/ingest). Other ' +
-      'tasks get 403. ' +
+      'or "Source: build_deck" for the Presentations engine cc_board.py cards, ' +
+      'in the description, written by /api/tasks/ingest). Other tasks get 403. ' +
       "'done' is always rejected with 403 regardless of card scope — it is " +
       'authority-gated on PATCH /api/tasks/{id} (independent QC auto-scorer / ' +
       "master agent only). 'blocked' is allowed ONLY for a marked card (the " +

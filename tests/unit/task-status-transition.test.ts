@@ -49,6 +49,8 @@ process.env.WEBHOOK_SECRET = WEBHOOK_SECRET;
 const RUN_ID = Math.random().toString(36).slice(2, 10);
 const TASK_ID = `task-status-${RUN_ID}`;
 const UNMARKED_TASK_ID = `task-status-unmarked-${RUN_ID}`;
+const PRESENTATIONS_TASK_ID = `task-status-presentations-${RUN_ID}`;
+const PRESENTATIONS_LEGACY_TASK_ID = `task-status-presentations-legacy-${RUN_ID}`;
 const WS_ID = `ws-status-${RUN_ID}`;
 
 type DbModule = typeof import('../../src/lib/db');
@@ -135,6 +137,25 @@ test.before(async () => {
     `INSERT INTO tasks (id, title, description, status, priority, workspace_id, business_id, created_at, updated_at)
      VALUES (?, 'Unmarked board card', 'Initial brief.', 'backlog', 'high', ?, 'default', ?, ?)`,
     [UNMARKED_TASK_ID, WS_ID, now, now],
+  );
+
+  // Presentations-engine cards. The modern card carries the immutable
+  // server-stamped tasks.source column the ingest route sets from the
+  // producer's validated source ("build_deck" — cc_board.py ingest_deck_task);
+  // the legacy card predates that column, so it carries the "Source:
+  // build_deck" description marker instead. Both must resolve to an in-scope
+  // board source (backlog → in_progress on P4-RENDER START is routed through
+  // this endpoint) — before the RECOGNIZED_BOARD_SOURCES widening these were
+  // 403 Forbidden and the producer's cards could never leave backlog.
+  run(
+    `INSERT INTO tasks (id, title, description, source, status, priority, workspace_id, business_id, created_at, updated_at)
+     VALUES (?, 'Presentations deck card (stamped source)', 'Deck brief.', 'build_deck', 'backlog', 'high', ?, 'default', ?, ?)`,
+    [PRESENTATIONS_TASK_ID, WS_ID, now, now],
+  );
+  run(
+    `INSERT INTO tasks (id, title, description, status, priority, workspace_id, business_id, created_at, updated_at)
+     VALUES (?, 'Presentations deck card (legacy marker)', 'Deck brief.\n\nSource: build_deck', 'backlog', 'high', ?, 'default', ?, ?)`,
+    [PRESENTATIONS_LEGACY_TASK_ID, WS_ID, now, now],
   );
 
   const route = (await import('../../src/app/api/tasks/[id]/status/route')) as RouteModule;
@@ -287,6 +308,36 @@ test('status=blocked on a Skill-6-marked card → 200, task moved + audit rows w
   );
   assert.equal(hist?.status_from, 'in_progress', 'task_history must record the previous status');
   assert.equal(hist?.status_to, 'blocked', 'task_history must record the new status');
+});
+
+// ── 7b. Presentations-engine cards (build_deck) → 200 ──────────────────────
+// The Presentations producer (cc_board.py ingest_deck_task, source=build_deck)
+// routes its P4-RENDER START (backlog → in_progress) and mid-run status
+// changes through this endpoint. Before RECOGNIZED_BOARD_SOURCES was widened
+// these were 403, so the card could never leave backlog via the producer.
+test('presentations card (stamped source=build_deck) → 200, task moved', async () => {
+  const rawBody = JSON.stringify({ status: 'in_progress', note: 'P4-RENDER START.' });
+  const res = await callRoute(PRESENTATIONS_TASK_ID, rawBody, {
+    authorization: `Bearer ${MC_API_TOKEN}`,
+    signature: sign(rawBody),
+  });
+
+  assert.equal(res.status, 200, 'a build_deck-sourced card must return 200');
+  const body = (await res.json()) as { id: string; status: string; description: string };
+  assert.equal(body.status, 'in_progress', 'status must be updated to in_progress');
+  assert.match(body.description, /P4-RENDER START/, 'note must be appended to description');
+  assert.equal(currentStatus(PRESENTATIONS_TASK_ID), 'in_progress', 'DB row status must be persisted');
+});
+
+test('presentations card (legacy Source: build_deck description marker) → 200, task moved', async () => {
+  const rawBody = JSON.stringify({ status: 'in_progress' });
+  const res = await callRoute(PRESENTATIONS_LEGACY_TASK_ID, rawBody, {
+    authorization: `Bearer ${MC_API_TOKEN}`,
+    signature: sign(rawBody),
+  });
+
+  assert.equal(res.status, 200, 'a legacy-marker build_deck card must return 200');
+  assert.equal(currentStatus(PRESENTATIONS_LEGACY_TASK_ID), 'in_progress', 'DB row status must be persisted');
 });
 
 // ── 8. non-Skill-6 (unmarked) card → 403, regardless of status ──────────────
