@@ -13,7 +13,7 @@ hits for `0713` | Pre-push: re-read the registry row after merge.
 
 ## 1. The live CC `model_registry` row (operator box, read-only)
 
-Command: python sqlite read of `/Users/blackceomacmini/command-center/data/mission-control.db`
+Command: python sqlite read of `<operator-box>/command-center/data/mission-control.db`
 
 ```
 (698, 'ollama-cloud/deepseek-v4-flash:0731-cloud', 'deepseek-v4-flash:0731-cloud', 'ollama-cloud', 'deepseek', 'active', '["text","streaming","reasoning","tool_use","long_context"]', 1048576)

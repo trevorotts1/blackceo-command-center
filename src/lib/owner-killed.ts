@@ -2,12 +2,12 @@
  * FIX-17 (Error 12 / Rule R12) — OWNER-KILLED tasks must never be re-dispatched.
  *
  * THE INCIDENT (from PRESENTATION-DEPARTMENT-ERRORS-DETECTED.md, Error 12):
- *   Aug 5 the orchestrator re-dispatched `fb2a8e72` — a task Kofi killed Jul 21
- *   05:21 EDT (sermon already delivered). The dispatch claimed "LIVE: This is the
- *   live request Kofi is waiting on" while its own body quoted the kill notice
- *   "do NOT start any new presentation work until the owner sends the new
- *   request." The stale-return sweeper ignored the kill note → 4 identical
- *   handback stalls (not 4 different problems).
+ *   Aug 5 the orchestrator re-dispatched `fb2a8e72` — a task the owner killed
+ *   Jul 21 05:21 EDT (deliverable already sent). The dispatch claimed "LIVE: This
+ *   is the live request the owner is waiting on" while its own body quoted the
+ *   kill notice "do NOT start any new presentation work until the owner sends
+ *   the new request." The stale-return sweeper ignored the kill note → 4
+ *   identical handback stalls (not 4 different problems).
  *
  * RULE: A task explicitly marked OWNER KILLED must not be re-dispatched.
  *
