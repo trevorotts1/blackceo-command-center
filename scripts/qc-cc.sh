@@ -589,6 +589,39 @@ check "11.16" "scheduler.ts registers the port-integrity job" \
 check "11.17" "port-integrity.ts routes any drift through notifySystem (SYSTEM audience, never the client)" \
   'grep -q "notifySystem" src/lib/jobs/port-integrity.ts'
 
+# 11.18-11.20: PORT-FIX-3 — the port-integrity job self-heals a non-4000 bind
+# (relaunch via the canonical ecosystem launch, scoped to :4000, never 20128).
+check "11.18" "port-integrity.ts has a self-heal relaunch path (PORT-FIX-3)" \
+  'grep -q "pm2.*ecosystem.config.cjs\|relaunchOnCanonicalPort\|relaunch:" src/lib/jobs/port-integrity.ts'
+check "11.19" "port-integrity.ts self-heal is hard-scoped to the canonical 4000 port" \
+  'grep -q "canonicalPortAnswered !== true\|listenPort !== CANONICAL_CC_PORT" src/lib/jobs/port-integrity.ts'
+check "11.20" "port-integrity self-heal can be disabled (DISABLE_PORT_INTEGRITY_SELF_HEAL)" \
+  'grep -q "DISABLE_PORT_INTEGRITY_SELF_HEAL" src/lib/jobs/port-integrity.ts'
+
+# 11.21-11.23: PORT-FIX-1/PORT-FIX-2 — every launch path goes through
+# ecosystem.config.cjs (never a bare `pm2 start npm --name ... -- start`), and
+# the fleet-canonical app name is the single default. A `pm2 start npm --name
+# cc-prod` (or mission-control) elsewhere in the tree is a regression this gate
+# catches.
+check "11.21" "atomic-deploy.sh defaults PM2_APP_NAME to the fleet-canonical blackceo-command-center (PORT-FIX-2)" \
+  'grep -q "PM2_APP_NAME=\"blackceo-command-center\"" scripts/atomic-deploy.sh'
+check "11.22" "atomic-deploy.sh flag-less invocation validates APP_DIR is a blackceo-command-center checkout (PORT-FIX-2)" \
+  'grep -q "blackceo-command-center" scripts/atomic-deploy.sh && grep -q "APP_DIR_EXPLICIT" scripts/atomic-deploy.sh'
+check "11.23" "CC repo launch paths route through ecosystem.config.cjs (PORT-FIX-1)" \
+  'grep -q "pm2 start.*ecosystem.config.cjs\|pm2 start .*ecosystem.config.cjs" scripts/atomic-deploy.sh && grep -q "pm2 start.*ecosystem.config.cjs\|pm2 start .*ecosystem.config.cjs" update.sh 2>/dev/null'
+
+# 11.24: onboarding installer (the fleet canonical update path) must ALSO start
+# the CC through ecosystem.config.cjs, not a bare `pm2 start npm --name ...`.
+# The onboarding repo lives beside this CC repo checkout on operator/dev boxes
+# (sibling dir), but on a fleet box it is not present — skip gracefully there.
+if [ -f "$ROOT/../openclaw-onboarding/32-command-center-setup/scripts/run-full-install.sh" ]; then
+  check "11.24" "onboarding run-full-install starts CC through ecosystem.config.cjs (PORT-FIX-1, canonical updater)" \
+    'grep -q "pm2 start .*ecosystem.config.cjs" "$ROOT/../openclaw-onboarding/32-command-center-setup/scripts/run-full-install.sh"'
+else
+  yellow "  ! 11.24  onboarding installer ecosystem-launch gate (skip — onboarding repo not beside this CC checkout on this box)"
+  WARN=$((WARN+1))
+fi
+
 blue ""
 blue "── 12. Cross-store embedding contract validate (SOP_EMBEDDING_PROVIDER=google / gemini-embedding-2 / 3072) ──"
 #

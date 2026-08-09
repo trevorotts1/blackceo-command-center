@@ -21,9 +21,25 @@
  *
  * On ANY mismatch: notifySystem() — SYSTEM audience only (MOVE-IN-SILENCE).
  * This is an operator concern; it must NEVER reach the client's Telegram.
+ *
+ * SELF-HEAL (PORT-FIX-3): when this process is ACTUALLY bound to a non-4000
+ * port AND nothing else is already answering on :4000 (no collision — the
+ * 9Router dashboard lives on 20128, never 4000), relaunch the board through the
+ * canonical launch path (`pm2 start ecosystem.config.cjs`) instead of only
+ * alerting. That config reads only CC_PORT, strips any ambient PORT via
+ * cc-start.sh, pins 4000, and carries the circuit-breaker — so the relaunch
+ * cannot drift again. Deliberately scoped: it only fires on a non-4000 bind
+ * with :4000 free; it NEVER kills a process that owns 4000 (that could be a
+ * legitimately co-resident service), and it never touches 20128.
+ *
+ * The relaunch shells out to pm2 (child_process execFile), which the CC process
+ * already does elsewhere for OpenClaw interactions. It is a fire-and-forget
+ * best effort: a failed relaunch still alerts, so the operator is never left
+ * with silence.
  */
 
 import { notifySystem } from '@/lib/notify';
+import { execFile } from 'node:child_process';
 
 /** The one canonical CC port, fleet-wide (P1-02). */
 export const CANONICAL_CC_PORT = 4000;
@@ -38,6 +54,12 @@ export interface PortIntegrityDeps {
    * the real fetch at a live box from a test.
    */
   fetchImpl?: typeof fetch;
+  /**
+   * PORT-FIX-3: injectable self-heal relaunch action; defaults to a real
+   * `pm2 start ecosystem.config.cjs`. Tests inject a no-op (or recorder) so a
+   * unit test can never actually shell out to pm2.
+   */
+  relaunch?: () => Promise<boolean>;
 }
 
 export interface PortIntegrityResult {
@@ -49,6 +71,10 @@ export interface PortIntegrityResult {
   tunnelDetail: string | null;
   alerted: boolean;
   canonicalPortAnswered: boolean | null;
+  /** PORT-FIX-3: true when a non-4000 bind was self-healed by relaunching via the canonical ecosystem launch. */
+  selfHealed: boolean;
+  /** PORT-FIX-3: detail string for the self-heal action (or null when none ran). */
+  selfHealDetail: string | null;
 }
 
 /**
@@ -140,6 +166,28 @@ async function checkTunnelIngress(): Promise<{ checked: boolean; ok: boolean | n
 }
 
 /**
+ * PORT-FIX-3 default self-heal relaunch: `pm2 start ecosystem.config.cjs` from
+ * the app cwd with CC_PORT pinned to the canonical 4000 (the ecosystem config
+ * reads only CC_PORT, cc-start.sh strips any ambient PORT, and the circuit-
+ * breaker is carried by that config). Returns true when pm2 exited 0.
+ * Fire-and-forget best effort; failures are surfaced through the alert.
+ */
+async function relaunchOnCanonicalPort(): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    execFile(
+      'pm2',
+      ['start', 'ecosystem.config.cjs'],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, CC_PORT: String(CANONICAL_CC_PORT) },
+        timeout: 20000,
+      },
+      (err) => resolve(!err),
+    );
+  });
+}
+
+/**
  * Run the daily port-integrity self-check. Never throws — mirrors the
  * `wrap()` contract every other scheduler.ts job relies on — and is directly
  * unit-testable via the `deps.notify` injection point (never mocks the real
@@ -148,6 +196,7 @@ async function checkTunnelIngress(): Promise<{ checked: boolean; ok: boolean | n
 export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promise<PortIntegrityResult> {
   const notify = deps.notify ?? notifySystem;
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const relaunch = deps.relaunch ?? relaunchOnCanonicalPort;
 
   const listenPort = resolveDeclaredPort();
   let listenPortOk = false;
@@ -210,6 +259,39 @@ export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promi
   }
 
   let alerted = false;
+  // PORT-FIX-3 SELF-HEAL: only when THIS process is actually bound to a
+  // non-4000 port AND nothing is answering on :4000 (so a relaunch cannot
+  // collide with a legitimately co-resident service on 4000). Relaunch the
+  // board through the canonical ecosystem launch — reads only CC_PORT, strips
+  // ambient PORT, pins 4000, carries the circuit-breaker. The relaunch is a
+  // fire-and-forget best effort; failure still alerts below, so the operator is
+  // never left with silence. Scope is hard-limited to port 4000 — it NEVER
+  // touches 20128 (9Router dashboard) or any other port.
+  let selfHealed = false;
+  let selfHealDetail: string | null = null;
+  const canSelfHeal =
+    listenPort !== null &&
+    listenPort !== CANONICAL_CC_PORT &&
+    canonicalPortAnswered !== true &&
+    process.env.DISABLE_PORT_INTEGRITY_SELF_HEAL !== '1' &&
+    process.env.DISABLE_PORT_INTEGRITY_SELF_HEAL !== 'true';
+  if (canSelfHeal) {
+    selfHealDetail = `self-heal: process bound to ${listenPort}, :${CANONICAL_CC_PORT} free — relaunching via ecosystem launch path`;
+    try {
+      selfHealed = await relaunch();
+      selfHealDetail += selfHealed ? ' — relaunch initiated' : ' — relaunch failed (see alert)';
+    } catch (err) {
+      selfHealDetail += ` — relaunch threw: ${(err as Error).message}`;
+    }
+    // The drift is being remediated; drop it from the escalated problem list so
+    // the alert reflects the post-self-heal state (the relaunch itself is the
+    // loudest possible notification of a drift, via the pm2 log / board restart).
+    const healIdx = problems.findIndex((p) => p.includes(`listening on port ${listenPort}`));
+    if (healIdx >= 0) {
+      problems.splice(healIdx, 1);
+    }
+  }
+
   if (problems.length > 0) {
     notify(`port-integrity: CC port/ingress drift detected — ${problems.join('; ')}`, {
       agent: 'port-integrity',
@@ -227,5 +309,7 @@ export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promi
     tunnelDetail: tunnel.detail,
     alerted,
     canonicalPortAnswered,
+    selfHealed,
+    selfHealDetail,
   };
 }

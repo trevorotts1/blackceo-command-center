@@ -85,16 +85,21 @@ test('port-integrity: canonical port + healthy health check -> no alert', async 
   }
 });
 
-test('port-integrity: drifted port -> exactly one alert naming the drifted and canonical ports', async () => {
+test('port-integrity: drifted port + canonical port also answering -> exactly one alert, no self-heal', async () => {
   process.env.CC_PORT = '3000';
   delete process.env.PORT;
   clearTunnelEnv();
 
   const restoreFetch = mockFetchSequence([() => ({ ok: true, status: 200 })]);
   const { notify, calls } = recordingNotify();
+  let relaunchCalled = 0;
+  const relaunch = async () => {
+    relaunchCalled += 1;
+    return true;
+  };
 
   try {
-    const result = await runPortIntegrityCheck({ notify });
+    const result = await runPortIntegrityCheck({ notify, relaunch });
     assert.equal(result.listenPort, 3000);
     assert.equal(result.listenPortOk, false);
     assert.equal(result.alerted, true);
@@ -103,6 +108,10 @@ test('port-integrity: drifted port -> exactly one alert naming the drifted and c
     assert.match(message, /3000/);
     assert.match(message, new RegExp(String(CANONICAL_CC_PORT)));
     assert.equal(meta?.action, 'escalate');
+    // PORT-FIX-3: :4000 is ALREADY answering (a second CC) — a relaunch would
+    // collide, so self-heal must NOT fire.
+    assert.equal(relaunchCalled, 0, 'no self-heal when :4000 is already answering');
+    assert.equal(result.selfHealed, false);
   } finally {
     restoreFetch();
   }
@@ -228,8 +237,13 @@ test('U068 (b): drifted process + canonical port also answering -> alerted, aler
   ]);
   const { fetchImpl, callCount } = stubFetchByPort(responses);
   const { notify, calls } = recordingNotify();
+  let relaunchCalled = 0;
+  const relaunch = async () => {
+    relaunchCalled += 1;
+    return true;
+  };
 
-  const result = await runPortIntegrityCheck({ notify, fetchImpl });
+  const result = await runPortIntegrityCheck({ notify, fetchImpl, relaunch });
   assert.equal(result.listenPort, 3000);
   assert.equal(result.listenPortOk, false);
   assert.equal(result.alerted, true);
@@ -242,6 +256,10 @@ test('U068 (b): drifted process + canonical port also answering -> alerted, aler
   assert.match(message, /4000/);
   assert.match(message, /second Command Center/);
   assert.equal(meta?.action, 'escalate');
+  // PORT-FIX-3: :4000 is already answering — a relaunch would collide with a
+  // second CC; self-heal must NOT fire.
+  assert.equal(relaunchCalled, 0, 'no self-heal when a second CC owns :4000');
+  assert.equal(result.selfHealed, false);
 });
 
 test('U068 (c): CC_PORT/PORT unset, but canonical port answering -> alerted naming 4000', async () => {
@@ -267,7 +285,7 @@ test('U068 (c): CC_PORT/PORT unset, but canonical port answering -> alerted nami
   assert.match(message, /CC_PORT\/PORT unset/);
 });
 
-test('U068 (d): drifted process, canonical port SILENT -> alerted naming 3000 only, NO second-CC claim', async () => {
+test('U068 (d): drifted process, canonical port SILENT -> self-heal relaunch fires, no escalated alert', async () => {
   process.env.CC_PORT = '3000';
   delete process.env.PORT;
   clearTunnelEnv();
@@ -278,22 +296,25 @@ test('U068 (d): drifted process, canonical port SILENT -> alerted naming 3000 on
   ]);
   const { fetchImpl, callCount } = stubFetchByPort(responses);
   const { notify, calls } = recordingNotify();
+  let relaunchCalled = 0;
+  const relaunch = async () => {
+    relaunchCalled += 1;
+    return true;
+  };
 
-  const result = await runPortIntegrityCheck({ notify, fetchImpl });
+  const result = await runPortIntegrityCheck({ notify, fetchImpl, relaunch });
   assert.equal(result.listenPort, 3000);
   assert.equal(result.listenPortOk, false);
-  assert.equal(result.alerted, true);
+  // PORT-FIX-3: the drift was remediated by the relaunch, so nothing escalated.
+  assert.equal(result.alerted, false);
+  assert.equal(result.selfHealed, true, 'non-4000 bind with :4000 free must self-heal');
+  assert.ok(result.selfHealDetail?.includes('relaunch initiated'));
+  assert.equal(relaunchCalled, 1, 'exactly one self-heal relaunch');
   // canonical port probe failed (connection refused) → canonicalProbe.ok is false
   assert.equal(result.canonicalPortAnswered, false);
   assert.ok(callCount.count > 0, 'fetchImpl must have been called');
 
-  assert.equal(calls.length, 1);
-  const [message] = calls[0];
-  assert.match(message, /3000/);
-  // Must NOT contain "second Command Center" — a refused connection is not a second listener
-  assert.doesNotMatch(message, /second Command Center/);
-  assert.doesNotMatch(message, /ALSO answering/);
-  assert.match(message, /listening on port/);
+  assert.equal(calls.length, 0, 'a successful self-heal must NOT escalate to notifySystem');
 });
 
 test('U068: canonical port answered field present and correct in result', async () => {
