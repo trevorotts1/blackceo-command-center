@@ -39,7 +39,10 @@
  */
 
 import { notifySystem } from '@/lib/notify';
-import { execFile } from 'node:child_process';
+// NOTE: no static `import ... from 'node:child_process'` here — Next/webpack
+// cannot bundle the node: scheme (UnhandledSchemeError at build). The self-heal
+// relaunch shells out to a standalone Node script (scripts/relaunch-cc-on-4000.cjs)
+// via process.execPath, which webpack never bundles.
 
 /** The one canonical CC port, fleet-wide (P1-02). */
 export const CANONICAL_CC_PORT = 4000;
@@ -173,18 +176,11 @@ async function checkTunnelIngress(): Promise<{ checked: boolean; ok: boolean | n
  * Fire-and-forget best effort; failures are surfaced through the alert.
  */
 async function relaunchOnCanonicalPort(): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    execFile(
-      'pm2',
-      ['start', 'ecosystem.config.cjs'],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, CC_PORT: String(CANONICAL_CC_PORT) },
-        timeout: 20000,
-      },
-      (err) => resolve(!err),
-    );
-  });
+  // Spawn the standalone relaunch script with the current Node binary via a
+  // helper module that is OUTSIDE the webpack graph (src/lib/jobs/relaunch.ts
+  // is not imported by any Next-routed page, so webpack never bundles it).
+  const { relaunchOnCanonicalPort: run } = await import('@/lib/jobs/relaunch');
+  return await run();
 }
 
 /**
