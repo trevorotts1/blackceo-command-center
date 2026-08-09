@@ -323,8 +323,8 @@ check "7.9" "tasks.ts emits task_created event" \
   "grep -q \"'task_created'\" src/lib/tasks.ts"
 check "7.10" "tasks.ts emits task_dispatched event for routed tasks" \
   "grep -q \"'task_dispatched'\" src/lib/tasks.ts"
-check "7.11" "task PATCH route emits task_completed event on done transition" \
-  "grep -q \"'task_completed'\" 'src/app/api/tasks/[id]/route.ts'"
+check "7.11" "task done transition emits task_completed event (via task-lifecycle)" \
+  "grep -q \"'task_completed'\" src/lib/task-lifecycle.ts"
 
 # (c) Auto-dispatch skips master/CEO agents (route-not-execute).
 check "7.12" "task-dispatcher: master/CEO agent guard present (PRD 2.9c)" \
