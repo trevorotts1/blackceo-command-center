@@ -16,6 +16,9 @@ import { isAnthologyTask } from './anthology/anthology-card';
 import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
 import { BlockTaskModal, type BlockTaskDetails } from './kanban/BlockTaskModal';
 import { MoveTaskMenu } from './kanban/MoveTaskMenu';
+// WI-15b (D1 Option B — NESTED subtasks): the parent+children card replaces
+// flat TaskCard rendering for the presentations department.
+import PresentationParentCard from './PresentationParentCard';
 import { formatDistanceToNow } from 'date-fns';
 import {
   BACKLOG_COLUMN_LABEL,
@@ -453,6 +456,12 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
     // Apply the active filter chip (was previously decorative).
     return bySearch.filter((task) => {
+      // WI-15b (D1 Option B): exclude child tasks from the board — they
+      // render ONLY nested under their parent PresentationParentCard.
+      // A task with a non-null parent_task_id is a child phase card and
+      // must not appear as a standalone card in any column.
+      if (task.parent_task_id != null) return false;
+
       switch (activeFilter) {
         case 'due':
           // Only tasks with a due date in the configurable window OR overdue.
@@ -1401,22 +1410,47 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                           )}
                         </div>
                       ) : (
-                        columnTasks.map((task) => (
-                          <TaskCard
-                            key={task.id}
-                            task={task}
-                            onDragStart={handleDragStart}
-                            onClick={() => setEditingTask(task)}
-                            isDragging={draggedTask?.id === task.id}
-                            isCompleted={column.id === 'done'}
-                            columns={COLUMNS}
-                            currentColumnId={column.id}
-                            onMove={handleColumnMove}
-                            columnTaskCounts={Object.fromEntries(
-                              COLUMNS.map((c) => [c.id, getTasksByStatus(c.id).length]),
-                            )}
-                          />
-                        ))
+                        columnTasks.map((task) => {
+                          // WI-15b (D1 Option B — NESTED subtasks):
+                          // presentations department parent tasks render
+                          // as a nested card with phase children instead
+                          // of the flat generic TaskCard.
+                          const dept = canonicalDeptSlug(task.department);
+                          if (dept === 'presentations') {
+                            return (
+                              <PresentationParentCard
+                                key={task.id}
+                                taskId={task.id}
+                                isDragging={draggedTask?.id === task.id}
+                                isCompleted={column.id === 'done'}
+                                onOpenParent={() => setEditingTask(task)}
+                                onOpenChild={(childId) => {
+                                  // Find the child task in the store and open it
+                                  const child = tasks.find(
+                                    (t) => t.id === childId,
+                                  );
+                                  if (child) setEditingTask(child);
+                                }}
+                              />
+                            );
+                          }
+                          return (
+                            <TaskCard
+                              key={task.id}
+                              task={task}
+                              onDragStart={handleDragStart}
+                              onClick={() => setEditingTask(task)}
+                              isDragging={draggedTask?.id === task.id}
+                              isCompleted={column.id === 'done'}
+                              columns={COLUMNS}
+                              currentColumnId={column.id}
+                              onMove={handleColumnMove}
+                              columnTaskCounts={Object.fromEntries(
+                                COLUMNS.map((c) => [c.id, getTasksByStatus(c.id).length]),
+                              )}
+                            />
+                          );
+                        })
                       )}
                     </div>
                   </div>

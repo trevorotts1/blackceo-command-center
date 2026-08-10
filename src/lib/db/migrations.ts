@@ -5808,6 +5808,38 @@ export const migrations: Migration[] = [
       console.log('[Migration 123] tasks.killed_at ready');
     },
   },
+  {
+    id: '124',
+    name: 'add_parent_task_id',
+    up: (db) => {
+      // WI-15b (D1 Option B — NESTED subtasks): the presentations department
+      // board renders one parent card per deck run with one child card per
+      // phase. The parent_task_id column on tasks creates the tree: a NULL
+      // parent_task_id means the row is a parent (or a plain non-nested task);
+      // a non-NULL value means it is a child, keyed to its parent.
+      //
+      // Additive, nullable TEXT column — same PRAGMA-guarded ALTER TABLE
+      // pattern as migration 123 above. Safe no-op on a fresh DB where
+      // schema.ts's tasks CREATE TABLE already carries the column.
+      console.log('[Migration 124] Adding parent_task_id to tasks...');
+
+      const tasksInfo = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+      if (!tasksInfo.some((col) => col.name === 'parent_task_id')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id)`);
+        console.log('[Migration 124] Added parent_task_id to tasks');
+      }
+
+      // Index for fetching children of a parent — the nested-card render path
+      // queries SELECT * FROM tasks WHERE parent_task_id = ?.
+      const indexInfo = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_tasks_parent_task_id'").all() as { name: string }[];
+      if (indexInfo.length === 0) {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`);
+        console.log('[Migration 124] Created idx_tasks_parent_task_id');
+      }
+
+      console.log('[Migration 124] parent_task_id ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

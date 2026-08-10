@@ -212,6 +212,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- and the text-marker fallback (OWNER KILLED in the description/notes,
   -- src/lib/owner-killed.ts) still guards independently.
   killed_at TEXT,
+  -- WI-15b (D1 Option B — NESTED subtasks): tree column for the presentations
+  -- department's parent+child board rendering. NULL = parent or plain flat task;
+  -- non-NULL = child row keyed to its parent. Indexed by migration 124.
+  parent_task_id TEXT REFERENCES tasks(id),
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

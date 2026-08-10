@@ -230,6 +230,10 @@ export interface Task {
   // means "not killed"; the text-marker fallback ("OWNER KILLED" in the
   // description/notes) is still guarded independently by isOwnerKilled().
   killed_at?: string | null;
+  // WI-15b (D1 Option B — NESTED subtasks): the parent row for a child task.
+  // NULL for a parent run card or a plain flat (non-nested) task; non-NULL for
+  // a per-phase child card keyed to its parent deck-run row. Migration 124.
+  parent_task_id?: string | null;
   // Planning fields
   planning_session_key?: string;
   planning_messages?: string;
