@@ -1,3 +1,16 @@
+## [v6.0.91] — 2026-08-10 — Final Batch: WI-15b D1 NESTED presentation board (parent+child cards)
+
+Atomic batch stamp for Pres Dept Final batch command-center lane (merge record:
+`CONTROL/merge-final-cc.md` in the pres-dept-fix project).
+
+- **WI-15b (D1 NESTED):** CC-side parent+child presentation board. Adds
+  `parent_task_id` to schema (migration 124), `/api/presentations/children`
+  route (178 lines), `PresentationParentCard` component (350 lines), wires
+  into `MissionQueue` with child-task exclusion filter.
+- **WI-07 (sweep flags):** Carried forward from Wave 1 `v6.0.90` —
+  `DISABLE_STALE_TASK_SWEEP=0` and `DISABLE_STUCK_IN_PROGRESS_SWEEP=0`
+  applied to the live CC `.env.local`.
+
 ## [v6.0.90] — 2026-08-10 — Wave 1: re-enable stuck-card sweeps (WI-07)
 
 Atomic batch stamp for Pres Dept Wave 1 command-center lane (merge record:
