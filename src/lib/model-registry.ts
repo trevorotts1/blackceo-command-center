@@ -264,6 +264,63 @@ export function upsertModel(input: ModelRegistryUpsertInput): UpsertOutcome {
 }
 
 /**
+ * FIX-24 (Error 13 / T-24) — model-catalog truth: the operator-facing catalog
+ * and the CC `model_registry` must name the LIVE fleet primary id
+ * `deepseek-v4-flash:0731-cloud` (the 2026-08-06 fleet rollout id), never the
+ * retired `deepseek-v4-flash:cloud` build and NEVER a phantom `0713` tag.
+ *
+ * The registry is populated by the weekly Ollama Cloud refresh, which pulls the
+ * LIVE catalog — so `:0731-cloud` appears after any refresh. But between the
+ * fleet rollout and the next weekly tick, a box could resolve the STALE
+ * `:cloud` build (or nothing) for presentations tasks, and the QC gate reads
+ * the row NOW. This helper idempotently upserts the live fleet primary id so
+ * the registry names it from boot forward — independent of refresh cadence.
+ *
+ * Safe: upserts by natural key `model_id` (never duplicates), never downgrades
+ * an existing row's status to deprecated, never touches client/provider
+ * sovereignty (this is the operator's own primary; a client box simply won't
+ * have the `ollama-cloud` provider configured and the row stays inert).
+ */
+export const FLEET_PRIMARY_MODEL_ID = 'ollama-cloud/deepseek-v4-flash:0731-cloud';
+
+/**
+ * Ensure the live fleet primary model is registered. Returns the upsert
+ * outcome ('inserted' | 'updated' | 'present'). Never throws — a registry
+ * write must never fail boot.
+ */
+export function ensureFleetPrimaryModel(): UpsertOutcome | 'present' {
+  try {
+    const existing = queryOne<{ id: number }>(
+      'SELECT id FROM model_registry WHERE model_id = ?',
+      [FLEET_PRIMARY_MODEL_ID],
+    );
+    if (existing) return 'present';
+    const outcome = upsertModel({
+      model_id: FLEET_PRIMARY_MODEL_ID,
+      label: 'deepseek-v4-flash:0731-cloud',
+      provider: 'ollama-cloud',
+      family: 'deepseek',
+      context_window: 1_048_576,
+      input_cost_per_million: 0,
+      output_cost_per_million: 0,
+      pricing_model: 'flat_rate_plan',
+      pricing_source: 'fleet-primary',
+      capabilities: ['text', 'streaming', 'reasoning', 'tool_use', 'long_context'],
+      status: 'active',
+      raw_metadata: {
+        source: 'fleet-primary',
+        fleet_rollout: '2026-08-06',
+        note: 'live fleet primary id (Error-13 truth); the retired :cloud build must not win a presentation task',
+      },
+    });
+    return outcome;
+  } catch (err) {
+    console.error('[model-registry] ensureFleetPrimaryModel failed (non-fatal):', err);
+    return 'present';
+  }
+}
+
+/**
  * Bulk upsert wrapped in a single SQLite transaction. Use this from the
  * weekly refresh job so a provider's full catalog is applied atomically.
  */

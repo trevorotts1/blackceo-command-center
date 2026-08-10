@@ -945,7 +945,7 @@ export interface QCResult {
  * The QC judge's completion budget.
  *
  * THIS NUMBER CAUSED A SIX-DAY OUTAGE. It was 300. The configured judge
- * (`deepseek-v4-flash:cloud`) is a REASONING model: its reply carries a hidden
+ * (`deepseek-v4-flash:0731-cloud`) is a REASONING model: its reply carries a hidden
  * `reasoning` field alongside `content`, and reasoning is billed against the
  * SAME completion budget. At 300 tokens the reasoning ate the entire budget and
  * `content` came back EMPTY — which the code then reported as "provider-down".
@@ -1222,8 +1222,12 @@ If score <8.5, "gaps" must list specific, actionable rework items.`;
 /**
  * True when a model id targets the client's Ollama Cloud provider — the ONLY
  * sanctioned QC-judge provider. Matches the registry shape `ollama-cloud/<m>`,
- * the legacy `ollama/<m>:cloud` shape, and a bare `<m>:cloud` tag (the ':cloud'
- * suffix is authoritative). Mirrors model-selector.tierOf()'s tier-1 detection.
+ * the legacy `ollama/<m>:cloud` shape, a bare `<m>:cloud` tag, AND the LIVE
+ * fleet tag `<m>:0731-cloud` (the 2026-08-06 fleet build whose id ends in the
+ * `-cloud` suffix, e.g. `deepseek-v4-flash:0731-cloud`). The legacy check was
+ * `id.includes(':cloud')`, which silently rejected the 0731 build — the very
+ * Error-13 catalog-truth class: the operator names a model the gate does not
+ * recognize. Mirrors model-selector.tierOf()'s tier-1 detection.
  *
  * Exported (P1-05) so the fleet judge-proof probe (src/lib/probes/qc-judge-
  * probe.ts) shares this exact classification instead of re-deriving it —
@@ -1232,7 +1236,11 @@ If score <8.5, "gaps" must list specific, actionable rework items.`;
 export function isOllamaCloudModel(modelId: string | null | undefined): boolean {
   if (!modelId) return false;
   const id = modelId.trim().toLowerCase();
-  return id.startsWith('ollama-cloud/') || id.includes(':cloud');
+  if (id.startsWith('ollama-cloud/')) return true;
+  // Legacy `:cloud` tag (deepseek-v4-flash:cloud) OR the live `-cloud` suffix
+  // (deepseek-v4-flash:0731-cloud). The suffix match is the Error-13 fix: the
+  // fleet now runs `:0731-cloud`, which carries `-cloud` but not `:cloud`.
+  return id.includes(':cloud') || id.endsWith('-cloud');
 }
 
 /**

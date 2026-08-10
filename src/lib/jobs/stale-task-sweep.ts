@@ -48,6 +48,7 @@ import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -87,6 +88,8 @@ interface StaleTaskRow {
   last_progress_at: string | null;
   updated_at: string;
   qc_reroute_attempts: number | null;
+  /** FIX-17: owner-kill timestamp (migration 123). Absent on pre-123 DBs. */
+  killed_at?: string | null;
 }
 
 export interface StaleSweepResult {
@@ -331,7 +334,23 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     return { scanned: 0, returned: 0, repinged: 0, skippedReason: 'Migration 071 not applied yet (no last_progress_at column)' };
   }
 
+  // FIX-17: `killed_at` (migration 123) may be absent on a box mid-roll. The
+  // owner-kill guard reads it defensively (see owner-killed.ts), but the SELECT
+  // below must not reference a column that does not exist yet — a pre-123 box
+  // would throw "no such column" and this sweep would return a hard `Query
+  // failed` instead of running. Probe the column exactly like last_progress_at
+  // and only include it when present. A pre-123 box keeps working with the
+  // TEXT-MARKER kill path only (the structured column arrives with the migration).
+  let hasKilledAt = false;
+  try {
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    hasKilledAt = cols.some((c) => c.name === 'killed_at');
+  } catch {
+    hasKilledAt = false;
+  }
+
   const progressCol = 'COALESCE(last_progress_at, updated_at)';
+  const killedAtCol = hasKilledAt ? ', killed_at' : '';
 
   // U101: query at the TIGHTEST possible per-column threshold across the
   // global default AND every configured department override, so a
@@ -351,7 +370,7 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     candidates = queryAll<StaleTaskRow>(
       `SELECT id, title, status, description, department, workspace_id,
               assigned_agent_id, blocked_reason, blocked_on_human, ask,
-              last_progress_at, updated_at, qc_reroute_attempts
+              last_progress_at, updated_at, qc_reroute_attempts${killedAtCol}
        FROM tasks
        WHERE archived_at IS NULL
          AND status NOT IN ('done')
@@ -371,6 +390,20 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
 
   for (const task of candidates) {
     try {
+      // FIX-17 / Error 12 / Rule R12: a task the owner KILLED (killed_at column
+      // OR the "OWNER KILLED" note marker) is NEVER returned to the orchestrator
+      // for re-routing. The incident: a killed deck task was bounced back to the
+      // orchestrator by this very sweep, re-dispatched as "LIVE", and produced
+      // 4 identical handback stalls. An OWNER-KILLED task stays dead — its
+      // correct end state is the owner's explicit un-kill, not the stale sweep.
+      // One deduped `dispatch_blocked_owner_killed` event row records the block.
+      if (blockDispatchIfOwnerKilled(task, 'stale-task-sweep')) {
+        console.warn(
+          `[stale-task-sweep] task ${task.id} is OWNER-KILLED (Rule R12) — excluded from stale return; task stays dead`,
+        );
+        continue;
+      }
+
       const progressTs = progressTimestamp(task);
       // B2: parseDbTime corrects the space-dialect misparse — new Date('YYYY-MM-DD
       // HH:MM:SS') reads as LOCAL time and shifts the age by the box's UTC offset.

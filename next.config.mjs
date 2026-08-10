@@ -19,6 +19,11 @@ const nextConfig = {
   webpack: (config, { nextRuntime }) => {
     config.externals.push({
       'better-sqlite3': 'commonjs better-sqlite3',
+      // PORT-FIX-3: the nodejs runtime legitimately uses node:child_process
+      // (relaunch bridge src/lib/jobs/relaunch.ts -> scripts/relaunch-cc-on-4000.cjs).
+      // Keep it external so webpack never tries to bundle the builtin in the
+      // nodejs runtime (the edge stub below already handles the edge runtime).
+      'node:child_process': 'commonjs node:child_process',
     });
     // instrumentation.ts pulls node-only modules (db/migrations, jobs/scheduler,
     // openclaw client) into its dependency graph. They run ONLY in the nodejs

@@ -59,17 +59,17 @@ fi
 ###############################################################################
 # Defaults
 ###############################################################################
-APP_DIR="${CC_APP_DIR:-${HOME}/projects/mission-control}"
-# Derive PM2 app name from the committed ecosystem file if present; fallback to
-# the env override, then to the production cc-prod name (U029: fix for fact 5 —
-# the old default "mission-control" matched neither PM2 app defined on disk, and
-# using it caused the deploy script to silently target the wrong process).
-if [[ -z "${CC_PM2_APP_NAME:-}" && -f "${APP_DIR}/ecosystem.cc-prod.config.cjs" ]]; then
-  PM2_APP_NAME="cc-prod"
-elif [[ -n "${CC_PM2_APP_NAME:-}" ]]; then
+APP_DIR="${CC_APP_DIR:-${HOME}/projects/command-center}"
+# PM2_APP_NAME defaults to the FLEET-CANONICAL name (PORT-FIX-2). The old
+# default resolved to "cc-prod"/"mission-control" — legacy aliases that this
+# deploy would target with zero flags, silently restarting a NON-canonical
+# process (or spawning a second CC) instead of the board. The canonical name is
+# what ecosystem.config.cjs, the onboarding installer Phase 6, the watchdog, and
+# every per-box dedup standardize on; a flag-less deploy must default to it.
+if [[ -n "${CC_PM2_APP_NAME:-}" ]]; then
   PM2_APP_NAME="${CC_PM2_APP_NAME}"
 else
-  PM2_APP_NAME="cc-prod"
+  PM2_APP_NAME="blackceo-command-center"
 fi
 PORT="${CC_PORT:-4000}"
 DB_PATH_OVERRIDE="${CC_DB_PATH:-}"
@@ -85,9 +85,10 @@ HEALTH_CHECK_PATH_OVERRIDE="${CC_HEALTH_CHECK_PATH:-}"
 ###############################################################################
 # Argument parsing
 ###############################################################################
+APP_DIR_EXPLICIT=0   # PORT-FIX-2: set when --app-dir is passed on the CLI
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --app-dir)           APP_DIR="${2:?--app-dir requires a value}"; shift 2 ;;
+    --app-dir)           APP_DIR="${2:?--app-dir requires a value}"; APP_DIR_EXPLICIT=1; shift 2 ;;
     --pm2-app)           PM2_APP_NAME="${2:?--pm2-app requires a value}"; shift 2 ;;
     --port)              PORT="${2:?--port requires a value}"; shift 2 ;;
     --db-path)           DB_PATH_OVERRIDE="${2:?--db-path requires a value}"; shift 2 ;;
@@ -336,6 +337,32 @@ if [[ ! -d "$APP_DIR" ]]; then
   _err "APP_DIR does not exist: $APP_DIR"
   _err "Pass --app-dir or set CC_APP_DIR"
   exit 2
+fi
+
+# PORT-FIX-2: a FLAG-LESS invocation must never deploy onto a scratch/non-CC
+# directory. The old default (~/projects/mission-control) or a bare
+# `bash scripts/atomic-deploy.sh` could target a directory that is NOT a
+# validated blackceo-command-center checkout, restarting a stale/foreign app or
+# spawning a second CC. Require --app-dir OR CC_APP_DIR OR a directory that
+# structurally validates as a blackceo-command-center checkout (git repo whose
+# origin names the CC repo, package.json present, and the canonical
+# ecosystem.config.cjs present). Any other flag-less run exits non-zero BEFORE
+# touching anything.
+if [[ "$APP_DIR_EXPLICIT" -eq 0 && -z "${CC_APP_DIR:-}" ]]; then
+  _cc_remote="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || echo "")"
+  _cc_valid=0
+  if [[ -d "$APP_DIR/.git" ]] \
+     && [[ -f "$APP_DIR/package.json" ]] \
+     && [[ -f "$APP_DIR/ecosystem.config.cjs" ]] \
+     && printf '%s' "$_cc_remote" | grep -q 'blackceo-command-center'; then
+    _cc_valid=1
+  fi
+  if [[ "$_cc_valid" -ne 1 ]]; then
+    _err "PORT-FIX-2: flag-less invocation refused — $APP_DIR is not a validated blackceo-command-center checkout."
+    _err "Pass --app-dir <path> (or export CC_APP_DIR) pointing at the real CC checkout."
+    _err "Refusing to deploy onto a non-canonical/foreign directory (would restart a stale app or spawn a second CC)."
+    exit 2
+  fi
 fi
 
 DISK_CHECK_PATH="${DISK_PATH_OVERRIDE:-$APP_DIR}"
@@ -695,8 +722,21 @@ if pm2 list 2>/dev/null | grep -q "$PM2_APP_NAME"; then
 else
   _warn "  pm2 app '${PM2_APP_NAME}' not found in pm2 list."
   _warn "  Attempting pm2 start from ${APP_DIR} ..."
-  cd "$APP_DIR"
-  pm2 start npm --name "$PM2_APP_NAME" -- start 2>/dev/null || true
+  # PORT-FIX-2: launch through the canonical ecosystem.config.cjs (CC_PORT-only
+  # pin, env-bleed strip via cc-start.sh, circuit-breaker, canonical app name) —
+  # NEVER `pm2 start npm --name ... -- start`, which bypasses the ecosystem and
+  # re-opens the non-4000 launch path. Forward the resolved DB path so a
+  # DATABASE_PATH pinned in .env.local is honoured (DATA-08 decoy-DB parity).
+  if [[ -f "$APP_DIR/ecosystem.config.cjs" ]]; then
+    cd "$APP_DIR"
+    CC_PORT="$PORT" \
+      DATABASE_PATH="${DB_PATH_OVERRIDE:-${DATABASE_PATH:-}}" \
+      CC_INSTALL_DIR="$APP_DIR" \
+      pm2 start "$APP_DIR/ecosystem.config.cjs" 2>/dev/null || true
+  else
+    cd "$APP_DIR"
+    CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" -- start 2>/dev/null || true
+  fi
 fi
 
 # Brief settle window before probing (server needs a few seconds to bind the port)

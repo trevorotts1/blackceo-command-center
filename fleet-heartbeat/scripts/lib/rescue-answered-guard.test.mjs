@@ -22,10 +22,19 @@ function withTempEnv(fn) {
   });
 }
 
-test("durable store status is authoritative: an answered ticket is seen as answered", async () => {
+test("durable store status is authoritative: an answered ticket is seen as answered", async (t) => {
+  // The durable store module is intentionally NOT published in this public repo
+  // (tombstone: rescue-ticket-store.mjs lives in the private blackceo-fleet-ops
+  // repo). When it is absent, skip this test instead of failing the whole suite.
+  let storeMod;
+  try {
+    storeMod = await import("./rescue-ticket-store.mjs");
+  } catch {
+    t.skip("rescue-ticket-store.mjs is a tombstone in this repo — durable-store tests skip (module lives in blackceo-fleet-ops)");
+    return;
+  }
   await withTempEnv(async () => {
     const guard = await import("./rescue-answered-guard.mjs?a=" + Math.random());
-    const storeMod = await import("./rescue-ticket-store.mjs");
     const s = storeMod.openStore();
     s.createTicket({ ticketId: "t-1", client: "acme", failureClass: "cron" });
     assert.equal(await guard.wasAnswered("t-1"), false, "OPEN ticket is not yet answered");
