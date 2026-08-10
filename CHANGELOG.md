@@ -1,3 +1,18 @@
+## [v6.0.90] — 2026-08-10 — Wave 1: re-enable stuck-card sweeps (WI-07)
+
+Atomic batch stamp for Pres Dept Wave 1 command-center lane (merge record:
+`CONTROL/merge-wave1.md` in the pres-dept-fix project).
+
+- **WI-07 (sweep flags):** `DISABLE_STALE_TASK_SWEEP=0` and
+  `DISABLE_STUCK_IN_PROGRESS_SWEEP=0` applied to the live CC `.env.local`.
+  Both sweeps now running (proven by live `cc-prod` cron output at 5-minute
+  intervals). Durable overrides file does not exist (fail-open). Flags
+  surviving across `pm2 restart --update-env`, `pm2 resurrect`, and shell
+  profile sourcing. Annotated with WI-07 comments referencing the spec,
+  work item, and backup path.
+- `.env.local` is gitignored (`.env*.local`); the config is applied live,
+  not merged as a tracked file. This stamp records the config change.
+
 ## [v6.0.89] — 2026-08-07 — Presentations engine board source (build_deck) legacy-marker support
 
 Loop 2B/2C integration: complete the Presentations engine's board-source
