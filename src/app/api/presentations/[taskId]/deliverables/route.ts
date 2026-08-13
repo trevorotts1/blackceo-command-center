@@ -24,6 +24,8 @@ import {
   SIZE_ONLY_SET,
   resolveFilename,
 } from '@/lib/presentation-deliverables';
+import { resolveActiveCompanyId } from '@/lib/company';
+import { boardWhereClause } from '@/lib/workspaces/board-query';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -145,6 +147,36 @@ export async function GET(
   try {
     const taskId = params.taskId;
     const db = getDb();
+
+    // ── Company scope (closes cross-company read) ────────────────────────
+    // Same convention as the sibling phases/children routes: tasks carry no
+    // direct company_id — only workspaces.company_id does — so ownership is
+    // checked by joining through workspaces and applying the SAME
+    // boardWhereClause the Kanban board itself uses. This gate runs BEFORE any
+    // deliverable row, filesystem path, or GHL ledger is touched, because the
+    // response body exposes `extra[].path` and `ghl_url` — an out-of-scope
+    // task id must leak neither. A NULL workspace_id is the box's own
+    // unattributed data and stays visible (matches boardWhereClause's posture);
+    // an out-of-scope workspace is treated as not found, never distinguishing
+    // "exists but not yours" from "doesn't exist".
+    const activeCompanyId = resolveActiveCompanyId(db);
+    const scope = boardWhereClause(activeCompanyId);
+    const scopedWorkspaceIds = (
+      db.prepare(`SELECT w.id FROM workspaces w ${scope.sql}`).all(...scope.params) as { id: string }[]
+    ).map((w) => w.id);
+    const scopeIdList = scopedWorkspaceIds.length > 0 ? scopedWorkspaceIds : ['__no_workspace__'];
+    const scopePlaceholders = scopeIdList.map(() => '?').join(',');
+
+    const task = db
+      .prepare(
+        `SELECT id FROM tasks
+          WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
+      )
+      .get(taskId, ...scopeIdList) as { id: string } | undefined;
+
+    if (!task) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
 
     const deliverables = db.prepare(
       `SELECT * FROM task_deliverables WHERE task_id = ? ORDER BY created_at ASC`
