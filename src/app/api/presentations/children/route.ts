@@ -16,6 +16,8 @@ import {
   computePhaseProgress,
   PHASE_LABELS,
 } from '@/lib/presentation-phases';
+import { resolveActiveCompanyId } from '@/lib/company';
+import { boardWhereClause } from '@/lib/workspaces/board-query';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -34,14 +36,35 @@ export async function GET(request: NextRequest) {
 
     const db = getDb();
 
-    // Fetch parent row
+    // ── Company scope (closes cross-company read) ────────────────────────
+    // tasks carry no direct company_id — only workspaces.company_id does —
+    // so parent ownership is checked by joining through workspaces and
+    // applying the SAME boardWhereClause the Kanban board itself uses, via
+    // the SAME resolveActiveCompanyId + boardWhereClause convention
+    // /api/performance already established for task-scoped queries. A task
+    // whose workspace_id is NULL is the box's own unattributed data and
+    // stays visible (matches boardWhereClause's own posture); a task whose
+    // workspace resolves to an OUT-OF-SCOPE workspace (foreign company /
+    // archived / residue) is treated as not found, same as a parent_id that
+    // does not exist at all. Children are fetched below by parent_task_id,
+    // so verifying the PARENT here closes the read for its whole child set.
+    const activeCompanyId = resolveActiveCompanyId(db);
+    const scope = boardWhereClause(activeCompanyId);
+    const scopedWorkspaceIds = (
+      db.prepare(`SELECT w.id FROM workspaces w ${scope.sql}`).all(...scope.params) as { id: string }[]
+    ).map((w) => w.id);
+    const scopeIdList = scopedWorkspaceIds.length > 0 ? scopedWorkspaceIds : ['__no_workspace__'];
+    const scopePlaceholders = scopeIdList.map(() => '?').join(',');
+
+    // Fetch parent row (company-scoped)
     const parent = db
       .prepare(
         `SELECT id, title, status, priority, department,
                 process_certificate_sha, created_at
-         FROM tasks WHERE id = ?`,
+         FROM tasks
+        WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
       )
-      .get(parentId) as Record<string, unknown> | undefined;
+      .get(parentId, ...scopeIdList) as Record<string, unknown> | undefined;
 
     if (!parent) {
       return NextResponse.json(
