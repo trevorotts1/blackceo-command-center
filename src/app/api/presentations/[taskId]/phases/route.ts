@@ -14,6 +14,8 @@ import {
   PHASE_LABELS,
   PHASE_TO_LABEL,
 } from '@/lib/presentation-phases';
+import { resolveActiveCompanyId } from '@/lib/company';
+import { boardWhereClause } from '@/lib/workspaces/board-query';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -25,6 +27,36 @@ export async function GET(
   try {
     const { taskId } = params;
     const db = getDb();
+
+    // ── Company scope (closes cross-company read) ────────────────────────
+    // tasks carry no direct company_id — only workspaces.company_id does —
+    // so ownership is checked by joining through workspaces and applying the
+    // SAME boardWhereClause the Kanban board itself uses, via the SAME
+    // resolveActiveCompanyId + boardWhereClause convention /api/performance
+    // already established for task-scoped queries. A task whose workspace_id
+    // is NULL is the box's own unattributed data and stays visible (matches
+    // boardWhereClause's own posture); a task whose workspace resolves to an
+    // OUT-OF-SCOPE workspace (foreign company / archived / residue) is
+    // treated as not found, same as a task id that does not exist at all —
+    // this must never distinguish "exists but not yours" from "doesn't exist".
+    const activeCompanyId = resolveActiveCompanyId(db);
+    const scope = boardWhereClause(activeCompanyId);
+    const scopedWorkspaceIds = (
+      db.prepare(`SELECT w.id FROM workspaces w ${scope.sql}`).all(...scope.params) as { id: string }[]
+    ).map((w) => w.id);
+    const scopeIdList = scopedWorkspaceIds.length > 0 ? scopedWorkspaceIds : ['__no_workspace__'];
+    const scopePlaceholders = scopeIdList.map(() => '?').join(',');
+
+    const task = db
+      .prepare(
+        `SELECT id, status FROM tasks
+          WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
+      )
+      .get(taskId, ...scopeIdList) as { id: string; status: string } | undefined;
+
+    if (!task) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
 
     const activities = db
       .prepare(
@@ -56,14 +88,9 @@ export async function GET(
       // current position.
     }
 
-    // job_id and terminal are extracted from the task row.
-    const task = db
-      .prepare('SELECT id, status FROM tasks WHERE id = ?')
-      .get(taskId) as { id: string; status: string } | undefined;
-
-    const terminal = task
-      ? task.status === 'done' || task.status === 'blocked'
-      : false;
+    // job_id and terminal are extracted from the task row already fetched
+    // (and company-scope-verified) above.
+    const terminal = task.status === 'done' || task.status === 'blocked';
 
     // Per-step artifacts: count of deliverables per label (best-effort).
 
