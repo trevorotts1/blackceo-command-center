@@ -114,6 +114,26 @@ const DISPATCH_BACKOFF_MAX_SECONDS = Math.max(
   parseInt(process.env.DISPATCH_BACKOFF_MAX_SECONDS || '3600', 10),
 );
 
+// TRIAD-PARK: a Triad-incomplete card is a DIFFERENT failure class from a
+// gateway outage. A gateway heals itself; a missing SOP/persona/description
+// never does — only a human grooming the card can clear it. So it gets its own,
+// much smaller attempt cap: retrying 5× buys nothing a human was not already
+// required for. Cards that fail this gate were previously re-fired every ~2 min
+// for days (one observed card burned ~6 days / 218 attempts) because GUARD 7
+// returned WITHOUT recording the failed attempt, so neither the backoff nor the
+// attempt cap the rest of this file relies on ever engaged.
+const TRIAD_HOLD_MAX_ATTEMPTS = Math.max(
+  1,
+  parseInt(process.env.TRIAD_HOLD_MAX_ATTEMPTS || '3', 10),
+);
+// A held card re-logs its triad_gate_hold line at most once per this window.
+// The backoff already spaces attempts out, but the log line is what floods the
+// operator's error log, so it is deduped independently of the retry ladder.
+const TRIAD_HOLD_LOG_INTERVAL_SECONDS = Math.max(
+  0,
+  parseInt(process.env.TRIAD_HOLD_LOG_INTERVAL_SECONDS || '3600', 10),
+);
+
 type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
 
 /**
@@ -139,6 +159,12 @@ export function recordDispatchFailure(
      * immediately regardless of the attempt count.
      */
     hardBlock?: boolean;
+    /**
+     * TRIAD-PARK: per-class attempt cap. Defaults to MAX_DISPATCH_ATTEMPTS.
+     * A failure class that a retry cannot cure (a card missing its SOP) parks
+     * after far fewer attempts than a transient one (a gateway that is down).
+     */
+    maxAttempts?: number;
   },
 ): void {
   try {
@@ -147,6 +173,7 @@ export function recordDispatchFailure(
       [taskId],
     );
     const attempts = (row?.dispatch_attempts ?? 0) + 1;
+    const attemptCap = Math.max(1, opts.maxAttempts ?? MAX_DISPATCH_ATTEMPTS);
     const now = new Date().toISOString();
     const backoffSeconds = Math.min(
       DISPATCH_BACKOFF_MAX_SECONDS,
@@ -154,14 +181,14 @@ export function recordDispatchFailure(
     );
     const nextEligible = new Date(Date.now() + backoffSeconds * 1000).toISOString();
 
-    if (opts.hardBlock || attempts >= MAX_DISPATCH_ATTEMPTS) {
+    if (opts.hardBlock || attempts >= attemptCap) {
       // Cap reached OR a non-transient hard-block class → BLOCK (visible on the
       // board + reported) immediately. No re-loop, no silent retry ladder.
       const blockNote = opts.hardBlock
         ? `[dispatch-blocked] ${opts.reason} — non-transient failure, blocked + reported on ` +
           `attempt ${attempts} (not retried). ${opts.needs}`
         : `[dispatch-blocked] ${opts.reason} after ${attempts} failed advance attempt(s) ` +
-          `(cap ${MAX_DISPATCH_ATTEMPTS}). ${opts.needs}`;
+          `(cap ${attemptCap}). ${opts.needs}`;
       // MR-06 BLOCKED-ASK FIX: when a dispatch path blocks a task, also populate
       // blocked_on_human and ask so the blocked card is ANSWERABLE — the named
       // human knows who they are and WHAT they must do. Without `ask`, a blocked
@@ -225,12 +252,12 @@ export function recordDispatchFailure(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
         [
           uuidv4(), 'task_dispatch_deferred', agentId, taskId,
-          `[${opts.context}] advance attempt ${attempts}/${MAX_DISPATCH_ATTEMPTS} failed (${opts.reason}); backing off ${backoffSeconds}s`,
+          `[${opts.context}] advance attempt ${attempts}/${attemptCap} failed (${opts.reason}); backing off ${backoffSeconds}s`,
           now,
         ],
       );
       console.warn(
-        `[${opts.context}] recordDispatchFailure: task ${taskId} attempt ${attempts}/${MAX_DISPATCH_ATTEMPTS} (${opts.reason}), backoff ${backoffSeconds}s`,
+        `[${opts.context}] recordDispatchFailure: task ${taskId} attempt ${attempts}/${attemptCap} (${opts.reason}), backoff ${backoffSeconds}s`,
       );
     }
   } catch (err) {
@@ -676,19 +703,62 @@ export async function autoDispatchTask(
         persona_id: task.persona_id,
       });
       if (triad.missing.length > 0) {
+        const missingLabel = triadMissingPillText(triad.missing as TriadMissingKey[]);
         const holdMsg =
           `[triad_gate_hold] Task "${task.title}" (${task.id}) held from auto-dispatch — ` +
-          `${triadMissingPillText(triad.missing as TriadMissingKey[])}. The advancer will not claim a ` +
+          `${missingLabel}. The advancer will not claim a ` +
           `Triad-incomplete card — same gate the UI PATCH enforces. Complete grooming to release.`;
-        console.warn(`[${context}] autoDispatchTask: ${holdMsg}`);
+
+        // TRIAD-PARK (dedupe): the hold itself is unchanged, but it no longer
+        // re-announces itself on every sweep tick. One line per card per
+        // TRIAD_HOLD_LOG_INTERVAL_SECONDS is enough to keep the hold queryable
+        // without burying every other error in the operator's log.
+        let shouldLog = true;
         try {
-          run(
-            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-            [uuidv4(), 'triad_gate_hold', task.id, holdMsg, new Date().toISOString()],
+          const lastHold = queryOne<{ created_at: string }>(
+            `SELECT created_at FROM events WHERE task_id = ? AND type = 'triad_gate_hold'
+              ORDER BY created_at DESC LIMIT 1`,
+            [task.id],
           );
+          if (lastHold?.created_at) {
+            const ageSeconds = (Date.now() - new Date(lastHold.created_at).getTime()) / 1000;
+            shouldLog = ageSeconds >= TRIAD_HOLD_LOG_INTERVAL_SECONDS;
+          }
         } catch {
-          /* audit best-effort — never block the hold on the write itself */
+          /* dedupe is an optimisation — a read failure must still log the hold */
         }
+
+        if (shouldLog) {
+          console.warn(`[${context}] autoDispatchTask: ${holdMsg}`);
+          try {
+            run(
+              `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+              [uuidv4(), 'triad_gate_hold', task.id, holdMsg, new Date().toISOString()],
+            );
+          } catch {
+            /* audit best-effort — never block the hold on the write itself */
+          }
+        }
+
+        // TRIAD-PARK: record the failed advance attempt. Previously this branch
+        // returned here, which meant a Triad-incomplete card was held WITHOUT
+        // any accounting — no attempt counter, no backoff, no cap — so all three
+        // sweeps re-selected and re-held it every ~2 minutes indefinitely. It is
+        // the same anti-furnace machinery the gateway-down path below already
+        // uses; this class simply parks after far fewer attempts because no
+        // retry can supply a missing SOP. Audience is SYSTEM (operator), so the
+        // block routes through notifySystem() and NEVER reaches the requester's
+        // own channel — the trust engine only messages a requester for
+        // block_audience='OWNER' (jobs/trust-engine.ts CANDIDATE_SQL).
+        recordDispatchFailure(task.id, agent.id, {
+          reason: 'triad_incomplete',
+          audience: 'SYSTEM',
+          needs:
+            `Card cannot leave backlog until it is groomed — ${missingLabel}. ` +
+            `Add the missing piece(s) on the card, then it re-enters the advance lane automatically.`,
+          context,
+          maxAttempts: TRIAD_HOLD_MAX_ATTEMPTS,
+        });
         return; // NOT claimable — held, loudly, never silently skipped
       }
     }

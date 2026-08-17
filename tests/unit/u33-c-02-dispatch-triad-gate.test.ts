@@ -153,10 +153,21 @@ test('[U33/C-02 b] empty-description task is NOT claimable — held with a query
   assert.equal(holdEvents.length, 1, 'exactly one triad_gate_hold event must be written');
   assert.match(holdEvents[0].message, /Missing: description/, 'names the missing field via board-labels vocabulary');
 
-  // It never even attempted the gateway connection — GUARD 7 fires before
-  // that step, so no gateway_down deferred-attempt event exists either.
+  // It never even attempted the gateway connection — GUARD 7 fires before that
+  // step. TRIAD-PARK: the hold now ALSO records a failed advance attempt (that
+  // accounting is the fix — without it the sweeps re-held this card forever), so
+  // the original "zero deferred events" assertion is no longer the right way to
+  // prove the gateway was never contacted. The reason string is: a triad hold
+  // records `triad_incomplete`, and only code PAST GUARD 7 can record
+  // `gateway_down`.
   const deferredEvents = eventsFor(taskId, 'task_dispatch_deferred');
-  assert.equal(deferredEvents.length, 0, 'a held card must never reach the gateway-connection attempt');
+  assert.equal(
+    deferredEvents.filter((e) => /gateway_down/.test(e.message)).length,
+    0,
+    'a held card must never reach the gateway-connection attempt',
+  );
+  assert.equal(deferredEvents.length, 1, 'the hold records exactly one failed advance attempt');
+  assert.match(deferredEvents[0].message, /triad_incomplete/, 'the recorded failure is classified as a Triad hold');
 });
 
 test('[U33/C-02] a card missing ONLY its persona is also held, naming just that field', async () => {
@@ -216,5 +227,148 @@ test('[U33/C-02] TRIAD_ADVANCER_GATE=0 restores the pre-U33 bypass (no hold, eve
   assert.ok(
     eventsFor(taskId, 'task_dispatch_deferred').length >= 1,
     'with the gate disabled, even a Triad-incomplete card reaches the gateway-connection step (pre-U33 behavior)',
+  );
+});
+
+// ── (4) TRIAD-PARK: the hold must PARK, not re-loop forever ─────────────────
+//
+// The defect this covers: GUARD 7 used to `return` without recording the failed
+// attempt, so neither the exponential backoff nor the attempt cap engaged and
+// all three sweeps re-selected the same card every ~2 minutes. One production
+// card accumulated 218 re-dispatches over ~6 days; four siblings burned 612
+// attempts between them. Parking is the existing anti-furnace machinery — this
+// class just reaches it after TRIAD_HOLD_MAX_ATTEMPTS (3) instead of never.
+
+/** Simulate the backoff window elapsing, exactly as a later sweep tick would. */
+function clearBackoff(id: string): void {
+  run('UPDATE tasks SET next_dispatch_eligible_at = NULL WHERE id = ?', [id]);
+}
+
+function taskRow(id: string) {
+  return queryOne<{
+    status: string;
+    dispatch_attempts: number | null;
+    block_audience: string | null;
+    blocked_notice_sent_at: string | null;
+    next_dispatch_eligible_at: string | null;
+  }>(
+    `SELECT status, dispatch_attempts, block_audience, blocked_notice_sent_at, next_dispatch_eligible_at
+       FROM tasks WHERE id = ?`,
+    [id],
+  );
+}
+
+test('[TRIAD-PARK a] a held card is PARKED to blocked after the small attempt cap, not re-looped', async () => {
+  const sopId = (globalThis as Record<string, unknown>).__triadGateTestSopId as string;
+  const taskId = 'task-triad-park';
+  seedTask({ id: taskId, description: 'Groomed text but no SOP.', sopId: null, personaId: 'hormozi-100m-offers' });
+
+  // Attempt 1: held, backoff stamped — and that backoff alone already stops the
+  // every-2-minutes hammering (GUARD 6 skips until it elapses).
+  await autoDispatchTask(taskId, 'test');
+  const afterFirst = taskRow(taskId);
+  assert.equal(afterFirst?.status, 'backlog', 'still on the board after one hold');
+  assert.equal(afterFirst?.dispatch_attempts, 1, 'the hold records a failed advance attempt (the fix)');
+  assert.ok(afterFirst?.next_dispatch_eligible_at, 'a backoff window is stamped, so sweeps skip it meanwhile');
+
+  // Attempts 2 and 3, each after its backoff window elapsed.
+  clearBackoff(taskId);
+  await autoDispatchTask(taskId, 'test');
+  clearBackoff(taskId);
+  await autoDispatchTask(taskId, 'test');
+
+  const parked = taskRow(taskId);
+  assert.equal(parked?.status, 'blocked', 'parked out of the advance lane at the cap (3), not at 140+');
+  assert.equal(parked?.dispatch_attempts, 3, 'parked after exactly TRIAD_HOLD_MAX_ATTEMPTS attempts');
+});
+
+test('[TRIAD-PARK b] parking emits exactly ONE system-audience notification', async () => {
+  const taskId = 'task-triad-park'; // parked by the previous test
+  const blockedEvents = eventsFor(taskId, 'task_blocked');
+  assert.equal(blockedEvents.length, 1, 'exactly one block announcement, not one per sweep tick');
+  assert.match(blockedEvents[0].message, /triad_incomplete/, 'the block names the Triad cause');
+
+  const row = taskRow(taskId);
+  assert.equal(row?.block_audience, 'SYSTEM', 'the block is an OPERATOR concern, never an owner-facing one');
+
+  const snapshots = queryAll<{ block_audience: string | null }>(
+    'SELECT block_audience FROM task_block_events WHERE task_id = ?',
+    [taskId],
+  );
+  assert.equal(snapshots.length, 1, 'one block-history snapshot');
+  assert.equal(snapshots[0].block_audience, 'SYSTEM');
+});
+
+test('[TRIAD-PARK d] parking has NO requester-facing side effect', () => {
+  const taskId = 'task-triad-park';
+  const row = taskRow(taskId);
+
+  // The trust engine is the only path that messages a requester about a blocked
+  // card, and it selects ONLY block_audience='OWNER' (jobs/trust-engine.ts
+  // CANDIDATE_SQL). Asserting against that exact condition proves the parked
+  // card is invisible to it — stronger than mocking the notifier.
+  assert.notEqual(row?.block_audience, 'OWNER');
+  const trustEngineWouldSelect = queryAll<{ id: string }>(
+    `SELECT id FROM tasks WHERE id = ? AND status = 'blocked' AND block_audience = 'OWNER'`,
+    [taskId],
+  );
+  assert.equal(trustEngineWouldSelect.length, 0, 'the trust engine must never select a Triad-parked card');
+  assert.equal(row?.blocked_notice_sent_at, null, 'no blocked notice was ever sent to the requester');
+});
+
+test('[TRIAD-PARK c] a parked card is never re-selected, and neither is an archived one', async () => {
+  const parkedId = 'task-triad-park';
+  const holdsBefore = eventsFor(parkedId, 'triad_gate_hold').length;
+  const deferredBefore = eventsFor(parkedId, 'task_dispatch_deferred').length;
+
+  clearBackoff(parkedId);
+  await autoDispatchTask(parkedId, 'test');
+
+  assert.equal(
+    eventsFor(parkedId, 'triad_gate_hold').length,
+    holdsBefore,
+    'a parked (blocked) card is skipped by GUARD 3 before the Triad gate is even reached',
+  );
+  assert.equal(
+    eventsFor(parkedId, 'task_dispatch_deferred').length,
+    deferredBefore,
+    'a parked card accrues no further attempts — the furnace is out',
+  );
+
+  // Archived cards are likewise terminal for dispatch (GUARD 3, DISP-12).
+  const sopId = (globalThis as Record<string, unknown>).__triadGateTestSopId as string;
+  const archivedId = 'task-triad-archived';
+  seedTask({ id: archivedId, description: null, sopId, personaId: 'hormozi-100m-offers' });
+  run('UPDATE tasks SET archived_at = ? WHERE id = ?', [new Date().toISOString(), archivedId]);
+
+  await autoDispatchTask(archivedId, 'test');
+
+  assert.equal(eventsFor(archivedId, 'triad_gate_hold').length, 0, 'an archived card is never held or re-selected');
+  assert.equal(eventsFor(archivedId, 'task_dispatch_deferred').length, 0, 'an archived card accrues no attempts');
+});
+
+test('[TRIAD-PARK] the hold log line is deduped — one per card per window, not one per sweep tick', async () => {
+  const sopId = (globalThis as Record<string, unknown>).__triadGateTestSopId as string;
+  const taskId = 'task-triad-dedupe';
+  seedTask({ id: taskId, description: null, sopId, personaId: 'hormozi-100m-offers' });
+
+  await autoDispatchTask(taskId, 'test');
+  assert.equal(eventsFor(taskId, 'triad_gate_hold').length, 1, 'the first hold is always announced');
+
+  // A second hold inside the dedupe window must NOT re-announce, even though the
+  // attempt itself is still recorded. This is what stopped the log flood: the
+  // observed card wrote 500 identical lines.
+  clearBackoff(taskId);
+  await autoDispatchTask(taskId, 'test');
+
+  assert.equal(
+    eventsFor(taskId, 'triad_gate_hold').length,
+    1,
+    'a repeat hold inside the window writes no second triad_gate_hold line',
+  );
+  assert.equal(
+    taskRow(taskId)?.dispatch_attempts,
+    2,
+    'the attempt is still counted — dedupe silences the log, it does not skip the accounting',
   );
 });
