@@ -7,6 +7,12 @@ import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
 import { notifyOwnerSchemaError } from '@/lib/owner-reports';
 import { getSelfClient } from '@/lib/clients';
+// WI-15b (D1 Option B — NESTED subtasks) — parent_task_id validation reuses
+// the SAME company-scope convention PR #262 established for
+// /api/presentations/children and /api/presentations/[taskId]/phases, so a
+// child card can never be attached to a parent outside the active company.
+import { resolveActiveCompanyId } from '@/lib/company';
+import { boardWhereClause } from '@/lib/workspaces/board-query';
 // ANTHOLOGY-CC — pure, framework-free helper that surfaces the anthology
 // sole-writer subject key onto the card's `Ref:` line (see below). Import-safe
 // server-side: anthology-card.ts has no React / client-only imports.
@@ -77,7 +83,10 @@ let selfHealState: 'idle' | 'running' | 'done' = 'idle';
  *   "persona": "Candace",                                    // optional; resolves the workspace by name
  *   "target_agent": "Candace",                               // optional; owner-direct specialist pin (alias: specialist)
  *   "external_session_id": "agent:main:telegram:direct:123",// optional provenance
- *   "idempotency_key": "sha256(...)"                         // optional; primary dedupe key
+ *   "idempotency_key": "sha256(...)",                        // optional; primary dedupe key
+ *   "parent_task_id": "<uuid>"                                // optional; WI-15b — creates a per-phase
+ *                                                              // CHILD card under this parent deck-run
+ *                                                              // task (validated: same-company only)
  * }
  */
 
@@ -103,6 +112,17 @@ interface IngestPayload {
    *   → routes to main again → dispatch → main receives → ∞
    */
   existing_task_id?: unknown;
+  /**
+   * WI-15b (D1 Option B — NESTED subtasks, migration 124) — the parent deck
+   * run's task id. When present, this ingest call creates a per-phase CHILD
+   * card rather than a standalone/parent task. Validated below (must exist
+   * AND be in the SAME company scope as the box's active company — a child
+   * card must never cross companies) before it is ever passed to
+   * createTaskCore; an invalid/foreign parent_task_id rejects the whole
+   * ingest with 400 rather than silently dropping the link or attaching to
+   * the wrong company's row.
+   */
+  parent_task_id?: unknown;
   /**
    * W4.1 — optional doc-pointer references the CEO/caller attaches so the
    * receiving specialist knows where specific docs live. Accepted as a JSON
@@ -470,6 +490,52 @@ export async function POST(request: NextRequest) {
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
 
+    // ── WI-15b (D1 Option B — NESTED subtasks): parent_task_id validation ──────
+    // A caller (the Presentations department engine's cc_board.py, per-phase)
+    // may attach this ingest to a parent deck-run row. Validate it BEFORE any
+    // write: the parent must exist AND resolve into the SAME company scope as
+    // this box's active company — reusing the EXACT resolveActiveCompanyId +
+    // boardWhereClause convention /api/presentations/children and
+    // /api/presentations/[taskId]/phases already use (PR #262), so a child
+    // card can never be linked to another company's parent. A missing/foreign
+    // parent_task_id is treated the same way those routes treat "not found":
+    // it never distinguishes "exists but not yours" from "doesn't exist" —
+    // both simply fail the ingest rather than silently attaching cross-company
+    // or silently dropping the link.
+    const parentTaskIdRaw =
+      typeof body.parent_task_id === 'string' ? body.parent_task_id.trim() : undefined;
+    let parentTaskId: string | null = null;
+    if (parentTaskIdRaw) {
+      const db = getDb();
+      const activeCompanyId = resolveActiveCompanyId(db);
+      const scope = boardWhereClause(activeCompanyId);
+      const scopedWorkspaceIds = (
+        db.prepare(`SELECT w.id FROM workspaces w ${scope.sql}`).all(...scope.params) as { id: string }[]
+      ).map((w) => w.id);
+      const scopeIdList = scopedWorkspaceIds.length > 0 ? scopedWorkspaceIds : ['__no_workspace__'];
+      const scopePlaceholders = scopeIdList.map(() => '?').join(',');
+      const parent = db
+        .prepare(
+          `SELECT id FROM tasks
+            WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
+        )
+        .get(parentTaskIdRaw, ...scopeIdList) as { id: string } | undefined;
+      if (!parent) {
+        console.warn(
+          `[INGEST] WI-15b: parent_task_id="${parentTaskIdRaw}" not found or not in the active ` +
+            'company scope — rejecting child ingest rather than attaching cross-company.',
+        );
+        return NextResponse.json(
+          {
+            error: 'parent_task_id does not reference a task in this company\'s scope',
+            detail: 'parent_not_found_or_out_of_scope',
+          },
+          { status: 400 },
+        );
+      }
+      parentTaskId = parent.id;
+    }
+
     // ── Skill-6 survey job-type mapping (zero-migration) ──────────────────────
     // cc_board.py (and callers like it) may post department_slug='survey', 'form',
     // or 'quiz' to describe a GoHighLevel web-builder task. There is no 'survey'
@@ -749,6 +815,9 @@ export async function POST(request: NextRequest) {
         created_by_agent_id: null,
         workspace_id: workspaceId,
         department: resolvedDepartment ?? null,
+        // WI-15b: pre-validated (existence + company-scope) above; NULL for a
+        // parent/flat task, the parent row id for a per-phase child.
+        parent_task_id: parentTaskId,
         eventMessage,
         // Pass idempotency key through so createTaskCore embeds it in the
         // task_created event AND checks it before writing a new row.
@@ -914,6 +983,7 @@ export async function GET() {
       target_agent: 'string (optional; owner-direct specialist pin — routes straight to the named AI, alias: specialist)',
       external_session_id: 'string (optional provenance)',
       idempotency_key: 'string (optional; primary dedupe key)',
+      parent_task_id: 'string (optional; WI-15b — attaches this task as a per-phase CHILD of the named parent deck-run task. Validated: parent must exist AND be in this box\'s active company scope, else 400.)',
       requester_channel: 'string (optional; P1-04 trust engine — originating client channel, default telegram when requester_chat_id is present)',
       requester_chat_id: 'string (optional; P1-04 trust engine — client chat id the report-back loop acks/progress/done into)',
       voice_persona_id: 'string (optional; B-U7 ingest parity — producer-resolved VOICE persona id. GATES the group below: pins directly instead of a fresh selector match; absent = async selector pin, unchanged)',

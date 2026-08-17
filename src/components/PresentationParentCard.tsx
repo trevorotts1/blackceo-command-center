@@ -11,8 +11,10 @@
  *   - Each child card is a compact row showing its phase label, status dot,
  *     and a click-through to its own modal.
  *   - When data is loading, shows a skeleton. When children are absent (no
- *     child tasks created yet), shows a designed empty-state: "Phases not yet
- *     dispatched — the engine will create child cards as phases begin."
+ *     child tasks created yet), shows a designed empty-state naming the actual
+ *     mechanism: a child card appears once a phase task is posted to
+ *     /api/tasks/ingest with this run's id as parent_task_id (WI-15b write
+ *     path — see src/app/api/tasks/ingest/route.ts).
  *   - The component is self-fetching (fetches /api/presentations/children
  *     on mount) but also accepts pre-fetched initialData from the board.
  */
@@ -286,8 +288,9 @@ export default function PresentationParentCard({
           {children.length === 0 ? (
             <div className="px-4 lg:px-5 py-4 text-center" data-testid="presentation-children-empty">
               <p className="text-xs text-gray-400 italic">
-                Phases not yet dispatched — the engine will create child cards
-                as phases begin.
+                No phase cards yet — a child card appears here once the
+                presentation engine posts a phase task with this run as its
+                parent_task_id.
               </p>
             </div>
           ) : (

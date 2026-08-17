@@ -2152,6 +2152,15 @@ export interface CreateTaskCoreInput {
   due_date?: string | null;
   sop_id?: string | null;
   /**
+   * WI-15b (D1 Option B — NESTED subtasks, migration 124). The parent row id
+   * for a per-phase child card. NULL/omitted for a parent run card or a plain
+   * flat task. The caller (currently /api/tasks/ingest) is responsible for
+   * validating the parent exists AND is in the same company scope BEFORE
+   * this is reached — createTaskCore trusts the value it is given here,
+   * exactly like it already trusts a pre-validated workspace_id.
+   */
+  parent_task_id?: string | null;
+  /**
    * Immutable board-producer provenance (migration 089 / INGEST-10). Stamped
    * ONLY here, at creation, from the VALIDATED ingest `source` value — never
    * from caller-editable text. Never accept this on an update path
@@ -2478,8 +2487,8 @@ export async function createTaskCore(
       : computeDueDateSmartDefault(resolvedPriority, new Date(now));
 
   run(
-    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, parent_task_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.title,
@@ -2498,6 +2507,9 @@ export async function createTaskCore(
       // report back into it. Both NULL for operator/internal tasks (never reported on).
       input.requester_channel || null,
       input.requester_chat_id || null,
+      // WI-15b (migration 124): NULL for a parent/flat task; the pre-validated
+      // parent row id for a per-phase child. See CreateTaskCoreInput above.
+      input.parent_task_id || null,
       now,
       now,
     ]
