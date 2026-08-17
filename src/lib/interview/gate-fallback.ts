@@ -8,9 +8,12 @@
  * a lightweight HTTP-based fallback: the middleware fetches a thin Node-runtime
  * endpoint that reads the canonical files and returns the completion signal.
  *
- * EDGE-SAFETY: imports NOTHING Node-only (no fs, no crypto, no seam.ts).
- * Only uses the Web-standard `fetch` API available in both Edge and Node.
+ * EDGE-SAFETY: imports NOTHING Node-only (no fs, no node:crypto, no seam.ts).
+ * Uses the Web-standard `fetch` API, plus internal-call.ts which is WebCrypto
+ * only (crypto.subtle) — available in both Edge and Node.
  */
+
+import { INTERNAL_GATE_HEADER, mintInternalGateToken } from '@/lib/interview/internal-call';
 
 /** Path of the gate-status Node endpoint (appended to the internal loopback URL). */
 const GATE_STATUS_PATH = '/api/interview/gate-status';
@@ -43,14 +46,21 @@ export async function checkInterviewCompleteViaFallback(host?: string | null): P
     const url = `http://127.0.0.1:${port}${GATE_STATUS_PATH}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3_000); // 3s timeout
+    // 2026-08-17: the Host-spoofing guard requires Cloudflare edge provenance
+    // before honoring a client hostname. This loopback call is server-to-server
+    // and has none, so without an attestation it is refused (403) and every
+    // client tenant fail-closes to /interview — locked out of their own
+    // dashboard. Prove we hold the box secret instead; a plain marker header
+    // would be forgeable by anything that can reach the origin.
+    const headers: Record<string, string> = {};
+    if (host) {
+      headers.host = host;
+      headers[INTERNAL_GATE_HEADER] = await mintInternalGateToken(host);
+    }
     const res = await fetch(url, {
       method: 'GET',
       signal: controller.signal,
-      // JANET-INTERVIEW-FIX: forward the original Host header so the
-      // gate-status endpoint resolves the same tenant the browser sees.
-      // Without it the internal loopback fetch reads the SELF state and a
-      // remote client's locked dashboard would wrongly unlock.
-      headers: host ? { host } : undefined,
+      headers: host ? headers : undefined,
     });
     clearTimeout(timeout);
     if (!res.ok) return false;

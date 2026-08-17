@@ -25,7 +25,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
-import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
+import { resolveInterviewTenant, refuseUnverifiedTenant, tenantForHost } from '@/lib/interview/tenant';
+import { INTERNAL_GATE_HEADER, verifyInternalGateToken } from '@/lib/interview/internal-call';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -35,9 +36,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   // JANET-INTERVIEW-FIX: a remote client's hostname must answer from ITS
   // clients-row flag, never this box's canonical files. Self (operator) reads
   // the canonical files exactly as before.
-  const tenant = resolveInterviewTenant(request);
-  const refusedTenant = refuseUnverifiedTenant(tenant);
-  if (refusedTenant) return refusedTenant;
+  // The middleware's dashboard-admission fallback calls this endpoint over an
+  // in-process loopback fetch. That call is server-to-server, so it carries no
+  // Cloudflare edge headers and would be refused by the Host-spoofing guard —
+  // which would 302 every client tenant to /interview even with a completed
+  // interview. It instead proves it holds the box's HMAC secret; an attacker
+  // that can reach the origin cannot mint that token.
+  const internalOk = await verifyInternalGateToken(
+    request.headers.get(INTERNAL_GATE_HEADER),
+    request.headers.get('host'),
+  );
+  const tenant = internalOk
+    ? tenantForHost(request.headers.get('host'))
+    : resolveInterviewTenant(request);
+  if (!internalOk) {
+    const refusedTenant = refuseUnverifiedTenant(tenant);
+    if (refusedTenant) return refusedTenant;
+  }
   if (tenant.kind === 'client' && tenant.client) {
     return NextResponse.json({
       interviewComplete: tenant.client.interview_complete === true,
