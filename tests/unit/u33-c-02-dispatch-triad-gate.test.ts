@@ -116,14 +116,22 @@ function seedTask(opts: {
   description: string | null;
   sopId: string | null;
   personaId: string | null;
+  /** TRIAD-PARK: the production card class this gate strands is TELEGRAM-sourced —
+   *  it carries a requester the trust engine can message. Seeding it is what makes
+   *  the "no requester-facing side effect" assertions non-vacuous. */
+  requesterChannel?: string | null;
+  requesterChatId?: string | null;
 }): void {
   const now = new Date().toISOString();
   run(
     `INSERT INTO tasks
        (id, title, description, status, priority, assigned_agent_id, workspace_id, business_id,
-        sop_id, persona_id, created_at, updated_at)
-     VALUES (?, ?, ?, 'backlog', 'medium', ?, NULL, NULL, ?, ?, ?, ?)`,
-    [opts.id, `Task ${opts.id}`, opts.description, AGENT_ID, opts.sopId, opts.personaId, now, now],
+        sop_id, persona_id, requester_channel, requester_chat_id, created_at, updated_at)
+     VALUES (?, ?, ?, 'backlog', 'medium', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
+    [
+      opts.id, `Task ${opts.id}`, opts.description, AGENT_ID, opts.sopId, opts.personaId,
+      opts.requesterChannel ?? null, opts.requesterChatId ?? null, now, now,
+    ],
   );
 }
 
@@ -314,6 +322,48 @@ test('[TRIAD-PARK d] parking has NO requester-facing side effect', () => {
   );
   assert.equal(trustEngineWouldSelect.length, 0, 'the trust engine must never select a Triad-parked card');
   assert.equal(row?.blocked_notice_sent_at, null, 'no blocked notice was ever sent to the requester');
+});
+
+test('[TRIAD-PARK e] a TELEGRAM-sourced parked card plans NO requester-facing block notice', async () => {
+  // The card class that actually stranded in production carries a requester
+  // (source telegram), so the previous assertions are only meaningful on a card
+  // the trust engine COULD message. This one drives the real selector and the
+  // real planner rather than a re-implementation of their WHERE clause.
+  const taskId = 'task-triad-park-telegram';
+  seedTask({
+    id: taskId,
+    description: 'Groomed text but no SOP.',
+    sopId: null,
+    personaId: 'hormozi-100m-offers',
+    requesterChannel: 'telegram',
+    requesterChatId: '424242',
+  });
+
+  await autoDispatchTask(taskId, 'test');
+  clearBackoff(taskId);
+  await autoDispatchTask(taskId, 'test');
+  clearBackoff(taskId);
+  await autoDispatchTask(taskId, 'test');
+
+  assert.equal(taskRow(taskId)?.status, 'blocked', 'the telegram-sourced card parks like any other');
+  assert.equal(taskRow(taskId)?.block_audience, 'SYSTEM', 'parked for the OPERATOR, not the client');
+
+  const { loadCandidateTasks, planSends } = await import('../../src/lib/jobs/trust-engine');
+  const candidates = loadCandidateTasks(taskId);
+  // isNight:false is the HARDER case on purpose: quiet hours would filter this
+  // card out on their own, so forcing day means the SYSTEM audience is the only
+  // thing standing between a parked card and the client's Telegram.
+  const plans = planSends(candidates, { now: new Date(), deliverableFor: () => null, isNight: false });
+
+  const blockNotices = plans
+    .flatMap((p) => p.stamps)
+    .filter((s) => s.guardColumn === 'blocked_notice_sent_at');
+  assert.equal(blockNotices.length, 0, 'a Triad-parked card must never plan a client "paused waiting on you" message');
+  assert.equal(
+    plans.filter((p) => /paused waiting on you/.test(p.message)).length,
+    0,
+    'and no such message text is planned by any other branch either',
+  );
 });
 
 test('[TRIAD-PARK c] a parked card is never re-selected, and neither is an archived one', async () => {
