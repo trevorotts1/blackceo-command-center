@@ -46,6 +46,7 @@ import {
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
+import { resolveInterviewTenant } from '@/lib/interview/tenant';
 import { getClientContext } from '@/lib/clients';
 
 export const runtime = 'nodejs';
@@ -88,6 +89,23 @@ function resolveOwnerId(req: NextRequest): string {
 }
 
 export async function POST(req: NextRequest) {
+  // FAIL CLOSED for client tenants (JANET-INTERVIEW-FIX phase 2). This route
+  // presses record-dept-decision.sh against the OPERATOR's canonical build
+  // state and resolves its client via getClientContext() (the self row), so a
+  // remote client's department decision would be written as the operator's.
+  const tenant = resolveInterviewTenant(req);
+  if (tenant.kind === 'client') {
+    return NextResponse.json(
+      {
+        error: 'not_implemented_for_client_tenant',
+        message:
+          'Recording department decisions from a client dashboard is not available yet. ' +
+          'Your answers are saved — your operator records these for you.',
+      },
+      { status: 501 },
+    );
+  }
+
   // 1) Validate the body.
   let body: z.infer<typeof requestSchema>;
   try {

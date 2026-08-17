@@ -36,6 +36,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { resolveInterviewTenant } from '@/lib/interview/tenant';
 import {
   InterviewScriptError,
   InterviewScriptMissingError,
@@ -195,6 +196,25 @@ function extractQcReasons(state: BuildState | null): string[] {
 /* -------------------------------------------------------------------------- */
 
 export async function POST(req: NextRequest) {
+  // FAIL CLOSED for client tenants (JANET-INTERVIEW-FIX phase 2). This route
+  // presses update-interview-state.sh --complete and kicks the workforce build
+  // — on THIS box, the operator's. Run by a remote client it would mark the
+  // OPERATOR's interview complete and start the OPERATOR's build from the
+  // client's data. Refuse until a per-client build path exists; a 501 is
+  // strictly better than running the wrong box's build.
+  const tenant = resolveInterviewTenant(req);
+  if (tenant.kind === 'client') {
+    return NextResponse.json(
+      {
+        error: 'not_implemented_for_client_tenant',
+        message:
+          'Completing the interview from a client dashboard is not available yet. ' +
+          'Your answers are saved — your operator finishes the build for you.',
+      },
+      { status: 501 },
+    );
+  }
+
   // Body is optional; tolerate an empty/absent body.
   let body: z.infer<typeof requestSchema>;
   try {

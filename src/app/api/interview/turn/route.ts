@@ -37,6 +37,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getOpenClawClient, type OpenClawClient } from '@/lib/openclaw/client';
+import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import {
+  getClientInterviewState,
+  setClientInterviewSessionId,
+} from '@/lib/interview/client-interview-state';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -172,9 +177,42 @@ function sleep(ms: number): Promise<void> {
  * src/app/api/openclaw/sessions/route.ts. Returns the connected client, or a
  * 503 NextResponse when the gateway is unreachable.
  */
-async function connectOr503(): Promise<
+async function connectOr503(req?: NextRequest): Promise<
   { ok: true; client: OpenClawClient } | { ok: false; response: NextResponse }
 > {
+  // JANET-INTERVIEW-FIX: a remote client's hostname relays the conversation to
+  // THAT client's own gateway (its row's gateway_url + token), so the
+  // interview runs on her box. Self keeps the historical local singleton.
+  if (req) {
+    const tenant = resolveInterviewTenant(req);
+    if (tenant.kind === 'client' && tenant.client?.gateway_url) {
+      const client = getOpenClawClient({
+        id: tenant.client.id,
+        url: tenant.client.gateway_url,
+        token: tenant.client.gateway_token ?? null,
+        cfAccessClientId: tenant.client.cf_access_client_id ?? null,
+        cfAccessClientSecret: tenant.client.cf_access_client_secret ?? null,
+      });
+      if (!client.isConnected()) {
+        try {
+          await client.connect();
+        } catch {
+          return {
+            ok: false,
+            response: NextResponse.json(
+              {
+                error: 'gateway_unreachable',
+                message:
+                  'Your interviewer is reconnecting. You can keep answering the branding and department cards — they save without the chat.',
+              },
+              { status: 503 },
+            ),
+          };
+        }
+      }
+      return { ok: true, client };
+    }
+  }
   const client = getOpenClawClient();
   if (!client.isConnected()) {
     try {
@@ -207,9 +245,31 @@ async function resolveSessionId(
   req: NextRequest,
   provided?: string,
 ): Promise<string> {
-  if (provided) return provided;
+  // JANET-INTERVIEW-FIX phase 2: for a client tenant, prefer the session we
+  // already persisted for that client. Without this the browser had nowhere to
+  // read a prior session id from (/api/interview/state returned null for
+  // clients), so every visit minted a NEW gateway session and the client met a
+  // blank-slate interviewer that had forgotten the whole conversation.
+  const tenant = resolveInterviewTenant(req);
+  const clientId =
+    tenant.kind === 'client' && tenant.client ? tenant.client.id : null;
+
+  if (provided) {
+    // Adopt a browser-supplied id for a client with no stored session yet, so
+    // an in-flight conversation survives the next reload.
+    if (clientId) setClientInterviewSessionId(clientId, provided);
+    return provided;
+  }
+
+  if (clientId) {
+    const stored = getClientInterviewState(clientId);
+    if (stored?.interviewSessionId) return stored.interviewSessionId;
+  }
+
   const peer = req.headers.get('Cf-Access-Authenticated-User-Email') || undefined;
   const session = await client.createSession('web', peer);
+  // Persist the mint so the NEXT visit rejoins this conversation.
+  if (clientId) setClientInterviewSessionId(clientId, session.id);
   return session.id;
 }
 
@@ -317,7 +377,7 @@ export async function POST(req: NextRequest) {
   const wantsStream =
     body.stream === true || new URL(req.url).searchParams.get('stream') === '1';
 
-  const conn = await connectOr503();
+  const conn = await connectOr503(req);
   if (!conn.ok) return conn.response;
   const { client } = conn;
 
@@ -410,7 +470,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const conn = await connectOr503();
+  const conn = await connectOr503(req);
   if (!conn.ok) return conn.response;
 
   let texts: string[];

@@ -681,7 +681,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         }
       }
       if (!admitted) {
-        const fallbackComplete = await checkInterviewCompleteViaFallback();
+        const fallbackComplete = await checkInterviewCompleteViaFallback(
+          request.headers.get('host')
+        );
         if (fallbackComplete) {
           admitted = true;
           needCookie = true; // mint cookie so next requests skip the fallback
