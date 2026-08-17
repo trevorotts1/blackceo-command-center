@@ -25,7 +25,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
-import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -36,6 +36,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   // clients-row flag, never this box's canonical files. Self (operator) reads
   // the canonical files exactly as before.
   const tenant = resolveInterviewTenant(request);
+  const refusedTenant = refuseUnverifiedTenant(tenant);
+  if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client' && tenant.client) {
     return NextResponse.json({
       interviewComplete: tenant.client.interview_complete === true,

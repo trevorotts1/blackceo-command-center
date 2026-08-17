@@ -22,13 +22,49 @@
  * the turn route relays to.
  */
 
-import type { NextRequest } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { getClient, type Client } from '@/lib/clients';
 
 export interface InterviewTenant {
-  kind: 'self' | 'client';
+  kind: 'self' | 'client' | 'unverified';
   /** The remote client row when kind === 'client'. */
   client: Client | null;
+  /** Why a client host was refused. Set only when kind === 'unverified'. */
+  reason?: string;
+}
+
+/**
+ * SECURITY (2026-08-17): the Host header is CLIENT-CONTROLLED. Selecting a
+ * tenant from it alone let anyone who could reach the origin read and write a
+ * client's interview simply by sending `Host: <client>.zerohumanworkforce.com`
+ * — proven exploitable with a bare curl against 127.0.0.1:4000, which returned
+ * a client's full interview state with no credential.
+ *
+ * The discriminator: a REAL client request reaches this origin only through the
+ * Cloudflare tunnel, so it carries Cloudflare edge headers. A forged-Host
+ * request made directly to the origin carries none. We therefore require edge
+ * provenance before honoring a client hostname.
+ *
+ * This is defence-in-depth, not a signature check: anything that can reach the
+ * origin directly can also invent a `cf-ray`. It closes the demonstrated local
+ * /direct-origin vector and is deliberately chosen over demanding a verified
+ * CF Access JWT, because REQUIRE_CF_ACCESS is currently off on this box and a
+ * hard JWT requirement would lock live clients out of their own interviews.
+ * Upgrade path: verify `cf-access-jwt-assertion` and bind its `aud` to the
+ * client's Access application id.
+ *
+ * Fail CLOSED: a client hostname we cannot corroborate resolves to
+ * 'unverified', NEVER to 'self' — falling back to self would hand the
+ * operator's own canonical interview to whoever forged the header.
+ */
+const TRUST_LOCAL_TENANT = process.env.INTERVIEW_TENANT_TRUST_LOCAL === 'true';
+
+function hasEdgeProvenance(headers: Headers): boolean {
+  return Boolean(
+    headers.get('cf-access-jwt-assertion') ||
+      headers.get('cf-ray') ||
+      headers.get('cf-connecting-ip'),
+  );
 }
 
 /** Hostname → clients-row id. One line per remote client served by this CC. */
@@ -54,6 +90,20 @@ export function resolveInterviewTenant(request: NextRequest): InterviewTenant {
   if (host && !SELF_HOSTS.has(host)) {
     const clientId = REMOTE_CLIENT_HOSTS[host];
     if (clientId) {
+      // Host claims a client — corroborate before honoring it.
+      if (!hasEdgeProvenance(request.headers) && !TRUST_LOCAL_TENANT) {
+        return {
+          kind: 'unverified',
+          client: null,
+          reason:
+            `Host '${host}' claims a client tenant but the request carries no ` +
+            `Cloudflare edge provenance (cf-ray / cf-connecting-ip / ` +
+            `cf-access-jwt-assertion). Refusing: the Host header is ` +
+            `client-controlled and cannot by itself authorize access to a ` +
+            `client's interview. Set INTERVIEW_TENANT_TRUST_LOCAL=true for ` +
+            `local development only.`,
+        };
+      }
       const client = getClient(clientId);
       if (client && !client.is_self) {
         return { kind: 'client', client };
@@ -63,7 +113,31 @@ export function resolveInterviewTenant(request: NextRequest): InterviewTenant {
   return { kind: 'self', client: null };
 }
 
-/** Hostname passed by callers that construct a synthetic request (middleware). */
+/**
+ * Fail-closed guard for every /api/interview/* route. Returns a 403 Response
+ * when the tenant could not be corroborated, or null to continue.
+ *
+ * Every route MUST call this immediately after resolveInterviewTenant(). An
+ * 'unverified' tenant must never fall through to the self branch — that is the
+ * exact leak this guard exists to prevent.
+ */
+export function refuseUnverifiedTenant(tenant: InterviewTenant): NextResponse | null {
+  if (tenant.kind !== 'unverified') return null;
+  console.warn(`[SECURITY] interview tenant refused: ${tenant.reason ?? 'unverified'}`);
+  return NextResponse.json(
+    { error: 'forbidden', detail: 'unverified interview tenant' },
+    { status: 403 },
+  );
+}
+
+/**
+ * Hostname passed by callers that construct a synthetic request (middleware).
+ *
+ * ROUTING ONLY — never an authorization decision. This variant has no headers
+ * to corroborate, so it cannot apply the edge-provenance check above. Callers
+ * must not use it to grant access to client data; the API routes re-resolve
+ * with resolveInterviewTenant() and fail closed there.
+ */
 export function tenantForHost(host: string | null): InterviewTenant {
   if (host) {
     const h = host.split(':')[0].toLowerCase();

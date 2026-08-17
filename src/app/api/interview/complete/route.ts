@@ -36,7 +36,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
 import {
   InterviewScriptError,
   InterviewScriptMissingError,
@@ -203,6 +203,8 @@ export async function POST(req: NextRequest) {
   // client's data. Refuse until a per-client build path exists; a 501 is
   // strictly better than running the wrong box's build.
   const tenant = resolveInterviewTenant(req);
+  const refusedTenant = refuseUnverifiedTenant(tenant);
+  if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client') {
     return NextResponse.json(
       {

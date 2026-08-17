@@ -46,7 +46,7 @@ import {
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
-import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
 import { getClientContext } from '@/lib/clients';
 
 export const runtime = 'nodejs';
@@ -94,6 +94,8 @@ export async function POST(req: NextRequest) {
   // state and resolves its client via getClientContext() (the self row), so a
   // remote client's department decision would be written as the operator's.
   const tenant = resolveInterviewTenant(req);
+  const refusedTenant = refuseUnverifiedTenant(tenant);
+  if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client') {
     return NextResponse.json(
       {

@@ -38,7 +38,7 @@ import {
   readAnswerBlocks,
   type GateFlags,
 } from '@/lib/interview/seam';
-import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
 import { getClientInterviewState } from '@/lib/interview/client-interview-state';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import {
@@ -175,6 +175,8 @@ export async function GET(request: NextRequest) {
   // clients-row flag — never the operator's canonical files. Self reads the
   // canonical snapshot exactly as before (regression requirement).
   const tenant = resolveInterviewTenant(request);
+  const refusedTenant = refuseUnverifiedTenant(tenant);
+  if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client' && tenant.client) {
     // The client's OWN state — never the operator's files, and never the stub
     // this branch used to return. Before this, answeredIds was hardcoded to []

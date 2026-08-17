@@ -64,7 +64,7 @@ import {
 import { INTERVIEW_QUESTIONS, type InterviewQuestion } from '@/lib/interview-questions';
 import { resolveBrandColor } from '@/lib/branding';
 import { getClientContext, updateClient } from '@/lib/clients';
-import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
 import { recordAnsweredQuestion } from '@/lib/interview/client-interview-state';
 
 export const runtime = 'nodejs';
@@ -274,6 +274,8 @@ export async function POST(req: NextRequest) {
   //     color, bad logo URL) has already run, so a client gets the same
   //     rejections; only the write targets differ.
   const tenant = resolveInterviewTenant(req);
+  const refusedTenant = refuseUnverifiedTenant(tenant);
+  if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client' && tenant.client) {
     const clientId = tenant.client.id;
 

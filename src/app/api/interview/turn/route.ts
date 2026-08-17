@@ -37,7 +37,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getOpenClawClient, type OpenClawClient } from '@/lib/openclaw/client';
-import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
 import {
   getClientInterviewState,
   setClientInterviewSessionId,
@@ -254,16 +254,26 @@ async function resolveSessionId(
   const clientId =
     tenant.kind === 'client' && tenant.client ? tenant.client.id : null;
 
-  if (provided) {
-    // Adopt a browser-supplied id for a client with no stored session yet, so
-    // an in-flight conversation survives the next reload.
-    if (clientId) setClientInterviewSessionId(clientId, provided);
-    return provided;
-  }
-
   if (clientId) {
     const stored = getClientInterviewState(clientId);
+
+    // SECURITY (2026-08-17) — session fixation. This branch previously adopted
+    // ANY browser-supplied sessionId and PERSISTED it against the client row
+    // (setClientInterviewSessionId(clientId, provided)) with no validation. A
+    // single forged request could therefore repoint a client's stored session
+    // permanently, so her next visit would silently join a session chosen by
+    // someone else — and every later turn would be relayed into it.
+    //
+    // Rule now: a caller-supplied id is honored ONLY when it already matches
+    // the id this server minted and stored for that client. A caller-supplied
+    // id is NEVER written to the store; only a server-minted id is (below).
+    if (provided && stored?.interviewSessionId === provided) return provided;
     if (stored?.interviewSessionId) return stored.interviewSessionId;
+    // No stored session yet: fall through and MINT one. Any `provided` id is
+    // deliberately discarded here rather than adopted.
+  } else if (provided) {
+    // Self/operator path — unchanged historical behavior.
+    return provided;
   }
 
   const peer = req.headers.get('Cf-Access-Authenticated-User-Email') || undefined;
@@ -361,6 +371,12 @@ function streamTurn(
 /* -------------------------------------------------------------------------- */
 
 export async function POST(req: NextRequest) {
+  // Fail closed BEFORE any work: a forged Host must never reach the relay,
+  // the session store, or a client's gateway. Covers the nested
+  // resolveInterviewTenant() calls in connectOr503() and resolveSessionId().
+  const refusedTenant = refuseUnverifiedTenant(resolveInterviewTenant(req));
+  if (refusedTenant) return refusedTenant;
+
   let body: z.infer<typeof requestSchema>;
   try {
     body = requestSchema.parse(await req.json());
@@ -460,6 +476,11 @@ export async function POST(req: NextRequest) {
  * agent text beyond `after` (joined), or null when nothing new has landed yet.
  */
 export async function GET(req: NextRequest) {
+  // Same fail-closed gate as POST: polling a client's gateway session is
+  // reading client data and must not be reachable via a forged Host.
+  const refusedTenant = refuseUnverifiedTenant(resolveInterviewTenant(req));
+  if (refusedTenant) return refusedTenant;
+
   const url = new URL(req.url);
   const sessionId = (url.searchParams.get('sessionId') ?? '').trim();
   const after = Math.max(0, parseInt(url.searchParams.get('after') ?? '0', 10) || 0);
