@@ -5892,6 +5892,31 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    // JANET-INTERVIEW-FIX phase 2 (2026-08-17): per-client interview state.
+    //
+    // The interview's canonical state lives in the OPERATOR's files, of which
+    // there is exactly one set on the box. A remote client routed here by
+    // hostname had nowhere to keep its own resume position or gateway session,
+    // so /api/interview/state answered client tenants with a hardcoded stub —
+    // every page load restarted the deck at card 1 and minted a new session.
+    //
+    // This table is the missing per-client store. Question IDS only: answer
+    // content stays in the transcript. Self (the operator) never uses it.
+    id: '126',
+    name: 'add_client_interview_state',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_interview_state (
+          client_id TEXT PRIMARY KEY,
+          interview_session_id TEXT,
+          answered_ids TEXT,
+          updated_at TEXT DEFAULT (datetime('now'))
+        )
+      `);
+      console.log('[Migration 126] client_interview_state ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

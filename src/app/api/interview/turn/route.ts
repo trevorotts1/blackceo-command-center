@@ -38,6 +38,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getOpenClawClient, type OpenClawClient } from '@/lib/openclaw/client';
 import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import {
+  getClientInterviewState,
+  setClientInterviewSessionId,
+} from '@/lib/interview/client-interview-state';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -241,9 +245,31 @@ async function resolveSessionId(
   req: NextRequest,
   provided?: string,
 ): Promise<string> {
-  if (provided) return provided;
+  // JANET-INTERVIEW-FIX phase 2: for a client tenant, prefer the session we
+  // already persisted for that client. Without this the browser had nowhere to
+  // read a prior session id from (/api/interview/state returned null for
+  // clients), so every visit minted a NEW gateway session and the client met a
+  // blank-slate interviewer that had forgotten the whole conversation.
+  const tenant = resolveInterviewTenant(req);
+  const clientId =
+    tenant.kind === 'client' && tenant.client ? tenant.client.id : null;
+
+  if (provided) {
+    // Adopt a browser-supplied id for a client with no stored session yet, so
+    // an in-flight conversation survives the next reload.
+    if (clientId) setClientInterviewSessionId(clientId, provided);
+    return provided;
+  }
+
+  if (clientId) {
+    const stored = getClientInterviewState(clientId);
+    if (stored?.interviewSessionId) return stored.interviewSessionId;
+  }
+
   const peer = req.headers.get('Cf-Access-Authenticated-User-Email') || undefined;
   const session = await client.createSession('web', peer);
+  // Persist the mint so the NEXT visit rejoins this conversation.
+  if (clientId) setClientInterviewSessionId(clientId, session.id);
   return session.id;
 }
 

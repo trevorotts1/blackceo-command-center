@@ -64,6 +64,8 @@ import {
 import { INTERVIEW_QUESTIONS, type InterviewQuestion } from '@/lib/interview-questions';
 import { resolveBrandColor } from '@/lib/branding';
 import { getClientContext, updateClient } from '@/lib/clients';
+import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { recordAnsweredQuestion } from '@/lib/interview/client-interview-state';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -254,6 +256,69 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
+  }
+
+  // 3b) TENANT SPLIT (JANET-INTERVIEW-FIX phase 2). Everything below this point
+  //     — the transcript append, the update-interview-state.sh stamp, the
+  //     company-config mirror — writes the OPERATOR's canonical state, of which
+  //     there is exactly one set on this box. A remote client routed here by
+  //     hostname must never reach any of it.
+  //
+  //     Observed live before this branch existed: a client's answers were
+  //     appended to the OPERATOR's encrypted transcript, stamped onto the
+  //     OPERATOR's build-state, and mirrored onto the OPERATOR's clients row —
+  //     the operator's company name was overwritten with the client's.
+  //
+  //     A client tenant records its answer against its OWN row and its own
+  //     resume state, and returns here. Validation above (empty answer, bad
+  //     color, bad logo URL) has already run, so a client gets the same
+  //     rejections; only the write targets differ.
+  const tenant = resolveInterviewTenant(req);
+  if (tenant.kind === 'client' && tenant.client) {
+    const clientId = tenant.client.id;
+
+    // Resume position: remember WHICH question was answered (id only — the
+    // answer text is never written to the operator's stores).
+    let answeredIds: string[] | null = null;
+    if (question?.id) {
+      answeredIds = recordAnsweredQuestion(clientId, question.id);
+    }
+
+    // Branding mirror onto the CLIENT's own row, so her dashboard themes from
+    // her answers. Never getClientContext() — that resolves to the operator.
+    let mirrored: { column: string; ok: boolean; warning?: string } | null = null;
+    const clientColumn: 'brand_color' | 'logo_url' | 'name' | null = brandColorHex
+      ? 'brand_color'
+      : logoUrl
+        ? 'logo_url'
+        : storeOn === 'client.name'
+          ? 'name'
+          : null;
+    if (clientColumn) {
+      const value = (brandColorHex ?? logoUrl ?? answer) as string;
+      try {
+        updateClient(clientId, { [clientColumn]: value });
+        mirrored = { column: clientColumn, ok: true };
+      } catch (err) {
+        mirrored = {
+          column: clientColumn,
+          ok: false,
+          warning: err instanceof Error ? err.message : 'mirror upsert failed',
+        };
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      tenant: 'client',
+      clientId,
+      questionId: question?.id ?? null,
+      answeredCount: answeredIds?.length ?? null,
+      mirror: mirrored,
+      // No operator transcript is written for a client tenant, so there is no
+      // transcriptPath to report. Said plainly rather than faked.
+      transcriptPath: null,
+    });
   }
 
   // 4) CANONICAL WRITE #1 — append the genuine Q/A block to the transcript.

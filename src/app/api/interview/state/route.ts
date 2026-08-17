@@ -39,6 +39,7 @@ import {
   type GateFlags,
 } from '@/lib/interview/seam';
 import { resolveInterviewTenant } from '@/lib/interview/tenant';
+import { getClientInterviewState } from '@/lib/interview/client-interview-state';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import {
   computeAnsweredIds,
@@ -110,6 +111,40 @@ function readKnownContext(): Record<string, { value: string; source: string }> {
   return known;
 }
 
+/**
+ * Known facts for a CLIENT tenant, read from that client's own row.
+ *
+ * Deliberately does NOT call readKnownContext(): that helper resolves the
+ * operator's context (getClientContext() → the self row) and the operator's
+ * company-config. Serving it to a client showed her the OPERATOR's company name
+ * and branding to "confirm" — cross-tenant leakage. A client confirms only what
+ * her own row already holds.
+ */
+function readClientKnownContext(
+  client: { name?: string | null; brand_color?: string | null; logo_url?: string | null },
+): Record<string, { value: string; source: string }> {
+  const known: Record<string, { value: string; source: string }> = {};
+  try {
+    const name = (client.name ?? '').trim();
+    const placeholderName = /^(default|this box(\s*\(operator\))?|operator)$/i.test(name);
+    if (name && !placeholderName) {
+      known.company_name = { value: name, source: 'client-record' };
+    }
+    if (client.brand_color && String(client.brand_color).trim()) {
+      known.brand_primary_color = {
+        value: String(client.brand_color).trim(),
+        source: 'client-record',
+      };
+    }
+    if (client.logo_url && String(client.logo_url).trim()) {
+      known.brand_logo = { value: String(client.logo_url).trim(), source: 'client-record' };
+    }
+  } catch {
+    /* fail-soft: nothing known */
+  }
+  return known;
+}
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -141,26 +176,52 @@ export async function GET(request: NextRequest) {
   // canonical snapshot exactly as before (regression requirement).
   const tenant = resolveInterviewTenant(request);
   if (tenant.kind === 'client' && tenant.client) {
+    // The client's OWN state — never the operator's files, and never the stub
+    // this branch used to return. Before this, answeredIds was hardcoded to []
+    // and nextIndex to 0, so a returning client restarted the deck at card 1
+    // on every single page load no matter how much they had answered.
+    const stored = getClientInterviewState(tenant.client.id);
+    const structured = computeStructuredResume(
+      INTERVIEW_QUESTIONS,
+      stored?.answeredIds ?? [],
+    );
+    // Percent tracks the structured deck the client is actually working; a
+    // client whose deck is complete reads 100 even though the operator-side
+    // canonical files (which this tenant never writes) know nothing about it.
+    const answeredCount = structured.answeredIds.length;
+    const percent = structured.complete
+      ? 100
+      : structured.total > 0
+        ? Math.min(100, Math.round((answeredCount / structured.total) * 100))
+        : 0;
     return NextResponse.json({
       ok: true,
       interviewComplete: tenant.client.interview_complete === true,
       buildCompleted: false,
       qcStatus: 'pending',
-      session: { interviewSessionId: null },
+      session: { interviewSessionId: stored?.interviewSessionId ?? null },
       structured: {
-        total: 0,
-        answeredIds: [],
-        remainingIds: [],
-        nextIndex: 0,
-        complete: false,
+        total: structured.total,
+        answeredIds: structured.answeredIds,
+        remainingIds: structured.remainingIds,
+        nextIndex: structured.nextIndex,
+        complete: structured.complete,
       },
-      knownContext: {},
-      progress: { lastQuestionNumber: null, phasesComplete: [], percent: 0 },
+      // Known facts come from the CLIENT's own row — asking her to "confirm"
+      // the operator's company name is exactly the leak this fix closes.
+      knownContext: readClientKnownContext(tenant.client),
+      progress: {
+        lastQuestionNumber: answeredCount > 0 ? answeredCount : null,
+        phasesComplete: [],
+        percent,
+      },
       resume: {
-        status: null,
-        nextQuestionNumber: null,
+        status: structured.complete ? 'structured_complete' : 'in_progress',
+        // 1-based card number the client resumes on; null once the deck is done.
+        nextQuestionNumber:
+          structured.nextIndex === null ? null : structured.nextIndex + 1,
         skippedQuestions: [],
-        totalQuestionsAnswered: null,
+        totalQuestionsAnswered: answeredCount,
         handoffExists: false,
       },
       transcript: {

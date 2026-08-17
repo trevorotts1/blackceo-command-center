@@ -165,6 +165,19 @@ export function refreshInterviewMirror(
       (typeof progress.lastQuestionPhase === 'string' ? progress.lastQuestionPhase : null) ??
       null;
 
+    // The interview's OWN planned question count. Omitting it made
+    // derivedPercent() fall back to a hardcoded 30, so a finished 11-question
+    // deck mirrored as 37% instead of 100%. Mirrors the same rule
+    // /api/interview/state applies: a completed interview is always 100.
+    const questionCountPlanned =
+      typeof progress.questionCountPlanned === 'number' && progress.questionCountPlanned > 0
+        ? progress.questionCountPlanned
+        : null;
+    const percent =
+      status === 'complete'
+        ? 100
+        : derivedPercent(lastQuestionNumber, questionCountPlanned);
+
     // One answer row per block, keyed by 1-based positional index (idempotent).
     const answers: UpsertAnswerInput[] = blocks.map((b, i) => ({
       sessionId,
@@ -185,7 +198,7 @@ export function refreshInterviewMirror(
         status,
         phase,
         lastQuestionNumber,
-        percent: derivedPercent(lastQuestionNumber),
+        percent,
       },
       answers,
       { pruneToAnswers: true },
