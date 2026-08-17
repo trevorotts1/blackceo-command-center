@@ -23,14 +23,26 @@
  * exposes three booleans, no secrets, no session, no write path.
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
+import { resolveInterviewTenant } from '@/lib/interview/tenant';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  // JANET-INTERVIEW-FIX: a remote client's hostname must answer from ITS
+  // clients-row flag, never this box's canonical files. Self (operator) reads
+  // the canonical files exactly as before.
+  const tenant = resolveInterviewTenant(request);
+  if (tenant.kind === 'client' && tenant.client) {
+    return NextResponse.json({
+      interviewComplete: tenant.client.interview_complete === true,
+      buildCompleted: false,
+      standardReady: false,
+    });
+  }
   const bs = readBuildState();
   return NextResponse.json({
     interviewComplete: bs?.interviewComplete === true,

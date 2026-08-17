@@ -37,7 +37,7 @@ interface GateStatusResponse {
  *   false on any failure (network error, timeout, non-OK status, bad JSON)
  *   so the middleware can fail closed to /interview.
  */
-export async function checkInterviewCompleteViaFallback(): Promise<boolean> {
+export async function checkInterviewCompleteViaFallback(host?: string | null): Promise<boolean> {
   try {
     const port = process.env.CC_PORT || process.env.PORT || '4000';
     const url = `http://127.0.0.1:${port}${GATE_STATUS_PATH}`;
@@ -46,6 +46,11 @@ export async function checkInterviewCompleteViaFallback(): Promise<boolean> {
     const res = await fetch(url, {
       method: 'GET',
       signal: controller.signal,
+      // JANET-INTERVIEW-FIX: forward the original Host header so the
+      // gate-status endpoint resolves the same tenant the browser sees.
+      // Without it the internal loopback fetch reads the SELF state and a
+      // remote client's locked dashboard would wrongly unlock.
+      headers: host ? { host } : undefined,
     });
     clearTimeout(timeout);
     if (!res.ok) return false;

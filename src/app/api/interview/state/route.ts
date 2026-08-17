@@ -38,6 +38,7 @@ import {
   readAnswerBlocks,
   type GateFlags,
 } from '@/lib/interview/seam';
+import { resolveInterviewTenant } from '@/lib/interview/tenant';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import {
   computeAnsweredIds,
@@ -134,6 +135,57 @@ export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const customDeptIds = parseIdList(url.searchParams.get('customDeptIds'));
   const implicitYesCustomIds = parseIdList(url.searchParams.get('implicitYesCustomIds'));
+
+  // JANET-INTERVIEW-FIX: a remote client's hostname must be served from ITS
+  // clients-row flag — never the operator's canonical files. Self reads the
+  // canonical snapshot exactly as before (regression requirement).
+  const tenant = resolveInterviewTenant(request);
+  if (tenant.kind === 'client' && tenant.client) {
+    return NextResponse.json({
+      ok: true,
+      interviewComplete: tenant.client.interview_complete === true,
+      buildCompleted: false,
+      qcStatus: 'pending',
+      session: { interviewSessionId: null },
+      structured: {
+        total: 0,
+        answeredIds: [],
+        remainingIds: [],
+        nextIndex: 0,
+        complete: false,
+      },
+      knownContext: {},
+      progress: { lastQuestionNumber: null, phasesComplete: [], percent: 0 },
+      resume: {
+        status: null,
+        nextQuestionNumber: null,
+        skippedQuestions: [],
+        totalQuestionsAnswered: null,
+        handoffExists: false,
+      },
+      transcript: {
+        exists: false,
+        qBlockCount: 0,
+        sizeBytes: 0,
+        hasSyntheticHeader: false,
+        genuine: false,
+      },
+      decisionCoverage: {
+        complete: false,
+        expected: [],
+        covered: [],
+        missing: [],
+        declined: [],
+        rejections: [],
+      },
+      canonicalFloor: null,
+      flags: {
+        genuineTranscriptReady: false,
+        decisionCoverageComplete: false,
+        noUnprovenancedDeclines: false,
+      },
+    });
+  }
 
   try {
     const snap = await getInterviewGateSnapshot({ customDeptIds, implicitYesCustomIds });

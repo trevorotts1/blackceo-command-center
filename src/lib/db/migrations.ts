@@ -5840,6 +5840,58 @@ export const migrations: Migration[] = [
       console.log('[Migration 124] parent_task_id ready');
     },
   },
+  {
+    // JANET-INTERVIEW-FIX (2026-08-13): tenant-scope the shared Command
+    // Center's interview surface. The client row for a remote box whose
+    // hostname routes here carries its own gateway_url / gateway_token
+    // (conversation relay) and its own interview_complete flag (state reads).
+    // The gateway token value is injected from the operator env store by the
+    // migration runner at seed time — never committed to the repo.
+    id: '125',
+    name: 'add_client_interview_tenant_janet',
+    up: (db) => {
+      const clientsInfo = db.prepare('PRAGMA table_info(clients)').all() as { name: string }[];
+      if (!clientsInfo.some((col) => col.name === 'gateway_url')) {
+        db.exec('ALTER TABLE clients ADD COLUMN gateway_url TEXT');
+      }
+      if (!clientsInfo.some((col) => col.name === 'gateway_token')) {
+        db.exec('ALTER TABLE clients ADD COLUMN gateway_token TEXT');
+      }
+      if (!clientsInfo.some((col) => col.name === 'cf_access_client_id')) {
+        db.exec('ALTER TABLE clients ADD COLUMN cf_access_client_id TEXT');
+      }
+      if (!clientsInfo.some((col) => col.name === 'cf_access_client_secret')) {
+        db.exec('ALTER TABLE clients ADD COLUMN cf_access_client_secret TEXT');
+      }
+      if (!clientsInfo.some((col) => col.name === 'ssh_target')) {
+        db.exec('ALTER TABLE clients ADD COLUMN ssh_target TEXT');
+      }
+      const wsRoot =
+        process.env.OPENCLAW_WORKSPACE_ROOT ||
+        (process.env.HOME ? `${process.env.HOME}/.openclaw/workspace` : null);
+      const existing = db
+        .prepare('SELECT id FROM clients WHERE id = ?')
+        .get('client-janet-pinkney') as { id: string } | undefined;
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO clients
+            (id, name, gateway_url, gateway_token, workspace_root, ssh_target,
+             interview_complete, brand_color, brand_secondary_color, logo_url, is_self)
+          VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, 0)
+        `).run(
+          'client-janet-pinkney',
+          'Janet Pinkney',
+          process.env.JANET_GATEWAY_URL || 'ws://127.0.0.1:18804',
+          process.env.JANET_GATEWAY_TOKEN || null,
+          wsRoot,
+          'contabo-host:oc-janet-pinkney',
+        );
+        console.log('[Migration 125] Seeded remote client row client-janet-pinkney');
+      } else {
+        console.log('[Migration 125] client-janet-pinkney already present');
+      }
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
