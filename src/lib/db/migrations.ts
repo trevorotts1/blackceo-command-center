@@ -5848,7 +5848,7 @@ export const migrations: Migration[] = [
     // The gateway token value is injected from the operator env store by the
     // migration runner at seed time — never committed to the repo.
     id: '125',
-    name: 'add_client_interview_tenant_janet',
+    name: 'add_client_interview_tenant',
     up: (db) => {
       const clientsInfo = db.prepare('PRAGMA table_info(clients)').all() as { name: string }[];
       if (!clientsInfo.some((col) => col.name === 'gateway_url')) {
@@ -5869,26 +5869,37 @@ export const migrations: Migration[] = [
       const wsRoot =
         process.env.OPENCLAW_WORKSPACE_ROOT ||
         (process.env.HOME ? `${process.env.HOME}/.openclaw/workspace` : null);
-      const existing = db
-        .prepare('SELECT id FROM clients WHERE id = ?')
-        .get('client-janet-pinkney') as { id: string } | undefined;
-      if (!existing) {
-        db.prepare(`
-          INSERT INTO clients
-            (id, name, gateway_url, gateway_token, workspace_root, ssh_target,
-             interview_complete, brand_color, brand_secondary_color, logo_url, is_self)
-          VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, 0)
-        `).run(
-          'client-janet-pinkney',
-          'Janet Pinkney',
-          process.env.JANET_GATEWAY_URL || 'ws://127.0.0.1:18804',
-          process.env.JANET_GATEWAY_TOKEN || null,
-          wsRoot,
-          'contabo-host:oc-janet-pinkney',
-        );
-        console.log('[Migration 125] Seeded remote client row client-janet-pinkney');
+      // Client-identifying seed values come from the operator env store —
+      // never from this public repo (qc-assert-no-client-names). A box that
+      // needs the remote-client row sets CC_SEED_REMOTE_CLIENT_* at deploy
+      // time; with no env the seed is skipped. Already-seeded databases keep
+      // their row — this block only ever inserts.
+      const seedId = process.env.CC_SEED_REMOTE_CLIENT_ID;
+      const seedName = process.env.CC_SEED_REMOTE_CLIENT_NAME;
+      if (!seedId || !seedName) {
+        console.log('[Migration 125] no CC_SEED_REMOTE_CLIENT_* env; remote-client seed skipped');
       } else {
-        console.log('[Migration 125] client-janet-pinkney already present');
+        const existing = db
+          .prepare('SELECT id FROM clients WHERE id = ?')
+          .get(seedId) as { id: string } | undefined;
+        if (!existing) {
+          db.prepare(`
+            INSERT INTO clients
+              (id, name, gateway_url, gateway_token, workspace_root, ssh_target,
+               interview_complete, brand_color, brand_secondary_color, logo_url, is_self)
+            VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, 0)
+          `).run(
+            seedId,
+            seedName,
+            process.env.CC_SEED_REMOTE_CLIENT_GATEWAY_URL || 'ws://127.0.0.1:18804',
+            process.env.CC_SEED_REMOTE_CLIENT_GATEWAY_TOKEN || null,
+            wsRoot,
+            process.env.CC_SEED_REMOTE_CLIENT_SSH_TARGET || null,
+          );
+          console.log(`[Migration 125] Seeded remote client row ${seedId}`);
+        } else {
+          console.log(`[Migration 125] remote client row ${seedId} already present`);
+        }
       }
     },
   },
