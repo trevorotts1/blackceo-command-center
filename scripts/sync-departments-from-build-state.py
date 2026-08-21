@@ -127,12 +127,18 @@ def _scan_zhc_companies():
     """Return (slug, departments.json path) tuples for every ZHC company found."""
     results = []
     for root in _zhc_roots():
-        if root.is_dir():
-            for entry in sorted(root.iterdir()):
-                if entry.is_dir() and not entry.name.startswith("."):
-                    dj = entry / "departments.json"
-                    if dj.exists():
-                        results.append((entry.name, dj))
+        if not root.is_dir():
+            continue
+        try:
+            entries = sorted(root.iterdir())
+        except (OSError, PermissionError) as e:
+            print(f"  [sync] skipping unscannable root {root}: {e}", file=sys.stderr)
+            continue
+        for entry in entries:
+            if entry.is_dir() and not entry.name.startswith("."):
+                dj = entry / "departments.json"
+                if dj.exists():
+                    results.append((entry.name, dj))
     return results
 
 
