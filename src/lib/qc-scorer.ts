@@ -73,6 +73,7 @@ import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner, notifySystem } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence } from '@/lib/completion-evidence';
@@ -5058,6 +5059,40 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // `task_completed` event atomically, broadcasts `task_updated`, and fires
       // the 5-field DONE owner report (notifyOwnerDone) — replacing the raw
       // UPDATE + hand-rolled event + separate notify that bypassed the audit sink.
+      //
+      // F14 (presentations no-skip proof): transition()'s registration gate would
+      // throw PRECONDITION_PROCESS_CERTIFICATE for a presentations task with no
+      // registered process_certificate_sha — and this scorer only caught
+      // CAS_CONFLICT, so every passing presentations deck stalled in review
+      // forever with an unhandled throw. Pre-check the SAME pure gate here: when
+      // the cert is missing, hold the card in review with an explicit event
+      // naming exactly what is missing instead of throwing. Registration itself
+      // happens at the PATCH route (the only presented-cert match point).
+      {
+        const certReg = requiresRegisteredCertificate({
+          department: task.department,
+          currentStatus: task.status,
+          targetStatus: 'done',
+          storedCert:
+            queryOne<{ process_certificate_sha: string | null }>(
+              'SELECT process_certificate_sha FROM tasks WHERE id = ?',
+              [taskId],
+            )?.process_certificate_sha ?? null,
+          sopAuthoringForTaskId: null,
+        });
+        if (certReg.applies && !certReg.ok) {
+          const holdMsg =
+            `[QC-AUTO] Score ${result.score.toFixed(1)}/10 PASS but held in review: ` +
+            `${certReg.error} ${certReg.remediation ?? ''}`.trim();
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [uuidv4(), 'qc_review', taskId, holdMsg, now],
+          );
+          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): PASS but held in review — process certificate not registered`);
+          return result;
+        }
+      }
       try {
         await transition(taskId, 'done', {
           actor: 'qc-auto-scorer',

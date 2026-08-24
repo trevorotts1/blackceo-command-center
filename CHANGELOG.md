@@ -1,3 +1,18 @@
+## [v6.0.92] — 2026-08-24 — Pres-dept enforcement sweep CC lane (F01/F09/F14/F26)
+
+CC-side of the cross-repo F01–F27 presentations sweep (onboarding lane: v22.0.68;
+ledger: openclaw-onboarding QUALITY-CONTROL/presentation-dept-fix-20260824/).
+
+- **F01:** `/api/tasks/bulk` move→done now requires the presentations
+  process_certificate — raw bulk UPDATE no longer bypasses transition().
+- **F09:** stale-task sweep long-render exemption requires events within
+  `PRESENTATIONS_ACTIVITY_WINDOW_HOURS` (default 24h, strictly shorter than
+  the 72h age ceiling) — dead runs always age out; query fails closed.
+- **F14:** qc-scorer done-transition reads the stored cert from the task row;
+  absent cert holds review with an explicit event instead of throwing
+  PRECONDITION_PROCESS_CERTIFICATE (cards no longer stall in review forever).
+- **F26:** parent children done-count excludes 'review' status children.
+
 ## [v6.0.91] — 2026-08-10 — Final Batch: WI-15b D1 NESTED presentation board (parent+child cards)
 
 Atomic batch stamp for Pres Dept Final batch command-center lane (merge record:

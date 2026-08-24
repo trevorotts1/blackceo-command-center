@@ -120,9 +120,10 @@ export async function GET(request: NextRequest) {
 
     // Aggregate progress across all children: count children whose status is
     // 'done' (or 'in_progress') to derive X of N for the parent card.
-    const doneCount = children.filter(
-      (c) => c.status === 'done' || c.status === 'review',
-    ).length;
+    // F26: 'review' is NOT done — a child in review is awaiting QC verification,
+    // and counting it as complete makes the parent show finished while phases
+    // are still unverified.
+    const doneCount = children.filter((c) => c.status === 'done').length;
     const inProgressCount = children.filter(
       (c) => c.status === 'in_progress',
     ).length;
@@ -153,6 +154,8 @@ export async function GET(request: NextRequest) {
           children[i].status === 'done' ||
           children[i].status === 'review'
         ) {
+          // F26 note: 'review' still identifies the CURRENT phase position here —
+          // this loop locates where the run is, it does not claim completion.
           const childTitle = children[i].title;
           for (const label of PHASE_LABELS) {
             if (

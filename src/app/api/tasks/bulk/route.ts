@@ -14,10 +14,12 @@
  * whose PATCH was rejected.
  *
  * Gates: bulk move carries no updated_by_agent_id, so the agent-only PATCH
- * gates do not apply — but the two gates PATCH applies to operator moves DO:
- * the completion-evidence gate (T0-01) on any move into 'done', and the Triad
- * Rule gate on any move out of 'backlog'. Bulk move is therefore never a
- * bypass of the invariants the single-card PATCH path protects.
+ * gates do not apply — but the gates PATCH applies to operator moves DO:
+ * the completion-evidence gate (T0-01) on any move into 'done', the
+ * presentations no-skip proof gate (registered process_certificate_sha) on a
+ * presentations task moved into 'done', and the Triad Rule gate on any move
+ * out of 'backlog'. Bulk move is therefore never a bypass of the invariants
+ * the single-card PATCH path protects.
  *
  * Body: { operation: "move" | "archive" | "assign", taskIds: string[], ...params }
  */
@@ -26,6 +28,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
+import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
 import { checkTriad } from '@/lib/sops';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task, TaskStatus } from '@/lib/types';
@@ -125,7 +128,30 @@ export async function POST(request: NextRequest) {
               }
             }
 
-            // 2. TRIAD RULE GATE: leaving 'backlog' requires description +
+            // 2. PRESENTATIONS NO-SKIP PROOF GATE: a presentations task moved to
+            //    'done' requires a registered process_certificate_sha (same pure
+            //    decision PATCH uses). Bulk move carries no presented cert, so the
+            //    only legal path is stored-or-absent-department; without this check
+            //    bulk move bypasses the cert gate entirely (F01).
+            if (targetStatus === 'done') {
+              const certGate = evaluatePresentationsDoneGate({
+                department: existing.department,
+                currentStatus: existing.status,
+                targetStatus,
+                storedCert: existing.process_certificate_sha,
+                providedCert: null,
+              });
+              if (certGate.applies && !certGate.ok) {
+                results.push({
+                  taskId,
+                  ok: false,
+                  error: `${certGate.error} ${certGate.remediation ?? ''}`.trim(),
+                });
+                continue;
+              }
+            }
+
+            // 3. TRIAD RULE GATE: leaving 'backlog' requires description +
             //    valid SOP + valid persona. PATCH evaluates this for operator
             //    moves too (and auto-resolves missing pieces in-band); bulk
             //    move does no auto-resolve, so it rejects and names what is
