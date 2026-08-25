@@ -425,6 +425,13 @@ export interface ConfirmOrderBody {
   closer: string | null;
 }
 export function pickConfirmOrderAction(actions: readonly string[]): string {
+  // Prefer the EXACT canonical finalize action when the engine surfaces it:
+  // the shared predicate matches any `*order*` name, so without this anchor
+  // an engine set like ["adjust_order","confirm_order"] picks adjust_order
+  // (a reorder action) and the finalized order payload never reaches the
+  // engine's confirm_order handler.
+  const exact = actions.find((a) => a === DEFAULT_FINALIZE_ACTION);
+  if (exact !== undefined) return exact;
   // Uses the SHARED finalize-action predicate (finalize-action.ts) — the exact
   // same matcher the board-door route uses to decide when to relay the order
   // payload, so the picker and the relay can never drift.

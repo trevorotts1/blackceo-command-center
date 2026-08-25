@@ -33,10 +33,25 @@ export async function GET(): Promise<NextResponse> {
     engines.podcast = false;
   }
 
-  // anthology: probe the engine state DB path
+  // anthology: probe the engine state DB path. Resolution mirrors
+  // anthology_state.py default_state_dir(): trim each env value (whitespace-
+  // only counts as absent), expand a leading ~, then ANTHOLOGY_STATE_DIR →
+  // OPENCLAW_DATA_DIR/anthology-engine/state → $HOME/.anthology-engine/state.
   try {
     const home = process.env.HOME || os.homedir();
-    const dbPath = path.join(home, '.anthology-engine', 'state', 'anthology_state.db');
+    const untilde = (p: string): string =>
+      p === '~' || p.startsWith('~/') ? path.join(home, p.slice(1)) : p;
+    const envState = (process.env.ANTHOLOGY_STATE_DIR || '').trim();
+    const envData = (process.env.OPENCLAW_DATA_DIR || '').trim();
+    let stateDir: string;
+    if (envState) {
+      stateDir = untilde(envState);
+    } else if (envData) {
+      stateDir = path.join(untilde(envData), 'anthology-engine', 'state');
+    } else {
+      stateDir = path.join(home, '.anthology-engine', 'state');
+    }
+    const dbPath = path.join(stateDir, 'anthology_state.db');
     engines.anthology = fs.existsSync(dbPath);
   } catch {
     engines.anthology = false;
