@@ -24,3 +24,25 @@
  * either one is not a leak.
  */
 process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
+
+/**
+ * Suite-wide OpenClaw gateway mute (same layered doctrine as above).
+ *
+ * createTaskCore fires autoDispatchTask as a DETACHED promise. When routing
+ * assigns a real agent, the dispatcher calls getOpenClawClient().connect(),
+ * which opens a live WebSocket to OPENCLAW_GATEWAY_URL (default
+ * ws://127.0.0.1:18789). On the operator Mac a real gateway answers there;
+ * on CI it is connection-refused. Either way the rejected connect leaves
+ * reconnect/backoff timers pending, so the detached promise keeps the
+ * node:test child process alive forever and the runner hangs after its files
+ * finish (observed: U55 job stuck 6h on 2026-08-21 and again 2026-08-25).
+ *
+ * Pointing the client at an unroutable URL makes connect() fail fast and
+ * synchronously inside the dispatcher's own try/catch, so nothing outlives
+ * the test. Tests that specifically exercise gateway behavior override this
+ * per-file AFTER this shim runs (e.g. point6-backlog-redispatch-cap.test.ts).
+ */
+if (!process.env.OPENCLAW_GATEWAY_URL?.includes('not-a-valid-url')) {
+  process.env.OPENCLAW_GATEWAY_URL = 'not-a-valid-url';
+}
+delete process.env.OPENCLAW_GATEWAY_TOKEN;
