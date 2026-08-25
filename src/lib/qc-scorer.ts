@@ -1535,6 +1535,7 @@ interface TaskRowForQC {
   description: string | null;
   sop_id: string | null;
   department: string | null;
+  source: string | null;
   workspace_id: string | null;
   assigned_agent_id: string | null;
   /** Persona assigned at task-creation time (from persona-selector-v2). */
@@ -3911,7 +3912,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
   try {
     const task = queryOne<TaskRowForQC>(
-      `SELECT id, title, description, sop_id, department, workspace_id,
+      `SELECT id, title, description, sop_id, department, source, workspace_id,
               assigned_agent_id, persona_id, status, qc_reroute_attempts
        FROM tasks WHERE id = ?`,
       [taskId],
@@ -5071,6 +5072,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       {
         const certReg = requiresRegisteredCertificate({
           department: task.department,
+          source: task.source,
           currentStatus: task.status,
           targetStatus: 'done',
           storedCert:

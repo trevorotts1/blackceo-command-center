@@ -1443,11 +1443,13 @@ export function checkSkill6BoardProjection(): Skill6BoardProjectionResult {
 // remaining fail-soft productized-skill producers:
 //   * the "mc_board six" — 49-signature-funnel, 50-email-engine,
 //     53-book-writer, 55-product-bio, 56-sales-page-assets,
-//     57-social-media-in-a-box — each vendoring the SAME shared,
-//     byte-for-byte-identical mc_board.py client (see that file's own
-//     docstring), which gained a `reconcile --json` verb + an opt-in
+//     57-social-media-in-a-box — each vendoring a copy of the shared
+//     mc_board.py client that shares lineage but legitimately diverges
+//     per-skill (53 carries BUG-31 CC-compat fields and a parameterized
+//     receipt_subdir), which gained a `reconcile --json` verb + an opt-in
 //     `evidence_root` receipt (`<evidence_root>/routing/board-ingest-
-//     receipt.json`, `{mc_url_set, ok, task_id}`).
+//     receipt.json`, `{mc_url_set, ok, task_id}`). Health reads receipts by
+//     path, so per-skill divergence is non-breaking.
 //   * Skill 35's cycle-manifest variant — run-publishing-cycle.sh, which
 //     stamps `cc_board_attempt: {mc_token_resolved, ok, task_id}` onto its
 //     own `cycle-manifest.json` per publishing cycle (see
@@ -1480,8 +1482,11 @@ interface McBoardSixProducer {
   reconcileHint: string;
 }
 
-/** The "mc_board six" (U100 spec, verbatim) — the shared, byte-for-byte-
- *  identical mc_board.py client's own docstring names these six skills. */
+/** The "mc_board six" (U100 spec, verbatim) — the mc_board.py client's own
+ *  docstring names these six skills. NOTE: the six vendored copies share
+ *  lineage but legitimately diverge per-skill (CC-compat fields, parameterized
+ *  receipt_subdir); health reads receipts by path, so per-skill drift is
+ *  non-breaking. */
 export const MC_BOARD_SIX_PRODUCERS: McBoardSixProducer[] = [
   {
     key: 'mc_board_49_signature_funnel_projection',
