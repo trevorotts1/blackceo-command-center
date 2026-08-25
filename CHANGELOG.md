@@ -1,3 +1,36 @@
+## [v6.0.93] — 2026-08-25 — U55 CI hang root-fix + five latent failures surfaced and repaired
+
+The U55 job (`npm run test:unit` + `test:component`) had hung for ~6 hours on
+every run since 2026-08-21, so it never finished — which also meant nothing
+behind it was ever tested. Two stacked event-loop keepers:
+
+- **Detached autoDispatchTask promises** opened live WebSockets to
+  OPENCLAW_GATEWAY_URL from tests; rejected connects left reconnect timers
+  pending forever. Suite shim (tests/setup/no-owner-telegram.ts, loaded first
+  via `--import`) now mutes the gateway URL/token suite-wide; per-file gateway
+  overrides still win.
+- **OpenClawClient's shared 5-minute cleanup interval** (client.ts) held every
+  node:test child alive. Timer is now `.unref()`'d — production behavior
+  unchanged while the process runs.
+
+First completed U55 run then surfaced five latent failures, all fixed:
+
+- **Migrations 121/125** ALTER TABLE'd `openclaw_sessions`/`clients` on fixture
+  DBs where those tables don't exist yet. `PRAGMA table_info()` returns [] for a
+  MISSING table (not an error), so the old guard couldn't tell "absent" from
+  "no columns". Both now check sqlite_master first — same convention as 116;
+  fresh installs get the columns from schema.ts.
+- **reseedWorkspacesFromConfig clobbered engine sort_order on every boot**
+  (podcast 1100→1000, presentations 100→1000). REAL production bug, not just a
+  test failure. Upsert now restores each engine's deliberate order via
+  engineSortOrders.
+- **test:unit exclusion drift**: three vitest-only files importing 'vitest'
+  (middleware-bypass-replay, task-phases, mr-46-agent-status-dot) were missing
+  from the node --test grep exclusion and crashed with ESM/CJS errors. Added to
+  the list; all three remain covered by vitest.config.ts include (B.1 job).
+
+CI: branch + main both 24/24 green; U55 passed for the first time ever.
+
 ## [v6.0.92] — 2026-08-24 — Pres-dept enforcement sweep CC lane (F01/F09/F14/F26)
 
 CC-side of the cross-repo F01–F27 presentations sweep (onboarding lane: v22.0.68;
