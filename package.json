@@ -1,6 +1,6 @@
 {
   "name": "mission-control",
-  "version": "6.0.91",
+  "version": "6.0.92",
   "private": true,
   "engines": {
     "node": ">=20.0.0"
