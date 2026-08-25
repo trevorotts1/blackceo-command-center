@@ -5387,6 +5387,19 @@ export const migrations: Migration[] = [
       // always read task_id even after the session has been marked dead. A
       // hard-delete of a mid-flight session row loses the task_id attribution
       // and the task stays in_progress forever.
+      //
+      // PRAGMA table_info() on a MISSING table returns [] (not an error), which
+      // is indistinguishable from "table exists, no columns" — so the column
+      // check below would proceed to ALTER TABLE and throw `no such table` on
+      // any fixture/partial state that skipped the table's creation. Existence
+      // check first, same convention as migration 116. Fresh installs get
+      // deleted_at from schema.ts directly.
+      const tableExists = !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get('openclaw_sessions');
+      if (!tableExists) {
+        return;
+      }
       const cols = (db.prepare('PRAGMA table_info(openclaw_sessions)').all() as {
         name: string;
       }[]);
@@ -5850,6 +5863,15 @@ export const migrations: Migration[] = [
     id: '125',
     name: 'add_client_interview_tenant',
     up: (db) => {
+      // PRAGMA-on-missing-table footgun guard (same convention as 116/121):
+      // PRAGMA table_info(clients) on an absent clients table returns [] and the
+      // ALTER TABLE below would throw. Migration 048 owns creating the table.
+      const clientsTableExists = !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get('clients');
+      if (!clientsTableExists) {
+        return;
+      }
       const clientsInfo = db.prepare('PRAGMA table_info(clients)').all() as { name: string }[];
       if (!clientsInfo.some((col) => col.name === 'gateway_url')) {
         db.exec('ALTER TABLE clients ADD COLUMN gateway_url TEXT');
@@ -7425,7 +7447,12 @@ export function reseedWorkspacesFromConfig(
       const slugLower = rawSlug.toLowerCase();
       const isCeo = canonicalSlug === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || rawId === 'ceo';
       const isGeneralTask = canonicalSlug === 'general-task' || slugLower === 'general-task';
-      const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : 1000;
+      // Engine workspaces carry deliberate migration-seeded sort orders (podcast
+      // 1100 / anthology 1101 / presentations 100) that must survive every
+      // reseed — the generic 1000 here used to clobber them on conflict, which
+      // is exactly what migration-114-engine-workspace-identity.test.ts caught.
+      const engineSortOrders: Record<string, number> = { podcast: 1100, anthology: 1101, presentations: 100 };
+      const sortOrder = isCeo ? 0 : isGeneralTask ? 99999 : (engineSortOrders[canonicalSlug] ?? 1000);
 
       // Slug-uniqueness guard (FM-6): never (re)create a SECOND workspace whose
       // slug canonicalizes to a department a DIFFERENT row already represents

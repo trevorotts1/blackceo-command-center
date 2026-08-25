@@ -300,6 +300,24 @@ pm2 start npm --name "blackceo-command-center" -- start
 
 ---
 
+## Anthology gates
+
+The anthology producer/assembly gate endpoints read four environment variables
+from `.env.local`:
+
+| Variable | Purpose |
+|----------|---------|
+| `ANTHOLOGY_GATE_TOKEN_SECRET` | Shared secret for the gate endpoints. Generate with `openssl rand -hex 32`. Required in production. |
+| `ANTHOLOGY_STATE_DIR` | Engine state directory. Optional; when unset the app resolves `OPENCLAW_DATA_DIR/anthology-engine/state`, then falls back to `$HOME/.anthology-engine/state`. Set only if state lives elsewhere. |
+| `ANTHOLOGY_GATE_ENGINE` | Producer engine backend. Only supported value: `python`. |
+| `ANTHOLOGY_PYTHON_BIN` | Python interpreter used to invoke the engine (default: `python3`). |
+
+The same-origin session middleware must stay on: keep `REQUIRE_CF_ACCESS=true`
+in `.env.local`. The gate endpoints are same-origin passthrough only — they are
+never public.
+
+---
+
 ## Site Details
 
 | Property | Value |

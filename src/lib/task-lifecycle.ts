@@ -461,6 +461,7 @@ function checkPreconditions(
   {
     const reg = requiresRegisteredCertificate({
       department: task.department,
+      source: task.source,
       currentStatus: task.status,
       targetStatus: to,
       storedCert: task.process_certificate_sha,
@@ -662,7 +663,7 @@ export function transitionWithDeclaredException(args: {
   const task = queryOne<TaskRowForLifecycle>(
     `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.model_id,
             t.persona_id, t.workspace_id, t.qc_reroute_attempts,
-            t.department, t.process_certificate_sha, t.sop_authoring_for_task_id,
+            t.department, t.source, t.process_certificate_sha, t.sop_authoring_for_task_id,
             a.specialist_type
      FROM tasks t
      LEFT JOIN agents a ON t.assigned_agent_id = a.id
@@ -794,7 +795,7 @@ export async function transition(
   const task = queryOne<TaskRowForLifecycle>(
     `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.model_id,
             t.persona_id, t.workspace_id, t.qc_reroute_attempts,
-            t.department, t.process_certificate_sha, t.sop_authoring_for_task_id,
+            t.department, t.source, t.process_certificate_sha, t.sop_authoring_for_task_id,
             a.specialist_type
      FROM tasks t
      LEFT JOIN agents a ON t.assigned_agent_id = a.id

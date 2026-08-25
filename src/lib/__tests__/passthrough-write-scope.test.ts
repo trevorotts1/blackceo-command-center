@@ -216,16 +216,16 @@ const reachableCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 107 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(107);
+  it('API routes exporting a mutating method: 108 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(108);
   });
 
   it('protected by isWebhookSecretRoute: 5', () => {
     expect(webhookProtectedCount).toBe(5);
   });
 
-  it('REACHABLE via forged same-origin: 102', () => {
-    expect(reachableCount).toBe(102);
+  it('REACHABLE via forged same-origin: 103', () => {
+    expect(reachableCount).toBe(103);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -242,12 +242,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (38 routes via 35 patterns)', () => {
-    expect(bearerCoveredRoutes.size).toBe(38);
+  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (39 routes via 36 patterns)', () => {
+    expect(bearerCoveredRoutes.size).toBe(39);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 35, not 38 (checksum: 32 + 3×2 = 38)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(35);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 36, not 39 (checksum: 33 + 3×2 = 39)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(36);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {

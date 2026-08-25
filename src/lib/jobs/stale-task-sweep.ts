@@ -47,11 +47,20 @@ import { notifySystem } from '@/lib/notify';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
+
+// F09: presentations signature-deck renders legitimately run for many hours
+// (40 pipeline phases; batch render of 25-50 slides). In_progress presentations
+// tasks younger than this many hours since last progress are exempt from the
+// stale return. Env-overridable.
+const PRESENTATIONS_RENDER_EXEMPT_HOURS = parseFloat(
+  process.env.PRESENTATIONS_RENDER_EXEMPT_HOURS || '72',
+);
 
 // Per-column stale thresholds in hours.
 const STALE_THRESHOLDS: Record<string, number> = {
@@ -135,6 +144,32 @@ function isParkedInReview(taskId: string): boolean {
                OR message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%'
                OR message LIKE '%[QC-JUDGE-FAILED-FINAL]%')`,
       [taskId],
+    );
+    return (row?.n ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * F09: does this presentations task show a REAL event (any type) within the
+ * last N hours? A live render emits phase/render/progress events as it runs,
+ * so recent activity proves the runner is alive. A crashed run emits nothing
+ * and must NOT be exempted — it ages out on the normal threshold. Fail-closed
+ * to "no activity" if the events table is unreadable, so a dead run is never
+ * shielded from the sweep by a broken check.
+ */
+const PRESENTATIONS_ACTIVITY_WINDOW_HOURS = parseFloat(
+  process.env.PRESENTATIONS_ACTIVITY_WINDOW_HOURS || '24',
+);
+
+function hasRecentTaskActivity(taskId: string, hours: number): boolean {
+  try {
+    const row = queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE task_id = ?
+          AND ${sqlTime('created_at')} >= ${sqlTime('?')}`,
+      [taskId, hoursAgo(hours)],
     );
     return (row?.n ?? 0) > 0;
   } catch {
@@ -465,6 +500,26 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
 
       // Non-Blocked tasks: check per-column threshold.
       // U101: per-department override (falls back to the global default).
+      const deptCanon = canonicalDeptSlug(task.department || '') || (task.department ?? '');
+
+      // F09 — presentations long-render exemption. A signature-deck render runs
+      // 40 pipeline phases and can legitimately occupy in_progress for many
+      // hours; a single slide render can take longer than the global 24h
+      // in_progress threshold on a loaded box. The sweep's returnToOrchestrator
+      // demotes such a run to backlog MID-RENDER (the runner treats that as an
+      // interrupted run). Exempt presentations in_progress tasks for up to
+      // PRESENTATIONS_RENDER_EXEMPT_HOURS — but ONLY while events show recent
+      // activity, so a genuinely dead run still ages out on the normal
+      // threshold. Review status keeps its own shorter path via B6/parked guard.
+      if (
+        deptCanon === 'presentations' &&
+        task.status === 'in_progress' &&
+        ageHours < PRESENTATIONS_RENDER_EXEMPT_HOURS &&
+        hasRecentTaskActivity(task.id, PRESENTATIONS_ACTIVITY_WINDOW_HOURS)
+      ) {
+        continue;
+      }
+
       const thresholdHours =
         task.status === 'in_progress' ? resolveSlaThreshold(task.department, 'staleInProgressHours', STALE_THRESHOLDS.in_progress) :
         task.status === 'review' ? resolveSlaThreshold(task.department, 'staleReviewHours', STALE_THRESHOLDS.review) :

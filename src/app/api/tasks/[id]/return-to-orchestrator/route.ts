@@ -23,7 +23,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { queryOne, run } from '@/lib/db';
+import { queryOne, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
@@ -102,18 +102,48 @@ export async function POST(
       : handbackNote;
 
     // Update the task: set status=backlog, increment attempt counter, bump progress.
-    // MR-04: route through transition() with extraColumns so the compound UPDATE
-    // goes through the legal-transition guard + preconditions + CAS atomically.
-    // Backlog is a legal target from every non-terminal state.
-    await transition(id, 'backlog', {
-      actor: data.returned_by_agent_id ?? 'return-to-orchestrator',
-      reason: data.problem ?? 'task returned to orchestrator',
-      extraColumns: {
-        description: updatedDescription,
-        qc_reroute_attempts: newAttempts,
-        last_progress_at: now,
-      },
-    });
+    // MR-04: non-backlog states route through transition() with extraColumns so
+    // the compound UPDATE goes through the legal-transition guard + preconditions
+    // + CAS atomically. Backlog is a legal target from every non-terminal state.
+    //
+    // Repeat-handback carve-out (report-back invariant): transition() short-circuits
+    // idempotently when the task is ALREADY in 'backlog' — the whole UPDATE (and
+    // with it qc_reroute_attempts and last_progress_at) is skipped, which froze
+    // repeat handbacks at attempt 1 and made the cap-3 escalation unreachable
+    // after MR-04 combined with U071 idempotency. A re-handback of a task still in
+    // backlog is NOT a no-op: it must write its own attempt counter, handback note,
+    // progress bump, and audit row. So for that one state we perform the guarded
+    // compound write directly, mirroring what transition()'s transaction does:
+    // CAS on status='backlog', structured task_events row, atomic commit.
+    if (existing.status === 'backlog') {
+      transaction(() => {
+        const res = run(
+          `UPDATE tasks
+             SET description = ?, qc_reroute_attempts = ?, last_progress_at = ?, updated_at = ?
+           WHERE id = ? AND status = 'backlog'`,
+          [updatedDescription, newAttempts, now, now, id],
+        );
+        if (res.changes === 0) {
+          throw new Error(
+            `CAS_CONFLICT: task ${id} was no longer in 'backlog' when applying repeat handback`,
+          );
+        }
+        recordStatusEvent(id, 'backlog', 'backlog', {
+          actor: data.returned_by_agent_id ?? 'return-to-orchestrator',
+          reason: data.problem ?? 'task returned to orchestrator',
+        });
+      });
+    } else {
+      await transition(id, 'backlog', {
+        actor: data.returned_by_agent_id ?? 'return-to-orchestrator',
+        reason: data.problem ?? 'task returned to orchestrator',
+        extraColumns: {
+          description: updatedDescription,
+          qc_reroute_attempts: newAttempts,
+          last_progress_at: now,
+        },
+      });
+    }
 
     // Write the task_returned event (audit trail).
     run(

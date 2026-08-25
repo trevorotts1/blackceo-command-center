@@ -408,6 +408,8 @@ test('buildConfirmOrderBody: empty order → null opener/closer', () => {
 test('pickConfirmOrderAction: uses an engine-surfaced finalize action, else confirm_order', () => {
   assert.equal(pickConfirmOrderAction(['confirm_order']), 'confirm_order');
   assert.equal(pickConfirmOrderAction(['finalize_order', 'sign_off']), 'finalize_order');
+  // P01: the regex matches adjust_order first — exact anchor must win.
+  assert.equal(pickConfirmOrderAction(['adjust_order', 'confirm_order']), 'confirm_order');
   assert.equal(pickConfirmOrderAction([]), 'confirm_order');
 });
 

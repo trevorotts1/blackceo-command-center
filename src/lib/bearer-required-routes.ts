@@ -35,6 +35,7 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/companies$/,
   /^\/api\/cron\/sop-learning$/,
   /^\/api\/da-challenges$/,
+  /^\/api\/departments\/[^/]+\/config$/,
   /^\/api\/execution-queue(\/[^/]+)?$/,
   /^\/api\/files\/upload$/,
   /^\/api\/harvest-cards\/[^/]+\/approve$/,

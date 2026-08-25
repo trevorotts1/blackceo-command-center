@@ -243,7 +243,12 @@ export class OpenClawClient extends EventEmitter {
         this.performCacheCleanup();
       }, this.PERIODIC_CLEANUP_INTERVAL_MS);
 
-      // Store the timer globally so all instances share it
+      // Store the timer globally so all instances share it. unref'd: this is
+      // best-effort hygiene, it must not hold the event loop open (in tests a
+      // detached dispatch promise can construct this client, and the 5-minute
+      // timer then keeps the node:test child process alive forever — the U55
+      // CI hang).
+      timer.unref();
       (globalThis as Record<string, unknown>)[GLOBAL_CACHE_CLEANUP_KEY] = timer;
       console.log('[OpenClaw] Started periodic cache cleanup (interval:', this.PERIODIC_CLEANUP_INTERVAL_MS, 'ms)');
     }

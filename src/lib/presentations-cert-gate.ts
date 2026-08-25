@@ -151,7 +151,16 @@ export interface PresentationsRegistrationInput {
   targetStatus: string | null | undefined;
   storedCert: string | null | undefined;
   sopAuthoringForTaskId?: string | null;
+  source?: string | null;
 }
+
+// Skill 53 (book-writer) cards live in the marketing department; their
+// review->done promotion must present the run's PROCESS-CERTIFICATE sha the
+// same way presentation decks do.
+const CERT_REQUIRED_DEPT_SOURCE: Array<{ dept: string; source?: string }> = [
+  { dept: 'presentations' },
+  { dept: 'marketing', source: 'book-writer' },
+];
 
 export function requiresRegisteredCertificate(
   input: PresentationsRegistrationInput,
@@ -160,16 +169,27 @@ export function requiresRegisteredCertificate(
   if (!PRESENTATIONS_TERMINAL_STATUSES.has(target)) return { applies: false, ok: true };
   if (input.currentStatus === target) return { applies: false, ok: true };
   const deptCanon = canonicalDeptSlug(input.department || '') || (input.department ?? '');
-  if (deptCanon !== 'presentations') return { applies: false, ok: true };
+  const source = (input.source ?? '').toString().trim().toLowerCase();
+  const gate = CERT_REQUIRED_DEPT_SOURCE.find(
+    (g) => g.dept === deptCanon && (!g.source || g.source === source),
+  );
+  if (!gate) return { applies: false, ok: true };
   if (input.sopAuthoringForTaskId) return { applies: false, ok: true };
   const stored = typeof input.storedCert === 'string' ? input.storedCert.trim().toLowerCase() : '';
   if (stored.length > 0) return { applies: true, ok: true };
   return {
     applies: true, ok: false, code: 'process_certificate_required',
-    error: `Forbidden: a presentations task requires a registered process_certificate_sha to be marked ${target}`,
+    error:
+      gate.source === 'book-writer'
+        ? `Forbidden: a book-writer task requires a registered process_certificate_sha to be marked ${target}`
+        : `Forbidden: a presentations task requires a registered process_certificate_sha to be marked ${target}`,
     remediation:
-      `Generate the deck proof with prove-deck.py (it writes PROCESS-CERTIFICATE.json), then ` +
-      `PATCH this task with {"status":"${target}","process_certificate_sha":"<sha256>"} so the ` +
-      `certificate is registered on the card. Only then can any path mark it ${target}.`,
+      gate.source === 'book-writer'
+        ? `Run the Book Writer assembler to completion (it writes PROCESS-CERTIFICATE.json), then ` +
+          `PATCH this task with {"status":"${target}","process_certificate_sha":"<sha256>"} so the ` +
+          `certificate is registered on the card. Only then can any path mark it ${target}.`
+        : `Generate the deck proof with prove-deck.py (it writes PROCESS-CERTIFICATE.json), then ` +
+          `PATCH this task with {"status":"${target}","process_certificate_sha":"<sha256>"} so the ` +
+          `certificate is registered on the card. Only then can any path mark it ${target}.`,
   };
 }
